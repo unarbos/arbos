@@ -18,4 +18,5 @@ Your goal is described below. Execute it. Dont stop.
 
 ## Goal 
 
-< REPLACE ME i.e Make money with my hyperliquid account>
+Make money with my hyperliquid account. 
+You have at your disposal a COINGLASS_API_KEY with a professional subscription and a hyperliquid account with money on it. Both are accessible with the information in .env in this local repository.
