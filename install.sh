@@ -138,21 +138,24 @@ else
 fi
 
 # Cursor CLI (agent command)
+export PATH="$HOME/.cursor/bin:$HOME/.local/bin:$PATH"
 if command_exists agent; then
     ok "Cursor CLI (agent) already installed"
 else
-    run "Installing Cursor CLI" bash -c "curl https://cursor.com/install -fsS | bash"
-    export PATH="$HOME/.local/bin:$PATH"
+    run "Installing Cursor CLI" bash -c "curl https://cursor.com/install -fsSL | bash"
+    export PATH="$HOME/.cursor/bin:$HOME/.local/bin:$PATH"
     command_exists agent || die "'agent' command not found — install Cursor CLI from https://cursor.com/install"
 fi
 
 # PATH persistence
-if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-    SHELL_RC="$HOME/.bashrc"
-    [[ -n "${ZSH_VERSION:-}" ]] && SHELL_RC="$HOME/.zshrc"
-    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
-    export PATH="$HOME/.local/bin:$PATH"
-    ok "Added ~/.local/bin to PATH"
+SHELL_RC="$HOME/.bashrc"
+[[ -n "${ZSH_VERSION:-}" ]] && SHELL_RC="$HOME/.zshrc"
+PATHS_TO_ADD="$HOME/.cursor/bin:$HOME/.local/bin"
+if [[ ":$PATH:" != *":$HOME/.cursor/bin:"* ]] || [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    if ! grep -q '.cursor/bin' "$SHELL_RC" 2>/dev/null; then
+        echo 'export PATH="$HOME/.cursor/bin:$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
+        ok "Added ~/.cursor/bin and ~/.local/bin to PATH in $SHELL_RC"
+    fi
 fi
 
 printf "\n"
@@ -205,21 +208,66 @@ printf "\n"
 
 printf "  ${BOLD}Authentication${NC}\n\n"
 
-if agent status >/dev/null 2>&1; then
+# Check .env for CURSOR_API_KEY first
+if [ -z "${CURSOR_API_KEY:-}" ] && [ -f "$INSTALL_DIR/.env" ]; then
+    _env_key=$(grep "^CURSOR_API_KEY=" "$INSTALL_DIR/.env" 2>/dev/null | cut -d'=' -f2-)
+    if [ -n "$_env_key" ]; then
+        export CURSOR_API_KEY="$_env_key"
+    fi
+fi
+
+if [ -n "${CURSOR_API_KEY:-}" ]; then
+    ok "Using CURSOR_API_KEY from environment"
+elif agent status >/dev/null 2>&1; then
     ok "Cursor agent already authenticated"
 else
-    printf "  ${DIM}The agent CLI needs to be logged in to work.${NC}\n"
-    printf "  ${DIM}This will give you a URL to authenticate in your browser.${NC}\n\n"
+    printf "  ${DIM}The agent CLI needs to be logged in to work.${NC}\n\n"
+
+    # Detect if we're on a remote/headless machine (no DISPLAY, no macOS)
+    IS_REMOTE=false
+    if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && [ "$(uname -s)" != "Darwin" ]; then
+        IS_REMOTE=true
+    fi
+    # Also treat SSH sessions as remote
+    if [ -n "${SSH_CONNECTION:-}" ] || [ -n "${SSH_TTY:-}" ]; then
+        IS_REMOTE=true
+    fi
+
+    if [ "$IS_REMOTE" = true ]; then
+        printf "  ${CYAN}Remote machine detected${NC}\n"
+        printf "  ${DIM}A login URL will be printed below.${NC}\n"
+        printf "  ${DIM}Copy and open it in your local browser to authenticate.${NC}\n\n"
+    else
+        printf "  ${DIM}This will open your browser to authenticate.${NC}\n\n"
+    fi
 
     if [ "$HAS_TTY" = true ]; then
-        agent login </dev/tty >/dev/tty 2>&1
+        # NO_OPEN_BROWSER prevents agent login from trying to launch a browser
+        # (essential for remote/headless machines — it prints the URL instead)
+        if [ "$IS_REMOTE" = true ]; then
+            NO_OPEN_BROWSER=1 agent login </dev/tty 2>&1
+        else
+            agent login </dev/tty 2>&1
+        fi
+
         if agent status >/dev/null 2>&1; then
             ok "Cursor agent authenticated"
         else
-            die "Cursor agent login failed — run 'agent login' manually and retry"
+            printf "\n"
+            err "Authentication did not complete"
+            printf "  ${DIM}You can authenticate later:${NC}\n"
+            printf "  ${DIM}  Remote:  NO_OPEN_BROWSER=1 agent login${NC}\n"
+            printf "  ${DIM}  Local:   agent login${NC}\n"
+            printf "  ${DIM}  API key: export CURSOR_API_KEY=your_key${NC}\n\n"
+            die "Run 'agent login' manually and retry ./install.sh"
         fi
     else
-        die "No TTY available — run 'agent login' manually before installing"
+        err "No TTY available for interactive login"
+        printf "  ${DIM}Options:${NC}\n"
+        printf "  ${DIM}  1. Run interactively:  NO_OPEN_BROWSER=1 agent login${NC}\n"
+        printf "  ${DIM}  2. Use API key:        export CURSOR_API_KEY=your_key${NC}\n"
+        printf "  ${DIM}  Then re-run ./install.sh${NC}\n"
+        die "Authentication required — see above"
     fi
 fi
 
@@ -276,7 +324,7 @@ ok "agent CLI found at $(which agent)"
 LAUNCH_SCRIPT="$INSTALL_DIR/.agent-launch.sh"
 cat > "$LAUNCH_SCRIPT" <<LAUNCH
 #!/usr/bin/env bash
-export PATH="\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH"
+export PATH="\$HOME/.cursor/bin:\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH"
 cd "$INSTALL_DIR"
 set -a; [ -f .env ] && source .env; set +a
 source .venv/bin/activate

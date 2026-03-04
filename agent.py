@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import time
@@ -122,6 +123,11 @@ def run_agent(cmd: list[str], phase: str, output_file: Path) -> subprocess.Compl
         stream_cmd.append(arg)
     if "--stream-partial-output" not in stream_cmd:
         stream_cmd.insert(-1, "--stream-partial-output")
+
+    api_key = os.environ.get("CURSOR_API_KEY")
+    if api_key and "--api-key" not in stream_cmd:
+        stream_cmd.insert(1, "--api-key")
+        stream_cmd.insert(2, api_key)
 
     dim(f"running: {' '.join(stream_cmd[:6])}{'…' if len(stream_cmd) > 6 else ''}")
     t0 = time.monotonic()
