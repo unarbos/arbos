@@ -52,7 +52,7 @@ def main():
     # Log to chatlog
     import json
     from datetime import datetime
-    chatlog_dir = WORKING_DIR / "chatlog"
+    chatlog_dir = WORKING_DIR / "context" / "chat"
     chatlog_dir.mkdir(exist_ok=True)
     existing = sorted(chatlog_dir.glob("*.jsonl"))
     current = None

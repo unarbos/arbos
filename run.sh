@@ -195,7 +195,7 @@ fi
 source .venv/bin/activate
 run "Installing dependencies" uv pip install -e .
 
-mkdir -p history scratch chatlog
+mkdir -p context/runs context/chat
 
 printf "\n"
 
@@ -324,10 +324,10 @@ printf "  ${DIM}status${NC}   pm2 status\n"
 printf "  ${DIM}restart${NC}  pm2 restart $PM2_NAME\n"
 printf "\n"
 printf "  ${BOLD}Next steps — open Telegram and message your bot:${NC}\n"
-printf "    1. /prompt <system prompt>\n"
-printf "    2. /agent <name> <delay_secs> <description>\n"
-printf "    3. /env KEY=VALUE  (optional extra API keys)\n"
-printf "    4. /status  to check state\n"
-printf "\n"
-printf "  ${DIM}The agent loop starts automatically once an agent exists.${NC}\n"
+printf "    Just tell it what you want in plain language, e.g.:\n"
+printf "    • \"I want you to build a SOTA quant trading system.\"\n"
+printf "    • \"What's the status of my trading system?\"\n"
+printf "    • \"Set the goal to ...\"\n"
+printf "    • \"Send a message to the trading system.\"\n"
+printf "    • \"...\"\n"
 printf "\n"
