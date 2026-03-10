@@ -214,9 +214,8 @@ def _generate_step_update(*, step_number: int, success: bool, run_dir: Path) -> 
         f"Logs:\n{_clip_text(logs_text, STEP_SOURCE_CHAR_LIMIT)}"
     )
 
-    summary_cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"]
-    if STEP_SUMMARY_MODEL:
-        summary_cmd.extend(["--model", STEP_SUMMARY_MODEL])
+    extra = ["--model", STEP_SUMMARY_MODEL] if STEP_SUMMARY_MODEL else None
+    summary_cmd = _claude_cmd(prompt, extra_flags=extra)
 
     result = run_agent(
         summary_cmd,
@@ -284,6 +283,18 @@ def _send_step_update(step_number: int, run_dir: Path, success: bool):
 # ── Agent runner ─────────────────────────────────────────────────────────────
 
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "anthropic/claude-opus-4.6")
+IS_ROOT = os.getuid() == 0
+
+
+def _claude_cmd(prompt: str, extra_flags: list[str] | None = None) -> list[str]:
+    """Build a claude CLI command, adding --dangerously-skip-permissions only when not root."""
+    cmd = ["claude", "-p", prompt]
+    if not IS_ROOT:
+        cmd.append("--dangerously-skip-permissions")
+    cmd.extend(["--output-format", "stream-json", "--verbose"])
+    if extra_flags:
+        cmd.extend(extra_flags)
+    return cmd
 
 
 def _write_claude_settings():
@@ -473,7 +484,7 @@ def run_step(prompt: str, step_number: int) -> bool:
         _log(f"step {step_number}: plan phase")
 
         plan_result = run_agent(
-            ["claude", "-p", prompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"],
+            _claude_cmd(prompt),
             phase="plan",
             output_file=run_dir / "plan_output.txt",
         )
@@ -495,7 +506,7 @@ def run_step(prompt: str, step_number: int) -> bool:
         _log(f"step {step_number}: exec phase")
 
         exec_result = run_agent(
-            ["claude", "-p", execute_prompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"],
+            _claude_cmd(execute_prompt),
             phase="exec",
             output_file=run_dir / "exec_output.txt",
         )
@@ -656,7 +667,7 @@ def _build_operator_prompt(user_text: str) -> str:
 
 def run_agent_streaming(bot, prompt: str, chat_id: int) -> str:
     """Run Claude Code CLI and stream output into a Telegram message."""
-    cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"]
+    cmd = _claude_cmd(prompt)
 
     msg = bot.send_message(chat_id, "Running...")
     current_text = ""
