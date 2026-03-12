@@ -9,9 +9,9 @@
 
 # The Design
 
+Arbos just loops a `GOAL.md` through a coding agent. 
 ```
-                                         (prompt.md + goal.md + state.md)
-                                     ┌─────────────────────────┐
+                                     ┌────── [GOAL.md] ────────┐
                                      ▼                         │
                 ┌──────────┐     ┌───────┐                     │
                 │ Telegram │◄───►│ Agent │─────────────────────┘
@@ -31,8 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/unconst/Arbos/main/run.sh | bash
 
 ## Usage
 
-Arbos just loops a `GOAL.md` through a coding agent. 
-To run Arbos just set the `/goal` like this:
+To run Arbos just set the `/goal`:
 ```
 /goal
 
