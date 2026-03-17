@@ -25,6 +25,13 @@ die() { err "$1"; exit 1; }
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
+# Append a line to a file, ensuring a trailing newline exists first
+append_env() {
+    local file="$1" line="$2"
+    [ -s "$file" ] && [ -n "$(tail -c1 "$file")" ] && printf '\n' >> "$file"
+    echo "$line" >> "$file"
+}
+
 # ── Spinner ──────────────────────────────────────────────────────────────────
 
 spin() {
@@ -187,7 +194,8 @@ printf "  ${BOLD}Setting up project${NC}\n\n"
 
 cd "$INSTALL_DIR"
 
-if [ ! -d ".venv" ]; then
+if [ ! -f ".venv/bin/activate" ]; then
+    rm -rf .venv
     run "Creating Python environment" uv venv .venv
 else
     ok "Python environment exists"
@@ -196,7 +204,7 @@ fi
 source .venv/bin/activate
 run "Installing dependencies" uv pip install -e .
 
-mkdir -p context/runs context/chat
+mkdir -p context/general/chat
 
 printf "\n"
 
@@ -220,11 +228,11 @@ elif [ "$HAS_TTY" = true ]; then
         2) PROVIDER="openrouter" ;;
         *) PROVIDER="chutes" ;;
     esac
-    echo "PROVIDER=$PROVIDER" >> "$INSTALL_DIR/.env"
+    append_env "$INSTALL_DIR/.env" "PROVIDER=$PROVIDER"
     ok "Provider set to $PROVIDER"
 else
     PROVIDER="chutes"
-    echo "PROVIDER=$PROVIDER" >> "$INSTALL_DIR/.env"
+    append_env "$INSTALL_DIR/.env" "PROVIDER=$PROVIDER"
     ok "Provider defaulted to chutes (no TTY)"
 fi
 
@@ -243,7 +251,7 @@ ask_key() {
     fi
 
     if [ -n "${!key_name:-}" ]; then
-        echo "${key_name}=${!key_name}" >> "$INSTALL_DIR/.env"
+        append_env "$INSTALL_DIR/.env" "${key_name}=${!key_name}"
         ok "$key_name saved (from environment)"
         return 0
     fi
@@ -269,7 +277,7 @@ ask_key() {
         fi
     fi
 
-    echo "${key_name}=${_val}" >> "$INSTALL_DIR/.env"
+    append_env "$INSTALL_DIR/.env" "${key_name}=${_val}"
     ok "$key_name saved"
 }
 
@@ -287,10 +295,64 @@ fi
 
 printf "\n"
 
-ask_key "TAU_BOT_TOKEN" \
-    "Telegram bot token" \
-    "Create a bot via @BotFather on Telegram, then paste the token here" \
+ask_key "BOT_TOKEN" \
+    "Discord bot token" \
+    "Create a bot at https://discord.com/developers/applications, then paste the token here" \
     "required"
+
+printf "\n"
+
+# Discord server ID (required — prevents the bot from responding in the wrong server)
+if ! grep -q "^DISCORD_GUILD=" "$INSTALL_DIR/.env" 2>/dev/null; then
+    if [ "$HAS_TTY" = true ]; then
+        printf "  ${DIM}Discord server ID the bot should listen on${NC}\n"
+        printf "  ${DIM}(In Discord: enable Developer Mode in Settings → App Settings → Advanced,${NC}\n"
+        printf "  ${DIM} then right-click your server icon → Copy Server ID)${NC}\n\n"
+        while true; do
+            printf "  ${CYAN}Discord server ID:${NC} "
+            read -r _guild </dev/tty 2>/dev/null || _guild=""
+            if [[ "$_guild" =~ ^[0-9]+$ ]]; then
+                append_env "$INSTALL_DIR/.env" "DISCORD_GUILD=$_guild"
+                ok "DISCORD_GUILD set to $_guild"
+                break
+            else
+                err "Please enter a valid server ID (numeric, e.g. 1483378668787990640)"
+            fi
+        done
+    else
+        die "No TTY — set DISCORD_GUILD in .env and re-run"
+    fi
+else
+    ok "DISCORD_GUILD already set"
+fi
+
+printf "\n"
+
+ask_key "GITHUB_TOKEN" \
+    "GitHub personal access token" \
+    "Create at: https://github.com/settings/tokens → Generate new token (classic) → select 'repo' scope" \
+    "required"
+
+printf "\n"
+
+# GitHub username (auto-detected from token)
+if ! grep -q "^GITHUB_USERNAME=" "$INSTALL_DIR/.env" 2>/dev/null; then
+    _gh_token=""
+    if grep -q "^GITHUB_TOKEN=" "$INSTALL_DIR/.env" 2>/dev/null; then
+        _gh_token=$(grep "^GITHUB_TOKEN=" "$INSTALL_DIR/.env" | head -1 | cut -d= -f2 | tr -d "' \"")
+    fi
+    if [ -n "$_gh_token" ]; then
+        _gh_user=$(curl -s -H "Authorization: token $_gh_token" https://api.github.com/user 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('login',''))" 2>/dev/null || true)
+        if [ -n "$_gh_user" ]; then
+            append_env "$INSTALL_DIR/.env" "GITHUB_USERNAME=$_gh_user"
+            ok "GITHUB_USERNAME detected: $_gh_user"
+        else
+            err "Could not detect GitHub username — set GITHUB_USERNAME in .env manually"
+        fi
+    fi
+else
+    ok "GITHUB_USERNAME already set"
+fi
 
 printf "\n"
 
@@ -359,11 +421,10 @@ printf "  ${DIM}logs${NC}     pm2 logs $PM2_NAME\n"
 printf "  ${DIM}status${NC}   pm2 status\n"
 printf "  ${DIM}restart${NC}  pm2 restart $PM2_NAME\n"
 printf "\n"
-printf "  ${BOLD}Next steps — open Telegram and message your bot:${NC}\n"
-printf "    Just tell it what you want in plain language, e.g.:\n"
-printf "    • \"I want you to build a SOTA quant trading system.\"\n"
-printf "    • \"What's the status of my trading system?\"\n"
-printf "    • \"Set the goal to ...\"\n"
-printf "    • \"Send a message to the trading system.\"\n"
-printf "    • \"...\"\n"
+printf "  ${BOLD}Next steps — message your bot in the #general channel on Discord:${NC}\n"
+printf "    Use /commands or plain text, e.g.:\n"
+printf "    • /goal Build a SOTA quant trading system\n"
+printf "    • /start 1\n"
+printf "    • /status\n"
+printf "    • Or just send a plain message to chat with the operator agent\n"
 printf "\n"

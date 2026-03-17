@@ -29,12 +29,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 WORKING_DIR = Path(__file__).parent
 PROMPT_FILE = WORKING_DIR / "PROMPT.md"
 CONTEXT_DIR = WORKING_DIR / "context"
-GOALS_DIR = CONTEXT_DIR / "goals"
-GOALS_JSON = CONTEXT_DIR / "goals.json"
-CHATLOG_DIR = CONTEXT_DIR / "chat"
+CHANNELS_JSON = CONTEXT_DIR / "channels.json"
+GENERAL_DIR = CONTEXT_DIR / "general"
+GENERAL_CHAT_DIR = GENERAL_DIR / "chat"
 FILES_DIR = CONTEXT_DIR / "files"
 RESTART_FLAG = WORKING_DIR / ".restart"
-CHAT_ID_FILE = WORKING_DIR / "chat_id.txt"
+CHANNEL_ID_FILE = WORKING_DIR / "channel_id.txt"
 ENV_ENC_FILE = WORKING_DIR / ".env.enc"
 
 # ── Encrypted .env ───────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ def _load_encrypted_env(bot_token: str) -> bool:
 
 def _save_to_encrypted_env(key: str, value: str):
     """Add/update a single key in the encrypted env file."""
-    bot_token = os.environ.get("TAU_BOT_TOKEN", "")
+    bot_token = os.environ.get("BOT_TOKEN", "")
     if not bot_token or not ENV_ENC_FILE.exists():
         return
     try:
@@ -113,16 +113,16 @@ def _init_env():
         load_dotenv(env_path)
         return
 
-    bot_token = os.environ.get("TAU_BOT_TOKEN", "")
+    bot_token = os.environ.get("BOT_TOKEN", "")
     if ENV_ENC_FILE.exists() and bot_token:
         if _load_encrypted_env(bot_token):
             return
-        print("ERROR: failed to decrypt .env.enc — wrong TAU_BOT_TOKEN?", file=sys.stderr)
+        print("ERROR: failed to decrypt .env.enc — wrong BOT_TOKEN?", file=sys.stderr)
         sys.exit(1)
 
     if ENV_ENC_FILE.exists() and not bot_token:
-        print("ERROR: .env.enc exists but TAU_BOT_TOKEN not set.", file=sys.stderr)
-        print("Pass it as an env var: TAU_BOT_TOKEN=xxx python arbos.py", file=sys.stderr)
+        print("ERROR: .env.enc exists but BOT_TOKEN not set.", file=sys.stderr)
+        print("Pass it as an env var: BOT_TOKEN=xxx python arbos.py", file=sys.stderr)
         sys.exit(1)
 
 
@@ -149,7 +149,7 @@ def _process_pending_env():
             with open(env_path, "a") as f:
                 f.write("\n" + content + "\n")
         elif ENV_ENC_FILE.exists():
-            bot_token = os.environ.get("TAU_BOT_TOKEN", "")
+            bot_token = os.environ.get("BOT_TOKEN", "")
             if bot_token:
                 try:
                     existing = _decrypt_env_content(bot_token)
@@ -258,96 +258,201 @@ _token_usage = {"input": 0, "output": 0}
 _token_lock = threading.Lock()
 _child_procs: set[subprocess.Popen] = set()
 _child_procs_lock = threading.Lock()
+_channel_procs: dict[str, subprocess.Popen] = {}
+_channel_procs_lock = threading.Lock()
 
 
-# ── Multi-goal state ────────────────────────────────────────────────────────
+def _pm2_list_names() -> set[str]:
+    """Return the set of currently running PM2 process names (excluding 'arbos' itself)."""
+    try:
+        r = subprocess.run(
+            ["pm2", "jlist"], capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return set()
+        procs = json.loads(r.stdout)
+        return {p["name"] for p in procs if p.get("name") != "arbos"}
+    except Exception:
+        return set()
+
+
+def _pm2_delete(names: list[str]):
+    """Delete a list of PM2 processes by name."""
+    for name in names:
+        try:
+            subprocess.run(
+                ["pm2", "delete", name],
+                capture_output=True, text=True, timeout=10,
+            )
+            _log(f"pm2 delete: {name}")
+        except Exception as exc:
+            _log(f"pm2 delete failed for {name}: {exc}")
+
+
+# ── Channel state ────────────────────────────────────────────────────────────
 
 
 @dataclass
-class GoalState:
-    index: int
-    summary: str = ""
-    delay: int = 0
-    started: bool = False
-    paused: bool = False
+class ThreadState:
+    thread_id: str
+    name: str = ""
+    goal: str = ""
     step_count: int = 0
-    goal_hash: str = ""
+    delay: int = 0
+    paused: bool = False
     last_run: str = ""
     last_finished: str = ""
+    loop_thread: threading.Thread | None = field(default=None, repr=False)
+    wake: threading.Event = field(default_factory=threading.Event, repr=False)
+    stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
+
+
+@dataclass
+class ChannelState:
+    channel_id: str
+    name: str = ""
+    dir_name: str = ""
+    delay: int = 0
+    running: bool = True
+    pin_text: str = ""
+    pin_hash: str = ""
+    repo_url: str = ""
+    pm2_procs: list[str] = field(default_factory=list)
+    active_threads: dict[str, ThreadState] = field(default_factory=dict)
     thread: threading.Thread | None = field(default=None, repr=False)
     wake: threading.Event = field(default_factory=threading.Event, repr=False)
     stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
 
-_goals: dict[int, GoalState] = {}
-_goals_lock = threading.Lock()
+_channels: dict[str, ChannelState] = {}
+_channels_lock = threading.Lock()
+_guild_id: str | None = None
+_running_category_id: str | None = None
+_paused_category_id: str | None = None
 
 
-def _goal_dir(index: int) -> Path:
-    return GOALS_DIR / str(index)
+def _channel_dir(channel_id: str) -> Path:
+    cs = _channels.get(channel_id)
+    if cs and cs.dir_name:
+        return CONTEXT_DIR / cs.dir_name
+    return CONTEXT_DIR / f"channel-{channel_id}"
 
 
-def _goal_file(index: int) -> Path:
-    return _goal_dir(index) / "GOAL.md"
+def _pin_file(channel_id: str) -> Path:
+    return _channel_dir(channel_id) / "pin"
 
 
-def _state_file(index: int) -> Path:
-    return _goal_dir(index) / "STATE.md"
+def _state_file(channel_id: str) -> Path:
+    return _channel_dir(channel_id) / "state"
 
 
-def _inbox_file(index: int) -> Path:
-    return _goal_dir(index) / "INBOX.md"
+def _channel_runs_dir(channel_id: str) -> Path:
+    return _channel_dir(channel_id) / "runs"
 
 
-def _goal_runs_dir(index: int) -> Path:
-    return _goal_dir(index) / "runs"
+def _channel_chat_dir(channel_id: str) -> Path:
+    return _channel_dir(channel_id) / "chat"
 
 
-def _step_msg_file(index: int) -> Path:
-    return _goal_dir(index) / ".step_msg"
+def _thread_dir(channel_id: str, thread_id: str) -> Path:
+    return _channel_dir(channel_id) / "threads" / thread_id
 
 
-def _save_goals():
-    """Persist goal metadata to goals.json. Caller must hold _goals_lock."""
+def _thread_goal_file(channel_id: str, thread_id: str) -> Path:
+    return _thread_dir(channel_id, thread_id) / "goal"
+
+
+def _thread_state_file(channel_id: str, thread_id: str) -> Path:
+    return _thread_dir(channel_id, thread_id) / "state"
+
+
+def _thread_runs_dir(channel_id: str, thread_id: str) -> Path:
+    return _thread_dir(channel_id, thread_id) / "runs"
+
+
+def _thread_chat_dir(channel_id: str, thread_id: str) -> Path:
+    return _thread_dir(channel_id, thread_id) / "chat"
+
+
+def _step_msg_file(channel_id: str) -> Path:
+    return _channel_dir(channel_id) / ".step_msg"
+
+
+def _save_channels():
+    """Persist channel metadata to channels.json. Caller must hold _channels_lock."""
     data = {}
-    for idx, gs in _goals.items():
-        data[str(idx)] = {
-            "summary": gs.summary,
-            "delay": gs.delay,
-            "started": gs.started,
-            "paused": gs.paused,
-            "step_count": gs.step_count,
-            "goal_hash": gs.goal_hash,
-            "last_run": gs.last_run,
-            "last_finished": gs.last_finished,
+    for cid, cs in _channels.items():
+        threads_data = {}
+        for tid, ts in cs.active_threads.items():
+            threads_data[tid] = {
+                "name": ts.name,
+                "goal": ts.goal,
+                "step_count": ts.step_count,
+                "delay": ts.delay,
+                "paused": ts.paused,
+                "last_run": ts.last_run,
+                "last_finished": ts.last_finished,
+            }
+        data[cid] = {
+            "name": cs.name,
+            "dir_name": cs.dir_name,
+            "delay": cs.delay,
+            "running": cs.running,
+            "pin_text": cs.pin_text,
+            "pin_hash": cs.pin_hash,
+            "repo_url": cs.repo_url,
+            "pm2_procs": cs.pm2_procs,
+            "active_threads": threads_data,
         }
-    GOALS_JSON.parent.mkdir(parents=True, exist_ok=True)
-    GOALS_JSON.write_text(json.dumps(data, indent=2))
+    CHANNELS_JSON.parent.mkdir(parents=True, exist_ok=True)
+    CHANNELS_JSON.write_text(json.dumps(data, indent=2))
 
 
-def _load_goals():
-    """Load goal metadata from goals.json into _goals dict."""
-    global _goals
-    if not GOALS_JSON.exists():
+def _load_channels():
+    """Load channel metadata from channels.json into _channels dict."""
+    global _channels
+    if not CHANNELS_JSON.exists():
         return
     try:
-        data = json.loads(GOALS_JSON.read_text())
+        data = json.loads(CHANNELS_JSON.read_text())
     except (json.JSONDecodeError, OSError):
         return
-    for idx_str, info in data.items():
-        idx = int(idx_str)
-        if not _goal_file(idx).exists():
+    for cid, info in data.items():
+        dir_name = info.get("dir_name", "")
+        if not dir_name:
             continue
-        _goals[idx] = GoalState(
-            index=idx,
-            summary=info.get("summary", ""),
+        if not (CONTEXT_DIR / dir_name).exists():
+            continue
+        threads_raw = info.get("active_threads", {})
+        active_threads: dict[str, ThreadState] = {}
+        for tid, tinfo in threads_raw.items():
+            if isinstance(tinfo, str):
+                active_threads[tid] = ThreadState(thread_id=tid, name=tinfo)
+            elif isinstance(tinfo, dict):
+                active_threads[tid] = ThreadState(
+                    thread_id=tid,
+                    name=tinfo.get("name", ""),
+                    goal=tinfo.get("goal", ""),
+                    step_count=tinfo.get("step_count", 0),
+                    delay=tinfo.get("delay", 0),
+                    paused=tinfo.get("paused", False),
+                    last_run=tinfo.get("last_run", ""),
+                    last_finished=tinfo.get("last_finished", ""),
+                )
+        # Migrate legacy goal_text/goal_hash -> pin_text/pin_hash
+        pin_text = info.get("pin_text", "") or info.get("goal_text", "")
+        pin_hash = info.get("pin_hash", "") or info.get("goal_hash", "")
+        _channels[cid] = ChannelState(
+            channel_id=cid,
+            name=info.get("name", ""),
+            dir_name=dir_name,
             delay=info.get("delay", 0),
-            started=info.get("started", False),
-            paused=info.get("paused", False),
-            step_count=info.get("step_count", 0),
-            goal_hash=info.get("goal_hash", ""),
-            last_run=info.get("last_run", ""),
-            last_finished=info.get("last_finished", ""),
+            running=info.get("running", False),
+            pin_text=pin_text,
+            pin_hash=pin_hash,
+            repo_url=info.get("repo_url", ""),
+            pm2_procs=info.get("pm2_procs", []),
+            active_threads=active_threads,
         )
 
 
@@ -368,12 +473,10 @@ def _format_last_time(iso_ts: str) -> str:
         return "unknown"
 
 
-def _goal_status_label(gs: GoalState) -> str:
-    if gs.started and not gs.paused:
+def _channel_status_label(cs: ChannelState) -> str:
+    if cs.running:
         return "running"
-    if gs.started and gs.paused:
-        return "paused"
-    return "stopped"
+    return "paused"
 
 
 def _file_log(msg: str):
@@ -424,39 +527,123 @@ def fmt_tokens(inp: int, out: int, elapsed: float = 0) -> str:
 
 # ── Prompt helpers ───────────────────────────────────────────────────────────
 
-def load_prompt(goal_index: int, consume_inbox: bool = False, goal_step: int = 0) -> str:
-    """Build full prompt: PROMPT.md + goal's GOAL/STATE/INBOX + chatlog."""
+def _build_thread_prompt(channel_id: str, thread_id: str, step: int = 0) -> str:
+    """Build prompt for an autonomous thread step: PROMPT + PIN + THREAD + THREAD_STATE + THREAD_CHAT."""
     parts = []
     if PROMPT_FILE.exists():
         text = PROMPT_FILE.read_text().strip()
         if text:
             parts.append(text)
-    gf = _goal_file(goal_index)
-    if gf.exists():
-        goal_text = gf.read_text().strip()
-        if goal_text:
-            header = f"## Goal #{goal_index} (step {goal_step})" if goal_step else f"## Goal #{goal_index}"
-            parts.append(f"{header}\n\n{goal_text}\n\nYour context files are in context/goals/{goal_index}/ (STATE.md, INBOX.md, runs/).")
-    sf = _state_file(goal_index)
+
+    cs = _channels.get(channel_id)
+    dir_name = cs.dir_name if cs else f"channel-{channel_id}"
+    abs_thread_dir = str(_thread_dir(channel_id, thread_id).resolve())
+
+    pf = _pin_file(channel_id)
+    if pf.exists():
+        pin_text = pf.read_text().strip()
+        if pin_text:
+            parts.append(f"## Pin\n\n{pin_text}")
+
+    ts = cs.active_threads.get(thread_id) if cs else None
+    thread_name = ts.name if ts else "untitled"
+    gf = _thread_goal_file(channel_id, thread_id)
+    goal_text = gf.read_text().strip() if gf.exists() else (ts.goal if ts else "")
+    header = f"## Thread: {thread_name} (step {step})" if step else f"## Thread: {thread_name}"
+    thread_meta = (
+        f"Your workspace is `context/{dir_name}/threads/{thread_id}/` (state, chat/, runs/).\n"
+        f"Absolute workspace path: `{abs_thread_dir}`\n"
+        f"All code, scripts, data, and artifacts you create must go inside this directory.\n"
+        f"You are running in autonomous mode. Focus on making progress toward the goal.\n"
+        f"Your output will be posted as a step summary — do not call `send`.\n"
+        f"When you have completed the goal, signal completion by running: `python arbos.py thread-done`\n\n"
+        f"## Operator chat\n"
+        f"The operator may send messages in the Thread chat below. Check for recent operator messages and respond to them.\n"
+        f"If the operator asks you to do something (change approach, fix something, restart), prioritize that.\n\n"
+        f"## Thread control commands\n"
+        f"You can control your own thread loop:\n"
+        f"- `python arbos.py thread-ctl delay <seconds>` — set delay between steps (0 = no delay)\n"
+        f"- `python arbos.py thread-ctl restart` — restart your loop from the next step\n"
+        f"- `python arbos.py thread-ctl goal <new goal>` — update your goal\n"
+        f"- `python arbos.py thread-ctl pause` — pause your loop\n"
+        f"- `python arbos.py thread-done` — mark goal complete and stop"
+    )
+    if cs and cs.repo_url:
+        thread_meta += f"\nGitHub repo: {cs.repo_url}"
+    parts.append(f"{header}\n\n{goal_text}\n\n{thread_meta}")
+
+    sf = _thread_state_file(channel_id, thread_id)
+    if sf.exists():
+        state_text = sf.read_text().strip()
+        if state_text:
+            parts.append(f"## Thread State\n\n{state_text}")
+
+    chatlog = load_thread_chatlog(channel_id, thread_id)
+    if chatlog:
+        parts.append(chatlog)
+
+    return "\n\n".join(parts)
+
+
+def _build_channel_chat_prompt(channel_id: str, user_text: str) -> str:
+    """Build prompt for channel chat mode: PROMPT + PIN + CHANNEL + STATE + THREADS + CHAT + USER."""
+    cs = _channels.get(channel_id)
+    dir_name = cs.dir_name if cs else f"channel-{channel_id}"
+    abs_dir = str(_channel_dir(channel_id).resolve())
+
+    parts = []
+    if PROMPT_FILE.exists():
+        text = PROMPT_FILE.read_text().strip()
+        if text:
+            parts.append(text)
+
+    pf = _pin_file(channel_id)
+    if pf.exists():
+        pin_text = pf.read_text().strip()
+        if pin_text:
+            parts.append(f"## Pin\n\n{pin_text}")
+
+    meta = (
+        f"Your context channel is `context/{dir_name}/` (state, chat/).\n"
+        f"Absolute workspace path: `{abs_dir}`\n"
+        f"All code, scripts, data, and artifacts you create must go inside this directory.\n"
+        f"You can create autonomous threads to work on tasks by running:\n"
+        f"  `python arbos.py thread \"thread-name\" \"goal description\"`\n"
+        f"When the operator asks you to start working on something, create a thread for it."
+    )
+    if cs and cs.repo_url:
+        meta += f"\nGitHub repo: {cs.repo_url}"
+    parts.append(f"## Channel\n\nYou are a chatbot for this channel. Respond to messages directly — your text output is streamed to Discord. Do NOT use `arbos.py send` (it is suppressed in chat mode).\n\n{meta}")
+
+    sf = _state_file(channel_id)
     if sf.exists():
         state_text = sf.read_text().strip()
         if state_text:
             parts.append(f"## State\n\n{state_text}")
-    inf = _inbox_file(goal_index)
-    if inf.exists():
-        inbox_text = inf.read_text().strip()
-        if inbox_text:
-            parts.append(f"## Inbox\n\n{inbox_text}")
-        if consume_inbox:
-            inf.write_text("")
-    chatlog = load_chatlog()
+
+    if cs and cs.active_threads:
+        thread_lines = []
+        for tid, ts in cs.active_threads.items():
+            status = "paused" if ts.paused else "running"
+            goal_preview = ts.goal[:80] + "..." if len(ts.goal) > 80 else ts.goal
+            thread_lines.append(f"- **{ts.name}** [{status}] (step {ts.step_count}): {goal_preview}")
+        parts.append("## Active Threads\n\n" + "\n".join(thread_lines))
+
+    chatlog = load_chatlog(channel_id=channel_id)
     if chatlog:
         parts.append(chatlog)
+
+    parts.append(f"## User message\n{user_text}")
     return "\n\n".join(parts)
 
 
-def make_run_dir(goal_index: int = 0) -> Path:
-    runs_dir = _goal_runs_dir(goal_index) if goal_index else GOALS_DIR / "_runs"
+def make_run_dir(channel_id: str = "", thread_id: str = "") -> Path:
+    if thread_id and channel_id:
+        runs_dir = _thread_runs_dir(channel_id, thread_id)
+    elif channel_id:
+        runs_dir = _channel_runs_dir(channel_id)
+    else:
+        runs_dir = GENERAL_DIR / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = runs_dir / ts
@@ -464,14 +651,16 @@ def make_run_dir(goal_index: int = 0) -> Path:
     return run_dir
 
 
-def log_chat(role: str, text: str):
-    """Append to chatlog, rolling to a new file when size exceeds limit."""
+def log_chat(role: str, text: str, channel_id: str = ""):
+    """Append to chatlog, rolling to a new file when size exceeds limit.
+    channel_id="" writes to general chat, otherwise to the channel's chat dir."""
     with _chatlog_lock:
-        CHATLOG_DIR.mkdir(parents=True, exist_ok=True)
+        chat_dir = _channel_chat_dir(channel_id) if channel_id else GENERAL_CHAT_DIR
+        chat_dir.mkdir(parents=True, exist_ok=True)
         max_file_size = 4000
         max_files = 50
 
-        existing = sorted(CHATLOG_DIR.glob("*.jsonl"))
+        existing = sorted(chat_dir.glob("*.jsonl"))
 
         current: Path | None = None
         if existing and existing[-1].stat().st_size < max_file_size:
@@ -479,22 +668,28 @@ def log_chat(role: str, text: str):
 
         if current is None:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            current = CHATLOG_DIR / f"{ts}.jsonl"
+            current = chat_dir / f"{ts}.jsonl"
 
         entry = json.dumps({"role": role, "text": _redact_secrets(text[:1000]), "ts": datetime.now().isoformat()})
         with open(current, "a", encoding="utf-8") as f:
             f.write(entry + "\n")
 
-        all_files = sorted(CHATLOG_DIR.glob("*.jsonl"))
+        all_files = sorted(chat_dir.glob("*.jsonl"))
         for old in all_files[:-max_files]:
             old.unlink(missing_ok=True)
 
 
-def load_chatlog(max_chars: int = 8000) -> str:
-    """Load recent Telegram chat history."""
-    if not CHATLOG_DIR.exists():
+def load_chatlog(max_chars: int = 8000, channel_id: str = "") -> str:
+    """Load recent chat history. channel_id="" loads general, otherwise per-channel."""
+    if channel_id:
+        chat_dir = _channel_chat_dir(channel_id)
+        header = "## Channel chat"
+    else:
+        chat_dir = GENERAL_CHAT_DIR
+        header = "## Recent Discord chat"
+    if not chat_dir.exists():
         return ""
-    files = sorted(CHATLOG_DIR.glob("*.jsonl"))
+    files = sorted(chat_dir.glob("*.jsonl"))
     if not files:
         return ""
 
@@ -509,86 +704,154 @@ def load_chatlog(max_chars: int = 8000) -> str:
             entry = f"[{msg.get('ts', '?')[:16]}] {msg['role']}: {msg['text']}"
             if total + len(entry) > max_chars:
                 lines.reverse()
-                return "## Recent Telegram chat\n\n" + "\n".join(lines)
+                return f"{header}\n\n" + "\n".join(lines)
             lines.append(entry)
             total += len(entry) + 1
 
     lines.reverse()
     if not lines:
         return ""
-    return "## Recent Telegram chat\n\n" + "\n".join(lines)
+    return f"{header}\n\n" + "\n".join(lines)
+
+
+def log_thread_chat(role: str, text: str, channel_id: str, thread_id: str):
+    """Append to a thread-specific chatlog."""
+    with _chatlog_lock:
+        chat_dir = _thread_chat_dir(channel_id, thread_id)
+        chat_dir.mkdir(parents=True, exist_ok=True)
+        max_file_size = 4000
+        max_files = 50
+        existing = sorted(chat_dir.glob("*.jsonl"))
+        current: Path | None = None
+        if existing and existing[-1].stat().st_size < max_file_size:
+            current = existing[-1]
+        if current is None:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            current = chat_dir / f"{ts}.jsonl"
+        entry = json.dumps({"role": role, "text": _redact_secrets(text[:1000]), "ts": datetime.now().isoformat()})
+        with open(current, "a", encoding="utf-8") as f:
+            f.write(entry + "\n")
+        all_files = sorted(chat_dir.glob("*.jsonl"))
+        for old in all_files[:-max_files]:
+            old.unlink(missing_ok=True)
+
+
+def load_thread_chatlog(channel_id: str, thread_id: str, max_chars: int = 8000) -> str:
+    """Load recent chat from a thread's chat dir."""
+    chat_dir = _thread_chat_dir(channel_id, thread_id)
+    header = "## Thread chat"
+    if not chat_dir.exists():
+        return ""
+    files = sorted(chat_dir.glob("*.jsonl"))
+    if not files:
+        return ""
+    lines: list[str] = []
+    total = 0
+    for f in reversed(files):
+        for raw in reversed(f.read_text().strip().splitlines()):
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            entry = f"[{msg.get('ts', '?')[:16]}] {msg['role']}: {msg['text']}"
+            if total + len(entry) > max_chars:
+                lines.reverse()
+                return f"{header}\n\n" + "\n".join(lines)
+            lines.append(entry)
+            total += len(entry) + 1
+    lines.reverse()
+    if not lines:
+        return ""
+    return f"{header}\n\n" + "\n".join(lines)
 
 
 # ── Step update helpers ──────────────────────────────────────────────────────
 
 
-def _step_update_target() -> tuple[str, str] | None:
-    token = os.getenv("TAU_BOT_TOKEN")
+DISCORD_API = "https://discord.com/api/v10"
+DISCORD_MSG_LIMIT = 2000
+
+
+def _discord_headers(token: str) -> dict:
+    return {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
+
+
+def _step_update_target(channel_id: str = "") -> tuple[str, str] | None:
+    token = os.getenv("BOT_TOKEN")
     if not token:
-        _log("step update skipped: TAU_BOT_TOKEN not set")
+        _log("step update skipped: BOT_TOKEN not set")
         return None
-    if not CHAT_ID_FILE.exists():
-        _log("step update skipped: chat_id.txt not found")
+    if channel_id:
+        return token, channel_id
+    if not CHANNEL_ID_FILE.exists():
+        _log("step update skipped: channel_id.txt not found")
         return None
-    chat_id = CHAT_ID_FILE.read_text().strip()
-    if not chat_id:
-        _log("step update skipped: empty chat_id.txt")
+    general_id = CHANNEL_ID_FILE.read_text().strip()
+    if not general_id:
+        _log("step update skipped: empty channel_id.txt")
         return None
-    return token, chat_id
+    return token, general_id
 
 
-def _send_telegram_text(text: str, *, target: tuple[str, str] | None = None) -> bool:
+def _send_discord_text(text: str, *, target: tuple[str, str] | None = None, channel_id: str = "") -> bool:
     target = target or _step_update_target()
     if not target:
         return False
-    token, chat_id = target
+    token, cid = target
     text = _redact_secrets(text)
     try:
         response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text[:4000]},
+            f"{DISCORD_API}/channels/{cid}/messages",
+            headers=_discord_headers(token),
+            json={"content": text[:DISCORD_MSG_LIMIT]},
             timeout=15,
         )
         response.raise_for_status()
     except Exception as exc:
-        _log(f"telegram send failed: {str(exc)[:120]}")
+        _log(f"discord send failed: {str(exc)[:120]}")
         return False
-    log_chat("bot", text[:1000])
-    _log("telegram message sent")
+    log_chat("bot", text[:1000], channel_id=channel_id)
+    _log("discord message sent")
     return True
 
 
-def _send_telegram_new(text: str, *, target: tuple[str, str] | None = None) -> int | None:
-    """Send a new Telegram message and return its message_id."""
+def _send_discord_new(text: str, *, target: tuple[str, str] | None = None,
+                      reply_to: str | None = None) -> str | None:
+    """Send a new Discord message and return its message id."""
     target = target or _step_update_target()
     if not target:
         return None
-    token, chat_id = target
+    token, channel_id = target
     text = _redact_secrets(text)
     try:
+        payload: dict = {"content": text[:DISCORD_MSG_LIMIT]}
+        if reply_to:
+            payload["message_reference"] = {"message_id": reply_to}
         response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text[:4000]},
+            f"{DISCORD_API}/channels/{channel_id}/messages",
+            headers=_discord_headers(token),
+            json=payload,
             timeout=15,
         )
         response.raise_for_status()
-        return response.json().get("result", {}).get("message_id")
+        return response.json().get("id")
     except Exception as exc:
-        _log(f"telegram send failed: {str(exc)[:120]}")
+        _log(f"discord send failed: {str(exc)[:120]}")
         return None
 
 
-def _edit_telegram_text(message_id: int, text: str, *, target: tuple[str, str] | None = None) -> bool:
-    """Edit an existing Telegram message."""
+def _edit_discord_text(message_id: str, text: str, *, target: tuple[str, str] | None = None) -> bool:
+    """Edit an existing Discord message."""
     target = target or _step_update_target()
     if not target:
         return False
-    token, chat_id = target
+    token, channel_id = target
     text = _redact_secrets(text)
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/editMessageText",
-            json={"chat_id": chat_id, "message_id": message_id, "text": text[:4000]},
+        requests.patch(
+            f"{DISCORD_API}/channels/{channel_id}/messages/{message_id}",
+            headers=_discord_headers(token),
+            json={"content": text[:DISCORD_MSG_LIMIT]},
             timeout=15,
         )
         return True
@@ -596,68 +859,503 @@ def _edit_telegram_text(message_id: int, text: str, *, target: tuple[str, str] |
         return False
 
 
-def _send_telegram_document(file_path: str, caption: str = "", *, target: tuple[str, str] | None = None) -> bool:
-    """Send a file as a Telegram document."""
+def _send_discord_document(file_path: str, caption: str = "", *, target: tuple[str, str] | None = None, channel_id: str = "") -> bool:
+    """Send a file as a Discord attachment."""
     target = target or _step_update_target()
     if not target:
         return False
-    token, chat_id = target
-    caption = _redact_secrets(caption)[:1024]
+    token, cid = target
+    caption = _redact_secrets(caption)[:DISCORD_MSG_LIMIT]
     try:
         with open(file_path, "rb") as f:
             response = requests.post(
-                f"https://api.telegram.org/bot{token}/sendDocument",
-                data={"chat_id": chat_id, "caption": caption},
-                files={"document": (Path(file_path).name, f)},
+                f"{DISCORD_API}/channels/{cid}/messages",
+                headers={"Authorization": f"Bot {token}"},
+                data={"content": caption} if caption else None,
+                files={"files[0]": (Path(file_path).name, f)},
                 timeout=60,
             )
         response.raise_for_status()
-        _log(f"telegram document sent: {Path(file_path).name}")
-        log_chat("bot", f"[sent file: {Path(file_path).name}] {caption}")
+        _log(f"discord file sent: {Path(file_path).name}")
+        log_chat("bot", f"[sent file: {Path(file_path).name}] {caption}", channel_id=channel_id)
         return True
     except Exception as exc:
-        _log(f"telegram document send failed: {str(exc)[:120]}")
+        _log(f"discord file send failed: {str(exc)[:120]}")
         return False
 
 
-def _send_telegram_photo(file_path: str, caption: str = "", *, target: tuple[str, str] | None = None) -> bool:
-    """Send an image as a Telegram photo (compressed)."""
-    target = target or _step_update_target()
-    if not target:
-        return False
-    token, chat_id = target
-    caption = _redact_secrets(caption)[:1024]
-    try:
-        with open(file_path, "rb") as f:
-            response = requests.post(
-                f"https://api.telegram.org/bot{token}/sendPhoto",
-                data={"chat_id": chat_id, "caption": caption},
-                files={"photo": (Path(file_path).name, f)},
-                timeout=60,
-            )
-        response.raise_for_status()
-        _log(f"telegram photo sent: {Path(file_path).name}")
-        log_chat("bot", f"[sent photo: {Path(file_path).name}] {caption}")
-        return True
-    except Exception as exc:
-        _log(f"telegram photo send failed: {str(exc)[:120]}")
-        return False
+def _send_discord_photo(file_path: str, caption: str = "", *, target: tuple[str, str] | None = None, channel_id: str = "") -> bool:
+    """Send an image as a Discord attachment."""
+    return _send_discord_document(file_path, caption, target=target, channel_id=channel_id)
 
 
-def _download_telegram_file(bot, file_id: str, filename: str) -> Path:
-    """Download a file from Telegram and save it to FILES_DIR."""
+def _download_discord_attachment(url: str, filename: str) -> Path:
+    """Download a Discord attachment and save it to FILES_DIR."""
     FILES_DIR.mkdir(parents=True, exist_ok=True)
-    file_info = bot.get_file(file_id)
-    downloaded = bot.download_file(file_info.file_path)
+    resp = requests.get(url, timeout=60)
+    resp.raise_for_status()
+    downloaded = resp.content
     save_path = FILES_DIR / filename
-    # avoid overwriting: append a suffix if the file already exists
     if save_path.exists():
         stem, suffix = save_path.stem, save_path.suffix
         ts = datetime.now().strftime("%H%M%S")
         save_path = FILES_DIR / f"{stem}_{ts}{suffix}"
     save_path.write_bytes(downloaded)
-    _log(f"saved telegram file: {save_path.name} ({len(downloaded)} bytes)")
+    _log(f"saved discord file: {save_path.name} ({len(downloaded)} bytes)")
     return save_path
+
+
+# ── Channel helpers ──────────────────────────────────────────────────────────
+
+
+def _sanitize_channel_name(text: str) -> str:
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9\s-]', '', text)
+    text = re.sub(r'[\s]+', '-', text)
+    text = re.sub(r'-+', '-', text)
+    text = text.strip('-')
+    return text[:100] or "channel"
+
+
+def _is_managed_channel(channel_id: str) -> bool:
+    return channel_id in _channels
+
+
+def _find_or_create_categories(guild_id: str) -> tuple[str | None, str | None]:
+    """Find or create 'Running' and 'Paused' categories. Returns (running_id, paused_id)."""
+    token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        return None, None
+    running_id = None
+    paused_id = None
+    try:
+        resp = requests.get(
+            f"{DISCORD_API}/guilds/{guild_id}/channels",
+            headers=_discord_headers(token),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        for ch in resp.json():
+            if ch["type"] == 4:
+                if ch["name"].lower() == "running":
+                    running_id = ch["id"]
+                elif ch["name"].lower() == "paused":
+                    paused_id = ch["id"]
+    except Exception:
+        pass
+    if not running_id:
+        try:
+            resp = requests.post(
+                f"{DISCORD_API}/guilds/{guild_id}/channels",
+                headers=_discord_headers(token),
+                json={"name": "Running", "type": 4},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            running_id = resp.json()["id"]
+        except Exception as exc:
+            _log(f"failed to create Running category: {str(exc)[:200]}")
+    if not paused_id:
+        try:
+            resp = requests.post(
+                f"{DISCORD_API}/guilds/{guild_id}/channels",
+                headers=_discord_headers(token),
+                json={"name": "Paused", "type": 4},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            paused_id = resp.json()["id"]
+        except Exception as exc:
+            _log(f"failed to create Paused category: {str(exc)[:200]}")
+    return running_id, paused_id
+
+
+def _fetch_channel_pins(channel_id: str) -> str:
+    """Fetch pinned messages for a channel and return concatenated text."""
+    token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        return ""
+    try:
+        resp = requests.get(
+            f"{DISCORD_API}/channels/{channel_id}/pins",
+            headers=_discord_headers(token),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        pins = resp.json()
+        if not pins:
+            return ""
+        parts = []
+        for pin in reversed(pins):
+            content = pin.get("content", "").strip()
+            if content:
+                parts.append(content)
+        return "\n\n".join(parts)
+    except Exception as exc:
+        _log(f"failed to fetch pins for {channel_id}: {str(exc)[:120]}")
+        return ""
+
+
+def _archive_thread(thread_id: str):
+    """Archive a Discord thread."""
+    token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        return
+    try:
+        requests.patch(
+            f"{DISCORD_API}/channels/{thread_id}",
+            headers=_discord_headers(token),
+            json={"archived": True, "locked": True},
+            timeout=15,
+        )
+        _log(f"archived thread {thread_id}")
+    except Exception as exc:
+        _log(f"failed to archive thread {thread_id}: {str(exc)[:120]}")
+
+
+def _setup_channel_context(channel_id: str, channel_name: str, is_running: bool) -> ChannelState:
+    """Create context directory and GitHub repo for a newly detected channel."""
+    dir_name = _sanitize_channel_name(channel_name)
+    if (CONTEXT_DIR / dir_name).exists():
+        dir_name = f"{dir_name}-{channel_id[:8]}"
+    cs = ChannelState(channel_id=channel_id, name=channel_name, dir_name=dir_name, running=is_running)
+
+    with _channels_lock:
+        _channels[channel_id] = cs
+
+    cdir = CONTEXT_DIR / dir_name
+    cdir.mkdir(parents=True, exist_ok=True)
+    state_f = cdir / "state"
+    if not state_f.exists():
+        state_f.write_text("")
+    (cdir / "runs").mkdir(parents=True, exist_ok=True)
+    (cdir / "chat").mkdir(parents=True, exist_ok=True)
+    (cdir / ".gitignore").write_text("runs/*/output.txt\n.step_msg\n__pycache__/\n*.pyc\n.venv/\n")
+
+    repo_url = _create_github_repo(f"arbos-{dir_name}", description=f"Arbos channel: {channel_name}")
+    if repo_url:
+        _init_channel_git_repo(cdir, repo_url)
+        _add_channel_submodule(dir_name, repo_url)
+        cs.repo_url = repo_url
+
+    pin_text = _fetch_channel_pins(channel_id)
+    if pin_text:
+        (cdir / "pin").write_text(pin_text)
+        cs.pin_text = pin_text
+        cs.pin_hash = hashlib.sha256(pin_text.encode()).hexdigest()[:16]
+
+    with _channels_lock:
+        _save_channels()
+    _log(f"channel setup: {channel_name} (id={channel_id}, dir={dir_name}, running={is_running})")
+    return cs
+
+
+def _delete_channel_context(channel_id: str):
+    """Kill processes and remove context for a deleted channel."""
+    import shutil
+    with _channel_procs_lock:
+        proc = _channel_procs.get(channel_id)
+    if proc and proc.poll() is None:
+        _log(f"channel {channel_id}: killing claude subprocess pid={proc.pid}")
+        proc.kill()
+    with _channels_lock:
+        cs = _channels.get(channel_id)
+        if not cs:
+            return
+        cdir = _channel_dir(channel_id)
+        pm2_names = list(cs.pm2_procs)
+        cs.stop_event.set()
+        cs.wake.set()
+        cs.running = False
+        thread = cs.thread
+        del _channels[channel_id]
+        _save_channels()
+    if thread and thread.is_alive():
+        thread.join(timeout=10)
+    if pm2_names:
+        _log(f"channel {channel_id}: deleting pm2 processes: {pm2_names}")
+        _pm2_delete(pm2_names)
+    if cdir.exists():
+        shutil.rmtree(cdir, ignore_errors=True)
+    _log(f"channel {channel_id} context deleted")
+
+
+def _create_discord_thread(channel_id: str, name: str, message: str = "") -> str | None:
+    """Create a Discord thread in a channel. Returns thread_id or None."""
+    token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        return None
+    try:
+        resp = requests.post(
+            f"{DISCORD_API}/channels/{channel_id}/threads",
+            headers=_discord_headers(token),
+            json={"name": name[:100], "type": 11, "auto_archive_duration": 10080},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        thread_id = resp.json()["id"]
+        if message:
+            owner_id = os.environ.get("DISCORD_OWNER_ID", "").strip()
+            if owner_id:
+                message = f"<@{owner_id}> {message}"
+            requests.post(
+                f"{DISCORD_API}/channels/{thread_id}/messages",
+                headers=_discord_headers(token),
+                json={"content": message[:DISCORD_MSG_LIMIT]},
+                timeout=15,
+            )
+        _log(f"created discord thread '{name}' (id={thread_id}) in channel {channel_id}")
+        return thread_id
+    except Exception as exc:
+        _log(f"failed to create discord thread: {str(exc)[:120]}")
+        return None
+
+
+def _fetch_thread_starter_message(thread_id: str) -> str:
+    """Fetch the first message in a thread (the starter message)."""
+    token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        return ""
+    try:
+        resp = requests.get(
+            f"{DISCORD_API}/channels/{thread_id}/messages?limit=1&after=0",
+            headers=_discord_headers(token),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        messages = resp.json()
+        if messages:
+            return messages[0].get("content", "").strip()
+        return ""
+    except Exception as exc:
+        _log(f"failed to fetch thread starter: {str(exc)[:120]}")
+        return ""
+
+
+def _create_thread(channel_id: str, name: str, goal: str, thread_id: str | None = None) -> ThreadState | None:
+    """Create a thread with its directory structure and add it to the channel.
+
+    If thread_id is provided, the Discord thread already exists.
+    Otherwise, a new Discord thread is created.
+    """
+    cs = _channels.get(channel_id)
+    if not cs:
+        _log(f"_create_thread: channel {channel_id} not found")
+        return None
+
+    if not thread_id:
+        thread_id = _create_discord_thread(channel_id, name, f"**Goal:** {goal}")
+    if not thread_id:
+        return None
+
+    tdir = _thread_dir(channel_id, thread_id)
+    tdir.mkdir(parents=True, exist_ok=True)
+    _thread_goal_file(channel_id, thread_id).write_text(goal)
+    sf = _thread_state_file(channel_id, thread_id)
+    if not sf.exists():
+        sf.write_text("")
+    _thread_runs_dir(channel_id, thread_id).mkdir(parents=True, exist_ok=True)
+    _thread_chat_dir(channel_id, thread_id).mkdir(parents=True, exist_ok=True)
+
+    ts = ThreadState(
+        thread_id=thread_id,
+        name=name,
+        goal=goal,
+        delay=cs.delay,
+    )
+    cs.active_threads[thread_id] = ts
+    cs.wake.set()
+    with _channels_lock:
+        _save_channels()
+    _log(f"channel {cs.name}: created thread '{name}' (id={thread_id})")
+    return ts
+
+
+def _add_discord_reaction(channel_id: str, message_id: str, emoji: str):
+    token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        return
+    try:
+        requests.put(
+            f"{DISCORD_API}/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me",
+            headers=_discord_headers(token),
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def _delete_discord_message(channel_id: str, message_id: str):
+    token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        return
+    try:
+        requests.delete(
+            f"{DISCORD_API}/channels/{channel_id}/messages/{message_id}",
+            headers=_discord_headers(token),
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def _update_channel_topic(channel_id: str, topic: str):
+    token = os.getenv("BOT_TOKEN", "")
+    if not token or not channel_id:
+        return
+    try:
+        requests.patch(
+            f"{DISCORD_API}/channels/{channel_id}",
+            headers=_discord_headers(token),
+            json={"topic": topic[:1024]},
+            timeout=15,
+        )
+    except Exception:
+        pass
+
+
+# ── GitHub helpers ───────────────────────────────────────────────────────────
+
+GITHUB_API = "https://api.github.com"
+
+
+def _github_headers() -> dict:
+    token = os.environ.get("GITHUB_TOKEN", "")
+    return {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+
+
+def _github_username() -> str:
+    return os.environ.get("GITHUB_USERNAME", "")
+
+
+def _create_github_repo(repo_name: str, description: str = "") -> str | None:
+    """Create a GitHub repo and return its https clone URL, or None on failure."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        _log("github: GITHUB_TOKEN not set, skipping repo creation")
+        return None
+    try:
+        resp = requests.post(
+            f"{GITHUB_API}/user/repos",
+            headers=_github_headers(),
+            json={"name": repo_name, "description": description[:350], "private": False, "auto_init": True},
+            timeout=30,
+        )
+        if resp.status_code == 422:
+            username = _github_username()
+            if username:
+                url = f"https://github.com/{username}/{repo_name}"
+                _log(f"github: repo already exists: {url}")
+                return url
+        resp.raise_for_status()
+        url = resp.json().get("html_url", "")
+        _log(f"github: created repo {url}")
+        return url
+    except Exception as exc:
+        _log(f"github: repo creation failed: {str(exc)[:200]}")
+        return None
+
+
+def _init_channel_git_repo(channel_dir: Path, repo_url: str) -> bool:
+    """Initialize a git repo in the channel directory, set remote, and make initial commit."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    username = _github_username()
+    if not token or not username:
+        return False
+    auth_url = repo_url.replace("https://", f"https://{username}:{token}@")
+    try:
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        def _run_git(*args, **kwargs):
+            return subprocess.run(
+                ["git"] + list(args), cwd=channel_dir, env=env,
+                capture_output=True, text=True, timeout=30, **kwargs,
+            )
+        _run_git("init")
+        _run_git("remote", "add", "origin", auth_url)
+        _run_git("config", "user.email", "arbos@bot")
+        _run_git("config", "user.name", "Arbos")
+        _run_git("fetch", "origin")
+        merge = _run_git("merge", "origin/main", "--allow-unrelated-histories", "-m", "merge remote")
+        if merge.returncode != 0:
+            _run_git("checkout", "-b", "main")
+        _run_git("add", "-A")
+        _run_git("commit", "-m", "initial channel context", "--allow-empty")
+        push = _run_git("push", "-u", "origin", "main")
+        if push.returncode != 0:
+            _run_git("push", "-u", "origin", "main", "--force")
+        _log(f"github: initialized channel repo at {channel_dir.name}")
+        return True
+    except Exception as exc:
+        _log(f"github: init failed for {channel_dir.name}: {str(exc)[:200]}")
+        return False
+
+
+def _add_channel_submodule(channel_dir_name: str, repo_url: str):
+    """Add the channel repo as a git submodule of the main Arbos project."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    username = _github_username()
+    if not token or not username:
+        return
+    auth_url = repo_url.replace("https://", f"https://{username}:{token}@")
+    try:
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        submodule_path = f"context/{channel_dir_name}"
+        result = subprocess.run(
+            ["git", "submodule", "add", "-f", auth_url, submodule_path],
+            cwd=WORKING_DIR, env=env, capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            subprocess.run(
+                ["git", "add", ".gitmodules", submodule_path],
+                cwd=WORKING_DIR, env=env, capture_output=True, text=True, timeout=10,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", f"add submodule: {channel_dir_name}"],
+                cwd=WORKING_DIR, env=env, capture_output=True, text=True, timeout=10,
+            )
+            _log(f"github: added submodule {submodule_path}")
+        else:
+            _log(f"github: submodule add returned {result.returncode}: {result.stderr[:200]}")
+    except Exception as exc:
+        _log(f"github: submodule add failed: {str(exc)[:200]}")
+
+
+def _push_channel_context(channel_id: str, step_label: str = ""):
+    """Commit and push the channel's context directory to its GitHub repo."""
+    cs = _channels.get(channel_id)
+    if not cs or not cs.repo_url:
+        return
+    cdir = _channel_dir(channel_id)
+    if not (cdir / ".git").exists():
+        return
+    token = os.environ.get("GITHUB_TOKEN", "")
+    username = _github_username()
+    if not token or not username:
+        return
+    try:
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        auth_url = cs.repo_url.replace("https://", f"https://{username}:{token}@")
+        def _run_git(*args):
+            return subprocess.run(
+                ["git"] + list(args), cwd=cdir, env=env,
+                capture_output=True, text=True, timeout=60,
+            )
+        _run_git("remote", "set-url", "origin", auth_url)
+        _run_git("add", "-A")
+        msg = step_label or "update"
+        commit = _run_git("commit", "-m", msg)
+        if commit.returncode != 0:
+            return
+        push = _run_git("push", "origin", "main")
+        if push.returncode == 0:
+            _log(f"github: pushed channel {channel_id[:8]} context ({msg})")
+        else:
+            _log(f"github: push failed for channel {channel_id[:8]}: {push.stderr[:200]}")
+    except Exception as exc:
+        _log(f"github: push failed for channel {channel_id[:8]}: {str(exc)[:200]}")
 
 
 # ── Chutes proxy (Anthropic Messages API → OpenAI Chat Completions) ──────────
@@ -1226,11 +1924,15 @@ def _write_claude_settings():
     _log(f"wrote .claude/settings.local.json (provider={PROVIDER}, model={CLAUDE_MODEL}, target={target_label})")
 
 
-def _claude_env(goal_index: int = 0) -> dict[str, str]:
+def _claude_env(channel_id: str = "", thread_id: str = "", silent: bool = False) -> dict[str, str]:
     env = os.environ.copy()
-    env.pop("TAU_BOT_TOKEN", None)
-    if goal_index:
-        env["ARBOS_GOAL_INDEX"] = str(goal_index)
+    env.pop("BOT_TOKEN", None)
+    if channel_id:
+        env["ARBOS_CHANNEL_ID"] = channel_id
+    if thread_id:
+        env["ARBOS_THREAD_ID"] = thread_id
+    if silent:
+        env["ARBOS_SILENT"] = "1"
     if PROVIDER == "openrouter":
         env["ANTHROPIC_API_KEY"] = LLM_API_KEY
         env["ANTHROPIC_BASE_URL"] = LLM_BASE_URL
@@ -1242,7 +1944,7 @@ def _claude_env(goal_index: int = 0) -> dict[str, str]:
     return env
 
 
-def _run_claude_once(cmd, env, on_text=None, on_activity=None):
+def _run_claude_once(cmd, env, on_text=None, on_activity=None, channel_id: str = ""):
     """Run a single claude subprocess, return (returncode, result_text, raw_lines, stderr).
 
     on_text: optional callback(accumulated_text) fired as assistant text streams in.
@@ -1257,6 +1959,9 @@ def _run_claude_once(cmd, env, on_text=None, on_activity=None):
     )
     with _child_procs_lock:
         _child_procs.add(proc)
+    if channel_id:
+        with _channel_procs_lock:
+            _channel_procs[channel_id] = proc
 
     result_text = ""
     complete_texts: list[str] = []
@@ -1345,14 +2050,18 @@ def _run_claude_once(cmd, env, on_text=None, on_activity=None):
     returncode = proc.wait()
     with _child_procs_lock:
         _child_procs.discard(proc)
+    if channel_id:
+        with _channel_procs_lock:
+            if _channel_procs.get(channel_id) is proc:
+                _channel_procs.pop(channel_id, None)
     return returncode, result_text, raw_lines, stderr_output
 
 
 def run_agent(cmd: list[str], phase: str, output_file: Path,
-              on_text=None, on_activity=None, goal_index: int = 0) -> subprocess.CompletedProcess:
+              on_text=None, on_activity=None, channel_id: str = "", thread_id: str = "", silent: bool = False) -> subprocess.CompletedProcess:
     _claude_semaphore.acquire()
     try:
-        env = _claude_env(goal_index=goal_index)
+        env = _claude_env(channel_id=channel_id, thread_id=thread_id, silent=silent)
         flags = " ".join(a for a in cmd if a.startswith("-"))
 
         returncode, result_text, raw_lines, stderr_output = 1, "", [], "no attempts made"
@@ -1362,7 +2071,7 @@ def run_agent(cmd: list[str], phase: str, output_file: Path,
             t0 = time.monotonic()
 
             returncode, result_text, raw_lines, stderr_output = _run_claude_once(
-                cmd, env, on_text=on_text, on_activity=on_activity,
+                cmd, env, on_text=on_text, on_activity=on_activity, channel_id=channel_id,
             )
             elapsed = time.monotonic() - t0
 
@@ -1399,40 +2108,51 @@ def extract_text(result: subprocess.CompletedProcess) -> str:
     return output
 
 
-def run_step(prompt: str, step_number: int, goal_index: int = 0, goal_step: int = 0) -> bool:
-    run_dir = make_run_dir(goal_index=goal_index)
+def run_step(prompt: str, step_number: int, channel_id: str = "", channel_step: int = 0, thread_id: str = "", silent: bool = False) -> tuple[bool, str]:
+    run_dir = make_run_dir(channel_id=channel_id, thread_id=thread_id)
     t0 = time.monotonic()
 
     log_file = run_dir / "logs.txt"
     _tls.log_fh = open(log_file, "a", encoding="utf-8")
 
-    smf = _step_msg_file(goal_index) if goal_index else CONTEXT_DIR / ".step_msg"
+    smf = _step_msg_file(channel_id) if channel_id else CONTEXT_DIR / ".step_msg"
 
-    target = _step_update_target()
-    step_label = f"Goal #{goal_index} Step {goal_step}" if goal_index else f"Step {step_number}"
-    step_msg_id: int | None = None
+    target_channel = thread_id if thread_id else channel_id
+    target = _step_update_target(target_channel) if not silent else None
+    cs = _channels.get(channel_id) if channel_id else None
+    ch_name = cs.name if cs else ""
+    step_label = f"{ch_name} Step {channel_step}" if channel_id else f"Step {step_number}"
+    step_msg_id: str | None = None
     step_msg_text = ""
     last_edit = 0.0
+    result_text = ""
 
-    if target:
-        step_msg_id = _send_telegram_new(f"{step_label}: starting...", target=target)
-        if step_msg_id:
-            smf.parent.mkdir(parents=True, exist_ok=True)
-            smf.write_text(json.dumps({
-                "msg_id": step_msg_id, "text": f"{step_label}: starting...",
-            }))
+    if silent:
+        smf.unlink(missing_ok=True)
+    elif target:
+        smf.parent.mkdir(parents=True, exist_ok=True)
+        smf.write_text(json.dumps({"msg_id": None, "text": ""}))
     else:
         smf.unlink(missing_ok=True)
 
     def _edit_step_msg(text: str, *, force: bool = False):
-        nonlocal last_edit, step_msg_text
-        if not step_msg_id or not target:
+        nonlocal last_edit, step_msg_text, step_msg_id
+        if not target:
             return
+        if not step_msg_id:
+            if smf.exists():
+                try:
+                    state = json.loads(smf.read_text())
+                    step_msg_id = state.get("msg_id")
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            if not step_msg_id:
+                return
         now = time.time()
         if not force and now - last_edit < 3.0:
             return
         step_msg_text = text
-        _edit_telegram_text(step_msg_id, text, target=target)
+        _edit_discord_text(step_msg_id, text, target=target)
         smf.write_text(json.dumps({"msg_id": step_msg_id, "text": text}))
         last_edit = now
 
@@ -1443,6 +2163,8 @@ def run_step(prompt: str, step_number: int, goal_index: int = 0, goal_step: int 
 
     def _on_activity(status: str):
         _last_activity[0] = status
+        if silent:
+            return
         elapsed_s = time.monotonic() - t0
         inp, out = _get_tokens()
         tok = f" | {fmt_tokens(inp, out, elapsed_s)}" if (inp or out) else ""
@@ -1463,201 +2185,204 @@ def run_step(prompt: str, step_number: int, goal_index: int = 0, goal_step: int 
         preview = prompt[:200] + ("…" if len(prompt) > 200 else "")
         _log(f"prompt preview: {preview}")
 
-        _log(f"goal #{goal_index} step {goal_step}: executing")
+        _log(f"channel {ch_name or 'general'} step {channel_step}: executing")
 
-        threading.Thread(target=_heartbeat, daemon=True).start()
+        if not silent:
+            threading.Thread(target=_heartbeat, daemon=True).start()
 
         result = run_agent(
             _claude_cmd(prompt),
-            phase=f"goal#{goal_index}",
+            phase=f"ch:{ch_name or 'general'}",
             output_file=run_dir / "output.txt",
             on_activity=_on_activity,
-            goal_index=goal_index,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            silent=silent,
         )
 
         rollout_text = _redact_secrets(extract_text(result))
         (run_dir / "rollout.md").write_text(rollout_text)
         _log(f"rollout saved ({len(rollout_text)} chars)")
+        result_text = rollout_text
 
         elapsed = time.monotonic() - t0
         success = result.returncode == 0
         _log(f"step {'succeeded' if success else 'failed'} in {fmt_duration(elapsed)}")
-        return success
+        return success, result_text
     finally:
         _heartbeat_stop.set()
         fh = getattr(_tls, "log_fh", None)
         if fh:
             fh.close()
             _tls.log_fh = None
-        try:
-            elapsed = fmt_duration(time.monotonic() - t0)
-            rollout = (run_dir / "rollout.md").read_text() if (run_dir / "rollout.md").exists() else ""
-            status = "done" if success else "failed"
-
-            agent_text = ""
-            if smf.exists():
-                try:
-                    state = json.loads(smf.read_text())
-                    saved = state.get("text", "")
-                    prefix = f"{step_label}: starting..."
-                    if saved != prefix and not saved.startswith(f"{step_label} ("):
-                        agent_text = saved
-                except (json.JSONDecodeError, KeyError):
-                    pass
-
-            elapsed_s = time.monotonic() - t0
-            inp, out = _get_tokens()
-            tok = f" | {fmt_tokens(inp, out, elapsed_s)}" if (inp or out) else ""
-            parts = [f"{step_label} ({elapsed}, {status}{tok})"]
-            if agent_text:
-                parts.append(agent_text)
-            if rollout.strip():
-                parts.append(rollout.strip()[:3500])
-            final = "\n\n".join(parts)
-
-            _edit_step_msg(final, force=True)
-            log_chat("bot", final[:1000])
+        if silent:
             smf.unlink(missing_ok=True)
-        except Exception as exc:
-            _log(f"step message finalize failed: {str(exc)[:120]}")
+        else:
+            try:
+                agent_text = ""
+                if smf.exists():
+                    try:
+                        state = json.loads(smf.read_text())
+                        agent_text = state.get("text", "").strip()
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+
+                if step_msg_id and agent_text:
+                    log_chat("bot", agent_text[:1000], channel_id=channel_id)
+
+                smf.unlink(missing_ok=True)
+            except Exception as exc:
+                _log(f"step message finalize failed: {str(exc)[:120]}")
 
 
 # ── Agent loop ───────────────────────────────────────────────────────────────
 
 
-def _goal_loop(index: int):
-    """Run the agent loop for a single goal. Exits when stop_event is set."""
+def _make_step_summary(rollout_text: str, step_number: int) -> str:
+    """Extract a concise summary from rollout text for posting after a silent step."""
+    lines = rollout_text.strip().splitlines() if rollout_text else []
+    if not lines:
+        return f"**Step {step_number}** completed (no output)."
+    tail = "\n".join(lines[-60:])
+    limit = DISCORD_MSG_LIMIT - 100
+    if len(tail) > limit:
+        tail = tail[-limit:]
+    return f"**Step {step_number}**\n{tail}"
+
+
+def _thread_loop(channel_id: str, thread_id: str):
+    """Run the autonomous loop for a single thread. Exits when stop_event is set or paused."""
     global _step_count
 
-    with _goals_lock:
-        gs = _goals.get(index)
-    if not gs:
+    cs = _channels.get(channel_id)
+    if not cs:
+        return
+    ts = cs.active_threads.get(thread_id)
+    if not ts:
         return
 
     failures = 0
-    gf = _goal_file(index)
+    _log(f"channel {cs.name}: thread '{ts.name}' loop started (id={thread_id})")
 
-    while not gs.stop_event.is_set():
-        if not gf.exists() or not gf.read_text().strip():
-            if gs.goal_hash:
-                _log(f"goal #{index} cleared after {gs.step_count} steps")
-                gs.goal_hash = ""
-                gs.step_count = 0
-            gs.wake.wait(timeout=5)
-            gs.wake.clear()
+    while not ts.stop_event.is_set():
+        if ts.paused or not cs.running:
+            ts.wake.wait(timeout=5)
+            ts.wake.clear()
             continue
-
-        if gs.paused:
-            gs.wake.wait(timeout=5)
-            gs.wake.clear()
-            continue
-
-        current_goal = gf.read_text().strip()
-        current_hash = hashlib.sha256(current_goal.encode()).hexdigest()[:16]
-        if current_hash != gs.goal_hash:
-            if gs.goal_hash:
-                _log(f"goal #{index} changed after {gs.step_count} steps on previous goal")
-            gs.goal_hash = current_hash
-            gs.step_count = 0
-            _log(f"goal #{index} new [{current_hash}]: {current_goal[:100]}")
 
         _step_count += 1
-        gs.step_count += 1
-        gs.last_run = datetime.now().isoformat()
-        with _goals_lock:
-            _save_goals()
+        ts.step_count += 1
+        ts.last_run = datetime.now().isoformat()
+        with _channels_lock:
+            _save_channels()
 
-        _log(f"Goal #{index} Step {gs.step_count} (global step {_step_count})", blank=True)
+        _log(f"Thread {ts.name} Step {ts.step_count} (global step {_step_count})", blank=True)
 
-        prompt = load_prompt(goal_index=index, consume_inbox=True, goal_step=gs.step_count)
+        # Notify the thread that a new step is starting
+        start_target = _step_update_target(thread_id)
+        _send_discord_text(f"Started Step #{ts.step_count}", target=start_target, channel_id=channel_id)
+
+        prompt = _build_thread_prompt(channel_id, thread_id, step=ts.step_count)
         if not prompt:
-            gs.wake.wait(timeout=5)
-            gs.wake.clear()
+            ts.wake.wait(timeout=5)
+            ts.wake.clear()
             continue
 
-        _log(f"goal #{index}: prompt={len(prompt)} chars")
+        _log(f"thread {ts.name}: prompt={len(prompt)} chars")
 
-        success = run_step(prompt, _step_count, goal_index=index, goal_step=gs.step_count)
+        pm2_before = _pm2_list_names()
+        success, result_text = run_step(prompt, _step_count, channel_id=channel_id,
+                           channel_step=ts.step_count, thread_id=thread_id,
+                           silent=True)
+        pm2_after = _pm2_list_names()
 
-        gs.last_finished = datetime.now().isoformat()
-        with _goals_lock:
-            _save_goals()
+        new_pm2 = pm2_after - pm2_before
+        if new_pm2:
+            cs.pm2_procs = list(set(cs.pm2_procs) | new_pm2)
+            _log(f"thread {ts.name}: tracked new pm2 processes: {new_pm2}")
+
+        ts.last_finished = datetime.now().isoformat()
+        with _channels_lock:
+            _save_channels()
+
+        _push_channel_context(channel_id, step_label=f"thread {ts.name} step {ts.step_count}")
+
+        summary = _make_step_summary(result_text, ts.step_count)
+        target = _step_update_target(thread_id)
+        _send_discord_text(summary, target=target, channel_id=channel_id)
 
         if success:
             failures = 0
         else:
             failures += 1
-            _log(f"goal #{index}: failure #{failures}")
+            _log(f"thread {ts.name}: failure #{failures}")
 
-        gs.wake.clear()
+        ts.wake.clear()
 
-        step_delay = gs.delay + int(os.environ.get("AGENT_DELAY", "0"))
+        step_delay = ts.delay + int(os.environ.get("AGENT_DELAY", "0"))
         if failures:
             backoff = min(2 ** failures, 120)
             step_delay += backoff
-            _log(f"goal #{index}: waiting {step_delay}s (failure backoff + delay)")
-            gs.wake.wait(timeout=step_delay)
+            _log(f"thread {ts.name}: waiting {step_delay}s (failure backoff + delay)")
+            ts.wake.wait(timeout=step_delay)
         elif step_delay > 0:
-            _log(f"goal #{index}: waiting {step_delay}s (delay)")
-            gs.wake.wait(timeout=step_delay)
+            _log(f"thread {ts.name}: waiting {step_delay}s (delay)")
+            ts.wake.wait(timeout=step_delay)
 
-    _log(f"goal #{index} loop exited")
+    _log(f"thread {ts.name} loop exited")
 
 
-def _goal_manager():
-    """Monitor _goals and spawn/stop goal threads as needed."""
+def _channel_loop(channel_id: str):
+    """Manage thread loops for a channel. Spawns/stops _thread_loop instances."""
+    with _channels_lock:
+        cs = _channels.get(channel_id)
+    if not cs:
+        return
+
+    while not cs.stop_event.is_set():
+        if not cs.running:
+            cs.wake.wait(timeout=5)
+            cs.wake.clear()
+            continue
+
+        for tid, ts in list(cs.active_threads.items()):
+            if ts.loop_thread is None and not ts.paused:
+                ts.stop_event.clear()
+                t = threading.Thread(target=_thread_loop, args=(channel_id, tid),
+                                     daemon=True, name=f"th-{ts.name}")
+                ts.loop_thread = t
+                t.start()
+                _log(f"channel {cs.name}: spawned loop for thread '{ts.name}'")
+            if ts.loop_thread is not None and not ts.loop_thread.is_alive():
+                ts.loop_thread = None
+
+        cs.wake.wait(timeout=5)
+        cs.wake.clear()
+
+    for tid, ts in cs.active_threads.items():
+        ts.stop_event.set()
+        ts.wake.set()
+
+    _log(f"channel {cs.name} loop exited")
+
+
+def _channel_manager():
+    """Monitor _channels and spawn/stop channel threads as needed."""
     while not _shutdown.is_set():
-        with _goals_lock:
-            for idx, gs in list(_goals.items()):
-                if gs.started and not gs.paused and gs.thread is None:
-                    gs.stop_event.clear()
-                    t = threading.Thread(target=_goal_loop, args=(idx,), daemon=True, name=f"goal-{idx}")
-                    gs.thread = t
+        with _channels_lock:
+            for cid, cs in list(_channels.items()):
+                if cs.running and cs.thread is None:
+                    cs.stop_event.clear()
+                    t = threading.Thread(target=_channel_loop, args=(cid,), daemon=True, name=f"ch-{cs.name}")
+                    cs.thread = t
                     t.start()
-                    _log(f"goal #{idx} thread spawned")
-                elif gs.started and gs.paused and gs.thread is not None:
-                    pass  # thread idles on its own
-                elif not gs.started and gs.thread is not None:
-                    gs.stop_event.set()
-                    gs.wake.set()
-                if gs.thread is not None and not gs.thread.is_alive():
-                    gs.thread = None
+                    _log(f"channel {cs.name} thread spawned")
+                elif not cs.running and cs.thread is not None:
+                    cs.stop_event.set()
+                    cs.wake.set()
+                if cs.thread is not None and not cs.thread.is_alive():
+                    cs.thread = None
         _shutdown.wait(timeout=2)
-
-
-def _summarize_goal(text: str) -> str:
-    """Generate a one-line summary of a goal via LLM. Falls back to truncation."""
-    try:
-        if PROVIDER == "openrouter":
-            url = f"{LLM_BASE_URL}/v1/chat/completions"
-            headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
-            model = CLAUDE_MODEL
-        else:
-            url = f"{CHUTES_BASE_URL}/chat/completions"
-            headers = _chutes_headers()
-            model = CHUTES_ROUTING_BOT
-
-        resp = requests.post(url, json={
-            "model": model,
-            "max_tokens": 50,
-            "messages": [
-                {"role": "system", "content": "Summarize the user's goal in 8 words or fewer. Reply with ONLY the summary."},
-                {"role": "user", "content": text[:500]},
-            ],
-        }, headers=headers, timeout=30)
-
-        if resp.status_code == 200:
-            data = resp.json()
-            choices = data.get("choices", [])
-            if choices:
-                summary = choices[0].get("message", {}).get("content", "").strip().strip('"\'.')
-                if summary:
-                    return summary[:80]
-    except Exception as exc:
-        _log(f"summarize failed: {str(exc)[:100]}")
-
-    first_line = text[:60].split('\n')[0].strip()
-    return first_line + ("..." if len(text) > 60 else "")
 
 
 def transcribe_voice(file_path: str, fmt: str = "ogg") -> str:
@@ -1689,20 +2414,20 @@ def transcribe_voice(file_path: str, fmt: str = "ogg") -> str:
         return "(voice transcription unavailable — send text instead)"
 
 
-# ── Telegram bot ─────────────────────────────────────────────────────────────
+# ── Discord bot ──────────────────────────────────────────────────────────────
 
 def _recent_context(max_chars: int = 6000) -> str:
-    """Collect recent rollouts across all goals."""
+    """Collect recent rollouts across all channels."""
     parts: list[str] = []
     total = 0
     all_runs: list[tuple[str, Path]] = []
-    for idx, gs in sorted(_goals.items()):
-        runs_dir = _goal_runs_dir(idx)
+    for cid, cs in sorted(_channels.items()):
+        runs_dir = _channel_runs_dir(cid)
         if not runs_dir.exists():
             continue
         for d in runs_dir.iterdir():
             if d.is_dir():
-                all_runs.append((f"goal#{idx}/{d.name}", d))
+                all_runs.append((f"{cs.name}/{d.name}", d))
     all_runs.sort(key=lambda x: x[1].name, reverse=True)
     for label, run_dir in all_runs:
         f = run_dir / "rollout.md"
@@ -1724,45 +2449,65 @@ def _build_operator_prompt(user_text: str) -> str:
 
     parts = [
         "You are the operator interface for Arbos, a coding agent running in a loop via pm2.\n"
-        "The operator communicates with you through Telegram. Be concise and direct.\n"
+        "The operator communicates with you through Discord. Be concise and direct.\n"
         "When the operator asks you to do something, do it by modifying the relevant files.\n"
         "When the operator asks a question, answer from the available context.\n\n"
         "## Security\n\n"
         "NEVER read, output, or reveal the contents of `.env`, `.env.enc`, or any secret/key/token values.\n"
         "Do not include API keys, passwords, seed phrases, or credentials in any response.\n"
         "If asked to show secrets, refuse. The .env file is encrypted; do not attempt to decrypt it.\n\n"
-        "## Multi-goal system\n\n"
-        "Goals are indexed and stored in `context/goals/<index>/`. Each goal has its own GOAL.md, STATE.md, INBOX.md, and runs/.\n"
-        "Goal management is handled via Telegram commands (/goal, /start, /stop, /pause, /delete, /delay, /ls, /status).\n"
-        "To modify a specific goal's context, write to `context/goals/<index>/STATE.md` or `context/goals/<index>/INBOX.md`.\n\n"
+        "## Context structure\n\n"
+        "Context is organized by Discord channels:\n"
+        "```\n"
+        "context/\n"
+        "  general/chat/        — #general channel chat logs\n"
+        "  <channel-name>/      — one directory per managed channel\n"
+        "    pin                 — pinned messages (always-on context)\n"
+        "    state               — working memory\n"
+        "    chat/               — channel chat logs\n"
+        "    threads/            — per-thread directories\n"
+        "      <thread-id>/\n"
+        "        goal            — thread goal\n"
+        "        state           — thread working memory\n"
+        "        chat/           — thread chat logs\n"
+        "        runs/           — thread step artifacts\n"
+        "  channels.json        — channel metadata\n"
+        "```\n"
+        "Channels are always in chat mode. Pins provide always-on context.\n"
+        "Threads are autonomous loops — each thread works on its goal continuously.\n"
+        "Channels under the 'Running' category are active. 'Paused' are paused.\n"
+        "Deleting a channel cleans up its context and processes.\n\n"
         "## Available operations\n\n"
-        "- **Message a goal's agent**: append a timestamped line to `context/goals/<index>/INBOX.md`.\n"
-        "- **Update a goal's state**: write to `context/goals/<index>/STATE.md`.\n"
+        "- **Update a channel's state**: write to `context/<channel-dir>/state`.\n"
         "- **Set system prompt**: write to `PROMPT.md`.\n"
         "- **Set env variable**: write `KEY='VALUE'` lines (one per line) to `context/.env.pending`. They are picked up automatically and persisted.\n"
-        "- **View logs**: read files in `context/goals/<index>/runs/<timestamp>/` (rollout.md, logs.txt).\n"
+        "- **View logs**: read files in `context/<channel-dir>/threads/<id>/runs/<timestamp>/` (rollout.md, logs.txt).\n"
         "- **Modify code & restart**: edit code files, then run `touch .restart`.\n"
-        "- **Send follow-up**: run `python arbos.py send \"your text here\"`.\n"
+        "- **Respond to operator**: Your text output is streamed directly to Discord. Just write your response — do NOT use `arbos.py send` (it is suppressed in chat mode).\n"
         "- **Send file to operator**: run `python arbos.py sendfile path/to/file [--caption 'text'] [--photo]`.\n"
         "- **Received files**: operator-sent files are saved in `context/files/` and their path is shown in the message.",
     ]
 
-    if _goals:
-        goals_section = []
-        for idx in sorted(_goals.keys()):
-            gs = _goals[idx]
-            status = _goal_status_label(gs)
-            gf = _goal_file(idx)
-            goal_text = gf.read_text().strip()[:200] if gf.exists() else "(empty)"
-            sf = _state_file(idx)
+    if _channels:
+        channels_section = []
+        for cid, cs in sorted(_channels.items(), key=lambda x: x[1].name):
+            status = _channel_status_label(cs)
+            pf = _pin_file(cid)
+            pin_text = pf.read_text().strip()[:200] if pf.exists() else "(no pin)"
+            sf = _state_file(cid)
             state_text = sf.read_text().strip()[:200] if sf.exists() else "(empty)"
-            goals_section.append(
-                f"### Goal #{idx} [{status}] (delay: {gs.delay}s, step {gs.step_count})\n"
-                f"{goal_text}\nState: {state_text}"
-            )
-        parts.append("## Goals\n" + "\n\n".join(goals_section))
+            ch_line = f"### {cs.name} [{status}] dir=`context/{cs.dir_name}/` (delay: {cs.delay}s)\nPin: {pin_text}\nState: {state_text}"
+            if cs.active_threads:
+                thread_lines = []
+                for tid, ts in cs.active_threads.items():
+                    t_status = "paused" if ts.paused else "running"
+                    goal_preview = ts.goal[:80] + "..." if len(ts.goal) > 80 else ts.goal
+                    thread_lines.append(f"  - {ts.name} [{t_status}] step {ts.step_count}: {goal_preview}")
+                ch_line += "\nThreads:\n" + "\n".join(thread_lines)
+            channels_section.append(ch_line)
+        parts.append("## Channels\n" + "\n\n".join(channels_section))
     else:
-        parts.append("## Goals\n(no goals set)")
+        parts.append("## Channels\n(no managed channels)")
 
     if chatlog:
         parts.append(chatlog)
@@ -1813,32 +2558,37 @@ def _format_tool_activity(tool_name: str, tool_input: dict) -> str:
     return f"{label}..."
 
 
-def run_agent_streaming(bot, prompt: str, chat_id: int) -> str:
-    """Run Claude Code CLI and stream output into a Telegram message."""
+def run_agent_streaming(prompt: str, channel_id: str, *,
+                        reply_to: str | None = None) -> str:
+    """Run Claude Code CLI and stream output into a Discord message."""
     if PROVIDER == "openrouter":
         cmd = _claude_cmd(prompt)
     else:
         cmd = _claude_cmd(prompt, extra_flags=["--model", "bot"])
 
-    msg = bot.send_message(chat_id, "thinking...")
+    token = os.getenv("BOT_TOKEN", "")
+    target = (token, channel_id)
+    # React with 🤔 (thinking) when Claude starts processing
+    if reply_to:
+        _add_discord_reaction(channel_id, reply_to, "\U0001f914")
+    msg_id = _send_discord_new("thinking...", target=target, reply_to=reply_to)
     current_text = ""
     activity_status = ""
     last_edit = 0.0
 
     def _edit(text: str, force: bool = False):
         nonlocal last_edit
+        if not msg_id:
+            return
         now = time.time()
         if not force and now - last_edit < 1.5:
             return
-        display = text[-3800:] if len(text) > 3800 else text
+        display = text[-(DISCORD_MSG_LIMIT - 50):] if len(text) > DISCORD_MSG_LIMIT - 50 else text
         display = _redact_secrets(display)
         if not display.strip():
             return
-        try:
-            bot.edit_message_text(display, chat_id, msg.message_id)
-            last_edit = now
-        except Exception:
-            pass
+        _edit_discord_text(msg_id, display, target=target)
+        last_edit = now
 
     def _on_text(text: str):
         nonlocal current_text
@@ -1853,7 +2603,10 @@ def run_agent_streaming(bot, prompt: str, chat_id: int) -> str:
 
     _claude_semaphore.acquire()
     try:
-        env = _claude_env()
+        env = _claude_env(channel_id=channel_id)
+        # Suppress `arbos.py send` calls — the agent's text output is already
+        # being streamed into the Discord message by run_agent_streaming.
+        env["ARBOS_SILENT"] = "1"
 
         for attempt in range(1, MAX_RETRIES + 1):
             current_text = ""
@@ -1877,17 +2630,16 @@ def run_agent_streaming(bot, prompt: str, chat_id: int) -> str:
 
         _edit(current_text, force=True)
 
-        if not current_text.strip():
-            try:
-                bot.edit_message_text("(no output)", chat_id, msg.message_id)
-            except Exception:
-                pass
+        if not current_text.strip() and msg_id:
+            _edit_discord_text(msg_id, "(no output)", target=target)
+
+        # React with 🏁 on the bot's response message — response complete
+        if msg_id:
+            _add_discord_reaction(channel_id, msg_id, "\U0001F3C1")
 
     except Exception as e:
-        try:
-            bot.edit_message_text(f"Error: {str(e)[:300]}", chat_id, msg.message_id)
-        except Exception:
-            pass
+        if msg_id:
+            _edit_discord_text(msg_id, f"Error: {str(e)[:300]}", target=target)
     finally:
         _claude_semaphore.release()
 
@@ -1895,7 +2647,7 @@ def run_agent_streaming(bot, prompt: str, chat_id: int) -> str:
 
 
 def _is_owner(user_id: int) -> bool:
-    owner = os.environ.get("TELEGRAM_OWNER_ID", "").strip()
+    owner = os.environ.get("DISCORD_OWNER_ID", "").strip()
     if not owner:
         return False
     return str(user_id) == owner
@@ -1904,481 +2656,837 @@ def _is_owner(user_id: int) -> bool:
 def _enroll_owner(user_id: int):
     """Auto-enroll the first /start user as the owner and persist."""
     owner_id = str(user_id)
-    os.environ["TELEGRAM_OWNER_ID"] = owner_id
+    os.environ["DISCORD_OWNER_ID"] = owner_id
     env_path = WORKING_DIR / ".env"
     if env_path.exists():
         existing = env_path.read_text()
-        if "TELEGRAM_OWNER_ID" not in existing:
+        if "DISCORD_OWNER_ID" not in existing:
             with open(env_path, "a") as f:
-                f.write(f"\nTELEGRAM_OWNER_ID='{owner_id}'\n")
+                f.write(f"\nDISCORD_OWNER_ID='{owner_id}'\n")
     elif ENV_ENC_FILE.exists():
-        _save_to_encrypted_env("TELEGRAM_OWNER_ID", owner_id)
+        _save_to_encrypted_env("DISCORD_OWNER_ID", owner_id)
     _log(f"enrolled owner: {owner_id}")
 
 
 def run_bot():
-    """Run the Telegram bot."""
-    token = os.getenv("TAU_BOT_TOKEN")
+    """Run the Discord bot with channel-based architecture."""
+    token = os.getenv("BOT_TOKEN")
     if not token:
-        _log("TAU_BOT_TOKEN not set; add it to .env and restart")
+        _log("BOT_TOKEN not set; add it to .env and restart")
         sys.exit(1)
 
-    import telebot
-    bot = telebot.TeleBot(token)
+    import discord
 
-    def _save_chat_id(chat_id: int):
-        CHAT_ID_FILE.write_text(str(chat_id))
+    intents = discord.Intents.default()
+    intents.message_content = True
+    intents.messages = True
+    intents.guilds = True
+    client = discord.Client(intents=intents)
 
-    def _reject(message):
-        uid = message.from_user.id if message.from_user else None
-        _log(f"rejected message from unauthorized user {uid}")
-        if not os.environ.get("TELEGRAM_OWNER_ID", "").strip():
-            bot.send_message(message.chat.id, "Send /start to register as the owner.")
-        else:
-            bot.send_message(message.chat.id, "Unauthorized.")
+    _general_channel: dict[str, str | None] = {"id": None}
 
-    @bot.message_handler(commands=["start"])
-    def handle_start(message):
-        uid = message.from_user.id if message.from_user else None
-        if not os.environ.get("TELEGRAM_OWNER_ID", "").strip() and uid is not None:
-            _enroll_owner(uid)
-        if not _is_owner(uid):
-            _reject(message)
-            return
-        _save_chat_id(message.chat.id)
-        args = (message.text or "").split()
-        if len(args) < 2:
-            bot.send_message(
-                message.chat.id,
-                "Use /goal <text> to create a goal, then /start <index> to begin.\n"
-                "Commands: /ls /goal /start /pause /delete /delay /status /stop /clear",
-            )
-            return
+    def _save_general_id(channel_id: str):
+        CHANNEL_ID_FILE.write_text(channel_id)
+        _general_channel["id"] = channel_id
+
+    def _reply_sync(channel_id: str, text: str):
+        """Send a message via REST API (sync, for use from any thread)."""
+        text = _redact_secrets(text)[:DISCORD_MSG_LIMIT]
         try:
-            idx = int(args[1])
-        except ValueError:
-            bot.send_message(message.chat.id, "Usage: /start <goal_index>")
+            requests.post(
+                f"{DISCORD_API}/channels/{channel_id}/messages",
+                headers=_discord_headers(token),
+                json={"content": text},
+                timeout=15,
+            )
+        except Exception as exc:
+            _log(f"discord reply failed: {str(exc)[:120]}")
+
+    def _handle_command(content: str, channel_id: str, author_id: int, msg_id: str = ""):
+        """Parse and dispatch a /command in #general."""
+        if not os.environ.get("DISCORD_OWNER_ID", "").strip():
+            _enroll_owner(author_id)
+        if not _is_owner(author_id):
+            _reply_sync(channel_id, "Unauthorized.")
             return
-        with _goals_lock:
-            gs = _goals.get(idx)
-            if not gs:
-                bot.send_message(message.chat.id, f"Goal #{idx} not found.")
+
+        parts = content.split()
+        cmd = parts[0].lower()
+
+        if cmd == "/help":
+            _reply_sync(channel_id, (
+                "**Arbos — Autonomous Coding Agent**\n\n"
+                "Arbos runs via pm2. Each Discord channel is an agent workspace with chat and threads.\n\n"
+                "**How it works**\n"
+                "• Create a channel under **Running** → agent workspace starts\n"
+                "• **Pin a message** → adds always-on context (pin) to every prompt\n"
+                "• **Create a thread** (`/thread <name> <goal>`) → starts an autonomous loop\n"
+                "• Each thread runs steps continuously toward its goal\n"
+                "• Send a message in the channel → chatbot responds (can also create threads)\n"
+                "• Move to **Paused** category → stops all thread loops\n"
+                "• Messages in **#general** go to an operator agent\n\n"
+                "**Commands**\n"
+                "In #general: `/status` `/update` `/restart` `/bash <cmd>` `/env <name> <value>` `/help`\n"
+                "In a channel: `/thread <name> <goal>` `/status` `/delay <thread|all> <min>` `/pause <thread>` `/resume <thread>` `/restart` `/help`"
+            ))
+
+        elif cmd == "/status":
+            if not _channels:
+                _reply_sync(channel_id, "No managed channels. Create a channel under the 'Running' or 'Paused' category.")
                 return
-            gs.started = True
-            gs.paused = False
-            gs.wake.set()
-            _save_goals()
-        bot.send_message(message.chat.id, f"Goal #{idx} started: {gs.summary}")
-        _log(f"goal #{idx} started via /start")
+            lines = [f"**{len(_channels)} channel(s)** — total steps: {_step_count}"]
+            for cid, cs in sorted(_channels.items(), key=lambda x: x[1].name):
+                status = _channel_status_label(cs)
+                delay_str = f" delay:{cs.delay // 60}m" if cs.delay else ""
+                pin_str = " pin" if cs.pin_text else ""
+                running_threads = sum(1 for t in cs.active_threads.values() if not t.paused)
+                paused_threads = sum(1 for t in cs.active_threads.values() if t.paused)
+                threads_str = f" threads:{running_threads}r/{paused_threads}p" if cs.active_threads else ""
+                lines.append(f"<#{cid}> [{status}]{delay_str}{pin_str}{threads_str}")
+                for tid, ts in cs.active_threads.items():
+                    t_status = "paused" if ts.paused else "running"
+                    last = _format_last_time(ts.last_finished)
+                    goal_preview = ts.goal[:50] + "..." if len(ts.goal) > 50 else ts.goal
+                    lines.append(f"  {ts.name} [{t_status}] step:{ts.step_count} last:{last} — {goal_preview}")
+            _reply_sync(channel_id, "\n".join(lines))
 
-    @bot.message_handler(commands=["ls"])
-    def handle_ls(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
-            return
-        if not _goals:
-            bot.send_message(message.chat.id, "No goals. Use /goal <text> to create one.")
-            return
-        lines = []
-        for idx in sorted(_goals.keys()):
-            gs = _goals[idx]
-            status = _goal_status_label(gs)
-            last = _format_last_time(gs.last_finished)
-            delay_str = f" delay:{gs.delay}s" if gs.delay else ""
-            lines.append(f"#{idx} [{status}]{delay_str} last:{last} - {gs.summary}")
-        bot.send_message(message.chat.id, "\n".join(lines))
+        elif cmd == "/restart":
+            _reply_sync(channel_id, "Restarting — killing agent and exiting for pm2...")
+            _log("restart requested via /restart command")
+            _kill_child_procs()
+            RESTART_FLAG.touch()
 
-    @bot.message_handler(commands=["status"])
-    def handle_status(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
-            return
-        args = (message.text or "").split()
-        if len(args) >= 2:
+        elif cmd == "/bash":
+            shell_cmd = content[len("/bash"):].strip()
+            if not shell_cmd:
+                _reply_sync(channel_id, "Usage: `/bash <command>`")
+                return
+            msg_id = _send_discord_new(f"```\n$ {shell_cmd}\n```\n⏳ Running...", target=(token, channel_id))
             try:
-                idx = int(args[1])
-            except ValueError:
-                bot.send_message(message.chat.id, "Usage: /status [goal_index]")
+                r = subprocess.run(
+                    shell_cmd, shell=True,
+                    capture_output=True, text=True, timeout=120,
+                    cwd=str(Path.home()),
+                )
+                out = r.stdout
+                err = r.stderr
+                parts_out = []
+                if out.strip():
+                    parts_out.append(out.strip())
+                if err.strip():
+                    parts_out.append(f"[stderr]\n{err.strip()}")
+                body = "\n".join(parts_out) if parts_out else "(no output)"
+                exit_line = f"\nexit code: {r.returncode}" if r.returncode != 0 else ""
+                result = f"```\n$ {shell_cmd}\n{body}{exit_line}\n```"
+                if len(result) > 1950:
+                    result = f"```\n$ {shell_cmd}\n{body[:1800]}…\n(truncated){exit_line}\n```"
+                if msg_id:
+                    _edit_discord_text(msg_id, result, target=(token, channel_id))
+                else:
+                    _reply_sync(channel_id, result)
+            except subprocess.TimeoutExpired:
+                timeout_msg = f"```\n$ {shell_cmd}\n(timed out after 120s)\n```"
+                if msg_id:
+                    _edit_discord_text(msg_id, timeout_msg, target=(token, channel_id))
+                else:
+                    _reply_sync(channel_id, timeout_msg)
+            except Exception as exc:
+                err_msg = f"```\n$ {shell_cmd}\nError: {str(exc)[:1800]}\n```"
+                if msg_id:
+                    _edit_discord_text(msg_id, err_msg, target=(token, channel_id))
+                else:
+                    _reply_sync(channel_id, err_msg)
+
+        elif cmd == "/update":
+            msg_id = _send_discord_new("Pulling latest changes...", target=(token, channel_id))
+            try:
+                r = subprocess.run(
+                    ["git", "pull", "--ff-only"],
+                    cwd=WORKING_DIR, capture_output=True, text=True, timeout=30,
+                )
+                output = (r.stdout.strip() + "\n" + r.stderr.strip()).strip()
+                if r.returncode != 0:
+                    if msg_id:
+                        _edit_discord_text(msg_id, f"Git pull failed:\n{output[:1900]}", target=(token, channel_id))
+                    _log(f"update failed: {output[:200]}")
+                    return
+                if msg_id:
+                    _edit_discord_text(msg_id, f"Pulled:\n{output[:1800]}\n\nRestarting...", target=(token, channel_id))
+                _log(f"update pulled: {output[:200]}")
+            except Exception as exc:
+                if msg_id:
+                    _edit_discord_text(msg_id, f"Git pull error: {str(exc)[:1900]}", target=(token, channel_id))
+                _log(f"update error: {str(exc)[:200]}")
                 return
-            gs = _goals.get(idx)
-            if not gs:
-                bot.send_message(message.chat.id, f"Goal #{idx} not found.")
+            _kill_child_procs()
+            RESTART_FLAG.touch()
+
+        elif cmd == "/env":
+            # /env NAME VALUE — store an env var securely
+            if msg_id:
+                _delete_discord_message(channel_id, msg_id)
+            if len(parts) < 3:
+                _reply_sync(channel_id, "Usage: `/env NAME VALUE`")
                 return
-            status = _goal_status_label(gs)
-            gf = _goal_file(idx)
-            goal_text = gf.read_text().strip()[:500] if gf.exists() else "(empty)"
-            sf = _state_file(idx)
+            env_name = parts[1]
+            env_value = " ".join(parts[2:])
+            ENV_PENDING_FILE.write_text(f"{env_name}='{env_value}'\n")
+            _process_pending_env()
+            _reply_sync(channel_id, f"Set `{env_name}` and saved to encrypted env.")
+
+        else:
+            _reply_sync(channel_id, "Unknown command. Use /help to see available commands.")
+
+    def _handle_text_message(content: str, channel_id: str, author_id: int,
+                             msg_id: str | None = None):
+        """Handle a plain text message from the operator."""
+        if not _is_owner(author_id):
+            if not os.environ.get("DISCORD_OWNER_ID", "").strip():
+                _enroll_owner(author_id)
+            else:
+                _reply_sync(channel_id, "Unauthorized.")
+                return
+        if msg_id:
+            _add_discord_reaction(channel_id, msg_id, "\u2705")  # ✅ accepted
+        log_chat("user", content)
+        prompt = _build_operator_prompt(content)
+        response = run_agent_streaming(prompt, channel_id, reply_to=msg_id)
+        log_chat("bot", response[:1000])
+        _process_pending_env()
+
+    def _handle_attachment_message(content: str, attachments: list, channel_id: str,
+                                    author_id: int, msg_id: str | None = None):
+        """Handle a message with file attachments."""
+        if not _is_owner(author_id):
+            _reply_sync(channel_id, "Unauthorized.")
+            return
+        if msg_id:
+            _add_discord_reaction(channel_id, msg_id, "\u2705")  # ✅ accepted
+
+        parts = []
+        for att in attachments:
+            filename = att["filename"]
+            url = att["url"]
+            size_bytes = att.get("size", 0)
+            content_type = att.get("content_type", "")
+
+            saved_path = _download_discord_attachment(url, filename)
+            size_kb = size_bytes / 1024 if size_bytes else saved_path.stat().st_size / 1024
+
+            att_text = f"[Sent file: {saved_path.name}] saved to {saved_path} ({size_kb:.1f} KB)"
+
+            if content_type and content_type.startswith("audio/"):
+                try:
+                    ext = filename.rsplit(".", 1)[-1] if "." in filename else "ogg"
+                    transcript = transcribe_voice(str(saved_path), fmt=ext)
+                    att_text += f"\n[Audio transcription]: {transcript}"
+                except Exception as exc:
+                    _log(f"audio transcription failed: {str(exc)[:120]}")
+            else:
+                is_text = False
+                try:
+                    file_content = saved_path.read_text(errors="strict")
+                    if len(file_content) <= 8000:
+                        att_text += f"\n[File contents]:\n{file_content}"
+                        is_text = True
+                except (UnicodeDecodeError, ValueError):
+                    pass
+                if not is_text:
+                    att_text += "\n(Binary file — not included inline. Read it from the saved path if needed.)"
+
+            parts.append(att_text)
+
+        user_text = "\n\n".join(parts)
+        if content:
+            user_text = f"{content}\n\n{user_text}"
+
+        log_chat("user", user_text[:1000])
+        prompt = _build_operator_prompt(user_text)
+        response = run_agent_streaming(prompt, channel_id, reply_to=msg_id)
+        log_chat("bot", response[:1000])
+        _process_pending_env()
+
+    def _handle_channel_command(content: str, channel_id: str, author_id: int):
+        """Handle a /command in a managed channel."""
+        if not _is_owner(author_id):
+            _reply_sync(channel_id, "Unauthorized.")
+            return
+        parts = content.split()
+        cmd = parts[0].lower()
+        args = parts[1:]
+
+        cs = _channels.get(channel_id)
+        if not cs:
+            _reply_sync(channel_id, "Channel not managed.")
+            return
+
+        if cmd == "/help":
+            _reply_sync(channel_id, (
+                f"**{cs.name} — Agent Channel**\n\n"
+                "Send messages and the agent responds as a chatbot.\n"
+                "Threads are autonomous loops — each thread works on a goal continuously.\n\n"
+                "**Pins**: Pin a message to add always-on context to every prompt.\n"
+                "**Threads**: Create a thread to start an autonomous loop on a goal.\n\n"
+                "**Commands**\n"
+                "`/thread <name> <goal>` — create a new thread with a goal\n"
+                "`/status` — show pin, threads, state\n"
+                "`/delay <thread|all> <min>` — set delay between steps\n"
+                "`/pause <thread>` — pause a running thread\n"
+                "`/resume <thread>` — resume a paused thread\n"
+                "`/restart` — kill all threads and restart the channel\n"
+                "`/help` — this message"
+            ))
+
+        elif cmd == "/thread":
+            if len(args) < 2:
+                _reply_sync(channel_id, "Usage: `/thread <name> <goal message>`")
+                return
+            thread_name = args[0]
+            thread_goal = " ".join(args[1:])
+            ts = _create_thread(channel_id, thread_name, thread_goal)
+            if ts:
+                _reply_sync(channel_id, f"Thread **{thread_name}** created and started.")
+            else:
+                _reply_sync(channel_id, "Failed to create thread.")
+
+        elif cmd == "/status":
+            status = _channel_status_label(cs)
+            delay_min = cs.delay // 60 if cs.delay else 0
+            delay_str = f"{delay_min}m" if delay_min else "none"
+            sf = _state_file(channel_id)
             state_text = sf.read_text().strip()[:500] if sf.exists() else "(empty)"
+            pin_preview = cs.pin_text[:300] if cs.pin_text else "(no pin)"
             lines = [
-                f"Goal #{idx} [{status}] (delay: {gs.delay}s, step {gs.step_count})",
-                f"Last run: {gs.last_run or 'never'}",
-                f"Last finished: {gs.last_finished or 'never'}",
-                "",
-                f"Goal: {goal_text}",
-                "",
+                f"**{cs.name}** [{status}] | Default delay: {delay_str}",
+                f"Pin: {pin_preview}",
                 f"State: {state_text}",
             ]
-            bot.send_message(message.chat.id, "\n".join(lines))
+            if cs.active_threads:
+                lines.append("**Threads:**")
+                for tid, ts in cs.active_threads.items():
+                    t_status = "paused" if ts.paused else "running"
+                    t_delay = f"{ts.delay // 60}m" if ts.delay else "none"
+                    goal_preview = ts.goal[:80] + "..." if len(ts.goal) > 80 else ts.goal
+                    lines.append(f"  - **{ts.name}** [{t_status}] step {ts.step_count} | delay {t_delay} | {goal_preview}")
+            else:
+                lines.append("**Threads:** (none)")
+            _reply_sync(channel_id, "\n".join(lines))
+
+        elif cmd == "/delay":
+            if len(args) < 2:
+                _reply_sync(channel_id, "Usage: `/delay <thread-name|all> <minutes>`")
+                return
+            target_name = args[0]
+            try:
+                minutes = float(args[1])
+            except ValueError:
+                _reply_sync(channel_id, "Usage: `/delay <thread-name|all> <minutes>`")
+                return
+            if minutes < 0:
+                _reply_sync(channel_id, "Delay must be >= 0.")
+                return
+            delay_seconds = int(minutes * 60)
+            if target_name == "all":
+                with _channels_lock:
+                    cs.delay = delay_seconds
+                    for ts in cs.active_threads.values():
+                        ts.delay = delay_seconds
+                    _save_channels()
+                _reply_sync(channel_id, f"Delay set to {minutes}m for all threads and channel default.")
+            else:
+                found = None
+                for ts in cs.active_threads.values():
+                    if ts.name == target_name:
+                        found = ts
+                        break
+                if not found:
+                    _reply_sync(channel_id, f"Thread `{target_name}` not found.")
+                    return
+                with _channels_lock:
+                    found.delay = delay_seconds
+                    _save_channels()
+                _reply_sync(channel_id, f"Delay for thread **{target_name}** set to {minutes}m ({delay_seconds}s).")
+
+        elif cmd == "/pause":
+            if not args:
+                _reply_sync(channel_id, "Usage: `/pause <thread-name>`")
+                return
+            target_name = args[0]
+            found = None
+            for ts in cs.active_threads.values():
+                if ts.name == target_name:
+                    found = ts
+                    break
+            if not found:
+                _reply_sync(channel_id, f"Thread `{target_name}` not found.")
+                return
+            if found.paused:
+                _reply_sync(channel_id, f"Thread **{target_name}** is already paused.")
+                return
+            found.paused = True
+            found.stop_event.set()
+            found.wake.set()
+            with _channels_lock:
+                _save_channels()
+            _reply_sync(channel_id, f"Thread **{target_name}** paused.")
+
+        elif cmd == "/resume":
+            if not args:
+                _reply_sync(channel_id, "Usage: `/resume <thread-name>`")
+                return
+            target_name = args[0]
+            found = None
+            for ts in cs.active_threads.values():
+                if ts.name == target_name:
+                    found = ts
+                    break
+            if not found:
+                _reply_sync(channel_id, f"Thread `{target_name}` not found.")
+                return
+            if not found.paused:
+                _reply_sync(channel_id, f"Thread **{target_name}** is already running.")
+                return
+            found.paused = False
+            found.stop_event = threading.Event()
+            found.wake = threading.Event()
+            found.loop_thread = None
+            cs.wake.set()
+            with _channels_lock:
+                _save_channels()
+            _reply_sync(channel_id, f"Thread **{target_name}** resumed.")
+
+        elif cmd == "/restart":
+            _reply_sync(channel_id, f"Restarting {cs.name}...")
+            with _channel_procs_lock:
+                proc = _channel_procs.get(channel_id)
+            if proc and proc.poll() is None:
+                _log(f"channel {cs.name}: killing claude subprocess pid={proc.pid}")
+                proc.kill()
+            for ts in cs.active_threads.values():
+                ts.stop_event.set()
+                ts.wake.set()
+            cs.stop_event.set()
+            cs.wake.set()
+            thread = cs.thread
+            if thread and thread.is_alive():
+                thread.join(timeout=10)
+            for ts in cs.active_threads.values():
+                ts.stop_event = threading.Event()
+                ts.wake = threading.Event()
+                ts.loop_thread = None
+                if not ts.paused:
+                    ts.paused = False
+            cs.stop_event = threading.Event()
+            cs.wake = threading.Event()
+            cs.running = True
+            cs.thread = None
+            with _channels_lock:
+                _save_channels()
+            _reply_sync(channel_id, f"{cs.name} restarted.")
+            _log(f"channel {cs.name} restarted via command")
+
         else:
-            if not _goals:
-                bot.send_message(message.chat.id, f"No goals. Total steps: {_step_count}")
-                return
-            lines = [f"Total steps: {_step_count}"]
-            for idx in sorted(_goals.keys()):
-                gs = _goals[idx]
-                status = _goal_status_label(gs)
-                last = _format_last_time(gs.last_finished)
-                delay_str = f" delay:{gs.delay}s" if gs.delay else ""
-                lines.append(f"#{idx} [{status}]{delay_str} last:{last} - {gs.summary}")
-            bot.send_message(message.chat.id, "\n".join(lines))
+            _reply_sync(channel_id, "Unknown command. Use `/help` to see available commands.")
 
-    @bot.message_handler(commands=["stop"])
-    def handle_stop(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
+    def _handle_channel_message(content: str, attachments: list, channel_id: str,
+                                message_id: str, author_id: int):
+        """Handle a plain message in a managed channel (always chat mode)."""
+        if not _is_owner(author_id):
             return
-        with _goals_lock:
-            count = 0
-            for gs in _goals.values():
-                if gs.started:
-                    gs.started = False
-                    gs.stop_event.set()
-                    gs.wake.set()
-                    count += 1
-            _save_goals()
-        bot.send_message(message.chat.id, f"Stopped {count} goal(s).")
-        _log(f"all goals stopped via /stop ({count})")
 
-    @bot.message_handler(commands=["pause"])
-    def handle_pause(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
-            return
-        args = (message.text or "").split()
-        if len(args) < 2:
-            bot.send_message(message.chat.id, "Usage: /pause <goal_index>")
-            return
-        try:
-            idx = int(args[1])
-        except ValueError:
-            bot.send_message(message.chat.id, "Usage: /pause <goal_index>")
-            return
-        with _goals_lock:
-            gs = _goals.get(idx)
-            if not gs:
-                bot.send_message(message.chat.id, f"Goal #{idx} not found.")
-                return
-            if gs.paused:
-                bot.send_message(message.chat.id, f"Goal #{idx} already paused.")
-                return
-            gs.paused = True
-            _save_goals()
-        bot.send_message(message.chat.id, f"Goal #{idx} paused. Use /start {idx} to resume.")
-        _log(f"goal #{idx} paused via /pause")
+        ts_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        parts = []
+        if content:
+            parts.append(f"[{ts_str}] {content}")
+        for att in attachments:
+            try:
+                saved = _download_discord_attachment(att["url"], att["filename"])
+                ct = att.get("content_type", "")
+                if ct and ct.startswith("audio/"):
+                    ext = att["filename"].rsplit(".", 1)[-1] if "." in att["filename"] else "ogg"
+                    try:
+                        transcript = transcribe_voice(str(saved), fmt=ext)
+                        parts.append(f"[{ts_str}] [Audio transcription]: {transcript}")
+                    except Exception as exc:
+                        _log(f"audio transcription failed: {str(exc)[:120]}")
+                        parts.append(f"[{ts_str}] [File: {saved}]")
+                else:
+                    att_text = f"[{ts_str}] [File: {saved}]"
+                    try:
+                        file_content = saved.read_text(errors="strict")
+                        if len(file_content) <= 8000:
+                            att_text += f"\n[File contents]:\n{file_content}"
+                    except (UnicodeDecodeError, ValueError):
+                        pass
+                    parts.append(att_text)
+            except Exception as exc:
+                _log(f"failed to download attachment: {str(exc)[:120]}")
 
-    @bot.message_handler(commands=["delay"])
-    def handle_delay(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
+        entry = "\n".join(parts)
+        if not entry.strip():
             return
-        args = (message.text or "").split()
-        if len(args) < 3:
-            bot.send_message(message.chat.id, "Usage: /delay <goal_index> <seconds>")
-            return
-        try:
-            idx = int(args[1])
-            seconds = int(args[2])
-        except ValueError:
-            bot.send_message(message.chat.id, "Usage: /delay <goal_index> <seconds>")
-            return
-        if seconds < 0:
-            bot.send_message(message.chat.id, "Delay must be >= 0.")
-            return
-        with _goals_lock:
-            gs = _goals.get(idx)
-            if not gs:
-                bot.send_message(message.chat.id, f"Goal #{idx} not found.")
-                return
-            gs.delay = seconds
-            _save_goals()
-        bot.send_message(message.chat.id, f"Goal #{idx} delay set to {seconds}s.")
-        _log(f"goal #{idx} delay set to {seconds}s via /delay")
 
-    @bot.message_handler(commands=["goal"])
-    def handle_goal(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
+        log_chat("user", content or entry, channel_id=channel_id)
+
+        cs = _channels.get(channel_id)
+        _add_discord_reaction(channel_id, message_id, "\u2705")  # ✅ accepted
+        _log(f"channel {cs.name if cs else channel_id}: chatbot mode, responding directly")
+        prompt = _build_channel_chat_prompt(channel_id, entry)
+        response = run_agent_streaming(prompt, channel_id, reply_to=message_id)
+        log_chat("bot", response[:1000], channel_id=channel_id)
+
+    @client.event
+    async def on_ready():
+        global _guild_id, _running_category_id, _paused_category_id
+        _log(f"discord bot logged in as {client.user}")
+        target_guild_id = os.environ.get("DISCORD_GUILD", "").strip()
+        for guild in client.guilds:
+            if target_guild_id and str(guild.id) != target_guild_id:
+                continue
+            _guild_id = str(guild.id)
+            _running_category_id, _paused_category_id = _find_or_create_categories(_guild_id)
+            _log(f"guild: {guild.name} (id={_guild_id}), running_cat={_running_category_id}, paused_cat={_paused_category_id}")
+
+            for channel in guild.text_channels:
+                if channel.name == "general":
+                    _save_general_id(str(channel.id))
+                    _log(f"found #general channel: {channel.id}")
+
+            for channel in guild.text_channels:
+                cid = str(channel.id)
+                parent = str(channel.category_id) if channel.category_id else None
+                if parent in (_running_category_id, _paused_category_id):
+                    is_running = (parent == _running_category_id)
+                    if cid not in _channels:
+                        _log(f"discovered channel: {channel.name} (id={cid}, running={is_running})")
+                        def _setup(c=channel, r=is_running):
+                            _setup_channel_context(str(c.id), c.name, r)
+                        threading.Thread(target=_setup, daemon=True).start()
+                    else:
+                        cs = _channels[cid]
+                        if cs.running != is_running:
+                            cs.running = is_running
+                            if is_running:
+                                cs.wake.set()
+                            with _channels_lock:
+                                _save_channels()
+
+            for cid, cs in list(_channels.items()):
+                if cs.running:
+                    chat_dir = _channel_chat_dir(cid)
+                    if chat_dir.exists():
+                        files = sorted(chat_dir.glob("*.jsonl"))
+                        if files:
+                            last_lines = files[-1].read_text().strip().splitlines()
+                            if last_lines:
+                                try:
+                                    msg = json.loads(last_lines[-1])
+                                    if msg.get("role") == "user":
+                                        cs.wake.set()
+                                        _log(f"channel {cs.name}: waking for unanswered messages")
+                                except (json.JSONDecodeError, IndexError):
+                                    pass
+
+            if _general_channel["id"]:
+                _send_discord_text("Restarted.", target=(token, _general_channel["id"]))
             return
-        text = (message.text or "").split(None, 1)
-        if len(text) < 2 or not text[1].strip():
-            bot.send_message(message.chat.id, "Usage: /goal <your goal text>")
+        if target_guild_id:
+            _log(f"WARNING: no guild found with id={target_guild_id}")
+        else:
+            _log("WARNING: no guild found")
+
+    @client.event
+    async def on_guild_channel_create(channel):
+        if not hasattr(channel, "category_id") or channel.category_id is None:
             return
-        goal_text = text[1].strip()
-        msg = bot.send_message(message.chat.id, "Creating goal...")
-        summary = _summarize_goal(goal_text)
-        with _goals_lock:
-            idx = max(_goals.keys(), default=0) + 1
-            gs = GoalState(index=idx, summary=summary)
-            _goals[idx] = gs
-            gdir = _goal_dir(idx)
-            gdir.mkdir(parents=True, exist_ok=True)
-            _goal_file(idx).write_text(goal_text)
-            _state_file(idx).write_text("")
-            _inbox_file(idx).write_text("")
-            _goal_runs_dir(idx).mkdir(parents=True, exist_ok=True)
-            _save_goals()
-        bot.edit_message_text(
-            f"Goal #{idx} created: {summary}\nUse /start {idx} to begin.",
-            message.chat.id, msg.message_id,
-        )
-        _log(f"goal #{idx} created ({len(goal_text)} chars): {summary}")
-
-    @bot.message_handler(commands=["delete"])
-    def handle_delete(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
+        parent = str(channel.category_id)
+        if parent not in (_running_category_id, _paused_category_id):
             return
-        args = (message.text or "").split()
-        if len(args) < 2:
-            bot.send_message(message.chat.id, "Usage: /delete <goal_index>")
+        cid = str(channel.id)
+        if cid in _channels:
             return
-        try:
-            idx = int(args[1])
-        except ValueError:
-            bot.send_message(message.chat.id, "Usage: /delete <goal_index>")
-            return
-        with _goals_lock:
-            gs = _goals.get(idx)
-            if not gs:
-                bot.send_message(message.chat.id, f"Goal #{idx} not found.")
-                return
-            gs.stop_event.set()
-            gs.wake.set()
-            gs.started = False
-            thread = gs.thread
-            del _goals[idx]
-            _save_goals()
-        if thread and thread.is_alive():
-            thread.join(timeout=5)
-        import shutil
-        gdir = _goal_dir(idx)
-        if gdir.exists():
-            shutil.rmtree(gdir, ignore_errors=True)
-        bot.send_message(message.chat.id, f"Goal #{idx} deleted.")
-        _log(f"goal #{idx} deleted via /delete")
-
-    @bot.message_handler(commands=["clear"])
-    def handle_clear(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
-            return
-        import shutil
-        with _goals_lock:
-            for gs in _goals.values():
-                gs.stop_event.set()
-                gs.wake.set()
-            _goals.clear()
-        removed = []
-        if CONTEXT_DIR.exists():
-            shutil.rmtree(CONTEXT_DIR)
-            removed.append("context/")
-        try:
-            r = subprocess.run(
-                ["git", "checkout", "HEAD", "--", "."],
-                cwd=WORKING_DIR, capture_output=True, text=True, timeout=10,
-            )
-            if r.returncode == 0:
-                removed.append("git checkout (restored tracked files)")
-        except Exception:
-            pass
-        try:
-            r = subprocess.run(
-                ["git", "clean", "-fd", "--exclude=.env*", "--exclude=chat_id.txt",
-                 "--exclude=.venv", "--exclude=__pycache__", "--exclude=.claude"],
-                cwd=WORKING_DIR, capture_output=True, text=True, timeout=10,
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                removed.append(f"git clean ({len(r.stdout.splitlines())} items)")
-        except Exception:
-            pass
-        CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
-        summary = ", ".join(removed) if removed else "nothing to clear"
-        bot.send_message(message.chat.id, f"Cleared: {summary}\nReady for a fresh /goal.")
-        _log(f"cleared via /clear command: {summary}")
-
-    @bot.message_handler(commands=["restart"])
-    def handle_restart(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
-            return
-        bot.send_message(message.chat.id, "Restarting — killing agent and exiting for pm2...")
-        _log("restart requested via /restart command")
-        _kill_child_procs()
-        RESTART_FLAG.touch()
-
-    @bot.message_handler(commands=["update"])
-    def handle_update(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
-            return
-        msg = bot.send_message(message.chat.id, "Pulling latest changes...")
-        try:
-            r = subprocess.run(
-                ["git", "pull", "--ff-only"],
-                cwd=WORKING_DIR, capture_output=True, text=True, timeout=30,
-            )
-            output = (r.stdout.strip() + "\n" + r.stderr.strip()).strip()
-            if r.returncode != 0:
-                bot.edit_message_text(f"Git pull failed:\n{output[:3800]}", message.chat.id, msg.message_id)
-                _log(f"update failed: {output[:200]}")
-                return
-            bot.edit_message_text(f"Pulled:\n{output[:3800]}\n\nRestarting...", message.chat.id, msg.message_id)
-            _log(f"update pulled: {output[:200]}")
-        except Exception as exc:
-            bot.edit_message_text(f"Git pull error: {str(exc)[:3800]}", message.chat.id, msg.message_id)
-            _log(f"update error: {str(exc)[:200]}")
-            return
-        _kill_child_procs()
-        RESTART_FLAG.touch()
-
-    @bot.message_handler(content_types=["voice", "audio"])
-    def handle_voice(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
-            return
-        _save_chat_id(message.chat.id)
-        bot.send_message(message.chat.id, "Transcribing voice note...")
-
-        voice_or_audio = message.voice or message.audio
-        file_info = bot.get_file(voice_or_audio.file_id)
-        downloaded = bot.download_file(file_info.file_path)
-
-        ext = file_info.file_path.rsplit(".", 1)[-1] if "." in file_info.file_path else "ogg"
-        tmp_path = WORKING_DIR / f"_voice_tmp.{ext}"
-        tmp_path.write_bytes(downloaded)
-
-        try:
-            transcript = transcribe_voice(str(tmp_path), fmt=ext)
-        finally:
-            tmp_path.unlink(missing_ok=True)
-
-        caption = message.caption or ""
-        user_text = f"[Voice note transcription]: {transcript}"
-        if caption:
-            user_text += f"\n[Caption]: {caption}"
-
-        log_chat("user", user_text[:1000])
-        prompt = _build_operator_prompt(user_text)
-
+        is_running = (parent == _running_category_id)
+        _log(f"new channel created: {channel.name} (id={cid}, running={is_running})")
         def _run():
-            response = run_agent_streaming(bot, prompt, message.chat.id)
-            log_chat("bot", response[:1000])
-            _process_pending_env()
-
+            _setup_channel_context(cid, channel.name, is_running)
         threading.Thread(target=_run, daemon=True).start()
 
-    @bot.message_handler(content_types=["document"])
-    def handle_document(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
+    @client.event
+    async def on_guild_channel_update(before, after):
+        if not hasattr(after, "category_id"):
             return
-        _save_chat_id(message.chat.id)
+        before_parent = str(before.category_id) if before.category_id else None
+        after_parent = str(after.category_id) if after.category_id else None
+        if before_parent == after_parent:
+            return
+        cid = str(after.id)
+        if after_parent == _running_category_id:
+            if cid in _channels:
+                cs = _channels[cid]
+                cs.running = True
+                cs.wake.set()
+                with _channels_lock:
+                    _save_channels()
+                _log(f"channel {cs.name} moved to Running")
+            else:
+                _log(f"channel {after.name} moved to Running (new)")
+                def _run():
+                    _setup_channel_context(cid, after.name, True)
+                threading.Thread(target=_run, daemon=True).start()
+        elif after_parent == _paused_category_id:
+            if cid in _channels:
+                cs = _channels[cid]
+                cs.running = False
+                with _channels_lock:
+                    _save_channels()
+                _log(f"channel {cs.name} moved to Paused")
+            else:
+                _log(f"channel {after.name} moved to Paused (new)")
+                def _run():
+                    _setup_channel_context(cid, after.name, False)
+                threading.Thread(target=_run, daemon=True).start()
+        elif before_parent in (_running_category_id, _paused_category_id):
+            if cid in _channels:
+                cs = _channels[cid]
+                cs.running = False
+                cs.stop_event.set()
+                cs.wake.set()
+                with _channels_lock:
+                    _save_channels()
+                _log(f"channel {cs.name} moved out of managed categories")
 
-        doc = message.document
-        filename = doc.file_name or f"file_{doc.file_id[:8]}"
-        saved_path = _download_telegram_file(bot, doc.file_id, filename)
-
-        caption = message.caption or ""
-        size_kb = doc.file_size / 1024 if doc.file_size else saved_path.stat().st_size / 1024
-        user_text = f"[Sent file: {saved_path.name}] saved to {saved_path} ({size_kb:.1f} KB)"
-        if caption:
-            user_text += f"\n[Caption]: {caption}"
-
-        is_text = False
-        try:
-            content = saved_path.read_text(errors="strict")
-            if len(content) <= 8000:
-                user_text += f"\n[File contents]:\n{content}"
-                is_text = True
-        except (UnicodeDecodeError, ValueError):
-            pass
-
-        if not is_text:
-            user_text += "\n(Binary file — not included inline. Read it from the saved path if needed.)"
-
-        log_chat("user", user_text[:1000])
-        prompt = _build_operator_prompt(user_text)
-
+    @client.event
+    async def on_guild_channel_delete(channel):
+        cid = str(channel.id)
+        if cid not in _channels:
+            return
+        _log(f"managed channel deleted: {channel.name} (id={cid})")
         def _run():
-            response = run_agent_streaming(bot, prompt, message.chat.id)
-            log_chat("bot", response[:1000])
-            _process_pending_env()
-
+            _delete_channel_context(cid)
+            _send_discord_text(f"Channel {channel.name} deleted (cleaned up context).")
         threading.Thread(target=_run, daemon=True).start()
 
-    @bot.message_handler(content_types=["photo"])
-    def handle_photo(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
+    @client.event
+    async def on_guild_channel_pins_update(channel, last_pin):
+        cid = str(channel.id)
+        if cid not in _channels:
             return
-        _save_chat_id(message.chat.id)
-
-        photo = message.photo[-1]  # highest resolution
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"photo_{ts}.jpg"
-        saved_path = _download_telegram_file(bot, photo.file_id, filename)
-
-        caption = message.caption or ""
-        user_text = f"[Sent photo: {saved_path.name}] saved to {saved_path}"
-        if caption:
-            user_text += f"\n[Caption]: {caption}"
-
-        log_chat("user", user_text[:1000])
-        prompt = _build_operator_prompt(user_text)
-
+        _log(f"pins updated for channel {channel.name} (id={cid})")
         def _run():
-            response = run_agent_streaming(bot, prompt, message.chat.id)
-            log_chat("bot", response[:1000])
-            _process_pending_env()
-
+            pin_text = _fetch_channel_pins(cid)
+            cs = _channels.get(cid)
+            if not cs:
+                return
+            pf = _pin_file(cid)
+            pf.parent.mkdir(parents=True, exist_ok=True)
+            pf.write_text(pin_text)
+            cs.pin_text = pin_text
+            new_hash = hashlib.sha256(pin_text.encode()).hexdigest()[:16] if pin_text else ""
+            if new_hash != cs.pin_hash:
+                cs.pin_hash = new_hash
+                with _channels_lock:
+                    _save_channels()
+                _log(f"channel {cs.name}: pin updated ({len(pin_text)} chars)")
         threading.Thread(target=_run, daemon=True).start()
 
-    @bot.message_handler(func=lambda m: True)
-    def handle_message(message):
-        uid = message.from_user.id if message.from_user else None
-        if not _is_owner(uid):
-            _reject(message)
+    @client.event
+    async def on_thread_create(thread):
+        if not hasattr(thread, "parent_id"):
             return
-        _save_chat_id(message.chat.id)
-        log_chat("user", message.text)
-        prompt = _build_operator_prompt(message.text)
-
+        parent_cid = str(thread.parent_id)
+        if parent_cid not in _channels:
+            return
+        cs = _channels[parent_cid]
+        thread_id = str(thread.id)
+        if thread_id in cs.active_threads:
+            return
+        thread_name = thread.name or "untitled"
         def _run():
-            response = run_agent_streaming(bot, prompt, message.chat.id)
-            log_chat("bot", response[:1000])
-            _process_pending_env()
-
+            goal = _fetch_thread_starter_message(thread_id)
+            if not goal:
+                goal = thread_name
+            _create_thread(parent_cid, thread_name, goal, thread_id=thread_id)
         threading.Thread(target=_run, daemon=True).start()
 
-    _log("telegram bot started")
+    @client.event
+    async def on_message(message):
+        if message.author == client.user:
+            return
+
+        channel_id = str(message.channel.id)
+        author_id = message.author.id
+        content = message.content.strip()
+        msg_id = str(message.id)
+
+        if hasattr(message.channel, "parent_id") and message.channel.parent_id:
+            parent_cid = str(message.channel.parent_id)
+            if parent_cid in _channels:
+                cs = _channels[parent_cid]
+                thread_id = channel_id
+                ts = cs.active_threads.get(thread_id)
+                if ts:
+                    log_thread_chat("user", content or "(attachment)", parent_cid, thread_id)
+                    ts.wake.set()
+                    _add_discord_reaction(channel_id, msg_id, "\u2705")
+                    # Handle thread control commands sent inside the thread itself
+                    if _is_owner(author_id) and content and content.startswith("/"):
+                        thread_cmd = content.strip().lower()
+                        if thread_cmd in ("/pause", "/stop"):
+                            if ts.paused:
+                                _reply_sync(channel_id, f"Thread **{ts.name}** is already paused.")
+                            else:
+                                ts.paused = True
+                                ts.stop_event.set()
+                                ts.wake.set()
+                                with _channels_lock:
+                                    _save_channels()
+                                _reply_sync(channel_id, f"Thread **{ts.name}** paused.")
+                                _log(f"channel {cs.name}: thread '{ts.name}' paused via in-thread command")
+                        elif thread_cmd in ("/resume", "/unpause", "/start"):
+                            if not ts.paused:
+                                _reply_sync(channel_id, f"Thread **{ts.name}** is already running.")
+                            else:
+                                ts.paused = False
+                                ts.stop_event = threading.Event()
+                                ts.wake = threading.Event()
+                                ts.loop_thread = None
+                                cs.wake.set()
+                                with _channels_lock:
+                                    _save_channels()
+                                _reply_sync(channel_id, f"Thread **{ts.name}** resumed.")
+                                _log(f"channel {cs.name}: thread '{ts.name}' resumed via in-thread command")
+                        elif thread_cmd.startswith("/delay"):
+                            delay_parts = thread_cmd.split()
+                            if len(delay_parts) < 2:
+                                _reply_sync(channel_id, "Usage: `/delay <minutes>`")
+                            else:
+                                try:
+                                    minutes = float(delay_parts[1])
+                                    delay_seconds = int(minutes * 60)
+                                    with _channels_lock:
+                                        ts.delay = delay_seconds
+                                        _save_channels()
+                                    _reply_sync(channel_id, f"Delay for thread **{ts.name}** set to {minutes}m ({delay_seconds}s).")
+                                except ValueError:
+                                    _reply_sync(channel_id, "Invalid delay value. Usage: `/delay <minutes>`")
+                        elif thread_cmd == "/status":
+                            status = "paused" if ts.paused else "running"
+                            _reply_sync(channel_id, f"Thread **{ts.name}**: {status}, step {ts.step_count}, delay {ts.delay}s")
+                        elif thread_cmd == "/restart":
+                            ts.stop_event.set()
+                            ts.wake.set()
+                            loop_t = ts.loop_thread
+                            if loop_t and loop_t.is_alive():
+                                loop_t.join(timeout=10)
+                            ts.stop_event = threading.Event()
+                            ts.wake = threading.Event()
+                            ts.loop_thread = None
+                            ts.paused = False
+                            cs.wake.set()
+                            with _channels_lock:
+                                _save_channels()
+                            _reply_sync(channel_id, f"Thread **{ts.name}** restarted.")
+                            _log(f"channel {cs.name}: thread '{ts.name}' restarted via in-thread command")
+                        else:
+                            # Unknown slash command — pass to agent as direct chat
+                            def _run_thread_direct_chat(
+                                _cs=cs, _ts=ts, _parent_cid=parent_cid,
+                                _thread_id=thread_id, _content=content,
+                                _channel_id=channel_id, _msg_id=msg_id,
+                            ):
+                                _log(f"channel {_cs.name}: thread '{_ts.name}' direct chat reply")
+                                prompt = _build_thread_prompt(_parent_cid, _thread_id, step=_ts.step_count)
+                                prompt += f"\n\n## Operator message (reply directly)\n\n{_content}"
+                                response = run_agent_streaming(prompt, _channel_id, reply_to=_msg_id)
+                                log_thread_chat("bot", response[:1000], _parent_cid, _thread_id)
+                            threading.Thread(target=_run_thread_direct_chat, daemon=True).start()
+                    # Direct chat response for owner messages in autonomous threads
+                    elif _is_owner(author_id) and content:
+                        def _run_thread_direct_chat(
+                            _cs=cs, _ts=ts, _parent_cid=parent_cid,
+                            _thread_id=thread_id, _content=content,
+                            _channel_id=channel_id, _msg_id=msg_id,
+                        ):
+                            _log(f"channel {_cs.name}: thread '{_ts.name}' direct chat reply")
+                            prompt = _build_thread_prompt(_parent_cid, _thread_id, step=_ts.step_count)
+                            prompt += f"\n\n## Operator message (reply directly)\n\n{_content}"
+                            response = run_agent_streaming(prompt, _channel_id, reply_to=_msg_id)
+                            log_thread_chat("bot", response[:1000], _parent_cid, _thread_id)
+                        threading.Thread(target=_run_thread_direct_chat, daemon=True).start()
+                else:
+                    # Thread exists in Discord but not as an Arbos autonomous thread —
+                    # treat as a chat message and respond in the thread.
+                    if _is_owner(author_id):
+                        log_chat("user", content or "(attachment)", channel_id=parent_cid)
+                        _add_discord_reaction(channel_id, msg_id, "\u2705")  # ✅ accepted
+                        def _run_thread_chat():
+                            _log(f"channel {cs.name}: thread chat, responding in thread {thread_id}")
+                            prompt = _build_channel_chat_prompt(parent_cid, content or "(attachment)")
+                            response = run_agent_streaming(prompt, channel_id, reply_to=msg_id)
+                            log_chat("bot", response[:1000], channel_id=parent_cid)
+                        threading.Thread(target=_run_thread_chat, daemon=True).start()
+                return
+
+        if _is_managed_channel(channel_id):
+            if content.startswith("/"):
+                def _run():
+                    _handle_channel_command(content, channel_id, author_id)
+                threading.Thread(target=_run, daemon=True).start()
+            elif content or message.attachments:
+                atts = [
+                    {"filename": a.filename, "url": a.url, "size": a.size,
+                     "content_type": a.content_type or ""}
+                    for a in message.attachments
+                ]
+                def _run():
+                    _handle_channel_message(content, atts, channel_id, msg_id, author_id)
+                threading.Thread(target=_run, daemon=True).start()
+            return
+
+        expected_channel = _general_channel["id"]
+        if expected_channel and channel_id != expected_channel:
+            return
+
+        if not expected_channel:
+            if hasattr(message.channel, "name") and message.channel.name == "general":
+                _save_general_id(channel_id)
+            else:
+                return
+
+        if message.attachments:
+            atts = [
+                {
+                    "filename": a.filename,
+                    "url": a.url,
+                    "size": a.size,
+                    "content_type": a.content_type or "",
+                }
+                for a in message.attachments
+            ]
+
+            def _run():
+                _handle_attachment_message(content, atts, channel_id, author_id, msg_id)
+            threading.Thread(target=_run, daemon=True).start()
+            return
+
+        if not content:
+            return
+
+        if content.startswith("/"):
+            def _run():
+                _handle_command(content, channel_id, author_id, msg_id)
+            threading.Thread(target=_run, daemon=True).start()
+        else:
+            def _run():
+                _handle_text_message(content, channel_id, author_id, msg_id)
+            threading.Thread(target=_run, daemon=True).start()
+
+    _log("discord bot starting")
     while True:
         try:
-            bot.infinity_polling()
+            client.run(token, log_handler=None)
         except Exception as e:
-            _log(f"bot polling error: {str(e)[:80]}, reconnecting in 5s")
+            _log(f"discord bot error: {str(e)[:80]}, reconnecting in 5s")
             time.sleep(5)
 
 
@@ -2425,12 +3533,19 @@ def _kill_stale_claude_procs():
 def _send_cli(args: list[str]):
     """CLI entry point: python arbos.py send 'message' [--file path]
 
-    Within a step, all sends are consolidated into a single Telegram message.
+    Within a step, all sends are consolidated into a single Discord message.
     The first send creates it; subsequent sends edit it by appending.
-    Uses ARBOS_GOAL_INDEX env var to find the per-goal step message file.
+    Uses ARBOS_CHANNEL_ID env var to find the per-channel step message file.
+    In silent mode (ARBOS_SILENT=1), sends are suppressed — the loop posts a
+    summary after the step instead.
     """
+    if os.environ.get("ARBOS_SILENT") == "1":
+        print("(silent mode — send suppressed)")
+        return
+
+    _load_channels()
     import argparse
-    parser = argparse.ArgumentParser(description="Send a Telegram message to the operator")
+    parser = argparse.ArgumentParser(description="Send a Discord message to the operator")
     parser.add_argument("message", nargs="?", help="Message text to send")
     parser.add_argument("--file", help="Send contents of a file instead")
     parsed = parser.parse_args(args)
@@ -2443,9 +3558,9 @@ def _send_cli(args: list[str]):
     else:
         text = parsed.message
 
-    goal_index = int(os.environ.get("ARBOS_GOAL_INDEX", "0"))
-    if goal_index:
-        smf = _step_msg_file(goal_index)
+    channel_id = os.environ.get("ARBOS_CHANNEL_ID", "")
+    if channel_id:
+        smf = _step_msg_file(channel_id)
     else:
         smf = CONTEXT_DIR / ".step_msg"
     smf.parent.mkdir(parents=True, exist_ok=True)
@@ -2464,12 +3579,12 @@ def _send_cli(args: list[str]):
 
     if msg_id:
         combined = (prev_text + "\n\n" + text).strip()
-        if _edit_telegram_text(msg_id, combined):
+        if _edit_discord_text(msg_id, combined):
             smf.write_text(json.dumps({"msg_id": msg_id, "text": combined}))
             log_chat("bot", combined[:1000])
             print(f"Edited step message ({len(combined)} chars)")
         else:
-            new_id = _send_telegram_new(text)
+            new_id = _send_discord_new(text)
             if new_id:
                 smf.write_text(json.dumps({"msg_id": new_id, "text": text}))
                 log_chat("bot", text[:1000])
@@ -2478,20 +3593,21 @@ def _send_cli(args: list[str]):
                 print("Failed to send", file=sys.stderr)
                 sys.exit(1)
     else:
-        new_id = _send_telegram_new(text)
+        new_id = _send_discord_new(text)
         if new_id:
             smf.write_text(json.dumps({"msg_id": new_id, "text": text}))
             log_chat("bot", text[:1000])
             print(f"Sent ({len(text)} chars)")
         else:
-            print("Failed to send (check TAU_BOT_TOKEN and chat_id.txt)", file=sys.stderr)
+            print("Failed to send (check BOT_TOKEN and channel_id.txt)", file=sys.stderr)
             sys.exit(1)
 
 
 def _sendfile_cli(args: list[str]):
     """CLI entry point: python arbos.py sendfile path/to/file [--caption 'text'] [--photo]"""
+    _load_channels()
     import argparse
-    parser = argparse.ArgumentParser(description="Send a file to the operator via Telegram")
+    parser = argparse.ArgumentParser(description="Send a file to the operator via Discord")
     parser.add_argument("path", help="Path to the file to send")
     parser.add_argument("--caption", default="", help="Caption for the file")
     parser.add_argument("--photo", action="store_true", help="Send as a compressed photo instead of a document")
@@ -2503,14 +3619,141 @@ def _sendfile_cli(args: list[str]):
         sys.exit(1)
 
     if parsed.photo:
-        ok = _send_telegram_photo(str(file_path), caption=parsed.caption)
+        ok = _send_discord_photo(str(file_path), caption=parsed.caption)
     else:
-        ok = _send_telegram_document(str(file_path), caption=parsed.caption)
+        ok = _send_discord_document(str(file_path), caption=parsed.caption)
 
     if ok:
         print(f"Sent {'photo' if parsed.photo else 'file'}: {file_path.name}")
     else:
-        print("Failed to send (check TAU_BOT_TOKEN and chat_id.txt)", file=sys.stderr)
+        print("Failed to send (check BOT_TOKEN and channel_id.txt)", file=sys.stderr)
+        sys.exit(1)
+
+
+def _thread_done_cli():
+    """CLI entry point: python arbos.py thread-done — pause the current thread (goal completed)."""
+    _load_channels()
+    channel_id = os.environ.get("ARBOS_CHANNEL_ID", "")
+    thread_id = os.environ.get("ARBOS_THREAD_ID", "")
+    if not channel_id or not thread_id:
+        print("ARBOS_CHANNEL_ID and ARBOS_THREAD_ID must be set", file=sys.stderr)
+        sys.exit(1)
+    cs = _channels.get(channel_id)
+    if cs and thread_id in cs.active_threads:
+        ts = cs.active_threads[thread_id]
+        ts.paused = True
+        ts.stop_event.set()
+        with _channels_lock:
+            _save_channels()
+    token = os.getenv("BOT_TOKEN", "")
+    if token:
+        try:
+            requests.post(
+                f"{DISCORD_API}/channels/{thread_id}/messages",
+                headers=_discord_headers(token),
+                json={"content": "Goal completed. Thread paused."},
+                timeout=15,
+            )
+        except Exception:
+            pass
+    print(f"Thread {thread_id} marked as done and paused")
+
+
+def _thread_ctl_cli():
+    """CLI entry point: python arbos.py thread-ctl <action> [args] — thread self-control.
+
+    Actions:
+        delay <seconds>   — set step delay for this thread
+        restart           — restart this thread's loop (finishes current step, then restarts)
+        goal <new goal>   — update the thread's goal
+        pause             — pause this thread after the current step
+    """
+    _load_channels()
+    channel_id = os.environ.get("ARBOS_CHANNEL_ID", "")
+    thread_id = os.environ.get("ARBOS_THREAD_ID", "")
+    if not channel_id or not thread_id:
+        print("ARBOS_CHANNEL_ID and ARBOS_THREAD_ID must be set", file=sys.stderr)
+        sys.exit(1)
+    cs = _channels.get(channel_id)
+    if not cs or thread_id not in cs.active_threads:
+        print(f"Thread {thread_id} not found", file=sys.stderr)
+        sys.exit(1)
+    ts = cs.active_threads[thread_id]
+
+    if len(sys.argv) < 3:
+        print("Usage: python arbos.py thread-ctl <delay|restart|goal|pause> [args]", file=sys.stderr)
+        sys.exit(1)
+
+    action = sys.argv[2].lower()
+
+    if action == "delay":
+        if len(sys.argv) < 4:
+            print("Usage: python arbos.py thread-ctl delay <seconds>", file=sys.stderr)
+            sys.exit(1)
+        try:
+            new_delay = int(sys.argv[3])
+        except ValueError:
+            print("Delay must be an integer (seconds)", file=sys.stderr)
+            sys.exit(1)
+        ts.delay = max(0, new_delay)
+        with _channels_lock:
+            _save_channels()
+        print(f"Thread delay set to {ts.delay}s")
+
+    elif action == "restart":
+        # Signal stop, then clear so channel_loop respawns it
+        ts.stop_event.set()
+        ts.wake.set()
+        ts.loop_thread = None
+        ts.stop_event = threading.Event()
+        ts.wake = threading.Event()
+        cs.wake.set()  # wake channel loop to respawn
+        with _channels_lock:
+            _save_channels()
+        print(f"Thread restart signaled")
+
+    elif action == "goal":
+        if len(sys.argv) < 4:
+            print("Usage: python arbos.py thread-ctl goal <new goal text>", file=sys.stderr)
+            sys.exit(1)
+        new_goal = " ".join(sys.argv[3:])
+        ts.goal = new_goal
+        gf = _thread_goal_file(channel_id, thread_id)
+        gf.write_text(new_goal)
+        with _channels_lock:
+            _save_channels()
+        print(f"Thread goal updated")
+
+    elif action == "pause":
+        ts.paused = True
+        ts.stop_event.set()
+        ts.wake.set()
+        with _channels_lock:
+            _save_channels()
+        print(f"Thread paused")
+
+    else:
+        print(f"Unknown action: {action}. Use: delay, restart, goal, pause", file=sys.stderr)
+        sys.exit(1)
+
+
+def _thread_create_cli():
+    """CLI entry point: python arbos.py thread <name> <goal> — create a new thread."""
+    if len(sys.argv) < 4:
+        print("Usage: python arbos.py thread <name> <goal>", file=sys.stderr)
+        sys.exit(1)
+    thread_name = sys.argv[2]
+    thread_goal = " ".join(sys.argv[3:])
+    channel_id = os.environ.get("ARBOS_CHANNEL_ID", "")
+    if not channel_id:
+        print("ARBOS_CHANNEL_ID must be set", file=sys.stderr)
+        sys.exit(1)
+    _load_channels()
+    ts = _create_thread(channel_id, thread_name, thread_goal)
+    if ts:
+        print(f"Thread created: {ts.thread_id}")
+    else:
+        print("Failed to create thread", file=sys.stderr)
         sys.exit(1)
 
 
@@ -2532,28 +3775,41 @@ def main() -> None:
                 print(".env not found, nothing to encrypt")
             return
         load_dotenv(env_path)
-        bot_token = os.environ.get("TAU_BOT_TOKEN", "")
+        bot_token = os.environ.get("BOT_TOKEN", "")
         if not bot_token:
-            print("TAU_BOT_TOKEN must be set in .env", file=sys.stderr)
+            print("BOT_TOKEN must be set in .env", file=sys.stderr)
             sys.exit(1)
         _encrypt_env_file(bot_token)
         print("Encrypted .env → .env.enc, deleted plaintext.")
-        print(f"On future starts: TAU_BOT_TOKEN='{bot_token}' python arbos.py")
+        print(f"On future starts: BOT_TOKEN='{bot_token}' python arbos.py")
         return
 
-    if len(sys.argv) > 1 and sys.argv[1] not in ("send", "encrypt", "sendfile"):
+    if len(sys.argv) > 1 and sys.argv[1] == "thread-done":
+        _thread_done_cli()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "thread-ctl":
+        _thread_ctl_cli()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "thread":
+        _thread_create_cli()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] not in ("send", "encrypt", "sendfile", "thread-done", "thread-ctl", "thread"):
         print(f"Unknown subcommand: {sys.argv[1]}", file=sys.stderr)
-        print("Usage: arbos.py [send|sendfile|encrypt]", file=sys.stderr)
+        print("Usage: arbos.py [send|sendfile|encrypt|thread-done|thread-ctl|thread]", file=sys.stderr)
         sys.exit(1)
 
     _log(f"arbos starting in {WORKING_DIR} (provider={PROVIDER}, model={CLAUDE_MODEL})")
     _kill_stale_claude_procs()
     _reload_env_secrets()
     CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
-    GOALS_DIR.mkdir(parents=True, exist_ok=True)
+    GENERAL_DIR.mkdir(parents=True, exist_ok=True)
+    GENERAL_CHAT_DIR.mkdir(parents=True, exist_ok=True)
 
-    _load_goals()
-    _log(f"loaded {len(_goals)} goal(s) from goals.json")
+    _load_channels()
+    _log(f"loaded {len(_channels)} channel(s) from channels.json")
 
     if not LLM_API_KEY:
         key_name = "OPENROUTER_API_KEY" if PROVIDER == "openrouter" else "CHUTES_API_KEY"
@@ -2574,9 +3830,7 @@ def main() -> None:
 
     _write_claude_settings()
 
-    _send_telegram_text("Restarted.")
-
-    threading.Thread(target=_goal_manager, daemon=True).start()
+    threading.Thread(target=_channel_manager, daemon=True).start()
     threading.Thread(target=run_bot, daemon=True).start()
 
     while not _shutdown.is_set():
