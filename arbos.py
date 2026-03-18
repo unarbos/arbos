@@ -374,6 +374,14 @@ def _thread_chat_dir(channel_id: str, thread_id: str) -> Path:
     return _thread_dir(channel_id, thread_id) / "chat"
 
 
+def _channel_env_file(channel_id: str) -> Path:
+    return _channel_dir(channel_id) / ".env"
+
+
+def _thread_env_file(channel_id: str, thread_id: str) -> Path:
+    return _thread_dir(channel_id, thread_id) / ".env"
+
+
 def _step_msg_file(channel_id: str) -> Path:
     return _channel_dir(channel_id) / ".step_msg"
 
@@ -1238,7 +1246,7 @@ def _create_github_repo(repo_name: str, description: str = "") -> str | None:
         resp = requests.post(
             f"{GITHUB_API}/user/repos",
             headers=_github_headers(),
-            json={"name": repo_name, "description": description[:350], "private": False, "auto_init": True},
+            json={"name": repo_name, "description": description[:350], "private": True, "auto_init": True},
             timeout=30,
         )
         if resp.status_code == 422:
@@ -1924,9 +1932,63 @@ def _write_claude_settings():
     _log(f"wrote .claude/settings.local.json (provider={PROVIDER}, model={CLAUDE_MODEL}, target={target_label})")
 
 
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a KEY=VALUE env file, returning a dict. Skips comments and blank lines."""
+    result = {}
+    if not path.exists():
+        return result
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip().strip("'\"")
+        if k:
+            result[k] = v
+    return result
+
+
+def _write_scoped_env(env_file: Path, name: str, value: str):
+    """Set a single env var in a scoped .env file (channel or thread level)."""
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    existing = _parse_env_file(env_file)
+    existing[name] = value
+    lines = [f"{k}='{v}'" for k, v in existing.items()]
+    env_file.write_text("\n".join(lines) + "\n")
+    # Restrict permissions: owner read/write only
+    env_file.chmod(0o600)
+
+
+def _delete_scoped_env(env_file: Path, name: str) -> bool:
+    """Remove a single env var from a scoped .env file. Returns True if found."""
+    existing = _parse_env_file(env_file)
+    if name not in existing:
+        return False
+    del existing[name]
+    if existing:
+        lines = [f"{k}='{v}'" for k, v in existing.items()]
+        env_file.write_text("\n".join(lines) + "\n")
+        env_file.chmod(0o600)
+    elif env_file.exists():
+        env_file.unlink()
+    return True
+
+
+def _load_scoped_env(channel_id: str, thread_id: str = "") -> dict[str, str]:
+    """Load scoped env vars: channel-level first, then thread-level overrides."""
+    scoped = {}
+    if channel_id:
+        scoped.update(_parse_env_file(_channel_env_file(channel_id)))
+    if channel_id and thread_id:
+        scoped.update(_parse_env_file(_thread_env_file(channel_id, thread_id)))
+    return scoped
+
+
 def _claude_env(channel_id: str = "", thread_id: str = "", silent: bool = False) -> dict[str, str]:
     env = os.environ.copy()
     env.pop("BOT_TOKEN", None)
+    # Apply scoped env vars (channel → thread, thread overrides channel)
+    env.update(_load_scoped_env(channel_id, thread_id))
     if channel_id:
         env["ARBOS_CHANNEL_ID"] = channel_id
     if thread_id:
@@ -2633,9 +2695,9 @@ def run_agent_streaming(prompt: str, channel_id: str, *,
         if not current_text.strip() and msg_id:
             _edit_discord_text(msg_id, "(no output)", target=target)
 
-        # React with 🏁 on the bot's response message — response complete
-        if msg_id:
-            _add_discord_reaction(channel_id, msg_id, "\U0001F3C1")
+        # React with 🏁 on the original trigger message — response complete
+        if reply_to:
+            _add_discord_reaction(channel_id, reply_to, "\U0001F3C1")
 
     except Exception as e:
         if msg_id:
@@ -2906,7 +2968,7 @@ def run_bot():
         log_chat("bot", response[:1000])
         _process_pending_env()
 
-    def _handle_channel_command(content: str, channel_id: str, author_id: int):
+    def _handle_channel_command(content: str, channel_id: str, author_id: int, msg_id: str | None = None):
         """Handle a /command in a managed channel."""
         if not _is_owner(author_id):
             _reply_sync(channel_id, "Unauthorized.")
@@ -2934,7 +2996,11 @@ def run_bot():
                 "`/pause <thread>` — pause a running thread\n"
                 "`/resume <thread>` — resume a paused thread\n"
                 "`/restart` — kill all threads and restart the channel\n"
-                "`/help` — this message"
+                "`/env NAME VALUE` — set channel-scoped env var (all threads inherit)\n"
+                "`/env -d NAME` — remove a channel env var\n"
+                "`/env` — list channel env vars\n"
+                "`/help` — this message\n\n"
+                "**Thread `/env`**: Use `/env` inside a thread for thread-scoped vars."
             ))
 
         elif cmd == "/thread":
@@ -3084,6 +3150,34 @@ def run_bot():
                 _save_channels()
             _reply_sync(channel_id, f"{cs.name} restarted.")
             _log(f"channel {cs.name} restarted via command")
+
+        elif cmd == "/env":
+            # Delete the message containing the secret value
+            if msg_id and len(args) >= 2 and args[0] != "-d":
+                _delete_discord_message(channel_id, msg_id)
+            if len(args) < 2:
+                # Show current channel env vars
+                env_file = _channel_env_file(channel_id)
+                current = _parse_env_file(env_file)
+                if current:
+                    lines = [f"`{k}` = (set)" for k in current]
+                    _reply_sync(channel_id, f"**Channel env vars:**\n" + "\n".join(lines))
+                else:
+                    _reply_sync(channel_id, "No channel-scoped env vars set.\nUsage: `/env NAME VALUE` or `/env -d NAME`")
+                return
+            env_name = args[0]
+            if env_name == "-d" and len(args) >= 2:
+                # Delete mode: /env -d NAME
+                target = args[1]
+                if _delete_scoped_env(_channel_env_file(channel_id), target):
+                    _reply_sync(channel_id, f"Removed `{target}` from channel env.")
+                else:
+                    _reply_sync(channel_id, f"`{target}` not found in channel env.")
+                return
+            env_value = " ".join(args[1:])
+            _write_scoped_env(_channel_env_file(channel_id), env_name, env_value)
+            _reply_sync(channel_id, f"Set `{env_name}` in channel env (available to all threads).")
+            _log(f"channel {cs.name}: set scoped env var {env_name}")
 
         else:
             _reply_sync(channel_id, "Unknown command. Use `/help` to see available commands.")
@@ -3387,6 +3481,41 @@ def run_bot():
                                 _save_channels()
                             _reply_sync(channel_id, f"Thread **{ts.name}** restarted.")
                             _log(f"channel {cs.name}: thread '{ts.name}' restarted via in-thread command")
+                        elif thread_cmd.startswith("/env"):
+                            env_parts = content.strip().split()
+                            # Delete message if it contains a secret value
+                            if msg_id and len(env_parts) >= 3 and env_parts[1] != "-d":
+                                _delete_discord_message(channel_id, msg_id)
+                            if len(env_parts) < 2:
+                                # Show thread env vars
+                                env_file = _thread_env_file(parent_cid, thread_id)
+                                current = _parse_env_file(env_file)
+                                ch_env = _parse_env_file(_channel_env_file(parent_cid))
+                                lines = []
+                                if ch_env:
+                                    lines.append("**Channel env (inherited):**")
+                                    lines.extend(f"`{k}` = (set)" for k in ch_env)
+                                if current:
+                                    lines.append("**Thread env:**")
+                                    lines.extend(f"`{k}` = (set)" for k in current)
+                                if lines:
+                                    _reply_sync(channel_id, "\n".join(lines))
+                                else:
+                                    _reply_sync(channel_id, "No env vars set.\nUsage: `/env NAME VALUE` or `/env -d NAME`")
+                            elif env_parts[1] == "-d" and len(env_parts) >= 3:
+                                target = env_parts[2]
+                                if _delete_scoped_env(_thread_env_file(parent_cid, thread_id), target):
+                                    _reply_sync(channel_id, f"Removed `{target}` from thread env.")
+                                else:
+                                    _reply_sync(channel_id, f"`{target}` not found in thread env.")
+                            elif len(env_parts) >= 3:
+                                env_name = env_parts[1]
+                                env_value = " ".join(env_parts[2:])
+                                _write_scoped_env(_thread_env_file(parent_cid, thread_id), env_name, env_value)
+                                _reply_sync(channel_id, f"Set `{env_name}` in thread env (this thread only).")
+                                _log(f"channel {cs.name}: thread '{ts.name}' set scoped env var {env_name}")
+                            else:
+                                _reply_sync(channel_id, "Usage: `/env NAME VALUE` or `/env -d NAME`")
                         else:
                             # Unknown slash command — pass to agent as direct chat
                             def _run_thread_direct_chat(
@@ -3430,7 +3559,7 @@ def run_bot():
         if _is_managed_channel(channel_id):
             if content.startswith("/"):
                 def _run():
-                    _handle_channel_command(content, channel_id, author_id)
+                    _handle_channel_command(content, channel_id, author_id, msg_id)
                 threading.Thread(target=_run, daemon=True).start()
             elif content or message.attachments:
                 atts = [
