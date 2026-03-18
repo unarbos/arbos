@@ -293,39 +293,38 @@ def _pm2_delete(names: list[str]):
 
 
 @dataclass
-class ThreadState:
-    thread_id: str
-    name: str = ""
-    goal: str = ""
-    step_count: int = 0
-    delay: int = 0
-    paused: bool = False
-    last_run: str = ""
-    last_finished: str = ""
-    loop_thread: threading.Thread | None = field(default=None, repr=False)
-    wake: threading.Event = field(default_factory=threading.Event, repr=False)
-    stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
-
-
-@dataclass
 class ChannelState:
     channel_id: str
     name: str = ""
     dir_name: str = ""
+    goal: str = ""
+    step_count: int = 0
     delay: int = 0
-    running: bool = True
+    running: bool = False
     pin_text: str = ""
     pin_hash: str = ""
     repo_url: str = ""
+    category_id: str = ""
+    category_name: str = ""
+    last_run: str = ""
+    last_finished: str = ""
+    started_at: str = ""
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_chat_input_tokens: int = 0
+    total_chat_output_tokens: int = 0
+    failures: int = 0
     pm2_procs: list[str] = field(default_factory=list)
-    active_threads: dict[str, ThreadState] = field(default_factory=dict)
-    thread: threading.Thread | None = field(default=None, repr=False)
+    resources: list[dict] = field(default_factory=list)
+    active_thread_id: str = ""  # Discord thread where the goal/loop is running
+    loop_thread: threading.Thread | None = field(default=None, repr=False)
     wake: threading.Event = field(default_factory=threading.Event, repr=False)
     stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
 
 _channels: dict[str, ChannelState] = {}
 _channels_lock = threading.Lock()
+_categories: dict[str, str] = {}  # category_id -> category_name
 _guild_id: str | None = None
 _running_category_id: str | None = None
 _paused_category_id: str | None = None
@@ -346,6 +345,10 @@ def _state_file(channel_id: str) -> Path:
     return _channel_dir(channel_id) / "state"
 
 
+def _goal_file(channel_id: str) -> Path:
+    return _channel_dir(channel_id) / "goal"
+
+
 def _channel_runs_dir(channel_id: str) -> Path:
     return _channel_dir(channel_id) / "runs"
 
@@ -354,32 +357,8 @@ def _channel_chat_dir(channel_id: str) -> Path:
     return _channel_dir(channel_id) / "chat"
 
 
-def _thread_dir(channel_id: str, thread_id: str) -> Path:
-    return _channel_dir(channel_id) / "threads" / thread_id
-
-
-def _thread_goal_file(channel_id: str, thread_id: str) -> Path:
-    return _thread_dir(channel_id, thread_id) / "goal"
-
-
-def _thread_state_file(channel_id: str, thread_id: str) -> Path:
-    return _thread_dir(channel_id, thread_id) / "state"
-
-
-def _thread_runs_dir(channel_id: str, thread_id: str) -> Path:
-    return _thread_dir(channel_id, thread_id) / "runs"
-
-
-def _thread_chat_dir(channel_id: str, thread_id: str) -> Path:
-    return _thread_dir(channel_id, thread_id) / "chat"
-
-
 def _channel_env_file(channel_id: str) -> Path:
     return _channel_dir(channel_id) / ".env"
-
-
-def _thread_env_file(channel_id: str, thread_id: str) -> Path:
-    return _thread_dir(channel_id, thread_id) / ".env"
 
 
 def _step_msg_file(channel_id: str) -> Path:
@@ -390,27 +369,29 @@ def _save_channels():
     """Persist channel metadata to channels.json. Caller must hold _channels_lock."""
     data = {}
     for cid, cs in _channels.items():
-        threads_data = {}
-        for tid, ts in cs.active_threads.items():
-            threads_data[tid] = {
-                "name": ts.name,
-                "goal": ts.goal,
-                "step_count": ts.step_count,
-                "delay": ts.delay,
-                "paused": ts.paused,
-                "last_run": ts.last_run,
-                "last_finished": ts.last_finished,
-            }
         data[cid] = {
             "name": cs.name,
             "dir_name": cs.dir_name,
+            "goal": cs.goal,
+            "step_count": cs.step_count,
             "delay": cs.delay,
             "running": cs.running,
             "pin_text": cs.pin_text,
             "pin_hash": cs.pin_hash,
             "repo_url": cs.repo_url,
+            "category_id": cs.category_id,
+            "category_name": cs.category_name,
+            "last_run": cs.last_run,
+            "last_finished": cs.last_finished,
+            "started_at": cs.started_at,
+            "total_input_tokens": cs.total_input_tokens,
+            "total_output_tokens": cs.total_output_tokens,
+            "total_chat_input_tokens": cs.total_chat_input_tokens,
+            "total_chat_output_tokens": cs.total_chat_output_tokens,
+            "failures": cs.failures,
             "pm2_procs": cs.pm2_procs,
-            "active_threads": threads_data,
+            "resources": cs.resources,
+            "active_thread_id": cs.active_thread_id,
         }
     CHANNELS_JSON.parent.mkdir(parents=True, exist_ok=True)
     CHANNELS_JSON.write_text(json.dumps(data, indent=2))
@@ -431,36 +412,32 @@ def _load_channels():
             continue
         if not (CONTEXT_DIR / dir_name).exists():
             continue
-        threads_raw = info.get("active_threads", {})
-        active_threads: dict[str, ThreadState] = {}
-        for tid, tinfo in threads_raw.items():
-            if isinstance(tinfo, str):
-                active_threads[tid] = ThreadState(thread_id=tid, name=tinfo)
-            elif isinstance(tinfo, dict):
-                active_threads[tid] = ThreadState(
-                    thread_id=tid,
-                    name=tinfo.get("name", ""),
-                    goal=tinfo.get("goal", ""),
-                    step_count=tinfo.get("step_count", 0),
-                    delay=tinfo.get("delay", 0),
-                    paused=tinfo.get("paused", False),
-                    last_run=tinfo.get("last_run", ""),
-                    last_finished=tinfo.get("last_finished", ""),
-                )
-        # Migrate legacy goal_text/goal_hash -> pin_text/pin_hash
         pin_text = info.get("pin_text", "") or info.get("goal_text", "")
         pin_hash = info.get("pin_hash", "") or info.get("goal_hash", "")
         _channels[cid] = ChannelState(
             channel_id=cid,
             name=info.get("name", ""),
             dir_name=dir_name,
+            goal=info.get("goal", ""),
+            step_count=info.get("step_count", 0),
             delay=info.get("delay", 0),
             running=info.get("running", False),
             pin_text=pin_text,
             pin_hash=pin_hash,
             repo_url=info.get("repo_url", ""),
+            category_id=info.get("category_id", ""),
+            category_name=info.get("category_name", ""),
+            last_run=info.get("last_run", ""),
+            last_finished=info.get("last_finished", ""),
+            started_at=info.get("started_at", ""),
+            total_input_tokens=info.get("total_input_tokens", 0),
+            total_output_tokens=info.get("total_output_tokens", 0),
+            total_chat_input_tokens=info.get("total_chat_input_tokens", 0),
+            total_chat_output_tokens=info.get("total_chat_output_tokens", 0),
+            failures=info.get("failures", 0),
             pm2_procs=info.get("pm2_procs", []),
-            active_threads=active_threads,
+            resources=info.get("resources", []),
+            active_thread_id=info.get("active_thread_id", ""),
         )
 
 
@@ -484,7 +461,7 @@ def _format_last_time(iso_ts: str) -> str:
 def _channel_status_label(cs: ChannelState) -> str:
     if cs.running:
         return "running"
-    return "paused"
+    return "stopped"
 
 
 def _file_log(msg: str):
@@ -511,6 +488,117 @@ def fmt_duration(seconds: float) -> str:
     return f"{m}m {s}s"
 
 
+def _fmt_uptime(iso_started: str) -> str:
+    """Human-readable uptime from an ISO timestamp to now."""
+    if not iso_started:
+        return "—"
+    try:
+        started = datetime.fromisoformat(iso_started)
+        delta = datetime.now() - started
+        total_s = int(delta.total_seconds())
+        if total_s < 0:
+            return "—"
+        days, rem = divmod(total_s, 86400)
+        hours, rem = divmod(rem, 3600)
+        mins, _ = divmod(rem, 60)
+        parts = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        parts.append(f"{mins}m")
+        return " ".join(parts)
+    except (ValueError, TypeError):
+        return "—"
+
+
+def _fmt_tokens_short(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+COST_PER_INPUT_MTOK = float(os.environ.get("COST_PER_INPUT_MTOK", "3.0"))
+COST_PER_OUTPUT_MTOK = float(os.environ.get("COST_PER_OUTPUT_MTOK", "15.0"))
+
+
+def _estimate_cost(input_tokens: int, output_tokens: int) -> float:
+    return (input_tokens / 1_000_000) * COST_PER_INPUT_MTOK + (output_tokens / 1_000_000) * COST_PER_OUTPUT_MTOK
+
+
+def _channel_status_text(cs: ChannelState) -> str:
+    """Build a rich status block for a channel."""
+    icon = "\U0001f7e9" if cs.running and cs.goal else "\u2b1c"
+    status = "running" if cs.running else "stopped"
+
+    loop_in = cs.total_input_tokens
+    loop_out = cs.total_output_tokens
+    chat_in = cs.total_chat_input_tokens
+    chat_out = cs.total_chat_output_tokens
+    total_in = loop_in + chat_in
+    total_out = loop_out + chat_out
+
+    loop_cost = _estimate_cost(loop_in, loop_out)
+    chat_cost = _estimate_cost(chat_in, chat_out)
+    total_cost = loop_cost + chat_cost
+
+    delay_min = cs.delay / 60 if cs.delay else 0
+    delay_str = f"{delay_min:.1f}m" if cs.delay else "none"
+    scope_label = f"category: {cs.category_name}" if cs.category_id else "global"
+    uptime = _fmt_uptime(cs.started_at) if cs.running else "—"
+
+    siblings = [
+        c for cid, c in _channels.items()
+        if c.category_id == cs.category_id and cid != cs.channel_id and cs.category_id
+    ]
+    sibling_info = f" | siblings: {', '.join(c.name for c in siblings)}" if siblings else ""
+
+    lines = [
+        f"{icon} **{cs.name}** [{status}]",
+        "",
+        f"**Scope:** {scope_label}{sibling_info}",
+        f"**Goal:** {cs.goal[:400] if cs.goal else '(no goal)'}",
+        "",
+        "```",
+        f"Status    : {status}",
+        f"Steps     : {cs.step_count}",
+        f"Failures  : {cs.failures}",
+        f"Delay     : {delay_str}",
+        f"Uptime    : {uptime}",
+        f"Last step : {_format_last_time(cs.last_finished)}",
+        f"Invoked   : {_format_last_time(cs.last_run)}",
+        "",
+        f"Loop tokens  : {_fmt_tokens_short(loop_in)} in / {_fmt_tokens_short(loop_out)} out  (${loop_cost:.2f})",
+        f"Chat tokens  : {_fmt_tokens_short(chat_in)} in / {_fmt_tokens_short(chat_out)} out  (${chat_cost:.2f})",
+        f"Total tokens : {_fmt_tokens_short(total_in)} in / {_fmt_tokens_short(total_out)} out  (${total_cost:.2f})",
+        "```",
+    ]
+
+    if cs.pm2_procs:
+        lines.append(f"**Processes ({len(cs.pm2_procs)}):** {', '.join(cs.pm2_procs)}")
+
+    if cs.resources:
+        lines.append(f"**Resources ({len(cs.resources)}):**")
+        for r in cs.resources:
+            rtype = r.get("type", "?")
+            rname = r.get("name", "?")
+            rmeta = r.get("meta", {})
+            meta_bits = " | ".join(f"{k}={v}" for k, v in rmeta.items()) if rmeta else ""
+            destroy = " | destroy: `" + r["destroy_cmd"] + "`" if r.get("destroy_cmd") else ""
+            meta_str = f" ({meta_bits})" if meta_bits else ""
+            lines.append(f"  - `{rtype}` **{rname}**{meta_str}{destroy}")
+
+    sf = _state_file(cs.channel_id)
+    state_text = sf.read_text().strip()[:400] if sf.exists() else "(empty)"
+    pin_preview = cs.pin_text[:200] if cs.pin_text else "(no pin)"
+    lines.append(f"**Pin:** {pin_preview}")
+    lines.append(f"**State:** {state_text}")
+
+    return "\n".join(lines)
+
+
 def _reset_tokens():
     with _token_lock:
         _token_usage["input"] = 0
@@ -533,10 +621,219 @@ def fmt_tokens(inp: int, out: int, elapsed: float = 0) -> str:
     return f"{_k(inp)} in / {_k(out)} out{tps}{cost_str}"
 
 
+# ── Scope context builders ───────────────────────────────────────────────────
+
+def _channel_summary(cs: ChannelState, *, max_pin: int = 500, max_state: int = 500) -> str:
+    """One-channel summary for scope context: status, goal, pin snippet, state snippet."""
+    icon = "\U0001f7e9" if cs.running and cs.goal else "\u2b1c"
+    step_info = f" step {cs.step_count}" if cs.step_count else ""
+    lines = [f"### {icon} #{cs.name}{step_info}"]
+    if cs.goal:
+        goal_preview = cs.goal[:200] + ("..." if len(cs.goal) > 200 else "")
+        lines.append(f"Goal: {goal_preview}")
+    pf = _pin_file(cs.channel_id)
+    if pf.exists():
+        pin = pf.read_text().strip()
+        if pin:
+            snippet = pin[:max_pin] + ("..." if len(pin) > max_pin else "")
+            lines.append(f"Pin: {snippet}")
+    sf = _state_file(cs.channel_id)
+    if sf.exists():
+        state = sf.read_text().strip()
+        if state:
+            snippet = state[:max_state] + ("..." if len(state) > max_state else "")
+            lines.append(f"State: {snippet}")
+    return "\n".join(lines)
+
+
+def _build_category_scope(channel_id: str, category_id: str) -> str:
+    """Context from sibling channels in the same category."""
+    siblings = [
+        cs for cid, cs in _channels.items()
+        if cs.category_id == category_id and cid != channel_id
+    ]
+    if not siblings:
+        return ""
+    cat_name = _categories.get(category_id, category_id)
+    parts = [
+        f"## Scope: {cat_name}\n",
+        "You share this category with the following sibling channels.",
+        "Their goals, pins, and state are shown for coordination.\n",
+    ]
+    for cs in sorted(siblings, key=lambda c: c.name):
+        parts.append(_channel_summary(cs))
+    return "\n\n".join(parts)
+
+
+def _build_global_scope(channel_id: str) -> str:
+    """Context from ALL channels grouped by category (condensed)."""
+    by_cat: dict[str, list[ChannelState]] = {}
+    uncategorized: list[ChannelState] = []
+    for cid, cs in _channels.items():
+        if cid == channel_id:
+            continue
+        if cs.category_id:
+            by_cat.setdefault(cs.category_id, []).append(cs)
+        else:
+            uncategorized.append(cs)
+    if not by_cat and not uncategorized:
+        return ""
+    parts = ["## Scope: Global\n", "You have global visibility across all categories and channels.\n"]
+    for cat_id, members in sorted(by_cat.items(), key=lambda x: _categories.get(x[0], x[0])):
+        cat_name = _categories.get(cat_id, cat_id)
+        parts.append(f"### Category: {cat_name}")
+        for cs in sorted(members, key=lambda c: c.name):
+            icon = "\U0001f7e9" if cs.running and cs.goal else "\u2b1c"
+            step_info = f" step {cs.step_count}" if cs.step_count else ""
+            goal_preview = ""
+            if cs.goal:
+                goal_preview = f" | goal: {cs.goal[:100]}{'...' if len(cs.goal) > 100 else ''}"
+            pin_preview = ""
+            pf = _pin_file(cs.channel_id)
+            if pf.exists():
+                pin = pf.read_text().strip()
+                if pin:
+                    pin_preview = f" | pin: {pin[:120]}{'...' if len(pin) > 120 else ''}"
+            parts.append(f"- {icon} **#{cs.name}**{step_info}{goal_preview}{pin_preview}")
+    if uncategorized:
+        parts.append("### Uncategorized")
+        for cs in sorted(uncategorized, key=lambda c: c.name):
+            status = "running" if cs.running else "paused"
+            parts.append(f"- **#{cs.name}** [{status}]")
+    return "\n".join(parts)
+
+
+def _build_scope_context(channel_id: str) -> str:
+    """Build scope context for a channel based on its category membership."""
+    cs = _channels.get(channel_id)
+    if not cs:
+        return ""
+    if cs.category_id:
+        return _build_category_scope(channel_id, cs.category_id)
+    return _build_global_scope(channel_id)
+
+
+def _build_scope_tree(channel_id: str) -> str:
+    """Build a tree-graph string showing where a channel sits in the scope hierarchy."""
+    cs = _channels.get(channel_id)
+    if not cs:
+        return ""
+
+    by_cat: dict[str, list[ChannelState]] = {}
+    uncategorized: list[ChannelState] = []
+    for cid, c in _channels.items():
+        if c.category_id:
+            by_cat.setdefault(c.category_id, []).append(c)
+        else:
+            uncategorized.append(c)
+
+    def _ch_line(c: ChannelState, is_self: bool = False) -> str:
+        icon = "\U0001f7e9" if c.running and c.goal else "\u2b1c"
+        marker = " **\u2190 you are here**" if is_self else ""
+        goal_bit = ""
+        if c.goal:
+            g = c.goal[:60] + ("..." if len(c.goal) > 60 else "")
+            goal_bit = f" — {g}"
+        return f"{icon} #{c.name}{goal_bit}{marker}"
+
+    lines = []
+
+    if cs.category_id:
+        scope_label = f"Category: {cs.category_name or cs.category_id}"
+    else:
+        scope_label = "Global"
+    lines.append(f"**Scope: {scope_label}**\n```")
+
+    cat_ids = sorted(by_cat.keys(), key=lambda x: _categories.get(x, x))
+    all_sections: list[tuple[str | None, list[ChannelState]]] = []
+    for cat_id in cat_ids:
+        all_sections.append((_categories.get(cat_id, cat_id), by_cat[cat_id]))
+    if uncategorized:
+        all_sections.append((None, uncategorized))
+
+    for idx, (cat_name, members) in enumerate(all_sections):
+        is_last_section = idx == len(all_sections) - 1
+        branch = "\u2514\u2500\u2500" if is_last_section else "\u251c\u2500\u2500"
+        cont = "    " if is_last_section else "\u2502   "
+        if cat_name:
+            lines.append(f"{branch} \U0001f4c1 {cat_name}")
+        else:
+            lines.append(f"{branch} (uncategorized)")
+        sorted_members = sorted(members, key=lambda c: c.name)
+        for j, c in enumerate(sorted_members):
+            is_last_ch = j == len(sorted_members) - 1
+            ch_branch = "\u2514\u2500\u2500" if is_last_ch else "\u251c\u2500\u2500"
+            lines.append(f"{cont}{ch_branch} {_ch_line(c, c.channel_id == channel_id)}")
+
+    lines.append("```")
+
+    if cs.category_id:
+        siblings = [c for c in by_cat.get(cs.category_id, []) if c.channel_id != channel_id]
+        if siblings:
+            names = ", ".join(f"#{c.name}" for c in sorted(siblings, key=lambda c: c.name))
+            lines.append(f"Siblings: {names}")
+        lines.append(f"Scope: channels in **{cs.category_name}** share context.")
+    else:
+        lines.append("Scope: **global** — you can see all categories and channels.")
+
+    lines.append("\nUse `/help` for commands, `/goal <text>` to set a goal, `/start` to begin.")
+    return "\n".join(lines)
+
+
+def _send_scope_welcome(channel_id: str):
+    """Send a scope/context welcome message to a channel or Discord thread."""
+    token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        return
+    tree = _build_scope_tree(channel_id)
+    if not tree:
+        return
+    try:
+        requests.post(
+            f"{DISCORD_API}/channels/{channel_id}/messages",
+            headers=_discord_headers(token),
+            json={"content": tree[:DISCORD_MSG_LIMIT]},
+            timeout=15,
+        )
+    except Exception as exc:
+        _log(f"failed to send scope welcome to {channel_id}: {str(exc)[:120]}")
+
+
+def _send_thread_welcome(thread_id: str, parent_channel_id: str):
+    """Send a context welcome message to a new Discord thread."""
+    token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        return
+    cs = _channels.get(parent_channel_id)
+    if not cs:
+        return
+
+    lines = ["**Context: thread under #{}**\n```".format(cs.name)]
+    icon = "\U0001f7e9" if cs.running and cs.goal else "\u2b1c"
+    goal_bit = f"\n\u2502   Goal: {cs.goal[:80]}{'...' if len(cs.goal) > 80 else ''}" if cs.goal else ""
+    scope_bit = f" ({cs.category_name})" if cs.category_name else " (global)"
+    lines.append(f"\u2514\u2500\u2500 {icon} #{cs.name}{scope_bit}{goal_bit}")
+    lines.append(f"    \u2514\u2500\u2500 this thread \u2190 you are here")
+    lines.append("```")
+    lines.append(f"This thread inherits #{cs.name}'s context (pin, state, scope).")
+    lines.append("Messages here are routed to the channel's chatbot.")
+
+    text = "\n".join(lines)
+    try:
+        requests.post(
+            f"{DISCORD_API}/channels/{thread_id}/messages",
+            headers=_discord_headers(token),
+            json={"content": text[:DISCORD_MSG_LIMIT]},
+            timeout=15,
+        )
+    except Exception as exc:
+        _log(f"failed to send thread welcome to {thread_id}: {str(exc)[:120]}")
+
+
 # ── Prompt helpers ───────────────────────────────────────────────────────────
 
-def _build_thread_prompt(channel_id: str, thread_id: str, step: int = 0) -> str:
-    """Build prompt for an autonomous thread step: PROMPT + PIN + THREAD + THREAD_STATE + THREAD_CHAT."""
+def _build_step_prompt(channel_id: str, step: int = 0) -> str:
+    """Build prompt for an autonomous step: PROMPT + PIN + SCOPE + GOAL + STATE + CHAT."""
     parts = []
     if PROMPT_FILE.exists():
         text = PROMPT_FILE.read_text().strip()
@@ -545,7 +842,7 @@ def _build_thread_prompt(channel_id: str, thread_id: str, step: int = 0) -> str:
 
     cs = _channels.get(channel_id)
     dir_name = cs.dir_name if cs else f"channel-{channel_id}"
-    abs_thread_dir = str(_thread_dir(channel_id, thread_id).resolve())
+    abs_dir = str(_channel_dir(channel_id).resolve())
 
     pf = _pin_file(channel_id)
     if pf.exists():
@@ -553,40 +850,48 @@ def _build_thread_prompt(channel_id: str, thread_id: str, step: int = 0) -> str:
         if pin_text:
             parts.append(f"## Pin\n\n{pin_text}")
 
-    ts = cs.active_threads.get(thread_id) if cs else None
-    thread_name = ts.name if ts else "untitled"
-    gf = _thread_goal_file(channel_id, thread_id)
-    goal_text = gf.read_text().strip() if gf.exists() else (ts.goal if ts else "")
-    header = f"## Thread: {thread_name} (step {step})" if step else f"## Thread: {thread_name}"
-    thread_meta = (
-        f"Your workspace is `context/{dir_name}/threads/{thread_id}/` (state, chat/, runs/).\n"
-        f"Absolute workspace path: `{abs_thread_dir}`\n"
+    scope_ctx = _build_scope_context(channel_id)
+    if scope_ctx:
+        parts.append(scope_ctx)
+
+    gf = _goal_file(channel_id)
+    goal_text = gf.read_text().strip() if gf.exists() else (cs.goal if cs else "")
+    header = f"## {cs.name if cs else 'Channel'} — Step {step}" if step else f"## {cs.name if cs else 'Channel'}"
+    step_meta = (
+        f"Your workspace is `context/{dir_name}/` (state, chat/, runs/).\n"
+        f"Absolute workspace path: `{abs_dir}`\n"
         f"All code, scripts, data, and artifacts you create must go inside this directory.\n"
         f"You are running in autonomous mode. Focus on making progress toward the goal.\n"
         f"Your output will be posted as a step summary — do not call `send`.\n"
-        f"When you have completed the goal, signal completion by running: `python arbos.py thread-done`\n\n"
+        f"When you have completed the goal, signal completion by running: `python arbos.py done`\n\n"
         f"## Operator chat\n"
-        f"The operator may send messages in the Thread chat below. Check for recent operator messages and respond to them.\n"
+        f"The operator may send messages in the chat below. Check for recent operator messages and respond to them.\n"
         f"If the operator asks you to do something (change approach, fix something, restart), prioritize that.\n\n"
-        f"## Thread control commands\n"
-        f"You can control your own thread loop:\n"
-        f"- `python arbos.py thread-ctl delay <seconds>` — set delay between steps (0 = no delay)\n"
-        f"- `python arbos.py thread-ctl restart` — restart your loop from the next step\n"
-        f"- `python arbos.py thread-ctl goal <new goal>` — update your goal\n"
-        f"- `python arbos.py thread-ctl pause` — pause your loop\n"
-        f"- `python arbos.py thread-done` — mark goal complete and stop"
+        f"## Control commands\n"
+        f"You can control your own loop:\n"
+        f"- `python arbos.py ctl delay <seconds>` — set delay between steps\n"
+        f"- `python arbos.py ctl restart` — restart the loop from the next step\n"
+        f"- `python arbos.py ctl goal <new goal>` — update your goal\n"
+        f"- `python arbos.py ctl pause` — pause your loop\n"
+        f"- `python arbos.py done` — mark goal complete and stop\n\n"
+        f"## Resource tracking\n"
+        f"Track machines, VMs, containers, or services you create:\n"
+        f"- `python arbos.py resource add <type> <name> [--destroy \"teardown cmd\"] [--meta key=value ...]`\n"
+        f"- `python arbos.py resource rm <name>` — untrack a resource\n"
+        f"- `python arbos.py resource list` — list all tracked resources\n"
+        f"Register resources so they can be monitored and destroyed when the channel is deleted."
     )
     if cs and cs.repo_url:
-        thread_meta += f"\nGitHub repo: {cs.repo_url}"
-    parts.append(f"{header}\n\n{goal_text}\n\n{thread_meta}")
+        step_meta += f"\nGitHub repo: {cs.repo_url}"
+    parts.append(f"{header}\n\n**Goal:**\n{goal_text}\n\n{step_meta}")
 
-    sf = _thread_state_file(channel_id, thread_id)
+    sf = _state_file(channel_id)
     if sf.exists():
         state_text = sf.read_text().strip()
         if state_text:
-            parts.append(f"## Thread State\n\n{state_text}")
+            parts.append(f"## State\n\n{state_text}")
 
-    chatlog = load_thread_chatlog(channel_id, thread_id)
+    chatlog = load_chatlog(channel_id=channel_id)
     if chatlog:
         parts.append(chatlog)
 
@@ -594,7 +899,7 @@ def _build_thread_prompt(channel_id: str, thread_id: str, step: int = 0) -> str:
 
 
 def _build_channel_chat_prompt(channel_id: str, user_text: str) -> str:
-    """Build prompt for channel chat mode: PROMPT + PIN + CHANNEL + STATE + THREADS + CHAT + USER."""
+    """Build prompt for channel chat mode: PROMPT + PIN + SCOPE + CHANNEL + GOAL + STATE + CHAT + USER."""
     cs = _channels.get(channel_id)
     dir_name = cs.dir_name if cs else f"channel-{channel_id}"
     abs_dir = str(_channel_dir(channel_id).resolve())
@@ -611,31 +916,29 @@ def _build_channel_chat_prompt(channel_id: str, user_text: str) -> str:
         if pin_text:
             parts.append(f"## Pin\n\n{pin_text}")
 
+    scope_ctx = _build_scope_context(channel_id)
+    if scope_ctx:
+        parts.append(scope_ctx)
+
+    loop_status = "running" if cs and cs.running else "stopped"
     meta = (
-        f"Your context channel is `context/{dir_name}/` (state, chat/).\n"
+        f"Your workspace is `context/{dir_name}/` (state, chat/).\n"
         f"Absolute workspace path: `{abs_dir}`\n"
         f"All code, scripts, data, and artifacts you create must go inside this directory.\n"
-        f"You can create autonomous threads to work on tasks by running:\n"
-        f"  `python arbos.py thread \"thread-name\" \"goal description\"`\n"
-        f"When the operator asks you to start working on something, create a thread for it."
+        f"Loop status: {loop_status} (step {cs.step_count if cs else 0})"
     )
     if cs and cs.repo_url:
         meta += f"\nGitHub repo: {cs.repo_url}"
     parts.append(f"## Channel\n\nYou are a chatbot for this channel. Respond to messages directly — your text output is streamed to Discord. Do NOT use `arbos.py send` (it is suppressed in chat mode).\n\n{meta}")
+
+    if cs and cs.goal:
+        parts.append(f"## Goal\n\n{cs.goal}")
 
     sf = _state_file(channel_id)
     if sf.exists():
         state_text = sf.read_text().strip()
         if state_text:
             parts.append(f"## State\n\n{state_text}")
-
-    if cs and cs.active_threads:
-        thread_lines = []
-        for tid, ts in cs.active_threads.items():
-            status = "paused" if ts.paused else "running"
-            goal_preview = ts.goal[:80] + "..." if len(ts.goal) > 80 else ts.goal
-            thread_lines.append(f"- **{ts.name}** [{status}] (step {ts.step_count}): {goal_preview}")
-        parts.append("## Active Threads\n\n" + "\n".join(thread_lines))
 
     chatlog = load_chatlog(channel_id=channel_id)
     if chatlog:
@@ -646,9 +949,7 @@ def _build_channel_chat_prompt(channel_id: str, user_text: str) -> str:
 
 
 def make_run_dir(channel_id: str = "", thread_id: str = "") -> Path:
-    if thread_id and channel_id:
-        runs_dir = _thread_runs_dir(channel_id, thread_id)
-    elif channel_id:
+    if channel_id:
         runs_dir = _channel_runs_dir(channel_id)
     else:
         runs_dir = GENERAL_DIR / "runs"
@@ -659,118 +960,60 @@ def make_run_dir(channel_id: str = "", thread_id: str = "") -> Path:
     return run_dir
 
 
+def _write_chatlog(chat_dir: Path, role: str, text: str):
+    """Append to chatlog in the given directory, rolling files when size exceeds limit."""
+    chat_dir.mkdir(parents=True, exist_ok=True)
+    max_file_size, max_files = 4000, 50
+    existing = sorted(chat_dir.glob("*.jsonl"))
+    current = existing[-1] if existing and existing[-1].stat().st_size < max_file_size else None
+    if current is None:
+        current = chat_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+    entry = json.dumps({"role": role, "text": _redact_secrets(text[:1000]), "ts": datetime.now().isoformat()})
+    with open(current, "a", encoding="utf-8") as f:
+        f.write(entry + "\n")
+    all_files = sorted(chat_dir.glob("*.jsonl"))
+    for old in all_files[:-max_files]:
+        old.unlink(missing_ok=True)
+
+
 def log_chat(role: str, text: str, channel_id: str = ""):
-    """Append to chatlog, rolling to a new file when size exceeds limit.
-    channel_id="" writes to general chat, otherwise to the channel's chat dir."""
+    """Append to chatlog. channel_id="" writes to general chat."""
     with _chatlog_lock:
         chat_dir = _channel_chat_dir(channel_id) if channel_id else GENERAL_CHAT_DIR
-        chat_dir.mkdir(parents=True, exist_ok=True)
-        max_file_size = 4000
-        max_files = 50
+        _write_chatlog(chat_dir, role, text)
 
-        existing = sorted(chat_dir.glob("*.jsonl"))
 
-        current: Path | None = None
-        if existing and existing[-1].stat().st_size < max_file_size:
-            current = existing[-1]
-
-        if current is None:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            current = chat_dir / f"{ts}.jsonl"
-
-        entry = json.dumps({"role": role, "text": _redact_secrets(text[:1000]), "ts": datetime.now().isoformat()})
-        with open(current, "a", encoding="utf-8") as f:
-            f.write(entry + "\n")
-
-        all_files = sorted(chat_dir.glob("*.jsonl"))
-        for old in all_files[:-max_files]:
-            old.unlink(missing_ok=True)
+def _load_chatlog_from(chat_dir: Path, header: str, max_chars: int = 8000) -> str:
+    """Load recent chat history from a chat directory."""
+    if not chat_dir.exists():
+        return ""
+    files = sorted(chat_dir.glob("*.jsonl"))
+    if not files:
+        return ""
+    lines: list[str] = []
+    total = 0
+    for f in reversed(files):
+        for raw in reversed(f.read_text().strip().splitlines()):
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            entry = f"[{msg.get('ts', '?')[:16]}] {msg['role']}: {msg['text']}"
+            if total + len(entry) > max_chars:
+                lines.reverse()
+                return f"{header}\n\n" + "\n".join(lines)
+            lines.append(entry)
+            total += len(entry) + 1
+    lines.reverse()
+    return f"{header}\n\n" + "\n".join(lines) if lines else ""
 
 
 def load_chatlog(max_chars: int = 8000, channel_id: str = "") -> str:
-    """Load recent chat history. channel_id="" loads general, otherwise per-channel."""
     if channel_id:
-        chat_dir = _channel_chat_dir(channel_id)
-        header = "## Channel chat"
-    else:
-        chat_dir = GENERAL_CHAT_DIR
-        header = "## Recent Discord chat"
-    if not chat_dir.exists():
-        return ""
-    files = sorted(chat_dir.glob("*.jsonl"))
-    if not files:
-        return ""
-
-    lines: list[str] = []
-    total = 0
-    for f in reversed(files):
-        for raw in reversed(f.read_text().strip().splitlines()):
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            entry = f"[{msg.get('ts', '?')[:16]}] {msg['role']}: {msg['text']}"
-            if total + len(entry) > max_chars:
-                lines.reverse()
-                return f"{header}\n\n" + "\n".join(lines)
-            lines.append(entry)
-            total += len(entry) + 1
-
-    lines.reverse()
-    if not lines:
-        return ""
-    return f"{header}\n\n" + "\n".join(lines)
+        return _load_chatlog_from(_channel_chat_dir(channel_id), "## Channel chat", max_chars)
+    return _load_chatlog_from(GENERAL_CHAT_DIR, "## Recent Discord chat", max_chars)
 
 
-def log_thread_chat(role: str, text: str, channel_id: str, thread_id: str):
-    """Append to a thread-specific chatlog."""
-    with _chatlog_lock:
-        chat_dir = _thread_chat_dir(channel_id, thread_id)
-        chat_dir.mkdir(parents=True, exist_ok=True)
-        max_file_size = 4000
-        max_files = 50
-        existing = sorted(chat_dir.glob("*.jsonl"))
-        current: Path | None = None
-        if existing and existing[-1].stat().st_size < max_file_size:
-            current = existing[-1]
-        if current is None:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            current = chat_dir / f"{ts}.jsonl"
-        entry = json.dumps({"role": role, "text": _redact_secrets(text[:1000]), "ts": datetime.now().isoformat()})
-        with open(current, "a", encoding="utf-8") as f:
-            f.write(entry + "\n")
-        all_files = sorted(chat_dir.glob("*.jsonl"))
-        for old in all_files[:-max_files]:
-            old.unlink(missing_ok=True)
-
-
-def load_thread_chatlog(channel_id: str, thread_id: str, max_chars: int = 8000) -> str:
-    """Load recent chat from a thread's chat dir."""
-    chat_dir = _thread_chat_dir(channel_id, thread_id)
-    header = "## Thread chat"
-    if not chat_dir.exists():
-        return ""
-    files = sorted(chat_dir.glob("*.jsonl"))
-    if not files:
-        return ""
-    lines: list[str] = []
-    total = 0
-    for f in reversed(files):
-        for raw in reversed(f.read_text().strip().splitlines()):
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            entry = f"[{msg.get('ts', '?')[:16]}] {msg['role']}: {msg['text']}"
-            if total + len(entry) > max_chars:
-                lines.reverse()
-                return f"{header}\n\n" + "\n".join(lines)
-            lines.append(entry)
-            total += len(entry) + 1
-    lines.reverse()
-    if not lines:
-        return ""
-    return f"{header}\n\n" + "\n".join(lines)
 
 
 # ── Step update helpers ──────────────────────────────────────────────────────
@@ -892,9 +1135,7 @@ def _send_discord_document(file_path: str, caption: str = "", *, target: tuple[s
         return False
 
 
-def _send_discord_photo(file_path: str, caption: str = "", *, target: tuple[str, str] | None = None, channel_id: str = "") -> bool:
-    """Send an image as a Discord attachment."""
-    return _send_discord_document(file_path, caption, target=target, channel_id=channel_id)
+_send_discord_photo = _send_discord_document
 
 
 def _download_discord_attachment(url: str, filename: str) -> Path:
@@ -929,8 +1170,9 @@ def _is_managed_channel(channel_id: str) -> bool:
     return channel_id in _channels
 
 
-def _find_or_create_categories(guild_id: str) -> tuple[str | None, str | None]:
-    """Find or create 'Running' and 'Paused' categories. Returns (running_id, paused_id)."""
+def _discover_categories(guild_id: str) -> tuple[str | None, str | None]:
+    """Discover ALL guild categories, populate _categories, return (running_id, paused_id) for backward compat."""
+    global _categories
     token = os.getenv("BOT_TOKEN", "")
     if not token:
         return None, None
@@ -945,10 +1187,13 @@ def _find_or_create_categories(guild_id: str) -> tuple[str | None, str | None]:
         resp.raise_for_status()
         for ch in resp.json():
             if ch["type"] == 4:
-                if ch["name"].lower() == "running":
-                    running_id = ch["id"]
-                elif ch["name"].lower() == "paused":
-                    paused_id = ch["id"]
+                cat_id = ch["id"]
+                cat_name = ch["name"]
+                _categories[cat_id] = cat_name
+                if cat_name.lower() == "running":
+                    running_id = cat_id
+                elif cat_name.lower() == "paused":
+                    paused_id = cat_id
     except Exception:
         pass
     if not running_id:
@@ -961,6 +1206,7 @@ def _find_or_create_categories(guild_id: str) -> tuple[str | None, str | None]:
             )
             resp.raise_for_status()
             running_id = resp.json()["id"]
+            _categories[running_id] = "Running"
         except Exception as exc:
             _log(f"failed to create Running category: {str(exc)[:200]}")
     if not paused_id:
@@ -973,8 +1219,10 @@ def _find_or_create_categories(guild_id: str) -> tuple[str | None, str | None]:
             )
             resp.raise_for_status()
             paused_id = resp.json()["id"]
+            _categories[paused_id] = "Paused"
         except Exception as exc:
             _log(f"failed to create Paused category: {str(exc)[:200]}")
+    _log(f"discovered {len(_categories)} categories: {list(_categories.values())}")
     return running_id, paused_id
 
 
@@ -1021,12 +1269,89 @@ def _archive_thread(thread_id: str):
         _log(f"failed to archive thread {thread_id}: {str(exc)[:120]}")
 
 
-def _setup_channel_context(channel_id: str, channel_name: str, is_running: bool) -> ChannelState:
+def _create_pending_channels(guild_id: str):
+    """Create Discord channels listed in context/pending_channels.json and register them."""
+    pending_path = CONTEXT_DIR / "pending_channels.json"
+    if not pending_path.exists():
+        return
+    token = os.getenv("BOT_TOKEN", "")
+    if not token or not guild_id:
+        return
+    try:
+        pending = json.loads(pending_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        _log("failed to read pending_channels.json")
+        return
+    if not isinstance(pending, list):
+        pending = [pending]
+    for entry in pending:
+        name = entry.get("name", "")
+        if not name:
+            continue
+        goal = entry.get("goal", "")
+        state = entry.get("state", "")
+        delay = entry.get("delay", 0)
+        running = entry.get("running", True)
+        try:
+            resp = requests.get(
+                f"{DISCORD_API}/guilds/{guild_id}/channels",
+                headers=_discord_headers(token), timeout=15,
+            )
+            resp.raise_for_status()
+            existing = resp.json()
+            already_exists = any(ch.get("name") == name and ch.get("type") == 0 for ch in existing)
+            if already_exists:
+                _log(f"pending channel '{name}' already exists in guild, skipping")
+                continue
+        except Exception as exc:
+            _log(f"failed to check guild channels: {str(exc)[:120]}")
+            continue
+        payload: dict = {"name": name, "type": 0}
+        if entry.get("category_id"):
+            payload["parent_id"] = entry["category_id"]
+        try:
+            resp = requests.post(
+                f"{DISCORD_API}/guilds/{guild_id}/channels",
+                headers=_discord_headers(token), json=payload, timeout=15,
+            )
+            resp.raise_for_status()
+            ch_data = resp.json()
+            cid = str(ch_data["id"])
+            _log(f"created pending Discord channel '{name}' (id={cid})")
+        except Exception as exc:
+            _log(f"failed to create pending channel '{name}': {str(exc)[:120]}")
+            continue
+        cat_id = entry.get("category_id", "")
+        cat_name = entry.get("category_name", "")
+        cs = _setup_channel_context(cid, name, running, category_id=cat_id, category_name=cat_name)
+        if goal:
+            cs.goal = goal
+            (CONTEXT_DIR / cs.dir_name / "goal").write_text(goal)
+        if state:
+            (CONTEXT_DIR / cs.dir_name / "state").write_text(state)
+        if delay:
+            cs.delay = delay
+        with _channels_lock:
+            _save_channels()
+        _sync_channel_name(cid)
+    try:
+        pending_path.unlink()
+        _log("pending_channels.json processed and removed")
+    except OSError:
+        pass
+
+
+def _setup_channel_context(channel_id: str, channel_name: str, is_running: bool,
+                           category_id: str = "", category_name: str = "") -> ChannelState:
     """Create context directory and GitHub repo for a newly detected channel."""
+    channel_name = _strip_name_prefix(channel_name)
     dir_name = _sanitize_channel_name(channel_name)
     if (CONTEXT_DIR / dir_name).exists():
         dir_name = f"{dir_name}-{channel_id[:8]}"
-    cs = ChannelState(channel_id=channel_id, name=channel_name, dir_name=dir_name, running=is_running)
+    cs = ChannelState(
+        channel_id=channel_id, name=channel_name, dir_name=dir_name,
+        running=is_running, category_id=category_id, category_name=category_name,
+    )
 
     with _channels_lock:
         _channels[channel_id] = cs
@@ -1054,12 +1379,38 @@ def _setup_channel_context(channel_id: str, channel_name: str, is_running: bool)
 
     with _channels_lock:
         _save_channels()
-    _log(f"channel setup: {channel_name} (id={channel_id}, dir={dir_name}, running={is_running})")
+    scope_label = f"category={category_name}" if category_id else "global"
+    _log(f"channel setup: {channel_name} (id={channel_id}, dir={dir_name}, running={is_running}, scope={scope_label})")
+    _send_scope_welcome(channel_id)
+    _sync_channel_name(channel_id)
     return cs
 
 
+def _destroy_channel_resources(cs: ChannelState):
+    """Run destroy commands for all tracked resources on a channel."""
+    for r in cs.resources:
+        destroy_cmd = r.get("destroy_cmd", "")
+        if not destroy_cmd:
+            continue
+        rname = r.get("name", "?")
+        rtype = r.get("type", "?")
+        _log(f"channel {cs.name}: destroying resource [{rtype}] {rname}: {destroy_cmd}")
+        try:
+            result = subprocess.run(
+                destroy_cmd, shell=True, capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode == 0:
+                _log(f"channel {cs.name}: resource [{rtype}] {rname} destroyed successfully")
+            else:
+                _log(f"channel {cs.name}: resource [{rtype}] {rname} destroy failed (rc={result.returncode}): {result.stderr[:200]}")
+        except subprocess.TimeoutExpired:
+            _log(f"channel {cs.name}: resource [{rtype}] {rname} destroy timed out")
+        except Exception as exc:
+            _log(f"channel {cs.name}: resource [{rtype}] {rname} destroy error: {str(exc)[:200]}")
+
+
 def _delete_channel_context(channel_id: str):
-    """Kill processes and remove context for a deleted channel."""
+    """Kill processes, destroy resources, and remove context for a deleted channel."""
     import shutil
     with _channel_procs_lock:
         proc = _channel_procs.get(channel_id)
@@ -1072,111 +1423,24 @@ def _delete_channel_context(channel_id: str):
             return
         cdir = _channel_dir(channel_id)
         pm2_names = list(cs.pm2_procs)
+        resources = list(cs.resources)
         cs.stop_event.set()
         cs.wake.set()
         cs.running = False
-        thread = cs.thread
+        lt = cs.loop_thread
         del _channels[channel_id]
         _save_channels()
-    if thread and thread.is_alive():
-        thread.join(timeout=10)
+    if lt and lt.is_alive():
+        lt.join(timeout=10)
     if pm2_names:
         _log(f"channel {channel_id}: deleting pm2 processes: {pm2_names}")
         _pm2_delete(pm2_names)
+    if resources:
+        _log(f"channel {channel_id}: destroying {len(resources)} resource(s)")
+        _destroy_channel_resources(cs)
     if cdir.exists():
         shutil.rmtree(cdir, ignore_errors=True)
     _log(f"channel {channel_id} context deleted")
-
-
-def _create_discord_thread(channel_id: str, name: str, message: str = "") -> str | None:
-    """Create a Discord thread in a channel. Returns thread_id or None."""
-    token = os.getenv("BOT_TOKEN", "")
-    if not token:
-        return None
-    try:
-        resp = requests.post(
-            f"{DISCORD_API}/channels/{channel_id}/threads",
-            headers=_discord_headers(token),
-            json={"name": name[:100], "type": 11, "auto_archive_duration": 10080},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        thread_id = resp.json()["id"]
-        if message:
-            owner_id = os.environ.get("DISCORD_OWNER_ID", "").strip()
-            if owner_id:
-                message = f"<@{owner_id}> {message}"
-            requests.post(
-                f"{DISCORD_API}/channels/{thread_id}/messages",
-                headers=_discord_headers(token),
-                json={"content": message[:DISCORD_MSG_LIMIT]},
-                timeout=15,
-            )
-        _log(f"created discord thread '{name}' (id={thread_id}) in channel {channel_id}")
-        return thread_id
-    except Exception as exc:
-        _log(f"failed to create discord thread: {str(exc)[:120]}")
-        return None
-
-
-def _fetch_thread_starter_message(thread_id: str) -> str:
-    """Fetch the first message in a thread (the starter message)."""
-    token = os.getenv("BOT_TOKEN", "")
-    if not token:
-        return ""
-    try:
-        resp = requests.get(
-            f"{DISCORD_API}/channels/{thread_id}/messages?limit=1&after=0",
-            headers=_discord_headers(token),
-            timeout=15,
-        )
-        resp.raise_for_status()
-        messages = resp.json()
-        if messages:
-            return messages[0].get("content", "").strip()
-        return ""
-    except Exception as exc:
-        _log(f"failed to fetch thread starter: {str(exc)[:120]}")
-        return ""
-
-
-def _create_thread(channel_id: str, name: str, goal: str, thread_id: str | None = None) -> ThreadState | None:
-    """Create a thread with its directory structure and add it to the channel.
-
-    If thread_id is provided, the Discord thread already exists.
-    Otherwise, a new Discord thread is created.
-    """
-    cs = _channels.get(channel_id)
-    if not cs:
-        _log(f"_create_thread: channel {channel_id} not found")
-        return None
-
-    if not thread_id:
-        thread_id = _create_discord_thread(channel_id, name, f"**Goal:** {goal}")
-    if not thread_id:
-        return None
-
-    tdir = _thread_dir(channel_id, thread_id)
-    tdir.mkdir(parents=True, exist_ok=True)
-    _thread_goal_file(channel_id, thread_id).write_text(goal)
-    sf = _thread_state_file(channel_id, thread_id)
-    if not sf.exists():
-        sf.write_text("")
-    _thread_runs_dir(channel_id, thread_id).mkdir(parents=True, exist_ok=True)
-    _thread_chat_dir(channel_id, thread_id).mkdir(parents=True, exist_ok=True)
-
-    ts = ThreadState(
-        thread_id=thread_id,
-        name=name,
-        goal=goal,
-        delay=cs.delay,
-    )
-    cs.active_threads[thread_id] = ts
-    cs.wake.set()
-    with _channels_lock:
-        _save_channels()
-    _log(f"channel {cs.name}: created thread '{name}' (id={thread_id})")
-    return ts
 
 
 def _add_discord_reaction(channel_id: str, message_id: str, emoji: str):
@@ -1220,6 +1484,46 @@ def _update_channel_topic(channel_id: str, topic: str):
         )
     except Exception:
         pass
+
+
+_NAME_PREFIX_RE = re.compile(r'^[\U0001f7e9\u2b1c][\d]*\s*[-\u2014]\s*')
+
+
+def _strip_name_prefix(name: str) -> str:
+    """Strip the status emoji + delay prefix from a channel name to get the base name."""
+    return _NAME_PREFIX_RE.sub('', name).strip() or name
+
+
+def _channel_display_name(cs: ChannelState) -> str:
+    """Build the Discord display name: 🟩5 - name or ⬜ - name.
+    If the goal is running in a thread, parent channel stays ⬜."""
+    base = _strip_name_prefix(cs.name)
+    if cs.running and cs.goal and not cs.active_thread_id:
+        delay_min = cs.delay // 60 if cs.delay else 0
+        delay_str = str(delay_min) if delay_min else ""
+        return f"\U0001f7e9{delay_str} - {base}"
+    return f"\u2b1c - {base}"
+
+
+def _sync_channel_name(channel_id: str):
+    """Rename the Discord channel to reflect current status (emoji + delay + name)."""
+    token = os.getenv("BOT_TOKEN", "")
+    if not token or not channel_id:
+        return
+    cs = _channels.get(channel_id)
+    if not cs:
+        return
+    new_name = _channel_display_name(cs)
+    try:
+        requests.patch(
+            f"{DISCORD_API}/channels/{channel_id}",
+            headers=_discord_headers(token),
+            json={"name": new_name[:100]},
+            timeout=15,
+        )
+        _log(f"channel {cs.name}: renamed to '{new_name}'")
+    except Exception as exc:
+        _log(f"channel {cs.name}: rename failed: {str(exc)[:120]}")
 
 
 # ── GitHub helpers ───────────────────────────────────────────────────────────
@@ -1979,8 +2283,6 @@ def _load_scoped_env(channel_id: str, thread_id: str = "") -> dict[str, str]:
     scoped = {}
     if channel_id:
         scoped.update(_parse_env_file(_channel_env_file(channel_id)))
-    if channel_id and thread_id:
-        scoped.update(_parse_env_file(_thread_env_file(channel_id, thread_id)))
     return scoped
 
 
@@ -2006,12 +2308,13 @@ def _claude_env(channel_id: str = "", thread_id: str = "", silent: bool = False)
     return env
 
 
-def _run_claude_once(cmd, env, on_text=None, on_activity=None, channel_id: str = ""):
+def _run_claude_once(cmd, env, on_text=None, on_activity=None, channel_id: str = "", thread_id: str = "", stop_event: threading.Event | None = None):
     """Run a single claude subprocess, return (returncode, result_text, raw_lines, stderr).
 
     on_text: optional callback(accumulated_text) fired as assistant text streams in.
     on_activity: optional callback(status_str) fired on tool use and other activity.
     Kills the process if no output is received for CLAUDE_TIMEOUT seconds.
+    If stop_event is set (e.g. thread paused), kills the process immediately.
     """
     proc = subprocess.Popen(
         cmd, cwd=WORKING_DIR, env=env,
@@ -2035,10 +2338,21 @@ def _run_claude_once(cmd, env, on_text=None, on_activity=None, channel_id: str =
     sel = selectors.DefaultSelector()
     sel.register(proc.stdout, selectors.EVENT_READ)
 
+    stopped = False
     try:
         while True:
+            if stop_event and stop_event.is_set():
+                _log(f"channel stop_event set, killing pid={proc.pid}")
+                proc.kill()
+                stopped = True
+                break
             ready = sel.select(timeout=min(CLAUDE_TIMEOUT, 30))
             if not ready:
+                if stop_event and stop_event.is_set():
+                    _log(f"channel stop_event set, killing pid={proc.pid}")
+                    proc.kill()
+                    stopped = True
+                    break
                 if time.monotonic() - last_activity > CLAUDE_TIMEOUT:
                     _log(f"claude timeout: no output for {CLAUDE_TIMEOUT}s, killing pid={proc.pid}")
                     proc.kill()
@@ -2104,7 +2418,9 @@ def _run_claude_once(cmd, env, on_text=None, on_activity=None, channel_id: str =
         elif streaming_tokens:
             result_text = "".join(streaming_tokens)
 
-    if timed_out:
+    if stopped:
+        stderr_output = "(stopped — channel paused)"
+    elif timed_out:
         stderr_output = "(timed out)"
     else:
         stderr_output = proc.stderr.read() if proc.stderr else ""
@@ -2120,7 +2436,7 @@ def _run_claude_once(cmd, env, on_text=None, on_activity=None, channel_id: str =
 
 
 def run_agent(cmd: list[str], phase: str, output_file: Path,
-              on_text=None, on_activity=None, channel_id: str = "", thread_id: str = "", silent: bool = False) -> subprocess.CompletedProcess:
+              on_text=None, on_activity=None, channel_id: str = "", thread_id: str = "", silent: bool = False, stop_event: threading.Event | None = None) -> subprocess.CompletedProcess:
     _claude_semaphore.acquire()
     try:
         env = _claude_env(channel_id=channel_id, thread_id=thread_id, silent=silent)
@@ -2134,18 +2450,35 @@ def run_agent(cmd: list[str], phase: str, output_file: Path,
 
             returncode, result_text, raw_lines, stderr_output = _run_claude_once(
                 cmd, env, on_text=on_text, on_activity=on_activity, channel_id=channel_id,
+                thread_id=thread_id, stop_event=stop_event,
             )
             elapsed = time.monotonic() - t0
 
             output_file.write_text(_redact_secrets("".join(raw_lines)))
             _log(f"{phase}: finished rc={returncode} {fmt_duration(elapsed)}")
 
+            if stop_event and stop_event.is_set():
+                _log(f"{phase}: stop_event set, aborting retries")
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=returncode,
+                    stdout=result_text, stderr="(stopped — channel paused)",
+                )
+
             if returncode != 0 and stderr_output.strip():
                 _log(f"{phase}: stderr {stderr_output.strip()[:300]}")
                 if attempt < MAX_RETRIES:
                     delay = min(2 ** attempt, 30)
                     _log(f"{phase}: retrying in {delay}s (attempt {attempt}/{MAX_RETRIES})")
-                    time.sleep(delay)
+                    if stop_event:
+                        stop_event.wait(timeout=delay)
+                        if stop_event.is_set():
+                            _log(f"{phase}: stop_event set during retry wait, aborting")
+                            return subprocess.CompletedProcess(
+                                args=cmd, returncode=returncode,
+                                stdout=result_text, stderr="(stopped — channel paused)",
+                            )
+                    else:
+                        time.sleep(delay)
                     continue
 
             return subprocess.CompletedProcess(
@@ -2252,6 +2585,8 @@ def run_step(prompt: str, step_number: int, channel_id: str = "", channel_step: 
         if not silent:
             threading.Thread(target=_heartbeat, daemon=True).start()
 
+        channel_stop = cs.stop_event if cs else None
+
         result = run_agent(
             _claude_cmd(prompt),
             phase=f"ch:{ch_name or 'general'}",
@@ -2260,6 +2595,7 @@ def run_step(prompt: str, step_number: int, channel_id: str = "", channel_step: 
             channel_id=channel_id,
             thread_id=thread_id,
             silent=silent,
+            stop_event=channel_stop,
         )
 
         rollout_text = _redact_secrets(extract_text(result))
@@ -2312,138 +2648,111 @@ def _make_step_summary(rollout_text: str, step_number: int) -> str:
     return f"**Step {step_number}**\n{tail}"
 
 
-def _thread_loop(channel_id: str, thread_id: str):
-    """Run the autonomous loop for a single thread. Exits when stop_event is set or paused."""
+def _channel_loop(channel_id: str):
+    """Run the autonomous loop for a channel. Executes steps toward the channel goal."""
     global _step_count
 
     cs = _channels.get(channel_id)
     if not cs:
         return
-    ts = cs.active_threads.get(thread_id)
-    if not ts:
-        return
 
     failures = 0
-    _log(f"channel {cs.name}: thread '{ts.name}' loop started (id={thread_id})")
+    _log(f"channel {cs.name}: loop started")
 
-    while not ts.stop_event.is_set():
-        if ts.paused or not cs.running:
-            ts.wake.wait(timeout=5)
-            ts.wake.clear()
+    while not cs.stop_event.is_set():
+        if not cs.running or not cs.goal:
+            cs.wake.wait(timeout=5)
+            cs.wake.clear()
             continue
 
         _step_count += 1
-        ts.step_count += 1
-        ts.last_run = datetime.now().isoformat()
+        cs.step_count += 1
+        cs.last_run = datetime.now().isoformat()
         with _channels_lock:
             _save_channels()
 
-        _log(f"Thread {ts.name} Step {ts.step_count} (global step {_step_count})", blank=True)
+        _log(f"{cs.name} Step {cs.step_count} (global step {_step_count})", blank=True)
 
-        # Notify the thread that a new step is starting
-        start_target = _step_update_target(thread_id)
-        _send_discord_text(f"Started Step #{ts.step_count}", target=start_target, channel_id=channel_id)
+        target_cid = cs.active_thread_id or channel_id
+        token = os.getenv("BOT_TOKEN", "")
+        if token:
+            _send_discord_text(f"Step #{cs.step_count}", target=(token, target_cid))
 
-        prompt = _build_thread_prompt(channel_id, thread_id, step=ts.step_count)
+        prompt = _build_step_prompt(channel_id, step=cs.step_count)
         if not prompt:
-            ts.wake.wait(timeout=5)
-            ts.wake.clear()
+            cs.wake.wait(timeout=5)
+            cs.wake.clear()
             continue
 
-        _log(f"thread {ts.name}: prompt={len(prompt)} chars")
+        _log(f"channel {cs.name}: prompt={len(prompt)} chars")
 
+        _reset_tokens()
         pm2_before = _pm2_list_names()
         success, result_text = run_step(prompt, _step_count, channel_id=channel_id,
-                           channel_step=ts.step_count, thread_id=thread_id,
-                           silent=True)
-        pm2_after = _pm2_list_names()
+                                        channel_step=cs.step_count,
+                                        thread_id=cs.active_thread_id,
+                                        silent=True)
+        step_in, step_out = _get_tokens()
 
+        if cs.stop_event.is_set() or not cs.running:
+            cs.total_input_tokens += step_in
+            cs.total_output_tokens += step_out
+            _log(f"channel {cs.name}: step killed (stopped)")
+            break
+
+        pm2_after = _pm2_list_names()
         new_pm2 = pm2_after - pm2_before
         if new_pm2:
             cs.pm2_procs = list(set(cs.pm2_procs) | new_pm2)
-            _log(f"thread {ts.name}: tracked new pm2 processes: {new_pm2}")
+            _log(f"channel {cs.name}: tracked new pm2 processes: {new_pm2}")
 
-        ts.last_finished = datetime.now().isoformat()
+        cs.total_input_tokens += step_in
+        cs.total_output_tokens += step_out
+        cs.last_finished = datetime.now().isoformat()
         with _channels_lock:
             _save_channels()
 
-        _push_channel_context(channel_id, step_label=f"thread {ts.name} step {ts.step_count}")
+        _push_channel_context(channel_id, step_label=f"step {cs.step_count}")
 
-        summary = _make_step_summary(result_text, ts.step_count)
-        target = _step_update_target(thread_id)
-        _send_discord_text(summary, target=target, channel_id=channel_id)
+        summary = _make_step_summary(result_text, cs.step_count)
+        if token:
+            _send_discord_text(summary, target=(token, target_cid))
 
         if success:
             failures = 0
         else:
             failures += 1
-            _log(f"thread {ts.name}: failure #{failures}")
+            cs.failures += 1
+            _log(f"channel {cs.name}: failure #{failures}")
 
-        ts.wake.clear()
+        cs.wake.clear()
 
-        step_delay = ts.delay + int(os.environ.get("AGENT_DELAY", "0"))
+        step_delay = cs.delay + int(os.environ.get("AGENT_DELAY", "0"))
         if failures:
             backoff = min(2 ** failures, 120)
             step_delay += backoff
-            _log(f"thread {ts.name}: waiting {step_delay}s (failure backoff + delay)")
-            ts.wake.wait(timeout=step_delay)
+            _log(f"channel {cs.name}: waiting {step_delay}s (failure backoff + delay)")
+            cs.wake.wait(timeout=step_delay)
         elif step_delay > 0:
-            _log(f"thread {ts.name}: waiting {step_delay}s (delay)")
-            ts.wake.wait(timeout=step_delay)
-
-    _log(f"thread {ts.name} loop exited")
-
-
-def _channel_loop(channel_id: str):
-    """Manage thread loops for a channel. Spawns/stops _thread_loop instances."""
-    with _channels_lock:
-        cs = _channels.get(channel_id)
-    if not cs:
-        return
-
-    while not cs.stop_event.is_set():
-        if not cs.running:
-            cs.wake.wait(timeout=5)
-            cs.wake.clear()
-            continue
-
-        for tid, ts in list(cs.active_threads.items()):
-            if ts.loop_thread is None and not ts.paused:
-                ts.stop_event.clear()
-                t = threading.Thread(target=_thread_loop, args=(channel_id, tid),
-                                     daemon=True, name=f"th-{ts.name}")
-                ts.loop_thread = t
-                t.start()
-                _log(f"channel {cs.name}: spawned loop for thread '{ts.name}'")
-            if ts.loop_thread is not None and not ts.loop_thread.is_alive():
-                ts.loop_thread = None
-
-        cs.wake.wait(timeout=5)
-        cs.wake.clear()
-
-    for tid, ts in cs.active_threads.items():
-        ts.stop_event.set()
-        ts.wake.set()
+            _log(f"channel {cs.name}: waiting {step_delay}s (delay)")
+            cs.wake.wait(timeout=step_delay)
 
     _log(f"channel {cs.name} loop exited")
 
 
 def _channel_manager():
-    """Monitor _channels and spawn/stop channel threads as needed."""
+    """Monitor _channels and spawn/stop channel loops as needed."""
     while not _shutdown.is_set():
         with _channels_lock:
             for cid, cs in list(_channels.items()):
-                if cs.running and cs.thread is None:
+                if cs.running and cs.goal and cs.loop_thread is None:
                     cs.stop_event.clear()
                     t = threading.Thread(target=_channel_loop, args=(cid,), daemon=True, name=f"ch-{cs.name}")
-                    cs.thread = t
+                    cs.loop_thread = t
                     t.start()
-                    _log(f"channel {cs.name} thread spawned")
-                elif not cs.running and cs.thread is not None:
-                    cs.stop_event.set()
-                    cs.wake.set()
-                if cs.thread is not None and not cs.thread.is_alive():
-                    cs.thread = None
+                    _log(f"channel {cs.name} loop spawned")
+                if cs.loop_thread is not None and not cs.loop_thread.is_alive():
+                    cs.loop_thread = None
         _shutdown.wait(timeout=2)
 
 
@@ -2500,8 +2809,6 @@ def _recent_context(max_chars: int = 6000) -> str:
                 return "".join(parts)
             parts.append(hdr + content)
             total += len(hdr) + len(content)
-        if total > max_chars:
-            break
     return "".join(parts)
 
 
@@ -2524,26 +2831,22 @@ def _build_operator_prompt(user_text: str) -> str:
         "context/\n"
         "  general/chat/        — #general channel chat logs\n"
         "  <channel-name>/      — one directory per managed channel\n"
+        "    goal                — channel objective\n"
         "    pin                 — pinned messages (always-on context)\n"
         "    state               — working memory\n"
         "    chat/               — channel chat logs\n"
-        "    threads/            — per-thread directories\n"
-        "      <thread-id>/\n"
-        "        goal            — thread goal\n"
-        "        state           — thread working memory\n"
-        "        chat/           — thread chat logs\n"
-        "        runs/           — thread step artifacts\n"
+        "    runs/               — per-step artifacts\n"
         "  channels.json        — channel metadata\n"
         "```\n"
-        "Channels are always in chat mode. Pins provide always-on context.\n"
-        "Threads are autonomous loops — each thread works on its goal continuously.\n"
-        "Channels under the 'Running' category are active. 'Paused' are paused.\n"
+        "Each channel is a work unit with at most one autonomous loop.\n"
+        "Use `/goal <text>` to set a goal, `/start` to begin the loop, `/stop` to halt.\n"
+        "Channels in the same Discord category share context.\n"
         "Deleting a channel cleans up its context and processes.\n\n"
         "## Available operations\n\n"
         "- **Update a channel's state**: write to `context/<channel-dir>/state`.\n"
         "- **Set system prompt**: write to `PROMPT.md`.\n"
         "- **Set env variable**: write `KEY='VALUE'` lines (one per line) to `context/.env.pending`. They are picked up automatically and persisted.\n"
-        "- **View logs**: read files in `context/<channel-dir>/threads/<id>/runs/<timestamp>/` (rollout.md, logs.txt).\n"
+        "- **View logs**: read files in `context/<channel-dir>/runs/<timestamp>/` (rollout.md, logs.txt).\n"
         "- **Modify code & restart**: edit code files, then run `touch .restart`.\n"
         "- **Respond to operator**: Your text output is streamed directly to Discord. Just write your response — do NOT use `arbos.py send` (it is suppressed in chat mode).\n"
         "- **Send file to operator**: run `python arbos.py sendfile path/to/file [--caption 'text'] [--photo]`.\n"
@@ -2551,22 +2854,38 @@ def _build_operator_prompt(user_text: str) -> str:
     ]
 
     if _channels:
-        channels_section = []
+        by_cat: dict[str, list[tuple[str, ChannelState]]] = {}
+        uncategorized: list[tuple[str, ChannelState]] = []
         for cid, cs in sorted(_channels.items(), key=lambda x: x[1].name):
-            status = _channel_status_label(cs)
+            if cs.category_id:
+                by_cat.setdefault(cs.category_id, []).append((cid, cs))
+            else:
+                uncategorized.append((cid, cs))
+
+        def _fmt_channel(cid, cs):
+            icon = "\U0001f7e9" if cs.running and cs.goal else "\u2b1c"
             pf = _pin_file(cid)
             pin_text = pf.read_text().strip()[:200] if pf.exists() else "(no pin)"
             sf = _state_file(cid)
             state_text = sf.read_text().strip()[:200] if sf.exists() else "(empty)"
-            ch_line = f"### {cs.name} [{status}] dir=`context/{cs.dir_name}/` (delay: {cs.delay}s)\nPin: {pin_text}\nState: {state_text}"
-            if cs.active_threads:
-                thread_lines = []
-                for tid, ts in cs.active_threads.items():
-                    t_status = "paused" if ts.paused else "running"
-                    goal_preview = ts.goal[:80] + "..." if len(ts.goal) > 80 else ts.goal
-                    thread_lines.append(f"  - {ts.name} [{t_status}] step {ts.step_count}: {goal_preview}")
-                ch_line += "\nThreads:\n" + "\n".join(thread_lines)
-            channels_section.append(ch_line)
+            goal_text = cs.goal[:200] if cs.goal else "(no goal)"
+            ch_line = (
+                f"### {icon} {cs.name} step {cs.step_count} | dir=`context/{cs.dir_name}/` | delay: {cs.delay}s\n"
+                f"Goal: {goal_text}\nPin: {pin_text}\nState: {state_text}"
+            )
+            return ch_line
+
+        channels_section = []
+        for cat_id, members in sorted(by_cat.items(), key=lambda x: _categories.get(x[0], x[0])):
+            cat_name = _categories.get(cat_id, cat_id)
+            channels_section.append(f"**Category: {cat_name}**")
+            for cid, cs in members:
+                channels_section.append(_fmt_channel(cid, cs))
+        if uncategorized:
+            if by_cat:
+                channels_section.append("**Uncategorized (global scope)**")
+            for cid, cs in uncategorized:
+                channels_section.append(_fmt_channel(cid, cs))
         parts.append("## Channels\n" + "\n\n".join(channels_section))
     else:
         parts.append("## Channels\n(no managed channels)")
@@ -2782,14 +3101,14 @@ def run_bot():
                 "**How it works**\n"
                 "• Create a channel under **Running** → agent workspace starts\n"
                 "• **Pin a message** → adds always-on context (pin) to every prompt\n"
-                "• **Create a thread** (`/thread <name> <goal>`) → starts an autonomous loop\n"
-                "• Each thread runs steps continuously toward its goal\n"
-                "• Send a message in the channel → chatbot responds (can also create threads)\n"
-                "• Move to **Paused** category → stops all thread loops\n"
+                "• Set a goal with `/goal <text>`, start the loop with `/start`\n"
+                "• Each channel runs one autonomous loop toward its goal\n"
+                "• Send a message in the channel → chatbot responds\n"
+                "• Use `/stop` or `/pause` to halt the loop\n"
                 "• Messages in **#general** go to an operator agent\n\n"
                 "**Commands**\n"
                 "In #general: `/status` `/update` `/restart` `/bash <cmd>` `/env <name> <value>` `/help`\n"
-                "In a channel: `/thread <name> <goal>` `/status` `/delay <thread|all> <min>` `/pause <thread>` `/resume <thread>` `/restart` `/help`"
+                "In a channel: `/goal <text>` `/start` `/stop` `/pause` `/delay <min>` `/status` `/restart` `/help`"
             ))
 
         elif cmd == "/status":
@@ -2798,18 +3117,17 @@ def run_bot():
                 return
             lines = [f"**{len(_channels)} channel(s)** — total steps: {_step_count}"]
             for cid, cs in sorted(_channels.items(), key=lambda x: x[1].name):
-                status = _channel_status_label(cs)
+                icon = "\U0001f7e9" if cs.running and cs.goal else "\u2b1c"
                 delay_str = f" delay:{cs.delay // 60}m" if cs.delay else ""
                 pin_str = " pin" if cs.pin_text else ""
-                running_threads = sum(1 for t in cs.active_threads.values() if not t.paused)
-                paused_threads = sum(1 for t in cs.active_threads.values() if t.paused)
-                threads_str = f" threads:{running_threads}r/{paused_threads}p" if cs.active_threads else ""
-                lines.append(f"<#{cid}> [{status}]{delay_str}{pin_str}{threads_str}")
-                for tid, ts in cs.active_threads.items():
-                    t_status = "paused" if ts.paused else "running"
-                    last = _format_last_time(ts.last_finished)
-                    goal_preview = ts.goal[:50] + "..." if len(ts.goal) > 50 else ts.goal
-                    lines.append(f"  {ts.name} [{t_status}] step:{ts.step_count} last:{last} — {goal_preview}")
+                step_str = f" step:{cs.step_count}" if cs.step_count else ""
+                last = _format_last_time(cs.last_finished)
+                invoked = _format_last_time(cs.last_run)
+                cat_str = f" [{cs.category_name}]" if cs.category_name else ""
+                goal_preview = ""
+                if cs.goal:
+                    goal_preview = f"\n  goal: {cs.goal[:80]}{'...' if len(cs.goal) > 80 else ''}"
+                lines.append(f"{icon} <#{cid}>{cat_str}{step_str}{delay_str}{pin_str} last:{last} invoked:{invoked}{goal_preview}")
             _reply_sync(channel_id, "\n".join(lines))
 
         elif cmd == "/restart":
@@ -2968,10 +3286,14 @@ def run_bot():
         log_chat("bot", response[:1000])
         _process_pending_env()
 
-    def _handle_channel_command(content: str, channel_id: str, author_id: int, msg_id: str | None = None):
-        """Handle a /command in a managed channel."""
+    def _handle_channel_command(content: str, channel_id: str, author_id: int, msg_id: str | None = None, reply_channel: str = ""):
+        """Handle a /command in a managed channel.
+        reply_channel: if set, send responses here instead of channel_id (for thread commands).
+        """
+        from_thread = bool(reply_channel)
+        reply_to = reply_channel or channel_id
         if not _is_owner(author_id):
-            _reply_sync(channel_id, "Unauthorized.")
+            _reply_sync(reply_to, "Unauthorized.")
             return
         parts = content.split()
         cmd = parts[0].lower()
@@ -2979,208 +3301,176 @@ def run_bot():
 
         cs = _channels.get(channel_id)
         if not cs:
-            _reply_sync(channel_id, "Channel not managed.")
+            _reply_sync(reply_to, "Channel not managed.")
             return
 
         if cmd == "/help":
-            _reply_sync(channel_id, (
-                f"**{cs.name} — Agent Channel**\n\n"
+            scope_label = f"category **{cs.category_name}**" if cs.category_id else "**global**"
+            _reply_sync(reply_to, (
+                f"**{cs.name}** (scope: {scope_label})\n\n"
                 "Send messages and the agent responds as a chatbot.\n"
-                "Threads are autonomous loops — each thread works on a goal continuously.\n\n"
-                "**Pins**: Pin a message to add always-on context to every prompt.\n"
-                "**Threads**: Create a thread to start an autonomous loop on a goal.\n\n"
+                "Each channel can run one autonomous loop working toward a goal.\n\n"
                 "**Commands**\n"
-                "`/thread <name> <goal>` — create a new thread with a goal\n"
-                "`/status` — show pin, threads, state\n"
-                "`/delay <thread|all> <min>` — set delay between steps\n"
-                "`/pause <thread>` — pause a running thread\n"
-                "`/resume <thread>` — resume a paused thread\n"
-                "`/restart` — kill all threads and restart the channel\n"
-                "`/env NAME VALUE` — set channel-scoped env var (all threads inherit)\n"
-                "`/env -d NAME` — remove a channel env var\n"
-                "`/env` — list channel env vars\n"
-                "`/help` — this message\n\n"
-                "**Thread `/env`**: Use `/env` inside a thread for thread-scoped vars."
+                "`/goal` — show current goal\n"
+                "`/goal <text>` — set the channel goal\n"
+                "`/append <text>` — append to the current goal\n"
+                "`/start` — start the autonomous loop\n"
+                "`/stop` — stop the loop\n"
+                "`/pause` — pause the loop\n"
+                "`/delay <minutes>` — set delay between steps\n"
+                "`/status` — show channel status\n"
+                "`/restart` — kill current step and restart the loop\n"
+                "`/env NAME VALUE` — set channel env var\n"
+                "`/env -d NAME` — remove env var\n"
+                "`/env` — list env vars\n"
+                "`/help` — this message"
             ))
 
-        elif cmd == "/thread":
-            if len(args) < 2:
-                _reply_sync(channel_id, "Usage: `/thread <name> <goal message>`")
-                return
-            thread_name = args[0]
-            thread_goal = " ".join(args[1:])
-            ts = _create_thread(channel_id, thread_name, thread_goal)
-            if ts:
-                _reply_sync(channel_id, f"Thread **{thread_name}** created and started.")
-            else:
-                _reply_sync(channel_id, "Failed to create thread.")
-
-        elif cmd == "/status":
-            status = _channel_status_label(cs)
-            delay_min = cs.delay // 60 if cs.delay else 0
-            delay_str = f"{delay_min}m" if delay_min else "none"
-            sf = _state_file(channel_id)
-            state_text = sf.read_text().strip()[:500] if sf.exists() else "(empty)"
-            pin_preview = cs.pin_text[:300] if cs.pin_text else "(no pin)"
-            lines = [
-                f"**{cs.name}** [{status}] | Default delay: {delay_str}",
-                f"Pin: {pin_preview}",
-                f"State: {state_text}",
-            ]
-            if cs.active_threads:
-                lines.append("**Threads:**")
-                for tid, ts in cs.active_threads.items():
-                    t_status = "paused" if ts.paused else "running"
-                    t_delay = f"{ts.delay // 60}m" if ts.delay else "none"
-                    goal_preview = ts.goal[:80] + "..." if len(ts.goal) > 80 else ts.goal
-                    lines.append(f"  - **{ts.name}** [{t_status}] step {ts.step_count} | delay {t_delay} | {goal_preview}")
-            else:
-                lines.append("**Threads:** (none)")
-            _reply_sync(channel_id, "\n".join(lines))
-
-        elif cmd == "/delay":
-            if len(args) < 2:
-                _reply_sync(channel_id, "Usage: `/delay <thread-name|all> <minutes>`")
-                return
-            target_name = args[0]
-            try:
-                minutes = float(args[1])
-            except ValueError:
-                _reply_sync(channel_id, "Usage: `/delay <thread-name|all> <minutes>`")
-                return
-            if minutes < 0:
-                _reply_sync(channel_id, "Delay must be >= 0.")
-                return
-            delay_seconds = int(minutes * 60)
-            if target_name == "all":
-                with _channels_lock:
-                    cs.delay = delay_seconds
-                    for ts in cs.active_threads.values():
-                        ts.delay = delay_seconds
-                    _save_channels()
-                _reply_sync(channel_id, f"Delay set to {minutes}m for all threads and channel default.")
-            else:
-                found = None
-                for ts in cs.active_threads.values():
-                    if ts.name == target_name:
-                        found = ts
-                        break
-                if not found:
-                    _reply_sync(channel_id, f"Thread `{target_name}` not found.")
-                    return
-                with _channels_lock:
-                    found.delay = delay_seconds
-                    _save_channels()
-                _reply_sync(channel_id, f"Delay for thread **{target_name}** set to {minutes}m ({delay_seconds}s).")
-
-        elif cmd == "/pause":
+        elif cmd == "/goal":
             if not args:
-                _reply_sync(channel_id, "Usage: `/pause <thread-name>`")
+                goal = cs.goal or "(no goal set)"
+                _reply_sync(reply_to, f"**Goal:**\n{goal}")
+            else:
+                new_goal = " ".join(args)
+                cs.goal = new_goal
+                if from_thread:
+                    cs.active_thread_id = reply_channel
+                else:
+                    cs.active_thread_id = ""
+                gf = _goal_file(channel_id)
+                gf.parent.mkdir(parents=True, exist_ok=True)
+                gf.write_text(new_goal)
+                with _channels_lock:
+                    _save_channels()
+                _reply_sync(reply_to, f"Goal set.\n{new_goal}")
+                _log(f"channel {cs.name}: goal set ({len(new_goal)} chars)")
+
+        elif cmd == "/append":
+            if not args:
+                _reply_sync(reply_to, "Usage: `/append <text to append to goal>`")
                 return
-            target_name = args[0]
-            found = None
-            for ts in cs.active_threads.values():
-                if ts.name == target_name:
-                    found = ts
-                    break
-            if not found:
-                _reply_sync(channel_id, f"Thread `{target_name}` not found.")
-                return
-            if found.paused:
-                _reply_sync(channel_id, f"Thread **{target_name}** is already paused.")
-                return
-            found.paused = True
-            found.stop_event.set()
-            found.wake.set()
+            addition = " ".join(args)
+            cs.goal = (cs.goal + "\n" + addition) if cs.goal else addition
+            gf = _goal_file(channel_id)
+            gf.parent.mkdir(parents=True, exist_ok=True)
+            gf.write_text(cs.goal)
             with _channels_lock:
                 _save_channels()
-            _reply_sync(channel_id, f"Thread **{target_name}** paused.")
+            _reply_sync(reply_to, f"Appended to goal.\n**Goal:**\n{cs.goal}")
+            _log(f"channel {cs.name}: goal appended ({len(addition)} chars)")
 
-        elif cmd == "/resume":
-            if not args:
-                _reply_sync(channel_id, "Usage: `/resume <thread-name>`")
+        elif cmd == "/start":
+            if cs.running:
+                _reply_sync(reply_to, f"**{cs.name}** is already running.")
                 return
-            target_name = args[0]
-            found = None
-            for ts in cs.active_threads.values():
-                if ts.name == target_name:
-                    found = ts
-                    break
-            if not found:
-                _reply_sync(channel_id, f"Thread `{target_name}` not found.")
+            if not cs.goal:
+                _reply_sync(reply_to, "No goal set. Use `/goal <text>` first.")
                 return
-            if not found.paused:
-                _reply_sync(channel_id, f"Thread **{target_name}** is already running.")
-                return
-            found.paused = False
-            found.stop_event = threading.Event()
-            found.wake = threading.Event()
-            found.loop_thread = None
+            cs.running = True
+            cs.started_at = datetime.now().isoformat()
+            if from_thread:
+                cs.active_thread_id = reply_channel
+            cs.stop_event = threading.Event()
             cs.wake.set()
             with _channels_lock:
                 _save_channels()
-            _reply_sync(channel_id, f"Thread **{target_name}** resumed.")
+            _reply_sync(reply_to, f"**{cs.name}** started.")
+            _sync_channel_name(channel_id)
+            _log(f"channel {cs.name}: started via command")
 
-        elif cmd == "/restart":
-            _reply_sync(channel_id, f"Restarting {cs.name}...")
+        elif cmd in ("/stop", "/pause"):
+            if not cs.running:
+                _reply_sync(reply_to, f"**{cs.name}** is already stopped.")
+                return
+            cs.running = False
+            cs.started_at = ""
+            cs.active_thread_id = ""
+            cs.stop_event.set()
+            cs.wake.set()
             with _channel_procs_lock:
                 proc = _channel_procs.get(channel_id)
             if proc and proc.poll() is None:
                 _log(f"channel {cs.name}: killing claude subprocess pid={proc.pid}")
                 proc.kill()
-            for ts in cs.active_threads.values():
-                ts.stop_event.set()
-                ts.wake.set()
-            cs.stop_event.set()
-            cs.wake.set()
-            thread = cs.thread
-            if thread and thread.is_alive():
-                thread.join(timeout=10)
-            for ts in cs.active_threads.values():
-                ts.stop_event = threading.Event()
-                ts.wake = threading.Event()
-                ts.loop_thread = None
-                if not ts.paused:
-                    ts.paused = False
-            cs.stop_event = threading.Event()
-            cs.wake = threading.Event()
-            cs.running = True
-            cs.thread = None
             with _channels_lock:
                 _save_channels()
-            _reply_sync(channel_id, f"{cs.name} restarted.")
+            label = "paused" if cmd == "/pause" else "stopped"
+            _reply_sync(reply_to, f"**{cs.name}** {label}.")
+            _sync_channel_name(channel_id)
+            _log(f"channel {cs.name}: {label} via command")
+
+        elif cmd == "/delay":
+            if not args:
+                delay_min = cs.delay / 60 if cs.delay else 0
+                _reply_sync(reply_to, f"Current delay: {delay_min:.1f}m ({cs.delay}s)")
+                return
+            try:
+                minutes = float(args[0])
+            except ValueError:
+                _reply_sync(reply_to, "Usage: `/delay <minutes>`")
+                return
+            if minutes < 0:
+                _reply_sync(reply_to, "Delay must be >= 0.")
+                return
+            cs.delay = int(minutes * 60)
+            with _channels_lock:
+                _save_channels()
+            _reply_sync(reply_to, f"Delay set to {minutes}m ({cs.delay}s).")
+            _sync_channel_name(channel_id)
+
+        elif cmd == "/status":
+            _reply_sync(reply_to, _channel_status_text(cs))
+
+        elif cmd == "/restart":
+            _reply_sync(reply_to, f"Restarting **{cs.name}**...")
+            cs.stop_event.set()
+            cs.wake.set()
+            with _channel_procs_lock:
+                proc = _channel_procs.get(channel_id)
+            if proc and proc.poll() is None:
+                _log(f"channel {cs.name}: killing claude subprocess pid={proc.pid}")
+                proc.kill()
+            lt = cs.loop_thread
+            if lt and lt.is_alive():
+                lt.join(timeout=10)
+            cs.stop_event = threading.Event()
+            cs.wake = threading.Event()
+            cs.loop_thread = None
+            if cs.goal:
+                cs.running = True
+            with _channels_lock:
+                _save_channels()
+            _reply_sync(reply_to, f"**{cs.name}** restarted.")
+            _sync_channel_name(channel_id)
             _log(f"channel {cs.name} restarted via command")
 
         elif cmd == "/env":
-            # Delete the message containing the secret value
             if msg_id and len(args) >= 2 and args[0] != "-d":
-                _delete_discord_message(channel_id, msg_id)
+                _delete_discord_message(reply_to, msg_id)
             if len(args) < 2:
-                # Show current channel env vars
                 env_file = _channel_env_file(channel_id)
                 current = _parse_env_file(env_file)
                 if current:
                     lines = [f"`{k}` = (set)" for k in current]
-                    _reply_sync(channel_id, f"**Channel env vars:**\n" + "\n".join(lines))
+                    _reply_sync(reply_to, "**Channel env vars:**\n" + "\n".join(lines))
                 else:
-                    _reply_sync(channel_id, "No channel-scoped env vars set.\nUsage: `/env NAME VALUE` or `/env -d NAME`")
+                    _reply_sync(reply_to, "No env vars set.\nUsage: `/env NAME VALUE` or `/env -d NAME`")
                 return
             env_name = args[0]
             if env_name == "-d" and len(args) >= 2:
-                # Delete mode: /env -d NAME
                 target = args[1]
                 if _delete_scoped_env(_channel_env_file(channel_id), target):
-                    _reply_sync(channel_id, f"Removed `{target}` from channel env.")
+                    _reply_sync(reply_to, f"Removed `{target}` from channel env.")
                 else:
-                    _reply_sync(channel_id, f"`{target}` not found in channel env.")
+                    _reply_sync(reply_to, f"`{target}` not found in channel env.")
                 return
             env_value = " ".join(args[1:])
             _write_scoped_env(_channel_env_file(channel_id), env_name, env_value)
-            _reply_sync(channel_id, f"Set `{env_name}` in channel env (available to all threads).")
+            _reply_sync(reply_to, f"Set `{env_name}` in channel env.")
             _log(f"channel {cs.name}: set scoped env var {env_name}")
 
         else:
-            _reply_sync(channel_id, "Unknown command. Use `/help` to see available commands.")
+            _reply_sync(reply_to, "Unknown command. Use `/help` to see available commands.")
 
     def _handle_channel_message(content: str, attachments: list, channel_id: str,
                                 message_id: str, author_id: int):
@@ -3225,8 +3515,15 @@ def run_bot():
         cs = _channels.get(channel_id)
         _add_discord_reaction(channel_id, message_id, "\u2705")  # ✅ accepted
         _log(f"channel {cs.name if cs else channel_id}: chatbot mode, responding directly")
+        _reset_tokens()
         prompt = _build_channel_chat_prompt(channel_id, entry)
         response = run_agent_streaming(prompt, channel_id, reply_to=message_id)
+        chat_in, chat_out = _get_tokens()
+        if cs:
+            cs.total_chat_input_tokens += chat_in
+            cs.total_chat_output_tokens += chat_out
+            with _channels_lock:
+                _save_channels()
         log_chat("bot", response[:1000], channel_id=channel_id)
 
     @client.event
@@ -3238,8 +3535,11 @@ def run_bot():
             if target_guild_id and str(guild.id) != target_guild_id:
                 continue
             _guild_id = str(guild.id)
-            _running_category_id, _paused_category_id = _find_or_create_categories(_guild_id)
+            _running_category_id, _paused_category_id = _discover_categories(_guild_id)
             _log(f"guild: {guild.name} (id={_guild_id}), running_cat={_running_category_id}, paused_cat={_paused_category_id}")
+
+            # Create any channels from pending_channels.json before discovery
+            _create_pending_channels(_guild_id)
 
             for channel in guild.text_channels:
                 if channel.name == "general":
@@ -3249,21 +3549,26 @@ def run_bot():
             for channel in guild.text_channels:
                 cid = str(channel.id)
                 parent = str(channel.category_id) if channel.category_id else None
-                if parent in (_running_category_id, _paused_category_id):
-                    is_running = (parent == _running_category_id)
+                if parent and parent in _categories:
+                    is_running = (parent != _paused_category_id)
+                    cat_name = _categories.get(parent, "")
                     if cid not in _channels:
-                        _log(f"discovered channel: {channel.name} (id={cid}, running={is_running})")
-                        def _setup(c=channel, r=is_running):
-                            _setup_channel_context(str(c.id), c.name, r)
+                        _log(f"discovered channel: {channel.name} (id={cid}, running={is_running}, category={cat_name})")
+                        def _setup(c=channel, r=is_running, ci=parent, cn=cat_name):
+                            _setup_channel_context(str(c.id), c.name, r, category_id=ci, category_name=cn)
                         threading.Thread(target=_setup, daemon=True).start()
                     else:
                         cs = _channels[cid]
-                        if cs.running != is_running:
-                            cs.running = is_running
-                            if is_running:
-                                cs.wake.set()
-                            with _channels_lock:
-                                _save_channels()
+                        cs.category_id = parent
+                        cs.category_name = cat_name
+                        if parent in (_running_category_id, _paused_category_id):
+                            new_running = (parent == _running_category_id)
+                            if cs.running != new_running:
+                                cs.running = new_running
+                                if new_running:
+                                    cs.wake.set()
+                        with _channels_lock:
+                            _save_channels()
 
             for cid, cs in list(_channels.items()):
                 if cs.running:
@@ -3291,18 +3596,24 @@ def run_bot():
 
     @client.event
     async def on_guild_channel_create(channel):
+        if hasattr(channel, "type") and channel.type.value == 4:
+            cat_id = str(channel.id)
+            _categories[cat_id] = channel.name
+            _log(f"new category created: {channel.name} (id={cat_id})")
+            return
         if not hasattr(channel, "category_id") or channel.category_id is None:
             return
         parent = str(channel.category_id)
-        if parent not in (_running_category_id, _paused_category_id):
+        if parent not in _categories:
             return
         cid = str(channel.id)
         if cid in _channels:
             return
-        is_running = (parent == _running_category_id)
-        _log(f"new channel created: {channel.name} (id={cid}, running={is_running})")
+        is_running = (parent != _paused_category_id)
+        cat_name = _categories.get(parent, "")
+        _log(f"new channel created: {channel.name} (id={cid}, running={is_running}, category={cat_name})")
         def _run():
-            _setup_channel_context(cid, channel.name, is_running)
+            _setup_channel_context(cid, channel.name, is_running, category_id=parent, category_name=cat_name)
         threading.Thread(target=_run, daemon=True).start()
 
     @client.event
@@ -3314,49 +3625,61 @@ def run_bot():
         if before_parent == after_parent:
             return
         cid = str(after.id)
-        if after_parent == _running_category_id:
+        new_cat_name = _categories.get(after_parent, "") if after_parent else ""
+        if after_parent and after_parent in _categories:
+            is_running = (after_parent != _paused_category_id)
+            if after_parent == _running_category_id:
+                is_running = True
+            elif after_parent == _paused_category_id:
+                is_running = False
             if cid in _channels:
                 cs = _channels[cid]
-                cs.running = True
-                cs.wake.set()
+                old_scope = cs.category_name or "global"
+                cs.category_id = after_parent
+                cs.category_name = new_cat_name
+                if after_parent in (_running_category_id, _paused_category_id):
+                    cs.running = is_running
+                if is_running:
+                    cs.wake.set()
                 with _channels_lock:
                     _save_channels()
-                _log(f"channel {cs.name} moved to Running")
+                _log(f"channel {cs.name} scope changed: {old_scope} -> {new_cat_name}")
             else:
-                _log(f"channel {after.name} moved to Running (new)")
+                _log(f"channel {after.name} moved to {new_cat_name} (new)")
                 def _run():
-                    _setup_channel_context(cid, after.name, True)
+                    _setup_channel_context(cid, after.name, is_running, category_id=after_parent, category_name=new_cat_name)
                 threading.Thread(target=_run, daemon=True).start()
-        elif after_parent == _paused_category_id:
+        elif after_parent is None or after_parent not in _categories:
             if cid in _channels:
                 cs = _channels[cid]
-                cs.running = False
-                with _channels_lock:
-                    _save_channels()
-                _log(f"channel {cs.name} moved to Paused")
-            else:
-                _log(f"channel {after.name} moved to Paused (new)")
-                def _run():
-                    _setup_channel_context(cid, after.name, False)
-                threading.Thread(target=_run, daemon=True).start()
-        elif before_parent in (_running_category_id, _paused_category_id):
-            if cid in _channels:
-                cs = _channels[cid]
-                cs.running = False
-                cs.stop_event.set()
-                cs.wake.set()
-                with _channels_lock:
-                    _save_channels()
-                _log(f"channel {cs.name} moved out of managed categories")
+                old_scope = cs.category_name or "global"
+                if before_parent in _categories:
+                    cs.category_id = ""
+                    cs.category_name = ""
+                    with _channels_lock:
+                        _save_channels()
+                    _log(f"channel {cs.name} scope changed: {old_scope} -> global (moved out of category)")
+                else:
+                    cs.running = False
+                    cs.stop_event.set()
+                    cs.wake.set()
+                    with _channels_lock:
+                        _save_channels()
+                    _log(f"channel {cs.name} moved out of managed categories")
 
     @client.event
     async def on_guild_channel_delete(channel):
-        cid = str(channel.id)
-        if cid not in _channels:
+        ch_id = str(channel.id)
+        if hasattr(channel, "type") and channel.type.value == 4:
+            if ch_id in _categories:
+                _log(f"category deleted: {_categories[ch_id]} (id={ch_id})")
+                del _categories[ch_id]
             return
-        _log(f"managed channel deleted: {channel.name} (id={cid})")
+        if ch_id not in _channels:
+            return
+        _log(f"managed channel deleted: {channel.name} (id={ch_id})")
         def _run():
-            _delete_channel_context(cid)
+            _delete_channel_context(ch_id)
             _send_discord_text(f"Channel {channel.name} deleted (cleaned up context).")
         threading.Thread(target=_run, daemon=True).start()
 
@@ -3385,21 +3708,14 @@ def run_bot():
 
     @client.event
     async def on_thread_create(thread):
-        if not hasattr(thread, "parent_id"):
+        if not hasattr(thread, "parent_id") or not thread.parent_id:
             return
         parent_cid = str(thread.parent_id)
         if parent_cid not in _channels:
             return
-        cs = _channels[parent_cid]
         thread_id = str(thread.id)
-        if thread_id in cs.active_threads:
-            return
-        thread_name = thread.name or "untitled"
         def _run():
-            goal = _fetch_thread_starter_message(thread_id)
-            if not goal:
-                goal = thread_name
-            _create_thread(parent_cid, thread_name, goal, thread_id=thread_id)
+            _send_thread_welcome(thread_id, parent_cid)
         threading.Thread(target=_run, daemon=True).start()
 
     @client.event
@@ -3412,152 +3728,29 @@ def run_bot():
         content = message.content.strip()
         msg_id = str(message.id)
 
+        # Messages in Discord threads under a managed channel
         if hasattr(message.channel, "parent_id") and message.channel.parent_id:
             parent_cid = str(message.channel.parent_id)
-            if parent_cid in _channels:
-                cs = _channels[parent_cid]
-                thread_id = channel_id
-                ts = cs.active_threads.get(thread_id)
-                if ts:
-                    log_thread_chat("user", content or "(attachment)", parent_cid, thread_id)
-                    ts.wake.set()
-                    _add_discord_reaction(channel_id, msg_id, "\u2705")
-                    # Handle thread control commands sent inside the thread itself
-                    if _is_owner(author_id) and content and content.startswith("/"):
-                        thread_cmd = content.strip().lower()
-                        if thread_cmd in ("/pause", "/stop"):
-                            if ts.paused:
-                                _reply_sync(channel_id, f"Thread **{ts.name}** is already paused.")
-                            else:
-                                ts.paused = True
-                                ts.stop_event.set()
-                                ts.wake.set()
-                                with _channels_lock:
-                                    _save_channels()
-                                _reply_sync(channel_id, f"Thread **{ts.name}** paused.")
-                                _log(f"channel {cs.name}: thread '{ts.name}' paused via in-thread command")
-                        elif thread_cmd in ("/resume", "/unpause", "/start"):
-                            if not ts.paused:
-                                _reply_sync(channel_id, f"Thread **{ts.name}** is already running.")
-                            else:
-                                ts.paused = False
-                                ts.stop_event = threading.Event()
-                                ts.wake = threading.Event()
-                                ts.loop_thread = None
-                                cs.wake.set()
-                                with _channels_lock:
-                                    _save_channels()
-                                _reply_sync(channel_id, f"Thread **{ts.name}** resumed.")
-                                _log(f"channel {cs.name}: thread '{ts.name}' resumed via in-thread command")
-                        elif thread_cmd.startswith("/delay"):
-                            delay_parts = thread_cmd.split()
-                            if len(delay_parts) < 2:
-                                _reply_sync(channel_id, "Usage: `/delay <minutes>`")
-                            else:
-                                try:
-                                    minutes = float(delay_parts[1])
-                                    delay_seconds = int(minutes * 60)
-                                    with _channels_lock:
-                                        ts.delay = delay_seconds
-                                        _save_channels()
-                                    _reply_sync(channel_id, f"Delay for thread **{ts.name}** set to {minutes}m ({delay_seconds}s).")
-                                except ValueError:
-                                    _reply_sync(channel_id, "Invalid delay value. Usage: `/delay <minutes>`")
-                        elif thread_cmd == "/status":
-                            status = "paused" if ts.paused else "running"
-                            _reply_sync(channel_id, f"Thread **{ts.name}**: {status}, step {ts.step_count}, delay {ts.delay}s")
-                        elif thread_cmd == "/restart":
-                            ts.stop_event.set()
-                            ts.wake.set()
-                            loop_t = ts.loop_thread
-                            if loop_t and loop_t.is_alive():
-                                loop_t.join(timeout=10)
-                            ts.stop_event = threading.Event()
-                            ts.wake = threading.Event()
-                            ts.loop_thread = None
-                            ts.paused = False
-                            cs.wake.set()
-                            with _channels_lock:
-                                _save_channels()
-                            _reply_sync(channel_id, f"Thread **{ts.name}** restarted.")
-                            _log(f"channel {cs.name}: thread '{ts.name}' restarted via in-thread command")
-                        elif thread_cmd.startswith("/env"):
-                            env_parts = content.strip().split()
-                            # Delete message if it contains a secret value
-                            if msg_id and len(env_parts) >= 3 and env_parts[1] != "-d":
-                                _delete_discord_message(channel_id, msg_id)
-                            if len(env_parts) < 2:
-                                # Show thread env vars
-                                env_file = _thread_env_file(parent_cid, thread_id)
-                                current = _parse_env_file(env_file)
-                                ch_env = _parse_env_file(_channel_env_file(parent_cid))
-                                lines = []
-                                if ch_env:
-                                    lines.append("**Channel env (inherited):**")
-                                    lines.extend(f"`{k}` = (set)" for k in ch_env)
-                                if current:
-                                    lines.append("**Thread env:**")
-                                    lines.extend(f"`{k}` = (set)" for k in current)
-                                if lines:
-                                    _reply_sync(channel_id, "\n".join(lines))
-                                else:
-                                    _reply_sync(channel_id, "No env vars set.\nUsage: `/env NAME VALUE` or `/env -d NAME`")
-                            elif env_parts[1] == "-d" and len(env_parts) >= 3:
-                                target = env_parts[2]
-                                if _delete_scoped_env(_thread_env_file(parent_cid, thread_id), target):
-                                    _reply_sync(channel_id, f"Removed `{target}` from thread env.")
-                                else:
-                                    _reply_sync(channel_id, f"`{target}` not found in thread env.")
-                            elif len(env_parts) >= 3:
-                                env_name = env_parts[1]
-                                env_value = " ".join(env_parts[2:])
-                                _write_scoped_env(_thread_env_file(parent_cid, thread_id), env_name, env_value)
-                                _reply_sync(channel_id, f"Set `{env_name}` in thread env (this thread only).")
-                                _log(f"channel {cs.name}: thread '{ts.name}' set scoped env var {env_name}")
-                            else:
-                                _reply_sync(channel_id, "Usage: `/env NAME VALUE` or `/env -d NAME`")
-                        else:
-                            # Unknown slash command — pass to agent as direct chat
-                            def _run_thread_direct_chat(
-                                _cs=cs, _ts=ts, _parent_cid=parent_cid,
-                                _thread_id=thread_id, _content=content,
-                                _channel_id=channel_id, _msg_id=msg_id,
-                            ):
-                                _log(f"channel {_cs.name}: thread '{_ts.name}' direct chat reply")
-                                prompt = _build_thread_prompt(_parent_cid, _thread_id, step=_ts.step_count)
-                                prompt += f"\n\n## Operator message (reply directly)\n\n{_content}"
-                                response = run_agent_streaming(prompt, _channel_id, reply_to=_msg_id)
-                                log_thread_chat("bot", response[:1000], _parent_cid, _thread_id)
-                            threading.Thread(target=_run_thread_direct_chat, daemon=True).start()
-                    # Direct chat response for owner messages in autonomous threads
-                    elif _is_owner(author_id) and content:
-                        def _run_thread_direct_chat(
-                            _cs=cs, _ts=ts, _parent_cid=parent_cid,
-                            _thread_id=thread_id, _content=content,
-                            _channel_id=channel_id, _msg_id=msg_id,
-                        ):
-                            _log(f"channel {_cs.name}: thread '{_ts.name}' direct chat reply")
-                            prompt = _build_thread_prompt(_parent_cid, _thread_id, step=_ts.step_count)
-                            prompt += f"\n\n## Operator message (reply directly)\n\n{_content}"
-                            response = run_agent_streaming(prompt, _channel_id, reply_to=_msg_id)
-                            log_thread_chat("bot", response[:1000], _parent_cid, _thread_id)
-                        threading.Thread(target=_run_thread_direct_chat, daemon=True).start()
-                else:
-                    # Thread exists in Discord but not as an Arbos autonomous thread —
-                    # treat as a chat message and respond in the thread.
-                    if _is_owner(author_id):
-                        log_chat("user", content or "(attachment)", channel_id=parent_cid)
-                        _add_discord_reaction(channel_id, msg_id, "\u2705")  # ✅ accepted
-                        def _run_thread_chat():
-                            _log(f"channel {cs.name}: thread chat, responding in thread {thread_id}")
-                            prompt = _build_channel_chat_prompt(parent_cid, content or "(attachment)")
-                            response = run_agent_streaming(prompt, channel_id, reply_to=msg_id)
-                            log_chat("bot", response[:1000], channel_id=parent_cid)
-                        threading.Thread(target=_run_thread_chat, daemon=True).start()
+            if parent_cid in _channels and _is_owner(author_id) and content:
+                # /commands in threads route to the parent channel's command handler
+                if content.startswith("/"):
+                    def _run_cmd(_content=content, _parent=parent_cid, _aid=author_id, _cid=channel_id, _mid=msg_id):
+                        _handle_channel_command(_content, _parent, _aid, _mid, reply_channel=_cid)
+                    threading.Thread(target=_run_cmd, daemon=True).start()
+                    return
+                log_chat("user", content, channel_id=parent_cid)
+                _add_discord_reaction(channel_id, msg_id, "\u2705")
+                def _run_thread_chat(_parent=parent_cid, _content=content, _cid=channel_id, _mid=msg_id):
+                    cs = _channels.get(_parent)
+                    _log(f"channel {cs.name if cs else _parent}: Discord thread chat reply")
+                    prompt = _build_channel_chat_prompt(_parent, _content)
+                    response = run_agent_streaming(prompt, _cid, reply_to=_mid)
+                    log_chat("bot", response[:1000], channel_id=_parent)
+                threading.Thread(target=_run_thread_chat, daemon=True).start()
                 return
 
         if _is_managed_channel(channel_id):
-            if content.startswith("/"):
+            if content and content.startswith("/"):
                 def _run():
                     _handle_channel_command(content, channel_id, author_id, msg_id)
                 threading.Thread(target=_run, daemon=True).start()
@@ -3759,130 +3952,367 @@ def _sendfile_cli(args: list[str]):
         sys.exit(1)
 
 
-def _thread_done_cli():
-    """CLI entry point: python arbos.py thread-done — pause the current thread (goal completed)."""
+def _done_cli():
+    """CLI: python arbos.py done — mark goal complete and stop the loop."""
     _load_channels()
     channel_id = os.environ.get("ARBOS_CHANNEL_ID", "")
-    thread_id = os.environ.get("ARBOS_THREAD_ID", "")
-    if not channel_id or not thread_id:
-        print("ARBOS_CHANNEL_ID and ARBOS_THREAD_ID must be set", file=sys.stderr)
+    if not channel_id:
+        print("ARBOS_CHANNEL_ID must be set", file=sys.stderr)
         sys.exit(1)
     cs = _channels.get(channel_id)
-    if cs and thread_id in cs.active_threads:
-        ts = cs.active_threads[thread_id]
-        ts.paused = True
-        ts.stop_event.set()
+    if cs:
+        cs.running = False
+        cs.stop_event.set()
         with _channels_lock:
             _save_channels()
+        _sync_channel_name(channel_id)
     token = os.getenv("BOT_TOKEN", "")
-    if token:
+    if token and channel_id:
         try:
             requests.post(
-                f"{DISCORD_API}/channels/{thread_id}/messages",
+                f"{DISCORD_API}/channels/{channel_id}/messages",
                 headers=_discord_headers(token),
-                json={"content": "Goal completed. Thread paused."},
+                json={"content": "Goal completed. Loop stopped."},
                 timeout=15,
             )
         except Exception:
             pass
-    print(f"Thread {thread_id} marked as done and paused")
+    print(f"Channel {channel_id} marked as done and stopped")
 
 
-def _thread_ctl_cli():
-    """CLI entry point: python arbos.py thread-ctl <action> [args] — thread self-control.
+def _ctl_cli():
+    """CLI: python arbos.py ctl <action> [args] — channel self-control.
 
     Actions:
-        delay <seconds>   — set step delay for this thread
-        restart           — restart this thread's loop (finishes current step, then restarts)
-        goal <new goal>   — update the thread's goal
-        pause             — pause this thread after the current step
+        delay <seconds>   — set step delay
+        restart           — restart the loop
+        goal <new goal>   — update the goal
+        pause             — pause the loop
     """
     _load_channels()
     channel_id = os.environ.get("ARBOS_CHANNEL_ID", "")
-    thread_id = os.environ.get("ARBOS_THREAD_ID", "")
-    if not channel_id or not thread_id:
-        print("ARBOS_CHANNEL_ID and ARBOS_THREAD_ID must be set", file=sys.stderr)
+    if not channel_id:
+        print("ARBOS_CHANNEL_ID must be set", file=sys.stderr)
         sys.exit(1)
     cs = _channels.get(channel_id)
-    if not cs or thread_id not in cs.active_threads:
-        print(f"Thread {thread_id} not found", file=sys.stderr)
+    if not cs:
+        print(f"Channel {channel_id} not found", file=sys.stderr)
         sys.exit(1)
-    ts = cs.active_threads[thread_id]
 
     if len(sys.argv) < 3:
-        print("Usage: python arbos.py thread-ctl <delay|restart|goal|pause> [args]", file=sys.stderr)
+        print("Usage: python arbos.py ctl <delay|restart|goal|pause> [args]", file=sys.stderr)
         sys.exit(1)
 
     action = sys.argv[2].lower()
 
     if action == "delay":
         if len(sys.argv) < 4:
-            print("Usage: python arbos.py thread-ctl delay <seconds>", file=sys.stderr)
+            print("Usage: python arbos.py ctl delay <seconds>", file=sys.stderr)
             sys.exit(1)
         try:
             new_delay = int(sys.argv[3])
         except ValueError:
             print("Delay must be an integer (seconds)", file=sys.stderr)
             sys.exit(1)
-        ts.delay = max(0, new_delay)
+        cs.delay = max(0, new_delay)
         with _channels_lock:
             _save_channels()
-        print(f"Thread delay set to {ts.delay}s")
+        _sync_channel_name(channel_id)
+        print(f"Delay set to {cs.delay}s")
 
     elif action == "restart":
-        # Signal stop, then clear so channel_loop respawns it
-        ts.stop_event.set()
-        ts.wake.set()
-        ts.loop_thread = None
-        ts.stop_event = threading.Event()
-        ts.wake = threading.Event()
-        cs.wake.set()  # wake channel loop to respawn
+        cs.stop_event.set()
+        cs.wake.set()
+        cs.loop_thread = None
+        cs.stop_event = threading.Event()
+        cs.wake = threading.Event()
+        cs.running = True
         with _channels_lock:
             _save_channels()
-        print(f"Thread restart signaled")
+        _sync_channel_name(channel_id)
+        print("Restart signaled")
 
     elif action == "goal":
         if len(sys.argv) < 4:
-            print("Usage: python arbos.py thread-ctl goal <new goal text>", file=sys.stderr)
+            print("Usage: python arbos.py ctl goal <new goal text>", file=sys.stderr)
             sys.exit(1)
         new_goal = " ".join(sys.argv[3:])
-        ts.goal = new_goal
-        gf = _thread_goal_file(channel_id, thread_id)
+        cs.goal = new_goal
+        gf = _goal_file(channel_id)
+        gf.parent.mkdir(parents=True, exist_ok=True)
         gf.write_text(new_goal)
         with _channels_lock:
             _save_channels()
-        print(f"Thread goal updated")
+        print("Goal updated")
 
     elif action == "pause":
-        ts.paused = True
-        ts.stop_event.set()
-        ts.wake.set()
+        cs.running = False
+        cs.stop_event.set()
+        cs.wake.set()
+        with _channel_procs_lock:
+            proc = _channel_procs.get(channel_id)
+        if proc and proc.poll() is None:
+            proc.kill()
         with _channels_lock:
             _save_channels()
-        print(f"Thread paused")
+        _sync_channel_name(channel_id)
+        print("Loop paused")
 
     else:
         print(f"Unknown action: {action}. Use: delay, restart, goal, pause", file=sys.stderr)
         sys.exit(1)
 
 
-def _thread_create_cli():
-    """CLI entry point: python arbos.py thread <name> <goal> — create a new thread."""
-    if len(sys.argv) < 4:
-        print("Usage: python arbos.py thread <name> <goal>", file=sys.stderr)
-        sys.exit(1)
-    thread_name = sys.argv[2]
-    thread_goal = " ".join(sys.argv[3:])
+def _scope_cli():
+    """CLI: python arbos.py scope — print current scope level and visible siblings."""
     channel_id = os.environ.get("ARBOS_CHANNEL_ID", "")
     if not channel_id:
         print("ARBOS_CHANNEL_ID must be set", file=sys.stderr)
         sys.exit(1)
     _load_channels()
-    ts = _create_thread(channel_id, thread_name, thread_goal)
-    if ts:
-        print(f"Thread created: {ts.thread_id}")
+    cs = _channels.get(channel_id)
+    if not cs:
+        print(f"Channel {channel_id} not found in channels.json", file=sys.stderr)
+        sys.exit(1)
+    if cs.category_id:
+        cat_name = cs.category_name or cs.category_id
+        siblings = [
+            c for cid, c in _channels.items()
+            if c.category_id == cs.category_id and cid != channel_id
+        ]
+        print(f"Scope: category \"{cat_name}\"")
+        print(f"Channel: {cs.name} ({'running' if cs.running else 'paused'})")
+        if siblings:
+            print(f"Siblings ({len(siblings)}):")
+            for s in sorted(siblings, key=lambda c: c.name):
+                status = "running" if s.running else "stopped"
+                step_info = f" step {s.step_count}" if s.step_count else ""
+                print(f"  - {s.name} [{status}{step_info}]")
+        else:
+            print("No siblings in this category.")
     else:
-        print("Failed to create thread", file=sys.stderr)
+        print("Scope: global")
+        print(f"Channel: {cs.name} ({'running' if cs.running else 'paused'})")
+        print(f"Visible channels: {len(_channels) - 1}")
+        for cid, c in sorted(_channels.items(), key=lambda x: x[1].name):
+            if cid == channel_id:
+                continue
+            cat = f" [{c.category_name}]" if c.category_name else ""
+            status = "running" if c.running else "stopped"
+            step_info = f" step {c.step_count}" if c.step_count else ""
+            print(f"  - {c.name}{cat} [{status}{step_info}]")
+
+
+def _siblings_cli():
+    """CLI: python arbos.py siblings — list sibling channels with summaries."""
+    channel_id = os.environ.get("ARBOS_CHANNEL_ID", "")
+    if not channel_id:
+        print("ARBOS_CHANNEL_ID must be set", file=sys.stderr)
+        sys.exit(1)
+    _load_channels()
+    cs = _channels.get(channel_id)
+    if not cs:
+        print(f"Channel {channel_id} not found", file=sys.stderr)
+        sys.exit(1)
+    if not cs.category_id:
+        siblings = [c for cid, c in _channels.items() if cid != channel_id]
+    else:
+        siblings = [
+            c for cid, c in _channels.items()
+            if c.category_id == cs.category_id and cid != channel_id
+        ]
+    if not siblings:
+        print("No siblings found.")
+        return
+    for s in sorted(siblings, key=lambda c: c.name):
+        print(_channel_summary(s))
+        print()
+
+
+def _send_to_cli():
+    """CLI: python arbos.py send-to <channel-name> 'message' — send to a sibling."""
+    if len(sys.argv) < 4:
+        print("Usage: python arbos.py send-to <channel-name> <message>", file=sys.stderr)
+        sys.exit(1)
+    target_name = sys.argv[2]
+    message = " ".join(sys.argv[3:])
+    channel_id = os.environ.get("ARBOS_CHANNEL_ID", "")
+    if not channel_id:
+        print("ARBOS_CHANNEL_ID must be set", file=sys.stderr)
+        sys.exit(1)
+    _load_channels()
+    cs = _channels.get(channel_id)
+    if not cs:
+        print(f"Channel {channel_id} not found", file=sys.stderr)
+        sys.exit(1)
+    if cs.category_id:
+        visible = {cid: c for cid, c in _channels.items()
+                   if c.category_id == cs.category_id and cid != channel_id}
+    else:
+        visible = {cid: c for cid, c in _channels.items() if cid != channel_id}
+    target_cs = None
+    target_cid = None
+    for cid, c in visible.items():
+        if c.name == target_name:
+            target_cs = c
+            target_cid = cid
+            break
+    if not target_cs:
+        print(f"Channel '{target_name}' not found in scope.", file=sys.stderr)
+        avail = ", ".join(c.name for c in visible.values())
+        print(f"Available: {avail}", file=sys.stderr)
+        sys.exit(1)
+    log_chat("bot", f"[from #{cs.name}] {message}", channel_id=target_cid)
+    log_chat("bot", f"[sent to #{target_name}] {message}", channel_id=channel_id)
+    token = os.environ.get("BOT_TOKEN", "")
+    if token and target_cid:
+        _send_discord_text(f"**[from #{cs.name}]** {message}", target=(token, target_cid))
+    print(f"Message sent to #{target_name}.")
+
+
+def _read_sibling_cli():
+    """CLI: python arbos.py read-sibling <channel-name> [state|pin|goal] — read sibling context."""
+    if len(sys.argv) < 3:
+        print("Usage: python arbos.py read-sibling <channel-name> [state|pin|goal]", file=sys.stderr)
+        sys.exit(1)
+    target_name = sys.argv[2]
+    what = sys.argv[3] if len(sys.argv) > 3 else "all"
+    channel_id = os.environ.get("ARBOS_CHANNEL_ID", "")
+    if not channel_id:
+        print("ARBOS_CHANNEL_ID must be set", file=sys.stderr)
+        sys.exit(1)
+    _load_channels()
+    cs = _channels.get(channel_id)
+    if not cs:
+        print(f"Channel {channel_id} not found", file=sys.stderr)
+        sys.exit(1)
+    if cs.category_id:
+        visible = {cid: c for cid, c in _channels.items()
+                   if c.category_id == cs.category_id and cid != channel_id}
+    else:
+        visible = {cid: c for cid, c in _channels.items() if cid != channel_id}
+    target_cs = None
+    for cid, c in visible.items():
+        if c.name == target_name:
+            target_cs = c
+            break
+    if not target_cs:
+        print(f"Channel '{target_name}' not found in scope.", file=sys.stderr)
+        avail = ", ".join(c.name for c in visible.values())
+        print(f"Available: {avail}", file=sys.stderr)
+        sys.exit(1)
+    if what in ("state", "all"):
+        sf = _state_file(target_cs.channel_id)
+        state = sf.read_text().strip() if sf.exists() else "(empty)"
+        print(f"## State\n{state}\n")
+    if what in ("pin", "all"):
+        pf = _pin_file(target_cs.channel_id)
+        pin = pf.read_text().strip() if pf.exists() else "(no pin)"
+        print(f"## Pin\n{pin}\n")
+    if what in ("goal", "all"):
+        goal = target_cs.goal or "(no goal)"
+        print(f"## Goal\n{goal}\n")
+
+
+def _resource_cli():
+    """CLI: python arbos.py resource <add|rm|list> — manage tracked resources.
+
+    add <type> <name> [--destroy "cmd"] [--meta key=value ...]
+    rm <name>
+    list
+    """
+    _load_channels()
+    channel_id = os.environ.get("ARBOS_CHANNEL_ID", "")
+    if not channel_id:
+        print("ARBOS_CHANNEL_ID must be set", file=sys.stderr)
+        sys.exit(1)
+    cs = _channels.get(channel_id)
+    if not cs:
+        print(f"Channel {channel_id} not found", file=sys.stderr)
+        sys.exit(1)
+
+    args = sys.argv[2:]
+    if not args:
+        print("Usage: python arbos.py resource <add|rm|list>", file=sys.stderr)
+        sys.exit(1)
+
+    action = args[0].lower()
+
+    if action == "list":
+        if not cs.resources and not cs.pm2_procs:
+            print("No resources or processes tracked.")
+            return
+        if cs.pm2_procs:
+            print(f"## PM2 Processes ({len(cs.pm2_procs)})")
+            for p in cs.pm2_procs:
+                print(f"  - {p}")
+        if cs.resources:
+            print(f"## Resources ({len(cs.resources)})")
+            for r in cs.resources:
+                meta = r.get("meta", {})
+                meta_str = " | ".join(f"{k}={v}" for k, v in meta.items()) if meta else ""
+                destroy = f" | destroy: {r['destroy_cmd']}" if r.get("destroy_cmd") else ""
+                print(f"  - [{r.get('type', '?')}] {r.get('name', '?')}{' (' + meta_str + ')' if meta_str else ''}{destroy}")
+
+    elif action == "add":
+        if len(args) < 3:
+            print("Usage: python arbos.py resource add <type> <name> [--destroy \"cmd\"] [--meta key=value ...]", file=sys.stderr)
+            sys.exit(1)
+        rtype = args[1]
+        rname = args[2]
+        destroy_cmd = ""
+        meta: dict[str, str] = {}
+        i = 3
+        while i < len(args):
+            if args[i] == "--destroy" and i + 1 < len(args):
+                destroy_cmd = args[i + 1]
+                i += 2
+            elif args[i] == "--meta" and i + 1 < len(args):
+                i += 1
+                while i < len(args) and not args[i].startswith("--"):
+                    if "=" in args[i]:
+                        k, v = args[i].split("=", 1)
+                        meta[k] = v
+                    i += 1
+            else:
+                i += 1
+
+        resource = {
+            "type": rtype,
+            "name": rname,
+            "created_at": datetime.now().isoformat(),
+            "destroy_cmd": destroy_cmd,
+            "meta": meta,
+        }
+        cs.resources.append(resource)
+        with _channels_lock:
+            _save_channels()
+        print(f"Resource added: [{rtype}] {rname}")
+        if destroy_cmd:
+            print(f"  destroy: {destroy_cmd}")
+        if meta:
+            print(f"  meta: {meta}")
+
+    elif action == "rm":
+        if len(args) < 2:
+            print("Usage: python arbos.py resource rm <name>", file=sys.stderr)
+            sys.exit(1)
+        target = args[1]
+        found = None
+        for idx, r in enumerate(cs.resources):
+            if r.get("name") == target:
+                found = idx
+                break
+        if found is None:
+            print(f"Resource '{target}' not found", file=sys.stderr)
+            sys.exit(1)
+        removed = cs.resources.pop(found)
+        with _channels_lock:
+            _save_channels()
+        print(f"Resource removed: [{removed.get('type', '?')}] {removed.get('name', '?')}")
+
+    else:
+        print(f"Unknown action: {action}. Use: add, rm, list", file=sys.stderr)
         sys.exit(1)
 
 
@@ -3913,21 +4343,39 @@ def main() -> None:
         print(f"On future starts: BOT_TOKEN='{bot_token}' python arbos.py")
         return
 
-    if len(sys.argv) > 1 and sys.argv[1] == "thread-done":
-        _thread_done_cli()
+    if len(sys.argv) > 1 and sys.argv[1] == "done":
+        _done_cli()
         return
 
-    if len(sys.argv) > 1 and sys.argv[1] == "thread-ctl":
-        _thread_ctl_cli()
+    if len(sys.argv) > 1 and sys.argv[1] == "ctl":
+        _ctl_cli()
         return
 
-    if len(sys.argv) > 1 and sys.argv[1] == "thread":
-        _thread_create_cli()
+    if len(sys.argv) > 1 and sys.argv[1] == "resource":
+        _resource_cli()
         return
 
-    if len(sys.argv) > 1 and sys.argv[1] not in ("send", "encrypt", "sendfile", "thread-done", "thread-ctl", "thread"):
+    if len(sys.argv) > 1 and sys.argv[1] == "scope":
+        _scope_cli()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "siblings":
+        _siblings_cli()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "send-to":
+        _send_to_cli()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "read-sibling":
+        _read_sibling_cli()
+        return
+
+    _KNOWN_CMDS = {"send", "encrypt", "sendfile", "done", "ctl",
+                   "scope", "siblings", "send-to", "read-sibling", "resource"}
+    if len(sys.argv) > 1 and sys.argv[1] not in _KNOWN_CMDS:
         print(f"Unknown subcommand: {sys.argv[1]}", file=sys.stderr)
-        print("Usage: arbos.py [send|sendfile|encrypt|thread-done|thread-ctl|thread]", file=sys.stderr)
+        print("Usage: arbos.py [send|sendfile|encrypt|done|ctl|scope|siblings|send-to|read-sibling|resource]", file=sys.stderr)
         sys.exit(1)
 
     _log(f"arbos starting in {WORKING_DIR} (provider={PROVIDER}, model={CLAUDE_MODEL})")

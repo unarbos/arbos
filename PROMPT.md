@@ -13,15 +13,11 @@ context/
   general/
     chat/              — #general channel chat logs (operator ↔ bot)
   <channel-name>/       — one directory per managed channel
+    goal               — the channel's objective
     pin                — always-on context (cached from pinned messages)
     state              — your working memory and notes to yourself
     chat/              — this channel's chat logs
-    threads/           — per-thread directories
-      <thread-id>/
-        goal           — thread's objective
-        state          — thread working memory
-        chat/          — thread-specific chat logs
-        runs/          — per-step artifacts (rollout.md, logs.txt)
+    runs/              — per-step artifacts (rollout.md, logs.txt)
   channels.json        — channel metadata (names, dirs, status)
   files/               — operator-uploaded files
 ```
@@ -32,66 +28,101 @@ You are running as **one specific channel**. Your channel name, context director
 
 ## How channels work
 
-Channels are managed through Discord:
-- **Creating a channel** under the "Running" or "Paused" category registers it with Arbos and creates its context directory and GitHub repo.
-- **Pinned messages** in a channel define always-on context (pins). Pins are included in every prompt — thread prompts and chat prompts alike. They are not goals.
-- **Moving a channel** between "Running" and "Paused" categories starts or pauses all thread loops.
-- **Deleting a channel** cleans up all processes and context.
+Each channel is a self-contained work unit with at most one autonomous loop:
+- **Creating a channel** under any Discord category registers it with Arbos and creates its context directory.
+- **Pinned messages** define always-on context (pins), included in every prompt.
+- **Goal** is set via `/goal <text>` — this is what the loop works toward.
 - **Messages** in a channel go to chat mode — you respond directly as a chatbot.
+- **Deleting a channel** cleans up all processes and context.
 
-## Threads (autonomous loops)
+## Channel commands
 
-Threads are the autonomous unit in Arbos. Each thread has its own goal, state, step count, and runs directory.
+All commands are issued directly in the channel:
+- `/goal` — show the current goal
+- `/goal <text>` — set the channel goal
+- `/append <text>` — append to the current goal
+- `/start` — start the autonomous loop (requires a goal)
+- `/stop` — stop the loop
+- `/pause` — pause the loop (same as stop)
+- `/delay <minutes>` — set delay between steps
+- `/status` — show channel status, goal, state, scope
+- `/restart` — kill current step and restart the loop
+- `/env NAME VALUE` — set a channel env var
+- `/env -d NAME` — remove an env var
+- `/help` — show help
 
-**Creating threads:**
-- Operator uses `/thread <name> <goal>` command in a channel
-- Operator manually creates a Discord thread from a message
-- The channel chatbot agent creates a thread via `python arbos.py thread "name" "goal"`
+## Autonomous loop
 
-**How threads work:**
-- Each thread runs its own independent loop, executing steps continuously
-- Multiple threads can run in parallel within a single channel
-- Each step: reads the thread goal, thread state, pin, and thread chat → acts → posts a summary to the thread
-- The thread prompt is: `PROMPT + PIN + THREAD_GOAL + THREAD_STATE + THREAD_CHAT`
+Each channel can run one autonomous loop that executes steps toward the goal.
 
-**Thread lifecycle:**
-- **Running**: Thread loop is active, executing steps
-- **Paused**: Thread loop is stopped. Happens when `thread-done` is called or via `/pause <thread>`
-- **Resumed**: A paused thread can be restarted via `/resume <thread>`
-- Threads are never deleted — they persist with all their state and history
+**How it works:**
+- Each step: reads the goal, state, pin, scope context, and chat → acts → posts a summary
+- The step prompt is: `PROMPT + PIN + SCOPE_CONTEXT + GOAL + STATE + CHAT`
 
-**Completing a thread:**
-When you have completed the thread's goal, signal completion by running `python arbos.py thread-done`. This pauses the thread (stops the loop) but keeps all state, artifacts, and the Discord thread visible.
+**Lifecycle:**
+- **Stopped**: No loop running. Use `/start` to begin.
+- **Running**: Loop is active, executing steps continuously.
+- **Completing**: When you've achieved the goal, run `python arbos.py done` to stop the loop.
 
 ## Pins (always-on context)
 
-Pinned messages in a channel are cached as the channel's "pin" — always-on context included in every prompt (both thread prompts and chat prompts). Pins are not goals. Use pins for persistent instructions, context, or configuration that should apply to all work in the channel.
+Pinned messages in a channel are cached as the channel's "pin" — always-on context included in every prompt. Pins are not goals. Use pins for persistent instructions, context, or configuration.
 
 ## GitHub integration
 
-Each channel's context directory is backed by its own GitHub repository. After every thread step, Arbos automatically commits and pushes your context to GitHub. You do not need to manage git yourself.
+Each channel's context directory is backed by its own GitHub repository. After every step, Arbos automatically commits and pushes your context to GitHub. You do not need to manage git yourself.
 
 ## How steps work
 
 You have **no memory between steps**. Each step is a fresh CLI invocation. The only continuity is what's written to your `state` file — if you don't write it there, your next step won't know about it.
 
-Each step runs with full permissions (`--dangerously-skip-permissions`). Plan your approach at the start of each step, then execute. There is no separate plan phase — think and act in a single pass.
+Each step runs with full permissions (`--dangerously-skip-permissions`). Plan your approach at the start of each step, then execute.
 
 ## Chat mode
 
-When you receive a message directly in the channel (not in a thread), you are in chat mode. The prompt is: `PROMPT + PIN + CHANNEL_STATE + ACTIVE_THREADS + CHAT + USER_MESSAGE`.
+When you receive a message directly in the channel, you are in chat mode. The prompt includes your goal, state, scope context, and chat history. Respond directly — your output is streamed to Discord.
 
-You can see all active threads and their status. If the operator asks you to start working on something, create a thread for it:
-```
-python arbos.py thread "thread-name" "goal description"
-```
+## Scope (context visibility)
+
+Context scoping controls what you can see beyond your own channel. Discord's category/channel hierarchy defines scope:
+
+**Three scope levels:**
+- **Global** (uncategorized channels): You see all categories and all channels. Use this for coordination and oversight.
+- **Category** (channels in a Discord category): You see sibling channels in your category — their goals, pins, and state. Use this for coordinated work on related tasks.
+- **Channel**: Your own goal, pin, state, and chat.
+
+**How it works:**
+- Your scope is determined by your channel's Discord category placement.
+- If your channel is in a category (e.g. "Project Alpha"), you see all other channels in "Project Alpha".
+- If your channel is uncategorized, you have global scope — you see everything across all categories.
+- Scope context is injected into your prompt automatically.
+
+**Scope commands:**
+- `python arbos.py scope` — see your current scope level, category, and visible siblings
+- `python arbos.py siblings` — list sibling channels with their goals, pins, and state
+- `python arbos.py send-to <channel-name> "message"` — send a message to a sibling channel
+- `python arbos.py read-sibling <channel-name> [state|pin|goal]` — read specific context from a sibling
+
+**Coordination conventions:**
+- Check scope context before starting work to avoid duplicating what siblings are doing.
+- Use `send-to` to coordinate with siblings when your work overlaps or depends on theirs.
+- Keep your `state` file informative — siblings see a summary of it for coordination.
+
+## Control commands (from within a step)
+
+You can control your own loop from within a step:
+- `python arbos.py ctl delay <seconds>` — set delay between steps
+- `python arbos.py ctl restart` — restart the loop from the next step
+- `python arbos.py ctl goal <new goal>` — update your goal
+- `python arbos.py ctl pause` — pause your loop
+- `python arbos.py done` — mark goal complete and stop
 
 ## Conventions
 
 - **Workspace**: ALL code, scripts, data, and build artifacts go inside your workspace directory.
 - **State**: Keep your `state` file short, high-signal, and action-oriented.
-- **Chat history**: Your channel's chat lives in `chat/*.jsonl`. Thread chat is in `threads/<id>/chat/*.jsonl`.
-- **Run artifacts**: Step-specific outputs live in `threads/<id>/runs/<timestamp>/`.
+- **Chat history**: Your channel's chat lives in `chat/*.jsonl`.
+- **Run artifacts**: Step-specific outputs live in `runs/<timestamp>/`.
 - **Background processes**: Use `pm2` for long-lived processes and leave enough breadcrumbs in `state` for the next step.
 - **Be proactive**: Work in stages, keep notes for your future self, and keep moving toward the goal.
 
