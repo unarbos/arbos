@@ -26,6 +26,8 @@ WORKING_DIR = Path(__file__).parent
 PROMPT_FILE = WORKING_DIR / "PROMPT.md"
 CONTEXT_DIR = WORKING_DIR / "context"
 GOAL_FILE = CONTEXT_DIR / "GOAL.md"
+# Presence of GO.md = goal loop may run steps; absence = paused (GOAL.md unchanged).
+GO_FLAG_FILE = CONTEXT_DIR / "GO.md"
 STATE_FILE = CONTEXT_DIR / "STATE.md"
 INBOX_FILE = CONTEXT_DIR / "INBOX.md"
 RUNS_DIR = CONTEXT_DIR / "runs"
@@ -36,6 +38,8 @@ CHATLOG_DIR = CONTEXT_DIR / "chat"
 FILES_DIR = CONTEXT_DIR / "files"
 RESTART_FLAG = WORKING_DIR / ".restart"
 CHAT_ID_FILE = WORKING_DIR / "chat_id.txt"
+# Forum supergroup topic for operator + goal-loop bubbles (same thread as streaming /operator replies).
+OPERATOR_THREAD_ID_FILE = WORKING_DIR / "operator_thread_id.txt"
 ENV_ENC_FILE = WORKING_DIR / ".env.enc"
 
 # ── Encrypted .env ───────────────────────────────────────────────────────────
@@ -218,13 +222,10 @@ def _redact_secrets(text: str) -> str:
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub("[REDACTED]", text)
     return text
-MAX_CONCURRENT = int(os.environ.get("CLAUDE_MAX_CONCURRENT", "4"))
 HEALTH_PORT = int(os.environ.get("ARBOS_HEALTH_PORT") or os.environ.get("PROXY_PORT", "8089"))
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "anthropic/claude-opus-4.6")
 LLM_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 LLM_BASE_URL = "https://openrouter.ai/api"
-COST_PER_M_INPUT = float(os.environ.get("COST_PER_M_INPUT", "5.00"))
-COST_PER_M_OUTPUT = float(os.environ.get("COST_PER_M_OUTPUT", "25.00"))
 IS_ROOT = os.getuid() == 0
 MAX_RETRIES = int(os.environ.get("CLAUDE_MAX_RETRIES", "5"))
 try:
@@ -338,10 +339,10 @@ def _persist_env_var_with_comment(key: str, value: str, description: str) -> tup
 
 
 _shutdown = threading.Event()
-_claude_semaphore = threading.Semaphore(MAX_CONCURRENT)
 _step_count = 0
-_token_usage = {"input": 0, "output": 0}
-_token_lock = threading.Lock()
+# Approximate size of the prompt Arbos passes into the agent (request scale for OpenRouter).
+_context_est_tokens = 0
+_context_lock = threading.Lock()
 _child_procs: set[subprocess.Popen] = set()
 _child_procs_lock = threading.Lock()
 
@@ -367,7 +368,13 @@ class AgentState:
 
 
 _agent = AgentState()
-_agent_lock = threading.Lock()
+# Agent state is saved from both locked and unlocked call sites, so this must
+# be re-entrant to avoid self-deadlocking during /loop, /resume, and step churn.
+_agent_lock = threading.RLock()
+
+# First step bubble from /loop (sent in the bot handler so it appears before the agent thread runs).
+_pending_step_msg_id: int | None = None
+_pending_step_msg_lock = threading.Lock()
 
 # Process-wide operator visibility (HTTP /health, Telegram /status).
 _arbos_boot_wall: float = 0.0
@@ -421,6 +428,7 @@ def _operator_health_payload() -> dict[str, Any]:
         gs = _agent
         out["agent"] = {
             "state": _agent_status_label(gs),
+            "go": GO_FLAG_FILE.exists(),
             "delay_minutes": gs.delay_minutes,
             "step_count": gs.step_count,
             "last_step_ok": gs.last_step_ok,
@@ -438,13 +446,17 @@ def _operator_health_payload() -> dict[str, Any]:
 
 
 def _save_agent():
-    """Persist agent metadata to meta.json."""
+    """Persist agent metadata to meta.json.
+
+    Safe to call both inside and outside an existing ``with _agent_lock`` block.
+    """
     with _agent_lock:
+        st = _agent.started
         data = {
             "summary": _agent.summary,
             "delay_minutes": _agent.delay_minutes,
-            "started": _agent.started,
-            "paused": _agent.paused,
+            "started": st,
+            "paused": _paused_persistent(started=st),
             "step_count": _agent.step_count,
             "goal_hash": _agent.goal_hash,
             "last_run": _agent.last_run,
@@ -472,13 +484,13 @@ def _load_agent():
             legacy_s = int(info.get("delay", 0))
             _agent.delay_minutes = (legacy_s + 59) // 60 if legacy_s > 0 else 0
         _agent.started = info.get("started", False)
-        _agent.paused = info.get("paused", False)
         _agent.step_count = info.get("step_count", 0)
         _agent.goal_hash = info.get("goal_hash", "")
         _agent.last_run = info.get("last_run", "")
         _agent.last_finished = info.get("last_finished", "")
         _agent.last_step_ok = info.get("last_step_ok")
         _agent.last_step_error = info.get("last_step_error", "")
+        _agent.paused = _paused_persistent(started=_agent.started)
 
 
 def _format_last_time(iso_ts: str) -> str:
@@ -498,12 +510,39 @@ def _format_last_time(iso_ts: str) -> str:
         return "unknown"
 
 
+def _paused_persistent(*, started: bool | None = None) -> bool:
+    """True when a goal exists but GO.md is absent (intentional pause).
+
+    Pass ``started`` when already holding ``_agent_lock`` to avoid deadlock.
+    """
+    if started is None:
+        with _agent_lock:
+            st = _agent.started
+    else:
+        st = started
+    if not st:
+        return False
+    if not GOAL_FILE.exists() or not GOAL_FILE.read_text().strip():
+        return False
+    return not GO_FLAG_FILE.exists()
+
+
+def _write_go_flag() -> None:
+    CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+    GO_FLAG_FILE.write_text(
+        "# Arbos: run enabled\n"
+        "# Remove this file (or /pause) to pause the loop without changing GOAL.md.\n"
+    )
+
+
 def _agent_status_label(gs: AgentState) -> str:
-    if gs.started and not gs.paused:
-        return "running"
-    if gs.started and gs.paused:
+    if not gs.started:
+        return "stopped"
+    if not GOAL_FILE.exists() or not GOAL_FILE.read_text().strip():
+        return "idle"
+    if not GO_FLAG_FILE.exists():
         return "paused"
-    return "stopped"
+    return "running"
 
 
 def _file_log(msg: str):
@@ -530,36 +569,192 @@ def fmt_duration(seconds: float) -> str:
     return f"{m}m {s}s"
 
 
-def _reset_tokens():
-    with _token_lock:
-        _token_usage["input"] = 0
-        _token_usage["output"] = 0
+def _approx_prompt_context_tokens(prompt: str) -> int:
+    """Rough token count from UTF-8 length (~4 bytes/token); matches common heuristics."""
+    if not prompt:
+        return 0
+    n = len(prompt.encode("utf-8"))
+    return max(1, (n + 3) // 4)
 
 
-def _get_tokens() -> tuple[int, int]:
-    with _token_lock:
-        return _token_usage["input"], _token_usage["output"]
+def _set_prompt_context_estimate(prompt: str) -> None:
+    global _context_est_tokens
+    with _context_lock:
+        _context_est_tokens = _approx_prompt_context_tokens(prompt)
 
 
-def fmt_tokens(inp: int, out: int, elapsed: float = 0) -> str:
-    def _k(n: int) -> str:
-        return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
-    tps = ""
-    if elapsed > 0 and out > 0:
-        tps = f" | {out / elapsed:.0f} t/s"
-    cost = (inp * COST_PER_M_INPUT + out * COST_PER_M_OUTPUT) / 1_000_000
-    cost_str = f" | ${cost:.4f}" if cost >= 0.0001 else ""
-    return f"{_k(inp)} in / {_k(out)} out{tps}{cost_str}"
+def _fmt_context_for_header(est: int) -> str:
+    if est <= 0:
+        return "~0 ctx"
+    if est >= 1000:
+        return f"~{est / 1000:.1f}k ctx"
+    return f"~{est} ctx"
 
 
 def _arbos_response_header(elapsed_s: float) -> str:
-    """First line on Telegram for agent/operator responses: elapsed + token usage."""
-    inp, out = _get_tokens()
-    toks = fmt_tokens(inp, out, elapsed_s) if (inp or out) else "0 toks"
-    return f"Arbos ( {fmt_duration(elapsed_s)}, {toks} )"
+    """First line on Telegram: elapsed + estimated request context (our prompt to the agent)."""
+    with _context_lock:
+        est = _context_est_tokens
+    return f"Arbos ( {fmt_duration(elapsed_s)}, {_fmt_context_for_header(est)} )"
+
+
+def _step_response_header(elapsed_s: float) -> str:
+    """First line on step bubbles: same timing/ctx as Arbos replies, prefixed with Step."""
+    with _context_lock:
+        est = _context_est_tokens
+    return f"Step ( {fmt_duration(elapsed_s)}, {_fmt_context_for_header(est)} )"
 
 
 # ── Prompt helpers ───────────────────────────────────────────────────────────
+
+# Built-in descriptions for env vars Arbos / Claude Code use (values never go in prompts).
+_ARBOS_ENV_BUILTIN_DOC: dict[str, str] = {
+    "AGENT_DELAY": "Extra seconds added to the loop delay between agent steps.",
+    "ANTHROPIC_API_KEY": "API key passed into the agent subprocess for LLM calls (from OPENROUTER_API_KEY).",
+    "ANTHROPIC_AUTH_TOKEN": "Optional auth token for the API (cleared when using OpenRouter).",
+    "ANTHROPIC_BASE_URL": "Anthropic-compatible API base URL (OpenRouter).",
+    "ARBOS_HEALTH_PORT": "Local HTTP /health port for this Arbos process.",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "Claude Code setting to reduce background traffic.",
+    "CLAUDE_MAX_RETRIES": "Retries when a Claude run fails.",
+    "CLAUDE_MODEL": "Model id for Claude Code (e.g. anthropic/claude-opus-4.6).",
+    "CLAUDE_TIMEOUT": "Idle watchdog timeout in seconds for Claude runs; 0 disables.",
+    "OPENROUTER_API_KEY": "OpenRouter API key (loaded into the agent as ANTHROPIC_API_KEY).",
+    "PROXY_PORT": "Fallback for health port if ARBOS_HEALTH_PORT is unset.",
+    "TAU_BOT_TOKEN": "Telegram bot token (Arbos host only; not passed to the coding agent subprocess).",
+    "TELEGRAM_OWNER_ID": "Telegram user id allowed to control the bot.",
+}
+
+_ENV_PROMPT_SKIP_KEYS = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "MAIL", "SHELL", "PWD", "OLDPWD",
+    "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_NUMERIC", "LC_TIME",
+    "TERM", "TERMINAL", "SHLVL", "HOSTNAME", "HOST", "INVOCATION_ID",
+    "JOURNAL_STREAM", "MANPATH", "LS_COLORS", "COMP_WORDS", "COMP_LINE", "_",
+    "CLUTTER_IM_MODULE", "SESSION_MANAGER", "XAUTHORITY", "DISPLAY",
+    "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS",
+})
+
+_ENV_PROMPT_SKIP_PREFIXES = (
+    "XDG_", "VSCODE", "CURSOR_", "npm_", "SSH_CONNECTION", "SSH_CLIENT",
+    "SSH_TTY", "LESSOPEN", "LESSCLOSE", "BUNDLED_DEBUGPY", "PYDEVD_",
+)
+
+
+def _env_key_suppressed_for_prompt(key: str) -> bool:
+    if key in _ENV_PROMPT_SKIP_KEYS:
+        return True
+    return any(key.startswith(p) for p in _ENV_PROMPT_SKIP_PREFIXES)
+
+
+def _env_key_looks_config_like(key: str) -> bool:
+    if _env_key_suppressed_for_prompt(key):
+        return False
+    u = key.upper()
+    if u.startswith(
+        (
+            "CLAUDE_", "ARBOS_", "OPENROUTER_", "TELEGRAM_", "ANTHROPIC_",
+            "AGENT_", "AWS_", "AZURE_", "GOOGLE_", "GCP_", "GITHUB", "GITLAB_",
+            "DOCKER_", "OPENAI_", "HF_", "DATABASE", "DB_",
+        )
+    ) or u.startswith("KUBECONFIG"):
+        return True
+    needles = (
+        "API_KEY", "_API_KEY", "_TOKEN", "_SECRET", "SECRET_", "PASSWORD",
+        "CREDENTIAL", "WEBHOOK", "ENDPOINT", "_KEY", "AUTH",
+    )
+    return any(n in u for n in needles)
+
+
+def _read_project_dotenv_plaintext() -> str | None:
+    """Raw .env text for metadata (comments + keys); None if unavailable."""
+    env_path = WORKING_DIR / ".env"
+    if env_path.exists():
+        return env_path.read_text()
+    if not ENV_ENC_FILE.exists():
+        return None
+    tok = os.environ.get("TAU_BOT_TOKEN", "")
+    if not tok:
+        return None
+    try:
+        return _decrypt_env_content(tok)
+    except InvalidToken:
+        return None
+
+
+def _parse_dotenv_key_comment_map(content: str) -> tuple[dict[str, str], set[str]]:
+    """Map assignment keys to preceding full-line # comments; also return all assignment keys."""
+    desc: dict[str, str] = {}
+    all_keys: set[str] = set()
+    pending: list[str] = []
+    for raw in content.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            pending.append(s[1:].strip())
+            continue
+        assign = s.split("#", 1)[0].strip()
+        if "=" not in assign:
+            pending.clear()
+            continue
+        key = assign.split("=", 1)[0].strip()
+        if not _ENV_KEY_NAME_RE.match(key):
+            pending.clear()
+            continue
+        all_keys.add(key)
+        joined = "; ".join(x for x in pending if x)
+        if joined:
+            desc[key] = joined
+        pending.clear()
+    return desc, all_keys
+
+
+def _agent_subprocess_env_keys() -> set[str]:
+    """Env keys visible to the Claude Code subprocess (matches _claude_env)."""
+    keys = set(os.environ.keys())
+    keys.discard("TAU_BOT_TOKEN")
+    keys.update(("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"))
+    return keys
+
+
+def _prompt_env_keys_to_show(agent_keys: set[str], dotenv_keys: set[str]) -> list[str]:
+    show: set[str] = set()
+    show |= agent_keys & dotenv_keys
+    for k in agent_keys:
+        if k in _ARBOS_ENV_BUILTIN_DOC or _env_key_looks_config_like(k):
+            show.add(k)
+    return sorted(show)
+
+
+def format_available_env_vars_section(*, max_keys: int = 120) -> str:
+    """Human-readable KEY + description for the agent (never values)."""
+    agent_keys = _agent_subprocess_env_keys()
+    raw = _read_project_dotenv_plaintext()
+    file_desc: dict[str, str] = {}
+    dotenv_keys: set[str] = set()
+    if raw:
+        file_desc, dotenv_keys = _parse_dotenv_key_comment_map(raw)
+
+    all_keys = _prompt_env_keys_to_show(agent_keys, dotenv_keys)
+    truncated = len(all_keys) > max_keys
+    keys = all_keys[:max_keys]
+
+    lines = [
+        "## Environment variables available to you",
+        "",
+        "These keys exist in your agent subprocess (via the Arbos host). "
+        "Values are never listed here — use them as needed; do not print secrets.",
+        "",
+    ]
+    for k in keys:
+        desc = file_desc.get(k) or _ARBOS_ENV_BUILTIN_DOC.get(k)
+        if not desc:
+            desc = "Present in the agent environment (no description in project env file)."
+        lines.append(f"- `{k}`: {desc}")
+    if truncated:
+        lines.append("")
+        lines.append(f"(… and {len(all_keys) - max_keys} more keys not shown.)")
+    return "\n".join(lines)
+
 
 def load_prompt(consume_inbox: bool = False, agent_step: int = 0) -> str:
     """Build full prompt: PROMPT.md + GOAL/STATE/INBOX + chatlog."""
@@ -568,6 +763,7 @@ def load_prompt(consume_inbox: bool = False, agent_step: int = 0) -> str:
         text = PROMPT_FILE.read_text().strip()
         if text:
             parts.append(text)
+    parts.append(format_available_env_vars_section())
     if GOAL_FILE.exists():
         goal_text = GOAL_FILE.read_text().strip()
         if goal_text:
@@ -664,8 +860,9 @@ TELEGRAM_SAFE_TEXT = 3900
 TELEGRAM_HELP_TEXT = """\
 Arbos:
 - /loop GOAL.md
-- /pause
+- /pause 
 - /resume
+- /force
 - /clear
 - /delay <mins>
 - /restart
@@ -686,6 +883,29 @@ def _is_leading_slash_command(message) -> bool:
     return True
 
 
+def _operator_message_thread_id() -> int | None:
+    if not OPERATOR_THREAD_ID_FILE.exists():
+        return None
+    raw = OPERATOR_THREAD_ID_FILE.read_text().strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _save_operator_telegram(message: Any) -> None:
+    """Persist chat id and forum topic so loop steps and HTTP sends match the operator thread."""
+    CHAT_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CHAT_ID_FILE.write_text(str(message.chat.id))
+    tid = getattr(message, "message_thread_id", None)
+    if tid is not None:
+        OPERATOR_THREAD_ID_FILE.write_text(str(int(tid)))
+    else:
+        OPERATOR_THREAD_ID_FILE.unlink(missing_ok=True)
+
+
 def _truncate_telegram_text(text: str, limit: int = TELEGRAM_SAFE_TEXT) -> str:
     """Trim for Telegram message body; append notice if truncated."""
     text = text or ""
@@ -693,6 +913,37 @@ def _truncate_telegram_text(text: str, limit: int = TELEGRAM_SAFE_TEXT) -> str:
         return text
     notice = f"\n\n… [truncated, {len(text)} chars total]"
     return text[: max(0, limit - len(notice))] + notice
+
+
+def _telegram_send_message_fallback(
+    bot: Any,
+    chat_id: int,
+    text: str,
+    base_kw: dict[str, Any],
+) -> tuple[Any, dict[str, Any]]:
+    """Send a Telegram message; drop reply/thread kwargs if the API rejects the first attempt."""
+    body = _truncate_telegram_text(_redact_secrets(text))[:TELEGRAM_TEXT_MAX]
+    attempts: list[dict[str, Any]] = []
+    attempts.append(dict(base_kw))
+    no_reply = {k: v for k, v in base_kw.items() if k != "reply_to_message_id"}
+    if no_reply != attempts[-1]:
+        attempts.append(no_reply)
+    tid = base_kw.get("message_thread_id")
+    if tid is not None:
+        thread_only: dict[str, Any] = {"message_thread_id": tid}
+        if thread_only != attempts[-1]:
+            attempts.append(thread_only)
+    if attempts[-1]:
+        attempts.append({})
+
+    last_exc: Exception | None = None
+    for kw in attempts:
+        try:
+            return bot.send_message(chat_id, body, **kw), kw
+        except Exception as e:
+            last_exc = e
+    assert last_exc is not None
+    raise last_exc
 
 
 def _telegram_result_ok(data: Any) -> tuple[bool, str]:
@@ -741,7 +992,7 @@ def _build_agent_failure_detail(result: subprocess.CompletedProcess) -> str:
     return "\n".join(lines)
 
 
-def _step_update_target() -> tuple[str, str] | None:
+def _step_update_target() -> tuple[str, str, int | None] | None:
     token = os.getenv("TAU_BOT_TOKEN")
     if not token:
         _log("step update skipped: TAU_BOT_TOKEN not set")
@@ -753,19 +1004,22 @@ def _step_update_target() -> tuple[str, str] | None:
     if not chat_id:
         _log("step update skipped: empty chat_id.txt")
         return None
-    return token, chat_id
+    return token, chat_id, _operator_message_thread_id()
 
 
-def _send_telegram_text(text: str, *, target: tuple[str, str] | None = None) -> bool:
+def _send_telegram_text(text: str, *, target: tuple[str, str, int | None] | None = None) -> bool:
     target = target or _step_update_target()
     if not target:
         return False
-    token, chat_id = target
+    token, chat_id, thread_id = target
     text = _redact_secrets(text)
+    payload: dict[str, Any] = {"chat_id": chat_id, "text": text[:TELEGRAM_TEXT_MAX]}
+    if thread_id is not None:
+        payload["message_thread_id"] = thread_id
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text[:TELEGRAM_TEXT_MAX]},
+            json=payload,
             timeout=15,
         )
         response.raise_for_status()
@@ -781,17 +1035,20 @@ def _send_telegram_text(text: str, *, target: tuple[str, str] | None = None) -> 
     return True
 
 
-def _send_telegram_new(text: str, *, target: tuple[str, str] | None = None) -> int | None:
+def _send_telegram_new(text: str, *, target: tuple[str, str, int | None] | None = None) -> int | None:
     """Send a new Telegram message and return its message_id."""
     target = target or _step_update_target()
     if not target:
         return None
-    token, chat_id = target
+    token, chat_id, thread_id = target
     text = _redact_secrets(text)
+    payload: dict[str, Any] = {"chat_id": chat_id, "text": text[:TELEGRAM_TEXT_MAX]}
+    if thread_id is not None:
+        payload["message_thread_id"] = thread_id
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text[:TELEGRAM_TEXT_MAX]},
+            json=payload,
             timeout=15,
         )
         response.raise_for_status()
@@ -806,18 +1063,24 @@ def _send_telegram_new(text: str, *, target: tuple[str, str] | None = None) -> i
         return None
 
 
-def _edit_telegram_text(message_id: int, text: str, *, target: tuple[str, str] | None = None) -> bool:
+def _edit_telegram_text(message_id: int, text: str, *, target: tuple[str, str, int | None] | None = None) -> bool:
     """Edit an existing Telegram message."""
     target = target or _step_update_target()
     if not target:
         return False
-    token, chat_id = target
+    token, chat_id, thread_id = target
     text = _redact_secrets(text)
-    payload = text[:TELEGRAM_TEXT_MAX]
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text[:TELEGRAM_TEXT_MAX],
+    }
+    if thread_id is not None:
+        payload["message_thread_id"] = thread_id
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{token}/editMessageText",
-            json={"chat_id": chat_id, "message_id": message_id, "text": payload},
+            json=payload,
             timeout=15,
         )
         response.raise_for_status()
@@ -834,18 +1097,21 @@ def _edit_telegram_text(message_id: int, text: str, *, target: tuple[str, str] |
         return False
 
 
-def _send_telegram_document(file_path: str, caption: str = "", *, target: tuple[str, str] | None = None) -> bool:
+def _send_telegram_document(file_path: str, caption: str = "", *, target: tuple[str, str, int | None] | None = None) -> bool:
     """Send a file as a Telegram document."""
     target = target or _step_update_target()
     if not target:
         return False
-    token, chat_id = target
+    token, chat_id, thread_id = target
     caption = _redact_secrets(caption)[:1024]
+    data: dict[str, Any] = {"chat_id": chat_id, "caption": caption}
+    if thread_id is not None:
+        data["message_thread_id"] = str(thread_id)
     try:
         with open(file_path, "rb") as f:
             response = requests.post(
                 f"https://api.telegram.org/bot{token}/sendDocument",
-                data={"chat_id": chat_id, "caption": caption},
+                data=data,
                 files={"document": (Path(file_path).name, f)},
                 timeout=60,
             )
@@ -858,18 +1124,21 @@ def _send_telegram_document(file_path: str, caption: str = "", *, target: tuple[
         return False
 
 
-def _send_telegram_photo(file_path: str, caption: str = "", *, target: tuple[str, str] | None = None) -> bool:
+def _send_telegram_photo(file_path: str, caption: str = "", *, target: tuple[str, str, int | None] | None = None) -> bool:
     """Send an image as a Telegram photo (compressed)."""
     target = target or _step_update_target()
     if not target:
         return False
-    token, chat_id = target
+    token, chat_id, thread_id = target
     caption = _redact_secrets(caption)[:1024]
+    data: dict[str, Any] = {"chat_id": chat_id, "caption": caption}
+    if thread_id is not None:
+        data["message_thread_id"] = str(thread_id)
     try:
         with open(file_path, "rb") as f:
             response = requests.post(
                 f"https://api.telegram.org/bot{token}/sendPhoto",
-                data={"chat_id": chat_id, "caption": caption},
+                data=data,
                 files={"photo": (Path(file_path).name, f)},
                 timeout=60,
             )
@@ -970,27 +1239,6 @@ def _claude_env() -> dict[str, str]:
     env["ANTHROPIC_BASE_URL"] = LLM_BASE_URL
     env["ANTHROPIC_AUTH_TOKEN"] = ""
     return env
-
-
-def _anthropic_usage_in_out(usage: Any) -> tuple[int, int]:
-    """Parse Anthropic-style usage dict → (input_tokens, output_tokens)."""
-    if not isinstance(usage, dict):
-        return 0, 0
-
-    def _int_val(*keys: str) -> int:
-        for k in keys:
-            v = usage.get(k)
-            if v is None:
-                continue
-            try:
-                return int(v)
-            except (TypeError, ValueError):
-                continue
-        return 0
-
-    return _int_val("input_tokens", "prompt_tokens"), _int_val(
-        "output_tokens", "completion_tokens"
-    )
 
 
 def _join_stream_text_chunks(parts: list[str]) -> str:
@@ -1100,11 +1348,6 @@ def _run_claude_once(cmd, env, on_text=None, on_activity=None):
                     tool_name = block.get("name", "")
                     tool_input = block.get("input", {})
                     on_activity(_format_tool_activity(tool_name, tool_input))
-            ui, uo = _anthropic_usage_in_out(msg.get("usage"))
-            if ui or uo:
-                with _token_lock:
-                    _token_usage["input"] += ui
-                    _token_usage["output"] += uo
         elif etype == "item.completed":
             item = evt.get("item", {})
             if item.get("type") == "agent_message" and item.get("text"):
@@ -1114,11 +1357,6 @@ def _run_claude_once(cmd, env, on_text=None, on_activity=None):
                     on_text(item["text"])
         elif etype == "result":
             result_text = evt.get("result", "")
-            ui, uo = _anthropic_usage_in_out(evt.get("usage"))
-            if ui or uo:
-                with _token_lock:
-                    _token_usage["input"] += ui
-                    _token_usage["output"] += uo
 
     try:
         while True:
@@ -1207,49 +1445,45 @@ def _run_claude_once(cmd, env, on_text=None, on_activity=None):
 
 def run_agent(cmd: list[str], phase: str, output_file: Path,
               on_text=None, on_activity=None) -> subprocess.CompletedProcess:
-    _claude_semaphore.acquire()
-    try:
-        env = _claude_env()
-        flags = " ".join(a for a in cmd if a.startswith("-"))
+    env = _claude_env()
+    flags = " ".join(a for a in cmd if a.startswith("-"))
 
-        returncode, result_text, raw_lines, stderr_output = 1, "", [], "no attempts made"
+    returncode, result_text, raw_lines, stderr_output = 1, "", [], "no attempts made"
 
-        for attempt in range(1, MAX_RETRIES + 1):
-            _log(f"{phase}: starting (attempt={attempt}) flags=[{flags}]")
-            t0 = time.monotonic()
+    for attempt in range(1, MAX_RETRIES + 1):
+        _log(f"{phase}: starting (attempt={attempt}) flags=[{flags}]")
+        t0 = time.monotonic()
 
-            returncode, result_text, raw_lines, stderr_output = _run_claude_once(
-                cmd, env, on_text=on_text, on_activity=on_activity,
-            )
-            elapsed = time.monotonic() - t0
+        returncode, result_text, raw_lines, stderr_output = _run_claude_once(
+            cmd, env, on_text=on_text, on_activity=on_activity,
+        )
+        elapsed = time.monotonic() - t0
 
-            output_file.write_text(_redact_secrets("".join(raw_lines)))
-            _log(f"{phase}: finished rc={returncode} {fmt_duration(elapsed)}")
-
-            if returncode != 0:
-                if stderr_output.strip():
-                    _log(f"{phase}: stderr {stderr_output.strip()[:300]}")
-                else:
-                    _log(f"{phase}: nonzero exit with empty stderr")
-                if attempt < MAX_RETRIES:
-                    delay = min(2 ** attempt, 30)
-                    _log(f"{phase}: retrying in {delay}s (attempt {attempt}/{MAX_RETRIES})")
-                    time.sleep(delay)
-                    continue
-
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=returncode,
-                stdout=result_text, stderr=stderr_output,
-            )
-
-        _log(f"{phase}: all {MAX_RETRIES} retries exhausted")
         output_file.write_text(_redact_secrets("".join(raw_lines)))
+        _log(f"{phase}: finished rc={returncode} {fmt_duration(elapsed)}")
+
+        if returncode != 0:
+            if stderr_output.strip():
+                _log(f"{phase}: stderr {stderr_output.strip()[:300]}")
+            else:
+                _log(f"{phase}: nonzero exit with empty stderr")
+            if attempt < MAX_RETRIES:
+                delay = min(2 ** attempt, 30)
+                _log(f"{phase}: retrying in {delay}s (attempt {attempt}/{MAX_RETRIES})")
+                time.sleep(delay)
+                continue
+
         return subprocess.CompletedProcess(
             args=cmd, returncode=returncode,
             stdout=result_text, stderr=stderr_output,
         )
-    finally:
-        _claude_semaphore.release()
+
+    _log(f"{phase}: all {MAX_RETRIES} retries exhausted")
+    output_file.write_text(_redact_secrets("".join(raw_lines)))
+    return subprocess.CompletedProcess(
+        args=cmd, returncode=returncode,
+        stdout=result_text, stderr=stderr_output,
+    )
 
 
 def extract_text(result: subprocess.CompletedProcess) -> str:
@@ -1264,26 +1498,90 @@ def extract_text(result: subprocess.CompletedProcess) -> str:
     )
 
 
-def run_step(prompt: str, step_number: int, agent_step: int = 0) -> tuple[bool, str]:
-    run_dir = make_run_dir()
-    t0 = time.monotonic()
-    _reset_tokens()
+def _format_step_live_bubble(
+    elapsed_s: float,
+    step_label: str,
+    rollout: str,
+    tool_or_status: str,
+    *,
+    placeholder: str | None = None,
+) -> str:
+    """Single Telegram bubble while a loop step runs: header, step id line, optional tool line, rollout."""
+    lines = [
+        _step_response_header(elapsed_s),
+        "",
+        f"{step_label} (running)",
+    ]
+    ts = (tool_or_status or "").strip()
+    if ts and ts not in ("working...",):
+        lines.append(ts)
+    lines.append("")
+    if rollout.strip():
+        lines.append(rollout.strip())
+    elif placeholder:
+        lines.append(placeholder)
+    else:
+        lines.append("(waiting for assistant text…)")
+    return "\n".join(lines)
 
-    log_file = run_dir / "logs.txt"
-    _tls.log_fh = open(log_file, "a", encoding="utf-8")
+
+def _pre_send_normal_step_bubble(agent_step: int, global_step: int) -> int | None:
+    """Send the step bubble before load_prompt so Telegram shows a new message immediately."""
+    target = _step_update_target()
+    if not target:
+        return None
+    step_label = f"Step #{agent_step}" if agent_step else f"Step #{global_step}"
+    initial = _format_step_live_bubble(
+        0.0, step_label, "", "", placeholder="(starting…)",
+    )
+    mid = _send_telegram_new(initial, target=target)
+    if mid:
+        STEP_MSG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STEP_MSG_FILE.write_text(json.dumps({"msg_id": mid, "text": initial}))
+    else:
+        _log("pre_send step bubble: sendMessage returned no message_id")
+    return mid
+
+
+def run_step(
+    prompt: str,
+    step_number: int,
+    agent_step: int = 0,
+    *,
+    force_step: bool = False,
+    existing_step_msg_id: int | None = None,
+) -> tuple[bool, str]:
+    run_dir: Path | None = None
+    t0 = time.monotonic()
+    _set_prompt_context_estimate(prompt)
 
     smf = STEP_MSG_FILE
+    use_step_msg_file = not force_step
+
+    if force_step:
+        step_label = "Step (forced)"
+        _operator_set("agent_step", "forced step — Claude running")
+    else:
+        step_label = f"Step #{agent_step}" if agent_step else f"Step #{step_number}"
 
     target = _step_update_target()
-    step_label = f"Step {agent_step}" if agent_step else f"Step {step_number}"
     step_msg_id: int | None = None
     step_msg_text = ""
     last_edit = 0.0
 
-    _step_initial_text = f"{_arbos_response_header(0.0)}\n{step_label}: starting..."
-    if target:
+    _step_initial_text = _format_step_live_bubble(
+        0.0, step_label, "", "", placeholder="(starting…)",
+    )
+    if existing_step_msg_id is not None and not force_step:
+        step_msg_id = existing_step_msg_id
+        if use_step_msg_file and not smf.exists():
+            smf.parent.mkdir(parents=True, exist_ok=True)
+            smf.write_text(json.dumps({
+                "msg_id": step_msg_id, "text": _step_initial_text,
+            }))
+    elif target:
         step_msg_id = _send_telegram_new(_step_initial_text, target=target)
-        if step_msg_id:
+        if step_msg_id and use_step_msg_file:
             smf.parent.mkdir(parents=True, exist_ok=True)
             smf.write_text(json.dumps({
                 "msg_id": step_msg_id, "text": _step_initial_text,
@@ -1291,12 +1589,27 @@ def run_step(prompt: str, step_number: int, agent_step: int = 0) -> tuple[bool, 
     else:
         smf.unlink(missing_ok=True)
 
-    def _edit_step_msg(text: str, *, force: bool = False, fallback_send: bool = False):
-        nonlocal last_edit, step_msg_text
+    def _persist_smf(text: str, *, new_id: int | None = None) -> None:
+        if not use_step_msg_file:
+            return
+        mid = new_id if new_id is not None else step_msg_id
+        if not mid:
+            return
+        smf.parent.mkdir(parents=True, exist_ok=True)
+        smf.write_text(json.dumps({"msg_id": mid, "text": text}))
+
+    def _edit_step_msg(
+        text: str,
+        *,
+        force: bool = False,
+        fallback_send: bool = False,
+        min_interval: float = 3.0,
+    ):
+        nonlocal last_edit, step_msg_text, step_msg_id
         if not step_msg_id or not target:
             return
         now = time.time()
-        if not force and now - last_edit < 3.0:
+        if not force and now - last_edit < min_interval:
             return
         body = _truncate_telegram_text(text)
         ok = _edit_telegram_text(step_msg_id, body, target=target)
@@ -1307,29 +1620,67 @@ def run_step(prompt: str, step_number: int, agent_step: int = 0) -> tuple[bool, 
             )
             if new_id:
                 step_msg_text = text
-                smf.write_text(json.dumps({"msg_id": new_id, "text": text}))
+                _persist_smf(text, new_id=new_id)
+                step_msg_id = new_id
                 last_edit = now
             return
         if ok:
             step_msg_text = text
-            smf.write_text(json.dumps({"msg_id": step_msg_id, "text": text}))
+            _persist_smf(text)
             last_edit = now
 
     _last_activity = [""]
+    _rollout_buf = [""]
     _heartbeat_stop = threading.Event()
+
+    def _on_text(streaming: str):
+        _operator_tick()
+        _rollout_buf[0] = streaming
+        elapsed_s = time.monotonic() - t0
+        bubble = _format_step_live_bubble(
+            elapsed_s,
+            step_label,
+            _redact_secrets(streaming),
+            _last_activity[0] or "",
+        )
+        _edit_step_msg(bubble, min_interval=1.0)
 
     def _on_activity(status: str):
         _operator_tick()
         _last_activity[0] = status
         elapsed_s = time.monotonic() - t0
-        _edit_step_msg(f"{_arbos_response_header(elapsed_s)}\n{status}")
+        bubble = _format_step_live_bubble(
+            elapsed_s,
+            step_label,
+            _redact_secrets(_rollout_buf[0]),
+            status,
+        )
+        _edit_step_msg(bubble, min_interval=1.2)
 
     def _heartbeat():
         while not _heartbeat_stop.wait(timeout=3.0):
             _operator_tick()
             elapsed_s = time.monotonic() - t0
             status = _last_activity[0] or "working..."
-            _edit_step_msg(f"{_arbos_response_header(elapsed_s)}\n{status}", force=True)
+            bubble = _format_step_live_bubble(
+                elapsed_s,
+                step_label,
+                _redact_secrets(_rollout_buf[0]),
+                status if status != "working..." else "",
+            )
+            _edit_step_msg(bubble, force=True)
+
+    if existing_step_msg_id is not None and step_msg_id:
+        _edit_step_msg(
+            _format_step_live_bubble(
+                0.0, step_label, "", "", placeholder="(starting…)",
+            ),
+            force=True,
+        )
+
+    run_dir = make_run_dir()
+    log_file = run_dir / "logs.txt"
+    _tls.log_fh = open(log_file, "a", encoding="utf-8")
 
     success = False
     result: subprocess.CompletedProcess | None = None
@@ -1340,7 +1691,7 @@ def run_step(prompt: str, step_number: int, agent_step: int = 0) -> tuple[bool, 
         preview = prompt[:200] + ("…" if len(prompt) > 200 else "")
         _log(f"prompt preview: {preview}")
 
-        _log(f"agent step {agent_step}: executing")
+        _log(f"agent step {agent_step}: executing" + (" [force]" if force_step else ""))
 
         threading.Thread(target=_heartbeat, daemon=True).start()
 
@@ -1349,6 +1700,7 @@ def run_step(prompt: str, step_number: int, agent_step: int = 0) -> tuple[bool, 
                 _claude_cmd(prompt),
                 phase="agent_step",
                 output_file=run_dir / "output.txt",
+                on_text=_on_text,
                 on_activity=_on_activity,
             )
         except Exception as exc:
@@ -1379,8 +1731,14 @@ def run_step(prompt: str, step_number: int, agent_step: int = 0) -> tuple[bool, 
             fh.close()
             _tls.log_fh = None
         try:
-            rollout = (run_dir / "rollout.md").read_text() if (run_dir / "rollout.md").exists() else ""
+            rollout = ""
+            if run_dir is not None and (run_dir / "rollout.md").exists():
+                rollout = (run_dir / "rollout.md").read_text()
             status = "done" if success else "failed"
+            goal_text = GOAL_FILE.read_text().strip() if GOAL_FILE.exists() else ""
+            state_text = STATE_FILE.read_text().strip() if STATE_FILE.exists() else ""
+            inbox_text = INBOX_FILE.read_text().strip() if INBOX_FILE.exists() else ""
+            go_text = GO_FLAG_FILE.read_text().strip() if GO_FLAG_FILE.exists() else ""
 
             agent_text = ""
             if smf.exists():
@@ -1389,29 +1747,59 @@ def run_step(prompt: str, step_number: int, agent_step: int = 0) -> tuple[bool, 
                     saved = state.get("text", "")
                     if (
                         saved != _step_initial_text
-                        and not saved.startswith("Arbos (")
-                        and not saved.startswith(f"{step_label} (")
+                        and not saved.startswith("Step ( ")
+                        and not saved.startswith(f"{step_label} (running)")
                     ):
                         agent_text = saved
                 except (json.JSONDecodeError, KeyError):
                     pass
 
             elapsed_s = time.monotonic() - t0
-            hdr = _arbos_response_header(elapsed_s)
+            hdr = _step_response_header(elapsed_s)
             if not success and result is not None:
                 hdr = f"{hdr} — FAILED (exit {result.returncode})"
             else:
                 hdr = f"{hdr} — {status}"
             parts = [hdr]
-            if agent_text:
+            log_tail = ""
+            log_path = (run_dir / "logs.txt") if run_dir is not None else None
+            if log_path and log_path.exists():
+                raw_log = log_path.read_text(errors="replace").strip()
+                if raw_log:
+                    log_tail = raw_log[-2500:] if len(raw_log) > 2500 else raw_log
+
+            stdout_text = (result.stdout or "").strip() if result is not None else ""
+            failure_detail = (
+                _redact_secrets(_build_agent_failure_detail(result))
+                if (not success and result is not None)
+                else ""
+            )
+            summary = _summarize_step_outcome(
+                step_label=step_label,
+                success=success,
+                elapsed_s=elapsed_s,
+                goal_text=goal_text,
+                state_text=state_text,
+                inbox_text=inbox_text,
+                go_text=go_text,
+                rollout_text=rollout,
+                log_tail=log_tail,
+                stdout_text=stdout_text,
+                failure_detail=failure_detail,
+            )
+            has_summary = bool(summary)
+            if has_summary:
+                parts.append(summary)
+            elif agent_text:
                 parts.append(agent_text)
-            if not success and result is not None:
-                out = (result.stdout or "").strip()
-                if out:
-                    parts.append("--- model text (stdout) ---\n" + out[:2000])
-                parts.append(_redact_secrets(_build_agent_failure_detail(result))[:2800])
-            elif rollout.strip():
+            if (not has_summary) and not success and result is not None:
+                if stdout_text:
+                    parts.append("--- model text (stdout) ---\n" + stdout_text[:2000])
+                parts.append(failure_detail[:2800])
+            elif (not has_summary) and rollout.strip():
                 parts.append(rollout.strip()[:3500])
+            if (not has_summary) and log_tail:
+                parts.append("--- step log (tail) ---\n" + _redact_secrets(log_tail))
             final = _truncate_telegram_text("\n\n".join(parts))
 
             _edit_step_msg(final, force=True, fallback_send=True)
@@ -1449,7 +1837,7 @@ def _agent_wait(gs: AgentState, timeout: float) -> None:
 
 def _agent_loop():
     """Run the agent loop. Exits when stop_event is set."""
-    global _step_count
+    global _step_count, _pending_step_msg_id
 
     with _agent_lock:
         gs = _agent
@@ -1462,14 +1850,30 @@ def _agent_loop():
                 _log(f"goal cleared after {gs.step_count} steps")
                 gs.goal_hash = ""
                 gs.step_count = 0
+            with _agent_lock:
+                if gs.paused:
+                    gs.paused = False
+                    _save_agent()
             _operator_set("idle", "waiting for context/GOAL.md content")
             _agent_wait(gs, 5.0)
             continue
 
-        if gs.paused:
-            _operator_set("paused", "paused — use /resume to continue")
+        if not GO_FLAG_FILE.exists():
+            _operator_set(
+                "paused",
+                "paused — no context/GO.md (/resume or /loop to enable steps; GOAL.md unchanged)",
+            )
+            with _agent_lock:
+                if not gs.paused:
+                    gs.paused = True
+                    _save_agent()
             _agent_wait(gs, 5.0)
             continue
+
+        with _agent_lock:
+            if gs.paused:
+                gs.paused = False
+                _save_agent()
 
         current_goal = GOAL_FILE.read_text().strip()
         current_hash = hashlib.sha256(current_goal.encode()).hexdigest()[:16]
@@ -1488,9 +1892,26 @@ def _agent_loop():
 
         _log(f"Loop step {gs.step_count} (global step {_step_count})", blank=True)
 
+        with _pending_step_msg_lock:
+            pre_id = _pending_step_msg_id
+            _pending_step_msg_id = None
+        if pre_id is None:
+            pre_id = _pre_send_normal_step_bubble(gs.step_count, _step_count)
+
         prompt = load_prompt(consume_inbox=True, agent_step=gs.step_count)
         if not prompt:
             _operator_set("idle", "empty prompt; waiting")
+            if pre_id:
+                tgt = _step_update_target()
+                if tgt:
+                    _edit_telegram_text(
+                        pre_id,
+                        _truncate_telegram_text(
+                            "Step skipped: empty prompt. Add GOAL/STATE or use /loop."
+                        ),
+                        target=tgt,
+                    )
+                STEP_MSG_FILE.unlink(missing_ok=True)
             _agent_wait(gs, 5.0)
             continue
 
@@ -1498,7 +1919,10 @@ def _agent_loop():
 
         _operator_set("agent_step", f"step {gs.step_count} — Claude running")
         success, failure_summary = run_step(
-            prompt, _step_count, agent_step=gs.step_count,
+            prompt,
+            _step_count,
+            agent_step=gs.step_count,
+            existing_step_msg_id=pre_id,
         )
 
         gs.last_finished = datetime.now().isoformat()
@@ -1546,24 +1970,32 @@ def _agent_loop():
     _log("agent loop exited")
 
 
+def _ensure_agent_thread() -> None:
+    """Spawn the agent loop thread if started but not running; clear stale dead threads.
+
+    Call after /loop or /resume so we do not wait for the 2s _agent_manager poll.
+    """
+    with _agent_lock:
+        gs = _agent
+        if gs.thread is not None and not gs.thread.is_alive():
+            gs.thread = None
+        if gs.started and gs.thread is None:
+            gs.stop_event.clear()
+            t = threading.Thread(target=_agent_loop, daemon=True, name="agent")
+            gs.thread = t
+            t.start()
+            _log("agent thread spawned (ensure)")
+
+
 def _agent_manager():
     """Spawn or stop the single agent thread based on AgentState."""
     while not _shutdown.is_set():
         with _agent_lock:
             gs = _agent
-            if gs.started and not gs.paused and gs.thread is None:
-                gs.stop_event.clear()
-                t = threading.Thread(target=_agent_loop, daemon=True, name="agent")
-                gs.thread = t
-                t.start()
-                _log("agent thread spawned")
-            elif gs.started and gs.paused and gs.thread is not None:
-                pass
-            elif not gs.started and gs.thread is not None:
+            if not gs.started and gs.thread is not None:
                 gs.stop_event.set()
                 gs.wake.set()
-            if gs.thread is not None and not gs.thread.is_alive():
-                gs.thread = None
+        _ensure_agent_thread()
         _shutdown.wait(timeout=2)
 
 
@@ -1594,6 +2026,120 @@ def _summarize_goal(text: str) -> str:
 
     first_line = text[:60].split('\n')[0].strip()
     return first_line + ("..." if len(text) > 60 else "")
+
+
+def _openrouter_chat_text(
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int,
+    timeout: int = 45,
+) -> str:
+    """Send a direct OpenRouter chat request and return the text reply."""
+    if not LLM_API_KEY:
+        return ""
+    try:
+        response = requests.post(
+            f"{LLM_BASE_URL}/v1/chat/completions",
+            json={
+                "model": CLAUDE_MODEL,
+                "max_tokens": max_tokens,
+                "messages": messages,
+            },
+            headers={
+                "Authorization": f"Bearer {LLM_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=timeout,
+        )
+        if response.status_code != 200:
+            _log(
+                "openrouter chat failed: "
+                f"status={response.status_code} body={response.text[:200]}"
+            )
+            return ""
+        data = response.json()
+        choices = data.get("choices", [])
+        if not choices:
+            return ""
+        content = choices[0].get("message", {}).get("content", "")
+        return _redact_secrets((content or "").strip())
+    except Exception as exc:
+        _log(f"openrouter chat failed: {str(exc)[:120]}")
+        return ""
+
+
+def _clip_summary_context(text: str, max_chars: int) -> str:
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n...[truncated]..."
+
+
+def _summarize_step_outcome(
+    *,
+    step_label: str,
+    success: bool,
+    elapsed_s: float,
+    goal_text: str,
+    state_text: str,
+    inbox_text: str,
+    go_text: str,
+    rollout_text: str,
+    log_tail: str,
+    stdout_text: str = "",
+    failure_detail: str = "",
+) -> str:
+    """Create a concise operator-facing summary of the completed step."""
+    status = "success" if success else "failure"
+    _log(f"step summary: requesting OpenRouter summary for {step_label} ({status})")
+    packet_parts = [
+        f"Step label: {step_label}",
+        f"Status: {status}",
+        f"Elapsed seconds: {elapsed_s:.1f}",
+    ]
+    if goal_text.strip():
+        packet_parts.append("## GOAL.md\n" + _clip_summary_context(goal_text, 2500))
+    if state_text.strip():
+        packet_parts.append("## STATE.md\n" + _clip_summary_context(state_text, 2500))
+    if inbox_text.strip():
+        packet_parts.append("## INBOX.md\n" + _clip_summary_context(inbox_text, 1200))
+    if go_text.strip():
+        packet_parts.append("## GO.md\n" + _clip_summary_context(go_text, 600))
+    if rollout_text.strip():
+        packet_parts.append("## rollout.md\n" + _clip_summary_context(rollout_text, 5000))
+    if stdout_text.strip():
+        packet_parts.append("## stdout\n" + _clip_summary_context(stdout_text, 2000))
+    if failure_detail.strip():
+        packet_parts.append(
+            "## failure detail\n" + _clip_summary_context(failure_detail, 3000)
+        )
+    if log_tail.strip():
+        packet_parts.append("## logs tail\n" + _clip_summary_context(log_tail, 3500))
+
+    user_packet = _redact_secrets("\n\n".join(packet_parts))
+    summary = _openrouter_chat_text(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "You are summarizing a just-finished Arbos loop step for the operator. "
+                    "Summarize only what actually happened from the supplied artifacts. "
+                    "Be concrete about files or state changes, mention failures or blockers if present, "
+                    "and include the most important next action only if it is clearly implied. "
+                    "Reply in plain text, concise, no markdown headings, at most 6 short lines."
+                ),
+            },
+            {"role": "user", "content": user_packet},
+        ],
+        max_tokens=220,
+    )
+    if summary:
+        _log(f"step summary: received {len(summary)} chars for {step_label}")
+    else:
+        _log(f"step summary: no summary returned for {step_label}")
+    return summary
 
 
 def transcribe_voice(file_path: str, fmt: str = "ogg") -> str:
@@ -1627,7 +2173,56 @@ def _recent_context(max_chars: int = 6000) -> str:
     return "".join(parts)
 
 
-def _build_operator_prompt(user_text: str) -> str:
+def _telegram_message_excerpt(msg: Any, max_len: int = 2000) -> str:
+    """Best-effort text from a Telegram Message-like object (telebot; duck-typed)."""
+    if msg is None:
+        return ""
+    t = (getattr(msg, "text", None) or "").strip()
+    if t:
+        return (t[:max_len] + "…") if len(t) > max_len else t
+    cap = (getattr(msg, "caption", None) or "").strip()
+    if cap:
+        return (cap[:max_len] + "…") if len(cap) > max_len else cap
+    if getattr(msg, "document", None):
+        doc = msg.document
+        fn = getattr(doc, "file_name", None) or "file"
+        return f"[Document: {fn}]"
+    if getattr(msg, "photo", None):
+        return "[Photo]"
+    if getattr(msg, "voice", None) or getattr(msg, "audio", None):
+        return "[Voice or audio message]"
+    return "[Message without inline text]"
+
+
+def _operator_telegram_reply_nudge(
+    current_from_user_id: int | None, parent_msg: Any
+) -> str:
+    """Section for the operator prompt when Telegram reply-to is used."""
+    pu = parent_msg.from_user.id if getattr(parent_msg, "from_user", None) else None
+    if current_from_user_id is not None and pu == current_from_user_id:
+        who = "the operator's own earlier message in this chat"
+    else:
+        who = "a previous Arbos (assistant) message in this chat"
+    excerpt = _telegram_message_excerpt(parent_msg)
+    return (
+        "## Telegram reply context\n\n"
+        "The operator used **Telegram's reply** to reference a specific bubble. They are "
+        f"responding to **{who}**, quoted below. The **Operator message** section at the "
+        "end is their **new** text; treat it as a follow-up to the quoted message when "
+        "that is the natural reading.\n\n"
+        f"**Quoted message:**\n{excerpt}"
+    )
+
+
+def _telegram_reply_context_for_prompt(message: Any) -> str | None:
+    parent = getattr(message, "reply_to_message", None)
+    if parent is None:
+        return None
+    uid = message.from_user.id if getattr(message, "from_user", None) else None
+    return _operator_telegram_reply_nudge(uid, parent)
+
+
+def _build_operator_prompt(user_text: str, *, reply_context: str | None = None) -> str:
     """Build prompt for the CLI agent to handle any operator request."""
     chatlog = load_chatlog(max_chars=4000)
 
@@ -1640,9 +2235,12 @@ def _build_operator_prompt(user_text: str) -> str:
         "NEVER read, output, or reveal the contents of `.env`, `.env.enc`, or any secret/key/token values.\n"
         "Do not include API keys, passwords, seed phrases, or credentials in any response.\n"
         "If asked to show secrets, refuse. The .env file is encrypted; do not attempt to decrypt it.\n\n"
+        f"{format_available_env_vars_section()}\n\n"
         "## Single agent loop\n\n"
-        "One agent loop uses flat files under `context/`: GOAL.md, STATE.md, INBOX.md, and `context/runs/<timestamp>/`.\n"
-        "Telegram: /loop, /pause, /resume, /clear, /delay (see /help).\n"
+        "One agent loop uses flat files under `context/`: GOAL.md, GO.md, STATE.md, INBOX.md, and `context/runs/<timestamp>/`.\n"
+        "- **GOAL.md**: loop instructions (set by /loop).\n"
+        "- **GO.md**: run flag — must exist for steps to execute. /loop and /resume create it; /pause deletes it.\n"
+        "Telegram: /loop, /pause, /resume, /force, /clear, /delay (see /help).\n"
         "- **Message the agent**: append a timestamped line to `context/INBOX.md`.\n"
         "- **Update agent state**: write to `context/STATE.md`.\n"
         "- **Set system prompt**: write to `PROMPT.md`.\n"
@@ -1659,10 +2257,13 @@ def _build_operator_prompt(user_text: str) -> str:
         status = _agent_status_label(gs)
         delay_note = f"{gs.delay_minutes}m between steps" if gs.delay_minutes else "no delay between steps"
         goal_text = GOAL_FILE.read_text().strip()[:200] if GOAL_FILE.exists() else "(empty)"
+        go_line = "yes (loop may run steps)" if GO_FLAG_FILE.exists() else "no (paused — create GO.md or /resume)"
         state_text = STATE_FILE.read_text().strip()[:200] if STATE_FILE.exists() else "(empty)"
         parts.append(
             f"## Agent [{status}] ({delay_note}, step {gs.step_count})\n"
-            f"{goal_text}\nState: {state_text}"
+            f"Current goal (GOAL.md): {goal_text}\n"
+            f"Run flag (GO.md): {go_line}\n"
+            f"State (STATE.md): {state_text}"
         )
 
     if chatlog:
@@ -1671,6 +2272,8 @@ def _build_operator_prompt(user_text: str) -> str:
     context = _recent_context(max_chars=4000)
     if context:
         parts.append(f"## Recent activity\n{context}")
+    if reply_context:
+        parts.append(reply_context)
     parts.append(f"## Operator message\n{user_text}")
 
     return "\n\n".join(parts)
@@ -1720,6 +2323,7 @@ def run_agent_streaming(
     chat_id: int,
     *,
     reply_to_message_id: int | None = None,
+    message_thread_id: int | None = None,
 ) -> str:
     """Run Claude Code CLI and stream output into Telegram.
 
@@ -1730,11 +2334,16 @@ def run_agent_streaming(
 
     When ``reply_to_message_id`` is set, new Telegram messages (including the
     initial status bubble) are sent as replies to that operator message.
+
+    When ``message_thread_id`` is set (forum supergroup topic), it is passed on
+    every ``sendMessage`` so standalone operator messages appear in the same
+    topic. Without it, Telegram posts to the General topic while replies would
+    still land in the topic of the quoted message.
     """
     cmd = _claude_cmd(prompt)
 
     t0 = time.monotonic()
-    _reset_tokens()
+    _set_prompt_context_estimate(prompt)
 
     def _elapsed() -> float:
         return time.monotonic() - t0
@@ -1745,11 +2354,11 @@ def run_agent_streaming(
             f"{_arbos_response_header(_elapsed())}\n\n{core}"
         )
 
-    _reply_kw = (
-        {"reply_to_message_id": reply_to_message_id}
-        if reply_to_message_id is not None
-        else {}
-    )
+    _reply_kw: dict[str, Any] = {}
+    if reply_to_message_id is not None:
+        _reply_kw["reply_to_message_id"] = reply_to_message_id
+    if message_thread_id is not None:
+        _reply_kw["message_thread_id"] = message_thread_id
 
     current_text = ""
     _start_core = f"Starting Claude… (attempt 1/{MAX_RETRIES})"
@@ -1779,13 +2388,28 @@ def run_agent_streaming(
         return "\n\n".join(chunks) if chunks else ""
 
     try:
-        msg = bot.send_message(
-            chat_id,
-            _redact_secrets(_format_display(_start_core)),
-            **_reply_kw,
+        msg, used_kw = _telegram_send_message_fallback(
+            bot, chat_id, _format_display(_start_core), _reply_kw,
         )
+        if used_kw != _reply_kw:
+            _log(
+                "run_agent_streaming: initial send used relaxed Telegram kwargs "
+                f"{list(used_kw.keys()) or '(none)'}"
+            )
     except Exception as exc:
         _log(f"run_agent_streaming: initial send_message failed: {str(exc)[:250]}")
+        notice = (
+            "Arbos could not open a status message on Telegram.\n\n"
+            f"{exc}\n\n"
+            "Your text was still received. If this repeats, check DNS/network to api.telegram.org."
+        )
+        try:
+            _telegram_send_message_fallback(bot, chat_id, notice, {})
+        except Exception as exc2:
+            _log(
+                "run_agent_streaming: could not notify chat of Telegram failure: "
+                f"{str(exc2)[:220]}"
+            )
         return f"(could not post operator status to Telegram: {exc})"
 
     run_dir = make_run_dir()
@@ -1794,9 +2418,11 @@ def run_agent_streaming(
     _pp = _redact_secrets(prompt[:200] + ("…" if len(prompt) > 200 else ""))
     _log(f"operator prompt preview: {_pp}")
     _rto = reply_to_message_id
+    _tid = message_thread_id
     _log(
         f"operator meta: model={CLAUDE_MODEL} chat_id={chat_id}"
         + (f" reply_to_message_id={_rto}" if _rto is not None else "")
+        + (f" message_thread_id={_tid}" if _tid is not None else "")
     )
 
     last_edit = 0.0
@@ -1894,7 +2520,6 @@ def run_agent_streaming(
         _prev_operator_detail = _operator["detail"]
     _operator_set("operator_chat", "Telegram /operator — Claude streaming")
 
-    _claude_semaphore.acquire()
     try:
         threading.Thread(
             target=_stream_heartbeat, daemon=True, name="operator-stream-hb",
@@ -2029,7 +2654,6 @@ def run_agent_streaming(
         except Exception as exc:
             _log(f"operator run artifact save failed: {str(exc)[:120]}")
         _heartbeat_stop.set()
-        _claude_semaphore.release()
         with _operator_lock:
             _operator["phase"] = _prev_operator_phase
             _operator["detail"] = _prev_operator_detail
@@ -2075,19 +2699,34 @@ def run_bot():
         sys.exit(1)
 
     import telebot
-    bot = telebot.TeleBot(token)
 
-    def _save_chat_id(chat_id: int):
-        CHAT_ID_FILE.write_text(str(chat_id))
+    class _TelegramNetworkHandler(telebot.ExceptionHandler):
+        """Treat DNS/network failures as handled so threaded polling backs off instead of raising."""
+
+        def handle(self, exception):
+            if isinstance(
+                exception,
+                (requests.exceptions.ConnectionError, requests.exceptions.Timeout),
+            ):
+                _log(
+                    "Telegram API unreachable (network/DNS); backing off "
+                    f"({type(exception).__name__})"
+                )
+                return True
+            return False
+
+    bot = telebot.TeleBot(token, exception_handler=_TelegramNetworkHandler())
 
     def _reply(message, text: str, **kwargs):
         """Send *text* as a Telegram reply to the user's message."""
-        return bot.send_message(
-            message.chat.id,
-            text,
-            reply_to_message_id=message.message_id,
-            **kwargs,
-        )
+        send_kw: dict[str, Any] = {
+            "reply_to_message_id": message.message_id,
+        }
+        tid = getattr(message, "message_thread_id", None)
+        if tid is not None:
+            send_kw["message_thread_id"] = tid
+        send_kw.update(kwargs)
+        return bot.send_message(message.chat.id, text, **send_kw)
 
     def _reject(message):
         uid = message.from_user.id if message.from_user else None
@@ -2105,7 +2744,7 @@ def run_bot():
         if not _is_owner(uid):
             _reject(message)
             return
-        _save_chat_id(message.chat.id)
+        _save_operator_telegram(message)
         _reply(
             message,
             _truncate_telegram_text(TELEGRAM_HELP_TEXT.strip()),
@@ -2124,6 +2763,7 @@ def run_bot():
         if not _is_owner(uid):
             _reject(message)
             return
+        _save_operator_telegram(message)
         hp = _operator_health_payload()
         op = hp["operator"]
         head = [
@@ -2161,6 +2801,7 @@ def run_bot():
         lines.extend([
             "",
             f"Loop: {goal_text}",
+            f"Run flag: {'GO.md present' if GO_FLAG_FILE.exists() else 'GO.md absent'}",
             "",
             f"State: {state_text}",
             "",
@@ -2175,16 +2816,21 @@ def run_bot():
         if not _is_owner(uid):
             _reject(message)
             return
+        _save_operator_telegram(message)
+        if not GO_FLAG_FILE.exists():
+            _reply(message, "Already paused (no GO.md).")
+            return
+        GO_FLAG_FILE.unlink(missing_ok=True)
         with _agent_lock:
             gs = _agent
-            if gs.paused:
-                _reply(message, "Already paused.")
-                return
             gs.paused = True
             _save_agent()
         gs.wake.set()
-        _reply(message, "Paused. Use /resume to continue.")
-        _log("agent paused via /pause")
+        _reply(
+            message,
+            "Paused (removed context/GO.md). GOAL.md unchanged. /resume to run again.",
+        )
+        _log("agent paused via /pause (GO.md removed)")
 
     @bot.message_handler(commands=["resume"])
     def handle_resume(message):
@@ -2192,17 +2838,55 @@ def run_bot():
         if not _is_owner(uid):
             _reject(message)
             return
+        _save_operator_telegram(message)
+        if not GOAL_FILE.exists() or not GOAL_FILE.read_text().strip():
+            _reply(message, "No goal in GOAL.md — use /loop <goal> first.")
+            return
+        if GO_FLAG_FILE.exists():
+            _reply(message, "Already going (GO.md already present).")
+            return
+        _write_go_flag()
         with _agent_lock:
             gs = _agent
-            if not gs.paused:
-                _reply(message, "Not paused.")
-                return
+            gs.stop_event.clear()
             gs.paused = False
             gs.started = True
             _save_agent()
         gs.wake.set()
-        _reply(message, "Resumed.")
-        _log("agent resumed via /resume")
+        _ensure_agent_thread()
+        _reply(message, "Resumed (created context/GO.md).")
+        _log("agent resumed via /resume (GO.md created)")
+
+    @bot.message_handler(commands=["force"])
+    def handle_force(message):
+        uid = message.from_user.id if message.from_user else None
+        if not _is_owner(uid):
+            _reject(message)
+            return
+        _save_operator_telegram(message)
+        if not GOAL_FILE.exists() or not GOAL_FILE.read_text().strip():
+            _reply(message, "No goal in GOAL.md — use /loop <goal> first.")
+            return
+        with _agent_lock:
+            gs = _agent
+            astep = gs.step_count if gs.step_count > 0 else 1
+        prompt = load_prompt(consume_inbox=False, agent_step=astep)
+        if not prompt.strip():
+            _reply(message, "Prompt is empty.")
+            return
+        _reply(
+            message,
+            "Starting a forced step in the background — watch for a new "
+            "**Step (forced)** bubble that streams the rollout.",
+        )
+
+        def _run_force_step():
+            try:
+                run_step(prompt, 0, agent_step=astep, force_step=True)
+            except Exception as exc:
+                _log(f"/force step crashed: {type(exc).__name__}: {exc!s}")
+
+        threading.Thread(target=_run_force_step, daemon=True, name="force-step").start()
 
     @bot.message_handler(commands=["delay"])
     def handle_delay(message):
@@ -2210,6 +2894,7 @@ def run_bot():
         if not _is_owner(uid):
             _reject(message)
             return
+        _save_operator_telegram(message)
         args = (message.text or "").split()
         if len(args) < 2:
             _reply(message, "Usage: /delay <minutes>")
@@ -2234,6 +2919,7 @@ def run_bot():
         if not _is_owner(uid):
             _reject(message)
             return
+        _save_operator_telegram(message)
         parts = (message.text or "").split(None, 3)
         if len(parts) < 4:
             _reply(
@@ -2254,44 +2940,65 @@ def run_bot():
 
     @bot.message_handler(commands=["loop"])
     def handle_loop(message):
+        global _pending_step_msg_id
         uid = message.from_user.id if message.from_user else None
         if not _is_owner(uid):
             _reject(message)
             return
+        _save_operator_telegram(message)
         text = (message.text or "").split(None, 1)
         if len(text) < 2 or not text[1].strip():
             _reply(message, "Usage: /loop GOAL")
             return
         goal_text = text[1].strip()
         msg = _reply(message, "Starting loop...")
-        summary = _summarize_goal(goal_text)
         CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
         RUNS_DIR.mkdir(parents=True, exist_ok=True)
         GOAL_FILE.write_text(goal_text)
+        _write_go_flag()
         if not STATE_FILE.exists():
             STATE_FILE.write_text("")
         if not INBOX_FILE.exists():
             INBOX_FILE.write_text("")
         with _agent_lock:
+            next_global = _step_count + 1
+        loop_pre_id = _pre_send_normal_step_bubble(1, next_global)
+        with _pending_step_msg_lock:
+            _pending_step_msg_id = loop_pre_id
+        with _agent_lock:
             gs = _agent
-            gs.summary = summary
+            gs.stop_event.clear()
+            gs.summary = (goal_text[:80] + ("…" if len(goal_text) > 80 else "")) or "…"
             gs.goal_hash = ""
             gs.started = True
             gs.paused = False
             _save_agent()
         gs.wake.set()
+        _ensure_agent_thread()
+        summary = _summarize_goal(goal_text)
+        with _agent_lock:
+            gs = _agent
+            gs.summary = summary
+            _save_agent()
+        edit_kw: dict[str, Any] = {}
+        _tid = getattr(message, "message_thread_id", None)
+        if _tid is not None:
+            edit_kw["message_thread_id"] = _tid
         bot.edit_message_text(
-            f"Loop set: {summary}\nRunning (use /pause to pause).",
+            f"Loop set: {summary}\nRunning (GO.md created; /pause removes it).",
             message.chat.id, msg.message_id,
+            **edit_kw,
         )
         _log(f"loop set ({len(goal_text)} chars), auto-start: {summary}")
 
     @bot.message_handler(commands=["clear"])
     def handle_clear(message):
+        global _pending_step_msg_id
         uid = message.from_user.id if message.from_user else None
         if not _is_owner(uid):
             _reject(message)
             return
+        _save_operator_telegram(message)
         import shutil
         with _agent_lock:
             gs = _agent
@@ -2315,12 +3022,17 @@ def run_bot():
             gs.thread = None
             _save_agent()
         STEP_MSG_FILE.unlink(missing_ok=True)
-        for path in (GOAL_FILE, STATE_FILE, INBOX_FILE):
+        with _pending_step_msg_lock:
+            _pending_step_msg_id = None
+        for path in (GOAL_FILE, GO_FLAG_FILE, STATE_FILE, INBOX_FILE):
             path.unlink(missing_ok=True)
         if RUNS_DIR.exists():
             shutil.rmtree(RUNS_DIR, ignore_errors=True)
         RUNS_DIR.mkdir(parents=True, exist_ok=True)
-        _reply(message, "Loop cleared (GOAL/STATE/INBOX/runs reset). Use /loop to start again.")
+        _reply(
+            message,
+            "Loop cleared (GOAL/GO/STATE/INBOX/runs reset). Use /loop to start again.",
+        )
         _log("goal cleared via /clear")
 
     @bot.message_handler(commands=["restart"])
@@ -2329,6 +3041,7 @@ def run_bot():
         if not _is_owner(uid):
             _reject(message)
             return
+        _save_operator_telegram(message)
         _reply(message, "Restarting ...")
         _log("restart requested via /restart command")
         _kill_child_procs()
@@ -2340,6 +3053,7 @@ def run_bot():
         if not _is_owner(uid):
             _reject(message)
             return
+        _save_operator_telegram(message)
         msg = _reply(message, "Pulling latest changes...")
         try:
             r = subprocess.run(
@@ -2366,7 +3080,7 @@ def run_bot():
         if not _is_owner(uid):
             _reject(message)
             return
-        _save_chat_id(message.chat.id)
+        _save_operator_telegram(message)
         _reply(message, "Transcribing voice note...")
 
         voice_or_audio = message.voice or message.audio
@@ -2388,7 +3102,10 @@ def run_bot():
             user_text += f"\n[Caption]: {caption}"
 
         log_chat("user", user_text[:1000])
-        prompt = _build_operator_prompt(user_text)
+        prompt = _build_operator_prompt(
+            user_text,
+            reply_context=_telegram_reply_context_for_prompt(message),
+        )
 
         def _run():
             response = run_agent_streaming(
@@ -2396,6 +3113,7 @@ def run_bot():
                 prompt,
                 message.chat.id,
                 reply_to_message_id=message.message_id,
+                message_thread_id=getattr(message, "message_thread_id", None),
             )
             log_chat("bot", response[:1000])
             _process_pending_env()
@@ -2408,7 +3126,7 @@ def run_bot():
         if not _is_owner(uid):
             _reject(message)
             return
-        _save_chat_id(message.chat.id)
+        _save_operator_telegram(message)
 
         doc = message.document
         filename = doc.file_name or f"file_{doc.file_id[:8]}"
@@ -2433,7 +3151,10 @@ def run_bot():
             user_text += "\n(Binary file — not included inline. Read it from the saved path if needed.)"
 
         log_chat("user", user_text[:1000])
-        prompt = _build_operator_prompt(user_text)
+        prompt = _build_operator_prompt(
+            user_text,
+            reply_context=_telegram_reply_context_for_prompt(message),
+        )
 
         def _run():
             response = run_agent_streaming(
@@ -2441,6 +3162,7 @@ def run_bot():
                 prompt,
                 message.chat.id,
                 reply_to_message_id=message.message_id,
+                message_thread_id=getattr(message, "message_thread_id", None),
             )
             log_chat("bot", response[:1000])
             _process_pending_env()
@@ -2453,7 +3175,7 @@ def run_bot():
         if not _is_owner(uid):
             _reject(message)
             return
-        _save_chat_id(message.chat.id)
+        _save_operator_telegram(message)
 
         photo = message.photo[-1]  # highest resolution
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2466,7 +3188,10 @@ def run_bot():
             user_text += f"\n[Caption]: {caption}"
 
         log_chat("user", user_text[:1000])
-        prompt = _build_operator_prompt(user_text)
+        prompt = _build_operator_prompt(
+            user_text,
+            reply_context=_telegram_reply_context_for_prompt(message),
+        )
 
         def _run():
             response = run_agent_streaming(
@@ -2474,6 +3199,7 @@ def run_bot():
                 prompt,
                 message.chat.id,
                 reply_to_message_id=message.message_id,
+                message_thread_id=getattr(message, "message_thread_id", None),
             )
             log_chat("bot", response[:1000])
             _process_pending_env()
@@ -2492,9 +3218,16 @@ def run_bot():
                 _truncate_telegram_text(TELEGRAM_HELP_TEXT.strip()),
             )
             return
-        _save_chat_id(message.chat.id)
-        log_chat("user", message.text)
-        prompt = _build_operator_prompt(message.text)
+        _save_operator_telegram(message)
+        raw_text = (message.text or "").strip()
+        if not raw_text:
+            _reply(message, "Send a non-empty text message.")
+            return
+        log_chat("user", raw_text)
+        prompt = _build_operator_prompt(
+            raw_text,
+            reply_context=_telegram_reply_context_for_prompt(message),
+        )
 
         def _run():
             response = run_agent_streaming(
@@ -2502,6 +3235,7 @@ def run_bot():
                 prompt,
                 message.chat.id,
                 reply_to_message_id=message.message_id,
+                message_thread_id=getattr(message, "message_thread_id", None),
             )
             log_chat("bot", response[:1000])
             _process_pending_env()
@@ -2511,7 +3245,8 @@ def run_bot():
     _log("telegram bot started")
     while True:
         try:
-            bot.infinity_polling()
+            # None disables TeleBot's internal error/traceback spam (its ERROR>=DEBUG check is wrong).
+            bot.infinity_polling(logger_level=None)
         except Exception as e:
             _log(f"bot polling error: {str(e)[:80]}, reconnecting in 5s")
             time.sleep(5)
