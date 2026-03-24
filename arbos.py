@@ -246,7 +246,14 @@ else:
     COST_PER_M_OUTPUT = float(os.environ.get("COST_PER_M_OUTPUT", "0.60"))
 IS_ROOT = os.getuid() == 0
 MAX_RETRIES = int(os.environ.get("CLAUDE_MAX_RETRIES", "5"))
-CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "600"))
+try:
+    _claude_timeout_raw = int(os.environ.get("CLAUDE_TIMEOUT", "600").strip())
+except ValueError:
+    _claude_timeout_raw = 600
+if _claude_timeout_raw < 0:
+    _claude_timeout_raw = 600
+CLAUDE_TIMEOUT = _claude_timeout_raw
+CLAUDE_IDLE_KILL = CLAUDE_TIMEOUT > 0
 _tls = threading.local()
 _log_lock = threading.Lock()
 _chatlog_lock = threading.Lock()
@@ -521,6 +528,64 @@ def load_chatlog(max_chars: int = 8000) -> str:
 
 # ── Step update helpers ──────────────────────────────────────────────────────
 
+TELEGRAM_TEXT_MAX = 4096
+TELEGRAM_SAFE_TEXT = 3900
+
+
+def _truncate_telegram_text(text: str, limit: int = TELEGRAM_SAFE_TEXT) -> str:
+    """Trim for Telegram message body; append notice if truncated."""
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    notice = f"\n\n… [truncated, {len(text)} chars total]"
+    return text[: max(0, limit - len(notice))] + notice
+
+
+def _telegram_result_ok(data: Any) -> tuple[bool, str]:
+    """Telegram often returns HTTP 200 with {\"ok\": false}."""
+    if not isinstance(data, dict):
+        return False, str(data)[:300]
+    if data.get("ok"):
+        return True, ""
+    desc = str(data.get("description", data))
+    return False, desc
+
+
+def _streaming_empty_summary(returncode: int, stderr_output: str, attempts: int) -> str:
+    """Telegram body when Claude returns no assistant text."""
+    lines = [
+        f"No assistant text after {attempts} attempt(s).",
+        f"exit_code={returncode}",
+    ]
+    if stderr_output.strip():
+        lines.append("--- stderr ---")
+        tail = stderr_output.strip()
+        lines.append(tail[-3200:] if len(tail) > 3200 else tail)
+    else:
+        lines.append("stderr=(empty) — check server logs for arbos.py lines.")
+    return "\n".join(lines)
+
+
+def _build_agent_failure_detail(result: subprocess.CompletedProcess) -> str:
+    """Human-readable diagnostics when a Claude run did not succeed."""
+    lines: list[str] = [f"exit_code={result.returncode}"]
+    err = (result.stderr or "").strip()
+    if err.startswith("(timed out") or "timed out after" in err[:120]:
+        lines.append(
+            "cause=idle_watchdog (no stdout/stderr for CLAUDE_TIMEOUT; "
+            "set CLAUDE_TIMEOUT higher or 0 to disable)"
+        )
+    if err:
+        lines.append("--- stderr ---")
+        lines.append(err[-3500:] if len(err) > 3500 else err)
+    else:
+        lines.append("stderr=(empty)")
+    out = (result.stdout or "").strip()
+    if out:
+        lines.append("--- stdout excerpt ---")
+        lines.append(out[:2000] + ("…" if len(out) > 2000 else ""))
+    return "\n".join(lines)
+
 
 def _step_update_target() -> tuple[str, str] | None:
     token = os.getenv("TAU_BOT_TOKEN")
@@ -546,10 +611,14 @@ def _send_telegram_text(text: str, *, target: tuple[str, str] | None = None) -> 
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text[:4000]},
+            json={"chat_id": chat_id, "text": text[:TELEGRAM_TEXT_MAX]},
             timeout=15,
         )
         response.raise_for_status()
+        ok, desc = _telegram_result_ok(response.json())
+        if not ok:
+            _log(f"telegram sendMessage API error: {desc[:300]}")
+            return False
     except Exception as exc:
         _log(f"telegram send failed: {str(exc)[:120]}")
         return False
@@ -568,11 +637,16 @@ def _send_telegram_new(text: str, *, target: tuple[str, str] | None = None) -> i
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text[:4000]},
+            json={"chat_id": chat_id, "text": text[:TELEGRAM_TEXT_MAX]},
             timeout=15,
         )
         response.raise_for_status()
-        return response.json().get("result", {}).get("message_id")
+        data = response.json()
+        ok, desc = _telegram_result_ok(data)
+        if not ok:
+            _log(f"telegram sendMessage API error: {desc[:300]}")
+            return None
+        return data.get("result", {}).get("message_id")
     except Exception as exc:
         _log(f"telegram send failed: {str(exc)[:120]}")
         return None
@@ -585,14 +659,24 @@ def _edit_telegram_text(message_id: int, text: str, *, target: tuple[str, str] |
         return False
     token, chat_id = target
     text = _redact_secrets(text)
+    payload = text[:TELEGRAM_TEXT_MAX]
     try:
-        requests.post(
+        response = requests.post(
             f"https://api.telegram.org/bot{token}/editMessageText",
-            json={"chat_id": chat_id, "message_id": message_id, "text": text[:4000]},
+            json={"chat_id": chat_id, "message_id": message_id, "text": payload},
             timeout=15,
         )
-        return True
-    except Exception:
+        response.raise_for_status()
+        data = response.json()
+        ok, desc = _telegram_result_ok(data)
+        if ok:
+            return True
+        if "message is not modified" in desc.lower():
+            return True
+        _log(f"telegram editMessageText API error: {desc[:300]}")
+        return False
+    except Exception as exc:
+        _log(f"telegram editMessageText request failed: {str(exc)[:200]}")
         return False
 
 
@@ -1247,7 +1331,10 @@ def _run_claude_once(cmd, env, on_text=None, on_activity=None):
 
     on_text: optional callback(accumulated_text) fired as assistant text streams in.
     on_activity: optional callback(status_str) fired on tool use and other activity.
-    Kills the process if no output is received for CLAUDE_TIMEOUT seconds.
+    If CLAUDE_IDLE_KILL is true, kills the process after CLAUDE_TIMEOUT seconds with no
+    stdout or stderr activity. Set CLAUDE_TIMEOUT=0 to disable that watchdog (still exits
+    when the process ends). Stderr is drained continuously so a chatty CLI cannot deadlock
+    on a full PIPE buffer.
     """
     proc = subprocess.Popen(
         cmd, cwd=WORKING_DIR, env=env,
@@ -1262,74 +1349,123 @@ def _run_claude_once(cmd, env, on_text=None, on_activity=None):
     complete_texts: list[str] = []
     streaming_tokens: list[str] = []
     raw_lines: list[str] = []
+    stderr_acc: list[str] = []
     timed_out = False
     last_activity = time.monotonic()
+    stdout_registered = True
 
     sel = selectors.DefaultSelector()
     sel.register(proc.stdout, selectors.EVENT_READ)
+    sel.register(proc.stderr, selectors.EVENT_READ)
+
+    def _consume_stdout_line(line: str) -> None:
+        nonlocal result_text
+        raw_lines.append(line)
+        try:
+            evt = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        etype = evt.get("type", "")
+        if etype == "assistant":
+            msg = evt.get("message", {})
+            for block in msg.get("content", []):
+                btype = block.get("type", "")
+                if btype == "text" and block.get("text"):
+                    if evt.get("model_call_id"):
+                        complete_texts.append(block["text"])
+                        streaming_tokens.clear()
+                    else:
+                        streaming_tokens.append(block["text"])
+                        if on_text:
+                            on_text("".join(streaming_tokens))
+                elif btype == "tool_use" and on_activity:
+                    tool_name = block.get("name", "")
+                    tool_input = block.get("input", {})
+                    on_activity(_format_tool_activity(tool_name, tool_input))
+            if PROVIDER == "openrouter":
+                u = msg.get("usage", {})
+                if u:
+                    with _token_lock:
+                        _token_usage["input"] += u.get("input_tokens", 0)
+                        _token_usage["output"] += u.get("output_tokens", 0)
+        elif etype == "item.completed":
+            item = evt.get("item", {})
+            if item.get("type") == "agent_message" and item.get("text"):
+                complete_texts.append(item["text"])
+                streaming_tokens.clear()
+                if on_text:
+                    on_text(item["text"])
+        elif etype == "result":
+            result_text = evt.get("result", "")
+            if PROVIDER == "openrouter":
+                u = evt.get("usage", {})
+                if u:
+                    with _token_lock:
+                        _token_usage["input"] += u.get("input_tokens", 0)
+                        _token_usage["output"] += u.get("output_tokens", 0)
 
     try:
         while True:
-            ready = sel.select(timeout=min(CLAUDE_TIMEOUT, 30))
+            select_timeout = min(CLAUDE_TIMEOUT, 30) if CLAUDE_IDLE_KILL else 30.0
+            ready = sel.select(timeout=select_timeout)
             if not ready:
-                if time.monotonic() - last_activity > CLAUDE_TIMEOUT:
-                    _log(f"claude timeout: no output for {CLAUDE_TIMEOUT}s, killing pid={proc.pid}")
+                if CLAUDE_IDLE_KILL and (time.monotonic() - last_activity > CLAUDE_TIMEOUT):
+                    _log(
+                        f"claude timeout: no stdout/stderr activity for {CLAUDE_TIMEOUT}s, "
+                        f"killing pid={proc.pid}"
+                    )
                     proc.kill()
                     timed_out = True
                     break
                 if proc.poll() is not None:
                     break
                 continue
-            line = proc.stdout.readline()
-            if not line:
+
+            for key, _ in ready:
+                if key.fileobj == proc.stdout:
+                    line = proc.stdout.readline()
+                    if not line:
+                        if stdout_registered:
+                            try:
+                                sel.unregister(proc.stdout)
+                            except (KeyError, ValueError):
+                                pass
+                            stdout_registered = False
+                    else:
+                        last_activity = time.monotonic()
+                        _consume_stdout_line(line)
+                elif key.fileobj == proc.stderr:
+                    err_line = proc.stderr.readline()
+                    if err_line:
+                        last_activity = time.monotonic()
+                        stderr_acc.append(err_line)
+
+            if not stdout_registered and proc.poll() is not None:
                 break
-            last_activity = time.monotonic()
-            raw_lines.append(line)
-            try:
-                evt = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            etype = evt.get("type", "")
-            if etype == "assistant":
-                msg = evt.get("message", {})
-                for block in msg.get("content", []):
-                    btype = block.get("type", "")
-                    if btype == "text" and block.get("text"):
-                        if evt.get("model_call_id"):
-                            complete_texts.append(block["text"])
-                            streaming_tokens.clear()
-                        else:
-                            streaming_tokens.append(block["text"])
-                            if on_text:
-                                on_text("".join(streaming_tokens))
-                    elif btype == "tool_use" and on_activity:
-                        tool_name = block.get("name", "")
-                        tool_input = block.get("input", {})
-                        on_activity(_format_tool_activity(tool_name, tool_input))
-                if PROVIDER == "openrouter":
-                    u = msg.get("usage", {})
-                    if u:
-                        with _token_lock:
-                            _token_usage["input"] += u.get("input_tokens", 0)
-                            _token_usage["output"] += u.get("output_tokens", 0)
-            elif etype == "item.completed":
-                item = evt.get("item", {})
-                if item.get("type") == "agent_message" and item.get("text"):
-                    complete_texts.append(item["text"])
-                    streaming_tokens.clear()
-                    if on_text:
-                        on_text(item["text"])
-            elif etype == "result":
-                result_text = evt.get("result", "")
-                if PROVIDER == "openrouter":
-                    u = evt.get("usage", {})
-                    if u:
-                        with _token_lock:
-                            _token_usage["input"] += u.get("input_tokens", 0)
-                            _token_usage["output"] += u.get("output_tokens", 0)
     finally:
-        sel.unregister(proc.stdout)
+        for fo in (proc.stdout, proc.stderr):
+            try:
+                sel.unregister(fo)
+            except (KeyError, ValueError):
+                pass
         sel.close()
+
+    if proc.stdout:
+        try:
+            rest = proc.stdout.read()
+            if rest:
+                for line in rest.splitlines(keepends=True):
+                    _consume_stdout_line(line)
+        except Exception:
+            pass
+
+    if proc.stderr:
+        try:
+            rest = proc.stderr.read()
+            if rest:
+                stderr_acc.append(rest)
+        except Exception:
+            pass
 
     if not result_text:
         if complete_texts:
@@ -1337,10 +1473,11 @@ def _run_claude_once(cmd, env, on_text=None, on_activity=None):
         elif streaming_tokens:
             result_text = "".join(streaming_tokens)
 
+    stderr_output = "".join(stderr_acc)
     if timed_out:
-        stderr_output = "(timed out)"
-    else:
-        stderr_output = proc.stderr.read() if proc.stderr else ""
+        stderr_output = (
+            f"(timed out after {CLAUDE_TIMEOUT}s idle)\n{stderr_output}".strip()
+        )
 
     returncode = proc.wait()
     with _child_procs_lock:
@@ -1369,8 +1506,11 @@ def run_agent(cmd: list[str], phase: str, output_file: Path,
             output_file.write_text(_redact_secrets("".join(raw_lines)))
             _log(f"{phase}: finished rc={returncode} {fmt_duration(elapsed)}")
 
-            if returncode != 0 and stderr_output.strip():
-                _log(f"{phase}: stderr {stderr_output.strip()[:300]}")
+            if returncode != 0:
+                if stderr_output.strip():
+                    _log(f"{phase}: stderr {stderr_output.strip()[:300]}")
+                else:
+                    _log(f"{phase}: nonzero exit with empty stderr")
                 if attempt < MAX_RETRIES:
                     delay = min(2 ** attempt, 30)
                     _log(f"{phase}: retrying in {delay}s (attempt {attempt}/{MAX_RETRIES})")
@@ -1393,10 +1533,15 @@ def run_agent(cmd: list[str], phase: str, output_file: Path,
 
 
 def extract_text(result: subprocess.CompletedProcess) -> str:
-    output = result.stdout or ""
-    if not output.strip():
-        output = result.stderr or "(no output)"
-    return output
+    out = (result.stdout or "").strip()
+    if out:
+        return result.stdout or ""
+    err = (result.stderr or "").strip()
+    if err:
+        return result.stderr or ""
+    return (
+        f"(no stdout/stderr from agent; exit_code={result.returncode})"
+    )
 
 
 def run_step(prompt: str, step_number: int, goal_index: int = 0, goal_step: int = 0) -> bool:
@@ -1424,17 +1569,29 @@ def run_step(prompt: str, step_number: int, goal_index: int = 0, goal_step: int 
     else:
         smf.unlink(missing_ok=True)
 
-    def _edit_step_msg(text: str, *, force: bool = False):
+    def _edit_step_msg(text: str, *, force: bool = False, fallback_send: bool = False):
         nonlocal last_edit, step_msg_text
         if not step_msg_id or not target:
             return
         now = time.time()
         if not force and now - last_edit < 3.0:
             return
-        step_msg_text = text
-        _edit_telegram_text(step_msg_id, text, target=target)
-        smf.write_text(json.dumps({"msg_id": step_msg_id, "text": text}))
-        last_edit = now
+        body = _truncate_telegram_text(text)
+        ok = _edit_telegram_text(step_msg_id, body, target=target)
+        if not ok and fallback_send:
+            _log("step message edit failed; sending new Telegram message with final state")
+            new_id = _send_telegram_new(
+                "[step: could not edit in-place]\n\n" + body, target=target,
+            )
+            if new_id:
+                step_msg_text = text
+                smf.write_text(json.dumps({"msg_id": new_id, "text": text}))
+                last_edit = now
+            return
+        if ok:
+            step_msg_text = text
+            smf.write_text(json.dumps({"msg_id": step_msg_id, "text": text}))
+            last_edit = now
 
     _reset_tokens()
 
@@ -1457,6 +1614,7 @@ def run_step(prompt: str, step_number: int, goal_index: int = 0, goal_step: int 
             _edit_step_msg(f"{step_label} ({fmt_duration(elapsed_s)}{tok})\n{status}", force=True)
 
     success = False
+    result: subprocess.CompletedProcess | None = None
     try:
         _log(f"run dir {run_dir}")
 
@@ -1482,6 +1640,11 @@ def run_step(prompt: str, step_number: int, goal_index: int = 0, goal_step: int 
         elapsed = time.monotonic() - t0
         success = result.returncode == 0
         _log(f"step {'succeeded' if success else 'failed'} in {fmt_duration(elapsed)}")
+        if not success and result is not None:
+            _log(
+                "step failure detail:\n"
+                + _redact_secrets(_build_agent_failure_detail(result))[:4000]
+            )
         return success
     finally:
         _heartbeat_stop.set()
@@ -1508,18 +1671,33 @@ def run_step(prompt: str, step_number: int, goal_index: int = 0, goal_step: int 
             elapsed_s = time.monotonic() - t0
             inp, out = _get_tokens()
             tok = f" | {fmt_tokens(inp, out, elapsed_s)}" if (inp or out) else ""
-            parts = [f"{step_label} ({elapsed}, {status}{tok})"]
+            if not success and result is not None:
+                hdr = f"{step_label} ({elapsed}, FAILED, exit {result.returncode}{tok})"
+            else:
+                hdr = f"{step_label} ({elapsed}, {status}{tok})"
+            parts = [hdr]
             if agent_text:
                 parts.append(agent_text)
-            if rollout.strip():
+            if not success and result is not None:
+                out = (result.stdout or "").strip()
+                if out:
+                    parts.append("--- model text (stdout) ---\n" + out[:2000])
+                parts.append(_redact_secrets(_build_agent_failure_detail(result))[:2800])
+            elif rollout.strip():
                 parts.append(rollout.strip()[:3500])
-            final = "\n\n".join(parts)
+            final = _truncate_telegram_text("\n\n".join(parts))
 
-            _edit_step_msg(final, force=True)
+            _edit_step_msg(final, force=True, fallback_send=True)
             log_chat("bot", final[:1000])
             smf.unlink(missing_ok=True)
         except Exception as exc:
             _log(f"step message finalize failed: {str(exc)[:120]}")
+            tgt = _step_update_target()
+            if tgt:
+                _send_telegram_text(
+                    f"{step_label}: finalize/crash in run_step: {str(exc)[:500]}",
+                    target=tgt,
+                )
 
 
 # ── Agent loop ───────────────────────────────────────────────────────────────
@@ -1820,25 +1998,52 @@ def run_agent_streaming(bot, prompt: str, chat_id: int) -> str:
     else:
         cmd = _claude_cmd(prompt, extra_flags=["--model", "bot"])
 
-    msg = bot.send_message(chat_id, "thinking...")
+    t0 = time.monotonic()
+
+    def _elapsed() -> float:
+        return time.monotonic() - t0
+
+    def _banner(core: str) -> str:
+        core = (core or "").strip() or "…"
+        return _truncate_telegram_text(
+            f"[operator {fmt_duration(_elapsed())} | {PROVIDER}]\n\n{core}"
+        )
+
     current_text = ""
-    activity_status = ""
+    try:
+        msg = bot.send_message(
+            chat_id,
+            _banner(f"Starting Claude… (attempt 1/{MAX_RETRIES})"),
+        )
+    except Exception as exc:
+        _log(f"run_agent_streaming: initial send_message failed: {str(exc)[:250]}")
+        return f"(could not post operator status to Telegram: {exc})"
     last_edit = 0.0
 
-    def _edit(text: str, force: bool = False):
+    def _edit(
+        text: str,
+        force: bool = False,
+        *,
+        send_if_edit_fails: bool = False,
+    ):
         nonlocal last_edit
         now = time.time()
         if not force and now - last_edit < 1.5:
             return
-        display = text[-3800:] if len(text) > 3800 else text
-        display = _redact_secrets(display)
+        display = _redact_secrets(_banner(text))
         if not display.strip():
             return
         try:
             bot.edit_message_text(display, chat_id, msg.message_id)
             last_edit = now
-        except Exception:
-            pass
+        except Exception as exc:
+            _log(f"run_agent_streaming: edit_message_text failed: {str(exc)[:220]}")
+            if send_if_edit_fails:
+                try:
+                    bot.send_message(chat_id, display[:TELEGRAM_TEXT_MAX])
+                    _log("run_agent_streaming: sent fallback new message after edit failure")
+                except Exception as exc2:
+                    _log(f"run_agent_streaming: fallback send_message failed: {str(exc2)[:220]}")
 
     def _on_text(text: str):
         nonlocal current_text
@@ -1846,48 +2051,77 @@ def run_agent_streaming(bot, prompt: str, chat_id: int) -> str:
         _edit(text)
 
     def _on_activity(status: str):
-        nonlocal activity_status
-        activity_status = status
-        if not current_text:
+        if not current_text.strip():
             _edit(status)
 
     _claude_semaphore.acquire()
     try:
         env = _claude_env()
+        last_attempt = 1
+        last_rc, last_stderr = 0, ""
 
         for attempt in range(1, MAX_RETRIES + 1):
+            last_attempt = attempt
             current_text = ""
-            activity_status = ""
             last_edit = 0.0
+            _edit(
+                f"Running Claude… attempt {attempt}/{MAX_RETRIES}",
+                force=True,
+            )
+            _log(f"run_agent_streaming: attempt {attempt}/{MAX_RETRIES} starting")
 
             returncode, result_text, raw_lines, stderr_output = _run_claude_once(
                 cmd, env, on_text=_on_text, on_activity=_on_activity,
+            )
+            last_rc, last_stderr = returncode, stderr_output
+
+            _log(
+                f"run_agent_streaming: attempt {attempt} finished rc={returncode} "
+                f"text_len={len(result_text or '')} stderr_len={len(stderr_output or '')}"
             )
 
             if result_text.strip():
                 current_text = result_text
                 break
 
-            if returncode != 0 and attempt < MAX_RETRIES:
+            if attempt < MAX_RETRIES:
                 delay = min(2 ** attempt, 30)
-                _edit(f"Error, retrying in {delay}s... (attempt {attempt}/{MAX_RETRIES})", force=True)
+                detail = _streaming_empty_summary(returncode, stderr_output, attempt)
+                _edit(
+                    f"{detail}\n\nRetrying in {delay}s (next {attempt + 1}/{MAX_RETRIES})…",
+                    force=True,
+                )
                 time.sleep(delay)
                 continue
+
+            current_text = _streaming_empty_summary(returncode, stderr_output, attempt)
             break
 
-        _edit(current_text, force=True)
+        _edit(current_text, force=True, send_if_edit_fails=True)
 
         if not current_text.strip():
+            fallback = _streaming_empty_summary(last_rc, last_stderr, last_attempt)
+            _log(f"run_agent_streaming: final still empty; pushing diagnostic len={len(fallback)}")
             try:
-                bot.edit_message_text("(no output)", chat_id, msg.message_id)
-            except Exception:
-                pass
+                bot.send_message(chat_id, _redact_secrets(_banner(fallback))[:TELEGRAM_TEXT_MAX])
+            except Exception as exc:
+                _log(f"run_agent_streaming: could not send final diagnostic: {str(exc)[:200]}")
 
     except Exception as e:
+        current_text = f"(operator failed: {type(e).__name__}: {e})"
+        _log(f"run_agent_streaming: exception: {str(e)[:500]}")
+        err_body = _truncate_telegram_text(
+            f"[operator {fmt_duration(_elapsed())} | {PROVIDER}]\n\n"
+            f"Arbos error (operator run):\n{type(e).__name__}: {e}"
+        )
         try:
-            bot.edit_message_text(f"Error: {str(e)[:300]}", chat_id, msg.message_id)
-        except Exception:
-            pass
+            bot.edit_message_text(_redact_secrets(err_body), chat_id, msg.message_id)
+        except Exception as exc:
+            _log(f"run_agent_streaming: could not edit with error text: {str(exc)[:200]}")
+            try:
+                bot.send_message(chat_id, _redact_secrets(err_body)[:TELEGRAM_TEXT_MAX])
+            except Exception as exc2:
+                _log(f"run_agent_streaming: could not send error message: {str(exc2)[:200]}")
     finally:
         _claude_semaphore.release()
 
