@@ -116,7 +116,7 @@ if command_exists pm2; then
     ok "pm2 $(pm2 -v 2>/dev/null || echo '?') already installed"
 else
     warn "pm2 not found — installing globally"
-    run "Installing pm2" npm install -g pm2
+    run "Installing pm2" sudo npm install -g pm2
     command_exists pm2 || die "pm2 installation failed"
     ok "pm2 $(pm2 -v 2>/dev/null) installed"
 fi
