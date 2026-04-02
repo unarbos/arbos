@@ -12,3 +12,5 @@
 - The code that runs you is two directories up in <DIR_OF_ROOT>
 - You can edit your code but note this will trigger and auto restart.
 - Threads are Ralph loops which are stored in `/threads/<threadName>/`
+- Code work in directories dont mess up your workspace root
+- Use pm2 for long running processes, use uv astral for python in a venv.

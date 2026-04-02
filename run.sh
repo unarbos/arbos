@@ -5,7 +5,7 @@
 # Usage:
 #   ./run.sh [discord_token] [guild_id] [openrouter_key]
 #
-# All three arguments are optional if they were previously saved to .env
+# All three arguments are optional if they were previously saved to the vault
 #
 
 set -e
@@ -144,39 +144,69 @@ printf "\n"
 
 printf "  ${BOLD}Configuring environment${NC}\n\n"
 
-# Load existing .env values as defaults (if the file exists)
-env_val() { grep "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2-; }
+mask() { local v="$1"; printf "%s…%s" "${v:0:4}" "${v: -4}"; }
+
+env_val() { grep "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- || true; }
 
 if [ -f .env ]; then
-    EXISTING_DISCORD_TOKEN=$(env_val DISCORD_TOKEN)
-    EXISTING_GUILD_ID=$(env_val GUILD_ID)
-    EXISTING_OPENROUTER_KEY=$(env_val OPENROUTER_KEY)
+    EXISTING_VAULT_KEY=$(env_val VAULT_KEY)
 fi
 
-DISCORD_TOKEN="${1:-${EXISTING_DISCORD_TOKEN:-}}"
-GUILD_ID="${2:-${EXISTING_GUILD_ID:-}}"
-OPENROUTER_KEY="${3:-${EXISTING_OPENROUTER_KEY:-}}"
+VAULT_KEY="${EXISTING_VAULT_KEY:-$(openssl rand -base64 32)}"
+
+# Collect secrets (args > existing vault > prompt)
+# On re-runs the vault already holds these, so we only prompt when truly missing.
+NEED_SEED=false
+
+vault_get() {
+    if [ -f dist/vault.js ]; then
+        VAULT_KEY="$VAULT_KEY" node -e "
+            import('./dist/vault.js').then(v => v.getAllValues()).then(m => {
+                process.stdout.write(m['$1'] || '');
+            }).catch(() => {});
+        " 2>/dev/null || true
+    fi
+}
+
+DISCORD_TOKEN="${1:-}"
+GUILD_ID="${2:-}"
+OPENROUTER_KEY="${3:-}"
+
+if [ -z "$DISCORD_TOKEN" ]; then DISCORD_TOKEN=$(vault_get DISCORD_TOKEN); fi
+if [ -z "$GUILD_ID" ];       then GUILD_ID=$(vault_get GUILD_ID); fi
+if [ -z "$OPENROUTER_KEY" ]; then OPENROUTER_KEY=$(vault_get OPENROUTER_KEY); fi
 
 if [ -z "$DISCORD_TOKEN" ]; then
-    printf "  ${BOLD}Discord bot token:${NC} " && read -r DISCORD_TOKEN
+    printf "  ${BOLD}Discord bot token:${NC} " && read -rs DISCORD_TOKEN && printf "\n"
     [ -n "$DISCORD_TOKEN" ] || die "Discord token is required"
+    NEED_SEED=true
 fi
 if [ -z "$GUILD_ID" ]; then
     printf "  ${BOLD}Discord guild (server) ID:${NC} " && read -r GUILD_ID
     [ -n "$GUILD_ID" ] || die "Guild ID is required"
+    NEED_SEED=true
 fi
 if [ -z "$OPENROUTER_KEY" ]; then
-    printf "  ${BOLD}OpenRouter API key:${NC} " && read -r OPENROUTER_KEY
+    printf "  ${BOLD}OpenRouter API key:${NC} " && read -rs OPENROUTER_KEY && printf "\n"
     [ -n "$OPENROUTER_KEY" ] || die "OpenRouter key is required"
+    NEED_SEED=true
+fi
+
+if [ -n "$1" ] || [ -n "$2" ] || [ -n "$3" ]; then
+    NEED_SEED=true
+fi
+
+if [ "$NEED_SEED" = true ]; then
+    ok "Credentials collected"
+else
+    ok "Credentials loaded from vault"
 fi
 
 cat > .env <<EOF
-DISCORD_TOKEN=${DISCORD_TOKEN}
-GUILD_ID=${GUILD_ID}
-OPENROUTER_KEY=${OPENROUTER_KEY}
+VAULT_KEY=${VAULT_KEY}
 WORKSPACE_ROOT=./workspace
 EOF
-ok ".env written"
+ok ".env written (vault key only — secrets stored in encrypted vault)"
 
 printf "\n"
 
@@ -186,6 +216,18 @@ printf "  ${BOLD}Installing & building${NC}\n\n"
 
 run "Installing dependencies" npm install --silent
 run "Compiling TypeScript" npx tsc
+
+# ── 3b. Seed vault ───────────────────────────────────────────────────────────
+
+if [ "$NEED_SEED" = true ]; then
+    export VAULT_KEY
+    run "Seeding secrets into encrypted vault" \
+        node dist/seed-vault.js \
+            "DISCORD_TOKEN=${DISCORD_TOKEN}" \
+            "GUILD_ID=${GUILD_ID}" \
+            "OPENROUTER_KEY=${OPENROUTER_KEY}"
+    ok "Credentials stored in ~/.arbos/vault.enc"
+fi
 
 printf "\n"
 

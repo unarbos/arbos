@@ -7,22 +7,27 @@ import { registerCommands, wireEvents, onReady } from "./bot.js";
 import { destroyMonitor, mlog, forceFlush } from "./monitor.js";
 import { getActiveLoops } from "./ralph.js";
 import { readRalphMeta } from "./workspace.js";
+import { getAllValues } from "./vault.js";
 
 loadEnv();
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
-function loadConfig(): Config {
-  const discordToken = process.env.DISCORD_TOKEN;
-  const guildId = process.env.GUILD_ID;
-  const openRouterKey = process.env.OPENROUTER_KEY;
-  const workspaceRoot = resolve(process.env.WORKSPACE_ROOT ?? "./workspace");
+async function loadConfig(): Promise<Config> {
   const vaultKey = process.env.VAULT_KEY;
-
-  if (!discordToken) throw new Error("DISCORD_TOKEN is required");
-  if (!guildId) throw new Error("GUILD_ID is required");
-  if (!openRouterKey) throw new Error("OPENROUTER_KEY is required");
   if (!vaultKey) throw new Error("VAULT_KEY is required");
+
+  const vaultVars = await getAllValues();
+  const get = (key: string) => process.env[key] || vaultVars[key];
+
+  const discordToken = get("DISCORD_TOKEN");
+  const guildId = get("GUILD_ID");
+  const openRouterKey = get("OPENROUTER_KEY");
+  const workspaceRoot = resolve(process.env.WORKSPACE_ROOT ?? "./workspace");
+
+  if (!discordToken) throw new Error("DISCORD_TOKEN is required (set in vault or env)");
+  if (!guildId) throw new Error("GUILD_ID is required (set in vault or env)");
+  if (!openRouterKey) throw new Error("OPENROUTER_KEY is required (set in vault or env)");
 
   return { discordToken, guildId, openRouterKey, workspaceRoot, vaultKey };
 }
@@ -30,7 +35,7 @@ function loadConfig(): Config {
 // ── Boot ────────────────────────────────────────────────────────────────────
 
 async function main() {
-  const config = loadConfig();
+  const config = await loadConfig();
 
   const client = new Client({
     intents: [

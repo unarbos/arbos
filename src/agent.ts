@@ -60,8 +60,8 @@ export async function runAgent(
   });
 
   return new Promise<AgentResult>((resolve) => {
-    const openRouterKey = process.env.OPENROUTER_KEY;
-    if (!openRouterKey) throw new Error("OPENROUTER_KEY not set");
+    const openRouterKey = vaultVars.OPENROUTER_KEY || process.env.OPENROUTER_KEY;
+    if (!openRouterKey) throw new Error("OPENROUTER_KEY not found in vault or env");
 
     const orSettings = JSON.stringify({
       env: {
