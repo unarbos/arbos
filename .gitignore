@@ -1,0 +1,6 @@
+node_modules/
+dist/
+workspace/
+.env
+logs/
+tsc-watch.log
