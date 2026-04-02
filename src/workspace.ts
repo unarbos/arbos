@@ -114,6 +114,13 @@ export async function ensureWorkspace(config: Config, channelName: string): Prom
     await writeFile(pinPath, CHANNEL_PIN);
   }
 
+  if (channelName === "root") {
+    const cwdFile = join(dir, ".cwd");
+    if (!(await exists(cwdFile))) {
+      await writeFile(cwdFile, ".");
+    }
+  }
+
   return dir;
 }
 

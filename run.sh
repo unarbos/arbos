@@ -3,7 +3,9 @@
 # Arbos — one-command bootstrap
 #
 # Usage:
-#   ./run.sh <discord_token> <guild_id> <openrouter_key>
+#   ./run.sh [discord_token] [guild_id] [openrouter_key]
+#
+# All three arguments are optional if they were previously saved to .env
 #
 
 set -e
@@ -13,14 +15,15 @@ set -o pipefail
 
 if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
     GREEN=$'\033[0;32m' RED=$'\033[0;31m' CYAN=$'\033[0;36m'
-    BOLD=$'\033[1m' DIM=$'\033[2m' NC=$'\033[0m'
+    YELLOW=$'\033[0;33m' BOLD=$'\033[1m' DIM=$'\033[2m' NC=$'\033[0m'
 else
-    GREEN='' RED='' CYAN='' BOLD='' DIM='' NC=''
+    GREEN='' RED='' CYAN='' YELLOW='' BOLD='' DIM='' NC=''
 fi
 
-ok()  { printf "  ${GREEN}+${NC} %s\n" "$1"; }
-err() { printf "  ${RED}x${NC} %s\n" "$1"; }
-die() { err "$1"; exit 1; }
+ok()   { printf "  ${GREEN}+${NC} %s\n" "$1"; }
+warn() { printf "  ${YELLOW}!${NC} %s\n" "$1"; }
+err()  { printf "  ${RED}x${NC} %s\n" "$1"; }
+die()  { err "$1"; exit 1; }
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
@@ -64,16 +67,6 @@ run() {
     rm -f "$tmp_out" "$tmp_err"
 }
 
-# ── Args ─────────────────────────────────────────────────────────────────────
-
-DISCORD_TOKEN="${1:-}"
-GUILD_ID="${2:-}"
-OPENROUTER_KEY="${3:-}"
-
-[ -n "$DISCORD_TOKEN"  ] || die "Usage: ./run.sh <discord_token> <guild_id> <openrouter_key>"
-[ -n "$GUILD_ID"       ] || die "Usage: ./run.sh <discord_token> <guild_id> <openrouter_key>"
-[ -n "$OPENROUTER_KEY" ] || die "Usage: ./run.sh <discord_token> <guild_id> <openrouter_key>"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -87,27 +80,95 @@ printf "   / ___ \\| |  | |_) | (_) \\__ \\\\\n"
 printf "  /_/   \\_\\_|  |_.__/ \\___/|___/\n"
 printf "${NC}\n"
 
-# ── 1. Preflight ─────────────────────────────────────────────────────────────
+# ── 1. Install missing tools ────────────────────────────────────────────────
 
-printf "  ${BOLD}Checking prerequisites${NC}\n\n"
+printf "  ${BOLD}Checking & installing prerequisites${NC}\n\n"
 
-for cmd in node claude pm2; do
-    if command_exists "$cmd"; then
-        case "$cmd" in
-            node)   ok "node $(node -v)" ;;
-            claude) ok "claude $(claude -v 2>/dev/null || echo '?')" ;;
-            pm2)    ok "pm2 $(pm2 -v 2>/dev/null || echo '?')" ;;
-        esac
-    else
-        die "$cmd is required"
+# ── Node.js ──────────────────────────────────────────────────────────────────
+
+if command_exists node; then
+    ok "node $(node -v) already installed"
+else
+    warn "node not found — installing via nvm"
+
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+
+    if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+        run "Installing nvm" bash -c \
+            'curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash'
     fi
-done
+
+    # shellcheck disable=SC1091
+    . "$NVM_DIR/nvm.sh"
+
+    run "Installing Node.js LTS" nvm install --lts
+    nvm use --lts >/dev/null 2>&1
+
+    command_exists node || die "node installation failed"
+    ok "node $(node -v) installed"
+fi
+
+command_exists npm || die "npm not found (should come with node)"
+
+# ── pm2 ──────────────────────────────────────────────────────────────────────
+
+if command_exists pm2; then
+    ok "pm2 $(pm2 -v 2>/dev/null || echo '?') already installed"
+else
+    warn "pm2 not found — installing globally"
+    run "Installing pm2" npm install -g pm2
+    command_exists pm2 || die "pm2 installation failed"
+    ok "pm2 $(pm2 -v 2>/dev/null) installed"
+fi
+
+# ── Claude CLI ───────────────────────────────────────────────────────────────
+
+if command_exists claude; then
+    ok "claude $(claude -v 2>/dev/null || echo '?') already installed"
+else
+    warn "claude not found — installing Claude CLI"
+    run "Installing Claude CLI" bash -c \
+        'curl -fsSL https://claude.ai/install.sh | bash'
+
+    # The installer puts it in ~/.local/bin — make sure it's on PATH
+    if ! command_exists claude; then
+        export PATH="$HOME/.local/bin:$PATH"
+    fi
+    command_exists claude || die "claude installation failed — add ~/.local/bin to your PATH and retry"
+    ok "claude $(claude -v 2>/dev/null || echo '?') installed"
+fi
 
 printf "\n"
 
-# ── 2. Environment ───────────────────────────────────────────────────────────
+# ── 2. Environment ──────────────────────────────────────────────────────────
 
-printf "  ${BOLD}Writing environment${NC}\n\n"
+printf "  ${BOLD}Configuring environment${NC}\n\n"
+
+# Load existing .env values as defaults (if the file exists)
+env_val() { grep "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2-; }
+
+if [ -f .env ]; then
+    EXISTING_DISCORD_TOKEN=$(env_val DISCORD_TOKEN)
+    EXISTING_GUILD_ID=$(env_val GUILD_ID)
+    EXISTING_OPENROUTER_KEY=$(env_val OPENROUTER_KEY)
+fi
+
+DISCORD_TOKEN="${1:-${EXISTING_DISCORD_TOKEN:-}}"
+GUILD_ID="${2:-${EXISTING_GUILD_ID:-}}"
+OPENROUTER_KEY="${3:-${EXISTING_OPENROUTER_KEY:-}}"
+
+if [ -z "$DISCORD_TOKEN" ]; then
+    printf "  ${BOLD}Discord bot token:${NC} " && read -r DISCORD_TOKEN
+    [ -n "$DISCORD_TOKEN" ] || die "Discord token is required"
+fi
+if [ -z "$GUILD_ID" ]; then
+    printf "  ${BOLD}Discord guild (server) ID:${NC} " && read -r GUILD_ID
+    [ -n "$GUILD_ID" ] || die "Guild ID is required"
+fi
+if [ -z "$OPENROUTER_KEY" ]; then
+    printf "  ${BOLD}OpenRouter API key:${NC} " && read -r OPENROUTER_KEY
+    [ -n "$OPENROUTER_KEY" ] || die "OpenRouter key is required"
+fi
 
 cat > .env <<EOF
 DISCORD_TOKEN=${DISCORD_TOKEN}
@@ -139,11 +200,11 @@ ok "Log directory ready"
 
 printf "\n"
 
-# ── 5. Launch ─────────────────────────────────────────────────────────────────
+# ── 5. Launch ────────────────────────────────────────────────────────────────
 
 printf "  ${BOLD}Starting Arbos${NC}\n\n"
 
-pm2 delete arbos 2>/dev/null || true
+pm2 delete arbos >/dev/null 2>&1 || true
 run "Starting PM2 process" pm2 start ecosystem.config.cjs
 pm2 save --force >/dev/null 2>&1
 ok "PM2 state saved"

@@ -311,12 +311,16 @@ export async function onReady(client: Client, config: Config, queue: DiscordSend
 
   await initMonitor(client, config);
 
-  await ensureWorkspace(config, "general");
+  await ensureWorkspace(config, "root");
+
+  const guild = client.guilds.cache.get(config.guildId);
+  if (guild) {
+    await assertRootChannel(guild, config);
+  }
 
   await cleanOrphanedWorkspace(client, config);
 
   await resumeLoopsOnStartup(config, queue, async (channelName, threadName) => {
-    const guild = client.guilds.cache.get(config.guildId);
     if (!guild) return null;
     const channels = await guild.channels.fetch();
     for (const [, ch] of channels) {
@@ -333,6 +337,52 @@ export async function onReady(client: Client, config: Config, queue: DiscordSend
   });
 }
 
+async function assertRootChannel(guild: import("discord.js").Guild, config: Config) {
+  const channels = await guild.channels.fetch();
+  let rootChannel: TextChannel | null = null;
+
+  for (const [, ch] of channels) {
+    if (ch && ch.type === ChannelType.GuildText && ch.name === "root") {
+      rootChannel = ch as TextChannel;
+      break;
+    }
+  }
+
+  if (!rootChannel) {
+    mlog("info", "bot", `Root channel not found — creating #root`);
+    rootChannel = await guild.channels.create({
+      name: "root",
+      type: ChannelType.GuildText,
+      reason: "Arbos root channel",
+    });
+  }
+
+  const pins = await rootChannel.messages.fetchPinned();
+  if (pins.size > 0) return;
+
+  mlog("info", "bot", `Pinning prompt banner in #root`);
+  const ctx = await resolveContext(config, "root");
+  const pinContent = await readPin(ctx.pinPath);
+  const vars = buildPlaceholderVars(config, "root", { cwd: ctx.cwd });
+  const filledPin = fillPlaceholders(pinContent, vars);
+  const banner = formatPinnedMessage({
+    cwd: ctx.cwd,
+    channelName: "root",
+    pin: filledPin,
+  });
+
+  try {
+    const topic = buildChannelTopic(ctx.cwd);
+    await rootChannel.setTopic(topic).catch(() => {});
+    const pinMsg = await rootChannel.send(`\`\`\`\n${banner}\n\`\`\``);
+    await pinMsg.pin();
+  } catch (err) {
+    mlog("error", "bot", `Failed to pin in #root`, {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 // ── Message Handler ─────────────────────────────────────────────────────────
 
 async function handleMessage(msg: Message, config: Config, queue: DiscordSendQueue) {
@@ -345,7 +395,7 @@ async function handleMessage(msg: Message, config: Config, queue: DiscordSendQue
 
   const isInThread = channel.isThread();
   const channelName = isInThread
-    ? ((channel as ThreadChannel).parent as TextChannel)?.name ?? "general"
+    ? ((channel as ThreadChannel).parent as TextChannel)?.name ?? "root"
     : (channel as TextChannel).name;
   const threadName = isInThread ? (channel as ThreadChannel).name : undefined;
 
@@ -553,7 +603,7 @@ async function handleThreadDelete(thread: ThreadChannel, config: Config) {
 
   const threadName = thread.name;
   const parentChannel = thread.parent as TextChannel | null;
-  const channelName = parentChannel?.name ?? "general";
+  const channelName = parentChannel?.name ?? "root";
 
   mlog("info", "thread", `Thread deleted: ${threadName}`, { channelName });
 
@@ -582,7 +632,7 @@ async function handleCommand(
 
   const isInThread = channel.isThread();
   const channelName = isInThread
-    ? ((channel as ThreadChannel).parent as TextChannel)?.name ?? "general"
+    ? ((channel as ThreadChannel).parent as TextChannel)?.name ?? "root"
     : (channel as TextChannel).name;
 
   mlog("info", "command", `/${cmd} invoked`, {
