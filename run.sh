@@ -23,12 +23,43 @@
 #   8. pm2 start (or reload) arbos-<machine>, pm2 save, hint about pm2 startup.
 set -euo pipefail
 
+# When invoked via `curl … | bash`, BASH_SOURCE[0] is unset / empty and there
+# is no local checkout to point REPO_ROOT at. Clone (or fast-forward) the
+# arbos source into <cwd>/.arbos/src and re-exec ourselves from the clone.
+if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-}" ]]; then
+  ARBOS_REMOTE="${ARBOS_REMOTE:-https://github.com/unarbos/arbos.git}"
+  ARBOS_BRANCH="${ARBOS_BRANCH:-main}"
+  _src="$(pwd -P)/.arbos/src"
+
+  command -v git >/dev/null 2>&1 || {
+    case "$(uname -s)" in
+      Linux)  command -v apt-get >/dev/null && sudo apt-get update -qq \
+                && sudo apt-get install -y git ;;
+      Darwin) command -v brew    >/dev/null && brew install git ;;
+    esac
+    command -v git >/dev/null 2>&1 || {
+      echo "arbos bootstrap: git is required but not installed" >&2; exit 1; }
+  }
+
+  if [[ -d "$_src/.git" ]]; then
+    git -C "$_src" fetch --quiet --depth 1 origin "$ARBOS_BRANCH"
+    git -C "$_src" reset --hard --quiet "origin/$ARBOS_BRANCH"
+  else
+    [[ -e "$_src" ]] && {
+      echo "arbos bootstrap: $_src exists and is not a git checkout" >&2; exit 1; }
+    mkdir -p "$(dirname "$_src")"
+    git clone --quiet --depth 1 --branch "$ARBOS_BRANCH" "$ARBOS_REMOTE" "$_src"
+  fi
+
+  exec bash "$_src/run.sh" "$@"
+fi
+
 # REPO_ROOT = where the arbos source / venv / run.sh live. Used only to
 # locate the python virtualenv and the editable package source. The user's
 # working directory at invocation time ("install root") is what owns
 # .arbos/, the doppler scope, and the cursor-agent workdir -- so a single
 # checkout of the arbos repo can drive any number of separate workspaces.
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 INVOKE_DIR="$(pwd -P)"
 
 STORAGE_DIR="${INVOKE_DIR}/.arbos"
