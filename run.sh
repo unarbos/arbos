@@ -167,33 +167,93 @@ ensure_tailscale_up() {
 # ----------------------------------------------------------------------------
 # 1b. machine name
 # ----------------------------------------------------------------------------
+# Telegram bot usernames are capped at 32 chars and must end with "bot".
+# We build the username as `arbos_<MACHINE>_bot`, so MACHINE must fit in
+# 32 - len("arbos_") - len("_bot") = 22 chars. We also use the same name as
+# the suffix on a doppler secret key (`ARBOS_<MACHINE_UPPER>_TELE_TOKEN`),
+# which has no hard cap but should stay readable. 22 keeps both happy.
+ARBOS_MACHINE_MAX_LEN=22
+
 sanitise_machine() {
-  printf '%s' "$1" \
+  local max="${2:-$ARBOS_MACHINE_MAX_LEN}"
+  local cleaned
+  cleaned="$(printf '%s' "$1" \
     | tr '[:upper:]' '[:lower:]' \
     | tr -- '-. \t' '____' \
     | tr -cd 'a-z0-9_' \
-    | sed -E 's/_+/_/g; s/^_+//; s/_+$//'
+    | sed -E 's/_+/_/g; s/^_+//; s/_+$//')"
+  # Hard length cap. If we have to truncate, append a short stable hash of
+  # the original input so two long-but-distinct hostnames don't collide.
+  if (( ${#cleaned} > max )); then
+    local hash
+    hash="$(printf '%s' "$1" | shasum 2>/dev/null | head -c 6 \
+      || printf '%s' "$1" | sha1sum 2>/dev/null | head -c 6 \
+      || printf '%s' "$1" | cksum | tr -d ' ' | head -c 6)"
+    local keep=$(( max - 1 - ${#hash} ))
+    (( keep < 1 )) && keep=1
+    cleaned="${cleaned:0:keep}_${hash}"
+    cleaned="$(printf '%s' "$cleaned" | sed -E 's/_+/_/g; s/^_+//; s/_+$//')"
+  fi
+  printf '%s' "$cleaned"
+}
+
+# Pull the user-assigned Tailnet machine name (the first DNS label, e.g.
+# "templar" from "templar.tail9859e8.ts.net.") rather than the OS hostname,
+# which on a lot of cloud images is a long random string.
+_tailscale_dns_label() {
+  tailscale status --self --json 2>/dev/null \
+    | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+dns = (d.get("Self") or {}).get("DNSName", "") or ""
+print(dns.split(".", 1)[0] if dns else "")
+' 2>/dev/null || true
+}
+
+_tailscale_hostname() {
+  tailscale status --self --json 2>/dev/null \
+    | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print((d.get("Self") or {}).get("HostName", "") or "")
+' 2>/dev/null || true
 }
 
 resolve_machine() {
-  local raw=""
-  if command -v tailscale >/dev/null 2>&1; then
-    raw="$(tailscale status --self --json 2>/dev/null \
-      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("Self",{}).get("HostName",""))' 2>/dev/null || true)"
+  # Allow an explicit override for users who want to pin the name regardless
+  # of what tailscale / the OS report.
+  local raw="${ARBOS_MACHINE_NAME:-}"
+  local source="override"
+
+  if [[ -z "$raw" ]] && command -v tailscale >/dev/null 2>&1; then
+    raw="$(_tailscale_dns_label)"
+    source="tailscale dns"
     if [[ -z "$raw" ]]; then
-      raw="$(tailscale status --json 2>/dev/null \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("Self",{}).get("HostName",""))' 2>/dev/null || true)"
+      raw="$(_tailscale_hostname)"
+      source="tailscale hostname"
     fi
   fi
   if [[ -z "$raw" ]]; then
     raw="$(hostname -s 2>/dev/null || hostname || echo "unknown")"
+    source="hostname"
   fi
 
   ARBOS_MACHINE="$(sanitise_machine "$raw")"
   [[ -n "$ARBOS_MACHINE" ]] || fail "could not resolve a usable machine name from '$raw'"
   ARBOS_MACHINE_UPPER="$(printf '%s' "$ARBOS_MACHINE" | tr '[:lower:]' '[:upper:]')"
   PM2_NAME="arbos-${ARBOS_MACHINE}"
-  ok "machine name: $ARBOS_MACHINE  (pm2 name: $PM2_NAME)"
+
+  if [[ "$raw" != "$ARBOS_MACHINE" ]]; then
+    ok "machine name: $ARBOS_MACHINE  ${DIM}(from $source: $raw)${NC}  (pm2: $PM2_NAME)"
+  else
+    ok "machine name: $ARBOS_MACHINE  ${DIM}(from $source)${NC}  (pm2: $PM2_NAME)"
+  fi
 }
 
 # ----------------------------------------------------------------------------
