@@ -163,7 +163,7 @@ ensure_tailscale_up() {
 sanitise_machine() {
   printf '%s' "$1" \
     | tr '[:upper:]' '[:lower:]' \
-    | tr '.- \t' '____' \
+    | tr -- '-. \t' '____' \
     | tr -cd 'a-z0-9_' \
     | sed -E 's/_+/_/g; s/^_+//; s/_+$//'
 }
