@@ -23,8 +23,15 @@
 #   8. pm2 start (or reload) arbos-<machine>, pm2 save, hint about pm2 startup.
 set -euo pipefail
 
+# REPO_ROOT = where the arbos source / venv / run.sh live. Used only to
+# locate the python virtualenv and the editable package source. The user's
+# working directory at invocation time ("install root") is what owns
+# .arbos/, the doppler scope, and the cursor-agent workdir -- so a single
+# checkout of the arbos repo can drive any number of separate workspaces.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STORAGE_DIR="${REPO_ROOT}/.arbos"
+INVOKE_DIR="$(pwd -P)"
+
+STORAGE_DIR="${INVOKE_DIR}/.arbos"
 WRITEBACK_PATH="${STORAGE_DIR}/doppler_writeback.json"
 AGENT_LOG_PATH="${STORAGE_DIR}/agent.log"
 
@@ -246,7 +253,7 @@ ensure_doppler_scope() {
     doppler setup --no-interactive \
       --project "$DOPPLER_PROJECT" \
       --config "$DOPPLER_CONFIG" \
-      --scope "$REPO_ROOT" \
+      --scope "$INVOKE_DIR" \
     || die "doppler setup failed; try 'doppler setup' manually"
 }
 
@@ -366,7 +373,7 @@ run_installer() {
   rm -f "$WRITEBACK_PATH" 2>/dev/null || true
 
   (
-    cd "$REPO_ROOT"
+    cd "$INVOKE_DIR"
     ARBOS_MACHINE="$ARBOS_MACHINE" \
     ARBOS_TELEGRAM_BOT_TOKEN="$EXPORT_BOT_TOKEN" \
     ARBOS_TELEGRAM_CHAT_ID="$EXPORT_CHAT_ID" \
@@ -589,7 +596,7 @@ for p in json.load(sys.stdin):
   fi
 
   if [[ -n "$existing_path" ]] \
-     && { [[ "$existing_path" != "$pybin" ]] || [[ "$existing_cwd" != "$REPO_ROOT" ]]; }; then
+     && { [[ "$existing_path" != "$pybin" ]] || [[ "$existing_cwd" != "$INVOKE_DIR" ]]; }; then
     warn "stale pm2 entry $PM2_NAME points at ${DIM}${existing_path}${NC} (cwd ${DIM}${existing_cwd}${NC})"
     info "deleting it so we can start the right binary"
     run "Deleting stale $PM2_NAME entry" pm2 delete "$PM2_NAME"
@@ -607,7 +614,7 @@ for p in json.load(sys.stdin):
         ${EXPORT_CURSOR_API_KEY:+CURSOR_API_KEY="$EXPORT_CURSOR_API_KEY"} \
         pm2 start "$pybin" \
           --name "$PM2_NAME" \
-          --cwd "$REPO_ROOT" \
+          --cwd "$INVOKE_DIR" \
           --log "$AGENT_LOG_PATH" \
           --time \
           --max-memory-restart 256M \
@@ -708,7 +715,7 @@ cmd_privacy_off() {
   section "Bot privacy mode"
   info "ensuring BotFather /setprivacy -> Disable"
   (
-    cd "$REPO_ROOT"
+    cd "$INVOKE_DIR"
     ARBOS_MACHINE="$ARBOS_MACHINE" \
     ARBOS_TELEGRAM_BOT_TOKEN="$EXPORT_BOT_TOKEN" \
     ARBOS_TELEGRAM_CHAT_ID="$EXPORT_CHAT_ID" \
