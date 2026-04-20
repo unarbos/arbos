@@ -57,6 +57,11 @@ _ARBOS_MSG_ID_SHIFT = 20
 INITIAL_BUBBLE_TEXT = "thinking…"
 PLAN_INITIAL_BUBBLE_TEXT = "planning…"
 IMPL_INITIAL_BUBBLE_TEXT = "implementing…"
+TRANSCRIBING_BUBBLE_TEXT = "transcribing…"
+
+OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
+WHISPER_MODEL = "whisper-1"
+WHISPER_TIMEOUT = 60.0
 
 PLAN_MODEL = "claude-opus-4-7-high"
 IMPL_MODEL = "claude-opus-4-7-high"
@@ -98,6 +103,11 @@ class CursorAgent:
         self.workdir: Path = paths.root
         self.offset_path = paths.offset_path
         self.lock_path = paths.lock_path
+        self.openai_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if not self.openai_api_key:
+            logger.warning(
+                "OPENAI_API_KEY not set in env — voice transcription will be disabled"
+            )
         self._stop = asyncio.Event()
         self._lock_fd: Optional[int] = None
         self._tasks: set[asyncio.Task[None]] = set()
@@ -170,10 +180,34 @@ class CursorAgent:
             return False
         if self.bot_user_id is not None and sender.get("id") == self.bot_user_id:
             return False
-        text = (message.get("text") or "").strip()
-        if not text:
-            return False
-        return True
+        if (message.get("text") or "").strip():
+            return True
+        if self._extract_audio(message) is not None:
+            return True
+        return False
+
+    @staticmethod
+    def _extract_audio(message: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """Return audio metadata for the first supported attachment, else None.
+
+        Preference order: voice (the canonical "voice note") > video_note
+        (round video; audio track is what we transcribe) > audio (uploaded
+        music file). Documents intentionally skipped.
+        """
+        for kind in ("voice", "video_note", "audio"):
+            att = message.get(kind)
+            if not att:
+                continue
+            file_id = att.get("file_id")
+            if not file_id:
+                continue
+            return {
+                "kind": kind,
+                "file_id": file_id,
+                "mime_type": att.get("mime_type") or "",
+                "duration": att.get("duration") or 0,
+            }
+        return None
 
     # ---- per-message handler ---------------------------------------------
     async def _send_initial_bubble(
@@ -222,25 +256,79 @@ class CursorAgent:
         prompt = (message.get("text") or "").strip()
         sender = (message.get("from") or {}).get("username") or (message.get("from") or {}).get("id")
 
+        # Voice / video_note / audio: transcribe before dispatch. The
+        # transcribing bubble is reused as the live bubble for the cursor
+        # run when the message routes to the regular agent path; for /plan
+        # we finalize it with the heard transcript so the user can see it.
+        voice_bubble: Optional[Bubble] = None
+        if not prompt:
+            audio = self._extract_audio(message)
+            if audio is None:
+                logger.debug("ignoring message with no text and no audio")
+                return
+
+            sent = await self._send_initial_bubble(
+                http, message, text=TRANSCRIBING_BUBBLE_TEXT
+            )
+            if sent is None:
+                return
+            voice_bubble = Bubble(
+                http=http,
+                bot_token=self.bot_token,
+                chat_id=self.chat_id,
+                message_thread_id=self.topic_id,
+                message_id=sent["message_id"],
+            )
+
+            try:
+                prompt = await self._transcribe_voice(http, audio)
+            except Exception as exc:
+                logger.warning("voice transcription failed: %s", exc)
+                try:
+                    await voice_bubble.finalize(f"voice transcription failed: {exc}")
+                finally:
+                    await voice_bubble.aclose()
+                return
+
+            if not prompt:
+                try:
+                    await voice_bubble.finalize("voice transcription returned empty text")
+                finally:
+                    await voice_bubble.aclose()
+                return
+
+            logger.info(
+                "transcribed %s from %s -> %d chars",
+                audio["kind"], sender, len(prompt),
+            )
+
         plan_arg = self._match_plan_command(prompt)
         if plan_arg is not None:
+            if voice_bubble is not None:
+                try:
+                    await voice_bubble.finalize(f"voice: {prompt}")
+                finally:
+                    await voice_bubble.aclose()
             logger.info("dispatching /plan from %s (len=%d)", sender, len(plan_arg))
             await self._handle_plan_command(http, message, plan_arg)
             return
 
         logger.info("dispatching message from %s -> cursor-agent (len=%d)", sender, len(prompt))
 
-        sent = await self._send_initial_bubble(http, message)
-        if sent is None:
-            return
-
-        bubble = Bubble(
-            http=http,
-            bot_token=self.bot_token,
-            chat_id=self.chat_id,
-            message_thread_id=self.topic_id,
-            message_id=sent["message_id"],
-        )
+        if voice_bubble is not None:
+            bubble = voice_bubble
+            await bubble.update(INITIAL_BUBBLE_TEXT)
+        else:
+            sent = await self._send_initial_bubble(http, message)
+            if sent is None:
+                return
+            bubble = Bubble(
+                http=http,
+                bot_token=self.bot_token,
+                chat_id=self.chat_id,
+                message_thread_id=self.topic_id,
+                message_id=sent["message_id"],
+            )
 
         runner = CursorRunner(
             prompt=prompt,
@@ -263,6 +351,66 @@ class CursorAgent:
                 pass
         finally:
             await bubble.aclose()
+
+    async def _transcribe_voice(
+        self,
+        http: httpx.AsyncClient,
+        audio: dict[str, Any],
+    ) -> str:
+        """Download a Telegram voice file and transcribe via OpenAI Whisper.
+
+        Raises ``RuntimeError`` with a short, user-facing message on any
+        failure (missing key, Telegram error, download failure, Whisper
+        non-200, or empty transcript).
+        """
+        if not self.openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY not configured")
+
+        resp = await self._api(http, "getFile", file_id=audio["file_id"])
+        if resp.status_code != 200:
+            raise RuntimeError(f"getFile HTTP {resp.status_code}")
+        body = resp.json()
+        if not body.get("ok"):
+            raise RuntimeError(f"getFile not ok: {body!r}")
+        file_path = (body.get("result") or {}).get("file_path")
+        if not file_path:
+            raise RuntimeError("getFile returned no file_path")
+
+        file_url = f"{BOT_API}/file/bot{self.bot_token}/{file_path}"
+        try:
+            download = await http.get(file_url, timeout=WHISPER_TIMEOUT)
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"audio download failed: {exc}") from exc
+        if download.status_code != 200:
+            raise RuntimeError(f"audio download HTTP {download.status_code}")
+        audio_bytes = download.content
+        if not audio_bytes:
+            raise RuntimeError("downloaded audio is empty")
+
+        filename = file_path.rsplit("/", 1)[-1] or "audio.ogg"
+        mime = audio["mime_type"] or "audio/ogg"
+
+        try:
+            transcribe_resp = await http.post(
+                OPENAI_TRANSCRIPTIONS_URL,
+                headers={"Authorization": f"Bearer {self.openai_api_key}"},
+                files={"file": (filename, audio_bytes, mime)},
+                data={"model": WHISPER_MODEL, "response_format": "text"},
+                timeout=WHISPER_TIMEOUT,
+            )
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"whisper request failed: {exc}") from exc
+
+        if transcribe_resp.status_code != 200:
+            raise RuntimeError(
+                f"whisper HTTP {transcribe_resp.status_code}: "
+                f"{transcribe_resp.text[:200]}"
+            )
+
+        transcript = transcribe_resp.text.strip()
+        if not transcript:
+            raise RuntimeError("whisper returned empty transcript")
+        return transcript
 
     async def _handle_plan_command(
         self,

@@ -775,11 +775,13 @@ for p in json.load(sys.stdin):
     run "Reloading $PM2_NAME (refreshed env)" \
       env ARBOS_MACHINE="$ARBOS_MACHINE" \
         ${EXPORT_CURSOR_API_KEY:+CURSOR_API_KEY="$EXPORT_CURSOR_API_KEY"} \
+        ${EXPORT_OPENAI_API_KEY:+OPENAI_API_KEY="$EXPORT_OPENAI_API_KEY"} \
         pm2 reload "$PM2_NAME" --update-env
   else
     run "Starting $PM2_NAME under pm2" \
       env ARBOS_MACHINE="$ARBOS_MACHINE" \
         ${EXPORT_CURSOR_API_KEY:+CURSOR_API_KEY="$EXPORT_CURSOR_API_KEY"} \
+        ${EXPORT_OPENAI_API_KEY:+OPENAI_API_KEY="$EXPORT_OPENAI_API_KEY"} \
         pm2 start "$pybin" \
           --name "$PM2_NAME" \
           --cwd "$INVOKE_DIR" \
