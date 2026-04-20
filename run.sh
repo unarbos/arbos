@@ -350,6 +350,43 @@ report_machine_secrets() {
 }
 
 # ----------------------------------------------------------------------------
+# 4b. system shared libraries needed by bundled tdjson (Linux only)
+#     aiotdlib ships a tdjson built against LLVM libc++, which is not present
+#     on a stock Debian/Ubuntu box. Without it, `import` is fine but the first
+#     `Client(...)` call dies with:
+#       OSError: libc++.so.1: cannot open shared object file
+# ----------------------------------------------------------------------------
+ensure_tdjson_runtime() {
+  [[ "$(uname -s)" == "Linux" ]] || return 0
+
+  # Quick probe via the dynamic linker -- if libc++.so.1 already resolves
+  # somewhere on the loader path, we're done.
+  if ldconfig -p 2>/dev/null | grep -q '\blibc++\.so\.1\b'; then
+    ok "libc++ runtime already present"
+    return 0
+  fi
+
+  warn "libc++ runtime not found — installing (needed by bundled tdjson)"
+  if command_exists apt-get; then
+    run "apt-get update" sudo apt-get update
+    # libc++1 pulls in libc++abi1 / libunwind as needed on modern Ubuntu/Debian.
+    run "Installing libc++1 libc++abi1" sudo apt-get install -y libc++1 libc++abi1
+  elif command_exists dnf; then
+    run "Installing libcxx" sudo dnf install -y libcxx libcxxabi
+  elif command_exists yum; then
+    run "Installing libcxx" sudo yum install -y libcxx libcxxabi
+  elif command_exists pacman; then
+    run "Installing libc++" sudo pacman -S --noconfirm libc++ libc++abi
+  else
+    die "no supported package manager (apt-get/dnf/yum/pacman) found; install libc++ manually"
+  fi
+
+  ldconfig -p 2>/dev/null | grep -q '\blibc++\.so\.1\b' \
+    || die "libc++ install appears to have failed (libc++.so.1 still not on loader path)"
+  ok "libc++ runtime installed"
+}
+
+# ----------------------------------------------------------------------------
 # 5. python venv + package install
 # ----------------------------------------------------------------------------
 ensure_venv() {
@@ -697,6 +734,9 @@ cmd_install() {
   section "Secrets"
   ensure_required_secrets
   report_machine_secrets
+
+  section "System libraries"
+  ensure_tdjson_runtime
 
   section "Python venv"
   ensure_venv
