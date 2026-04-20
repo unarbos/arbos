@@ -520,6 +520,15 @@ run_installer() {
   printf "\n  ${BOLD}Running arbos install${NC} ${DIM}(secrets via 'doppler run')${NC}\n\n"
   rm -f "$WRITEBACK_PATH" 2>/dev/null || true
 
+  # arbos install is interactive (aiotdlib prompts for SMS code / 2FA via
+  # sys.stdin.readline). When the parent shell was started by `curl | bash`,
+  # stdin is the now-exhausted curl pipe, so readline() returns "" forever
+  # and the auth flow infinite-loops. Force stdin to /dev/tty whenever one
+  # exists; the sub-redirect in the subshell wins over whatever the parent
+  # bash inherited.
+  local stdin_src="/dev/stdin"
+  [[ -r /dev/tty ]] && stdin_src="/dev/tty"
+
   (
     cd "$INVOKE_DIR"
     ARBOS_MACHINE="$ARBOS_MACHINE" \
@@ -527,7 +536,7 @@ run_installer() {
     ARBOS_TELEGRAM_CHAT_ID="$EXPORT_CHAT_ID" \
     ARBOS_TELEGRAM_SUPERGROUP_ID="$EXPORT_SUPERGROUP_ID" \
     ARBOS_TELE_TOKEN_KEY="$EXPORT_TOKEN_KEY" \
-    doppler run --silent --preserve-env -- "$REPO_ROOT/.venv/bin/arbos" install
+    doppler run --silent --preserve-env -- "$REPO_ROOT/.venv/bin/arbos" install <"$stdin_src"
   )
 }
 
@@ -719,6 +728,17 @@ start_agent() {
     export CURSOR_API_KEY="$EXPORT_CURSOR_API_KEY"
   fi
 
+  # Forward OPENAI_API_KEY when present in doppler. Optional: voice-note
+  # transcription in agent.py is disabled when this is empty, but the agent
+  # still runs. Mirrors the CURSOR_API_KEY plumbing above.
+  EXPORT_OPENAI_API_KEY="$(get_secret OPENAI_API_KEY)"
+  if [[ -n "$EXPORT_OPENAI_API_KEY" ]]; then
+    export OPENAI_API_KEY="$EXPORT_OPENAI_API_KEY"
+    ok "OPENAI_API_KEY forwarded to pm2 (voice transcription enabled)"
+  else
+    info "no OPENAI_API_KEY in doppler — voice transcription disabled"
+  fi
+
   # If an entry with this name already exists, only reuse it when its
   # script path + cwd match what we'd start now. An older project may
   # have grabbed the same pm2 name, in which case `pm2 reload` would
@@ -865,6 +885,8 @@ cmd_privacy_off() {
   # see plain text messages (the default privacy mode hides them).
   section "Bot privacy mode"
   info "ensuring BotFather /setprivacy -> Disable"
+  local stdin_src="/dev/stdin"
+  [[ -r /dev/tty ]] && stdin_src="/dev/tty"
   (
     cd "$INVOKE_DIR"
     ARBOS_MACHINE="$ARBOS_MACHINE" \
@@ -872,7 +894,7 @@ cmd_privacy_off() {
     ARBOS_TELEGRAM_CHAT_ID="$EXPORT_CHAT_ID" \
     ARBOS_TELEGRAM_SUPERGROUP_ID="$EXPORT_SUPERGROUP_ID" \
     ARBOS_TELE_TOKEN_KEY="$EXPORT_TOKEN_KEY" \
-    doppler run --silent --preserve-env -- "$REPO_ROOT/.venv/bin/arbos" privacy-off
+    doppler run --silent --preserve-env -- "$REPO_ROOT/.venv/bin/arbos" privacy-off <"$stdin_src"
   ) || warn "privacy-off step failed; bot may only see mentions/commands"
 }
 
