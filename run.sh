@@ -359,9 +359,15 @@ ensure_venv() {
   fi
   # shellcheck disable=SC1091
   source "$REPO_ROOT/.venv/bin/activate"
-  if ! python -c "import arbos" >/dev/null 2>&1; then
+  # Check for the console-script entry point, not `import arbos`. The latter
+  # gives false positives when cwd contains an `arbos/` directory (the repo
+  # itself, when run.sh is invoked from its parent), since Python 3 treats
+  # any directory without __init__.py as a namespace package.
+  if [[ ! -x "$REPO_ROOT/.venv/bin/arbos" ]]; then
     run "Installing arbos into .venv" uv pip install -e "$REPO_ROOT"
   fi
+  [[ -x "$REPO_ROOT/.venv/bin/arbos" ]] \
+    || die "arbos entry point still missing at $REPO_ROOT/.venv/bin/arbos after install"
   ok "venv ready ($(python --version 2>&1))"
 }
 
