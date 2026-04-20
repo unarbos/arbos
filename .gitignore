@@ -1,0 +1,36 @@
+# Python build artifacts
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Arbos runtime state (contains live secrets, tdlib db, logs)
+.arbos/
+
+# Legacy / leftover state directories from older layouts
+system/
+workspace/
+
+# Editor / OS junk
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local env files
+.env
+.env.*
+!.env.example
