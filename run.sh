@@ -368,9 +368,16 @@ ensure_tdjson_runtime() {
 
   warn "libc++ runtime not found — installing (needed by bundled tdjson)"
   if command_exists apt-get; then
-    run "apt-get update" sudo apt-get update
+    # `apt-get update` may fail on boxes with a broken third-party repo
+    # (we've seen Doppler's apt source 404 in the wild). Don't let that
+    # abort us -- libc++1 is almost always already in the apt cache.
+    run "apt-get update (best effort)" bash -c 'sudo apt-get update || true'
     # libc++1 pulls in libc++abi1 / libunwind as needed on modern Ubuntu/Debian.
-    run "Installing libc++1 libc++abi1" sudo apt-get install -y libc++1 libc++abi1
+    if ! run "Installing libc++1 libc++abi1" sudo apt-get install -y libc++1 libc++abi1; then
+      warn "install failed; retrying after a forced apt-get update"
+      run "apt-get update (forced)" sudo apt-get update
+      run "Installing libc++1 libc++abi1 (retry)" sudo apt-get install -y libc++1 libc++abi1
+    fi
   elif command_exists dnf; then
     run "Installing libcxx" sudo dnf install -y libcxx libcxxabi
   elif command_exists yum; then
