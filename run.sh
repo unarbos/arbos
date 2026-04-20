@@ -51,7 +51,14 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-}" ]]; then
     git clone --quiet --depth 1 --branch "$ARBOS_BRANCH" "$ARBOS_REMOTE" "$_src"
   fi
 
-  exec bash "$_src/run.sh" "$@"
+  # Reattach stdin to the controlling terminal: when piped via `curl | bash`,
+  # stdin is the (now-exhausted) curl pipe, so any later input() prompt
+  # (e.g. aiotdlib's "Enter SMS code:") would EOF-loop forever.
+  if [[ -r /dev/tty ]]; then
+    exec bash "$_src/run.sh" "$@" </dev/tty
+  else
+    exec bash "$_src/run.sh" "$@"
+  fi
 fi
 
 # REPO_ROOT = where the arbos source / venv / run.sh live. Used only to
