@@ -39,6 +39,13 @@ RENDER_BUDGET = 3500
 # from the head, keeping the latest reasoning visible.
 THINKING_WINDOW = 2400
 
+# asyncio.StreamReader's default line buffer is 64 KiB; cursor-agent's
+# stream-json events embed the full running assistant text on every delta
+# and easily exceed that on long chats, raising LimitOverrunError
+# ("Separator is found, but chunk is longer than limit"). 16 MiB is well
+# beyond any realistic single event but still bounded.
+STDOUT_LINE_LIMIT = 16 * 1024 * 1024
+
 
 UpdateCb = Callable[[str], Awaitable[None]]
 FinalCb = Callable[[str], Awaitable[None]]
@@ -167,6 +174,7 @@ class CursorRunner:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=STDOUT_LINE_LIMIT,
             )
         except FileNotFoundError:
             await on_final(f"`{CURSOR_BIN}` not found on PATH.")
@@ -229,7 +237,25 @@ class CursorRunner:
         if stream is None:
             return
         while True:
-            line = await stream.readline()
+            try:
+                line = await stream.readline()
+            except asyncio.LimitOverrunError as exc:
+                # Single NDJSON event exceeded our (16 MiB) line limit.
+                # Drain it from the buffer so the stream keeps moving and
+                # log a single warning -- we lose this one event but the
+                # rest of the run continues normally.
+                logger.warning(
+                    "cursor-agent stdout line exceeded limit (%d bytes consumed); skipping",
+                    exc.consumed,
+                )
+                try:
+                    await stream.readexactly(exc.consumed)
+                except (asyncio.IncompleteReadError, Exception):
+                    return
+                continue
+            except (asyncio.IncompleteReadError, ValueError) as exc:
+                logger.warning("cursor-agent stdout read failed: %s", exc)
+                return
             if not line:
                 return
             try:
