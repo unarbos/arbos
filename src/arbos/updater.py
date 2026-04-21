@@ -197,25 +197,29 @@ def fetch_and_reset(src: Path) -> tuple[str, str, str, str, list[str]]:
     return old_sha, old_subject, new_sha, new_subject, dirty
 
 
-def spawn_pm2_reload(machine: str) -> None:
-    """Fire-and-forget ``pm2 reload arbos-<machine>`` in a detached child so
-    we survive long enough to flush the bubble before pm2 SIGINTs us."""
+def spawn_pm2_reload(pm2_name: str) -> None:
+    """Fire-and-forget ``pm2 reload <pm2_name>`` in a detached child so we
+    survive long enough to flush the bubble before pm2 SIGINTs us.
+
+    ``pm2_name`` is the full pm2 entry name (e.g. ``arbos-constmac``), not
+    just the machine suffix; the caller is responsible for picking the
+    right one (see ``CursorAgent.pm2_name``).
+    """
     if shutil.which("pm2") is None:
         raise UpdateError("`pm2` not on PATH; cannot trigger restart")
-    name = f"arbos-{machine}"
     try:
         subprocess.Popen(
-            ["pm2", "reload", name],
+            ["pm2", "reload", pm2_name],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
     except OSError as exc:
-        raise UpdateError(f"failed to spawn `pm2 reload {name}`: {exc}") from exc
+        raise UpdateError(f"failed to spawn `pm2 reload {pm2_name}`: {exc}") from exc
 
 
-def render_summary(result: UpdateResult, *, machine: str, restarting: bool) -> str:
+def render_summary(result: UpdateResult, *, pm2_name: str, restarting: bool) -> str:
     """Format the final bubble text for an update run."""
     lines: list[str] = []
     if not result.changed:
@@ -239,5 +243,5 @@ def render_summary(result: UpdateResult, *, machine: str, restarting: bool) -> s
             lines.append(f"  …and {len(result.dirty_wiped) - len(shown)} more")
     if restarting:
         lines.append("")
-        lines.append(f"restarting arbos-{machine}…")
+        lines.append(f"restarting {pm2_name}…")
     return "\n".join(lines)

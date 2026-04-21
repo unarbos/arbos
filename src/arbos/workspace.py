@@ -148,6 +148,17 @@ class InstallPaths:
         return self.arbos / "inflight.json"
 
     @property
+    def restart_marker_path(self) -> Path:
+        """Pre-restart bubble pointer for ``/restart``.
+
+        Written immediately before we spawn ``pm2 reload`` so the freshly
+        booted agent can edit the *same* bubble in-place to a "back online"
+        message instead of posting a new one. Deleted by the new agent
+        once it has finalised the bubble.
+        """
+        return self.arbos / "restart_marker.json"
+
+    @property
     def outbox_dir(self) -> Path:
         """Drop-zone watched by the agent: any file landed here is posted to
         this machine's Telegram topic and then moved aside."""
@@ -160,6 +171,15 @@ class InstallPaths:
     @property
     def outbox_failed_dir(self) -> Path:
         return self.outbox_dir / "failed"
+
+    @property
+    def runs_dir(self) -> Path:
+        """Per-bubble run journal entries, one JSON file per Telegram message_id.
+
+        See ``runjournal.py``. Used to give the agent grounded context when
+        the user replies to a previous Arbos bubble.
+        """
+        return self.arbos / "runs"
 
     def bootstrap(self) -> None:
         """Create the ``.arbos/`` skeleton with restrictive perms.
@@ -175,6 +195,7 @@ class InstallPaths:
         self.outbox_dir.mkdir(parents=True, exist_ok=True)
         self.outbox_sent_dir.mkdir(parents=True, exist_ok=True)
         self.outbox_failed_dir.mkdir(parents=True, exist_ok=True)
+        self.runs_dir.mkdir(parents=True, exist_ok=True)
 
         for path in (
             self.arbos,
@@ -184,6 +205,7 @@ class InstallPaths:
             self.outbox_dir,
             self.outbox_sent_dir,
             self.outbox_failed_dir,
+            self.runs_dir,
         ):
             try:
                 os.chmod(path, 0o700)

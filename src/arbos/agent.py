@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import json
 import logging
 import os
 import signal
@@ -41,6 +42,8 @@ from . import inflight
 from .inflight import InflightEntry, InflightStore
 from .outbox import OutboxWatcher
 from .prompts import build_prompt, load_extra_prompts
+from . import runjournal
+from .runjournal import RunJournal
 from . import session_store
 from .session_store import ChatSession
 from . import updater
@@ -133,7 +136,19 @@ class CursorAgent:
         # config.machine.topic_id is the encoded form (shifted left 20);
         # convert to the Bot API's raw server message id for filter+reply.
         self.topic_id = _to_bot_thread_id(self.config.machine.topic_id)
+        # Logical machine name from config.json -- locked at install time,
+        # drives Telegram routing (bot username, topic title) and stays
+        # stable even if the host's tailscale name changes later.
         self.machine = self.config.machine.name
+        # Physical pm2 entry name. ``run.sh`` derives ``ARBOS_MACHINE`` from
+        # tailscale at start-up and exports it into the agent's env; the
+        # config-time machine name is the fallback when ARBOS_MACHINE is
+        # unset (e.g. running `arbos agent run` outside pm2). Without this
+        # split, ``pm2 reload arbos-<config-name>`` from /restart and
+        # /update silently no-ops on hosts whose pm2 entry is named after
+        # the (different) tailscale label.
+        env_machine = (os.environ.get("ARBOS_MACHINE") or "").strip()
+        self.pm2_name = f"arbos-{env_machine or self.machine}"
         self.bot_user_id = self.config.bot.user_id
         self.bot_username = (self.config.bot.username or "").lstrip("@")
         self.workdir: Path = paths.root
@@ -152,6 +167,13 @@ class CursorAgent:
         # a SIGINT mid-handler doesn't silently drop the user's question.
         # See ``inflight.py`` for the full lifecycle.
         self._inflight = InflightStore(self.paths)
+
+        # Per-bubble run journal. Records the trigger + tool log + final
+        # text for every bubble we post, keyed by Telegram message_id, so
+        # that when the user replies to one of our messages we can decorate
+        # the next cursor-agent prompt with grounded context. See
+        # ``runjournal.py`` and :meth:`_build_reply_context_block`.
+        self._runs = RunJournal(self.paths)
 
         # Persistent per-topic cursor-agent chat. Loaded from disk so memory
         # survives PM2 restarts. The lock serialises every spawn that touches
@@ -367,6 +389,17 @@ class CursorAgent:
             candidates.add(f"/update@{self.bot_username.lower()}")
         return head in candidates
 
+    def _match_restart_command(self, prompt: str) -> bool:
+        """True if ``prompt`` is ``/restart`` (optionally ``@<bot>``).
+
+        Trailing arguments are ignored -- /restart is parameterless.
+        """
+        head = prompt.partition(" ")[0].lower()
+        candidates = {"/restart"}
+        if self.bot_username:
+            candidates.add(f"/restart@{self.bot_username.lower()}")
+        return head in candidates
+
     def _match_confirm_command(self, prompt: str) -> Optional[str]:
         """Return the trailing argument if ``prompt`` is ``/confirm``, else None.
 
@@ -382,6 +415,143 @@ class CursorAgent:
         if head_lower not in candidates:
             return None
         return rest.strip()
+
+    def _trigger_sender_label(self, message: dict[str, Any]) -> str:
+        """Short identifier for the user who sent ``message`` (for the journal)."""
+        sender = message.get("from") or {}
+        return str(
+            sender.get("username")
+            or sender.get("first_name")
+            or sender.get("id")
+            or ""
+        )
+
+    def _journal_command_start(
+        self,
+        bubble_msg_id: int,
+        *,
+        kind: str,
+        message: Optional[dict[str, Any]],
+        trigger_text: str,
+    ) -> None:
+        """Open a journal entry for a parameterless command bubble.
+
+        Best-effort and exception-safe -- swallows any failure so a
+        journal hiccup never breaks the command itself.
+        """
+        try:
+            sender_label = (
+                self._trigger_sender_label(message) if message else ""
+            )
+            trigger_id = message.get("message_id") if message else None
+            self._runs.record_start(
+                bubble_msg_id,
+                kind=kind,
+                trigger_message_id=trigger_id,
+                trigger_text=trigger_text,
+                trigger_sender=sender_label,
+            )
+        except Exception:
+            logger.exception("runjournal record_start (%s) crashed", kind)
+
+    def _journal_command_finish(
+        self,
+        bubble_msg_id: int,
+        *,
+        status: str,
+        final_text: str,
+    ) -> None:
+        """Close out a parameterless-command journal entry."""
+        try:
+            self._runs.record_finish(
+                bubble_msg_id,
+                status=status,
+                final_text=final_text,
+                tool_log=[],
+            )
+        except Exception:
+            logger.exception("runjournal record_finish crashed")
+
+    def _build_reply_context_block(
+        self,
+        message: dict[str, Any],
+        prompt: str,
+    ) -> str:
+        """Render a ``<<<REPLY_CONTEXT>>>`` block for replies to our bubbles.
+
+        Returns ``""`` when:
+
+        * the message is not a Telegram reply, or
+        * the reply target was not posted by *our* bot, or
+        * the replier is not the original sender of the parent run (avoids
+          cross-user context leakage in shared topics).
+
+        On a successful lookup, summarises the prior run via
+        :func:`runjournal.summarise` and wraps it in fences identical in
+        style to ``<<<USER_MESSAGE>>>`` so the model treats it as
+        instructions rather than user text.
+        """
+        try:
+            reply = message.get("reply_to_message")
+            if not isinstance(reply, dict):
+                return ""
+            reply_from = reply.get("from") or {}
+            if self.bot_user_id is None:
+                return ""
+            if reply_from.get("id") != self.bot_user_id:
+                # Reply to a human message; not ours to annotate.
+                return ""
+            reply_msg_id = reply.get("message_id")
+            if not isinstance(reply_msg_id, int):
+                return ""
+
+            rec = self._runs.get(reply_msg_id)
+            if rec is None:
+                # Bubble exists but we have no provenance (older than our
+                # journal, or written before the journal existed). Surface
+                # what Telegram itself gave us so the model knows roughly
+                # what the user is pointing at.
+                quoted = (reply.get("text") or "").strip()
+                quoted = quoted if len(quoted) <= 1500 else quoted[:1499] + "…"
+                if not quoted:
+                    return ""
+                body = (
+                    "The user is replying to one of my earlier Telegram bubbles, "
+                    "but I no longer have provenance for it (predates my run "
+                    "journal or was lost on restart).\n\n"
+                    f'The bubble said:\n"""\n{quoted}\n"""'
+                )
+            else:
+                body = (
+                    "The user is replying to a previous Arbos message in this "
+                    "same Telegram topic. Here is the run that produced that "
+                    "bubble:\n\n"
+                    + runjournal.summarise(rec)
+                    + "\n\n"
+                    + 'If they say "finished?", "no", "do that again", "what '
+                    'about the second one", etc., resolve the referent against '
+                    "this run before answering."
+                )
+
+                # If it's a /plan or /impl bubble and we have the paired
+                # half (plan <-> impl), include that too -- the user
+                # almost certainly cares about the linked phase as well.
+                if rec.paired_bubble_id is not None:
+                    paired = self._runs.get(rec.paired_bubble_id)
+                    if paired is not None:
+                        body += (
+                            "\n\nLinked phase:\n"
+                            + runjournal.summarise(paired)
+                        )
+
+            return (
+                "<<<REPLY_CONTEXT>>>\n"
+                + body.rstrip()
+                + "\n<<<END_REPLY_CONTEXT>>>"
+            )
+        except Exception:
+            logger.exception("reply-context build failed; continuing without it")
+            return ""
 
     async def _handle_message(
         self,
@@ -437,6 +607,18 @@ class CursorAgent:
                 audio["kind"], sender, len(prompt),
             )
 
+        # If this message is a Telegram reply to one of *our* bubbles, look
+        # up the run journal entry and build a REPLY_CONTEXT block. Empty
+        # string when not a reply (or not a reply to us). Only the chat +
+        # /plan paths consume it; the parameterless commands (/update,
+        # /restart, /reset, /confirm) ignore it intentionally.
+        reply_block = self._build_reply_context_block(message, prompt)
+        if reply_block:
+            logger.info(
+                "reply-context attached for %s (block=%d chars)",
+                sender, len(reply_block),
+            )
+
         plan_arg = self._match_plan_command(prompt)
         if plan_arg is not None:
             if voice_bubble is not None:
@@ -445,7 +627,9 @@ class CursorAgent:
                 finally:
                     await voice_bubble.aclose()
             logger.info("dispatching /plan from %s (len=%d)", sender, len(plan_arg))
-            await self._handle_plan_command(http, message, plan_arg)
+            await self._handle_plan_command(
+                http, message, plan_arg, reply_context=reply_block
+            )
             return
 
         confirm_arg = self._match_confirm_command(prompt)
@@ -502,6 +686,26 @@ class CursorAgent:
                 )
             return
 
+        if self._match_restart_command(prompt):
+            if voice_bubble is not None:
+                try:
+                    await voice_bubble.finalize(f"voice: {prompt}")
+                finally:
+                    await voice_bubble.aclose()
+            if self._skip_confirm:
+                logger.info("dispatching /restart from %s (confirm skipped)", sender)
+                await self._handle_restart_command(http, message)
+            else:
+                logger.info("gating /restart from %s behind Confirm/Cancel", sender)
+                await self._prompt_confirmation(
+                    http,
+                    message,
+                    label="/restart",
+                    description="pm2 reload this machine (no code changes)",
+                    action=lambda b: self._handle_restart_action(b),
+                )
+            return
+
         logger.info("dispatching message from %s -> cursor-agent (len=%d)", sender, len(prompt))
 
         if voice_bubble is not None:
@@ -519,13 +723,30 @@ class CursorAgent:
                 message_id=sent["message_id"],
             )
 
-        await self._run_persistent_chat(prompt=prompt, bubble=bubble)
+        # Open a journal entry for this bubble *before* we hand off to the
+        # runner, so the user can already reply to the in-flight bubble
+        # and get a sensible "(run is still in progress)" context block.
+        self._runs.record_start(
+            bubble.message_id,
+            kind="chat",
+            trigger_message_id=message.get("message_id"),
+            trigger_text=prompt,
+            trigger_sender=self._trigger_sender_label(message),
+            model=CHAT_MODEL,
+        )
+
+        await self._run_persistent_chat(
+            prompt=prompt,
+            bubble=bubble,
+            reply_context=reply_block,
+        )
 
     async def _run_persistent_chat(
         self,
         *,
         prompt: str,
         bubble: Bubble,
+        reply_context: str = "",
     ) -> None:
         """Spawn cursor-agent against the per-topic persistent chat.
 
@@ -533,17 +754,30 @@ class CursorAgent:
         appends to a single chat thread; concurrent appends would interleave.
         Auto-recovers from a stale/missing session by clearing the stored id
         and retrying once without ``--resume``.
+
+        ``reply_context``, if non-empty, is prepended to ``prompt`` as a
+        ``<<<REPLY_CONTEXT>>>``-fenced block so the model can ground "no,
+        the second one" / "did that finish?" against a specific prior run.
         """
+        status = "ok"
         async with self._chat_lock:
+            runner: Optional[CursorRunner] = None
             try:
-                await self._do_persistent_chat_run(prompt=prompt, bubble=bubble)
+                runner = await self._do_persistent_chat_run(
+                    prompt=prompt,
+                    bubble=bubble,
+                    reply_context=reply_context,
+                )
             except asyncio.CancelledError:
+                status = "interrupted"
                 try:
                     await bubble.finalize("(interrupted)")
                 finally:
                     await bubble.aclose()
+                self._record_chat_finish(bubble, status, runner)
                 raise
             except Exception as exc:
+                status = "error"
                 logger.exception("cursor-agent run crashed")
                 try:
                     await bubble.finalize(f"cursor-agent crashed: {exc}")
@@ -551,17 +785,44 @@ class CursorAgent:
                     pass
             finally:
                 await bubble.aclose()
+                if status != "interrupted":
+                    self._record_chat_finish(bubble, status, runner)
+
+    def _record_chat_finish(
+        self,
+        bubble: Bubble,
+        status: str,
+        runner: Optional[CursorRunner],
+    ) -> None:
+        try:
+            self._runs.record_finish(
+                bubble.message_id,
+                status=status,
+                final_text=(runner.final_text if runner else "") or "",
+                tool_log=(list(runner.tool_log) if runner else []),
+                session_id=(runner.session_id if runner else None),
+            )
+        except Exception:
+            logger.exception("runjournal record_finish (chat) crashed")
 
     async def _do_persistent_chat_run(
         self,
         *,
         prompt: str,
         bubble: Bubble,
-    ) -> None:
+        reply_context: str = "",
+    ) -> CursorRunner:
         resume_id = self._chat_session_id
+        # The REPLY_CONTEXT block is conceptually system-level
+        # instructions for resolving a referent, but cursor-agent has no
+        # dedicated channel for it; we tack it onto the user prompt with
+        # explicit fences so the model treats it as authoritative.
+        full_prompt = (
+            (reply_context + "\n\n" + prompt) if reply_context else prompt
+        )
 
         runner = CursorRunner(
-            prompt=prompt,
+            prompt=full_prompt,
             workdir=self.workdir,
             model=CHAT_MODEL,
             system_prompt=self._system_prompt(),
@@ -578,7 +839,7 @@ class CursorAgent:
             self._chat_session_id = None
             session_store.clear(self.paths)
             runner = CursorRunner(
-                prompt=prompt,
+                prompt=full_prompt,
                 workdir=self.workdir,
                 model=CHAT_MODEL,
                 system_prompt=self._system_prompt(),
@@ -599,6 +860,7 @@ class CursorAgent:
                 logger.warning(
                     "could not persist chat session %s: %s", new_id, exc
                 )
+        return runner
 
     async def _transcribe_voice(
         self,
@@ -669,6 +931,12 @@ class CursorAgent:
         sent = await self._send_initial_bubble(http, message, text="resetting…")
         if sent is None:
             return
+        self._journal_command_start(
+            sent["message_id"],
+            kind="reset",
+            message=message,
+            trigger_text="/reset",
+        )
         bubble = Bubble(
             http=http,
             bot_token=self.bot_token,
@@ -680,6 +948,11 @@ class CursorAgent:
             await self._handle_reset_action(bubble)
         finally:
             await bubble.aclose()
+            self._journal_command_finish(
+                bubble.message_id,
+                status="ok",
+                final_text=bubble.last_sent or "",
+            )
 
     async def _handle_reset_action(self, bubble: Bubble) -> None:
         """Reset behaviour, given an already-sent bubble to finalise into."""
@@ -718,6 +991,12 @@ class CursorAgent:
             logger.warning("/update aborted: could not send initial bubble")
             return
         logger.info("/update bubble sent (msg_id=%s); starting update run", sent["message_id"])
+        self._journal_command_start(
+            sent["message_id"],
+            kind="update",
+            message=message,
+            trigger_text="/update",
+        )
         bubble = Bubble(
             http=http,
             bot_token=self.bot_token,
@@ -729,15 +1008,21 @@ class CursorAgent:
 
     async def _handle_update_action(self, bubble: Bubble) -> None:
         """Update behaviour, given an already-sent bubble to drive."""
+        status = "ok"
         try:
             await self._do_update_run(bubble)
         except asyncio.CancelledError:
+            status = "interrupted"
             try:
                 await bubble.finalize("(interrupted)")
             finally:
                 await bubble.aclose()
+            self._journal_command_finish(
+                bubble.message_id, status=status, final_text=bubble.last_sent or ""
+            )
             raise
         except Exception as exc:
+            status = "error"
             logger.exception("/update crashed")
             try:
                 await bubble.finalize(f"update crashed: {exc}")
@@ -746,6 +1031,10 @@ class CursorAgent:
             await bubble.aclose()
         else:
             await bubble.aclose()
+        if status != "interrupted":
+            self._journal_command_finish(
+                bubble.message_id, status=status, final_text=bubble.last_sent or ""
+            )
 
     async def _do_update_run(self, bubble: Bubble) -> None:
         try:
@@ -804,35 +1093,265 @@ class CursorAgent:
         if not result.changed:
             logger.info("/update: already up to date at %s", new_sha)
             await bubble.finalize(
-                updater.render_summary(result, machine=self.machine, restarting=False)
+                updater.render_summary(result, pm2_name=self.pm2_name, restarting=False)
             )
             return
 
         await bubble.finalize(
-            updater.render_summary(result, machine=self.machine, restarting=True)
+            updater.render_summary(result, pm2_name=self.pm2_name, restarting=True)
         )
 
         try:
-            updater.spawn_pm2_reload(self.machine)
+            updater.spawn_pm2_reload(self.pm2_name)
             logger.info(
-                "/update: spawned `pm2 reload arbos-%s`; waiting to be replaced",
-                self.machine,
+                "/update: spawned `pm2 reload %s`; waiting to be replaced",
+                self.pm2_name,
             )
         except UpdateError as exc:
             logger.warning("pm2 reload failed: %s", exc)
             try:
                 await bubble.update(
-                    updater.render_summary(result, machine=self.machine, restarting=False)
+                    updater.render_summary(result, pm2_name=self.pm2_name, restarting=False)
                     + f"\n\npm2 reload failed: {exc}\nrestart manually with `./run.sh restart`"
                 )
             except Exception:
                 pass
+
+    async def _handle_restart_command(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+    ) -> None:
+        """Trigger a clean ``pm2 reload arbos-<machine>``.
+
+        UX is single-bubble: we send "restarting…", drop a marker file
+        pointing at this bubble, and spawn a detached pm2 reload. The
+        post-restart agent (see :meth:`_finalize_restart_marker`) then
+        edits the same bubble in-place to "✅ back online — restart took
+        Xs", so the whole event lives in one Telegram message.
+        """
+        sent = await self._send_initial_bubble(http, message, text="restarting…")
+        if sent is None:
+            logger.warning("/restart aborted: could not send initial bubble")
+            return
+        logger.info(
+            "/restart bubble sent (msg_id=%s); starting restart run",
+            sent["message_id"],
+        )
+        self._journal_command_start(
+            sent["message_id"],
+            kind="restart",
+            message=message,
+            trigger_text="/restart",
+        )
+        bubble = Bubble(
+            http=http,
+            bot_token=self.bot_token,
+            chat_id=self.chat_id,
+            message_thread_id=self.topic_id,
+            message_id=sent["message_id"],
+        )
+        await self._handle_restart_action(bubble)
+
+    async def _handle_restart_action(self, bubble: Bubble) -> None:
+        """Restart behaviour, given an already-sent bubble to drive."""
+        status = "ok"
+        try:
+            await self._do_restart_run(bubble)
+        except asyncio.CancelledError:
+            status = "interrupted"
+            try:
+                await bubble.finalize("(interrupted)")
+            finally:
+                await bubble.aclose()
+            self._journal_command_finish(
+                bubble.message_id, status=status, final_text=bubble.last_sent or ""
+            )
+            raise
+        except Exception as exc:
+            status = "error"
+            logger.exception("/restart crashed")
+            try:
+                await bubble.finalize(f"restart crashed: {exc}")
+            except Exception:
+                pass
+            await bubble.aclose()
+        # NOTE: ok-path doesn't call _journal_command_finish here on
+        # purpose -- /restart's bubble finalisation lives in the *next*
+        # process via _finalize_restart_marker. We update the journal
+        # there instead so the entry reflects the "back online" text the
+        # user actually saw.
+        if status not in ("interrupted", "ok"):
+            self._journal_command_finish(
+                bubble.message_id, status=status, final_text=bubble.last_sent or ""
+            )
+
+    async def _do_restart_run(self, bubble: Bubble) -> None:
+        # Persist enough info for the post-restart agent to re-attach to
+        # this exact bubble. Written *before* spawning pm2 reload so even
+        # if pm2 SIGINTs us between the spawn and our own bubble.aclose,
+        # the new agent still finds the marker.
+        marker = {
+            "version": 1,
+            "chat_id": self.chat_id,
+            "thread_id": self.topic_id,
+            "message_id": bubble.message_id,
+            "machine": self.machine,
+            "started_at": time.time(),
+            "pid": os.getpid(),
+        }
+        try:
+            self._write_restart_marker(marker)
+        except OSError as exc:
+            logger.warning("/restart: could not write marker: %s", exc)
+            await bubble.finalize(
+                f"restart failed: could not write marker ({exc})"
+            )
+            return
+
+        await bubble.update(
+            f"restarting {self.pm2_name}…\n(pm2 reload incoming)"
+        )
+
+        try:
+            updater.spawn_pm2_reload(self.pm2_name)
+            logger.info(
+                "/restart: spawned `pm2 reload %s`; waiting to be replaced",
+                self.pm2_name,
+            )
+        except UpdateError as exc:
+            logger.warning("/restart: pm2 reload failed: %s", exc)
+            self._delete_restart_marker()
+            try:
+                await bubble.finalize(
+                    f"restart failed: {exc}\n"
+                    "fix manually with `./run.sh restart`"
+                )
+            except Exception:
+                pass
+            return
+
+        # Don't finalize here -- the *new* agent will edit this same
+        # bubble to "back online" via _finalize_restart_marker(). Just
+        # flush the pending "restarting…" snapshot so the user actually
+        # sees something between SIGTERM and the new boot.
+        await bubble.update(
+            f"restarting {self.pm2_name}…\n"
+            f"⏳ waiting for the new process to come up"
+        )
+        # Give the flusher a short window to push the latest snapshot
+        # before pm2 SIGINTs us. The flusher is rate-limited to one edit
+        # per 2.5s, so anything shorter risks losing the update.
+        try:
+            await asyncio.sleep(3.0)
+        except asyncio.CancelledError:
+            pass
+        # Best-effort close; pm2 may already be SIGTERMing us.
+        try:
+            await bubble.aclose()
+        except Exception:
+            pass
+
+    def _write_restart_marker(self, marker: dict[str, Any]) -> None:
+        """Atomically persist the restart marker."""
+        path = self.paths.restart_marker_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(marker, sort_keys=True))
+        os.replace(tmp, path)
+
+    def _delete_restart_marker(self) -> None:
+        try:
+            self.paths.restart_marker_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning("could not delete restart marker: %s", exc)
+
+    async def _finalize_restart_marker(self, http: httpx.AsyncClient) -> None:
+        """If a previous run dropped a restart marker, edit that bubble to
+        announce we're back online, then delete the marker."""
+        path = self.paths.restart_marker_path
+        try:
+            raw = path.read_text()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning("could not read restart marker: %s", exc)
+            return
+
+        try:
+            marker = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            logger.warning("restart marker malformed (%s); deleting", exc)
+            self._delete_restart_marker()
+            return
+
+        chat_id = marker.get("chat_id")
+        thread_id = marker.get("thread_id")
+        message_id = marker.get("message_id")
+        started_at = marker.get("started_at")
+        if not (
+            isinstance(chat_id, int)
+            and isinstance(thread_id, int)
+            and isinstance(message_id, int)
+        ):
+            logger.warning("restart marker missing fields; deleting: %r", marker)
+            self._delete_restart_marker()
+            return
+
+        # Only honour the marker if it's for *this* topic; otherwise it
+        # belongs to a different machine sharing the .arbos dir layout
+        # (shouldn't happen, but defensive).
+        if chat_id != self.chat_id or thread_id != self.topic_id:
+            logger.warning(
+                "restart marker for chat=%s thread=%s; we are chat=%s thread=%s; ignoring",
+                chat_id, thread_id, self.chat_id, self.topic_id,
+            )
+            self._delete_restart_marker()
+            return
+
+        elapsed = ""
+        if isinstance(started_at, (int, float)):
+            dt = max(0.0, time.time() - float(started_at))
+            elapsed = f" — restart took {dt:.1f}s"
+
+        bubble = Bubble(
+            http=http,
+            bot_token=self.bot_token,
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            message_id=message_id,
+        )
+        try:
+            await bubble.finalize(
+                f"✅ {self.pm2_name} back online{elapsed}"
+            )
+            logger.info(
+                "/restart: finalized bubble msg_id=%s after %s",
+                message_id, elapsed.strip(" —") or "?",
+            )
+            # Close out the restart bubble's journal entry (started in
+            # the previous process before the pm2 reload) with the
+            # "back online" text the user actually saw.
+            self._journal_command_finish(
+                message_id,
+                status="ok",
+                final_text=bubble.last_sent or "",
+            )
+        except Exception:
+            logger.exception("/restart: failed to finalize back-online bubble")
+        finally:
+            await bubble.aclose()
+            self._delete_restart_marker()
 
     async def _handle_plan_command(
         self,
         http: httpx.AsyncClient,
         message: dict[str, Any],
         request: str,
+        *,
+        reply_context: str = "",
     ) -> None:
         if not request:
             sent = await self._send_initial_bubble(
@@ -849,6 +1368,9 @@ class CursorAgent:
                 await bubble.aclose()
             return
 
+        sender_label = self._trigger_sender_label(message)
+        trigger_msg_id = message.get("message_id")
+
         # --- Phase 1: plan ------------------------------------------------
         sent1 = await self._send_initial_bubble(
             http, message, text=PLAN_INITIAL_BUBBLE_TEXT
@@ -864,8 +1386,23 @@ class CursorAgent:
             message_id=sent1["message_id"],
         )
 
+        # Journal the plan bubble immediately so a reply hitting it mid-run
+        # already gets a "(in progress)" context block.
+        self._runs.record_start(
+            bubble1.message_id,
+            kind="plan",
+            trigger_message_id=trigger_msg_id,
+            trigger_text=f"/plan {request}",
+            trigger_sender=sender_label,
+            model=PLAN_MODEL,
+        )
+
+        plan_prompt = PLAN_PROMPT_PREAMBLE + request
+        if reply_context:
+            plan_prompt = reply_context + "\n\n" + plan_prompt
+
         plan_runner = CursorRunner(
-            prompt=PLAN_PROMPT_PREAMBLE + request,
+            prompt=plan_prompt,
             workdir=self.workdir,
             model=PLAN_MODEL,
             plan_mode=True,
@@ -873,6 +1410,7 @@ class CursorAgent:
             extra_prompts=self._extra_prompts(),
         )
         plan_holder: dict[str, str] = {"text": "", "error": ""}
+        plan_status = "ok"
 
         async def _capture_plan(text: str) -> None:
             plan_holder["text"] = text
@@ -881,12 +1419,24 @@ class CursorAgent:
         try:
             await plan_runner.run(on_update=bubble1.update, on_final=_capture_plan)
         except asyncio.CancelledError:
+            plan_status = "interrupted"
             try:
                 await bubble1.finalize("(interrupted)")
             finally:
                 await bubble1.aclose()
+            try:
+                self._runs.record_finish(
+                    bubble1.message_id,
+                    status=plan_status,
+                    final_text="(interrupted)",
+                    tool_log=list(plan_runner.tool_log),
+                    session_id=plan_runner.session_id,
+                )
+            except Exception:
+                logger.exception("runjournal record_finish (plan) crashed")
             raise
         except Exception as exc:
+            plan_status = "error"
             logger.exception("cursor-agent plan-mode run crashed")
             plan_holder["error"] = str(exc)
             try:
@@ -895,6 +1445,21 @@ class CursorAgent:
                 pass
         finally:
             await bubble1.aclose()
+            if plan_status != "interrupted":
+                try:
+                    self._runs.record_finish(
+                        bubble1.message_id,
+                        status=plan_status,
+                        final_text=(
+                            plan_runner.final_text
+                            or plan_holder["text"]
+                            or ""
+                        ),
+                        tool_log=list(plan_runner.tool_log),
+                        session_id=plan_runner.session_id,
+                    )
+                except Exception:
+                    logger.exception("runjournal record_finish (plan) crashed")
 
         plan_text = plan_holder["text"].strip()
         # If the plan phase failed (errored out, no output, or returned the
@@ -922,6 +1487,18 @@ class CursorAgent:
             message_id=sent2["message_id"],
         )
 
+        # Cross-link the impl bubble back to the plan bubble so a reply
+        # to either surfaces the other half via `paired_bubble_id`.
+        self._runs.record_start(
+            bubble2.message_id,
+            kind="impl",
+            trigger_message_id=trigger_msg_id,
+            trigger_text=f"/plan {request}",
+            trigger_sender=sender_label,
+            model=IMPL_MODEL,
+            paired_bubble_id=bubble1.message_id,
+        )
+
         impl_prompt = (
             IMPL_PROMPT_PREAMBLE
             + f"Original request:\n{request}\n\nPlan:\n{plan_text}"
@@ -933,15 +1510,28 @@ class CursorAgent:
             system_prompt=self._system_prompt(),
             extra_prompts=self._extra_prompts(),
         )
+        impl_status = "ok"
         try:
             await impl_runner.run(on_update=bubble2.update, on_final=bubble2.finalize)
         except asyncio.CancelledError:
+            impl_status = "interrupted"
             try:
                 await bubble2.finalize("(interrupted)")
             finally:
                 await bubble2.aclose()
+            try:
+                self._runs.record_finish(
+                    bubble2.message_id,
+                    status=impl_status,
+                    final_text="(interrupted)",
+                    tool_log=list(impl_runner.tool_log),
+                    session_id=impl_runner.session_id,
+                )
+            except Exception:
+                logger.exception("runjournal record_finish (impl) crashed")
             raise
         except Exception as exc:
+            impl_status = "error"
             logger.exception("cursor-agent implementation run crashed")
             try:
                 await bubble2.finalize(f"cursor-agent crashed: {exc}")
@@ -949,6 +1539,27 @@ class CursorAgent:
                 pass
         finally:
             await bubble2.aclose()
+            if impl_status != "interrupted":
+                try:
+                    self._runs.record_finish(
+                        bubble2.message_id,
+                        status=impl_status,
+                        final_text=impl_runner.final_text or "",
+                        tool_log=list(impl_runner.tool_log),
+                        session_id=impl_runner.session_id,
+                    )
+                except Exception:
+                    logger.exception("runjournal record_finish (impl) crashed")
+
+        # Once the impl half lands, back-link the plan record to it so a
+        # reply to the plan bubble can surface the impl outcome too.
+        try:
+            plan_rec = self._runs.get(bubble1.message_id)
+            if plan_rec is not None and plan_rec.paired_bubble_id is None:
+                plan_rec.paired_bubble_id = bubble2.message_id
+                self._runs._atomic_write(bubble1.message_id, plan_rec)
+        except Exception:
+            logger.exception("runjournal plan back-link crashed")
 
     # ---- confirmation flow ----------------------------------------------
     async def _prompt_confirmation(
@@ -984,6 +1595,13 @@ class CursorAgent:
         # Opportunistic GC of expired entries so the dict can't grow without
         # bound on a long-lived process.
         self._gc_pending_confirms()
+
+        self._journal_command_start(
+            sent["message_id"],
+            kind="confirm",
+            message=message,
+            trigger_text=f"/confirm {label}",
+        )
 
         sender = message.get("from") or {}
         self._pending_confirms[sent["message_id"]] = _PendingConfirm(
@@ -1039,6 +1657,10 @@ class CursorAgent:
                 "needed, then pm2 reload this machine"
             )
             action: Callable[[Bubble], Awaitable[None]] = lambda b: self._handle_update_action(b)
+        elif self._match_restart_command(wrapped):
+            label = "/restart"
+            description = "pm2 reload this machine (no code changes)"
+            action = lambda b: self._handle_restart_action(b)
         elif self._match_reset_command(wrapped):
             label = "/reset"
             description = "wipe the persistent chat session"
@@ -1134,6 +1756,11 @@ class CursorAgent:
                 await bubble.finalize(f"{entry.label}: cancelled")
             finally:
                 await bubble.aclose()
+            self._journal_command_finish(
+                bubble_msg_id,
+                status="ok",
+                final_text=bubble.last_sent or f"{entry.label}: cancelled",
+            )
             return
 
         await _answer("confirmed")
@@ -1148,6 +1775,11 @@ class CursorAgent:
                 await bubble.finalize("(interrupted)")
             finally:
                 await bubble.aclose()
+            self._journal_command_finish(
+                bubble_msg_id,
+                status="interrupted",
+                final_text=bubble.last_sent or "(interrupted)",
+            )
             raise
         except Exception as exc:
             logger.exception("confirmed action %s crashed", entry.label)
@@ -1156,6 +1788,11 @@ class CursorAgent:
             except Exception:
                 pass
             await bubble.aclose()
+            self._journal_command_finish(
+                bubble_msg_id,
+                status="error",
+                final_text=bubble.last_sent or f"{entry.label} crashed: {exc}",
+            )
 
     def _spawn_callback_handler(
         self,
@@ -1265,6 +1902,14 @@ class CursorAgent:
             outbox.start()
 
             try:
+                # If the previous process spawned `pm2 reload` for a
+                # `/restart`, finalize that bubble in-place so the user
+                # sees a clean "back online" message in the same chat
+                # bubble they triggered the restart from. Runs before
+                # inflight recovery so the back-online message lands
+                # before any "I was restarted" notes from interrupted
+                # handlers.
+                await self._finalize_restart_marker(http)
                 # Replay anything we owed the user from the previous run
                 # before we accept new updates. This deliberately runs
                 # *after* the outbox watcher is up so any media the
@@ -1414,6 +2059,7 @@ class CursorAgent:
             self._match_plan_command(text) is not None
             or self._match_reset_command(text)
             or self._match_update_command(text)
+            or self._match_restart_command(text)
             or self._match_confirm_command(text) is not None
         )
         if is_command:

@@ -213,6 +213,12 @@ class CursorRunner:
         # "session not found" upstream. Caller should clear its stored id and
         # retry without --resume.
         self.resume_failed: bool = False
+        # Surfaced after run() so the agent layer can journal what the
+        # bubble actually showed (used by the per-bubble run journal to
+        # give the model grounded context when the user replies to a
+        # specific Arbos message).
+        self.tool_log: list[str] = []
+        self.final_text: str = ""
 
     def _build_cmd(self) -> list[str]:
         cmd = [
@@ -340,7 +346,12 @@ class CursorRunner:
                     f"cursor-agent exited with code {rc}"
                     + (f":\n{tail}" if tail else "")
                 )
-        await on_final(_render_final(state))
+        # Snapshot what the bubble showed so the agent layer can journal it.
+        # tool_log is copied (not aliased) because state goes out of scope
+        # once we return.
+        self.tool_log = list(state.tool_log)
+        self.final_text = _render_final(state)
+        await on_final(self.final_text)
 
     async def _consume_stdout(
         self,

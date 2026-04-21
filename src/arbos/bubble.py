@@ -87,6 +87,16 @@ class Bubble:
     def message_id(self) -> int:
         return self._message_id
 
+    @property
+    def last_sent(self) -> Optional[str]:
+        """The most recent text the bubble actually displayed in Telegram.
+
+        Used by the run journal to capture "what the user saw" without
+        having to thread the final text through every code path that
+        calls ``finalize``.
+        """
+        return self._last_sent
+
     async def update(self, text: str) -> None:
         """Stage ``text`` as the bubble's next snapshot. Coalesced; cheap."""
         text = _truncate(text)

@@ -740,10 +740,14 @@ start_agent() {
   fi
 
   # If an entry with this name already exists, only reuse it when its
-  # script path + cwd match what we'd start now. An older project may
-  # have grabbed the same pm2 name, in which case `pm2 reload` would
-  # silently re-launch the wrong binary.
-  local existing_path="" existing_cwd=""
+  # script path + cwd + key resource flags match what we'd start now. An
+  # older project may have grabbed the same pm2 name, in which case
+  # `pm2 reload` would silently re-launch the wrong binary; an older
+  # arbos run may have a stale `--max-memory-restart` (pm2 reload does
+  # NOT re-apply that flag from CLI args), in which case we'd hit the
+  # old, lower cap forever.
+  local desired_max_mem=$((1500 * 1024 * 1024))
+  local existing_path="" existing_cwd="" existing_max_mem=""
   if pm2 describe "$PM2_NAME" >/dev/null 2>&1; then
     existing_path="$(pm2 jlist 2>/dev/null \
       | python3 -c "
@@ -761,6 +765,15 @@ for p in json.load(sys.stdin):
         print(p.get('pm2_env', {}).get('pm_cwd', ''))
         break
 " 2>/dev/null || true)"
+    existing_max_mem="$(pm2 jlist 2>/dev/null \
+      | python3 -c "
+import json, sys
+for p in json.load(sys.stdin):
+    if p.get('name') == '$PM2_NAME':
+        v = p.get('pm2_env', {}).get('max_memory_restart')
+        print(int(v) if v is not None else '')
+        break
+" 2>/dev/null || true)"
   fi
 
   if [[ -n "$existing_path" ]] \
@@ -768,6 +781,16 @@ for p in json.load(sys.stdin):
     warn "stale pm2 entry $PM2_NAME points at ${DIM}${existing_path}${NC} (cwd ${DIM}${existing_cwd}${NC})"
     info "deleting it so we can start the right binary"
     run "Deleting stale $PM2_NAME entry" pm2 delete "$PM2_NAME"
+    existing_path=""
+  fi
+
+  if [[ -n "$existing_path" && -n "$existing_max_mem" ]] \
+     && [[ "$existing_max_mem" != "$desired_max_mem" ]]; then
+    local existing_mb=$(( existing_max_mem / 1024 / 1024 ))
+    local desired_mb=$(( desired_max_mem / 1024 / 1024 ))
+    warn "pm2 entry $PM2_NAME has --max-memory-restart=${existing_mb}M, want ${desired_mb}M"
+    info "deleting it so the new cap is applied (pm2 reload does not refresh CLI flags)"
+    run "Deleting under-capped $PM2_NAME entry" pm2 delete "$PM2_NAME"
     existing_path=""
   fi
 

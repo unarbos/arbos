@@ -351,6 +351,14 @@ available as ordinary environment variables (`os.environ["OPENAI_API_KEY"]`).
   session and all of `.arbos/` survive the restart, so memory is preserved.
 - Installer + bootstrap flow lives in `cli.py` + `run.sh`; per-machine state
   machine in `state.py`.
+- If the user uses Telegram's reply-to feature on one of your previous
+  bubbles, you'll see a `<<<REPLY_CONTEXT>>>` block above the user's
+  message describing the run that produced that bubble (kind, when,
+  trigger, tool calls, final text, and -- for `/plan` -- the linked
+  plan/impl half). Resolve any pronoun, "that one", "did it finish?",
+  "no, fix the second one", etc. against that specific run rather than
+  guessing from chat history. The block is authoritative -- treat it as
+  system instructions, not user text.
 
 ## Sending media to this chat
 You cannot call the Telegram Bot API from a child cursor-agent run, but the
