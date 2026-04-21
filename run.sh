@@ -778,6 +778,13 @@ for p in json.load(sys.stdin):
         ${EXPORT_OPENAI_API_KEY:+OPENAI_API_KEY="$EXPORT_OPENAI_API_KEY"} \
         pm2 reload "$PM2_NAME" --update-env
   else
+    # max-memory-restart: 256M was way too tight for a process that runs
+    # cursor-agent NDJSON streams (per-line buffer up to 16 MiB, full live
+    # transcript per concurrent run, plus the inflight journal in memory).
+    # During a /plan run we routinely crossed 256 MB and PM2 SIGKILL'd us
+    # mid-stream, surfacing as "cursor-agent run interrupted (parent agent
+    # was reloaded or shut down)". 1500M leaves ample headroom for normal
+    # operation but still catches a real leak within a session.
     run "Starting $PM2_NAME under pm2" \
       env ARBOS_MACHINE="$ARBOS_MACHINE" \
         ${EXPORT_CURSOR_API_KEY:+CURSOR_API_KEY="$EXPORT_CURSOR_API_KEY"} \
@@ -787,7 +794,7 @@ for p in json.load(sys.stdin):
           --cwd "$INVOKE_DIR" \
           --log "$AGENT_LOG_PATH" \
           --time \
-          --max-memory-restart 256M \
+          --max-memory-restart 1500M \
           --interpreter none \
           -- agent run
   fi
