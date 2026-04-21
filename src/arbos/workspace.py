@@ -137,6 +137,17 @@ class InstallPaths:
         return self.arbos / "chat_session.json"
 
     @property
+    def inflight_path(self) -> Path:
+        """Crash-recovery journal of Telegram updates currently being handled.
+
+        See ``inflight.py`` for the schema. The file is written atomically
+        on every state transition (``pending`` -> ``done``/``failed``/
+        ``interrupted``) so a crash mid-handler never loses the record
+        of what we owed the user.
+        """
+        return self.arbos / "inflight.json"
+
+    @property
     def outbox_dir(self) -> Path:
         """Drop-zone watched by the agent: any file landed here is posted to
         this machine's Telegram topic and then moved aside."""

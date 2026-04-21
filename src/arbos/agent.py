@@ -35,6 +35,8 @@ import httpx
 from .bubble import Bubble
 from .config import StoredConfig
 from .cursor_runner import CursorRunner
+from . import inflight
+from .inflight import InflightEntry, InflightStore
 from .outbox import OutboxWatcher
 from .prompts import build_prompt, load_extra_prompts
 from . import session_store
@@ -118,6 +120,11 @@ class CursorAgent:
         self._stop = asyncio.Event()
         self._lock_fd: Optional[int] = None
         self._tasks: set[asyncio.Task[None]] = set()
+        # Crash-recovery journal of in-flight Telegram updates. Written
+        # before the offset advances and on every handler completion, so
+        # a SIGINT mid-handler doesn't silently drop the user's question.
+        # See ``inflight.py`` for the full lifecycle.
+        self._inflight = InflightStore(self.paths)
 
         # Persistent per-topic cursor-agent chat. Loaded from disk so memory
         # survives PM2 restarts. The lock serialises every spawn that touches
@@ -836,7 +843,13 @@ class CursorAgent:
         finally:
             await bubble2.aclose()
 
-    def _spawn_handler(self, http: httpx.AsyncClient, message: dict[str, Any]) -> None:
+    def _spawn_handler(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+        *,
+        update_id: int,
+    ) -> None:
         msg_id = message.get("message_id")
         sender = (message.get("from") or {}).get("username") or (
             message.get("from") or {}
@@ -850,6 +863,9 @@ class CursorAgent:
         def _on_done(t: asyncio.Task[None]) -> None:
             self._tasks.discard(t)
             if t.cancelled():
+                # We only cancel tasks during graceful shutdown, where
+                # mark_interrupted_all() has already touched the journal.
+                # Don't override that here.
                 return
             exc = t.exception()
             if exc is not None:
@@ -862,6 +878,15 @@ class CursorAgent:
                     "message handler crashed (msg_id=%s sender=%s): %s",
                     msg_id, sender, exc, exc_info=exc,
                 )
+                try:
+                    self._inflight.mark_failed(update_id, f"{type(exc).__name__}: {exc}")
+                except Exception:
+                    logger.exception("inflight mark_failed crashed")
+                return
+            try:
+                self._inflight.mark_done(update_id)
+            except Exception:
+                logger.exception("inflight mark_done crashed")
 
         task.add_done_callback(_on_done)
 
@@ -895,10 +920,23 @@ class CursorAgent:
             outbox.start()
 
             try:
+                # Replay anything we owed the user from the previous run
+                # before we accept new updates. This deliberately runs
+                # *after* the outbox watcher is up so any media the
+                # replayed handlers produce can flow back out.
+                await self._recover_inflight(http)
                 await self._poll_loop(http, offset)
             finally:
                 await outbox.stop()
                 await self._drain_tasks()
+                # Any handler tasks still pending at this point either
+                # raced the cancellation or refused it; either way we
+                # mark them ``interrupted`` so the next boot can replay
+                # them with correct provenance.
+                try:
+                    self._inflight.mark_interrupted_all()
+                except Exception:
+                    logger.exception("inflight mark_interrupted_all crashed")
 
         logger.info("cursor-agent stopping (signal received)")
 
@@ -936,11 +974,118 @@ class CursorAgent:
                 continue
 
             for upd in payload.get("result", []):
-                offset = upd["update_id"] + 1
+                update_id = upd["update_id"]
+                offset = update_id + 1
                 msg = upd.get("message")
                 if msg and self._is_for_us(msg):
-                    self._spawn_handler(http, msg)
-                self._save_offset(offset)
+                    # Journal first (so a crash between here and the next
+                    # line cannot leave us with an advanced offset and no
+                    # record of what we owed the user), then advance the
+                    # Telegram offset, then spawn the actual handler.
+                    try:
+                        self._inflight.mark_pending(update_id, msg)
+                    except Exception:
+                        # If the journal is unwritable we still take the
+                        # message -- losing crash-recovery is bad, but
+                        # silently rejecting live messages is worse.
+                        logger.exception(
+                            "inflight mark_pending failed; proceeding without journal"
+                        )
+                    self._save_offset(offset)
+                    self._spawn_handler(http, msg, update_id=update_id)
+                else:
+                    self._save_offset(offset)
+
+    async def _recover_inflight(self, http: httpx.AsyncClient) -> None:
+        """Replay or apologise for handlers that didn't finish last run.
+
+        Called once at startup, *before* the main poll loop. For each
+        ``pending`` / ``interrupted`` entry in the journal:
+
+        * If the message is a plain text dispatch (or a voice/video note
+          with no text), replay it through the normal handler path. The
+          user's original message stays in the chat; we just produce a
+          fresh bubble underneath. Replays use the same ``update_id`` so
+          their journal row gets updated in-place rather than orphaned.
+        * If the message is a ``/`` command we treat as too-side-effecty
+          to safely re-run (``/update``, ``/reset``, ``/new``, ``/plan``),
+          we don't re-execute -- we just post a short note to the topic
+          asking the user to re-issue it, and mark the entry done.
+
+        The decision is intentionally conservative: false positives (a
+        plain message that wasn't actually idempotent) cost the user one
+        duplicated answer; false negatives on a side-effecty replay cost
+        the user a corrupted machine.
+        """
+        try:
+            pending = self._inflight.pending()
+        except Exception:
+            logger.exception("inflight pending() crashed")
+            return
+        if not pending:
+            return
+
+        logger.info(
+            "recovering %d in-flight handler(s) from previous run", len(pending)
+        )
+        for entry in pending:
+            try:
+                await self._recover_one(http, entry)
+            except Exception:
+                logger.exception(
+                    "recovery for update_id=%s crashed; marking failed",
+                    entry.update_id,
+                )
+                try:
+                    self._inflight.mark_failed(
+                        entry.update_id, "recovery raised; see agent.log"
+                    )
+                except Exception:
+                    pass
+
+    async def _recover_one(
+        self,
+        http: httpx.AsyncClient,
+        entry: InflightEntry,
+    ) -> None:
+        text = entry.text
+        message = entry.message
+        if not message:
+            self._inflight.mark_failed(entry.update_id, "no message in journal")
+            return
+
+        # Side-effecty commands: don't re-run, just tell the user.
+        is_command = (
+            self._match_plan_command(text) is not None
+            or self._match_reset_command(text)
+            or self._match_update_command(text)
+        )
+        if is_command:
+            head = text.partition(" ")[0] or "(command)"
+            note = (
+                f"⚠️ I was restarted while running `{head}` — that command "
+                "isn't safe to auto-replay. Re-send it if you still want it."
+            )
+            try:
+                await self._send_initial_bubble(http, message, text=note)
+            except Exception:
+                logger.exception("recovery: failed to post apology bubble")
+            self._inflight.mark_done(entry.update_id)
+            return
+
+        # Plain text / voice path: replay through the normal handler.
+        # _spawn_handler will overwrite the journal row in-place because
+        # it's keyed by update_id, so we go from interrupted -> pending
+        # -> done (or failed) without leaking entries.
+        try:
+            self._inflight.mark_pending(entry.update_id, message)
+        except Exception:
+            logger.exception("recovery: re-marking pending failed")
+        logger.info(
+            "replaying interrupted handler: update_id=%s text=%r",
+            entry.update_id, text[:60],
+        )
+        self._spawn_handler(http, message, update_id=entry.update_id)
 
     async def _drain_tasks(self) -> None:
         if not self._tasks:
