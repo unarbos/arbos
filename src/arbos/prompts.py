@@ -291,6 +291,9 @@ will answer it.
   - `prompts/*.md` — additional context (memory, chat-history pointers, …)
   - `secrets/` — `bot_token.txt`, `api_hash.txt` (0700)
   - `tdlib/` — aiotdlib session for the human user account
+  - `outbox/` — drop-zone watched once per second; any file written here
+    gets posted to this Telegram topic and moved to `outbox/sent/`
+    (or `outbox/failed/` with a `.error.txt` sidecar).
 - Remote: `{remote}` (currently `{branch}@{short_sha}`)
 
 ## Who else exists (Tailscale tailnet)
@@ -348,6 +351,26 @@ available as ordinary environment variables (`os.environ["OPENAI_API_KEY"]`).
   session and all of `.arbos/` survive the restart, so memory is preserved.
 - Installer + bootstrap flow lives in `cli.py` + `run.sh`; per-machine state
   machine in `state.py`.
+
+## Sending media to this chat
+You cannot call the Telegram Bot API from a child cursor-agent run, but the
+host agent watches `{arbos_dir}/outbox/` once per second. To send a photo,
+PDF, screenshot, log file, video, etc. into this topic, just write the file
+there:
+
+```sh
+cp /tmp/diagram.png {arbos_dir}/outbox/
+# optional caption (max 1024 chars):
+printf 'pipeline overview' > {arbos_dir}/outbox/diagram.png.caption.txt
+```
+
+Routing by extension: `.jpg/.jpeg/.png/.webp` -> sendPhoto (≤10 MB);
+`.gif` -> sendAnimation; `.mp4/.mov/.m4v` -> sendVideo; `.mp3/.m4a/.flac/
+.wav` -> sendAudio; `.ogg/.opus` -> sendVoice; everything else ->
+sendDocument (≤50 MB). Hidden files and `*.partial` / `*.tmp` are ignored,
+so write-then-rename is safe. Successful files move to `outbox/sent/` with
+a UTC timestamp prefix; failures move to `outbox/failed/` with a sibling
+`.error.txt`.
 
 ## Conventions
 - Use `doppler secrets get KEY --plain` to read secrets. Never write or read

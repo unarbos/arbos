@@ -35,6 +35,7 @@ import httpx
 from .bubble import Bubble
 from .config import StoredConfig
 from .cursor_runner import CursorRunner
+from .outbox import OutboxWatcher
 from .prompts import build_prompt, load_extra_prompts
 from . import session_store
 from .session_store import ChatSession
@@ -844,48 +845,62 @@ class CursorAgent:
                 offset = await self._drain_backlog(http)
                 self._save_offset(offset)
 
-            while not self._stop.is_set():
-                try:
-                    resp = await self._api(
-                        http,
-                        "getUpdates",
-                        offset=offset,
-                        timeout=LONG_POLL_TIMEOUT,
-                        allowed_updates=["message"],
-                    )
-                except httpx.HTTPError as exc:
-                    logger.warning("getUpdates network error: %s", exc)
-                    await self._sleep_unless_stopped(ERROR_BACKOFF)
-                    continue
+            outbox = OutboxWatcher(
+                http=http,
+                bot_token=self.bot_token,
+                chat_id=self.chat_id,
+                message_thread_id=self.topic_id,
+                paths=self.paths,
+            )
+            outbox.start()
 
-                if resp.status_code == 409:
-                    logger.warning(
-                        "getUpdates 409 Conflict (another poller live); backing off %.1fs",
-                        CONFLICT_BACKOFF,
-                    )
-                    await self._sleep_unless_stopped(CONFLICT_BACKOFF)
-                    continue
-                if resp.status_code != 200:
-                    logger.warning("getUpdates HTTP %d: %s", resp.status_code, resp.text[:200])
-                    await self._sleep_unless_stopped(ERROR_BACKOFF)
-                    continue
-
-                payload = resp.json()
-                if not payload.get("ok"):
-                    logger.warning("getUpdates not ok: %r", payload)
-                    await self._sleep_unless_stopped(ERROR_BACKOFF)
-                    continue
-
-                for upd in payload.get("result", []):
-                    offset = upd["update_id"] + 1
-                    msg = upd.get("message")
-                    if msg and self._is_for_us(msg):
-                        self._spawn_handler(http, msg)
-                    self._save_offset(offset)
-
-            await self._drain_tasks()
+            try:
+                await self._poll_loop(http, offset)
+            finally:
+                await outbox.stop()
+                await self._drain_tasks()
 
         logger.info("cursor-agent stopping (signal received)")
+
+    async def _poll_loop(self, http: httpx.AsyncClient, offset: int) -> None:
+        while not self._stop.is_set():
+            try:
+                resp = await self._api(
+                    http,
+                    "getUpdates",
+                    offset=offset,
+                    timeout=LONG_POLL_TIMEOUT,
+                    allowed_updates=["message"],
+                )
+            except httpx.HTTPError as exc:
+                logger.warning("getUpdates network error: %s", exc)
+                await self._sleep_unless_stopped(ERROR_BACKOFF)
+                continue
+
+            if resp.status_code == 409:
+                logger.warning(
+                    "getUpdates 409 Conflict (another poller live); backing off %.1fs",
+                    CONFLICT_BACKOFF,
+                )
+                await self._sleep_unless_stopped(CONFLICT_BACKOFF)
+                continue
+            if resp.status_code != 200:
+                logger.warning("getUpdates HTTP %d: %s", resp.status_code, resp.text[:200])
+                await self._sleep_unless_stopped(ERROR_BACKOFF)
+                continue
+
+            payload = resp.json()
+            if not payload.get("ok"):
+                logger.warning("getUpdates not ok: %r", payload)
+                await self._sleep_unless_stopped(ERROR_BACKOFF)
+                continue
+
+            for upd in payload.get("result", []):
+                offset = upd["update_id"] + 1
+                msg = upd.get("message")
+                if msg and self._is_for_us(msg):
+                    self._spawn_handler(http, msg)
+                self._save_offset(offset)
 
     async def _drain_tasks(self) -> None:
         if not self._tasks:

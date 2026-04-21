@@ -136,6 +136,20 @@ class InstallPaths:
         """Persistent cursor-agent chat id for this machine's topic."""
         return self.arbos / "chat_session.json"
 
+    @property
+    def outbox_dir(self) -> Path:
+        """Drop-zone watched by the agent: any file landed here is posted to
+        this machine's Telegram topic and then moved aside."""
+        return self.arbos / "outbox"
+
+    @property
+    def outbox_sent_dir(self) -> Path:
+        return self.outbox_dir / "sent"
+
+    @property
+    def outbox_failed_dir(self) -> Path:
+        return self.outbox_dir / "failed"
+
     def bootstrap(self) -> None:
         """Create the ``.arbos/`` skeleton with restrictive perms.
 
@@ -147,8 +161,19 @@ class InstallPaths:
         self.secrets.mkdir(parents=True, exist_ok=True)
         self.tdlib.mkdir(parents=True, exist_ok=True)
         self.prompts_dir.mkdir(parents=True, exist_ok=True)
+        self.outbox_dir.mkdir(parents=True, exist_ok=True)
+        self.outbox_sent_dir.mkdir(parents=True, exist_ok=True)
+        self.outbox_failed_dir.mkdir(parents=True, exist_ok=True)
 
-        for path in (self.arbos, self.secrets, self.tdlib, self.prompts_dir):
+        for path in (
+            self.arbos,
+            self.secrets,
+            self.tdlib,
+            self.prompts_dir,
+            self.outbox_dir,
+            self.outbox_sent_dir,
+            self.outbox_failed_dir,
+        ):
             try:
                 os.chmod(path, 0o700)
             except OSError:
