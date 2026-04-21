@@ -35,6 +35,9 @@ import httpx
 from .bubble import Bubble
 from .config import StoredConfig
 from .cursor_runner import CursorRunner
+from .prompts import build_prompt, load_extra_prompts
+from . import session_store
+from .session_store import ChatSession
 from .workspace import InstallPaths
 
 logger = logging.getLogger(__name__)
@@ -65,6 +68,7 @@ WHISPER_TIMEOUT = 60.0
 
 PLAN_MODEL = "claude-opus-4-7-high"
 IMPL_MODEL = "claude-opus-4-7-high"
+CHAT_MODEL = "claude-opus-4-7-high"
 
 PLAN_PROMPT_PREAMBLE = (
     "You are in plan mode. Produce a complete, actionable plan for the user "
@@ -111,6 +115,39 @@ class CursorAgent:
         self._stop = asyncio.Event()
         self._lock_fd: Optional[int] = None
         self._tasks: set[asyncio.Task[None]] = set()
+
+        # Persistent per-topic cursor-agent chat. Loaded from disk so memory
+        # survives PM2 restarts. The lock serialises every spawn that touches
+        # this chat -- two parallel `--resume <id>` calls would interleave
+        # appends.
+        loaded = session_store.load(self.paths)
+        self._chat_session_id: Optional[str] = loaded.session_id if loaded else None
+        self._chat_lock = asyncio.Lock()
+        if loaded is not None:
+            logger.info("loaded persistent chat session: %s", loaded.session_id)
+
+        # Render the system preamble eagerly so PROMPT.md exists from t=0
+        # even before the first message; build_prompt persists to disk and
+        # caches in-process for ~60s.
+        try:
+            build_prompt(self.paths, self.config)
+        except Exception:
+            logger.exception("initial PROMPT.md render failed; continuing")
+
+    def _system_prompt(self) -> str:
+        """Cached system preamble (refreshed by build_prompt's own TTL)."""
+        try:
+            return build_prompt(self.paths, self.config)
+        except Exception:
+            logger.exception("system prompt render failed; sending empty preamble")
+            return ""
+
+    def _extra_prompts(self) -> str:
+        try:
+            return load_extra_prompts(self.paths)
+        except Exception:
+            logger.exception("extra prompts load failed; skipping")
+            return ""
 
     # ---- single-instance lock --------------------------------------------
     def acquire_lock(self) -> None:
@@ -248,6 +285,18 @@ class CursorAgent:
             return None
         return rest.strip()
 
+    def _match_reset_command(self, prompt: str) -> bool:
+        """True if ``prompt`` is a bare ``/reset`` or ``/new`` (with optional
+        ``@<bot>`` suffix). Trailing arguments after the command are ignored
+        but still treated as a reset request."""
+        head = prompt.partition(" ")[0].lower()
+        candidates = {"/reset", "/new"}
+        if self.bot_username:
+            uname = self.bot_username.lower()
+            candidates.add(f"/reset@{uname}")
+            candidates.add(f"/new@{uname}")
+        return head in candidates
+
     async def _handle_message(
         self,
         http: httpx.AsyncClient,
@@ -313,6 +362,16 @@ class CursorAgent:
             await self._handle_plan_command(http, message, plan_arg)
             return
 
+        if self._match_reset_command(prompt):
+            if voice_bubble is not None:
+                try:
+                    await voice_bubble.finalize(f"voice: {prompt}")
+                finally:
+                    await voice_bubble.aclose()
+            logger.info("dispatching /reset from %s", sender)
+            await self._handle_reset_command(http, message)
+            return
+
         logger.info("dispatching message from %s -> cursor-agent (len=%d)", sender, len(prompt))
 
         if voice_bubble is not None:
@@ -330,27 +389,86 @@ class CursorAgent:
                 message_id=sent["message_id"],
             )
 
+        await self._run_persistent_chat(prompt=prompt, bubble=bubble)
+
+    async def _run_persistent_chat(
+        self,
+        *,
+        prompt: str,
+        bubble: Bubble,
+    ) -> None:
+        """Spawn cursor-agent against the per-topic persistent chat.
+
+        Serialised on ``self._chat_lock`` because cursor-agent's ``--resume``
+        appends to a single chat thread; concurrent appends would interleave.
+        Auto-recovers from a stale/missing session by clearing the stored id
+        and retrying once without ``--resume``.
+        """
+        async with self._chat_lock:
+            try:
+                await self._do_persistent_chat_run(prompt=prompt, bubble=bubble)
+            except asyncio.CancelledError:
+                try:
+                    await bubble.finalize("(interrupted)")
+                finally:
+                    await bubble.aclose()
+                raise
+            except Exception as exc:
+                logger.exception("cursor-agent run crashed")
+                try:
+                    await bubble.finalize(f"cursor-agent crashed: {exc}")
+                except Exception:
+                    pass
+            finally:
+                await bubble.aclose()
+
+    async def _do_persistent_chat_run(
+        self,
+        *,
+        prompt: str,
+        bubble: Bubble,
+    ) -> None:
+        resume_id = self._chat_session_id
+
         runner = CursorRunner(
             prompt=prompt,
             workdir=self.workdir,
-            model="claude-opus-4-7-high",
+            model=CHAT_MODEL,
+            system_prompt=self._system_prompt(),
+            extra_prompts=self._extra_prompts(),
+            resume_session=resume_id,
         )
-        try:
+        await runner.run(on_update=bubble.update, on_final=bubble.finalize)
+
+        if runner.resume_failed and resume_id:
+            logger.warning(
+                "resume of chat %s failed; clearing and starting fresh",
+                resume_id,
+            )
+            self._chat_session_id = None
+            session_store.clear(self.paths)
+            runner = CursorRunner(
+                prompt=prompt,
+                workdir=self.workdir,
+                model=CHAT_MODEL,
+                system_prompt=self._system_prompt(),
+                extra_prompts=self._extra_prompts(),
+            )
             await runner.run(on_update=bubble.update, on_final=bubble.finalize)
-        except asyncio.CancelledError:
+
+        new_id = runner.session_id
+        if new_id and new_id != self._chat_session_id:
+            self._chat_session_id = new_id
             try:
-                await bubble.finalize("(interrupted)")
-            finally:
-                await bubble.aclose()
-            raise
-        except Exception as exc:
-            logger.exception("cursor-agent run crashed")
-            try:
-                await bubble.finalize(f"cursor-agent crashed: {exc}")
-            except Exception:
-                pass
-        finally:
-            await bubble.aclose()
+                session_store.save(
+                    self.paths,
+                    ChatSession.now(session_id=new_id, model=CHAT_MODEL),
+                )
+                logger.info("persisted new chat session id: %s", new_id)
+            except OSError as exc:
+                logger.warning(
+                    "could not persist chat session %s: %s", new_id, exc
+                )
 
     async def _transcribe_voice(
         self,
@@ -412,6 +530,36 @@ class CursorAgent:
             raise RuntimeError("whisper returned empty transcript")
         return transcript
 
+    async def _handle_reset_command(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+    ) -> None:
+        """Wipe the persistent chat session and ack with a bubble."""
+        async with self._chat_lock:
+            prev = self._chat_session_id
+            removed = session_store.clear(self.paths)
+            self._chat_session_id = None
+
+        if prev:
+            text = f"started a fresh chat (cleared session {prev})"
+        elif removed:
+            text = "started a fresh chat (cleared stale session file)"
+        else:
+            text = "no chat session to reset; next message will start one"
+
+        sent = await self._send_initial_bubble(http, message, text=text)
+        if sent is None:
+            return
+        bubble = Bubble(
+            http=http,
+            bot_token=self.bot_token,
+            chat_id=self.chat_id,
+            message_thread_id=self.topic_id,
+            message_id=sent["message_id"],
+        )
+        await bubble.aclose()
+
     async def _handle_plan_command(
         self,
         http: httpx.AsyncClient,
@@ -453,6 +601,8 @@ class CursorAgent:
             workdir=self.workdir,
             model=PLAN_MODEL,
             plan_mode=True,
+            system_prompt=self._system_prompt(),
+            extra_prompts=self._extra_prompts(),
         )
         plan_holder: dict[str, str] = {"text": "", "error": ""}
 
@@ -512,6 +662,8 @@ class CursorAgent:
             prompt=impl_prompt,
             workdir=self.workdir,
             model=IMPL_MODEL,
+            system_prompt=self._system_prompt(),
+            extra_prompts=self._extra_prompts(),
         )
         try:
             await impl_runner.run(on_update=bubble2.update, on_final=bubble2.finalize)

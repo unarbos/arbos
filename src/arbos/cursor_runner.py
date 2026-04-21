@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
+from .prompts import assemble_full_prompt
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,12 +93,28 @@ class CursorRunner:
         model: Optional[str] = None,
         extra_env: Optional[dict[str, str]] = None,
         plan_mode: bool = False,
+        system_prompt: Optional[str] = None,
+        extra_prompts: Optional[str] = None,
+        resume_session: Optional[str] = None,
     ) -> None:
         self.prompt = prompt
         self.workdir = workdir
         self.model = model
         self.extra_env = extra_env or {}
         self.plan_mode = plan_mode
+        self.system_prompt = system_prompt
+        self.extra_prompts = extra_prompts
+        self.resume_session = resume_session
+        # Populated after run(): the chat session id cursor-agent reported on
+        # this invocation (== resume_session on a successful resume, a fresh
+        # uuid on a brand-new chat, None if the run never reached a `system`
+        # event).
+        self.session_id: Optional[str] = None
+        # Set True after run() if `resume_session` was supplied but the
+        # invocation produced no events and exited non-zero -- almost always
+        # "session not found" upstream. Caller should clear its stored id and
+        # retry without --resume.
+        self.resume_failed: bool = False
 
     def _build_cmd(self) -> list[str]:
         cmd = [
@@ -107,11 +125,21 @@ class CursorRunner:
             "--force",
             "--workspace", str(self.workdir),
         ]
+        if self.resume_session:
+            cmd += ["--resume", self.resume_session]
         if self.plan_mode:
             cmd += ["--mode", "plan"]
         if self.model:
             cmd += ["--model", self.model]
-        cmd.append(self.prompt)
+        if self.system_prompt or self.extra_prompts:
+            final = assemble_full_prompt(
+                self.system_prompt or "",
+                self.extra_prompts or "",
+                self.prompt,
+            )
+        else:
+            final = self.prompt
+        cmd.append(final)
         return cmd
 
     async def run(self, *, on_update: UpdateCb, on_final: FinalCb) -> None:
@@ -166,6 +194,22 @@ class CursorRunner:
                 await stderr_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+        # Surface cursor-agent's chat id to the caller so the agent layer
+        # can persist it for future --resume calls.
+        self.session_id = state.session_id
+
+        # Heuristic: if we asked for --resume <id> and cursor-agent gave us
+        # back nothing usable (no result, no session, non-zero exit), treat
+        # it as a stale/missing session so the caller can clear its stored
+        # id and retry without --resume.
+        if (
+            self.resume_session
+            and rc != 0
+            and not state.result
+            and state.session_id is None
+        ):
+            self.resume_failed = True
 
         if rc != 0 and not state.result:
             state.is_error = True

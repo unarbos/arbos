@@ -118,6 +118,24 @@ class InstallPaths:
     def gitignore_path(self) -> Path:
         return self.arbos / ".gitignore"
 
+    @property
+    def prompts_dir(self) -> Path:
+        return self.arbos / "prompts"
+
+    @property
+    def prompt_md_path(self) -> Path:
+        return self.prompts_dir / "PROMPT.md"
+
+    @property
+    def src_dir(self) -> Path:
+        """Where ``run.sh`` clones the arbos repo when bootstrapping."""
+        return self.arbos / "src"
+
+    @property
+    def chat_session_path(self) -> Path:
+        """Persistent cursor-agent chat id for this machine's topic."""
+        return self.arbos / "chat_session.json"
+
     def bootstrap(self) -> None:
         """Create the ``.arbos/`` skeleton with restrictive perms.
 
@@ -128,8 +146,9 @@ class InstallPaths:
         self.arbos.mkdir(parents=True, exist_ok=True)
         self.secrets.mkdir(parents=True, exist_ok=True)
         self.tdlib.mkdir(parents=True, exist_ok=True)
+        self.prompts_dir.mkdir(parents=True, exist_ok=True)
 
-        for path in (self.arbos, self.secrets, self.tdlib):
+        for path in (self.arbos, self.secrets, self.tdlib, self.prompts_dir):
             try:
                 os.chmod(path, 0o700)
             except OSError:
