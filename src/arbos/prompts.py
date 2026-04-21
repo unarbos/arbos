@@ -341,6 +341,11 @@ available as ordinary environment variables (`os.environ["OPENAI_API_KEY"]`).
 - `/plan` runs are intentionally **isolated** from this persistent chat —
   neither the plan nor the impl phase resumes it, so they cannot pollute
   the conversation history.
+- `/update` does `git fetch + git reset --hard origin/main` in the arbos
+  source dir (only when origin actually moved), reinstalls the editable
+  package if `pyproject.toml`, `run.sh`, or `uv.lock` changed, then
+  triggers a detached `pm2 reload arbos-<machine>`. The persistent chat
+  session and all of `.arbos/` survive the restart, so memory is preserved.
 - Installer + bootstrap flow lives in `cli.py` + `run.sh`; per-machine state
   machine in `state.py`.
 

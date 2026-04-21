@@ -38,6 +38,8 @@ from .cursor_runner import CursorRunner
 from .prompts import build_prompt, load_extra_prompts
 from . import session_store
 from .session_store import ChatSession
+from . import updater
+from .updater import UpdateError, UpdateResult
 from .workspace import InstallPaths
 
 logger = logging.getLogger(__name__)
@@ -297,6 +299,18 @@ class CursorAgent:
             candidates.add(f"/new@{uname}")
         return head in candidates
 
+    def _match_update_command(self, prompt: str) -> bool:
+        """True if ``prompt`` is ``/update`` (optionally ``@<bot>``).
+
+        Trailing arguments are ignored -- /update always pulls origin/main
+        per the project's update policy.
+        """
+        head = prompt.partition(" ")[0].lower()
+        candidates = {"/update"}
+        if self.bot_username:
+            candidates.add(f"/update@{self.bot_username.lower()}")
+        return head in candidates
+
     async def _handle_message(
         self,
         http: httpx.AsyncClient,
@@ -370,6 +384,16 @@ class CursorAgent:
                     await voice_bubble.aclose()
             logger.info("dispatching /reset from %s", sender)
             await self._handle_reset_command(http, message)
+            return
+
+        if self._match_update_command(prompt):
+            if voice_bubble is not None:
+                try:
+                    await voice_bubble.finalize(f"voice: {prompt}")
+                finally:
+                    await voice_bubble.aclose()
+            logger.info("dispatching /update from %s", sender)
+            await self._handle_update_command(http, message)
             return
 
         logger.info("dispatching message from %s -> cursor-agent (len=%d)", sender, len(prompt))
@@ -559,6 +583,119 @@ class CursorAgent:
             message_id=sent["message_id"],
         )
         await bubble.aclose()
+
+    async def _handle_update_command(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+    ) -> None:
+        """Hard-reset the arbos checkout to ``origin/main``, optionally
+        reinstall, then trigger a detached ``pm2 reload`` so we restart on
+        the new code.
+
+        Driven step-by-step from the event loop so the bubble can stream
+        progress between phases. Each shell-out is itself sync but short
+        (~hundreds of ms), so we briefly block the loop -- acceptable given
+        ``/update`` is rare and intentionally exclusive.
+        """
+        sent = await self._send_initial_bubble(http, message, text="updating…")
+        if sent is None:
+            return
+        bubble = Bubble(
+            http=http,
+            bot_token=self.bot_token,
+            chat_id=self.chat_id,
+            message_thread_id=self.topic_id,
+            message_id=sent["message_id"],
+        )
+
+        try:
+            await self._do_update_run(bubble)
+        except asyncio.CancelledError:
+            try:
+                await bubble.finalize("(interrupted)")
+            finally:
+                await bubble.aclose()
+            raise
+        except Exception as exc:
+            logger.exception("/update crashed")
+            try:
+                await bubble.finalize(f"update crashed: {exc}")
+            except Exception:
+                pass
+            await bubble.aclose()
+        else:
+            await bubble.aclose()
+
+    async def _do_update_run(self, bubble: Bubble) -> None:
+        try:
+            src = updater.resolve_src_dir(self.paths)
+        except UpdateError as exc:
+            await bubble.finalize(f"update failed: {exc}")
+            return
+
+        await bubble.update(f"fetching origin/{updater.UPDATE_BRANCH} in {src}…")
+        try:
+            old_sha, old_subject, new_sha, new_subject, dirty = await asyncio.to_thread(
+                updater.fetch_and_reset, src
+            )
+        except UpdateError as exc:
+            await bubble.finalize(f"update failed: {exc}")
+            return
+
+        reinstalled = False
+        if old_sha != new_sha:
+            try:
+                changed = await asyncio.to_thread(
+                    updater._changed_paths, src, old_sha, new_sha
+                )
+            except UpdateError as exc:
+                await bubble.finalize(f"update failed (diff): {exc}")
+                return
+            if updater._needs_reinstall(changed):
+                await bubble.update(
+                    f"old: {old_sha} -> new: {new_sha}\nreinstalling deps…"
+                )
+                try:
+                    await asyncio.to_thread(updater._reinstall, src)
+                except UpdateError as exc:
+                    await bubble.finalize(f"update failed (reinstall): {exc}")
+                    return
+                reinstalled = True
+
+        result = UpdateResult(
+            src_dir=src,
+            old_sha=old_sha,
+            new_sha=new_sha,
+            old_subject=old_subject,
+            new_subject=new_subject,
+            reinstalled=reinstalled,
+            dirty_wiped=dirty,
+        )
+
+        # If nothing changed, no need to bounce the agent at all.
+        if not result.changed:
+            await bubble.finalize(
+                updater.render_summary(result, machine=self.machine, restarting=False)
+            )
+            return
+
+        await bubble.finalize(
+            updater.render_summary(result, machine=self.machine, restarting=True)
+        )
+
+        try:
+            updater.spawn_pm2_reload(self.machine)
+        except UpdateError as exc:
+            # Code is already updated on disk; just couldn't trigger restart.
+            logger.warning("pm2 reload failed: %s", exc)
+            try:
+                await bubble.update(
+                    updater.render_summary(result, machine=self.machine, restarting=False)
+                    + f"\n\npm2 reload failed: {exc}\nrestart manually with `./run.sh restart`"
+                )
+            except Exception:
+                pass
 
     async def _handle_plan_command(
         self,
