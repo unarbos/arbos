@@ -354,3 +354,50 @@ class RunJournal:
         except Exception:
             logger.exception("runjournal.get crashed (swallowed)")
             return None
+
+    def mark_running_as_interrupted(self) -> int:
+        """Flip every ``running`` entry to ``interrupted``. Returns count flipped.
+
+        Called at agent shutdown so a reply against a bubble whose run was
+        cut short by ``pm2 reload`` (parent died before its own
+        ``record_finish``) doesn't see a stale ``status: running``
+        forever. Best-effort and exception-safe; per-entry failures are
+        swallowed so one bad file can't block the rest.
+        """
+        flipped = 0
+        try:
+            entries = list(os.scandir(self.paths.runs_dir))
+        except OSError as exc:
+            logger.warning("runjournal sweep scandir failed: %s", exc)
+            return 0
+        for entry in entries:
+            try:
+                if not entry.is_file() or not entry.name.endswith(".json"):
+                    continue
+                # Strip the .json suffix to get the bubble id; skip if the
+                # filename doesn't look numeric (shouldn't happen, defensive).
+                stem = entry.name[: -len(".json")]
+                try:
+                    msg_id = int(stem)
+                except ValueError:
+                    continue
+                rec = self.get(msg_id)
+                if rec is None or rec.status != "running":
+                    continue
+                rec.status = "interrupted"
+                rec.ended_at = time.time()
+                # Leave final_text alone -- a partial bubble snapshot is
+                # more useful than blanking it. Caller may overwrite later
+                # via record_finish if it ever resumes the run.
+                self._atomic_write(msg_id, rec)
+                flipped += 1
+            except Exception:
+                logger.exception(
+                    "runjournal sweep entry %s failed (swallowed)", entry.name
+                )
+        if flipped:
+            logger.info(
+                "runjournal: marked %d running entr%s as interrupted on shutdown",
+                flipped, "y" if flipped == 1 else "ies",
+            )
+        return flipped

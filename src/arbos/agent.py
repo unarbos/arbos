@@ -1927,6 +1927,15 @@ class CursorAgent:
                     self._inflight.mark_interrupted_all()
                 except Exception:
                     logger.exception("inflight mark_interrupted_all crashed")
+                # Same idea for the per-bubble run journal: any entry
+                # still flagged ``running`` is a bubble whose finalize
+                # got cut off by SIGINT/SIGTERM before the agent's own
+                # finally-clause could write record_finish. Flip them
+                # so a future reply doesn't show stale "(in progress)".
+                try:
+                    self._runs.mark_running_as_interrupted()
+                except Exception:
+                    logger.exception("runjournal sweep crashed")
 
         logger.info("cursor-agent stopping (signal received)")
 
