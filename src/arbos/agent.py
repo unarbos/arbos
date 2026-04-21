@@ -601,7 +601,12 @@ class CursorAgent:
         """
         sent = await self._send_initial_bubble(http, message, text="updating…")
         if sent is None:
+            # _send_initial_bubble already logged the HTTP failure at WARNING.
+            # Log here too so the /update lifecycle has a clean "started ->
+            # bailed at bubble" trail rather than disappearing into silence.
+            logger.warning("/update aborted: could not send initial bubble")
             return
+        logger.info("/update bubble sent (msg_id=%s); starting update run", sent["message_id"])
         bubble = Bubble(
             http=http,
             bot_token=self.bot_token,
@@ -632,8 +637,10 @@ class CursorAgent:
         try:
             src = updater.resolve_src_dir(self.paths)
         except UpdateError as exc:
+            logger.warning("/update: resolve_src_dir failed: %s", exc)
             await bubble.finalize(f"update failed: {exc}")
             return
+        logger.info("/update: src=%s; fetching origin/%s", src, updater.UPDATE_BRANCH)
 
         await bubble.update(f"fetching origin/{updater.UPDATE_BRANCH} in {src}…")
         try:
@@ -641,8 +648,10 @@ class CursorAgent:
                 updater.fetch_and_reset, src
             )
         except UpdateError as exc:
+            logger.warning("/update: fetch_and_reset failed: %s", exc)
             await bubble.finalize(f"update failed: {exc}")
             return
+        logger.info("/update: old=%s new=%s dirty=%d", old_sha, new_sha, len(dirty))
 
         reinstalled = False
         if old_sha != new_sha:
@@ -651,18 +660,22 @@ class CursorAgent:
                     updater._changed_paths, src, old_sha, new_sha
                 )
             except UpdateError as exc:
+                logger.warning("/update: _changed_paths failed: %s", exc)
                 await bubble.finalize(f"update failed (diff): {exc}")
                 return
             if updater._needs_reinstall(changed):
+                logger.info("/update: reinstall trigger files changed; running reinstall")
                 await bubble.update(
                     f"old: {old_sha} -> new: {new_sha}\nreinstalling deps…"
                 )
                 try:
                     await asyncio.to_thread(updater._reinstall, src)
                 except UpdateError as exc:
+                    logger.warning("/update: reinstall failed: %s", exc)
                     await bubble.finalize(f"update failed (reinstall): {exc}")
                     return
                 reinstalled = True
+                logger.info("/update: reinstall OK")
 
         result = UpdateResult(
             src_dir=src,
@@ -674,8 +687,8 @@ class CursorAgent:
             dirty_wiped=dirty,
         )
 
-        # If nothing changed, no need to bounce the agent at all.
         if not result.changed:
+            logger.info("/update: already up to date at %s", new_sha)
             await bubble.finalize(
                 updater.render_summary(result, machine=self.machine, restarting=False)
             )
@@ -687,8 +700,11 @@ class CursorAgent:
 
         try:
             updater.spawn_pm2_reload(self.machine)
+            logger.info(
+                "/update: spawned `pm2 reload arbos-%s`; waiting to be replaced",
+                self.machine,
+            )
         except UpdateError as exc:
-            # Code is already updated on disk; just couldn't trigger restart.
             logger.warning("pm2 reload failed: %s", exc)
             try:
                 await bubble.update(
@@ -821,9 +837,33 @@ class CursorAgent:
             await bubble2.aclose()
 
     def _spawn_handler(self, http: httpx.AsyncClient, message: dict[str, Any]) -> None:
-        task = asyncio.create_task(self._handle_message(http, message))
+        msg_id = message.get("message_id")
+        sender = (message.get("from") or {}).get("username") or (
+            message.get("from") or {}
+        ).get("id")
+        task = asyncio.create_task(
+            self._handle_message(http, message),
+            name=f"handle-msg-{msg_id}",
+        )
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+
+        def _on_done(t: asyncio.Task[None]) -> None:
+            self._tasks.discard(t)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                # Without this hook, asyncio loses unhandled task exceptions
+                # to "Task exception was never retrieved" at GC time and they
+                # never reach our log -- which is exactly how /update on
+                # templar (07:42-08:54Z) failed silently. Log them here so
+                # every handler crash leaves a breadcrumb in agent.log.
+                logger.error(
+                    "message handler crashed (msg_id=%s sender=%s): %s",
+                    msg_id, sender, exc, exc_info=exc,
+                )
+
+        task.add_done_callback(_on_done)
 
     # ---- main loop -------------------------------------------------------
     async def run(self) -> None:
