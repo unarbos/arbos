@@ -27,8 +27,10 @@ import fcntl
 import logging
 import os
 import signal
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 
@@ -88,6 +90,31 @@ IMPL_PROMPT_PREAMBLE = (
     "finished, output a short summary of what changed.\n\n"
 )
 
+# How long a Confirm/Cancel bubble stays clickable. After this many seconds
+# the in-memory pending entry is dropped and a click yields a "expired" toast.
+CONFIRM_TTL_SECONDS = 300.0
+
+# Set ARBOS_SKIP_CONFIRM=1 (in the agent's env, e.g. via run.sh or pm2 ecosystem)
+# to bypass the auto-wrap of destructive ops. Useful for scripted replays.
+SKIP_CONFIRM_ENV = "ARBOS_SKIP_CONFIRM"
+
+
+@dataclass
+class _PendingConfirm:
+    """One outstanding Confirm/Cancel bubble waiting on a callback.
+
+    Lives only in :attr:`CursorAgent._pending_confirms`; intentionally not
+    journaled -- if the agent restarts before the user clicks, the entry is
+    silently dropped and they re-issue.
+    """
+
+    bubble_message_id: int
+    user_id: Optional[int]
+    label: str
+    original_message: dict[str, Any]
+    action: Callable[[Bubble], Awaitable[None]]
+    expires_at: float = field(default_factory=lambda: time.monotonic() + CONFIRM_TTL_SECONDS)
+
 
 def _to_bot_thread_id(arbos_topic_id: int) -> int:
     return arbos_topic_id >> _ARBOS_MSG_ID_SHIFT
@@ -135,6 +162,19 @@ class CursorAgent:
         self._chat_lock = asyncio.Lock()
         if loaded is not None:
             logger.info("loaded persistent chat session: %s", loaded.session_id)
+
+        # In-memory map of bubble message_id -> _PendingConfirm. Populated by
+        # the destructive-op auto-wrap and by `/confirm <command>`; consumed by
+        # callback_query updates. Deliberately not persisted across restarts.
+        self._pending_confirms: dict[int, _PendingConfirm] = {}
+        self._skip_confirm = os.environ.get(SKIP_CONFIRM_ENV, "").strip() not in (
+            "", "0", "false", "False", "no", "NO",
+        )
+        if self._skip_confirm:
+            logger.info(
+                "%s set; destructive ops will run without Confirm/Cancel prompt",
+                SKIP_CONFIRM_ENV,
+            )
 
         # Render the system preamble eagerly so PROMPT.md exists from t=0
         # even before the first message; build_prompt persists to disk and
@@ -202,7 +242,12 @@ class CursorAgent:
 
     async def _drain_backlog(self, http: httpx.AsyncClient) -> int:
         """Skip any queued updates so a fresh start doesn't re-handle backlog."""
-        resp = await self._api(http, "getUpdates", timeout=0, allowed_updates=["message"])
+        resp = await self._api(
+            http,
+            "getUpdates",
+            timeout=0,
+            allowed_updates=["message", "callback_query"],
+        )
         if resp.status_code != 200:
             return 0
         payload = resp.json()
@@ -263,8 +308,9 @@ class CursorAgent:
         message: dict[str, Any],
         *,
         text: str = INITIAL_BUBBLE_TEXT,
+        reply_markup: Optional[dict[str, Any]] = None,
     ) -> Optional[dict[str, Any]]:
-        params = {
+        params: dict[str, Any] = {
             "chat_id": self.chat_id,
             "message_thread_id": self.topic_id,
             "text": text,
@@ -274,6 +320,8 @@ class CursorAgent:
                 "allow_sending_without_reply": True,
             },
         }
+        if reply_markup is not None:
+            params["reply_markup"] = reply_markup
         resp = await self._api(http, "sendMessage", **params)
         if resp.status_code != 200:
             logger.warning("sendMessage HTTP %d: %s", resp.status_code, resp.text[:200])
@@ -318,6 +366,22 @@ class CursorAgent:
         if self.bot_username:
             candidates.add(f"/update@{self.bot_username.lower()}")
         return head in candidates
+
+    def _match_confirm_command(self, prompt: str) -> Optional[str]:
+        """Return the trailing argument if ``prompt`` is ``/confirm``, else None.
+
+        Lets the user explicitly gate any other prompt or command behind a
+        Confirm/Cancel bubble. Empty argument is treated as a usage error
+        upstream.
+        """
+        head, _, rest = prompt.partition(" ")
+        head_lower = head.lower()
+        candidates = {"/confirm"}
+        if self.bot_username:
+            candidates.add(f"/confirm@{self.bot_username.lower()}")
+        if head_lower not in candidates:
+            return None
+        return rest.strip()
 
     async def _handle_message(
         self,
@@ -384,14 +448,35 @@ class CursorAgent:
             await self._handle_plan_command(http, message, plan_arg)
             return
 
+        confirm_arg = self._match_confirm_command(prompt)
+        if confirm_arg is not None:
+            if voice_bubble is not None:
+                try:
+                    await voice_bubble.finalize(f"voice: {prompt}")
+                finally:
+                    await voice_bubble.aclose()
+            logger.info("dispatching /confirm from %s (wraps: %r)", sender, confirm_arg[:60])
+            await self._handle_confirm_command(http, message, confirm_arg)
+            return
+
         if self._match_reset_command(prompt):
             if voice_bubble is not None:
                 try:
                     await voice_bubble.finalize(f"voice: {prompt}")
                 finally:
                     await voice_bubble.aclose()
-            logger.info("dispatching /reset from %s", sender)
-            await self._handle_reset_command(http, message)
+            if self._skip_confirm:
+                logger.info("dispatching /reset from %s (confirm skipped)", sender)
+                await self._handle_reset_command(http, message)
+            else:
+                logger.info("gating /reset from %s behind Confirm/Cancel", sender)
+                await self._prompt_confirmation(
+                    http,
+                    message,
+                    label="/reset",
+                    description="wipe the persistent chat session",
+                    action=lambda b: self._handle_reset_action(b),
+                )
             return
 
         if self._match_update_command(prompt):
@@ -400,8 +485,21 @@ class CursorAgent:
                     await voice_bubble.finalize(f"voice: {prompt}")
                 finally:
                     await voice_bubble.aclose()
-            logger.info("dispatching /update from %s", sender)
-            await self._handle_update_command(http, message)
+            if self._skip_confirm:
+                logger.info("dispatching /update from %s (confirm skipped)", sender)
+                await self._handle_update_command(http, message)
+            else:
+                logger.info("gating /update from %s behind Confirm/Cancel", sender)
+                await self._prompt_confirmation(
+                    http,
+                    message,
+                    label="/update",
+                    description=(
+                        "git fetch + hard-reset to origin/main, reinstall if "
+                        "needed, then pm2 reload this machine"
+                    ),
+                    action=lambda b: self._handle_update_action(b),
+                )
             return
 
         logger.info("dispatching message from %s -> cursor-agent (len=%d)", sender, len(prompt))
@@ -568,6 +666,23 @@ class CursorAgent:
         message: dict[str, Any],
     ) -> None:
         """Wipe the persistent chat session and ack with a bubble."""
+        sent = await self._send_initial_bubble(http, message, text="resetting…")
+        if sent is None:
+            return
+        bubble = Bubble(
+            http=http,
+            bot_token=self.bot_token,
+            chat_id=self.chat_id,
+            message_thread_id=self.topic_id,
+            message_id=sent["message_id"],
+        )
+        try:
+            await self._handle_reset_action(bubble)
+        finally:
+            await bubble.aclose()
+
+    async def _handle_reset_action(self, bubble: Bubble) -> None:
+        """Reset behaviour, given an already-sent bubble to finalise into."""
         async with self._chat_lock:
             prev = self._chat_session_id
             removed = session_store.clear(self.paths)
@@ -579,18 +694,7 @@ class CursorAgent:
             text = "started a fresh chat (cleared stale session file)"
         else:
             text = "no chat session to reset; next message will start one"
-
-        sent = await self._send_initial_bubble(http, message, text=text)
-        if sent is None:
-            return
-        bubble = Bubble(
-            http=http,
-            bot_token=self.bot_token,
-            chat_id=self.chat_id,
-            message_thread_id=self.topic_id,
-            message_id=sent["message_id"],
-        )
-        await bubble.aclose()
+        await bubble.finalize(text)
 
     async def _handle_update_command(
         self,
@@ -621,7 +725,10 @@ class CursorAgent:
             message_thread_id=self.topic_id,
             message_id=sent["message_id"],
         )
+        await self._handle_update_action(bubble)
 
+    async def _handle_update_action(self, bubble: Bubble) -> None:
+        """Update behaviour, given an already-sent bubble to drive."""
         try:
             await self._do_update_run(bubble)
         except asyncio.CancelledError:
@@ -843,6 +950,244 @@ class CursorAgent:
         finally:
             await bubble2.aclose()
 
+    # ---- confirmation flow ----------------------------------------------
+    async def _prompt_confirmation(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+        *,
+        label: str,
+        description: str,
+        action: Callable[[Bubble], Awaitable[None]],
+    ) -> None:
+        """Post a Confirm/Cancel bubble that, on Confirm, runs ``action(bubble)``.
+
+        ``label`` is a short tag for logs and the bubble headline.
+        ``description`` is a one-liner shown to the user above the buttons.
+        Only the original sender (Telegram ``from.id``) is allowed to click;
+        others get a toast and the bubble stays armed.
+        """
+        text = f"confirm {label}?\n{description}"
+        markup = {
+            "inline_keyboard": [[
+                {"text": "✅ Confirm", "callback_data": f"confirm:{label}"},
+                {"text": "✖️ Cancel", "callback_data": f"cancel:{label}"},
+            ]]
+        }
+        sent = await self._send_initial_bubble(
+            http, message, text=text, reply_markup=markup
+        )
+        if sent is None:
+            logger.warning("confirmation bubble for %s could not be sent", label)
+            return
+
+        # Opportunistic GC of expired entries so the dict can't grow without
+        # bound on a long-lived process.
+        self._gc_pending_confirms()
+
+        sender = message.get("from") or {}
+        self._pending_confirms[sent["message_id"]] = _PendingConfirm(
+            bubble_message_id=sent["message_id"],
+            user_id=sender.get("id"),
+            label=label,
+            original_message=message,
+            action=action,
+        )
+
+    def _gc_pending_confirms(self) -> None:
+        now = time.monotonic()
+        stale = [
+            mid for mid, entry in self._pending_confirms.items()
+            if entry.expires_at < now
+        ]
+        for mid in stale:
+            self._pending_confirms.pop(mid, None)
+        if stale:
+            logger.info("dropped %d expired confirmation(s)", len(stale))
+
+    async def _handle_confirm_command(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+        wrapped: str,
+    ) -> None:
+        """Gate any prompt or sub-command behind a Confirm/Cancel bubble.
+
+        If ``wrapped`` is itself ``/update`` or ``/reset`` we route to the
+        existing destructive-op handlers; otherwise the wrapped text is
+        treated as a fresh prompt for the persistent chat.
+        """
+        if not wrapped:
+            sent = await self._send_initial_bubble(
+                http, message, text="usage: /confirm <command-or-prompt>"
+            )
+            if sent is not None:
+                bubble = Bubble(
+                    http=http,
+                    bot_token=self.bot_token,
+                    chat_id=self.chat_id,
+                    message_thread_id=self.topic_id,
+                    message_id=sent["message_id"],
+                )
+                await bubble.aclose()
+            return
+
+        if self._match_update_command(wrapped):
+            label = "/update"
+            description = (
+                "git fetch + hard-reset to origin/main, reinstall if "
+                "needed, then pm2 reload this machine"
+            )
+            action: Callable[[Bubble], Awaitable[None]] = lambda b: self._handle_update_action(b)
+        elif self._match_reset_command(wrapped):
+            label = "/reset"
+            description = "wipe the persistent chat session"
+            action = lambda b: self._handle_reset_action(b)
+        else:
+            preview = wrapped if len(wrapped) <= 80 else wrapped[:77] + "…"
+            label = "prompt"
+            description = f"run: {preview}"
+            wrapped_prompt = wrapped
+            action = lambda b, _p=wrapped_prompt: self._run_persistent_chat(
+                prompt=_p, bubble=b
+            )
+
+        await self._prompt_confirmation(
+            http,
+            message,
+            label=label,
+            description=description,
+            action=action,
+        )
+
+    async def _handle_callback_query(
+        self,
+        http: httpx.AsyncClient,
+        cb: dict[str, Any],
+    ) -> None:
+        """React to a Confirm/Cancel button press on a bubble we own.
+
+        Acks the callback (so the spinner clears), authenticates the
+        clicker against the original sender, removes the inline keyboard,
+        and either runs the captured action or finalises the bubble with
+        "cancelled".
+        """
+        cb_id = cb.get("id")
+        data = cb.get("data") or ""
+        msg = cb.get("message") or {}
+        bubble_msg_id = msg.get("message_id")
+        clicker = (cb.get("from") or {}).get("id")
+
+        async def _answer(text: str = "", *, alert: bool = False) -> None:
+            if not cb_id:
+                return
+            params: dict[str, Any] = {"callback_query_id": cb_id}
+            if text:
+                params["text"] = text
+                params["show_alert"] = alert
+            try:
+                await self._api(http, "answerCallbackQuery", **params)
+            except Exception:
+                logger.exception("answerCallbackQuery failed")
+
+        if not bubble_msg_id or not data:
+            await _answer()
+            return
+
+        # Only react to callbacks on bubbles in our own topic; ignore others.
+        if (msg.get("chat") or {}).get("id") != self.chat_id:
+            await _answer()
+            return
+        if msg.get("message_thread_id") != self.topic_id:
+            await _answer()
+            return
+
+        action_kind, _, _ = data.partition(":")
+        entry = self._pending_confirms.get(bubble_msg_id)
+        if entry is None:
+            await _answer("expired or already handled", alert=False)
+            return
+
+        if entry.user_id is not None and clicker is not None and clicker != entry.user_id:
+            await _answer("not your prompt", alert=False)
+            return
+
+        # Take ownership of the entry so a double-click can't run twice.
+        self._pending_confirms.pop(bubble_msg_id, None)
+
+        bubble = Bubble(
+            http=http,
+            bot_token=self.bot_token,
+            chat_id=self.chat_id,
+            message_thread_id=self.topic_id,
+            message_id=bubble_msg_id,
+        )
+
+        try:
+            await bubble.clear_reply_markup()
+        except Exception:
+            logger.exception("clear_reply_markup failed; continuing")
+
+        if action_kind != "confirm":
+            await _answer("cancelled")
+            try:
+                await bubble.finalize(f"{entry.label}: cancelled")
+            finally:
+                await bubble.aclose()
+            return
+
+        await _answer("confirmed")
+        logger.info(
+            "callback confirmed: label=%s bubble=%s clicker=%s",
+            entry.label, bubble_msg_id, clicker,
+        )
+        try:
+            await entry.action(bubble)
+        except asyncio.CancelledError:
+            try:
+                await bubble.finalize("(interrupted)")
+            finally:
+                await bubble.aclose()
+            raise
+        except Exception as exc:
+            logger.exception("confirmed action %s crashed", entry.label)
+            try:
+                await bubble.finalize(f"{entry.label} crashed: {exc}")
+            except Exception:
+                pass
+            await bubble.aclose()
+
+    def _spawn_callback_handler(
+        self,
+        http: httpx.AsyncClient,
+        cb: dict[str, Any],
+    ) -> None:
+        """Run :meth:`_handle_callback_query` as a tracked task.
+
+        Callbacks are intentionally NOT journaled in the inflight store --
+        they're transient UI. If the agent dies mid-callback, the user
+        re-clicks (or re-issues if the bubble's TTL lapsed across restart).
+        """
+        cb_id = cb.get("id")
+        task = asyncio.create_task(
+            self._handle_callback_query(http, cb),
+            name=f"handle-cb-{cb_id}",
+        )
+        self._tasks.add(task)
+
+        def _on_done(t: asyncio.Task[None]) -> None:
+            self._tasks.discard(t)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error(
+                    "callback handler crashed (cb_id=%s): %s",
+                    cb_id, exc, exc_info=exc,
+                )
+
+        task.add_done_callback(_on_done)
+
     def _spawn_handler(
         self,
         http: httpx.AsyncClient,
@@ -948,7 +1293,7 @@ class CursorAgent:
                     "getUpdates",
                     offset=offset,
                     timeout=LONG_POLL_TIMEOUT,
-                    allowed_updates=["message"],
+                    allowed_updates=["message", "callback_query"],
                 )
             except httpx.HTTPError as exc:
                 logger.warning("getUpdates network error: %s", exc)
@@ -977,6 +1322,7 @@ class CursorAgent:
                 update_id = upd["update_id"]
                 offset = update_id + 1
                 msg = upd.get("message")
+                cb = upd.get("callback_query")
                 if msg and self._is_for_us(msg):
                     # Journal first (so a crash between here and the next
                     # line cannot leave us with an advanced offset and no
@@ -993,6 +1339,12 @@ class CursorAgent:
                         )
                     self._save_offset(offset)
                     self._spawn_handler(http, msg, update_id=update_id)
+                elif cb is not None:
+                    # Callback queries are transient UI -- never journaled
+                    # (see _spawn_callback_handler). Advance the offset
+                    # immediately so a crash mid-callback doesn't loop.
+                    self._save_offset(offset)
+                    self._spawn_callback_handler(http, cb)
                 else:
                     self._save_offset(offset)
 
@@ -1055,10 +1407,14 @@ class CursorAgent:
             return
 
         # Side-effecty commands: don't re-run, just tell the user.
+        # /confirm is included because the in-memory pending entry it
+        # created is gone after a restart -- replaying would just orphan
+        # another bubble.
         is_command = (
             self._match_plan_command(text) is not None
             or self._match_reset_command(text)
             or self._match_update_command(text)
+            or self._match_confirm_command(text) is not None
         )
         if is_command:
             head = text.partition(" ")[0] or "(command)"

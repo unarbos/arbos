@@ -141,6 +141,31 @@ class Bubble:
                 pass
             self._task = None
 
+    async def clear_reply_markup(self) -> None:
+        """Strip any inline keyboard from the bubble. Safe if there isn't one.
+
+        Used after a confirmation callback fires so the (now-stale) buttons
+        disappear before we proceed with the wrapped action.
+        """
+        url = f"{BOT_API}/bot{self._bot_token}/editMessageReplyMarkup"
+        params = {
+            "chat_id": self._chat_id,
+            "message_id": self._message_id,
+            "reply_markup": {"inline_keyboard": []},
+        }
+        try:
+            resp = await self._http.post(url, json=params)
+        except httpx.HTTPError as exc:
+            logger.warning("editMessageReplyMarkup network error: %s", exc)
+            return
+        if resp.status_code != 200:
+            body = resp.text[:300]
+            if "message is not modified" in body:
+                return
+            logger.warning(
+                "editMessageReplyMarkup HTTP %d: %s", resp.status_code, body
+            )
+
     async def _flusher(self) -> None:
         loop = asyncio.get_running_loop()
         try:
