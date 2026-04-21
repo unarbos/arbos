@@ -175,6 +175,16 @@ class CursorRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=STDOUT_LINE_LIMIT,
+                # Run cursor-agent in its own session/process-group so that a
+                # SIGINT delivered to *our* pgid (e.g. by `pm2 reload` or a
+                # terminal Ctrl-C against the parent) does not also kill the
+                # child mid-run. Without this the child would exit 130 and
+                # the bubble would surface "cursor-agent exited with code
+                # 130: Aborting operation..." every time we got reloaded.
+                # We still cancel/terminate the child explicitly on our own
+                # asyncio.CancelledError below, so a real shutdown still
+                # tears it down promptly.
+                start_new_session=True,
             )
         except FileNotFoundError:
             await on_final(f"`{CURSOR_BIN}` not found on PATH.")
@@ -222,10 +232,23 @@ class CursorRunner:
         if rc != 0 and not state.result:
             state.is_error = True
             tail = state.stderr_tail.strip()
-            state.result = (
-                f"cursor-agent exited with code {rc}"
-                + (f":\n{tail}" if tail else "")
-            )
+            # rc 130 == SIGINT, 143 == SIGTERM. These almost always mean the
+            # parent agent was being shut down or reloaded (pm2 reload sends
+            # SIGINT to our pid; older builds without start_new_session=True
+            # propagated that to the child). Render a friendlier line so the
+            # user doesn't see a scary "Aborting operation..." after every
+            # reload.
+            if rc in (130, -2, 143, -15):
+                state.result = (
+                    "cursor-agent run interrupted "
+                    "(parent agent was reloaded or shut down). "
+                    "Send your message again to retry."
+                )
+            else:
+                state.result = (
+                    f"cursor-agent exited with code {rc}"
+                    + (f":\n{tail}" if tail else "")
+                )
         await on_final(_render_final(state))
 
     async def _consume_stdout(
