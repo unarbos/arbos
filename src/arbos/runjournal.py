@@ -209,37 +209,77 @@ class RunJournal:
         except OSError as exc:
             logger.warning("could not create runs dir %s: %s", self.paths.runs_dir, exc)
 
+        # In-memory alias graph: every message_id maps to the *list* of
+        # message_ids in its continuation chain (always at least itself).
+        # Populated by ``link_alias`` when ``Bubble`` rolls a long answer
+        # over into a fresh Telegram message; lets ``record_finish`` and
+        # the live REPLY_CONTEXT lookup treat all parts as the same run.
+        # Process-local only -- if the agent restarts mid-run the chain
+        # is forgotten, which is fine because the underlying JSON files
+        # for each part still exist independently.
+        self._aliases: dict[int, list[int]] = {}
+
     def _path_for(self, message_id: int) -> Any:
         return self.paths.runs_dir / f"{int(message_id)}.json"
 
+    def _chain_for(self, message_id: int) -> list[int]:
+        """All message_ids that should mirror the same record. Always includes ``message_id``."""
+        chain = self._aliases.get(int(message_id))
+        if chain is None:
+            return [int(message_id)]
+        # Defensive copy + dedupe while preserving order.
+        seen: set[int] = set()
+        out: list[int] = []
+        for mid in chain:
+            mid = int(mid)
+            if mid in seen:
+                continue
+            seen.add(mid)
+            out.append(mid)
+        return out
+
     def _atomic_write(self, message_id: int, rec: RunRecord) -> None:
+        """Write ``rec`` to ``message_id``'s file, fanning out to its chain.
+
+        If ``message_id`` belongs to a continuation chain (registered via
+        ``link_alias``), the same record is mirrored to every part's file
+        so ``get(any_part)`` returns the same run state. Each per-file
+        ``bubble_message_id`` is set to that file's own id so the record
+        stays self-consistent on disk.
+        """
         rec = _trim_record_for_disk(rec)
-        payload = rec.to_json()
-        if len(payload) > MAX_BYTES:
-            # Last-resort: lop off final_text + tool_log entirely.
+        # Pre-flight one shared payload size check on the canonical record.
+        canonical = rec.to_json()
+        if len(canonical) > MAX_BYTES:
             rec.final_text = _truncate(rec.final_text, 200) + " (truncated)"
             rec.tool_log = rec.tool_log[-3:]
-            payload = rec.to_json()
-        path = self._path_for(message_id)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        try:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+
+        for mid in self._chain_for(message_id):
+            # Re-render per file so each one's bubble_message_id matches
+            # its own filename (handy if someone greps the directory).
+            per_file = RunRecord(**asdict(rec))
+            per_file.bubble_message_id = int(mid)
+            payload = per_file.to_json()
+            path = self._path_for(mid)
+            tmp = path.with_suffix(path.suffix + ".tmp")
             try:
-                with os.fdopen(fd, "w") as fh:
-                    fh.write(payload)
-            except Exception:
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 try:
-                    os.unlink(tmp)
+                    with os.fdopen(fd, "w") as fh:
+                        fh.write(payload)
+                except Exception:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
+                os.replace(tmp, path)
+                try:
+                    os.chmod(path, 0o600)
                 except OSError:
                     pass
-                raise
-            os.replace(tmp, path)
-            try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
-        except OSError as exc:
-            logger.warning("runjournal write %s failed: %s", path, exc)
+            except OSError as exc:
+                logger.warning("runjournal write %s failed: %s", path, exc)
 
     def _prune(self) -> None:
         """Keep the KEEP_N newest entries by mtime; unlink the rest."""
@@ -267,6 +307,38 @@ class RunJournal:
                 pass
 
     # ---- public API ------------------------------------------------------
+
+    def link_alias(self, prev_message_id: int, new_message_id: int) -> None:
+        """Tie ``new_message_id`` into the same chain as ``prev_message_id``.
+
+        Called by the agent layer whenever ``Bubble`` rolls a long answer
+        over into a fresh Telegram message (see ``Bubble._roll_over``).
+        After this call, ``get(prev_message_id)`` and
+        ``get(new_message_id)`` return the same record, and any future
+        ``record_finish`` on either id updates both files. The very first
+        call seeds the chain with both ids; subsequent rollovers append.
+
+        Idempotent and crash-safe: if either id is already in a chain we
+        merge into the canonical chain rather than fragmenting.
+        """
+        try:
+            prev_message_id = int(prev_message_id)
+            new_message_id = int(new_message_id)
+            chain = self._aliases.get(prev_message_id)
+            if chain is None:
+                chain = [prev_message_id]
+            if new_message_id not in chain:
+                chain.append(new_message_id)
+            self._aliases[prev_message_id] = chain
+            self._aliases[new_message_id] = chain
+            # Mirror the existing record (if any) onto the new id right
+            # away so a reply that lands in the brief window before
+            # record_finish still resolves.
+            existing = self.get(prev_message_id)
+            if existing is not None:
+                self._atomic_write(new_message_id, existing)
+        except Exception:
+            logger.exception("runjournal.link_alias crashed (swallowed)")
 
     def record_start(
         self,

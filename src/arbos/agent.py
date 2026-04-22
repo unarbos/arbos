@@ -354,6 +354,43 @@ class CursorAgent:
             return None
         return body.get("result")
 
+    def _make_bubble(
+        self,
+        http: httpx.AsyncClient,
+        message_id: int,
+        *,
+        chat_id: Optional[int] = None,
+        message_thread_id: Optional[int] = None,
+    ) -> Bubble:
+        """Wrap a Telegram message id in a ``Bubble`` with our journal hook.
+
+        Centralised so every Bubble in the agent automatically rolls its
+        run-journal entry onto each continuation message_id when a long
+        answer overflows Telegram's 4096-char per-message cap. Callers
+        that override ``chat_id`` / ``message_thread_id`` are the rare
+        cross-thread bubbles (e.g. confirmations posted into a different
+        topic); everyone else uses this install's primary topic.
+        """
+
+        async def _on_continuation(prev_id: int, new_id: int) -> None:
+            # Mirror the journal entry onto the new message id so a
+            # reply that lands on either part resolves to the same run.
+            try:
+                self._runs.link_alias(prev_id, new_id)
+            except Exception:
+                logger.exception("runjournal link_alias failed (swallowed)")
+
+        return Bubble(
+            http=http,
+            bot_token=self.bot_token,
+            chat_id=chat_id if chat_id is not None else self.chat_id,
+            message_thread_id=(
+                message_thread_id if message_thread_id is not None else self.topic_id
+            ),
+            message_id=message_id,
+            on_continuation=_on_continuation,
+        )
+
     def _match_plan_command(self, prompt: str) -> Optional[str]:
         """Return the trailing argument if ``prompt`` is a ``/plan`` command, else None."""
         head, _, rest = prompt.partition(" ")
@@ -577,13 +614,7 @@ class CursorAgent:
             )
             if sent is None:
                 return
-            voice_bubble = Bubble(
-                http=http,
-                bot_token=self.bot_token,
-                chat_id=self.chat_id,
-                message_thread_id=self.topic_id,
-                message_id=sent["message_id"],
-            )
+            voice_bubble = self._make_bubble(http, sent["message_id"])
 
             try:
                 prompt = await self._transcribe_voice(http, audio)
@@ -715,13 +746,7 @@ class CursorAgent:
             sent = await self._send_initial_bubble(http, message)
             if sent is None:
                 return
-            bubble = Bubble(
-                http=http,
-                bot_token=self.bot_token,
-                chat_id=self.chat_id,
-                message_thread_id=self.topic_id,
-                message_id=sent["message_id"],
-            )
+            bubble = self._make_bubble(http, sent["message_id"])
 
         # Open a journal entry for this bubble *before* we hand off to the
         # runner, so the user can already reply to the in-flight bubble
@@ -937,13 +962,7 @@ class CursorAgent:
             message=message,
             trigger_text="/reset",
         )
-        bubble = Bubble(
-            http=http,
-            bot_token=self.bot_token,
-            chat_id=self.chat_id,
-            message_thread_id=self.topic_id,
-            message_id=sent["message_id"],
-        )
+        bubble = self._make_bubble(http, sent["message_id"])
         try:
             await self._handle_reset_action(bubble)
         finally:
@@ -997,13 +1016,7 @@ class CursorAgent:
             message=message,
             trigger_text="/update",
         )
-        bubble = Bubble(
-            http=http,
-            bot_token=self.bot_token,
-            chat_id=self.chat_id,
-            message_thread_id=self.topic_id,
-            message_id=sent["message_id"],
-        )
+        bubble = self._make_bubble(http, sent["message_id"])
         await self._handle_update_action(bubble)
 
     async def _handle_update_action(self, bubble: Bubble) -> None:
@@ -1144,13 +1157,7 @@ class CursorAgent:
             message=message,
             trigger_text="/restart",
         )
-        bubble = Bubble(
-            http=http,
-            bot_token=self.bot_token,
-            chat_id=self.chat_id,
-            message_thread_id=self.topic_id,
-            message_id=sent["message_id"],
-        )
+        bubble = self._make_bubble(http, sent["message_id"])
         await self._handle_restart_action(bubble)
 
     async def _handle_restart_action(self, bubble: Bubble) -> None:
@@ -1316,12 +1323,8 @@ class CursorAgent:
             dt = max(0.0, time.time() - float(started_at))
             elapsed = f" — restart took {dt:.1f}s"
 
-        bubble = Bubble(
-            http=http,
-            bot_token=self.bot_token,
-            chat_id=chat_id,
-            message_thread_id=thread_id,
-            message_id=message_id,
+        bubble = self._make_bubble(
+            http, message_id, chat_id=chat_id, message_thread_id=thread_id
         )
         try:
             await bubble.finalize(
@@ -1358,13 +1361,7 @@ class CursorAgent:
                 http, message, text="usage: /plan <what you want done>"
             )
             if sent is not None:
-                bubble = Bubble(
-                    http=http,
-                    bot_token=self.bot_token,
-                    chat_id=self.chat_id,
-                    message_thread_id=self.topic_id,
-                    message_id=sent["message_id"],
-                )
+                bubble = self._make_bubble(http, sent["message_id"])
                 await bubble.aclose()
             return
 
@@ -1378,13 +1375,7 @@ class CursorAgent:
         if sent1 is None:
             return
 
-        bubble1 = Bubble(
-            http=http,
-            bot_token=self.bot_token,
-            chat_id=self.chat_id,
-            message_thread_id=self.topic_id,
-            message_id=sent1["message_id"],
-        )
+        bubble1 = self._make_bubble(http, sent1["message_id"])
 
         # Journal the plan bubble immediately so a reply hitting it mid-run
         # already gets a "(in progress)" context block.
@@ -1479,13 +1470,7 @@ class CursorAgent:
         if sent2 is None:
             return
 
-        bubble2 = Bubble(
-            http=http,
-            bot_token=self.bot_token,
-            chat_id=self.chat_id,
-            message_thread_id=self.topic_id,
-            message_id=sent2["message_id"],
-        )
+        bubble2 = self._make_bubble(http, sent2["message_id"])
 
         # Cross-link the impl bubble back to the plan bubble so a reply
         # to either surfaces the other half via `paired_bubble_id`.
@@ -1640,13 +1625,7 @@ class CursorAgent:
                 http, message, text="usage: /confirm <command-or-prompt>"
             )
             if sent is not None:
-                bubble = Bubble(
-                    http=http,
-                    bot_token=self.bot_token,
-                    chat_id=self.chat_id,
-                    message_thread_id=self.topic_id,
-                    message_id=sent["message_id"],
-                )
+                bubble = self._make_bubble(http, sent["message_id"])
                 await bubble.aclose()
             return
 
@@ -1737,13 +1716,7 @@ class CursorAgent:
         # Take ownership of the entry so a double-click can't run twice.
         self._pending_confirms.pop(bubble_msg_id, None)
 
-        bubble = Bubble(
-            http=http,
-            bot_token=self.bot_token,
-            chat_id=self.chat_id,
-            message_thread_id=self.topic_id,
-            message_id=bubble_msg_id,
-        )
+        bubble = self._make_bubble(http, bubble_msg_id)
 
         try:
             await bubble.clear_reply_markup()
