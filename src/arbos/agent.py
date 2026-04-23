@@ -46,6 +46,7 @@ from . import runjournal
 from .runjournal import RunJournal
 from . import session_store
 from .session_store import ChatSession
+from .supervisor import Supervisor
 from . import updater
 from .updater import UpdateError, UpdateResult
 from .workspace import InstallPaths
@@ -79,6 +80,18 @@ WHISPER_TIMEOUT = 60.0
 PLAN_MODEL = "claude-opus-4-7-high"
 IMPL_MODEL = "claude-opus-4-7-high"
 CHAT_MODEL = "claude-opus-4-7-high"
+
+# Supervisor layer: a small LLM throttles the worker's noisy snapshot stream
+# down to a single short status line every few seconds, so the bubble stays
+# glanceable mid-run. Set ARBOS_SUPERVISOR_DISABLE=1 (or omit OPENAI_API_KEY)
+# to bypass and stream raw snapshots straight to the bubble (legacy behavior).
+SUPERVISOR_MODEL = (
+    os.environ.get("ARBOS_SUPERVISOR_MODEL", "gpt-4o-mini").strip()
+    or "gpt-4o-mini"
+)
+SUPERVISOR_INTERVAL = 2.0
+SUPERVISOR_MAX_CHARS = 250
+SUPERVISOR_DISABLE = os.environ.get("ARBOS_SUPERVISOR_DISABLE", "").strip() == "1"
 
 PLAN_PROMPT_PREAMBLE = (
     "You are in plan mode. Produce a complete, actionable plan for the user "
@@ -389,6 +402,23 @@ class CursorAgent:
             ),
             message_id=message_id,
             on_continuation=_on_continuation,
+        )
+
+    def _make_supervisor(self, bubble: Bubble, initial_text: str) -> Supervisor:
+        """Wrap ``bubble`` in a Supervisor that summarises the worker's noisy
+        snapshot stream into a single short status line every couple of
+        seconds. When the supervisor is disabled (no key, or
+        ``ARBOS_SUPERVISOR_DISABLE=1``), the wrapper passes worker snapshots
+        straight through so behaviour matches the legacy direct-bubble path.
+        """
+        key = "" if SUPERVISOR_DISABLE else self.openai_api_key
+        return Supervisor(
+            bubble=bubble,
+            openai_api_key=key,
+            model=SUPERVISOR_MODEL,
+            interval=SUPERVISOR_INTERVAL,
+            max_chars=SUPERVISOR_MAX_CHARS,
+            initial_text=initial_text,
         )
 
     def _match_plan_command(self, prompt: str) -> Optional[str]:
@@ -854,7 +884,8 @@ class CursorAgent:
             extra_prompts=self._extra_prompts(),
             resume_session=resume_id,
         )
-        await runner.run(on_update=bubble.update, on_final=bubble.finalize)
+        async with self._make_supervisor(bubble, INITIAL_BUBBLE_TEXT) as sup:
+            await runner.run(on_update=sup.on_update, on_final=sup.on_final)
 
         if runner.resume_failed and resume_id:
             logger.warning(
@@ -870,7 +901,8 @@ class CursorAgent:
                 system_prompt=self._system_prompt(),
                 extra_prompts=self._extra_prompts(),
             )
-            await runner.run(on_update=bubble.update, on_final=bubble.finalize)
+            async with self._make_supervisor(bubble, INITIAL_BUBBLE_TEXT) as sup:
+                await runner.run(on_update=sup.on_update, on_final=sup.on_final)
 
         new_id = runner.session_id
         if new_id and new_id != self._chat_session_id:
@@ -1403,12 +1435,17 @@ class CursorAgent:
         plan_holder: dict[str, str] = {"text": "", "error": ""}
         plan_status = "ok"
 
-        async def _capture_plan(text: str) -> None:
-            plan_holder["text"] = text
-            await bubble1.finalize(text)
-
         try:
-            await plan_runner.run(on_update=bubble1.update, on_final=_capture_plan)
+            async with self._make_supervisor(bubble1, PLAN_INITIAL_BUBBLE_TEXT) as sup:
+                async def _final_with_capture(text: str) -> None:
+                    # Capture the plan text for phase 2 *before* delegating
+                    # to the supervisor (which will finalize the bubble).
+                    plan_holder["text"] = text
+                    await sup.on_final(text)
+                await plan_runner.run(
+                    on_update=sup.on_update,
+                    on_final=_final_with_capture,
+                )
         except asyncio.CancelledError:
             plan_status = "interrupted"
             try:
@@ -1497,7 +1534,8 @@ class CursorAgent:
         )
         impl_status = "ok"
         try:
-            await impl_runner.run(on_update=bubble2.update, on_final=bubble2.finalize)
+            async with self._make_supervisor(bubble2, IMPL_INITIAL_BUBBLE_TEXT) as sup:
+                await impl_runner.run(on_update=sup.on_update, on_final=sup.on_final)
         except asyncio.CancelledError:
             impl_status = "interrupted"
             try:
