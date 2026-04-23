@@ -37,6 +37,7 @@ import httpx
 
 from .bubble import Bubble
 from .config import StoredConfig
+from .crons import CronEntry, CronStore
 from .cursor_runner import CursorRunner
 from . import inflight
 from .inflight import InflightEntry, InflightStore
@@ -90,7 +91,11 @@ SUPERVISOR_MODEL = (
     or "gpt-4o-mini"
 )
 SUPERVISOR_INTERVAL = 2.0
-SUPERVISOR_MAX_CHARS = 250
+# Per-rollout-line display budget. Keep this tight -- the rollout is a
+# scannable timeline of short status lines, not a place for raw shell
+# commands or long prose. The LLM live-summary is also told to stay
+# within this budget via {max_chars} interpolation.
+SUPERVISOR_MAX_CHARS = 80
 SUPERVISOR_FINAL_MAX_CHARS = 500
 SUPERVISOR_STALL_HINT_AFTER = 15.0
 SUPERVISOR_STALL_WARN_AFTER = 60.0
@@ -200,6 +205,19 @@ class CursorAgent:
         self._chat_lock = asyncio.Lock()
         if loaded is not None:
             logger.info("loaded persistent chat session: %s", loaded.session_id)
+
+        # Persistent recurring-prompt schedules. Loaded from disk so cron
+        # entries survive PM2 restarts and ``/update``. The agent spawns
+        # one asyncio task per entry on boot (see ``_restore_crons``).
+        self._crons = CronStore(self.paths)
+        self._cron_tasks: dict[str, asyncio.Task[None]] = {}
+        # Wall-clock for the *next* scheduled fire of each cron, set by
+        # the loop right before it sleeps. Used by ``/cron list`` to
+        # render "next in Ymss". Missing entry == not scheduled yet.
+        self._cron_next_at: dict[str, float] = {}
+        # Captured in ``run()`` from the agent-lifetime ``httpx.AsyncClient``
+        # so cron loops have something to send Telegram traffic over.
+        self._cron_http: Optional[httpx.AsyncClient] = None
 
         # In-memory map of bubble message_id -> _PendingConfirm. Populated by
         # the destructive-op auto-wrap and by `/confirm <command>`; consumed by
@@ -484,7 +502,12 @@ class CursorAgent:
         past-tense recap.
         """
         recap: Optional[str] = None
-        async with self._make_supervisor(bubble, initial_text) as sup:
+        # The runner's prompt drives the supervisor's "Starting <task>"
+        # hint; trim to keep the LLM call cheap.
+        task_prompt = (runner.prompt or "").strip()[:1500] or None
+        async with self._make_supervisor(
+            bubble, initial_text, task_prompt=task_prompt
+        ) as sup:
             async def _on_final(text: str) -> None:
                 if on_final_capture is not None:
                     try:
@@ -518,7 +541,13 @@ class CursorAgent:
             except Exception:
                 logger.exception("posting summary bubble failed (swallowed)")
 
-    def _make_supervisor(self, bubble: Bubble, initial_text: str) -> Supervisor:
+    def _make_supervisor(
+        self,
+        bubble: Bubble,
+        initial_text: str,
+        *,
+        task_prompt: Optional[str] = None,
+    ) -> Supervisor:
         """Wrap ``bubble`` in a Supervisor that summarises the worker's noisy
         snapshot stream into a single short status line every couple of
         seconds, with an elapsed-time heartbeat and stall detection so the
@@ -526,7 +555,22 @@ class CursorAgent:
         key, or ``ARBOS_SUPERVISOR_DISABLE=1``), the wrapper still drives
         the heartbeat but uses a deterministic Python summarizer over the
         worker's rendered snapshot instead of an LLM call.
+
+        ``initial_text`` is normalized into a short rollout-friendly word
+        (``starting`` / ``planning`` / ``implementing``); the legacy
+        ``thinking...`` style placeholders are only used as the
+        pre-supervisor ``sendMessage`` text the bubble briefly shows
+        before ``__aenter__`` runs.
         """
+        # Map the bubble's pre-supervisor placeholders into rollout-style
+        # capitalized words so the first rollout line reads as
+        # "0:00  Starting <task>" (with the task hint filled in
+        # asynchronously by the supervisor's task-hint LLM call).
+        initial = {
+            INITIAL_BUBBLE_TEXT: "Starting",
+            PLAN_INITIAL_BUBBLE_TEXT: "Planning",
+            IMPL_INITIAL_BUBBLE_TEXT: "Implementing",
+        }.get(initial_text, "Starting")
         key = "" if SUPERVISOR_DISABLE else self.openai_api_key
         return Supervisor(
             bubble=bubble,
@@ -537,7 +581,8 @@ class CursorAgent:
             final_max_chars=SUPERVISOR_FINAL_MAX_CHARS,
             stall_hint_after=SUPERVISOR_STALL_HINT_AFTER,
             stall_warn_after=SUPERVISOR_STALL_WARN_AFTER,
-            initial_text=initial_text,
+            initial_text=initial,
+            task_prompt=task_prompt,
         )
 
     def _match_plan_command(self, prompt: str) -> Optional[str]:
@@ -585,6 +630,18 @@ class CursorAgent:
         if self.bot_username:
             candidates.add(f"/restart@{self.bot_username.lower()}")
         return head in candidates
+
+    def _match_cron_command(self, prompt: str) -> Optional[str]:
+        """Return the trailing argument if ``prompt`` is a ``/cron`` command,
+        else None. The argument may be empty (bare ``/cron`` lists)."""
+        head, _, rest = prompt.partition(" ")
+        head_lower = head.lower()
+        candidates = {"/cron"}
+        if self.bot_username:
+            candidates.add(f"/cron@{self.bot_username.lower()}")
+        if head_lower not in candidates:
+            return None
+        return rest.strip()
 
     def _match_confirm_command(self, prompt: str) -> Optional[str]:
         """Return the trailing argument if ``prompt`` is ``/confirm``, else None.
@@ -821,6 +878,17 @@ class CursorAgent:
                     await voice_bubble.aclose()
             logger.info("dispatching /confirm from %s (wraps: %r)", sender, confirm_arg[:60])
             await self._handle_confirm_command(http, message, confirm_arg)
+            return
+
+        cron_arg = self._match_cron_command(prompt)
+        if cron_arg is not None:
+            if voice_bubble is not None:
+                try:
+                    await voice_bubble.finalize(f"voice: {prompt}")
+                finally:
+                    await voice_bubble.aclose()
+            logger.info("dispatching /cron from %s (args=%r)", sender, cron_arg[:80])
+            await self._handle_cron_command(http, message, cron_arg)
             return
 
         if self._match_reset_command(prompt):
@@ -1822,6 +1890,284 @@ class CursorAgent:
             action=action,
         )
 
+    # ---- /cron ----------------------------------------------------------
+    async def _handle_cron_command(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+        args: str,
+    ) -> None:
+        """Dispatch ``/cron`` subcommands.
+
+        Forms:
+          ``/cron``                  -> list active crons
+          ``/cron list``             -> list active crons
+          ``/cron rm <id>`` (also ``delete`` / ``remove`` / ``del``)
+          ``/cron <mins> <prompt>``  -> schedule
+        """
+        usage = (
+            "usage:\n"
+            "/cron <mins> <prompt>   schedule a recurring prompt\n"
+            "/cron list              show active crons\n"
+            "/cron rm <id>           remove a cron"
+        )
+        args = args.strip()
+
+        if not args or args.lower() == "list":
+            await self._send_short_bubble(http, message, self._render_cron_list())
+            return
+
+        head, _, rest = args.partition(" ")
+        head_lower = head.lower()
+
+        if head_lower in ("rm", "delete", "remove", "del"):
+            cid = rest.strip()
+            if not cid:
+                await self._send_short_bubble(http, message, "usage: /cron rm <id>")
+                return
+            removed = await self._remove_cron(cid)
+            text = f"removed cron {cid}" if removed else f"no cron with id {cid}"
+            await self._send_short_bubble(http, message, text)
+            return
+
+        try:
+            mins = int(head)
+        except ValueError:
+            await self._send_short_bubble(http, message, usage)
+            return
+        if mins < 1:
+            await self._send_short_bubble(http, message, "mins must be a positive integer")
+            return
+        prompt = rest.strip()
+        if not prompt:
+            await self._send_short_bubble(http, message, "usage: /cron <mins> <prompt>")
+            return
+
+        sender_label = self._trigger_sender_label(message)
+        entry = self._crons.add(mins=mins, prompt=prompt, created_by=sender_label)
+        self._spawn_cron_task(entry)
+        preview = prompt if len(prompt) <= 200 else prompt[:197] + "…"
+        await self._send_short_bubble(
+            http,
+            message,
+            f"scheduled cron {entry.id} every {mins}m (running now): {preview}",
+        )
+
+    async def _send_short_bubble(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+        text: str,
+    ) -> None:
+        """One-shot reply bubble for command acks (no streaming, no journal)."""
+        sent = await self._send_initial_bubble(http, message, text=text)
+        if sent is not None:
+            bubble = self._make_bubble(http, sent["message_id"])
+            await bubble.aclose()
+
+    def _render_cron_list(self) -> str:
+        entries = self._crons.all()
+        if not entries:
+            return "no active crons.\n/cron <mins> <prompt> to schedule one."
+        now = time.time()
+        lines = [f"active crons ({len(entries)}):"]
+        for e in sorted(entries, key=lambda x: x.id):
+            next_at = self._cron_next_at.get(e.id)
+            if next_at is None:
+                # Either not yet scheduled (just spawned, first run pending)
+                # or no task running for this entry (crash / not restored).
+                running = e.id in self._cron_tasks
+                next_str = "soon" if running else "stopped"
+            else:
+                next_str = self._fmt_next_in(int(next_at - now))
+            preview = e.prompt if len(e.prompt) <= 60 else e.prompt[:57] + "…"
+            lines.append(
+                f"{e.id}  every {e.mins}m  next in {next_str}  \"{preview}\""
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _fmt_next_in(secs: int) -> str:
+        secs = max(0, int(secs))
+        if secs < 60:
+            return f"{secs}s"
+        if secs < 3600:
+            return f"{secs // 60}m{secs % 60:02d}s"
+        h, rem = divmod(secs, 3600)
+        return f"{h}h{rem // 60:02d}m"
+
+    def _spawn_cron_task(self, entry: CronEntry) -> None:
+        """Create (or replace) the asyncio loop task for ``entry``."""
+        old = self._cron_tasks.pop(entry.id, None)
+        if old is not None and not old.done():
+            old.cancel()
+        # Drop any stale "next in" so /cron list shows "soon" until the
+        # first iteration completes and the next sleep is scheduled.
+        self._cron_next_at.pop(entry.id, None)
+        task = asyncio.create_task(
+            self._cron_loop(entry), name=f"cron-{entry.id}"
+        )
+        self._cron_tasks[entry.id] = task
+
+        def _on_done(t: asyncio.Task[None]) -> None:
+            # Remove ourselves only if we're still the registered task --
+            # a re-spawn (same id) may have already replaced us.
+            if self._cron_tasks.get(entry.id) is t:
+                self._cron_tasks.pop(entry.id, None)
+                self._cron_next_at.pop(entry.id, None)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error(
+                    "cron %s loop crashed: %s", entry.id, exc, exc_info=exc
+                )
+
+        task.add_done_callback(_on_done)
+
+    async def _cron_loop(self, entry: CronEntry) -> None:
+        """Run ``entry`` immediately, then every ``entry.mins`` minutes."""
+        interval = max(1, int(entry.mins)) * 60.0
+        try:
+            while not self._stop.is_set():
+                # Re-fetch from store each tick: if /cron rm landed
+                # between iterations, the loop should exit.
+                if self._crons.get(entry.id) is None:
+                    return
+                try:
+                    await self._run_cron_iteration(entry)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "cron %s iteration crashed; will retry next interval",
+                        entry.id,
+                    )
+                self._cron_next_at[entry.id] = time.time() + interval
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                except asyncio.TimeoutError:
+                    continue
+                # _stop set -> exit cleanly.
+                return
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._cron_next_at.pop(entry.id, None)
+
+    async def _run_cron_iteration(self, entry: CronEntry) -> None:
+        """Post a fresh bubble into the topic and run ``entry.prompt``
+        through the persistent chat session.
+
+        The bubble is *not* a reply (there's no triggering user message);
+        the prefix ``(cron <id>)`` makes the origin visually obvious.
+        """
+        http = self._cron_http
+        if http is None:
+            logger.warning(
+                "cron %s: no http client captured; skipping iteration", entry.id
+            )
+            return
+
+        params: dict[str, Any] = {
+            "chat_id": self.chat_id,
+            "message_thread_id": self.topic_id,
+            "text": f"(cron {entry.id}) {INITIAL_BUBBLE_TEXT}",
+            "disable_web_page_preview": True,
+        }
+        try:
+            resp = await self._api(http, "sendMessage", **params)
+        except httpx.HTTPError as exc:
+            logger.warning("cron %s sendMessage network error: %s", entry.id, exc)
+            return
+        if resp.status_code != 200:
+            logger.warning(
+                "cron %s sendMessage HTTP %d: %s",
+                entry.id, resp.status_code, resp.text[:200],
+            )
+            return
+        body = resp.json()
+        if not body.get("ok"):
+            logger.warning("cron %s sendMessage not ok: %r", entry.id, body)
+            return
+        sent = body.get("result") or {}
+        msg_id = sent.get("message_id")
+        if not isinstance(msg_id, int):
+            logger.warning("cron %s sendMessage returned no message_id", entry.id)
+            return
+
+        bubble = self._make_bubble(http, msg_id)
+
+        try:
+            self._runs.record_start(
+                msg_id,
+                kind="cron",
+                trigger_message_id=None,
+                trigger_text=f"/cron {entry.mins} {entry.prompt}",
+                trigger_sender=entry.created_by,
+                model=CHAT_MODEL,
+            )
+        except Exception:
+            logger.exception("cron %s runjournal record_start crashed", entry.id)
+
+        # _run_persistent_chat needs a message-shaped dict; the only
+        # field it actually consumes downstream is to satisfy the
+        # supervisor + recap path, which doesn't dereference user info.
+        fake_msg: dict[str, Any] = {
+            "message_id": msg_id,
+            "from": {"username": entry.created_by or f"cron-{entry.id}"},
+            "chat": {"id": self.chat_id},
+            "message_thread_id": self.topic_id,
+        }
+
+        await self._run_persistent_chat(
+            http=http,
+            message=fake_msg,
+            prompt=entry.prompt,
+            bubble=bubble,
+        )
+
+    async def _remove_cron(self, cid: str) -> bool:
+        """Cancel the in-memory task and drop the persisted entry."""
+        existed = self._crons.get(cid) is not None
+        task = self._cron_tasks.pop(cid, None)
+        self._cron_next_at.pop(cid, None)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        # Always touch the store so a hand-edited journal can still be
+        # cleaned up via the command (existed=False -> noop here).
+        removed = self._crons.remove(cid)
+        return existed or removed
+
+    def _restore_crons(self) -> None:
+        """Spawn one asyncio task per persisted cron. Called once at boot."""
+        try:
+            entries = self._crons.all()
+        except Exception:
+            logger.exception("cron restore: load() crashed; no crons will run")
+            return
+        if not entries:
+            return
+        logger.info("restoring %d cron(s) from disk", len(entries))
+        for e in entries:
+            self._spawn_cron_task(e)
+
+    async def _drain_cron_tasks(self) -> None:
+        """Cancel every cron loop and await them. Called on shutdown."""
+        if not self._cron_tasks:
+            return
+        logger.info("cancelling %d cron task(s)…", len(self._cron_tasks))
+        tasks = list(self._cron_tasks.values())
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._cron_tasks.clear()
+        self._cron_next_at.clear()
+
     async def _handle_callback_query(
         self,
         http: httpx.AsyncClient,
@@ -2035,6 +2381,13 @@ class CursorAgent:
             )
             outbox.start()
 
+            # Capture the agent-lifetime http client so cron loops can
+            # post into Telegram without opening their own. Lifetime is
+            # bounded by this `async with`, and cron tasks are cancelled
+            # in the finally below before the client closes.
+            self._cron_http = http
+            self._restore_crons()
+
             try:
                 # If the previous process spawned `pm2 reload` for a
                 # `/restart`, finalize that bubble in-place so the user
@@ -2051,6 +2404,13 @@ class CursorAgent:
                 await self._recover_inflight(http)
                 await self._poll_loop(http, offset)
             finally:
+                # Cancel cron loops first so an in-flight iteration
+                # doesn't try to use the http client after we close it.
+                # They are intentionally NOT journaled in inflight --
+                # the persisted entry in crons.json drives recovery on
+                # the next boot.
+                await self._drain_cron_tasks()
+                self._cron_http = None
                 await outbox.stop()
                 await self._drain_tasks()
                 # Any handler tasks still pending at this point either
@@ -2204,6 +2564,7 @@ class CursorAgent:
             or self._match_update_command(text)
             or self._match_restart_command(text)
             or self._match_confirm_command(text) is not None
+            or self._match_cron_command(text) is not None
         )
         if is_command:
             head = text.partition(" ")[0] or "(command)"

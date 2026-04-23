@@ -173,6 +173,16 @@ class InstallPaths:
         return self.outbox_dir / "failed"
 
     @property
+    def crons_path(self) -> Path:
+        """Persistent recurring-prompt schedules for this install.
+
+        See ``crons.py``. One JSON document holding every active cron
+        plus the ``next_id`` counter. Reloaded on every agent boot so
+        crons survive PM2 restarts and ``/update``.
+        """
+        return self.arbos / "crons.json"
+
+    @property
     def runs_dir(self) -> Path:
         """Per-bubble run journal entries, one JSON file per Telegram message_id.
 
