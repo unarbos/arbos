@@ -612,17 +612,18 @@ class Supervisor:
     # --- internal: heartbeat --------------------------------------------
 
     async def _heartbeat(self) -> None:
-        """Drive entry mutations + stall transitions + LLM swap-ins.
-
-        We don't push the bubble on a fixed cadence; we push when
-        something visible has actually changed (new entry, LLM swap-in,
-        stall transition). This keeps the bubble honest and saves
-        editMessageText calls.
+        """Drive entry mutations + stall transitions + LLM swap-ins,
+        and push every tick so the current entry's live timer prefix
+        visibly advances. The bubble's own per-edit throttle and
+        ``text == _pending_text`` short-circuit absorb edits that
+        wouldn't change anything (e.g. when the M:SS prefix hasn't
+        rolled over since the previous push).
         """
         try:
             while not self._stopped.is_set():
                 # Wake on either the wake event (snapshot arrived) or
-                # the interval (so we can check stall transitions).
+                # the interval (so we can check stall transitions and
+                # tick the live timer).
                 try:
                     await asyncio.wait_for(self._wake.wait(), timeout=self._interval)
                 except asyncio.TimeoutError:
@@ -630,12 +631,10 @@ class Supervisor:
                 self._wake.clear()
                 if self._stopped.is_set():
                     return
-                changed = False
                 # Stall transition first: appending an entry shifts the
                 # current entry, so we want stalls to land before we
                 # fire the LLM call below.
-                if self._maybe_stall_transition():
-                    changed = True
+                self._maybe_stall_transition()
                 # Fire LLM for the current entry if it has a pending
                 # snapshot and we have a client.
                 cur = self._entries[-1] if self._entries else None
@@ -657,9 +656,9 @@ class Supervisor:
                         and not cur.final
                     ):
                         cur.text = _truncate(fresh, self._max_chars)
-                        changed = True
-                if changed:
-                    await self._push()
+                # Always push so the live timer prefix on the current
+                # entry advances visibly, even when no entry mutated.
+                await self._push()
         except asyncio.CancelledError:
             raise
         except Exception:
