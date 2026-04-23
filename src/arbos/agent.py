@@ -91,6 +91,9 @@ SUPERVISOR_MODEL = (
 )
 SUPERVISOR_INTERVAL = 2.0
 SUPERVISOR_MAX_CHARS = 250
+SUPERVISOR_FINAL_MAX_CHARS = 500
+SUPERVISOR_STALL_HINT_AFTER = 15.0
+SUPERVISOR_STALL_WARN_AFTER = 60.0
 SUPERVISOR_DISABLE = os.environ.get("ARBOS_SUPERVISOR_DISABLE", "").strip() == "1"
 
 PLAN_PROMPT_PREAMBLE = (
@@ -404,12 +407,125 @@ class CursorAgent:
             on_continuation=_on_continuation,
         )
 
+    async def _post_summary_bubble(
+        self,
+        http: httpx.AsyncClient,
+        *,
+        chat_id: int,
+        message_thread_id: int,
+        rollout_message_id: int,
+        text: str,
+    ) -> Optional[int]:
+        """Send a fresh Telegram message in ``message_thread_id`` containing
+        the supervisor's past-tense recap. Posted as a reply to the rollout
+        bubble so the two are visually linked, then aliased into the
+        rollout's run-journal entry so a reply to either resolves to the
+        same run.
+
+        Returns the new message id, or ``None`` if the send failed.
+        """
+        body = (text or "").strip()
+        if not body:
+            return None
+        params: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_thread_id": message_thread_id,
+            "text": body,
+            "disable_web_page_preview": True,
+            "reply_parameters": {
+                "message_id": rollout_message_id,
+                "allow_sending_without_reply": True,
+            },
+        }
+        try:
+            resp = await self._api(http, "sendMessage", **params)
+        except httpx.HTTPError as exc:
+            logger.warning("summary sendMessage network error: %s", exc)
+            return None
+        if resp.status_code != 200:
+            logger.warning(
+                "summary sendMessage HTTP %d: %s",
+                resp.status_code,
+                resp.text[:200],
+            )
+            return None
+        result = (resp.json() or {}).get("result") or {}
+        new_id = result.get("message_id")
+        if not new_id:
+            return None
+        try:
+            self._runs.link_alias(rollout_message_id, int(new_id))
+        except Exception:
+            logger.exception("runjournal link_alias for summary bubble failed")
+        return int(new_id)
+
+    async def _run_supervised(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+        bubble: Bubble,
+        runner: CursorRunner,
+        *,
+        initial_text: str = INITIAL_BUBBLE_TEXT,
+        on_final_capture: Optional[Callable[[str], Awaitable[None]]] = None,
+    ) -> None:
+        """Run ``runner`` under a Supervisor that owns the rollout bubble's
+        terminal line, then post a separate summary bubble with the LLM
+        recap.
+
+        ``on_final_capture`` is an optional async hook called with the
+        worker's raw final text *before* the supervisor finalises the
+        rollout. ``/plan`` uses this to capture the plan text for phase 2.
+
+        On cancel / crash the rollout's terminal line is appended via
+        ``mark_interrupted`` / ``mark_crashed`` and no summary bubble is
+        sent. On success we post a fresh Telegram message in the same
+        thread (as a reply to the rollout) containing the supervisor's
+        past-tense recap.
+        """
+        recap: Optional[str] = None
+        async with self._make_supervisor(bubble, initial_text) as sup:
+            async def _on_final(text: str) -> None:
+                if on_final_capture is not None:
+                    try:
+                        await on_final_capture(text)
+                    except Exception:
+                        logger.exception("on_final_capture raised")
+                await sup.on_final(text)
+            try:
+                await runner.run(on_update=sup.on_update, on_final=_on_final)
+            except asyncio.CancelledError:
+                await sup.mark_interrupted()
+                raise
+            except Exception as exc:
+                await sup.mark_crashed(str(exc))
+                raise
+            try:
+                recap = await sup.summarise_final()
+            except Exception:
+                logger.exception("supervisor summarise_final crashed")
+                recap = None
+
+        if recap:
+            try:
+                await self._post_summary_bubble(
+                    http,
+                    chat_id=self.chat_id,
+                    message_thread_id=self.topic_id,
+                    rollout_message_id=bubble.message_id,
+                    text=recap,
+                )
+            except Exception:
+                logger.exception("posting summary bubble failed (swallowed)")
+
     def _make_supervisor(self, bubble: Bubble, initial_text: str) -> Supervisor:
         """Wrap ``bubble`` in a Supervisor that summarises the worker's noisy
         snapshot stream into a single short status line every couple of
-        seconds. When the supervisor is disabled (no key, or
-        ``ARBOS_SUPERVISOR_DISABLE=1``), the wrapper passes worker snapshots
-        straight through so behaviour matches the legacy direct-bubble path.
+        seconds, with an elapsed-time heartbeat and stall detection so the
+        bubble always feels alive. When the supervisor is disabled (no
+        key, or ``ARBOS_SUPERVISOR_DISABLE=1``), the wrapper still drives
+        the heartbeat but uses a deterministic Python summarizer over the
+        worker's rendered snapshot instead of an LLM call.
         """
         key = "" if SUPERVISOR_DISABLE else self.openai_api_key
         return Supervisor(
@@ -418,6 +534,9 @@ class CursorAgent:
             model=SUPERVISOR_MODEL,
             interval=SUPERVISOR_INTERVAL,
             max_chars=SUPERVISOR_MAX_CHARS,
+            final_max_chars=SUPERVISOR_FINAL_MAX_CHARS,
+            stall_hint_after=SUPERVISOR_STALL_HINT_AFTER,
+            stall_warn_after=SUPERVISOR_STALL_WARN_AFTER,
             initial_text=initial_text,
         )
 
@@ -791,6 +910,8 @@ class CursorAgent:
         )
 
         await self._run_persistent_chat(
+            http=http,
+            message=message,
             prompt=prompt,
             bubble=bubble,
             reply_context=reply_block,
@@ -799,6 +920,8 @@ class CursorAgent:
     async def _run_persistent_chat(
         self,
         *,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
         prompt: str,
         bubble: Bubble,
         reply_context: str = "",
@@ -813,31 +936,37 @@ class CursorAgent:
         ``reply_context``, if non-empty, is prepended to ``prompt`` as a
         ``<<<REPLY_CONTEXT>>>``-fenced block so the model can ground "no,
         the second one" / "did that finish?" against a specific prior run.
+
+        On success we post a separate "summary" bubble in the same thread
+        (a reply to the rollout bubble) containing the supervisor's
+        past-tense recap. On cancel/crash the rollout's terminal line
+        (``interrupted at ...`` / ``crashed at ...``) is enough; no
+        summary bubble is sent.
         """
         status = "ok"
         async with self._chat_lock:
             runner: Optional[CursorRunner] = None
             try:
                 runner = await self._do_persistent_chat_run(
+                    http=http,
+                    message=message,
                     prompt=prompt,
                     bubble=bubble,
                     reply_context=reply_context,
                 )
             except asyncio.CancelledError:
                 status = "interrupted"
-                try:
-                    await bubble.finalize("(interrupted)")
-                finally:
-                    await bubble.aclose()
+                # Rollout's terminal line was already appended by the
+                # supervisor inside _do_persistent_chat_run; nothing else
+                # to do at this layer.
+                await bubble.aclose()
                 self._record_chat_finish(bubble, status, runner)
                 raise
-            except Exception as exc:
+            except Exception:
                 status = "error"
                 logger.exception("cursor-agent run crashed")
-                try:
-                    await bubble.finalize(f"cursor-agent crashed: {exc}")
-                except Exception:
-                    pass
+                # Rollout terminal line already appended by supervisor
+                # (mark_crashed). Nothing else to surface.
             finally:
                 await bubble.aclose()
                 if status != "interrupted":
@@ -863,6 +992,8 @@ class CursorAgent:
     async def _do_persistent_chat_run(
         self,
         *,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
         prompt: str,
         bubble: Bubble,
         reply_context: str = "",
@@ -884,8 +1015,7 @@ class CursorAgent:
             extra_prompts=self._extra_prompts(),
             resume_session=resume_id,
         )
-        async with self._make_supervisor(bubble, INITIAL_BUBBLE_TEXT) as sup:
-            await runner.run(on_update=sup.on_update, on_final=sup.on_final)
+        await self._run_supervised(http, message, bubble, runner)
 
         if runner.resume_failed and resume_id:
             logger.warning(
@@ -901,8 +1031,7 @@ class CursorAgent:
                 system_prompt=self._system_prompt(),
                 extra_prompts=self._extra_prompts(),
             )
-            async with self._make_supervisor(bubble, INITIAL_BUBBLE_TEXT) as sup:
-                await runner.run(on_update=sup.on_update, on_final=sup.on_final)
+            await self._run_supervised(http, message, bubble, runner)
 
         new_id = runner.session_id
         if new_id and new_id != self._chat_session_id:
@@ -1435,23 +1564,23 @@ class CursorAgent:
         plan_holder: dict[str, str] = {"text": "", "error": ""}
         plan_status = "ok"
 
+        async def _capture_plan_text(text: str) -> None:
+            # Capture the worker's raw plan text for phase 2 *before* the
+            # supervisor finalises the rollout / produces a recap.
+            plan_holder["text"] = text
+
         try:
-            async with self._make_supervisor(bubble1, PLAN_INITIAL_BUBBLE_TEXT) as sup:
-                async def _final_with_capture(text: str) -> None:
-                    # Capture the plan text for phase 2 *before* delegating
-                    # to the supervisor (which will finalize the bubble).
-                    plan_holder["text"] = text
-                    await sup.on_final(text)
-                await plan_runner.run(
-                    on_update=sup.on_update,
-                    on_final=_final_with_capture,
-                )
+            await self._run_supervised(
+                http,
+                message,
+                bubble1,
+                plan_runner,
+                initial_text=PLAN_INITIAL_BUBBLE_TEXT,
+                on_final_capture=_capture_plan_text,
+            )
         except asyncio.CancelledError:
             plan_status = "interrupted"
-            try:
-                await bubble1.finalize("(interrupted)")
-            finally:
-                await bubble1.aclose()
+            await bubble1.aclose()
             try:
                 self._runs.record_finish(
                     bubble1.message_id,
@@ -1467,10 +1596,6 @@ class CursorAgent:
             plan_status = "error"
             logger.exception("cursor-agent plan-mode run crashed")
             plan_holder["error"] = str(exc)
-            try:
-                await bubble1.finalize(f"cursor-agent crashed: {exc}")
-            except Exception:
-                pass
         finally:
             await bubble1.aclose()
             if plan_status != "interrupted":
@@ -1534,14 +1659,16 @@ class CursorAgent:
         )
         impl_status = "ok"
         try:
-            async with self._make_supervisor(bubble2, IMPL_INITIAL_BUBBLE_TEXT) as sup:
-                await impl_runner.run(on_update=sup.on_update, on_final=sup.on_final)
+            await self._run_supervised(
+                http,
+                message,
+                bubble2,
+                impl_runner,
+                initial_text=IMPL_INITIAL_BUBBLE_TEXT,
+            )
         except asyncio.CancelledError:
             impl_status = "interrupted"
-            try:
-                await bubble2.finalize("(interrupted)")
-            finally:
-                await bubble2.aclose()
+            await bubble2.aclose()
             try:
                 self._runs.record_finish(
                     bubble2.message_id,
@@ -1553,13 +1680,9 @@ class CursorAgent:
             except Exception:
                 logger.exception("runjournal record_finish (impl) crashed")
             raise
-        except Exception as exc:
+        except Exception:
             impl_status = "error"
             logger.exception("cursor-agent implementation run crashed")
-            try:
-                await bubble2.finalize(f"cursor-agent crashed: {exc}")
-            except Exception:
-                pass
         finally:
             await bubble2.aclose()
             if impl_status != "interrupted":
@@ -1687,8 +1810,8 @@ class CursorAgent:
             label = "prompt"
             description = f"run: {preview}"
             wrapped_prompt = wrapped
-            action = lambda b, _p=wrapped_prompt: self._run_persistent_chat(
-                prompt=_p, bubble=b
+            action = lambda b, _p=wrapped_prompt, _http=http, _msg=message: self._run_persistent_chat(
+                http=_http, message=_msg, prompt=_p, bubble=b
             )
 
         await self._prompt_confirmation(
