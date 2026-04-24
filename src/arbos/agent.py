@@ -104,13 +104,21 @@ CHAT_MODEL = "claude-opus-4-7-high"
 # worker is even considered, so latency here directly compounds onto every
 # reply. The job is small (read at most a couple of files / run a short
 # shell, then either answer in 1-3 lines or emit one slash command), so a
-# fast cheap model wins overall: routing finishes in ~2-4s instead of
-# ~15-25s with Opus, and the heavy Opus worker still owns anything the
-# router delegates. Override with ARBOS_ROUTER_MODEL if a slug stops
-# working in cursor-agent.
+# fast cheap model wins overall: routing finishes in a few seconds instead
+# of ~15-25s with Opus, and the heavy Opus worker still owns anything the
+# router delegates.
+#
+# Default is ``gpt-5.4-mini-medium`` -- small, fast, and well-behaved on
+# structured output (the slash-command grammar). Override with
+# ``ARBOS_ROUTER_MODEL`` to swap; the model slug must be one cursor-agent
+# accepts (``cursor-agent --help`` lists them). The previous default
+# ``claude-haiku-4-5`` was hallucinated and not actually a real cursor
+# slug -- if cursor-agent rejects whatever ``ARBOS_ROUTER_MODEL`` is set
+# to, the router will exit 1 and the agent will fall through to the
+# worker (see ``_run_smart_router``'s ``decision is None`` branch).
 ROUTER_MODEL = (
-    os.environ.get("ARBOS_ROUTER_MODEL", "claude-haiku-4-5").strip()
-    or "claude-haiku-4-5"
+    os.environ.get("ARBOS_ROUTER_MODEL", "gpt-5.4-mini-medium").strip()
+    or "gpt-5.4-mini-medium"
 )
 
 # Supervisor layer: a small LLM throttles the worker's noisy snapshot stream
