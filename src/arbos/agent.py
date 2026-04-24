@@ -1180,13 +1180,28 @@ class CursorAgent:
         async with self._router_lock_for(topic_id):
             resume_id = self._router_sessions.get(topic_id)
             workdir = self._workdir_for(topic_id)
-            system_prompt = self._router.build_system_prompt(ctx)
+            # Combine the full Arbos system context (machine identity,
+            # Tailscale peers, Doppler key list, paths, wiring) with the
+            # router-specific routing protocol so the router can answer
+            # questions like "ssh into templar" / "is doppler set up?"
+            # from the same shared knowledge base the worker has.
+            # Without this the router was a contextless agent and would
+            # answer "I don't know that machine" for things obviously
+            # available in the system preamble.
+            arbos_system = self._system_prompt(topic_id)
+            router_addendum = self._router.build_system_prompt(ctx)
+            combined_system = (
+                (arbos_system.rstrip() + "\n\n" + router_addendum)
+                if arbos_system
+                else router_addendum
+            )
 
             runner = CursorRunner(
                 prompt=prompt,
                 workdir=workdir,
                 model=ROUTER_MODEL,
-                system_prompt=system_prompt,
+                system_prompt=combined_system,
+                extra_prompts=self._extra_prompts(),
                 resume_session=resume_id,
             )
 
