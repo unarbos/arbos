@@ -824,9 +824,18 @@ for p in json.load(sys.stdin):
     existing_path=""
   fi
 
+  # Compose the PATH the pm2 child should inherit. We MUST include
+  # ``$HOME/.local/bin`` so the agent's `shutil.which("cursor-agent")`
+  # resolves -- the Linux installer drops the cursor-agent symlink there
+  # and an SSH non-login shell's PATH usually does not include it. Without
+  # this, every spawn fails with "`cursor-agent` is not installed on this
+  # machine" even though it is, just outside pm2's PATH.
+  ARBOS_PM2_PATH="$HOME/.local/bin:${PATH}"
+
   if [[ -n "$existing_path" ]]; then
     run "Reloading $PM2_NAME (refreshed env)" \
       env ARBOS_MACHINE="$ARBOS_MACHINE" \
+        PATH="$ARBOS_PM2_PATH" \
         ${EXPORT_CURSOR_API_KEY:+CURSOR_API_KEY="$EXPORT_CURSOR_API_KEY"} \
         ${EXPORT_OPENAI_API_KEY:+OPENAI_API_KEY="$EXPORT_OPENAI_API_KEY"} \
         pm2 reload "$PM2_NAME" --update-env
@@ -840,6 +849,7 @@ for p in json.load(sys.stdin):
     # operation but still catches a real leak within a session.
     run "Starting $PM2_NAME under pm2" \
       env ARBOS_MACHINE="$ARBOS_MACHINE" \
+        PATH="$ARBOS_PM2_PATH" \
         ${EXPORT_CURSOR_API_KEY:+CURSOR_API_KEY="$EXPORT_CURSOR_API_KEY"} \
         ${EXPORT_OPENAI_API_KEY:+OPENAI_API_KEY="$EXPORT_OPENAI_API_KEY"} \
         pm2 start "$pybin" \
