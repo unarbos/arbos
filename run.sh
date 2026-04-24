@@ -23,15 +23,43 @@
 #   8. pm2 start (or reload) arbos-<machine>, pm2 save, hint about pm2 startup.
 set -euo pipefail
 
-# When invoked via `curl … | bash`, BASH_SOURCE[0] is unset / empty and there
-# is no local checkout to point REPO_ROOT at. Clone (or fast-forward) the
-# arbos source into ~/.arbos/src and re-exec ourselves from the clone.
-# Storage location is fixed at ~/.arbos on every machine -- run.sh from any
-# cwd produces the same install.
-if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-}" ]]; then
+# Canonicalise the install location.
+#
+# arbos lives at exactly ONE path on every machine: ``~/.arbos/src``.
+# This block fires when the invocation does NOT match that:
+#
+#   1. ``curl … | bash`` -- BASH_SOURCE[0] is unset / empty, there is
+#      no local checkout to point at. Clone or fast-forward
+#      ``~/.arbos/src`` and re-exec from there.
+#   2. ``bash /Users/const/arbos/run.sh`` (or any other local clone
+#      sitting outside the canonical path) -- the user has a sibling
+#      checkout. Sync ``~/.arbos/src`` from origin/main and re-exec
+#      from there. We never install from a sibling clone, because
+#      ``/update`` only ever touches ``~/.arbos/src`` and pm2 must run
+#      a binary out of that install's venv -- mixing the two is the
+#      exact misconfiguration that broke things on remote machines.
+#
+# In both cases we hand off to ``$HOME/.arbos/src/run.sh`` via exec
+# so the rest of this script can assume ``REPO_ROOT == ~/.arbos/src``.
+ARBOS_CANONICAL_SRC="$HOME/.arbos/src"
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]:-}" ]]; then
+  ARBOS_INVOKED_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+  ARBOS_INVOKED_DIR=""
+fi
+
+if [[ -z "$ARBOS_INVOKED_DIR" || "$ARBOS_INVOKED_DIR" != "$ARBOS_CANONICAL_SRC" ]]; then
   ARBOS_REMOTE="${ARBOS_REMOTE:-https://github.com/unarbos/arbos.git}"
   ARBOS_BRANCH="${ARBOS_BRANCH:-main}"
-  _src="$HOME/.arbos/src"
+  _src="$ARBOS_CANONICAL_SRC"
+
+  if [[ -z "$ARBOS_INVOKED_DIR" ]]; then
+    printf "  > arbos bootstrap: piped invocation; cloning to %s\n" "$_src" >&2
+  else
+    printf "  ! invoked from %s\n" "$ARBOS_INVOKED_DIR" >&2
+    printf "  ! canonical install lives at %s -- syncing and re-execing from there\n" "$_src" >&2
+    printf "  ! (your local checkout is left untouched; arbos's running install always lives at the canonical path)\n" >&2
+  fi
 
   command -v git >/dev/null 2>&1 || {
     case "$(uname -s)" in

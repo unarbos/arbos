@@ -2562,6 +2562,18 @@ class CursorAgent:
             logger.warning("/update: resolve_src_dir failed: %s", exc)
             await bubble.finalize(f"update failed: {exc}")
             return
+        # Verify pm2 actually launches the canonical binary BEFORE we
+        # fetch + reset. Otherwise we would happily update ~/.arbos/src
+        # and then `pm2 reload` a different install, leaving the agent
+        # running stale code while the bubble claimed success.
+        try:
+            await asyncio.to_thread(
+                updater.verify_pm2_canonical, src, self.pm2_name
+            )
+        except UpdateError as exc:
+            logger.warning("/update: verify_pm2_canonical failed: %s", exc)
+            await bubble.finalize(f"update aborted: {exc}")
+            return
         logger.info("/update: src=%s; fetching origin/%s", src, updater.UPDATE_BRANCH)
 
         await bubble.update(f"fetching origin/{updater.UPDATE_BRANCH} in {src}…")

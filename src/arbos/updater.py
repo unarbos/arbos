@@ -10,6 +10,7 @@ shoving the lot into a worker thread.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -132,53 +133,124 @@ def _is_arbos_repo(candidate: Path) -> bool:
 
 
 def resolve_src_dir(paths: InstallPaths) -> Path:
-    """Find the arbos git checkout to update -- and ONLY that.
+    """Return the canonical arbos source dir, or raise :class:`UpdateError`.
 
-    Lookup order:
+    Strict policy: ``/update`` operates on **exactly one** location --
+    ``~/.arbos/src`` -- and nowhere else. There is no fallback that
+    walks up looking for an arbitrary git repo; that fallback used to
+    land on a user's unrelated project checkout and silently
+    ``git reset --hard`` it (see the templar incident).
 
-    1. ``~/.arbos/src`` (the canonical curl-install location). Must
-       verify as an arbos repo via :func:`_is_arbos_repo` -- we will
-       NEVER ``git reset --hard`` a directory whose ``origin`` doesn't
-       look like arbos.
-    2. Walk up from this module's path (editable-install dev loop), but
-       again only return a candidate that verifies as arbos. This stops
-       the previous behaviour where the walk-up could land in an
-       unrelated parent git repo (e.g. a project the user happened to
-       install arbos inside) and silently destroy their work.
+    Two checks must both pass:
 
-    Anything else raises :class:`UpdateError` so ``/update`` aborts
-    instead of touching the wrong tree.
+    1. ``paths.src_dir`` (i.e. ``~/.arbos/src``) exists and contains a
+       ``.git`` directory.
+    2. Its ``origin`` remote URL substring-matches an arbos remote (see
+       :func:`_is_arbos_repo`; ``ARBOS_UPSTREAM_REMOTES`` widens the
+       allowlist for forks).
+
+    Failures raise :class:`UpdateError` with a clear remediation hint:
+    re-run ``run.sh`` (or the curl installer) to canonicalise the
+    install. ``/update`` itself never bootstraps -- it would have to
+    touch pm2 and the venv to do that, which is run.sh's job.
     """
-    if (paths.src_dir / ".git").exists():
-        if _is_arbos_repo(paths.src_dir):
-            return paths.src_dir
+    src = paths.src_dir
+    if not (src / ".git").exists():
         raise UpdateError(
-            f"{paths.src_dir} is a git repo but its `origin` URL does not "
-            "look like arbos. Refusing to /update -- this looks like a "
-            "different project's checkout. Set ARBOS_UPSTREAM_REMOTES if "
-            "you intend to update from a fork."
+            f"no canonical arbos install at {src}.\n"
+            "/update only touches the canonical install. To bootstrap "
+            "(or migrate an existing dev install) re-run run.sh:\n"
+            "  curl -sSf https://github.com/unarbos/arbos/raw/main/run.sh | bash\n"
+            "or, if you already have a clone elsewhere:\n"
+            "  bash <existing_clone>/run.sh\n"
+            "which will sync ~/.arbos/src and re-anchor pm2 there."
         )
-    # Editable-install dev loop: arbos/updater.py lives at <repo>/src/arbos/.
-    here = Path(__file__).resolve()
-    if len(here.parents) >= 3:
-        candidate = here.parents[2]
-        if _is_arbos_repo(candidate):
-            return candidate
-        # Found a git repo but it's NOT arbos -- this is exactly the
-        # scenario that destroyed user work on remote machines (the
-        # walk-up landed in a project repo, /update ran git reset --hard
-        # against it). Refuse loudly.
-        if (candidate / ".git").exists():
-            raise UpdateError(
-                f"refusing to /update {candidate}: that's a git repo but "
-                "its `origin` does not look like arbos. /update only "
-                "touches arbos's own checkout (see ARBOS_UPSTREAM_REMOTES "
-                "for fork support)."
-            )
-    raise UpdateError(
-        f"no arbos git checkout at {paths.src_dir} or in this module's "
-        "source tree; nothing to update"
-    )
+    if not _is_arbos_repo(src):
+        raise UpdateError(
+            f"refusing to /update: {src} is a git repo but its `origin` "
+            "URL does not look like arbos. Set ARBOS_UPSTREAM_REMOTES "
+            "(comma-separated substrings) if you intend to update from "
+            "a fork; otherwise re-run run.sh to re-bootstrap a clean "
+            "arbos clone at ~/.arbos/src."
+        )
+    return src
+
+
+def verify_pm2_canonical(src_dir: Path, pm2_name: str) -> None:
+    """Ensure pm2's running entry actually launches the arbos binary
+    from inside ``src_dir``'s venv. Raises :class:`UpdateError` if not.
+
+    Without this check, ``/update`` would happily ``git reset --hard``
+    ``~/.arbos/src`` and then ``pm2 reload <name>``, but the reload
+    would re-launch a binary from a *different* install (e.g. a leftover
+    dev install at ``/Users/const/arbos/.venv/bin/arbos``). The user
+    would see "restart succeeded" and assume the new code was live --
+    but pm2 is running stale code from a path we never touched.
+
+    The fix is run.sh: it has stale-pm2-entry detection that drops the
+    pm2 entry and re-creates it pointing at the canonical binary. We
+    refuse here and tell the user to run it.
+    """
+    if shutil.which("pm2") is None:
+        raise UpdateError("`pm2` not on PATH; cannot verify pm2 entry")
+    expected_prefix = str((src_dir / ".venv").resolve())
+    try:
+        proc = subprocess.run(
+            ["pm2", "jlist"],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise UpdateError(f"`pm2 jlist` failed: {exc}") from exc
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip()[-300:]
+        raise UpdateError(f"`pm2 jlist` exited {proc.returncode}: {tail}")
+    try:
+        entries = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise UpdateError(f"`pm2 jlist` returned non-JSON: {exc}") from exc
+    if not isinstance(entries, list):
+        raise UpdateError("`pm2 jlist` did not return a list")
+
+    entry: Optional[dict] = None
+    for raw in entries:
+        if isinstance(raw, dict) and raw.get("name") == pm2_name:
+            entry = raw
+            break
+    if entry is None:
+        raise UpdateError(
+            f"pm2 entry {pm2_name!r} not found. /update needs an existing "
+            "pm2 entry to reload; bootstrap one with `bash "
+            f"{src_dir}/run.sh`."
+        )
+
+    pm2_env = entry.get("pm2_env") or {}
+    exec_path = str(pm2_env.get("pm_exec_path") or "")
+    if not exec_path:
+        raise UpdateError(
+            f"pm2 entry {pm2_name!r} has no `pm_exec_path`; cannot "
+            "verify it points at the canonical install"
+        )
+
+    # Resolve to handle symlinks / relative paths consistently with the
+    # expected prefix above.
+    try:
+        exec_resolved = str(Path(exec_path).resolve())
+    except OSError:
+        exec_resolved = exec_path
+
+    if not exec_resolved.startswith(expected_prefix + os.sep):
+        raise UpdateError(
+            "refusing to /update: pm2 is running\n"
+            f"  {exec_resolved}\n"
+            "but the canonical arbos binary lives at\n"
+            f"  {expected_prefix}/bin/arbos\n"
+            "A `pm2 reload` would re-launch the wrong binary, so the new "
+            f"code would never take effect. Run `bash {src_dir}/run.sh` "
+            "to re-anchor pm2 at the canonical install, then /update again."
+        )
 
 
 def _head_info(src: Path, ref: str = "HEAD") -> tuple[str, str]:
