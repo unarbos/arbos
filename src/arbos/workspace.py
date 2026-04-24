@@ -1,28 +1,38 @@
-"""Install-local filesystem layout.
+"""Filesystem layout for arbos.
 
-Arbos stores all of its state in ``<install-root>/.arbos/`` -- the install root
-is wherever the repo is checked out (``Path.cwd()``). The first ``bootstrap()``
-call seeds ``.arbos/.gitignore`` with ``*`` so the entire blob is ignored by
-git regardless of the surrounding project's own ``.gitignore``.
+Arbos stores all of its state under a single, fixed location per machine:
+``~/.arbos/``. There is exactly one install per user account on the host.
+The cursor-agent **workdir** is decoupled from the storage location and
+becomes a per-topic setting (see ``topic_state.py``); ``./run.sh`` can be
+invoked from anywhere and always produces the same install.
 
 Layout::
 
-    <install-root>/                  # cursor-agent workdir
-      run.sh
-      .arbos/
-        .gitignore                   # contains "*\n"
-        config.json
-        install_state.json
-        install.log
-        agent.log
-        agent.offset
-        agent.lock
-        doppler_writeback.json
-        secrets/                     # 0700, bot_token.txt, api_hash.txt
-        tdlib/                       # aiotdlib files_directory
+    ~/.arbos/
+      .gitignore                   # contains "*\n"
+      config.json
+      install_state.json
+      install.log
+      agent.log
+      agent.offset
+      agent.lock
+      doppler_writeback.json
+      secrets/                     # 0700, bot_token.txt, api_hash.txt
+      tdlib/                       # aiotdlib files_directory
+      prompts/                     # PROMPT.md + extras
+      runs/                        # per-Telegram-message-id run journal
+      crons.json                   # recurring prompts
+      inflight.json                # crash-recovery journal
+      restart_marker.json          # /restart bubble pointer
+      src/                         # arbos source clone (run.sh bootstrap)
+      topics/<topic_id>/
+        state.json                 # workspace path, adopted_at, ...
+        chat_session.json          # per-topic persistent cursor-agent chat
+        router_session.json        # per-topic persistent SmartRouter chat
+        outbox/                    # per-topic file-drop outbox
 
-``InstallPaths`` centralises path computation so the rest of the modules never
-hard-code joins.
+The ``ARBOS_HOME`` environment variable overrides the storage location
+(intended for tests). When unset, ``~/.arbos/`` is used unconditionally.
 """
 
 from __future__ import annotations
@@ -34,6 +44,8 @@ from pathlib import Path
 
 _NAME_RE = re.compile(r"[^a-z0-9_]+")
 _COLLAPSE_RE = re.compile(r"_+")
+
+ARBOS_HOME_ENV = "ARBOS_HOME"
 
 
 def normalize_project_name(raw: str) -> str:
@@ -51,11 +63,19 @@ def normalize_project_name(raw: str) -> str:
     return name
 
 
+def _default_arbos_home() -> Path:
+    """Resolve the ``~/.arbos`` storage dir, honouring ``ARBOS_HOME``."""
+    override = os.environ.get(ARBOS_HOME_ENV, "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path.home() / ".arbos"
+
+
 @dataclass(frozen=True)
 class InstallPaths:
-    """Resolved paths for a single install root."""
+    """Resolved paths for the single per-host install."""
 
-    root: Path
+    arbos: Path
 
     @classmethod
     def from_path(cls, path: str | os.PathLike[str]) -> "InstallPaths":
@@ -63,12 +83,18 @@ class InstallPaths:
 
     @classmethod
     def discover(cls) -> "InstallPaths":
-        """Resolve the install root from the current working directory."""
-        return cls.from_path(Path.cwd())
+        """Resolve the canonical ``~/.arbos`` storage dir."""
+        return cls(_default_arbos_home())
 
+    # NOTE: ``root`` is retained as an alias of ``arbos`` so a small number
+    # of legacy call sites (logging, an ``install_root`` field in
+    # ``StoredConfig``) keep working without churn. Anything that previously
+    # used ``paths.root`` as a *cursor-agent workdir* must now resolve the
+    # workdir via ``topic_state.workspace_for(...)`` instead -- the
+    # install location is no longer a workspace.
     @property
-    def arbos(self) -> Path:
-        return self.root / ".arbos"
+    def root(self) -> Path:
+        return self.arbos
 
     @property
     def secrets(self) -> Path:
@@ -132,11 +158,6 @@ class InstallPaths:
         return self.arbos / "src"
 
     @property
-    def chat_session_path(self) -> Path:
-        """Persistent cursor-agent chat id for this machine's topic."""
-        return self.arbos / "chat_session.json"
-
-    @property
     def inflight_path(self) -> Path:
         """Crash-recovery journal of Telegram updates currently being handled.
 
@@ -159,20 +180,6 @@ class InstallPaths:
         return self.arbos / "restart_marker.json"
 
     @property
-    def outbox_dir(self) -> Path:
-        """Drop-zone watched by the agent: any file landed here is posted to
-        this machine's Telegram topic and then moved aside."""
-        return self.arbos / "outbox"
-
-    @property
-    def outbox_sent_dir(self) -> Path:
-        return self.outbox_dir / "sent"
-
-    @property
-    def outbox_failed_dir(self) -> Path:
-        return self.outbox_dir / "failed"
-
-    @property
     def crons_path(self) -> Path:
         """Persistent recurring-prompt schedules for this install.
 
@@ -191,8 +198,48 @@ class InstallPaths:
         """
         return self.arbos / "runs"
 
+    # ---- per-topic paths -------------------------------------------------
+
+    @property
+    def topics_dir(self) -> Path:
+        """Parent dir of every adopted topic's per-topic state."""
+        return self.arbos / "topics"
+
+    def topic_dir(self, topic_id: int) -> Path:
+        """Per-topic state directory: workspace, chat session, outbox."""
+        return self.topics_dir / str(int(topic_id))
+
+    def topic_state_path(self, topic_id: int) -> Path:
+        """Per-topic ``state.json`` (workspace, adopted_at, last_seen_at)."""
+        return self.topic_dir(topic_id) / "state.json"
+
+    def topic_chat_session_path(self, topic_id: int) -> Path:
+        """Per-topic persistent cursor-agent chat session id."""
+        return self.topic_dir(topic_id) / "chat_session.json"
+
+    def topic_router_session_path(self, topic_id: int) -> Path:
+        """Per-topic persistent cursor-agent SmartRouter session id.
+
+        Separate from the worker's chat session so routing-decision
+        thinking ('what should I do with this message?' → ``/cron`` /
+        ``/delegate``) doesn't pollute the worker's coding chat history,
+        and vice-versa. Both threads still independently see every user
+        message that arrives in this topic.
+        """
+        return self.topic_dir(topic_id) / "router_session.json"
+
+    def topic_outbox_dir(self, topic_id: int) -> Path:
+        """Per-topic file-drop outbox watched by ``OutboxWatcher``."""
+        return self.topic_dir(topic_id) / "outbox"
+
+    def topic_outbox_sent_dir(self, topic_id: int) -> Path:
+        return self.topic_outbox_dir(topic_id) / "sent"
+
+    def topic_outbox_failed_dir(self, topic_id: int) -> Path:
+        return self.topic_outbox_dir(topic_id) / "failed"
+
     def bootstrap(self) -> None:
-        """Create the ``.arbos/`` skeleton with restrictive perms.
+        """Create the ``~/.arbos/`` skeleton with restrictive perms.
 
         Idempotent. Seeds ``.arbos/.gitignore`` with ``*\\n`` on first run so
         the storage dir is git-ignored even inside a project whose own
@@ -202,9 +249,7 @@ class InstallPaths:
         self.secrets.mkdir(parents=True, exist_ok=True)
         self.tdlib.mkdir(parents=True, exist_ok=True)
         self.prompts_dir.mkdir(parents=True, exist_ok=True)
-        self.outbox_dir.mkdir(parents=True, exist_ok=True)
-        self.outbox_sent_dir.mkdir(parents=True, exist_ok=True)
-        self.outbox_failed_dir.mkdir(parents=True, exist_ok=True)
+        self.topics_dir.mkdir(parents=True, exist_ok=True)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
 
         for path in (
@@ -212,9 +257,7 @@ class InstallPaths:
             self.secrets,
             self.tdlib,
             self.prompts_dir,
-            self.outbox_dir,
-            self.outbox_sent_dir,
-            self.outbox_failed_dir,
+            self.topics_dir,
             self.runs_dir,
         ):
             try:
@@ -225,5 +268,20 @@ class InstallPaths:
         if not self.gitignore_path.exists():
             try:
                 self.gitignore_path.write_text("*\n")
+            except OSError:
+                pass
+
+    def bootstrap_topic(self, topic_id: int) -> None:
+        """Create the per-topic state subtree (idempotent)."""
+        topic_id = int(topic_id)
+        for path in (
+            self.topic_dir(topic_id),
+            self.topic_outbox_dir(topic_id),
+            self.topic_outbox_sent_dir(topic_id),
+            self.topic_outbox_failed_dir(topic_id),
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(path, 0o700)
             except OSError:
                 pass

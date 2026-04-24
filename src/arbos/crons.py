@@ -40,6 +40,11 @@ class CronEntry:
     prompt: str
     created_at: float = field(default_factory=time.time)
     created_by: str = ""
+    # Forum topic this cron fires into. ``0`` is a sentinel for "use the
+    # home topic at load time" -- set by older crons.json files written
+    # before the multi-topic refactor. ``CronStore.load`` rewrites these
+    # in-place once the agent supplies its home topic id.
+    topic_id: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -57,12 +62,17 @@ class CronEntry:
             return None
         if not cid or mins < 1 or not prompt.strip():
             return None
+        try:
+            topic_id = int(raw.get("topic_id") or 0)
+        except (TypeError, ValueError):
+            topic_id = 0
         return cls(
             id=cid,
             mins=mins,
             prompt=prompt,
             created_at=float(raw.get("created_at") or time.time()),
             created_by=str(raw.get("created_by") or ""),
+            topic_id=topic_id,
         )
 
 
@@ -152,7 +162,14 @@ class CronStore:
 
     # ---- mutation --------------------------------------------------------
 
-    def add(self, *, mins: int, prompt: str, created_by: str = "") -> CronEntry:
+    def add(
+        self,
+        *,
+        mins: int,
+        prompt: str,
+        topic_id: int,
+        created_by: str = "",
+    ) -> CronEntry:
         """Allocate a new id and persist the entry."""
         if not self._loaded:
             self.load()
@@ -163,10 +180,33 @@ class CronStore:
             mins=int(mins),
             prompt=prompt,
             created_by=created_by,
+            topic_id=int(topic_id),
         )
         self._entries[cid] = entry
         self._flush()
         return entry
+
+    def backfill_topic_id(self, default_topic_id: int) -> int:
+        """Rewrite any legacy entry with ``topic_id == 0`` to the home topic.
+
+        Returns the number of entries patched. No-op when nothing to fix.
+        Called by the agent at boot so persisted crons survive the
+        multi-topic refactor without needing a manual edit.
+        """
+        if not self._loaded:
+            self.load()
+        patched = 0
+        for entry in self._entries.values():
+            if entry.topic_id == 0:
+                entry.topic_id = int(default_topic_id)
+                patched += 1
+        if patched:
+            self._flush()
+            logger.info(
+                "backfilled topic_id=%s onto %d legacy cron(s)",
+                default_topic_id, patched,
+            )
+        return patched
 
     def remove(self, cid: str) -> bool:
         """Drop ``cid`` from the store. Returns True iff it existed."""

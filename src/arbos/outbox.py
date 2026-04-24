@@ -1,14 +1,18 @@
-"""File-drop outbox: any file landed in ``.arbos/outbox/`` is posted to this
-machine's Telegram topic and then moved aside.
+"""File-drop outbox: any file landed in a topic's ``outbox/`` is posted to
+that topic and then moved aside.
 
 Why a filesystem queue rather than a richer IPC channel?
 
 The cursor-agent that handles each Telegram message runs as a *child* of the
 long-lived agent process; there is no in-process call path back from a child
-back to ``CursorAgent``. A drop-zone in ``.arbos/outbox/`` is the simplest
-thing that gives every child (and every other process on the host) a way to
-post images, PDFs, traces, screenshots, etc. into the chat without growing
-a control-plane.
+back to ``CursorAgent``. A drop-zone per adopted topic at
+``~/.arbos/topics/<topic_id>/outbox/`` is the simplest thing that gives
+every child (and every other process on the host) a way to post images,
+PDFs, traces, screenshots, etc. into the right topic without growing a
+control-plane.
+
+The agent owns one :class:`OutboxWatcher` per adopted topic. New topics
+adopted at runtime get a fresh watcher spun up by the agent layer.
 
 Behaviour
 ---------
@@ -199,7 +203,7 @@ def _move_aside(path: Path, dest_dir: Path) -> Path:
 
 
 class OutboxWatcher:
-    """Background task that ships files from ``.arbos/outbox/`` to Telegram."""
+    """Background task that ships files from a per-topic outbox to Telegram."""
 
     def __init__(
         self,
@@ -209,6 +213,7 @@ class OutboxWatcher:
         chat_id: int,
         message_thread_id: int,
         paths: InstallPaths,
+        topic_id: int,
         poll_interval: float = POLL_INTERVAL,
     ) -> None:
         self._http = http
@@ -216,6 +221,10 @@ class OutboxWatcher:
         self._chat_id = chat_id
         self._thread_id = message_thread_id
         self._paths = paths
+        self._topic_id = int(topic_id)
+        self._outbox_dir = paths.topic_outbox_dir(self._topic_id)
+        self._sent_dir = paths.topic_outbox_sent_dir(self._topic_id)
+        self._failed_dir = paths.topic_outbox_failed_dir(self._topic_id)
         self._poll_interval = poll_interval
         self._stop = asyncio.Event()
         self._task: Optional[asyncio.Task[None]] = None
@@ -223,17 +232,20 @@ class OutboxWatcher:
         # stability before posting, which catches partial writes.
         self._seen: dict[Path, tuple[int, int]] = {}
 
+    @property
+    def topic_id(self) -> int:
+        return self._topic_id
+
     def start(self) -> None:
         if self._task is not None:
             return
-        self._paths.outbox_dir.mkdir(parents=True, exist_ok=True)
-        self._paths.outbox_sent_dir.mkdir(parents=True, exist_ok=True)
-        self._paths.outbox_failed_dir.mkdir(parents=True, exist_ok=True)
-        self._task = asyncio.create_task(self._loop(), name="outbox-watcher")
+        self._paths.bootstrap_topic(self._topic_id)
+        self._task = asyncio.create_task(
+            self._loop(), name=f"outbox-watcher-{self._topic_id}"
+        )
         logger.info(
-            "outbox watcher started: dir=%s every=%.1fs",
-            self._paths.outbox_dir,
-            self._poll_interval,
+            "outbox watcher started: topic=%s dir=%s every=%.1fs",
+            self._topic_id, self._outbox_dir, self._poll_interval,
         )
 
     async def stop(self) -> None:
@@ -265,7 +277,7 @@ class OutboxWatcher:
             raise
 
     async def _tick(self) -> None:
-        outbox = self._paths.outbox_dir
+        outbox = self._outbox_dir
         try:
             entries = sorted(outbox.iterdir(), key=lambda p: p.name)
         except FileNotFoundError:
@@ -376,9 +388,9 @@ class OutboxWatcher:
             self._fail(path, caption_path, f"{method} not ok: {body!r}")
             return
 
-        sent_path = _move_aside(path, self._paths.outbox_sent_dir)
+        sent_path = _move_aside(path, self._sent_dir)
         if caption_path is not None and caption_path.exists():
-            _move_aside(caption_path, self._paths.outbox_sent_dir)
+            _move_aside(caption_path, self._sent_dir)
         logger.info(
             "outbox %s OK: %s (%d bytes)%s",
             method,
@@ -391,9 +403,9 @@ class OutboxWatcher:
         self, path: Path, caption_path: Optional[Path], reason: str
     ) -> None:
         logger.warning("outbox failed %s: %s", path.name, reason)
-        moved = _move_aside(path, self._paths.outbox_failed_dir)
+        moved = _move_aside(path, self._failed_dir)
         if caption_path is not None and caption_path.exists():
-            _move_aside(caption_path, self._paths.outbox_failed_dir)
+            _move_aside(caption_path, self._failed_dir)
         try:
             moved.with_name(moved.name + ERROR_SUFFIX).write_text(
                 reason + "\n", encoding="utf-8"

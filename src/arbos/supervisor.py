@@ -73,8 +73,11 @@ STALL_HINT_AFTER = 15.0
 # the user knows we're not sure it's progressing.
 STALL_WARN_AFTER = 60.0
 
-# One-shot end-of-run wrap-up budget.
-FINAL_MAX_CHARS = 500
+# One-shot end-of-run wrap-up budget. Bumped from 500 -> 1500 so that an
+# information-request reply (small directory listing, a code snippet, a
+# few config lines) can fit verbatim inside the supervisor's MODE A
+# passthrough; well under Telegram's 4096-char bubble cap.
+FINAL_MAX_CHARS = 1500
 FINAL_TIMEOUT = 12.0
 
 # Stall states; tracked so we only append a new line on transition.
@@ -104,14 +107,34 @@ TASK_HINT_PROMPT = (
 )
 
 FINAL_PROMPT = (
-    "You ARE the coding agent that just finished this run -- speak in "
-    "the first person. Reply with ONE first-person past-tense sentence "
-    "(<= {max_chars} chars) telling the user what you did, using 'I' "
-    "(e.g. 'I created the file...', 'I edited agent.py...'). Be "
-    "specific about files / actions if obvious from the inputs, vague "
-    "if not. No preamble, no markdown, no quotes, NEVER refer to "
-    "yourself as 'the agent' or in the third person. Do not restate "
-    "the duration -- the rollout already shows it."
+    "You are posting the final reply for a coding agent run. The user "
+    "asked something; the agent did some tool calls; you have the "
+    "tool-log tail and the agent's raw final answer. Decide which mode "
+    "applies and reply accordingly.\n"
+    "\n"
+    "MODE A -- INFORMATION REQUEST (the user asked for a file listing, "
+    "file contents, a value, a count, a diff, a log line, command "
+    "output, a status, who is online, what time it is, etc.):\n"
+    "  Reply with the actual content from the agent's final answer, "
+    "verbatim where possible. Use a fenced code block for terminal "
+    "output, code, paths, or structured data. Do NOT paraphrase, do "
+    "NOT prefix with 'I ...'. If the content is too long for "
+    "{max_chars} chars, paste the salient excerpt and add a short "
+    "trailing note like '(truncated)'. NEVER reply with 'I listed it' "
+    "/ 'I checked it' / 'Done' instead of the content -- that is a BUG.\n"
+    "\n"
+    "MODE B -- ACTION REQUEST (restart, deploy, fix, edit, install, "
+    "rename, commit, etc.):\n"
+    "  Reply with ONE first-person past-tense sentence (<= {max_chars} "
+    "chars) saying what you did, with concrete evidence inline (file "
+    "paths, sha, status, count). Examples: 'I edited agent.py to add "
+    "X.', 'I restarted arbos and pm2 shows online.'. Use 'I'. Never "
+    "refer to yourself as 'the agent' or in the third person. Do not "
+    "restate the duration -- the rollout already shows it.\n"
+    "\n"
+    "If the agent's final answer is empty or just '(no output)', "
+    "describe what the tool log shows happening in MODE B style.\n"
+    "No preamble before either reply."
 )
 
 
@@ -463,7 +486,7 @@ class Supervisor:
         ~300 chars of the worker's final answer (or '(no output)').
         """
         worker_final = (self._worker_final_text or "").strip()
-        fallback = _truncate(worker_final, 300) or "(no output)"
+        fallback = _truncate(worker_final, self._final_max_chars) or "(no output)"
         if self._client is None or not self._key:
             return _truncate(fallback, self._final_max_chars)
 
@@ -483,7 +506,7 @@ class Supervisor:
                     ),
                 },
             ],
-            "max_tokens": 220,
+            "max_tokens": 600,
             "temperature": 0.2,
         }
         try:

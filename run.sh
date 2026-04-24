@@ -25,11 +25,13 @@ set -euo pipefail
 
 # When invoked via `curl … | bash`, BASH_SOURCE[0] is unset / empty and there
 # is no local checkout to point REPO_ROOT at. Clone (or fast-forward) the
-# arbos source into <cwd>/.arbos/src and re-exec ourselves from the clone.
+# arbos source into ~/.arbos/src and re-exec ourselves from the clone.
+# Storage location is fixed at ~/.arbos on every machine -- run.sh from any
+# cwd produces the same install.
 if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-}" ]]; then
   ARBOS_REMOTE="${ARBOS_REMOTE:-https://github.com/unarbos/arbos.git}"
   ARBOS_BRANCH="${ARBOS_BRANCH:-main}"
-  _src="$(pwd -P)/.arbos/src"
+  _src="$HOME/.arbos/src"
 
   command -v git >/dev/null 2>&1 || {
     case "$(uname -s)" in
@@ -62,14 +64,14 @@ if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]:-}" ]]; then
 fi
 
 # REPO_ROOT = where the arbos source / venv / run.sh live. Used only to
-# locate the python virtualenv and the editable package source. The user's
-# working directory at invocation time ("install root") is what owns
-# .arbos/, the doppler scope, and the cursor-agent workdir -- so a single
-# checkout of the arbos repo can drive any number of separate workspaces.
+# locate the python virtualenv and the editable package source. Storage
+# lives at the fixed location ``$HOME/.arbos`` regardless of where run.sh
+# was invoked from -- the cursor-agent workdir is now per-topic and set
+# inside Telegram via ``/workspace <path>`` rather than via cwd.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 INVOKE_DIR="$(pwd -P)"
 
-STORAGE_DIR="${INVOKE_DIR}/.arbos"
+STORAGE_DIR="$HOME/.arbos"
 WRITEBACK_PATH="${STORAGE_DIR}/doppler_writeback.json"
 AGENT_LOG_PATH="${STORAGE_DIR}/agent.log"
 
@@ -351,7 +353,7 @@ ensure_doppler_scope() {
     doppler setup --no-interactive \
       --project "$DOPPLER_PROJECT" \
       --config "$DOPPLER_CONFIG" \
-      --scope "$INVOKE_DIR" \
+      --scope "$STORAGE_DIR" \
     || die "doppler setup failed; try 'doppler setup' manually"
 }
 
@@ -530,7 +532,7 @@ run_installer() {
   [[ -r /dev/tty ]] && stdin_src="/dev/tty"
 
   (
-    cd "$INVOKE_DIR"
+    cd "$STORAGE_DIR"
     ARBOS_MACHINE="$ARBOS_MACHINE" \
     ARBOS_TELEGRAM_BOT_TOKEN="$EXPORT_BOT_TOKEN" \
     ARBOS_TELEGRAM_CHAT_ID="$EXPORT_CHAT_ID" \
@@ -776,13 +778,13 @@ for p in json.load(sys.stdin):
 " 2>/dev/null || true)"
   fi
 
-  if [[ -n "$existing_path" ]] \
-     && { [[ "$existing_path" != "$pybin" ]] || [[ "$existing_cwd" != "$INVOKE_DIR" ]]; }; then
-    warn "stale pm2 entry $PM2_NAME points at ${DIM}${existing_path}${NC} (cwd ${DIM}${existing_cwd}${NC})"
-    info "deleting it so we can start the right binary"
-    run "Deleting stale $PM2_NAME entry" pm2 delete "$PM2_NAME"
-    existing_path=""
-  fi
+    if [[ -n "$existing_path" ]] \
+       && { [[ "$existing_path" != "$pybin" ]] || [[ "$existing_cwd" != "$STORAGE_DIR" ]]; }; then
+      warn "stale pm2 entry $PM2_NAME points at ${DIM}${existing_path}${NC} (cwd ${DIM}${existing_cwd}${NC})"
+      info "deleting it so we can start the right binary"
+      run "Deleting stale $PM2_NAME entry" pm2 delete "$PM2_NAME"
+      existing_path=""
+    fi
 
   if [[ -n "$existing_path" && -n "$existing_max_mem" ]] \
      && [[ "$existing_max_mem" != "$desired_max_mem" ]]; then
@@ -814,7 +816,7 @@ for p in json.load(sys.stdin):
         ${EXPORT_OPENAI_API_KEY:+OPENAI_API_KEY="$EXPORT_OPENAI_API_KEY"} \
         pm2 start "$pybin" \
           --name "$PM2_NAME" \
-          --cwd "$INVOKE_DIR" \
+          --cwd "$STORAGE_DIR" \
           --log "$AGENT_LOG_PATH" \
           --time \
           --max-memory-restart 1500M \
@@ -920,7 +922,7 @@ cmd_privacy_off() {
   local stdin_src="/dev/stdin"
   [[ -r /dev/tty ]] && stdin_src="/dev/tty"
   (
-    cd "$INVOKE_DIR"
+    cd "$STORAGE_DIR"
     ARBOS_MACHINE="$ARBOS_MACHINE" \
     ARBOS_TELEGRAM_BOT_TOKEN="$EXPORT_BOT_TOKEN" \
     ARBOS_TELEGRAM_CHAT_ID="$EXPORT_CHAT_ID" \

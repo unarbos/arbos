@@ -43,11 +43,19 @@ from . import inflight
 from .inflight import InflightEntry, InflightStore
 from .outbox import OutboxWatcher
 from .prompts import build_prompt, load_extra_prompts
+from .router import (
+    DELEGATE_SLASH,
+    RouterContext,
+    RouterDecision,
+    RouterOutcome,
+    SmartRouter,
+)
 from . import runjournal
 from .runjournal import RunJournal
 from . import session_store
 from .session_store import ChatSession
 from .supervisor import Supervisor
+from . import topic_state
 from . import updater
 from .updater import UpdateError, UpdateResult
 from .workspace import InstallPaths
@@ -73,6 +81,16 @@ INITIAL_BUBBLE_TEXT = "thinking…"
 PLAN_INITIAL_BUBBLE_TEXT = "planning…"
 IMPL_INITIAL_BUBBLE_TEXT = "implementing…"
 TRANSCRIBING_BUBBLE_TEXT = "transcribing…"
+# Placeholder shown in the routing bubble before the SmartRouter's
+# supervisor flips it to "0:00 Routing"; visible only for the brief
+# window between sendMessage and the supervisor's first push.
+ROUTING_BUBBLE_TEXT = "routing…"
+
+# Display name for the home (machine-default) topic's ``<name>`` slot.
+# Renders as ``root · <machine>@<workspace>`` in the Telegram topic
+# title so the machine's primary thread is visually distinct from any
+# user-named topic adopted later.
+HOME_TOPIC_NAME = "root"
 
 OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
 WHISPER_MODEL = "whisper-1"
@@ -82,13 +100,26 @@ PLAN_MODEL = "claude-opus-4-7-high"
 IMPL_MODEL = "claude-opus-4-7-high"
 CHAT_MODEL = "claude-opus-4-7-high"
 
+# SmartRouter runs in agent mode for EVERY user message before the heavy
+# worker is even considered, so latency here directly compounds onto every
+# reply. The job is small (read at most a couple of files / run a short
+# shell, then either answer in 1-3 lines or emit one slash command), so a
+# fast cheap model wins overall: routing finishes in ~2-4s instead of
+# ~15-25s with Opus, and the heavy Opus worker still owns anything the
+# router delegates. Override with ARBOS_ROUTER_MODEL if a slug stops
+# working in cursor-agent.
+ROUTER_MODEL = (
+    os.environ.get("ARBOS_ROUTER_MODEL", "claude-haiku-4-5").strip()
+    or "claude-haiku-4-5"
+)
+
 # Supervisor layer: a small LLM throttles the worker's noisy snapshot stream
 # down to a single short status line every few seconds, so the bubble stays
 # glanceable mid-run. Set ARBOS_SUPERVISOR_DISABLE=1 (or omit OPENAI_API_KEY)
 # to bypass and stream raw snapshots straight to the bubble (legacy behavior).
 SUPERVISOR_MODEL = (
-    os.environ.get("ARBOS_SUPERVISOR_MODEL", "gpt-4o-mini").strip()
-    or "gpt-4o-mini"
+    os.environ.get("ARBOS_SUPERVISOR_MODEL", "gpt-4.1-mini").strip()
+    or "gpt-4.1-mini"
 )
 SUPERVISOR_INTERVAL = 2.0
 # Per-rollout-line display budget. Keep this tight -- the rollout is a
@@ -96,7 +127,14 @@ SUPERVISOR_INTERVAL = 2.0
 # commands or long prose. The LLM live-summary is also told to stay
 # within this budget via {max_chars} interpolation.
 SUPERVISOR_MAX_CHARS = 80
-SUPERVISOR_FINAL_MAX_CHARS = 500
+# Per-bubble editMessageText floor for rollout bubbles. The default
+# in bubble.py is 2.5s, picked to stay under Telegram's per-chat
+# throttling ceiling. We push it down to 2.0s for the rollout bubble
+# so the supervisor's live M:SS prefix advances every two seconds in
+# real time (matches SUPERVISOR_INTERVAL). 429s, if any, are absorbed
+# by the bubble's process-wide global backoff.
+ROLLOUT_EDIT_INTERVAL = 2.0
+SUPERVISOR_FINAL_MAX_CHARS = 1500
 SUPERVISOR_STALL_HINT_AFTER = 15.0
 SUPERVISOR_STALL_WARN_AFTER = 60.0
 SUPERVISOR_DISABLE = os.environ.get("ARBOS_SUPERVISOR_DISABLE", "").strip() == "1"
@@ -156,7 +194,10 @@ class CursorAgent:
         self.chat_id = self.config.supergroup.chat_id
         # config.machine.topic_id is the encoded form (shifted left 20);
         # convert to the Bot API's raw server message id for filter+reply.
-        self.topic_id = _to_bot_thread_id(self.config.machine.topic_id)
+        # This is the *home* topic for this machine. The agent additionally
+        # listens on any other topic in the same supergroup that has been
+        # adopted via @-mention -- see ``_is_for_us`` and ``topic_state``.
+        self.home_topic_id = _to_bot_thread_id(self.config.machine.topic_id)
         # Logical machine name from config.json -- locked at install time,
         # drives Telegram routing (bot username, topic title) and stays
         # stable even if the host's tailscale name changes later.
@@ -172,7 +213,6 @@ class CursorAgent:
         self.pm2_name = f"arbos-{env_machine or self.machine}"
         self.bot_user_id = self.config.bot.user_id
         self.bot_username = (self.config.bot.username or "").lstrip("@")
-        self.workdir: Path = paths.root
         self.offset_path = paths.offset_path
         self.lock_path = paths.lock_path
         self.openai_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -196,15 +236,106 @@ class CursorAgent:
         # ``runjournal.py`` and :meth:`_build_reply_context_block`.
         self._runs = RunJournal(self.paths)
 
-        # Persistent per-topic cursor-agent chat. Loaded from disk so memory
-        # survives PM2 restarts. The lock serialises every spawn that touches
-        # this chat -- two parallel `--resume <id>` calls would interleave
-        # appends.
-        loaded = session_store.load(self.paths)
-        self._chat_session_id: Optional[str] = loaded.session_id if loaded else None
-        self._chat_lock = asyncio.Lock()
-        if loaded is not None:
-            logger.info("loaded persistent chat session: %s", loaded.session_id)
+        # ---- multi-topic state ------------------------------------------
+        # Auto-adopt the home topic and load any other topics adopted on
+        # previous boots. ``_adopted`` is the source of truth for "do we
+        # answer messages in this thread"; it is mutated in-place when a
+        # new topic is adopted via @-mention at runtime.
+        try:
+            # Home topic always renders as ``root · <machine>@<workspace>``:
+            # the topic-creator's name component is fixed at "root" so the
+            # machine's "main" thread is visually distinct from any other
+            # topic the user adopts later. ``base_title`` is the machine
+            # name (the "host" half of the ``<base>@<workspace>`` pair).
+            topic_state.adopt(
+                self.paths,
+                self.home_topic_id,
+                name=HOME_TOPIC_NAME,
+                base_title=self.machine,
+            )
+        except Exception:
+            logger.exception("could not adopt home topic %s", self.home_topic_id)
+        # ---- one-shot migrations for legacy state ----------------------
+        # 1. base_title backfill: every topic *this* agent answers in is
+        #    owned by *this* machine, so any state file written before
+        #    base_title existed is unambiguously self.machine.
+        # 2. home-topic name migration: older boots auto-set
+        #    name=self.machine on the home topic; rewrite to "root" so
+        #    fresh installs and upgrades both render identically. Only
+        #    rewrites the legacy default -- a user-chosen name (anything
+        #    other than self.machine) is preserved.
+        for tid in topic_state.list_adopted(self.paths):
+            existing = topic_state.load(self.paths, tid)
+            if existing is None:
+                continue
+            if not existing.base_title:
+                try:
+                    topic_state.adopt(
+                        self.paths, tid, base_title=self.machine
+                    )
+                except Exception:
+                    logger.exception(
+                        "base_title backfill failed (topic=%s)", tid
+                    )
+            if (
+                tid == self.home_topic_id
+                and existing.name == self.machine
+                and existing.name != HOME_TOPIC_NAME
+            ):
+                try:
+                    migrated = topic_state.set_name(
+                        self.paths, tid, HOME_TOPIC_NAME
+                    )
+                    if migrated is not None:
+                        logger.info(
+                            "home-topic name migrated: %r -> %r",
+                            self.machine, HOME_TOPIC_NAME,
+                        )
+                except Exception:
+                    logger.exception(
+                        "home-topic name migration failed (topic=%s)", tid
+                    )
+        self._adopted: set[int] = set(topic_state.list_adopted(self.paths))
+        self._adopted.add(self.home_topic_id)
+        # Per-topic persistent cursor-agent chat sessions and the per-topic
+        # serialisation lock that gates `--resume <id>` calls (two parallel
+        # appends would interleave). Both are lazy: a topic only enters the
+        # dicts once it has been touched.
+        self._chat_sessions: dict[int, Optional[str]] = {}
+        self._chat_locks: dict[int, asyncio.Lock] = {}
+        # Per-topic SmartRouter sessions. Distinct from the worker's
+        # chat session so routing-decision history and worker-coding
+        # history never pollute each other; both threads see the same
+        # incoming user messages but only one sees each side's replies.
+        self._router_sessions: dict[int, Optional[str]] = {}
+        self._router_locks: dict[int, asyncio.Lock] = {}
+        for tid in list(self._adopted):
+            loaded = session_store.load(self.paths, tid)
+            if loaded is not None:
+                self._chat_sessions[tid] = loaded.session_id
+                logger.info(
+                    "loaded persistent chat session for topic %s: %s",
+                    tid, loaded.session_id,
+                )
+            loaded_router = session_store.load_router(self.paths, tid)
+            if loaded_router is not None:
+                self._router_sessions[tid] = loaded_router.session_id
+                logger.info(
+                    "loaded persistent router session for topic %s: %s",
+                    tid, loaded_router.session_id,
+                )
+        # One outbox watcher per adopted topic; created in ``run()`` once
+        # the agent-lifetime httpx client is open.
+        self._outbox_watchers: dict[int, OutboxWatcher] = {}
+        self._outbox_http: Optional[httpx.AsyncClient] = None
+        # In-memory ``topic_id -> name`` cache populated from any
+        # ``forum_topic_created`` / ``forum_topic_edited`` service
+        # message we observe, even before the topic is adopted. Lets
+        # ``_is_for_us`` pick up the user-given name on first @-mention
+        # (the create event is a *separate* Telegram update that arrives
+        # before the mention, so without this cache the name would be
+        # discarded by the not-yet-adopted guard).
+        self._topic_name_cache: dict[int, str] = {}
 
         # Persistent recurring-prompt schedules. Loaded from disk so cron
         # entries survive PM2 restarts and ``/update``. The agent spawns
@@ -232,18 +363,48 @@ class CursorAgent:
                 SKIP_CONFIRM_ENV,
             )
 
-        # Render the system preamble eagerly so PROMPT.md exists from t=0
-        # even before the first message; build_prompt persists to disk and
-        # caches in-process for ~60s.
+        # Render the system preamble eagerly for the home topic so PROMPT.md
+        # exists from t=0 even before the first message; build_prompt
+        # persists to disk and caches per-(workspace, topic) for ~60s.
         try:
-            build_prompt(self.paths, self.config)
+            build_prompt(
+                self.paths,
+                self.config,
+                workspace=self._workdir_for(self.home_topic_id),
+                topic_id=self.home_topic_id,
+            )
         except Exception:
             logger.exception("initial PROMPT.md render failed; continuing")
 
-    def _system_prompt(self) -> str:
-        """Cached system preamble (refreshed by build_prompt's own TTL)."""
+        # Front-line routing agent. Each non-slash message spawns a
+        # ``cursor-agent`` invocation in agent mode against this topic's
+        # SmartRouter ``--resume`` session, so the routing decision sees
+        # the topic's prior chat history. The agent ends its reply with
+        # one of a small set of slash commands (/cron, /restart, ...,
+        # /delegate) which we parse + dispatch via the existing handlers.
+        # Falls open to delegate when ``ARBOS_SMART_ROUTER_DISABLE=1``
+        # is set, so the agent remains fully functional even if the
+        # router cursor-agent itself misbehaves.
+        smart_router_disabled = (
+            os.environ.get("ARBOS_SMART_ROUTER_DISABLE", "").strip()
+            in ("1", "true", "True", "yes", "YES")
+        )
+        self._router = SmartRouter(enabled=not smart_router_disabled)
+        if smart_router_disabled:
+            logger.info(
+                "ARBOS_SMART_ROUTER_DISABLE set; SmartRouter bypassed, "
+                "all messages will delegate straight to the worker"
+            )
+
+    def _system_prompt(self, topic_id: int) -> str:
+        """Cached system preamble for ``topic_id`` (refreshed by build_prompt's own TTL)."""
         try:
-            return build_prompt(self.paths, self.config)
+            return build_prompt(
+                self.paths,
+                self.config,
+                workspace=self._workdir_for(topic_id),
+                topic_id=topic_id,
+            )
         except Exception:
             logger.exception("system prompt render failed; sending empty preamble")
             return ""
@@ -254,6 +415,298 @@ class CursorAgent:
         except Exception:
             logger.exception("extra prompts load failed; skipping")
             return ""
+
+    # ---- per-topic helpers -----------------------------------------------
+    def _workdir_for(self, topic_id: int) -> Path:
+        """Resolve the cursor-agent ``--workspace`` for ``topic_id``.
+
+        Falls back to ``Path.home()`` when no per-topic state exists yet
+        (newly-adopted topic, or a race where state was wiped).
+        """
+        return topic_state.workspace_for(self.paths, int(topic_id))
+
+    def _chat_lock_for(self, topic_id: int) -> asyncio.Lock:
+        """Return (lazily creating) the per-topic chat-session lock."""
+        lock = self._chat_locks.get(topic_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._chat_locks[topic_id] = lock
+        return lock
+
+    def _router_lock_for(self, topic_id: int) -> asyncio.Lock:
+        """Return (lazily creating) the per-topic router-session lock.
+
+        Same rationale as :meth:`_chat_lock_for`: ``--resume <id>`` on
+        the same session id from two concurrent invocations would
+        interleave appends; the lock serialises them per-topic. Routing
+        for different topics still runs in parallel.
+        """
+        lock = self._router_locks.get(topic_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._router_locks[topic_id] = lock
+        return lock
+
+    def _topic_thread_id(self, message: dict[str, Any]) -> int:
+        """Extract the message's forum thread id (== adopted topic id)."""
+        thread_id = message.get("message_thread_id")
+        if isinstance(thread_id, int):
+            return thread_id
+        # Defensive: the home topic is the only place a non-thread message
+        # could plausibly land in our supergroup, so route it there.
+        return self.home_topic_id
+
+    def _start_outbox_watcher(self, topic_id: int) -> None:
+        """Spin up (idempotently) the per-topic outbox watcher.
+
+        No-op when the agent's http client is not yet up (e.g. called from
+        ``__init__``); ``run()`` boots watchers for every adopted topic
+        right after the client opens, and ``_is_for_us`` calls this again
+        on first adoption of a new topic at runtime.
+        """
+        if topic_id in self._outbox_watchers:
+            return
+        http = self._outbox_http
+        if http is None:
+            return
+        watcher = OutboxWatcher(
+            http=http,
+            bot_token=self.bot_token,
+            chat_id=self.chat_id,
+            message_thread_id=int(topic_id),
+            paths=self.paths,
+            topic_id=int(topic_id),
+        )
+        watcher.start()
+        self._outbox_watchers[int(topic_id)] = watcher
+
+    # ---- topic header rendering -----------------------------------------
+    @staticmethod
+    def _short_workspace(path: str | Path) -> str:
+        """Render an absolute path as ``~/foo`` when it lives under ``$HOME``.
+
+        Plain absolute paths (outside home) are returned unchanged. Used
+        as the workspace suffix in the Telegram topic title so the user
+        can see at a glance what cwd this thread is bound to.
+        """
+        p = Path(path).expanduser()
+        try:
+            home = Path.home()
+        except (OSError, RuntimeError):
+            return str(p)
+        try:
+            rel = p.relative_to(home)
+        except ValueError:
+            return str(p)
+        rel_str = str(rel)
+        if rel_str in ("", "."):
+            return "~"
+        return f"~/{rel_str}"
+
+    def _render_topic_name(
+        self,
+        *,
+        name: Optional[str],
+        base_title: Optional[str],
+        workspace: str,
+    ) -> str:
+        """Compose the Telegram topic name as ``<name> · <base>@<workspace>``.
+
+        ``<base>`` and ``<workspace>`` are joined with ``@`` (think
+        ``user@host`` -- the agent is "running as <base> in <cwd>");
+        the user-given ``<name>`` is the first ``·``-separated
+        component. Missing components degrade gracefully:
+
+        * ``name=None``  -> ``<base>@<workspace>``
+        * ``base=None``  -> ``<name> · <workspace>``
+        * both None      -> just ``<workspace>``
+
+        Telegram caps forum topic names at 128 chars; the rendered name
+        is ellipsis-truncated if needed.
+        """
+        short = self._short_workspace(workspace)
+        if base_title:
+            tail = f"{base_title}@{short}"
+        else:
+            tail = short
+        out = f"{name} · {tail}" if name else tail
+        if len(out) > 128:
+            out = out[:127] + "…"
+        return out
+
+    async def _rename_topic_for_workspace(
+        self,
+        http: httpx.AsyncClient,
+        topic_id: int,
+        workspace: str,
+    ) -> bool:
+        """Push ``<name> · <base> · <workspace>`` into the topic title.
+
+        Idempotent: skips the API call when the topic's cached ``title``
+        already matches the desired name. Returns True iff Telegram
+        confirmed the rename.
+        """
+        state = topic_state.load(self.paths, topic_id)
+        new_name = self._render_topic_name(
+            name=state.name if state else None,
+            base_title=state.base_title if state else None,
+            workspace=workspace,
+        )
+        if state is not None and state.title == new_name:
+            return False
+        try:
+            resp = await self._api(
+                http,
+                "editForumTopic",
+                chat_id=self.chat_id,
+                message_thread_id=int(topic_id),
+                name=new_name,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "editForumTopic network error (topic=%s): %s", topic_id, exc
+            )
+            return False
+        if resp.status_code != 200:
+            logger.warning(
+                "editForumTopic HTTP %d (topic=%s): %s",
+                resp.status_code, topic_id, resp.text[:200],
+            )
+            return False
+        body = resp.json()
+        if not body.get("ok"):
+            logger.warning(
+                "editForumTopic not ok (topic=%s): %r", topic_id, body
+            )
+            return False
+        if state is not None:
+            state.title = new_name
+            try:
+                topic_state.save(self.paths, state)
+            except Exception:
+                logger.exception(
+                    "could not persist topic title cache (topic=%s)", topic_id
+                )
+        logger.info("renamed topic %s -> %r", topic_id, new_name)
+        return True
+
+    def _maybe_capture_topic_name(self, message: dict[str, Any]) -> None:
+        """Pull the user-given name out of a ``forum_topic_created`` /
+        ``forum_topic_edited`` service message and remember it.
+
+        Always updates ``self._topic_name_cache`` (so the name survives
+        the gap between create-event and the first @-mention that
+        actually adopts the topic). Additionally persists immediately
+        if the topic has already been adopted.
+
+        Skips inputs that look like the agent's own rendered title
+        (anything containing the ``" · "`` separator OR an embedded
+        ``"@"`` between base and workspace) to avoid an echo loop with
+        our own ``editForumTopic`` calls.
+        """
+        thread_id = message.get("message_thread_id")
+        if not isinstance(thread_id, int):
+            return
+        raw_name: Optional[str] = None
+        created = message.get("forum_topic_created")
+        if isinstance(created, dict):
+            raw = created.get("name")
+            if isinstance(raw, str):
+                raw_name = raw
+        if raw_name is None:
+            edited = message.get("forum_topic_edited")
+            if isinstance(edited, dict):
+                raw = edited.get("name")
+                if isinstance(raw, str):
+                    raw_name = raw
+        if not raw_name:
+            return
+        cleaned = raw_name.strip()
+        if not cleaned:
+            return
+        if " · " in cleaned or self._looks_like_our_title(cleaned):
+            return
+        # Cache unconditionally so a not-yet-adopted topic still gets
+        # its name applied when ``_is_for_us`` later adopts it.
+        self._topic_name_cache[thread_id] = cleaned
+        if not topic_state.is_adopted(self.paths, thread_id):
+            return
+        try:
+            updated = topic_state.set_name(self.paths, thread_id, cleaned)
+        except Exception:
+            logger.exception(
+                "topic_state.set_name failed (topic=%s)", thread_id
+            )
+            return
+        if updated is None:
+            return
+        logger.info(
+            "captured topic name (topic=%s) -> %r", thread_id, cleaned
+        )
+        # Re-render so the new name component lands in the title.
+        self._schedule_topic_rename(thread_id)
+
+    def _looks_like_our_title(self, candidate: str) -> bool:
+        """True if ``candidate`` is plausibly something we wrote ourselves.
+
+        Defends against an echo loop: when we ``editForumTopic`` to
+        ``"<name> · <base>@<ws>"``, Telegram emits a
+        ``forum_topic_edited`` event back at us. The ``"·"`` check
+        catches the three-component form; ``"<base>@~"`` form is also
+        ours (no ``name`` component yet).
+        """
+        if " · " in candidate:
+            return True
+        # Pattern "<base>@<workspace_path>" — we only generate this when
+        # base_title is set, and the suffix is an absolute or ~/ path.
+        at = candidate.rfind("@")
+        if at <= 0:
+            return False
+        suffix = candidate[at + 1 :]
+        return suffix.startswith("~") or suffix.startswith("/")
+
+    def _schedule_listening_notification(
+        self,
+        message: dict[str, Any],
+        topic_id: int,
+        *,
+        first_adoption: bool,
+    ) -> None:
+        """Send a short ack bubble in response to an @-mention.
+
+        ``first_adoption=True`` means the mention just adopted the topic;
+        the ack tells the user where the workspace is pointed and how
+        to change it. ``first_adoption=False`` is a re-ping in an
+        already-adopted topic; the ack just confirms we're still
+        listening so the user knows the @ wasn't dispatched as a prompt.
+        """
+        http = self._outbox_http
+        if http is None:
+            return
+        workspace_short = self._short_workspace(self._workdir_for(topic_id))
+        if first_adoption:
+            text = (
+                f"listening on this topic\n"
+                f"workspace: {workspace_short}\n"
+                f"send a message (no @ needed) or "
+                f"`/workspace <path>` to change the cwd"
+            )
+        else:
+            text = f"listening (workspace: {workspace_short})"
+
+        async def _do_notify() -> None:
+            try:
+                await self._send_initial_bubble(http, message, text=text)
+            except Exception:
+                logger.exception(
+                    "listening notification failed (topic=%s)", topic_id
+                )
+
+        task = asyncio.create_task(
+            _do_notify(), name=f"listening-notify-{topic_id}"
+        )
+        self._tasks.add(task)
+        task.add_done_callback(lambda t: self._tasks.discard(t))
 
     # ---- single-instance lock --------------------------------------------
     def acquire_lock(self) -> None:
@@ -318,20 +771,158 @@ class CursorAgent:
 
     # ---- message filtering -----------------------------------------------
     def _is_for_us(self, message: dict[str, Any]) -> bool:
+        """True iff we should dispatch ``message`` to cursor-agent.
+
+        Filters in priority order:
+
+        1. Must land in our supergroup chat.
+        2. Must come from a real user (not a bot, not us).
+        3. Service messages (``forum_topic_created`` / ``forum_topic_edited``)
+           are intercepted to capture the user-given topic name; they are
+           never dispatched as prompts.
+        4. Must have something we can act on (text or supported audio).
+        5. @-mentions of our bot are treated as "ping me, I'm listening"
+           rather than as prompts: we adopt the topic if needed, schedule
+           an ack bubble, and return False so the message is NOT sent to
+           cursor-agent. The user then sends their actual prompt as a
+           plain (un-@'d) message.
+        6. Otherwise: only dispatch when the topic is already adopted.
+        """
         chat = message.get("chat") or {}
         if chat.get("id") != self.chat_id:
             return False
-        if message.get("message_thread_id") != self.topic_id:
-            return False
+
+        # Service-message side channel: capture topic names regardless of
+        # whether the message would otherwise be acted on.
+        self._maybe_capture_topic_name(message)
+
         sender = message.get("from") or {}
         if sender.get("is_bot"):
             return False
         if self.bot_user_id is not None and sender.get("id") == self.bot_user_id:
             return False
-        if (message.get("text") or "").strip():
+        if not (
+            (message.get("text") or "").strip()
+            or self._extract_audio(message) is not None
+        ):
+            return False
+
+        thread_id = message.get("message_thread_id")
+        if not isinstance(thread_id, int):
+            # Non-topic messages in the supergroup are out of scope.
+            return False
+
+        is_mention = self._message_mentions_us(message)
+
+        if thread_id in self._adopted:
+            if is_mention:
+                # Already adopted; user @-mentioned us. Ack and skip
+                # dispatching so the @ doesn't become a prompt.
+                self._schedule_listening_notification(
+                    message, thread_id, first_adoption=False
+                )
+                logger.info(
+                    "ignoring @%s ping in already-adopted topic %s "
+                    "(sent listening ack)",
+                    self.bot_username, thread_id,
+                )
+                return False
             return True
-        if self._extract_audio(message) is not None:
-            return True
+
+        if not is_mention:
+            return False
+
+        # First contact: mention adopts the topic but does NOT dispatch
+        # the triggering message; we ack instead so the user knows we
+        # heard them and can send their actual prompt next. Drain the
+        # in-memory name cache (populated by an earlier
+        # ``forum_topic_created`` update) so the user-given topic name
+        # lands on disk as part of the same write.
+        cached_name = self._topic_name_cache.pop(thread_id, None)
+        try:
+            topic_state.adopt(
+                self.paths,
+                thread_id,
+                base_title=self.machine,
+                name=cached_name,
+            )
+        except Exception:
+            logger.exception("topic_state.adopt failed for %s", thread_id)
+            return False
+        self._adopted.add(thread_id)
+        self._start_outbox_watcher(thread_id)
+        logger.info(
+            "adopted new topic %s via @%s mention from %s (name=%r)",
+            thread_id, self.bot_username,
+            sender.get("username") or sender.get("id"),
+            cached_name,
+        )
+        # Rename the topic header to show the (default) workspace as a
+        # side-channel hint that arbos is now driving this thread, then
+        # ack so the user sees we're listening.
+        self._schedule_topic_rename(thread_id)
+        self._schedule_listening_notification(
+            message, thread_id, first_adoption=True
+        )
+        return False
+
+    def _schedule_topic_rename(self, topic_id: int) -> None:
+        """Fire-and-forget ``editForumTopic`` for ``topic_id`` from sync code.
+
+        Used from ``_is_for_us`` (which can't ``await``). The task is
+        added to ``self._tasks`` so the run-loop's shutdown drain
+        cancels it cleanly if we're stopping.
+        """
+        http = self._outbox_http  # captured in run() before polling starts
+        if http is None:
+            return
+        workspace = str(self._workdir_for(topic_id))
+
+        async def _do_rename() -> None:
+            try:
+                await self._rename_topic_for_workspace(http, topic_id, workspace)
+            except Exception:
+                logger.exception(
+                    "scheduled topic rename failed (topic=%s)", topic_id
+                )
+
+        task = asyncio.create_task(
+            _do_rename(), name=f"rename-topic-{topic_id}"
+        )
+        self._tasks.add(task)
+        task.add_done_callback(lambda t: self._tasks.discard(t))
+
+    def _message_mentions_us(self, message: dict[str, Any]) -> bool:
+        """True iff ``message`` contains a Telegram mention of our bot.
+
+        Honours both ``mention`` entities (``@bot_username`` literal in the
+        text/caption) and ``text_mention`` entities (a tagged user id, used
+        when the username collides with someone else or is hidden).
+        """
+        target = f"@{self.bot_username}".lower() if self.bot_username else ""
+        for field in ("text", "caption"):
+            text = message.get(field) or ""
+            if not text:
+                continue
+            entities_key = "entities" if field == "text" else "caption_entities"
+            for entity in message.get(entities_key) or []:
+                if not isinstance(entity, dict):
+                    continue
+                etype = entity.get("type")
+                if etype == "mention" and target:
+                    offset = entity.get("offset")
+                    length = entity.get("length")
+                    if isinstance(offset, int) and isinstance(length, int):
+                        chunk = text[offset : offset + length]
+                        if chunk.lower() == target:
+                            return True
+                elif etype == "text_mention":
+                    user = entity.get("user") or {}
+                    if (
+                        self.bot_user_id is not None
+                        and user.get("id") == self.bot_user_id
+                    ):
+                        return True
         return False
 
     @staticmethod
@@ -368,7 +959,7 @@ class CursorAgent:
     ) -> Optional[dict[str, Any]]:
         params: dict[str, Any] = {
             "chat_id": self.chat_id,
-            "message_thread_id": self.topic_id,
+            "message_thread_id": self._topic_thread_id(message),
             "text": text,
             "disable_web_page_preview": True,
             "reply_parameters": {
@@ -395,6 +986,7 @@ class CursorAgent:
         *,
         chat_id: Optional[int] = None,
         message_thread_id: Optional[int] = None,
+        edit_interval: Optional[float] = None,
     ) -> Bubble:
         """Wrap a Telegram message id in a ``Bubble`` with our journal hook.
 
@@ -404,6 +996,12 @@ class CursorAgent:
         that override ``chat_id`` / ``message_thread_id`` are the rare
         cross-thread bubbles (e.g. confirmations posted into a different
         topic); everyone else uses this install's primary topic.
+
+        ``edit_interval`` overrides the per-bubble editMessageText floor.
+        Rollout bubbles pass a tighter value (see ROLLOUT_EDIT_INTERVAL)
+        so the supervisor's live timer prefix can advance every two
+        seconds; static bubbles (confirmations, restart, voice) inherit
+        the safe default.
         """
 
         async def _on_continuation(prev_id: int, new_id: int) -> None:
@@ -414,16 +1012,21 @@ class CursorAgent:
             except Exception:
                 logger.exception("runjournal link_alias failed (swallowed)")
 
-        return Bubble(
-            http=http,
-            bot_token=self.bot_token,
-            chat_id=chat_id if chat_id is not None else self.chat_id,
-            message_thread_id=(
-                message_thread_id if message_thread_id is not None else self.topic_id
+        kwargs: dict[str, Any] = {
+            "http": http,
+            "bot_token": self.bot_token,
+            "chat_id": chat_id if chat_id is not None else self.chat_id,
+            "message_thread_id": (
+                message_thread_id
+                if message_thread_id is not None
+                else self.home_topic_id
             ),
-            message_id=message_id,
-            on_continuation=_on_continuation,
-        )
+            "message_id": message_id,
+            "on_continuation": _on_continuation,
+        }
+        if edit_interval is not None:
+            kwargs["edit_interval"] = edit_interval
+        return Bubble(**kwargs)
 
     async def _post_summary_bubble(
         self,
@@ -534,12 +1137,111 @@ class CursorAgent:
                 await self._post_summary_bubble(
                     http,
                     chat_id=self.chat_id,
-                    message_thread_id=self.topic_id,
+                    message_thread_id=self._topic_thread_id(message),
                     rollout_message_id=bubble.message_id,
                     text=recap,
                 )
             except Exception:
                 logger.exception("posting summary bubble failed (swallowed)")
+
+    async def _run_smart_router(
+        self,
+        *,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+        prompt: str,
+        bubble: Bubble,
+        ctx: RouterContext,
+        topic_id: int,
+    ) -> tuple[Optional[RouterDecision], Optional[CursorRunner]]:
+        """Spawn cursor-agent in agent mode for a routing decision and stream
+        live status into ``bubble`` via the supervisor.
+
+        Returns ``(decision, runner)``. ``decision`` is the parsed
+        :class:`RouterDecision` (slash + recap text) on success, or
+        ``None`` on any failure (spawn error, resume-session miss,
+        cursor-agent crash) -- the caller treats ``None`` as "delegate
+        to the worker" so the user always still gets a response.
+        ``runner`` is returned even on failure so the caller can read
+        ``runner.final_text`` for the run-journal record_finish entry.
+
+        Per-topic serialised on the SmartRouter lock because
+        ``--resume <id>`` from two parallel calls would interleave the
+        single chat thread.
+        """
+        async with self._router_lock_for(topic_id):
+            resume_id = self._router_sessions.get(topic_id)
+            workdir = self._workdir_for(topic_id)
+            system_prompt = self._router.build_system_prompt(ctx)
+
+            runner = CursorRunner(
+                prompt=prompt,
+                workdir=workdir,
+                model=ROUTER_MODEL,
+                system_prompt=system_prompt,
+                resume_session=resume_id,
+            )
+
+            task_prompt = (prompt or "").strip()[:1500] or None
+            try:
+                async with self._make_supervisor(
+                    bubble, ROUTING_BUBBLE_TEXT, task_prompt=task_prompt
+                ) as sup:
+                    try:
+                        await runner.run(
+                            on_update=sup.on_update, on_final=sup.on_final
+                        )
+                    except asyncio.CancelledError:
+                        await sup.mark_interrupted()
+                        raise
+                    except Exception as exc:
+                        await sup.mark_crashed(str(exc))
+                        logger.exception("smart router cursor-agent crashed")
+                        return (None, runner)
+            except asyncio.CancelledError:
+                raise
+
+            # Stale --resume recovery: if the stored router session id is
+            # gone upstream, drop it so the next call starts fresh. We
+            # do NOT retry inside this hop -- the user's message is the
+            # routing trigger, and on a missed resume we conservatively
+            # delegate so the worker still gets the message verbatim.
+            if runner.resume_failed and resume_id:
+                logger.warning(
+                    "smart router resume of %s (topic=%s) failed; "
+                    "clearing and falling through to worker",
+                    resume_id, topic_id,
+                )
+                self._router_sessions[topic_id] = None
+                try:
+                    session_store.clear_router(self.paths, topic_id)
+                except Exception:
+                    logger.exception(
+                        "session_store.clear_router crashed for topic %s",
+                        topic_id,
+                    )
+                return (None, runner)
+
+            new_id = runner.session_id
+            if new_id and new_id != self._router_sessions.get(topic_id):
+                self._router_sessions[topic_id] = new_id
+                try:
+                    session_store.save_router(
+                        self.paths,
+                        topic_id,
+                        ChatSession.now(session_id=new_id, model=ROUTER_MODEL),
+                    )
+                    logger.info(
+                        "persisted new router session id: %s (topic=%s)",
+                        new_id, topic_id,
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "could not persist router session %s (topic=%s): %s",
+                        new_id, topic_id, exc,
+                    )
+
+            return (self._router.parse_decision(runner.final_text), runner)
 
     def _make_supervisor(
         self,
@@ -570,6 +1272,7 @@ class CursorAgent:
             INITIAL_BUBBLE_TEXT: "Starting",
             PLAN_INITIAL_BUBBLE_TEXT: "Planning",
             IMPL_INITIAL_BUBBLE_TEXT: "Implementing",
+            ROUTING_BUBBLE_TEXT: "Routing",
         }.get(initial_text, "Starting")
         key = "" if SUPERVISOR_DISABLE else self.openai_api_key
         return Supervisor(
@@ -631,6 +1334,17 @@ class CursorAgent:
             candidates.add(f"/restart@{self.bot_username.lower()}")
         return head in candidates
 
+    def _match_abort_command(self, prompt: str) -> bool:
+        """True if ``prompt`` is ``/abort`` (optionally ``@<bot>``).
+
+        Trailing arguments are ignored -- /abort is parameterless.
+        """
+        head = prompt.partition(" ")[0].lower()
+        candidates = {"/abort"}
+        if self.bot_username:
+            candidates.add(f"/abort@{self.bot_username.lower()}")
+        return head in candidates
+
     def _match_cron_command(self, prompt: str) -> Optional[str]:
         """Return the trailing argument if ``prompt`` is a ``/cron`` command,
         else None. The argument may be empty (bare ``/cron`` lists)."""
@@ -655,6 +1369,24 @@ class CursorAgent:
         candidates = {"/confirm"}
         if self.bot_username:
             candidates.add(f"/confirm@{self.bot_username.lower()}")
+        if head_lower not in candidates:
+            return None
+        return rest.strip()
+
+    def _match_workspace_command(self, prompt: str) -> Optional[str]:
+        """Return the trailing argument if ``prompt`` is ``/workspace`` (or
+        ``/cwd`` alias), else None.
+
+        Empty argument means "show the current workspace"; anything else is
+        a path to set as the topic's cursor-agent ``--workspace``.
+        """
+        head, _, rest = prompt.partition(" ")
+        head_lower = head.lower()
+        candidates = {"/workspace", "/cwd"}
+        if self.bot_username:
+            uname = self.bot_username.lower()
+            candidates.add(f"/workspace@{uname}")
+            candidates.add(f"/cwd@{uname}")
         if head_lower not in candidates:
             return None
         return rest.strip()
@@ -820,7 +1552,11 @@ class CursorAgent:
             )
             if sent is None:
                 return
-            voice_bubble = self._make_bubble(http, sent["message_id"])
+            voice_bubble = self._make_bubble(
+                http,
+                sent["message_id"],
+                message_thread_id=self._topic_thread_id(message),
+            )
 
             try:
                 prompt = await self._transcribe_voice(http, audio)
@@ -891,12 +1627,27 @@ class CursorAgent:
             await self._handle_cron_command(http, message, cron_arg)
             return
 
+        workspace_arg = self._match_workspace_command(prompt)
+        if workspace_arg is not None:
+            if voice_bubble is not None:
+                try:
+                    await voice_bubble.finalize(f"voice: {prompt}")
+                finally:
+                    await voice_bubble.aclose()
+            logger.info(
+                "dispatching /workspace from %s (arg=%r)",
+                sender, workspace_arg[:120],
+            )
+            await self._handle_workspace_command(http, message, workspace_arg)
+            return
+
         if self._match_reset_command(prompt):
             if voice_bubble is not None:
                 try:
                     await voice_bubble.finalize(f"voice: {prompt}")
                 finally:
                     await voice_bubble.aclose()
+            topic_id = self._topic_thread_id(message)
             if self._skip_confirm:
                 logger.info("dispatching /reset from %s (confirm skipped)", sender)
                 await self._handle_reset_command(http, message)
@@ -906,8 +1657,8 @@ class CursorAgent:
                     http,
                     message,
                     label="/reset",
-                    description="wipe the persistent chat session",
-                    action=lambda b: self._handle_reset_action(b),
+                    description="wipe the persistent chat session for this topic",
+                    action=lambda b, _tid=topic_id: self._handle_reset_action(b, topic_id=_tid),
                 )
             return
 
@@ -940,6 +1691,7 @@ class CursorAgent:
                     await voice_bubble.finalize(f"voice: {prompt}")
                 finally:
                     await voice_bubble.aclose()
+            topic_id = self._topic_thread_id(message)
             if self._skip_confirm:
                 logger.info("dispatching /restart from %s (confirm skipped)", sender)
                 await self._handle_restart_command(http, message)
@@ -950,12 +1702,238 @@ class CursorAgent:
                     message,
                     label="/restart",
                     description="pm2 reload this machine (no code changes)",
-                    action=lambda b: self._handle_restart_action(b),
+                    action=lambda b, _tid=topic_id: self._handle_restart_action(b, thread_id=_tid),
                 )
             return
 
-        logger.info("dispatching message from %s -> cursor-agent (len=%d)", sender, len(prompt))
+        if self._match_abort_command(prompt):
+            if voice_bubble is not None:
+                try:
+                    await voice_bubble.finalize(f"voice: {prompt}")
+                finally:
+                    await voice_bubble.aclose()
+            if self._skip_confirm:
+                logger.info("dispatching /abort from %s (confirm skipped)", sender)
+                await self._handle_abort_command(http, message)
+            else:
+                logger.info("gating /abort from %s behind Confirm/Cancel", sender)
+                await self._prompt_confirmation(
+                    http,
+                    message,
+                    label="/abort",
+                    description=(
+                        "cancel all in-flight handlers (cursor-agent runs, "
+                        "/plan, /update, …); crons keep running"
+                    ),
+                    action=lambda b: self._handle_abort_action(b),
+                )
+            return
 
+        # Front-line SmartRouter: cursor-agent in agent mode against
+        # this topic's --resume router session, so the routing decision
+        # has full chat-history context. The agent ends its reply with
+        # one of a small slash-command set (/cron, /restart, /workspace,
+        # /update, /plan, /delegate) which we parse + dispatch via the
+        # existing handlers (_router_do_* below).
+        #
+        # ONE bubble per user message wherever possible:
+        #   - text answer:    bubble's final text IS the answer.
+        #   - action slash:   bubble's final text IS the recap + decision
+        #                     ("Scheduling 5-min disk check.\n→ /cron 5 ...");
+        #                     the dispatched handler creates its own ack bubble.
+        #   - /delegate:      bubble's final text is the recap; the worker
+        #                     spawns a separate rollout + summary pair so
+        #                     its progress is visible distinctly.
+        if not self._router.enabled:
+            logger.info(
+                "smart router disabled; dispatching message from %s straight "
+                "to worker (len=%d)", sender, len(prompt),
+            )
+            await self._dispatch_chat_worker(
+                http=http,
+                message=message,
+                prompt=prompt,
+                voice_bubble=voice_bubble,
+                reply_block=reply_block,
+            )
+            return
+
+        topic_id = self._topic_thread_id(message)
+        ctx = self._build_router_ctx(http, message)
+
+        if voice_bubble is not None:
+            bubble = voice_bubble
+            await bubble.update(ROUTING_BUBBLE_TEXT)
+        else:
+            sent = await self._send_initial_bubble(
+                http, message, text=ROUTING_BUBBLE_TEXT,
+            )
+            if sent is None:
+                return
+            bubble = self._make_bubble(
+                http,
+                sent["message_id"],
+                message_thread_id=topic_id,
+                edit_interval=ROLLOUT_EDIT_INTERVAL,
+            )
+
+        # Journal the routing bubble so a reply that lands while it's
+        # in-flight resolves to this run. Records ROUTER_MODEL so the
+        # journal reflects which model actually produced the recap; if
+        # the router delegates, the worker's own bubble (with model=
+        # CHAT_MODEL) is journaled separately.
+        self._runs.record_start(
+            bubble.message_id,
+            kind="chat",
+            trigger_message_id=message.get("message_id"),
+            trigger_text=prompt,
+            trigger_sender=self._trigger_sender_label(message),
+            model=ROUTER_MODEL,
+        )
+
+        # Reply-context is grounding for resolving "no, the second one"
+        # / "did that finish?" -- equally useful to the router and the
+        # worker, so we feed it to both via the same fenced block.
+        router_prompt = (
+            (reply_block + "\n\n" + prompt) if reply_block else prompt
+        )
+
+        decision: Optional[RouterDecision] = None
+        router_runner: Optional[CursorRunner] = None
+        try:
+            decision, router_runner = await self._run_smart_router(
+                http=http,
+                message=message,
+                prompt=router_prompt,
+                bubble=bubble,
+                ctx=ctx,
+                topic_id=topic_id,
+            )
+        except asyncio.CancelledError:
+            await bubble.aclose()
+            self._record_chat_finish(bubble, "interrupted", router_runner)
+            raise
+        except Exception:
+            logger.exception("smart router crashed; falling through to worker")
+
+        # Recover-by-delegate: if the router never produced a decision
+        # we want the worker to actually answer the user. The routing
+        # bubble has been finalised by the supervisor with its terminal
+        # "Done" line; surface a short note and spawn a fresh worker
+        # bubble so the user has clear visual progress.
+        if decision is None:
+            try:
+                await bubble.finalize(
+                    "router unavailable; handing off to the worker…"
+                )
+            except Exception:
+                logger.exception("finalising router-failure bubble (swallowed)")
+            finally:
+                await bubble.aclose()
+            self._record_chat_finish(bubble, "error", router_runner)
+            await self._dispatch_chat_worker(
+                http=http,
+                message=message,
+                prompt=prompt,
+                voice_bubble=None,
+                reply_block=reply_block,
+            )
+            return
+
+        # No-slash branch: the router answered the user directly; the
+        # answer text becomes the bubble's final state, no extra bubble.
+        if decision.slash is None:
+            answer = (
+                decision.recap.strip()
+                or decision.raw_final.strip()
+                or "(no response)"
+            )
+            try:
+                await bubble.finalize(answer)
+            except Exception:
+                logger.exception("finalising router answer bubble (swallowed)")
+            finally:
+                await bubble.aclose()
+            self._record_chat_finish(bubble, "ok", router_runner)
+            logger.info(
+                "smart router answered %s directly (len=%d)", sender, len(answer),
+            )
+            return
+
+        cmd, args = decision.slash
+        logger.info(
+            "smart router → %s (sender=%s, args=%r)", cmd, sender, args[:80],
+        )
+
+        # Render the routing bubble's *final* state as recap + decision
+        # marker. For /delegate the recap is usually a one-liner ("I'll
+        # forward this to the worker"); we surface it so the user can see
+        # WHY the router delegated.
+        recap = decision.recap.strip()
+        ack_line = f"→ {cmd}{(' ' + args) if args else ''}"
+        display = (recap + "\n\n" + ack_line) if recap else ack_line
+        try:
+            await bubble.finalize(display)
+        except Exception:
+            logger.exception("finalising router decision bubble (swallowed)")
+        finally:
+            await bubble.aclose()
+        self._record_chat_finish(bubble, "ok", router_runner)
+
+        if cmd == DELEGATE_SLASH:
+            # /delegate: hand off to the heavy worker on a fresh bubble.
+            # The routing bubble stands as the audit trail of the routing
+            # decision; the worker bubble carries the actual progress +
+            # answer so the two are visually distinct.
+            await self._dispatch_chat_worker(
+                http=http,
+                message=message,
+                prompt=prompt,
+                voice_bubble=None,
+                reply_block=reply_block,
+            )
+            return
+
+        # Action slash: dispatch via existing handlers (which own their
+        # ack bubble lifecycle).
+        try:
+            outcome = await self._router.dispatch(cmd, args, ctx)
+        except Exception:
+            logger.exception(
+                "router dispatch of %s crashed; falling through to worker", cmd,
+            )
+            outcome = RouterOutcome.DELEGATE
+
+        if outcome is RouterOutcome.HANDLED:
+            return
+
+        # Unknown slash (defensive): treat as delegate.
+        await self._dispatch_chat_worker(
+            http=http,
+            message=message,
+            prompt=prompt,
+            voice_bubble=None,
+            reply_block=reply_block,
+        )
+
+    async def _dispatch_chat_worker(
+        self,
+        *,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+        prompt: str,
+        voice_bubble: Optional[Bubble],
+        reply_block: str,
+    ) -> None:
+        """Run the heavy chat worker for ``prompt`` in a fresh rollout bubble.
+
+        Factored out of ``_handle_message`` so both the SmartRouter
+        delegation path and the router-disabled bypass path share one
+        implementation. Reuses ``voice_bubble`` if supplied (so the
+        already-visible voice transcription bubble continues into the
+        worker), otherwise opens a new ``thinking...`` bubble.
+        """
+        sender = self._trigger_sender_label(message)
         if voice_bubble is not None:
             bubble = voice_bubble
             await bubble.update(INITIAL_BUBBLE_TEXT)
@@ -963,17 +1941,19 @@ class CursorAgent:
             sent = await self._send_initial_bubble(http, message)
             if sent is None:
                 return
-            bubble = self._make_bubble(http, sent["message_id"])
+            bubble = self._make_bubble(
+                http,
+                sent["message_id"],
+                message_thread_id=self._topic_thread_id(message),
+                edit_interval=ROLLOUT_EDIT_INTERVAL,
+            )
 
-        # Open a journal entry for this bubble *before* we hand off to the
-        # runner, so the user can already reply to the in-flight bubble
-        # and get a sensible "(run is still in progress)" context block.
         self._runs.record_start(
             bubble.message_id,
             kind="chat",
             trigger_message_id=message.get("message_id"),
             trigger_text=prompt,
-            trigger_sender=self._trigger_sender_label(message),
+            trigger_sender=sender,
             model=CHAT_MODEL,
         )
 
@@ -985,6 +1965,138 @@ class CursorAgent:
             reply_context=reply_block,
         )
 
+    # ---- router glue ----------------------------------------------------
+    # The five ``_router_do_*`` methods below are thin shims the front-line
+    # router calls into; they reuse existing slash-command handlers so the
+    # router never reimplements behaviour, only routes to it. ``do_say``
+    # is the one-shot bubble used by the router for clarifications and
+    # arg-validation errors.
+
+    def _build_router_ctx(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+    ) -> RouterContext:
+        """Construct the per-message :class:`RouterContext`.
+
+        Each bound ``do_*`` closes over ``http`` + ``message`` so the
+        :mod:`router` module never sees Telegram primitives directly. The
+        topic id and workspace are also captured here so the router's
+        system prompt can mention them (it does NOT need the full Arbos
+        system context).
+        """
+        topic_id = self._topic_thread_id(message)
+        workspace = self._workdir_for(topic_id)
+        return RouterContext(
+            machine_name=self.machine,
+            topic_id=topic_id,
+            workspace=workspace,
+            do_workspace=lambda p: self._router_do_workspace(http, message, p),
+            do_restart_with_confirm=lambda: self._router_do_restart(http, message),
+            do_update_with_confirm=lambda: self._router_do_update(http, message),
+            do_add_cron=lambda mins, prompt: self._router_do_add_cron(
+                http, message, mins, prompt
+            ),
+            do_plan=lambda req: self._router_do_plan(http, message, req),
+            do_say=lambda text: self._send_short_bubble(http, message, text),
+        )
+
+    async def _router_do_workspace(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+        path: Path,
+    ) -> None:
+        """Forward to ``_handle_workspace_command`` with a resolved path.
+
+        The handler already validates existence + dir-ness, persists the
+        new workspace, clears the topic's chat session, re-renders
+        PROMPT.md, renames the topic, and finalises an ack bubble. We
+        pass ``str(path)``; the handler re-resolves (idempotent on an
+        already-resolved path).
+        """
+        await self._handle_workspace_command(http, message, str(path))
+
+    async def _router_do_restart(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+    ) -> None:
+        """Restart, gated through the existing Confirm/Cancel keyboard.
+
+        Honours ``ARBOS_SKIP_CONFIRM`` exactly like the literal
+        ``/restart`` slash command does -- the router never bypasses
+        the confirmation gate that the user explicitly opted into.
+        """
+        topic_id = self._topic_thread_id(message)
+        if self._skip_confirm:
+            await self._handle_restart_command(http, message)
+            return
+        await self._prompt_confirmation(
+            http,
+            message,
+            label="/restart",
+            description="pm2 reload this machine (no code changes)",
+            action=lambda b, _tid=topic_id: self._handle_restart_action(b, thread_id=_tid),
+        )
+
+    async def _router_do_update(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+    ) -> None:
+        """Update from ``origin/main``, gated through Confirm/Cancel.
+
+        Mirrors the literal ``/update`` slash-command path including the
+        ``ARBOS_SKIP_CONFIRM`` bypass.
+        """
+        if self._skip_confirm:
+            await self._handle_update_command(http, message)
+            return
+        await self._prompt_confirmation(
+            http,
+            message,
+            label="/update",
+            description=(
+                "git fetch + hard-reset to origin/main, reinstall if "
+                "needed, then pm2 reload this machine"
+            ),
+            action=lambda b: self._handle_update_action(b),
+        )
+
+    async def _router_do_add_cron(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+        mins: int,
+        prompt: str,
+    ) -> None:
+        """Schedule a cron via the existing ``/cron <mins> <prompt>`` path.
+
+        Format-and-forward keeps the cron-add behaviour (immediate first
+        run, journaling, ack bubble shape) identical to the literal
+        slash command -- the only difference is who invoked it.
+        """
+        composed = f"{int(mins)} {prompt}".strip()
+        await self._handle_cron_command(http, message, composed)
+
+    async def _router_do_plan(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+        request: str,
+    ) -> None:
+        """Run the 2-phase ``/plan`` flow on a router-classified request.
+
+        The reply-context block is the same one ``_handle_message``
+        already computed above; we recompute here to avoid plumbing it
+        through the router (cheap; the journal lookup is local).
+        """
+        reply_block = self._build_reply_context_block(message, request)
+        await self._handle_plan_command(
+            http, message, request, reply_context=reply_block
+        )
+
     async def _run_persistent_chat(
         self,
         *,
@@ -994,12 +2106,13 @@ class CursorAgent:
         bubble: Bubble,
         reply_context: str = "",
     ) -> None:
-        """Spawn cursor-agent against the per-topic persistent chat.
+        """Spawn cursor-agent against THIS topic's persistent chat.
 
-        Serialised on ``self._chat_lock`` because cursor-agent's ``--resume``
-        appends to a single chat thread; concurrent appends would interleave.
-        Auto-recovers from a stale/missing session by clearing the stored id
-        and retrying once without ``--resume``.
+        Serialised on a per-topic lock because cursor-agent's ``--resume``
+        appends to a single chat thread; concurrent appends to the *same*
+        chat would interleave. Different topics run in parallel.
+        Auto-recovers from a stale/missing session by clearing the stored
+        id and retrying once without ``--resume``.
 
         ``reply_context``, if non-empty, is prepended to ``prompt`` as a
         ``<<<REPLY_CONTEXT>>>``-fenced block so the model can ground "no,
@@ -1012,7 +2125,8 @@ class CursorAgent:
         summary bubble is sent.
         """
         status = "ok"
-        async with self._chat_lock:
+        topic_id = self._topic_thread_id(message)
+        async with self._chat_lock_for(topic_id):
             runner: Optional[CursorRunner] = None
             try:
                 runner = await self._do_persistent_chat_run(
@@ -1066,7 +2180,9 @@ class CursorAgent:
         bubble: Bubble,
         reply_context: str = "",
     ) -> CursorRunner:
-        resume_id = self._chat_session_id
+        topic_id = self._topic_thread_id(message)
+        resume_id = self._chat_sessions.get(topic_id)
+        workdir = self._workdir_for(topic_id)
         # The REPLY_CONTEXT block is conceptually system-level
         # instructions for resolving a referent, but cursor-agent has no
         # dedicated channel for it; we tack it onto the user prompt with
@@ -1077,9 +2193,9 @@ class CursorAgent:
 
         runner = CursorRunner(
             prompt=full_prompt,
-            workdir=self.workdir,
+            workdir=workdir,
             model=CHAT_MODEL,
-            system_prompt=self._system_prompt(),
+            system_prompt=self._system_prompt(topic_id),
             extra_prompts=self._extra_prompts(),
             resume_session=resume_id,
         )
@@ -1087,32 +2203,36 @@ class CursorAgent:
 
         if runner.resume_failed and resume_id:
             logger.warning(
-                "resume of chat %s failed; clearing and starting fresh",
-                resume_id,
+                "resume of chat %s (topic=%s) failed; clearing and starting fresh",
+                resume_id, topic_id,
             )
-            self._chat_session_id = None
-            session_store.clear(self.paths)
+            self._chat_sessions[topic_id] = None
+            session_store.clear(self.paths, topic_id)
             runner = CursorRunner(
                 prompt=full_prompt,
-                workdir=self.workdir,
+                workdir=workdir,
                 model=CHAT_MODEL,
-                system_prompt=self._system_prompt(),
+                system_prompt=self._system_prompt(topic_id),
                 extra_prompts=self._extra_prompts(),
             )
             await self._run_supervised(http, message, bubble, runner)
 
         new_id = runner.session_id
-        if new_id and new_id != self._chat_session_id:
-            self._chat_session_id = new_id
+        if new_id and new_id != self._chat_sessions.get(topic_id):
+            self._chat_sessions[topic_id] = new_id
             try:
                 session_store.save(
                     self.paths,
+                    topic_id,
                     ChatSession.now(session_id=new_id, model=CHAT_MODEL),
                 )
-                logger.info("persisted new chat session id: %s", new_id)
+                logger.info(
+                    "persisted new chat session id: %s (topic=%s)", new_id, topic_id,
+                )
             except OSError as exc:
                 logger.warning(
-                    "could not persist chat session %s: %s", new_id, exc
+                    "could not persist chat session %s (topic=%s): %s",
+                    new_id, topic_id, exc,
                 )
         return runner
 
@@ -1176,12 +2296,119 @@ class CursorAgent:
             raise RuntimeError("whisper returned empty transcript")
         return transcript
 
+    async def _handle_workspace_command(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+        arg: str,
+    ) -> None:
+        """Set (or show) the cursor-agent ``--workspace`` for THIS topic.
+
+        ``/workspace`` (no arg)        -> show current workspace
+        ``/workspace ~/projA``        -> set workspace, clear chat session
+
+        Tilde + relative paths are expanded against the agent's home; the
+        target must already exist and be a directory. Setting the workspace
+        clears the topic's persistent cursor-agent chat session because a
+        cwd change typically means the user has moved to a different
+        project, and a stale session would be confusing.
+        """
+        topic_id = self._topic_thread_id(message)
+        arg = (arg or "").strip()
+
+        if not arg:
+            current = self._workdir_for(topic_id)
+            await self._send_short_bubble(
+                http,
+                message,
+                f"workspace: {current}\nusage: /workspace <path>",
+            )
+            return
+
+        try:
+            path = Path(arg).expanduser().resolve()
+        except (OSError, RuntimeError) as exc:
+            await self._send_short_bubble(
+                http, message, f"could not resolve {arg!r}: {exc}",
+            )
+            return
+        if not path.exists():
+            await self._send_short_bubble(
+                http, message, f"no such directory: {path}",
+            )
+            return
+        if not path.is_dir():
+            await self._send_short_bubble(
+                http, message, f"not a directory: {path}",
+            )
+            return
+
+        try:
+            topic_state.set_workspace(self.paths, topic_id, str(path))
+        except OSError as exc:
+            await self._send_short_bubble(
+                http, message, f"could not save workspace: {exc}",
+            )
+            return
+
+        # cwd change == new project context. Wipe the persistent chat
+        # session for this topic so the model isn't anchored on the
+        # previous workspace's history.
+        cleared_session: Optional[str] = None
+        async with self._chat_lock_for(topic_id):
+            cleared_session = self._chat_sessions.get(topic_id)
+            self._chat_sessions[topic_id] = None
+            try:
+                session_store.clear(self.paths, topic_id)
+            except Exception:
+                logger.exception(
+                    "session_store.clear crashed for topic %s", topic_id
+                )
+
+        # Re-render PROMPT.md with the new workspace so the next message's
+        # system preamble reflects the change immediately (rather than
+        # waiting for the per-topic cache to expire).
+        try:
+            build_prompt(
+                self.paths,
+                self.config,
+                workspace=path,
+                topic_id=topic_id,
+                force=True,
+            )
+        except Exception:
+            logger.exception(
+                "post-/workspace PROMPT.md re-render failed (swallowed)"
+            )
+
+        # Push the new workspace into the Telegram topic title so the
+        # header reflects what the agent is bound to. Best-effort: a
+        # rename failure (e.g. revoked topic-management right) is just
+        # logged; the workspace is still set in our own state.
+        try:
+            await self._rename_topic_for_workspace(http, topic_id, str(path))
+        except Exception:
+            logger.exception(
+                "topic rename after /workspace failed (topic=%s)", topic_id
+            )
+
+        ack = f"workspace set: {path}"
+        if cleared_session:
+            ack += f"\nstarted a fresh chat for this topic (cleared {cleared_session})"
+        else:
+            ack += "\n(no prior chat session to clear)"
+        await self._send_short_bubble(http, message, ack)
+        logger.info(
+            "topic %s workspace -> %s (session cleared: %s)",
+            topic_id, path, bool(cleared_session),
+        )
+
     async def _handle_reset_command(
         self,
         http: httpx.AsyncClient,
         message: dict[str, Any],
     ) -> None:
-        """Wipe the persistent chat session and ack with a bubble."""
+        """Wipe THIS topic's persistent chat session and ack with a bubble."""
         sent = await self._send_initial_bubble(http, message, text="resetting…")
         if sent is None:
             return
@@ -1191,9 +2418,12 @@ class CursorAgent:
             message=message,
             trigger_text="/reset",
         )
-        bubble = self._make_bubble(http, sent["message_id"])
+        topic_id = self._topic_thread_id(message)
+        bubble = self._make_bubble(
+            http, sent["message_id"], message_thread_id=topic_id
+        )
         try:
-            await self._handle_reset_action(bubble)
+            await self._handle_reset_action(bubble, topic_id=topic_id)
         finally:
             await bubble.aclose()
             self._journal_command_finish(
@@ -1202,19 +2432,39 @@ class CursorAgent:
                 final_text=bubble.last_sent or "",
             )
 
-    async def _handle_reset_action(self, bubble: Bubble) -> None:
-        """Reset behaviour, given an already-sent bubble to finalise into."""
-        async with self._chat_lock:
-            prev = self._chat_session_id
-            removed = session_store.clear(self.paths)
-            self._chat_session_id = None
+    async def _handle_reset_action(
+        self, bubble: Bubble, *, topic_id: int
+    ) -> None:
+        """Reset behaviour for ``topic_id``, given an already-sent bubble.
 
+        Wipes BOTH the worker chat session and the SmartRouter session so
+        ``/reset`` returns the topic to a fully fresh state -- the router
+        no longer remembers prior decisions and the worker no longer
+        remembers prior coding context. Both locks are taken so we don't
+        race an in-flight router or worker run.
+        """
+        async with self._chat_lock_for(topic_id):
+            prev = self._chat_sessions.get(topic_id)
+            removed = session_store.clear(self.paths, topic_id)
+            self._chat_sessions[topic_id] = None
+        async with self._router_lock_for(topic_id):
+            prev_router = self._router_sessions.get(topic_id)
+            removed_router = session_store.clear_router(self.paths, topic_id)
+            self._router_sessions[topic_id] = None
+
+        bits: list[str] = []
         if prev:
-            text = f"started a fresh chat (cleared session {prev})"
+            bits.append(f"cleared chat session {prev}")
         elif removed:
-            text = "started a fresh chat (cleared stale session file)"
+            bits.append("cleared stale chat session file")
+        if prev_router:
+            bits.append(f"cleared router session {prev_router}")
+        elif removed_router:
+            bits.append("cleared stale router session file")
+        if bits:
+            text = "started a fresh chat for this topic (" + ", ".join(bits) + ")"
         else:
-            text = "no chat session to reset; next message will start one"
+            text = "no chat or router session to reset; next message will start one"
         await bubble.finalize(text)
 
     async def _handle_update_command(
@@ -1245,7 +2495,11 @@ class CursorAgent:
             message=message,
             trigger_text="/update",
         )
-        bubble = self._make_bubble(http, sent["message_id"])
+        bubble = self._make_bubble(
+            http,
+            sent["message_id"],
+            message_thread_id=self._topic_thread_id(message),
+        )
         await self._handle_update_action(bubble)
 
     async def _handle_update_action(self, bubble: Bubble) -> None:
@@ -1386,14 +2640,27 @@ class CursorAgent:
             message=message,
             trigger_text="/restart",
         )
-        bubble = self._make_bubble(http, sent["message_id"])
-        await self._handle_restart_action(bubble)
+        bubble = self._make_bubble(
+            http,
+            sent["message_id"],
+            message_thread_id=self._topic_thread_id(message),
+        )
+        await self._handle_restart_action(bubble, thread_id=self._topic_thread_id(message))
 
-    async def _handle_restart_action(self, bubble: Bubble) -> None:
-        """Restart behaviour, given an already-sent bubble to drive."""
+    async def _handle_restart_action(
+        self, bubble: Bubble, *, thread_id: Optional[int] = None
+    ) -> None:
+        """Restart behaviour, given an already-sent bubble to drive.
+
+        ``thread_id`` is the topic the user triggered ``/restart`` from;
+        the post-restart agent will edit the same bubble in that topic
+        (see :meth:`_finalize_restart_marker`). Defaults to the home
+        topic when callers don't know it (e.g. /confirm wrappers built
+        from arbitrary contexts).
+        """
         status = "ok"
         try:
-            await self._do_restart_run(bubble)
+            await self._do_restart_run(bubble, thread_id=thread_id or self.home_topic_id)
         except asyncio.CancelledError:
             status = "interrupted"
             try:
@@ -1422,7 +2689,7 @@ class CursorAgent:
                 bubble.message_id, status=status, final_text=bubble.last_sent or ""
             )
 
-    async def _do_restart_run(self, bubble: Bubble) -> None:
+    async def _do_restart_run(self, bubble: Bubble, *, thread_id: int) -> None:
         # Persist enough info for the post-restart agent to re-attach to
         # this exact bubble. Written *before* spawning pm2 reload so even
         # if pm2 SIGINTs us between the spawn and our own bubble.aclose,
@@ -1430,7 +2697,7 @@ class CursorAgent:
         marker = {
             "version": 1,
             "chat_id": self.chat_id,
-            "thread_id": self.topic_id,
+            "thread_id": int(thread_id),
             "message_id": bubble.message_id,
             "machine": self.machine,
             "started_at": time.time(),
@@ -1536,13 +2803,14 @@ class CursorAgent:
             self._delete_restart_marker()
             return
 
-        # Only honour the marker if it's for *this* topic; otherwise it
-        # belongs to a different machine sharing the .arbos dir layout
-        # (shouldn't happen, but defensive).
-        if chat_id != self.chat_id or thread_id != self.topic_id:
+        # Only honour the marker if it's for our supergroup. Any topic
+        # within the supergroup is fine -- a /restart can be triggered
+        # from the home topic or any other adopted topic, and the
+        # post-restart agent must edit the same bubble in that topic.
+        if chat_id != self.chat_id:
             logger.warning(
-                "restart marker for chat=%s thread=%s; we are chat=%s thread=%s; ignoring",
-                chat_id, thread_id, self.chat_id, self.topic_id,
+                "restart marker for chat=%s; we are chat=%s; ignoring",
+                chat_id, self.chat_id,
             )
             self._delete_restart_marker()
             return
@@ -1577,6 +2845,70 @@ class CursorAgent:
             await bubble.aclose()
             self._delete_restart_marker()
 
+    async def _handle_abort_command(
+        self,
+        http: httpx.AsyncClient,
+        message: dict[str, Any],
+    ) -> None:
+        """Cancel every in-flight handler and ack with a bubble."""
+        sent = await self._send_initial_bubble(http, message, text="aborting…")
+        if sent is None:
+            return
+        self._journal_command_start(
+            sent["message_id"],
+            kind="abort",
+            message=message,
+            trigger_text="/abort",
+        )
+        bubble = self._make_bubble(
+            http,
+            sent["message_id"],
+            message_thread_id=self._topic_thread_id(message),
+        )
+        await self._handle_abort_action(bubble)
+
+    async def _handle_abort_action(self, bubble: Bubble) -> None:
+        """Cancel all tasks in ``self._tasks`` except the one running us.
+
+        Cron loops live in ``self._cron_tasks`` and are intentionally
+        left alone -- they keep their schedule. The cursor-agent
+        subprocess attached to each cancelled handler is torn down by
+        ``CursorRunner.run``'s own ``CancelledError`` branch (terminate
+        then kill after a 5s grace), so we don't need to await them
+        here -- doing so would block ``/abort``'s bubble for up to 5s
+        per child for no UX gain.
+        """
+        status = "ok"
+        try:
+            me = asyncio.current_task()
+            victims = [t for t in self._tasks if t is not me and not t.done()]
+            for t in victims:
+                t.cancel()
+            cleared_confirms = len(self._pending_confirms)
+            self._pending_confirms.clear()
+            logger.info(
+                "/abort cancelled %d handler(s); cleared %d pending confirm(s)",
+                len(victims), cleared_confirms,
+            )
+            await bubble.finalize(
+                f"aborted {len(victims)} in-flight handler(s); "
+                f"cleared {cleared_confirms} pending confirm(s)"
+            )
+        except Exception as exc:
+            status = "error"
+            logger.exception("/abort crashed")
+            try:
+                await bubble.finalize(f"abort crashed: {exc}")
+            except Exception:
+                pass
+        finally:
+            await bubble.aclose()
+            self._journal_command_finish(
+                bubble.message_id,
+                status=status,
+                final_text=bubble.last_sent or "",
+            )
+
     async def _handle_plan_command(
         self,
         http: httpx.AsyncClient,
@@ -1585,12 +2917,15 @@ class CursorAgent:
         *,
         reply_context: str = "",
     ) -> None:
+        topic_id = self._topic_thread_id(message)
         if not request:
             sent = await self._send_initial_bubble(
                 http, message, text="usage: /plan <what you want done>"
             )
             if sent is not None:
-                bubble = self._make_bubble(http, sent["message_id"])
+                bubble = self._make_bubble(
+                    http, sent["message_id"], message_thread_id=topic_id
+                )
                 await bubble.aclose()
             return
 
@@ -1604,7 +2939,12 @@ class CursorAgent:
         if sent1 is None:
             return
 
-        bubble1 = self._make_bubble(http, sent1["message_id"])
+        bubble1 = self._make_bubble(
+            http,
+            sent1["message_id"],
+            message_thread_id=topic_id,
+            edit_interval=ROLLOUT_EDIT_INTERVAL,
+        )
 
         # Journal the plan bubble immediately so a reply hitting it mid-run
         # already gets a "(in progress)" context block.
@@ -1623,10 +2963,10 @@ class CursorAgent:
 
         plan_runner = CursorRunner(
             prompt=plan_prompt,
-            workdir=self.workdir,
+            workdir=self._workdir_for(topic_id),
             model=PLAN_MODEL,
             plan_mode=True,
-            system_prompt=self._system_prompt(),
+            system_prompt=self._system_prompt(topic_id),
             extra_prompts=self._extra_prompts(),
         )
         plan_holder: dict[str, str] = {"text": "", "error": ""}
@@ -1700,7 +3040,12 @@ class CursorAgent:
         if sent2 is None:
             return
 
-        bubble2 = self._make_bubble(http, sent2["message_id"])
+        bubble2 = self._make_bubble(
+            http,
+            sent2["message_id"],
+            message_thread_id=topic_id,
+            edit_interval=ROLLOUT_EDIT_INTERVAL,
+        )
 
         # Cross-link the impl bubble back to the plan bubble so a reply
         # to either surfaces the other half via `paired_bubble_id`.
@@ -1720,9 +3065,9 @@ class CursorAgent:
         )
         impl_runner = CursorRunner(
             prompt=impl_prompt,
-            workdir=self.workdir,
+            workdir=self._workdir_for(topic_id),
             model=IMPL_MODEL,
-            system_prompt=self._system_prompt(),
+            system_prompt=self._system_prompt(topic_id),
             extra_prompts=self._extra_prompts(),
         )
         impl_status = "ok"
@@ -1854,10 +3199,15 @@ class CursorAgent:
                 http, message, text="usage: /confirm <command-or-prompt>"
             )
             if sent is not None:
-                bubble = self._make_bubble(http, sent["message_id"])
+                bubble = self._make_bubble(
+                    http,
+                    sent["message_id"],
+                    message_thread_id=self._topic_thread_id(message),
+                )
                 await bubble.aclose()
             return
 
+        topic_id = self._topic_thread_id(message)
         if self._match_update_command(wrapped):
             label = "/update"
             description = (
@@ -1868,11 +3218,11 @@ class CursorAgent:
         elif self._match_restart_command(wrapped):
             label = "/restart"
             description = "pm2 reload this machine (no code changes)"
-            action = lambda b: self._handle_restart_action(b)
+            action = lambda b, _tid=topic_id: self._handle_restart_action(b, thread_id=_tid)
         elif self._match_reset_command(wrapped):
             label = "/reset"
-            description = "wipe the persistent chat session"
-            action = lambda b: self._handle_reset_action(b)
+            description = "wipe the persistent chat session for this topic"
+            action = lambda b, _tid=topic_id: self._handle_reset_action(b, topic_id=_tid)
         else:
             preview = wrapped if len(wrapped) <= 80 else wrapped[:77] + "…"
             label = "prompt"
@@ -1909,7 +3259,8 @@ class CursorAgent:
             "usage:\n"
             "/cron <mins> <prompt>   schedule a recurring prompt\n"
             "/cron list              show active crons\n"
-            "/cron rm <id>           remove a cron"
+            "/cron rm <id>           remove a cron\n"
+            "(prompt may span multiple lines)"
         )
         args = args.strip()
 
@@ -1917,11 +3268,17 @@ class CursorAgent:
             await self._send_short_bubble(http, message, self._render_cron_list())
             return
 
-        head, _, rest = args.partition(" ")
+        # Split on *any* whitespace (space, tab, or newline) so multi-line
+        # prompts like `/cron 10\n\nI want you to...` parse correctly --
+        # Telegram sends the literal newline, so str.partition(" ") would
+        # otherwise treat `10\n<rest>` as a single token.
+        parts = args.split(None, 1)
+        head = parts[0]
+        rest = parts[1] if len(parts) > 1 else ""
         head_lower = head.lower()
 
         if head_lower in ("rm", "delete", "remove", "del"):
-            cid = rest.strip()
+            cid = rest.strip().split(None, 1)[0] if rest.strip() else ""
             if not cid:
                 await self._send_short_bubble(http, message, "usage: /cron rm <id>")
                 return
@@ -1944,13 +3301,19 @@ class CursorAgent:
             return
 
         sender_label = self._trigger_sender_label(message)
-        entry = self._crons.add(mins=mins, prompt=prompt, created_by=sender_label)
+        topic_id = self._topic_thread_id(message)
+        entry = self._crons.add(
+            mins=mins,
+            prompt=prompt,
+            topic_id=topic_id,
+            created_by=sender_label,
+        )
         self._spawn_cron_task(entry)
         preview = prompt if len(prompt) <= 200 else prompt[:197] + "…"
         await self._send_short_bubble(
             http,
             message,
-            f"scheduled cron {entry.id} every {mins}m (running now): {preview}",
+            f"scheduled cron {entry.id} every {mins}m in this topic (running now): {preview}",
         )
 
     async def _send_short_bubble(
@@ -1962,7 +3325,11 @@ class CursorAgent:
         """One-shot reply bubble for command acks (no streaming, no journal)."""
         sent = await self._send_initial_bubble(http, message, text=text)
         if sent is not None:
-            bubble = self._make_bubble(http, sent["message_id"])
+            bubble = self._make_bubble(
+                http,
+                sent["message_id"],
+                message_thread_id=self._topic_thread_id(message),
+            )
             await bubble.aclose()
 
     def _render_cron_list(self) -> str:
@@ -2056,8 +3423,8 @@ class CursorAgent:
             self._cron_next_at.pop(entry.id, None)
 
     async def _run_cron_iteration(self, entry: CronEntry) -> None:
-        """Post a fresh bubble into the topic and run ``entry.prompt``
-        through the persistent chat session.
+        """Post a fresh bubble into the cron's topic and run ``entry.prompt``
+        through that topic's persistent chat session.
 
         The bubble is *not* a reply (there's no triggering user message);
         the prefix ``(cron <id>)`` makes the origin visually obvious.
@@ -2069,9 +3436,10 @@ class CursorAgent:
             )
             return
 
+        topic_id = entry.topic_id or self.home_topic_id
         params: dict[str, Any] = {
             "chat_id": self.chat_id,
-            "message_thread_id": self.topic_id,
+            "message_thread_id": topic_id,
             "text": f"(cron {entry.id}) {INITIAL_BUBBLE_TEXT}",
             "disable_web_page_preview": True,
         }
@@ -2096,7 +3464,12 @@ class CursorAgent:
             logger.warning("cron %s sendMessage returned no message_id", entry.id)
             return
 
-        bubble = self._make_bubble(http, msg_id)
+        bubble = self._make_bubble(
+            http,
+            msg_id,
+            message_thread_id=topic_id,
+            edit_interval=ROLLOUT_EDIT_INTERVAL,
+        )
 
         try:
             self._runs.record_start(
@@ -2117,7 +3490,7 @@ class CursorAgent:
             "message_id": msg_id,
             "from": {"username": entry.created_by or f"cron-{entry.id}"},
             "chat": {"id": self.chat_id},
-            "message_thread_id": self.topic_id,
+            "message_thread_id": topic_id,
         }
 
         await self._run_persistent_chat(
@@ -2144,8 +3517,14 @@ class CursorAgent:
         return existed or removed
 
     def _restore_crons(self) -> None:
-        """Spawn one asyncio task per persisted cron. Called once at boot."""
+        """Spawn one asyncio task per persisted cron. Called once at boot.
+
+        Backfills ``topic_id`` onto any legacy entry that was written
+        before the multi-topic refactor (when crons were implicitly tied
+        to the home topic).
+        """
         try:
+            self._crons.backfill_topic_id(self.home_topic_id)
             entries = self._crons.all()
         except Exception:
             logger.exception("cron restore: load() crashed; no crons will run")
@@ -2202,11 +3581,14 @@ class CursorAgent:
             await _answer()
             return
 
-        # Only react to callbacks on bubbles in our own topic; ignore others.
+        # Only react to callbacks on bubbles in our own supergroup AND
+        # in a topic we're listening on. Random topics in the same
+        # supergroup that we never adopted are not ours to act on.
         if (msg.get("chat") or {}).get("id") != self.chat_id:
             await _answer()
             return
-        if msg.get("message_thread_id") != self.topic_id:
+        cb_thread_id = msg.get("message_thread_id")
+        if not isinstance(cb_thread_id, int) or cb_thread_id not in self._adopted:
             await _answer()
             return
 
@@ -2223,7 +3605,9 @@ class CursorAgent:
         # Take ownership of the entry so a double-click can't run twice.
         self._pending_confirms.pop(bubble_msg_id, None)
 
-        bubble = self._make_bubble(http, bubble_msg_id)
+        bubble = self._make_bubble(
+            http, bubble_msg_id, message_thread_id=cb_thread_id
+        )
 
         try:
             await bubble.clear_reply_markup()
@@ -2363,8 +3747,8 @@ class CursorAgent:
 
         offset = self._load_offset()
         logger.info(
-            "cursor-agent online: machine=%s chat=%s topic=%s workdir=%s starting_offset=%s",
-            self.machine, self.chat_id, self.topic_id, self.workdir, offset,
+            "cursor-agent online: machine=%s chat=%s home_topic=%s adopted=%d starting_offset=%s",
+            self.machine, self.chat_id, self.home_topic_id, len(self._adopted), offset,
         )
 
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as http:
@@ -2372,14 +3756,31 @@ class CursorAgent:
                 offset = await self._drain_backlog(http)
                 self._save_offset(offset)
 
-            outbox = OutboxWatcher(
-                http=http,
-                bot_token=self.bot_token,
-                chat_id=self.chat_id,
-                message_thread_id=self.topic_id,
-                paths=self.paths,
-            )
-            outbox.start()
+            # Boot one outbox watcher per adopted topic. ``_outbox_http``
+            # is also consulted by ``_start_outbox_watcher`` so that a
+            # topic adopted *at runtime* (via @-mention in a brand-new
+            # forum thread) gets its own watcher spawned immediately.
+            self._outbox_http = http
+            for tid in sorted(self._adopted):
+                self._start_outbox_watcher(tid)
+
+            # Ensure every adopted topic's Telegram header reflects the
+            # current workspace (set on `/workspace` change, but a fresh
+            # boot also has to push the initial render in case the user
+            # restarted before any rename was queued, or upgraded onto
+            # a build that didn't have this feature).
+            for tid in sorted(self._adopted):
+                state = topic_state.load(self.paths, tid)
+                if state is None:
+                    continue
+                try:
+                    await self._rename_topic_for_workspace(
+                        http, tid, state.workspace
+                    )
+                except Exception:
+                    logger.exception(
+                        "boot-time topic rename failed (topic=%s)", tid
+                    )
 
             # Capture the agent-lifetime http client so cron loops can
             # post into Telegram without opening their own. Lifetime is
@@ -2411,7 +3812,17 @@ class CursorAgent:
                 # the next boot.
                 await self._drain_cron_tasks()
                 self._cron_http = None
-                await outbox.stop()
+                # Stop every per-topic outbox watcher.
+                for watcher in list(self._outbox_watchers.values()):
+                    try:
+                        await watcher.stop()
+                    except Exception:
+                        logger.exception(
+                            "outbox watcher stop crashed (topic=%s)",
+                            watcher.topic_id,
+                        )
+                self._outbox_watchers.clear()
+                self._outbox_http = None
                 await self._drain_tasks()
                 # Any handler tasks still pending at this point either
                 # raced the cancellation or refused it; either way we
@@ -2430,6 +3841,8 @@ class CursorAgent:
                     self._runs.mark_running_as_interrupted()
                 except Exception:
                     logger.exception("runjournal sweep crashed")
+                # SmartRouter is stateless (no httpx client, no
+                # subprocess held across calls); nothing to close here.
 
         logger.info("cursor-agent stopping (signal received)")
 
@@ -2565,6 +3978,7 @@ class CursorAgent:
             or self._match_restart_command(text)
             or self._match_confirm_command(text) is not None
             or self._match_cron_command(text) is not None
+            or self._match_workspace_command(text) is not None
         )
         if is_command:
             head = text.partition(" ")[0] or "(command)"

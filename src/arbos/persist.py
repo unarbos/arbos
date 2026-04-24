@@ -58,7 +58,7 @@ def build_stored_config(
     machine_topic: CreatedTopic,
 ) -> StoredConfig:
     return StoredConfig(
-        install_root=str(paths.root),
+        install_root=str(paths.arbos),
         machine=MachineSection(
             name=machine_topic.name,
             topic_id=machine_topic.topic_id,

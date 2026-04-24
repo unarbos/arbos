@@ -6,10 +6,11 @@ Subcommands:
   ``./run.sh`` (or by interactive prompts for the four base secrets if env
   is empty).
 * ``arbos status``   - print persisted install state and last error.
-* ``arbos reset --hard`` - wipe ``.arbos/`` (typed confirmation).
+* ``arbos reset --hard`` - wipe ``~/.arbos/`` (typed confirmation).
 
-All commands operate against ``<cwd>/.arbos/`` as their storage; the install
-root is the directory the command is invoked from.
+All commands operate against the fixed location ``~/.arbos/`` (overridable
+via the ``ARBOS_HOME`` env var, intended for tests). The cwd of invocation
+no longer matters -- there is exactly one install per host.
 """
 
 from __future__ import annotations
@@ -152,7 +153,7 @@ def _build_inputs() -> InstallInputs:
 
 async def _run_install(paths: InstallPaths, inputs: InstallInputs) -> None:
     paths.bootstrap()
-    append_log(paths, f"install start: root={paths.root} machine={inputs.machine_name}")
+    append_log(paths, f"install start: arbos={paths.arbos} machine={inputs.machine_name}")
 
     store = StateStore(paths.state_path)
     snapshot = store.load()
@@ -381,7 +382,6 @@ async def _run_install(paths: InstallPaths, inputs: InstallInputs) -> None:
     write_doppler_writeback(paths, writeback)
 
     console.rule("[bold green]install complete[/bold green]")
-    console.print(f"install root: {paths.root}")
     console.print(f"storage:      {paths.arbos}")
     console.print(f"config:       {paths.config_path}")
     console.print(f"machine:      {inputs.machine_name}  bot: @{inputs.bot_username}")
@@ -425,7 +425,7 @@ def install(
 
 @app.command()
 def status() -> None:
-    """Print the persisted install state for this install root."""
+    """Print the persisted install state for this host's ``~/.arbos``."""
     paths = InstallPaths.discover()
     if not paths.state_path.exists():
         console.print(f"[yellow]no install state at {paths.state_path}[/yellow]")
@@ -433,7 +433,7 @@ def status() -> None:
 
     snapshot = StateStore(paths.state_path).load()
     table = Table(show_header=False, box=None)
-    table.add_row("install_root", str(paths.root))
+    table.add_row("arbos_dir", str(paths.arbos))
     table.add_row("state", snapshot.state.value)
     table.add_row("updated_at", snapshot.updated_at or "-")
     table.add_row("last_error", snapshot.last_error or "-")

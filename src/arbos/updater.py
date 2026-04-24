@@ -87,15 +87,21 @@ def _run(
 def resolve_src_dir(paths: InstallPaths) -> Path:
     """Find the arbos git checkout to update.
 
-    Curl-installed machines clone to ``<install-root>/.arbos/src``; dev
-    machines have the repo as the install root itself.
+    Curl-installed machines clone to ``~/.arbos/src``; dev machines run
+    against an in-place editable install -- in that case we walk up from
+    this module to find the source repo root.
     """
     if (paths.src_dir / ".git").exists():
         return paths.src_dir
-    if (paths.root / ".git").exists():
-        return paths.root
+    # Editable-install dev loop: arbos/updater.py lives at <repo>/src/arbos/.
+    here = Path(__file__).resolve()
+    if len(here.parents) >= 3:
+        candidate = here.parents[2]
+        if (candidate / ".git").exists():
+            return candidate
     raise UpdateError(
-        f"no git checkout at {paths.src_dir} or {paths.root}; nothing to update"
+        f"no git checkout at {paths.src_dir} or in this module's source tree; "
+        "nothing to update"
     )
 
 

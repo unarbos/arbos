@@ -1,14 +1,22 @@
-"""Persisted single-chat session for the per-machine cursor-agent.
+"""Persisted per-topic cursor-agent chat session(s).
 
-Arbos keeps every Telegram message in this machine's forum topic inside a
-single, persistent ``cursor-agent`` chat (resumed via ``--resume <id>`` on
-each spawn). The chat id and a little bookkeeping live in
-``<install-root>/.arbos/chat_session.json``.
+Every adopted forum topic keeps two parallel persistent ``cursor-agent``
+chats (each resumed via ``--resume <id>`` on each spawn):
 
-The store is intentionally tiny + sync: one small JSON read at agent boot,
-one atomic write whenever the id changes (which is rarely — only on first
-spawn after install or after a ``/reset``). Atomic write = ``tmp`` file +
-``os.replace`` so a crash mid-write can never produce a half-written id.
+* the **worker** chat (``chat_session.json``) -- the heavy coding thread
+  the user actually has long-form conversations with;
+* the **router** chat (``router_session.json``) -- the SmartRouter's own
+  thread, used purely for one-shot routing decisions (which slash command
+  to emit / whether to delegate). Kept separate so neither side pollutes
+  the other's history.
+
+Both ids and a little bookkeeping live in ``~/.arbos/topics/<topic_id>/``.
+
+The store is intentionally tiny + sync: one small JSON read at agent boot
+per topic, one atomic write whenever the id changes (which is rare --
+only on first spawn after adoption or after a ``/reset``). Atomic write =
+``tmp`` file + ``os.replace`` so a crash mid-write can never produce a
+half-written id.
 """
 
 from __future__ import annotations
@@ -40,9 +48,7 @@ class ChatSession:
         )
 
 
-def load(paths: InstallPaths) -> Optional[ChatSession]:
-    """Read the persisted chat session, or ``None`` if missing/corrupt."""
-    p = paths.chat_session_path
+def _load_from(p) -> Optional[ChatSession]:
     if not p.exists():
         return None
     try:
@@ -62,14 +68,10 @@ def load(paths: InstallPaths) -> Optional[ChatSession]:
     )
 
 
-def save(paths: InstallPaths, session: ChatSession) -> None:
-    """Atomically persist ``session`` to ``chat_session.json`` (0600)."""
-    p = paths.chat_session_path
-    p.parent.mkdir(parents=True, exist_ok=True)
+def _save_to(paths: InstallPaths, topic_id: int, p, session: ChatSession) -> None:
+    paths.bootstrap_topic(topic_id)
     tmp = p.with_suffix(p.suffix + ".tmp")
     payload = json.dumps(asdict(session), indent=2)
-    # Open with restrictive perms from the start so we never briefly expose
-    # the file world-readable on a shared filesystem.
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w") as fh:
@@ -87,9 +89,7 @@ def save(paths: InstallPaths, session: ChatSession) -> None:
         pass
 
 
-def clear(paths: InstallPaths) -> bool:
-    """Remove the persisted session. Returns ``True`` if a file was removed."""
-    p = paths.chat_session_path
+def _clear_at(p) -> bool:
     try:
         p.unlink()
         return True
@@ -98,3 +98,33 @@ def clear(paths: InstallPaths) -> bool:
     except OSError as exc:
         logger.warning("could not unlink %s: %s", p, exc)
         return False
+
+
+def load(paths: InstallPaths, topic_id: int) -> Optional[ChatSession]:
+    """Read the persisted worker chat session for ``topic_id``, or ``None``."""
+    return _load_from(paths.topic_chat_session_path(topic_id))
+
+
+def save(paths: InstallPaths, topic_id: int, session: ChatSession) -> None:
+    """Atomically persist ``session`` to the topic's worker chat session file (0600)."""
+    _save_to(paths, topic_id, paths.topic_chat_session_path(topic_id), session)
+
+
+def clear(paths: InstallPaths, topic_id: int) -> bool:
+    """Remove the persisted worker chat session for ``topic_id``. Returns True if removed."""
+    return _clear_at(paths.topic_chat_session_path(topic_id))
+
+
+def load_router(paths: InstallPaths, topic_id: int) -> Optional[ChatSession]:
+    """Read the persisted SmartRouter chat session for ``topic_id``, or ``None``."""
+    return _load_from(paths.topic_router_session_path(topic_id))
+
+
+def save_router(paths: InstallPaths, topic_id: int, session: ChatSession) -> None:
+    """Atomically persist ``session`` to the topic's router session file (0600)."""
+    _save_to(paths, topic_id, paths.topic_router_session_path(topic_id), session)
+
+
+def clear_router(paths: InstallPaths, topic_id: int) -> bool:
+    """Remove the persisted router session for ``topic_id``. Returns True if removed."""
+    return _clear_at(paths.topic_router_session_path(topic_id))
