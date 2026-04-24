@@ -27,6 +27,14 @@ UPDATE_BRANCH = "main"
 _GIT_TIMEOUT = 30.0
 _INSTALL_TIMEOUT = 120.0
 
+# Substrings that, when present in a git remote URL, identify it as the
+# arbos repo. We accept any of these so https/ssh, mirror forks, and
+# username variants all match -- the important property is that NO
+# unrelated repo (e.g. a user's templar / project checkout that happens
+# to live near the install) can be mistaken for arbos. Override via the
+# ``ARBOS_UPSTREAM_REMOTES`` env var (comma-separated substrings).
+_DEFAULT_ARBOS_REMOTE_NEEDLES = ("/arbos.git", "/arbos ", "unarbos/arbos")
+
 
 class UpdateError(RuntimeError):
     """User-facing update failure (network, missing git, etc.)."""
@@ -84,24 +92,92 @@ def _run(
 
 # --- public helpers ---------------------------------------------------------
 
-def resolve_src_dir(paths: InstallPaths) -> Path:
-    """Find the arbos git checkout to update.
+def _arbos_remote_needles() -> tuple[str, ...]:
+    """Substrings that identify a git remote URL as the arbos repo.
 
-    Curl-installed machines clone to ``~/.arbos/src``; dev machines run
-    against an in-place editable install -- in that case we walk up from
-    this module to find the source repo root.
+    Override via ``ARBOS_UPSTREAM_REMOTES`` (comma-separated substrings)
+    if a fork / mirror needs to be recognised.
+    """
+    raw = (os.environ.get("ARBOS_UPSTREAM_REMOTES") or "").strip()
+    if raw:
+        extra = tuple(s.strip() for s in raw.split(",") if s.strip())
+        if extra:
+            return extra
+    return _DEFAULT_ARBOS_REMOTE_NEEDLES
+
+
+def _is_arbos_repo(candidate: Path) -> bool:
+    """True iff ``candidate`` is a git repo whose ``origin`` URL looks like arbos.
+
+    The check is intentionally a substring match against ``origin``'s
+    fetch URL: we want to ALLOW https/ssh variants and forks named
+    ``arbos`` (set ARBOS_UPSTREAM_REMOTES to broaden), but REFUSE any
+    unrelated repo so we can never ``git reset --hard`` something that
+    isn't ours. Returns False on any git error.
+    """
+    if not (candidate / ".git").exists():
+        return False
+    try:
+        url = _run(
+            ["git", "remote", "get-url", "origin"], cwd=candidate
+        ).strip()
+    except UpdateError:
+        return False
+    if not url:
+        return False
+    # Pad with a trailing space so substrings like "/arbos " match a URL
+    # whose path component ends exactly with "/arbos" (no .git suffix).
+    haystack = url + " "
+    return any(needle in haystack for needle in _arbos_remote_needles())
+
+
+def resolve_src_dir(paths: InstallPaths) -> Path:
+    """Find the arbos git checkout to update -- and ONLY that.
+
+    Lookup order:
+
+    1. ``~/.arbos/src`` (the canonical curl-install location). Must
+       verify as an arbos repo via :func:`_is_arbos_repo` -- we will
+       NEVER ``git reset --hard`` a directory whose ``origin`` doesn't
+       look like arbos.
+    2. Walk up from this module's path (editable-install dev loop), but
+       again only return a candidate that verifies as arbos. This stops
+       the previous behaviour where the walk-up could land in an
+       unrelated parent git repo (e.g. a project the user happened to
+       install arbos inside) and silently destroy their work.
+
+    Anything else raises :class:`UpdateError` so ``/update`` aborts
+    instead of touching the wrong tree.
     """
     if (paths.src_dir / ".git").exists():
-        return paths.src_dir
+        if _is_arbos_repo(paths.src_dir):
+            return paths.src_dir
+        raise UpdateError(
+            f"{paths.src_dir} is a git repo but its `origin` URL does not "
+            "look like arbos. Refusing to /update -- this looks like a "
+            "different project's checkout. Set ARBOS_UPSTREAM_REMOTES if "
+            "you intend to update from a fork."
+        )
     # Editable-install dev loop: arbos/updater.py lives at <repo>/src/arbos/.
     here = Path(__file__).resolve()
     if len(here.parents) >= 3:
         candidate = here.parents[2]
-        if (candidate / ".git").exists():
+        if _is_arbos_repo(candidate):
             return candidate
+        # Found a git repo but it's NOT arbos -- this is exactly the
+        # scenario that destroyed user work on remote machines (the
+        # walk-up landed in a project repo, /update ran git reset --hard
+        # against it). Refuse loudly.
+        if (candidate / ".git").exists():
+            raise UpdateError(
+                f"refusing to /update {candidate}: that's a git repo but "
+                "its `origin` does not look like arbos. /update only "
+                "touches arbos's own checkout (see ARBOS_UPSTREAM_REMOTES "
+                "for fork support)."
+            )
     raise UpdateError(
-        f"no git checkout at {paths.src_dir} or in this module's source tree; "
-        "nothing to update"
+        f"no arbos git checkout at {paths.src_dir} or in this module's "
+        "source tree; nothing to update"
     )
 
 
@@ -117,11 +193,25 @@ def _head_info(src: Path, ref: str = "HEAD") -> tuple[str, str]:
     return out, ""
 
 
-def _dirty_files(src: Path) -> list[str]:
+def _dirty_tracked_files(src: Path) -> list[str]:
+    """List TRACKED files with uncommitted changes -- the only files that
+    ``git reset --hard origin/main`` actually overwrites.
+
+    Untracked files (``??`` in ``git status --porcelain``) survive a
+    hard reset, so listing them as "wiped" was misleading and led the
+    previous /update output to scare users into thinking we'd deleted
+    work we hadn't. We exclude them here so the post-update warning
+    only mentions files that genuinely got rolled back.
+    """
     out = _run(["git", "status", "--porcelain"], cwd=src)
     files: list[str] = []
     for line in out.splitlines():
-        # `XY <path>` (XY is two-char status)
+        if not line.strip():
+            continue
+        # `XY <path>` (XY is two-char status). `??` means untracked.
+        status = line[:2]
+        if status == "??":
+            continue
         path = line[3:].strip() if len(line) > 3 else line.strip()
         if path:
             files.append(path)
@@ -194,7 +284,11 @@ def fetch_and_reset(src: Path) -> tuple[str, str, str, str, list[str]]:
     if target_sha == old_sha:
         return old_sha, old_subject, old_sha, old_subject, []
 
-    dirty = _dirty_files(src)
+    # Only TRACKED-modified files are actually thrown away by
+    # `git reset --hard`; untracked files survive. Listing untracked
+    # files as "wiped" was misleading and scared users into thinking
+    # /update had destroyed work it hadn't.
+    dirty = _dirty_tracked_files(src)
     _run(
         ["git", "reset", "--hard", f"origin/{UPDATE_BRANCH}"],
         cwd=src,
