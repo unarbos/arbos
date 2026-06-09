@@ -22,7 +22,13 @@ const NoPlanContext = "(no active plans)"
 // then standing (maintain) obligations, then nodes waiting on the human. A
 // [ready] marker means the node can be worked on now; [due] means a deferred
 // or recurring node's time has arrived.
-func Render(nodes []Node, now time.Time) string {
+//
+// last carries each node's most recent attempt — the working memory of the
+// forest. An open node renders its predecessor's outcome beneath it, so every
+// execution vehicle (a recurrence, a retry, a fresh executor, a delegated
+// child) reads what the previous one learned from the same projection it
+// already receives. nil disables the history lines.
+func Render(nodes []Node, last map[NodeID]Attempt, now time.Time) string {
 	if len(nodes) == 0 {
 		return NoPlanContext
 	}
@@ -38,7 +44,7 @@ func Render(nodes []Node, now time.Time) string {
 
 	var b strings.Builder
 	for _, root := range roots {
-		renderPlan(&b, root, children, now)
+		renderPlan(&b, root, children, last, now)
 		if b.Len() > renderBudgetChars {
 			b.WriteString("… (plan truncated; use the plan tool with op:show for the rest)\n")
 			break
@@ -47,7 +53,7 @@ func Render(nodes []Node, now time.Time) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func renderPlan(b *strings.Builder, root Node, children map[NodeID][]Node, now time.Time) {
+func renderPlan(b *strings.Builder, root Node, children map[NodeID][]Node, last map[NodeID]Attempt, now time.Time) {
 	done, total := countAchieve(root.ID, children)
 	fmt.Fprintf(b, "#%d %s", root.ID, root.Goal)
 	if total > 0 {
@@ -56,12 +62,13 @@ func renderPlan(b *strings.Builder, root Node, children map[NodeID][]Node, now t
 	b.WriteString("\n")
 
 	var standing, human []Node
-	renderOpen(b, root.ID, children, now, 1, &standing, &human)
+	renderOpen(b, root.ID, children, last, now, 1, &standing, &human)
 
 	if len(standing) > 0 {
 		b.WriteString("  standing:\n")
 		for _, n := range standing {
 			fmt.Fprintf(b, "    #%d %s%s\n", n.ID, n.Goal, dueSuffix(n, now))
+			writeLastAttempt(b, last, n.ID, "      ")
 		}
 	}
 	if len(human) > 0 {
@@ -72,10 +79,25 @@ func renderPlan(b *strings.Builder, root Node, children map[NodeID][]Node, now t
 	}
 }
 
+// writeLastAttempt prints one node's most recent attempt outcome — its
+// working memory. Absolute time (stable between attempts, ADR-0015), verdict
+// shown only when it was not a success, outcome clipped to one line.
+func writeLastAttempt(b *strings.Builder, last map[NodeID]Attempt, id NodeID, indent string) {
+	a, ok := last[id]
+	if !ok || a.Outcome == "" {
+		return
+	}
+	suffix := ""
+	if a.Verdict != VerdictSuccess {
+		suffix = " — " + string(a.Verdict)
+	}
+	fmt.Fprintf(b, "%slast: %s (%s%s)\n", indent, clipText(a.Outcome, 110), a.At.Format("15:04"), suffix)
+}
+
 // renderOpen walks a subtree depth-first, printing open achieve nodes and
 // collecting maintain and human-assigned nodes for their own sections.
 // Terminal nodes are folded into their parent's done count and not printed.
-func renderOpen(b *strings.Builder, parent NodeID, children map[NodeID][]Node, now time.Time, depth int, standing, human *[]Node) {
+func renderOpen(b *strings.Builder, parent NodeID, children map[NodeID][]Node, last map[NodeID]Attempt, now time.Time, depth int, standing, human *[]Node) {
 	siblings := children[parent]
 	for _, n := range siblings {
 		switch {
@@ -99,7 +121,8 @@ func renderOpen(b *strings.Builder, parent NodeID, children map[NodeID][]Node, n
 				marker = "due"
 			}
 		}
-		fmt.Fprintf(b, "%s#%d [%s] %s", strings.Repeat("  ", depth), n.ID, marker, n.Goal)
+		indent := strings.Repeat("  ", depth)
+		fmt.Fprintf(b, "%s#%d [%s] %s", indent, n.ID, marker, n.Goal)
 		// A deferred node's timer is part of its state: without it the model
 		// cannot answer "what is scheduled?". Absolute time, not a countdown,
 		// so the rendering is stable between state changes (ADR-0015 churn).
@@ -116,7 +139,8 @@ func renderOpen(b *strings.Builder, parent NodeID, children map[NodeID][]Node, n
 			fmt.Fprintf(b, "  — %s", n.Outcome)
 		}
 		b.WriteString("\n")
-		renderOpen(b, n.ID, children, now, depth+1, standing, human)
+		writeLastAttempt(b, last, n.ID, indent+"    ")
+		renderOpen(b, n.ID, children, last, now, depth+1, standing, human)
 	}
 }
 

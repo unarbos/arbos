@@ -210,22 +210,32 @@ func updateOp(ctx context.Context, store Store, a Args, now time.Time) (string, 
 }
 
 func showOp(ctx context.Context, store Store, now time.Time) (string, error) {
+	return renderForest(ctx, store, now)
+}
+
+// renderForest loads the open nodes and their most recent attempts and renders
+// the plan forest. It is the single place that fetches both halves Render needs.
+func renderForest(ctx context.Context, store Store, now time.Time) (string, error) {
 	nodes, err := store.OpenPlanNodes(ctx)
 	if err != nil {
 		return "", err
 	}
-	return Render(nodes, now), nil
+	last, err := store.LastPlanAttempts(ctx)
+	if err != nil {
+		return "", err
+	}
+	return Render(nodes, last, now), nil
 }
 
 // result appends the refreshed forest to a mutation's acknowledgement — the
 // same verification-loop philosophy as edit's updated-region snippet: the
 // model confirms the change from the result instead of issuing a show.
 func result(ctx context.Context, store Store, now time.Time, ack string) (string, error) {
-	nodes, err := store.OpenPlanNodes(ctx)
+	forest, err := renderForest(ctx, store, now)
 	if err != nil {
 		return ack, nil // the mutation succeeded; the echo is best-effort
 	}
-	return ack + "\n\n" + Render(nodes, now), nil
+	return ack + "\n\n" + forest, nil
 }
 
 func sessionFrom(ctx context.Context) string {
@@ -251,7 +261,9 @@ func Injector(store Store) func(context.Context, core.SessionID) ([]core.Segment
 		if err != nil {
 			return nil, nil // intent is best-effort context, never a turn-breaker
 		}
-		content := Render(nodes, time.Now())
+		// Attempt history is best-effort: the forest still renders without it.
+		lastAttempts, _ := store.LastPlanAttempts(ctx)
+		content := Render(nodes, lastAttempts, time.Now())
 		mu.Lock()
 		defer mu.Unlock()
 		prev, seen := last[sid]

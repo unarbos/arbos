@@ -141,6 +141,11 @@ type Store interface {
 	OpenPlanNodes(ctx context.Context) ([]Node, error)
 	// AddPlanAttempt appends one attempt record.
 	AddPlanAttempt(ctx context.Context, a Attempt) error
+	// LastPlanAttempts returns the most recent attempt per node for nodes of
+	// open plans — the working memory the projection surfaces: each execution
+	// (a recurrence, a retry, a fresh executor) reads its predecessor's
+	// outcome from here instead of needing files or recall.
+	LastPlanAttempts(ctx context.Context) (map[NodeID]Attempt, error)
 	// ClaimPlanNode atomically moves a pending node to active for owner,
 	// reporting whether THIS caller won. The compare-and-claim is what lets
 	// several scheduler processes share one store without double-running a

@@ -222,6 +222,40 @@ func (s *Store) AddPlanAttempt(ctx context.Context, a plan.Attempt) error {
 	return nil
 }
 
+// LastPlanAttempts returns the most recent attempt per node, for nodes of
+// open plans — the working memory the projection shows under each open node
+// (a recurrence's previous reading, a retry's failed approach).
+func (s *Store) LastPlanAttempts(ctx context.Context) (map[plan.NodeID]plan.Attempt, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT a.node_id, a.session_id, a.verdict, a.outcome, a.verified_by, a.workspace, a.created_at
+		   FROM plan_attempts a
+		   JOIN (SELECT node_id, MAX(id) AS max_id FROM plan_attempts GROUP BY node_id) m ON m.max_id = a.id
+		   JOIN plan_nodes n ON n.id = a.node_id
+		   JOIN plan_nodes r ON r.id = n.plan_id
+		  WHERE r.status NOT IN ('done','cancelled','failed')`)
+	if err != nil {
+		return nil, fmt.Errorf("last plan attempts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[plan.NodeID]plan.Attempt{}
+	for rows.Next() {
+		var (
+			a        plan.Attempt
+			node, at int64
+			verdict  string
+		)
+		if err := rows.Scan(&node, &a.Session, &verdict, &a.Outcome, &a.VerifiedBy, &a.Workspace, &at); err != nil {
+			return nil, fmt.Errorf("scan last plan attempt: %w", err)
+		}
+		a.Node, a.Verdict, a.At = plan.NodeID(node), plan.Verdict(verdict), fromNanos(at)
+		out[a.Node] = a
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("last plan attempts: %w", err)
+	}
+	return out, nil
+}
+
 // PlanNodesUpdatedSince returns nodes updated after since, from any plan —
 // including closed ones, since a mission finishing is exactly what the
 // front-door brief must report. Ordered by update time, oldest first.
