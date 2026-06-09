@@ -21,6 +21,8 @@ import (
 	"github.com/unarbos/arbos/internal/mcp"
 	"github.com/unarbos/arbos/internal/mind"
 	"github.com/unarbos/arbos/internal/obs"
+	"github.com/unarbos/arbos/internal/outbox"
+	"github.com/unarbos/arbos/internal/plan"
 	"github.com/unarbos/arbos/internal/ports"
 	"github.com/unarbos/arbos/internal/sqlite"
 	"github.com/unarbos/arbos/internal/tool"
@@ -41,10 +43,15 @@ type HostConfig struct {
 	Logger *slog.Logger
 }
 
-// Host bundles the assembled engine with a cleanup hook for MCP subprocesses.
+// Host bundles the assembled engine with a cleanup hook for MCP subprocesses,
+// plus the store and logger seams its optional organs (the plan scheduler)
+// attach through.
 type Host struct {
 	Engine  *engine.Engine
 	Cleanup func()
+
+	store  ports.SessionStore
+	logger *slog.Logger
 }
 
 // Assemble builds the top-level pi engine with delegation tools, memory, MCP, and
@@ -92,6 +99,21 @@ func Assemble(cfg HostConfig) (*Host, error) {
 	if cfg.Approve {
 		piOpts.Approval = pi.CodingApprovalPolicy{}
 	}
+	// Durable intent: when the store backs the plan forest (SQLite, not the
+	// in-memory fake), every session — top-level and delegated children alike —
+	// gets the plan tool and the per-turn forest injection. Set before
+	// pi.Register so children inherit it: one forest in one DB is what makes
+	// intent survive any session and coordinate all of them.
+	if ps, ok := cfg.Store.(plan.Store); ok {
+		piOpts.Plan = ps
+	}
+	// Durable voice: same condition and same reasoning — any session
+	// (including scheduler-spawned executors) may need to reach the user
+	// outside an open conversation, so notify rides wherever the store can
+	// hold an outbox.
+	if os, ok := cfg.Store.(outbox.Store); ok {
+		piOpts.Outbox = os
+	}
 
 	router := agent.NewRouter()
 	if err := pi.Register(router, piOpts, NewSessionID); err != nil {
@@ -137,7 +159,7 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		}
 		mcpMgr.Close()
 	}
-	return &Host{Engine: eng, Cleanup: cleanup}, nil
+	return &Host{Engine: eng, Cleanup: cleanup, store: cfg.Store, logger: cfg.Logger}, nil
 }
 
 // codingReadOnlyTools is the set of coding tool names that do not mutate the

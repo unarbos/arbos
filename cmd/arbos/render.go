@@ -28,6 +28,7 @@ type uiRenderer interface {
 	approvalPrompt(call core.ToolCall)
 	turnComplete(reason core.StopReason)
 	promptFollowUp()
+	notice(msgs []string)
 	interrupted()
 	errorf(e core.ErrorEvent)
 	close()
@@ -225,6 +226,16 @@ func (r *renderer) turnComplete(reason core.StopReason) {
 func (r *renderer) promptFollowUp() {
 	r.breakText()
 	_, _ = fmt.Fprint(r.status, r.note.Render("› "))
+}
+
+// notice prints outbox messages as ambient lines: the agent's voice arriving
+// between turns, dimly marked so it never reads as a turn of its own.
+func (r *renderer) notice(msgs []string) {
+	r.breakText()
+	_, _ = fmt.Fprintln(r.status)
+	for _, m := range msgs {
+		_, _ = fmt.Fprintln(r.status, r.note.Render("◇ ")+m)
+	}
 }
 
 func (r *renderer) close() {}

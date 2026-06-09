@@ -89,6 +89,12 @@ type Segment struct {
 // each time it is injected, so the prompt always shows one current job table.
 const SourceJobs = "jobs"
 
+// SourcePlan is the Segment.Source for the agent's plan forest (internal/plan).
+// The same latest-per-source rule is what makes intent survive compaction: the
+// projection is re-injected each turn from the store, never accumulated in the
+// conversation.
+const SourcePlan = "plan"
+
 // ContextPayload records context that was injected into a turn (memory, skills,
 // retrieval). It is logged — rather than assembled ephemerally — so a replayed
 // session reproduces exactly what the model saw. Projection renders only the

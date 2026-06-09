@@ -23,6 +23,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/charmbracelet/x/term"
 
@@ -32,7 +33,9 @@ import (
 	"github.com/unarbos/arbos/internal/engine"
 	"github.com/unarbos/arbos/internal/envfile"
 	"github.com/unarbos/arbos/internal/obs"
+	"github.com/unarbos/arbos/internal/outbox"
 	"github.com/unarbos/arbos/internal/piwire"
+	"github.com/unarbos/arbos/internal/sqlite"
 )
 
 func main() {
@@ -87,7 +90,7 @@ func run(cfg piwire.Config, serve bool, dbPath, task, session string, approve, o
 }
 
 func runServe(cfg piwire.Config, dbPath string, approve bool) error {
-	host, cleanup, err := assemble(cfg, dbPath, approve, false)
+	host, _, cleanup, err := assemble(cfg, dbPath, approve, false)
 	if err != nil {
 		return err
 	}
@@ -100,11 +103,19 @@ func runServe(cfg piwire.Config, dbPath string, approve bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The serve host is the agent's body: it owns the clock, so time-armed
+	// plan nodes (deferred tasks, standing obligations) fire here. One-shot
+	// runs have no clock — their projection still marks due nodes for any
+	// running turn (pull mode).
+	if stopSched := host.StartPlanScheduler(); stopSched != nil {
+		defer stopSched()
+	}
+
 	return control.Serve(ctx, host.Engine, os.Stdin, os.Stdout, piwire.NewSessionID, cfg.ServeDrainTimeout)
 }
 
 func runOneShot(cfg piwire.Config, dbPath, task, session string, approve, once bool) error {
-	host, cleanup, err := assemble(cfg, dbPath, approve, true)
+	host, store, cleanup, err := assemble(cfg, dbPath, approve, true)
 	if err != nil {
 		return err
 	}
@@ -116,18 +127,43 @@ func runOneShot(cfg piwire.Config, dbPath, task, session string, approve, once b
 	defer stop()
 
 	cwd, _ := os.Getwd()
+	interactive := term.IsTerminal(os.Stderr.Fd())
+	// The front door: a bare interactive `arbos` greets with the brief —
+	// what happened since you left, what waits on you, what is open — from
+	// pure store reads, before any session starts.
+	if task == "" && interactive {
+		printBrief(ctx, store, cwd, os.Stderr)
+	}
+
+	// An interactive session is a long-lived process, so it carries the clock
+	// too: deferred tasks and standing obligations fire here into fresh
+	// executor sessions, and anything they must tell the user lands in the
+	// outbox, which this terminal drains at quiet moments.
+	if interactive {
+		if stopSched := host.StartPlanScheduler(); stopSched != nil {
+			defer stopSched()
+		}
+	}
+
 	templates := pi.LoadPromptTemplates(cwd, piwire.AgentConfigDir())
 	expand := func(s string) string { return pi.ExpandPromptTemplate(s, templates) }
-	return oneShot(ctx, host.Engine, expand(task), session, once, expand)
+	err = oneShot(ctx, host.Engine, store, expand(task), session, once, expand)
+	// The handoff: on the way out, show what stays open. Fresh reads — the
+	// session that just ended usually changed the forest.
+	if interactive {
+		printHandoff(context.Background(), store, os.Stderr)
+	}
+	return err
 }
 
 // assemble builds the host. When quiet, diagnostics go to a debug file instead
 // of the console so an interactive one-shot run shows only its transcript; the
-// headless serve seam stays verbose on stderr.
-func assemble(cfg piwire.Config, dbPath string, approve, quiet bool) (*piwire.Host, func(), error) {
+// headless serve seam stays verbose on stderr. The store is returned alongside
+// the host for read-only frontend projections (the brief and handoff).
+func assemble(cfg piwire.Config, dbPath string, approve, quiet bool) (*piwire.Host, *sqlite.Store, func(), error) {
 	store, err := piwire.OpenStore(dbPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open store: %w", err)
+		return nil, nil, nil, fmt.Errorf("open store: %w", err)
 	}
 	logger := piwire.NewLogger()
 	if quiet {
@@ -142,16 +178,16 @@ func assemble(cfg piwire.Config, dbPath string, approve, quiet bool) (*piwire.Ho
 	})
 	if err != nil {
 		_ = store.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	cleanup := func() {
 		host.Cleanup()
 		_ = store.Close()
 	}
-	return host, cleanup, nil
+	return host, store, cleanup, nil
 }
 
-func oneShot(ctx context.Context, eng *engine.Engine, task, session string, once bool, expand func(string) string) error {
+func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, task, session string, once bool, expand func(string) string) error {
 	id := piwire.NewSessionID()
 	if session != "" {
 		id = core.SessionID(session)
@@ -173,7 +209,27 @@ func oneShot(ctx context.Context, eng *engine.Engine, task, session string, once
 	// -once or piped stdio means a single turn.
 	followUps := !once && term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stderr.Fd())
 
+	// deliver drains the outbox through this terminal door: claimed messages
+	// print as ambient notice lines, only ever at quiet moments (session
+	// start, turn boundaries, idle at the prompt) — never mid-stream.
+	deliver := func() bool {
+		if store == nil {
+			return false
+		}
+		msgs, err := store.ClaimOutbox(ctx, outbox.ViaTerminal)
+		if err != nil || len(msgs) == 0 {
+			return false
+		}
+		lines := make([]string, len(msgs))
+		for i, m := range msgs {
+			lines[i] = m.Text
+		}
+		r.notice(lines)
+		return true
+	}
+
 	r.header(string(conv.ID()))
+	deliver()
 	if task == "" && !followUps {
 		// Piped invocation with no argv task: the pipe is the task. Consume
 		// stdin fully before the line reader takes ownership of it.
@@ -186,7 +242,7 @@ func oneShot(ctx context.Context, eng *engine.Engine, task, session string, once
 	}
 	in := startStdinReader()
 	if task == "" {
-		first, err := readFollowUp(ctx, r, in)
+		first, err := readFollowUp(ctx, r, in, deliver)
 		if err != nil || first == "" {
 			return nil
 		}
@@ -218,10 +274,11 @@ func oneShot(ctx context.Context, eng *engine.Engine, task, session string, once
 				continue
 			}
 			r.turnComplete(e.StopReason)
+			deliver()
 			if !followUps {
 				return nil
 			}
-			next, err := readFollowUp(ctx, r, in)
+			next, err := readFollowUp(ctx, r, in, deliver)
 			if err != nil || next == "" {
 				return nil
 			}
@@ -276,25 +333,42 @@ func (in *stdinReader) read(ctx context.Context) (string, error) {
 	}
 }
 
+// outboxPoll is how often an idle prompt checks for outbox messages. The
+// agent's voice should feel prompt without the terminal feeling busy.
+const outboxPoll = 2 * time.Second
+
 // readFollowUp prompts for the next task in the session. It returns "" when
 // the user is done: EOF (ctrl-d), an exit word, or a cancelled context
 // (ctrl-c). Blank lines re-prompt rather than exit, so a stray enter never
-// kills the session.
-func readFollowUp(ctx context.Context, r uiRenderer, in *stdinReader) (string, error) {
+// kills the session. While idle it polls deliver: an outbox message prints
+// as an ambient notice and the prompt redraws beneath it — the agent speaking
+// up between turns without ever owning one.
+func readFollowUp(ctx context.Context, r uiRenderer, in *stdinReader, deliver func() bool) (string, error) {
 	for {
 		r.promptFollowUp()
-		line, err := in.read(ctx)
-		if err != nil {
-			fmt.Fprintln(os.Stderr)
-			return "", err
-		}
-		switch line = strings.TrimSpace(line); line {
-		case "":
-			continue
-		case "exit", "quit", "q":
-			return "", nil
-		default:
-			return line, nil
+	wait:
+		for {
+			select {
+			case <-ctx.Done():
+				fmt.Fprintln(os.Stderr)
+				return "", ctx.Err()
+			case err := <-in.errs:
+				fmt.Fprintln(os.Stderr)
+				return "", err
+			case line := <-in.lines:
+				switch line = strings.TrimSpace(line); line {
+				case "":
+					break wait // re-prompt
+				case "exit", "quit", "q":
+					return "", nil
+				default:
+					return line, nil
+				}
+			case <-time.After(outboxPoll):
+				if deliver != nil && deliver() {
+					break wait // redraw the prompt beneath the notice
+				}
+			}
 		}
 	}
 }

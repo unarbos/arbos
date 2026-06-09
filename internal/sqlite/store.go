@@ -17,6 +17,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -119,9 +120,78 @@ CREATE TABLE IF NOT EXISTS mind_checkpoints (
     session_id TEXT PRIMARY KEY,
     last_seq   INTEGER NOT NULL
 );
+
+-- plan_nodes: the agent's durable intent — a forest of goals (see
+-- internal/plan). Nodes are goals, not tasks: executing one is a row in
+-- plan_attempts. Integer ids on purpose: the model references nodes tersely
+-- ("#7"). Times are UnixNano with 0 = unset; every_ns is a recurrence period
+-- in nanoseconds (0 = one-shot).
+CREATE TABLE IF NOT EXISTS plan_nodes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id    INTEGER NOT NULL,            -- root's id; a root points at itself
+    parent_id  INTEGER NOT NULL DEFAULT 0,  -- 0 = root
+    seq        INTEGER NOT NULL,            -- sibling order = implicit dependency
+    kind       TEXT    NOT NULL,            -- achieve | maintain
+    goal       TEXT    NOT NULL,
+    check_expr TEXT    NOT NULL DEFAULT '', -- how to verify done ('' = self-report)
+    cmd        TEXT    NOT NULL DEFAULT '', -- mechanical payload: kernel-run shell command ('' = judgment node)
+    status     TEXT    NOT NULL,            -- pending|active|blocked|done|cancelled|failed
+    outcome    TEXT    NOT NULL DEFAULT '',
+    assignee   TEXT    NOT NULL DEFAULT 'agent',
+    owner      TEXT    NOT NULL DEFAULT '', -- claiming session
+    after_at   INTEGER NOT NULL DEFAULT 0,  -- not ready before
+    every_ns   INTEGER NOT NULL DEFAULT 0,  -- recurrence period
+    next_due   INTEGER NOT NULL DEFAULT 0,  -- next firing for recurring nodes
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_nodes_tree ON plan_nodes(plan_id, parent_id, seq);
+
+-- plan_attempts: append-only execution history of plan nodes. Never updated
+-- or deleted — failed attempts are knowledge. workspace and verified_by are
+-- day-one columns for attempt-isolated worktrees and independent verifiers.
+CREATE TABLE IF NOT EXISTS plan_attempts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id     INTEGER NOT NULL REFERENCES plan_nodes(id),
+    session_id  TEXT    NOT NULL,
+    verdict     TEXT    NOT NULL,            -- success | fail | inconclusive
+    outcome     TEXT    NOT NULL DEFAULT '',
+    verified_by TEXT    NOT NULL DEFAULT 'self',
+    workspace   TEXT    NOT NULL DEFAULT '',
+    created_at  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_attempts_node ON plan_attempts(node_id);
+
+-- outbox: the agent's undelivered messages to the user (see internal/outbox).
+-- Delivery is claim-then-deliver: a door sets delivered_at/delivered_via
+-- atomically before showing the message, so racing doors never double-deliver.
+CREATE TABLE IF NOT EXISTS outbox (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    message       TEXT    NOT NULL,
+    session_id    TEXT    NOT NULL DEFAULT '',
+    created_at    INTEGER NOT NULL,
+    delivered_at  INTEGER NOT NULL DEFAULT 0,
+    delivered_via TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbox_undelivered ON outbox(delivered_at) WHERE delivered_at = 0;
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate: %w", err)
+	}
+	// Forward-only column additions (ADR-0005): CREATE TABLE IF NOT EXISTS
+	// does not retrofit columns onto pre-existing databases, so each later
+	// column also appends an ALTER, tolerated when the column already exists
+	// (fresh databases get it from the CREATE above).
+	alters := []string{
+		`ALTER TABLE plan_nodes ADD COLUMN cmd TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range alters {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate: %s: %w", stmt, err)
+		}
 	}
 	return nil
 }

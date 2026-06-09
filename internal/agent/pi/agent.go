@@ -11,6 +11,8 @@ import (
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/engine"
 	"github.com/unarbos/arbos/internal/mind"
+	"github.com/unarbos/arbos/internal/outbox"
+	"github.com/unarbos/arbos/internal/plan"
 	"github.com/unarbos/arbos/internal/ports"
 	"github.com/unarbos/arbos/internal/tool"
 	"github.com/unarbos/arbos/internal/tool/coding"
@@ -46,6 +48,16 @@ type Options struct {
 	// it only to the top-level session — delegated children share the same global
 	// atoms through it, so they need no Mind of their own.
 	Mind *mind.Mind
+	// Plan, when set, is the agent's durable intent (internal/plan): the plan
+	// tool joins the toolset and the forest is injected at each turn start.
+	// Unlike Mind it threads into delegated children too — the forest is
+	// shared, so a child sees and advances the same intent as its parent.
+	Plan plan.Store
+	// Outbox, when set, is the agent's voice to the user outside any open
+	// conversation (internal/outbox): the notify tool joins the toolset.
+	// Threads into children and scheduler-spawned executors alike — any
+	// session may need to reach the user.
+	Outbox outbox.Store
 	// ExtraRuntimes are merged into the top-level toolset only (e.g. MCP servers).
 	ExtraRuntimes []ports.ToolRuntime
 	// ExtraTools, when set, is composed alongside the coding toolset for the
@@ -83,13 +95,34 @@ func (o Options) DistillerModel() string {
 // auto-loaded context files/skills all derive from root, so a delegated child
 // granted a different repo (Grant.Env.Path) genuinely operates there.
 func (o Options) buildForRoot(root string) (engine.Config, ports.ToolRuntime, error) {
+	var rt ports.ToolRuntime
 	reg, err := coding.NewRuntime(root)
 	if err != nil {
 		return engine.Config{}, nil, err
 	}
+	rt = reg
+	infos := codingspec.PromptInfos()
+	// Subsystem tools (plan, notify) join one extras registry so the toolset
+	// is composed once however many subsystems are wired.
+	extras := tool.New()
+	if o.Plan != nil {
+		if err := plan.RegisterTool(extras, o.Plan); err != nil {
+			return engine.Config{}, nil, err
+		}
+		infos = append(infos, plan.PromptInfo())
+	}
+	if o.Outbox != nil {
+		if err := outbox.RegisterTool(extras, o.Outbox); err != nil {
+			return engine.Config{}, nil, err
+		}
+		infos = append(infos, outbox.PromptInfo())
+	}
+	if len(extras.Schemas()) > 0 {
+		rt = tool.Multi(reg, extras)
+	}
 	prompt := BuildSystemPrompt(PromptOptions{
 		Cwd:          root,
-		Tools:        codingspec.PromptInfos(),
+		Tools:        infos,
 		ContextFiles: loadContextFiles(root),
 		Skills:       LoadSkills(root, o.AgentDir),
 	})
@@ -104,14 +137,15 @@ func (o Options) buildForRoot(root string) (engine.Config, ports.ToolRuntime, er
 		Reasoning:      o.Reasoning,
 		CacheRetention: o.CacheRetention,
 	}
-	return cfg, reg, nil
+	return cfg, rt, nil
 }
 
 // engineOptions returns the engine options for sessions rooted at root:
 // compaction policy, summarizer, approval, observer, and the turn-start
-// context injectors — memory recall when a Mind is attached, and the
-// workspace's background-job table always (jobs are part of the coding
-// toolset, so every session that can start one can see them).
+// context injectors — memory recall when a Mind is attached, the plan forest
+// when a plan store is attached, and the workspace's background-job table
+// always (jobs are part of the coding toolset, so every session that can
+// start one can see them).
 func (o Options) engineOptions(root string) []engine.Option {
 	mi := o.models().Get(o.Model)
 	policy := CompactionPolicy{ContextWindow: mi.ContextWindow}
@@ -120,6 +154,9 @@ func (o Options) engineOptions(root string) []engine.Option {
 	if o.Mind != nil {
 		// Recall at turn start, curate at turn end — the symmetric memory seam.
 		opts = append(opts, engine.WithContextInjector(o.Mind.Recall), engine.WithTurnEnd(o.Mind.Curate))
+	}
+	if o.Plan != nil {
+		opts = append(opts, engine.WithContextInjector(plan.Injector(o.Plan)))
 	}
 	opts = append(opts, engine.WithContextInjector(jobsInjector(root)))
 	if o.Approval != nil {

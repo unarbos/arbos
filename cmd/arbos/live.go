@@ -233,6 +233,23 @@ func (r *liveRenderer) promptFollowUp() {
 	_, _ = fmt.Fprint(r.status, r.note.Render("› "))
 }
 
+// notice prints outbox messages as permanent ambient lines. When the cursor
+// is parked on the follow-up prompt (suspended), it first steps off that line;
+// the caller redraws the prompt beneath the notice.
+func (r *liveRenderer) notice(msgs []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.erase()
+	r.endProse()
+	if r.suspended {
+		_, _ = fmt.Fprintln(r.status)
+		r.suspended = false
+	}
+	for _, m := range msgs {
+		_, _ = fmt.Fprintln(r.status, r.note.Render("◇ ")+m)
+	}
+}
+
 func (r *liveRenderer) interrupted() {
 	r.finish(func() {
 		_, _ = fmt.Fprintln(r.status, r.dim.Render("· interrupted"))

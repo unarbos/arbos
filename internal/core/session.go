@@ -44,3 +44,9 @@ type Session struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
+
+// OriginScheduler marks sessions the plan scheduler spawned (machine-initiated
+// work, not a human at a door). The front-door brief uses it to anchor "since
+// you left" on the last session a human actually drove; future doors set their
+// own origins ("telegram:chat/123") per the reservation above.
+const OriginScheduler = "scheduler"

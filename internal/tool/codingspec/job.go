@@ -1,6 +1,7 @@
 package codingspec
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -465,6 +466,85 @@ func JobsContext(root string) string {
 		return NoJobsContext
 	}
 	return "Background jobs in this workspace (follow with await, inspect with jobs):\n" + strings.Join(lines, "\n")
+}
+
+// RunWorkspaceCmd runs command as a journaled job in root's workspace and
+// waits for it — the plan scheduler's mechanical executor. The run is visible
+// in the job table like any other job (the model's injected table, the jobs
+// tool, the front-door brief), so a kernel-run pipeline is inspectable with
+// the same eyes as everything else. Cancellation kills the job's process
+// group. Returns the job id, exit code (-1 when killed), and the journal's
+// tail.
+func RunWorkspaceCmd(ctx context.Context, root, command string) (jobID string, exitCode int, tail string, err error) {
+	s := newJobSupervisor(root)
+	info, done, kill, err := s.spawn(command)
+	if err != nil {
+		return "", -1, "", err
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		kill()
+		<-done
+	}
+	final, err := loadJob(info.Dir)
+	if err != nil {
+		return info.ID, -1, "", fmt.Errorf("job %s: %w", info.ID, err)
+	}
+	code := final.ExitCode
+	if final.Status == JobKilled {
+		code = -1
+	}
+	return info.ID, code, journalTail(info.Dir, 4096), nil
+}
+
+// journalTail reads the last max bytes of a job's output log, trimmed.
+func journalTail(dir string, max int64) string {
+	f, err := os.Open(filepath.Join(dir, "out.log"))
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	off := int64(0)
+	if st.Size() > max {
+		off = st.Size() - max
+	}
+	buf := make([]byte, st.Size()-off)
+	if _, err := f.ReadAt(buf, off); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(buf))
+}
+
+// JobsBrief renders the HUMAN front-door view of the job table, as JobsContext
+// renders the model's. Only jobs actually running appear — finished jobs are
+// history, not a greeting — one line each: id, age, and the first line of the
+// command, clipped. Returns "" when nothing is running so the caller prints no
+// section at all.
+func JobsBrief(root string) string {
+	var lines []string
+	for _, j := range listJobs(jobsRoot(root)) {
+		if j.Status != JobRunning {
+			continue
+		}
+		cmd := j.Meta.Command
+		if i := strings.IndexByte(cmd, '\n'); i >= 0 {
+			cmd = cmd[:i] + " …"
+		}
+		if len(cmd) > 64 {
+			cmd = cmd[:64] + "…"
+		}
+		age := time.Since(j.Meta.StartedAt).Round(time.Second)
+		lines = append(lines, fmt.Sprintf("  ▸ %s (%s) %s", j.ID, age, cmd))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "running:\n" + strings.Join(lines, "\n")
 }
 
 // contextLine is the duration-free sibling of statusLine, used by JobsContext
