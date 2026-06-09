@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/tool"
 )
 
@@ -23,7 +24,7 @@ const findDefaultLimit = 1000
 // pi's find tool. fd is hard-required (clear error if absent); there is no
 // auto-download (the broker-and-allowlist posture, D11).
 func findSpec(root string) tool.Spec {
-	return tool.NewSpec("find",
+	spec := tool.NewSpec("find",
 		fmt.Sprintf("Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to %d results or %dKB (whichever is hit first).", findDefaultLimit, DefaultMaxBytes/1024),
 		true,
 		func(ctx context.Context, a FindArgs) (string, error) {
@@ -104,4 +105,9 @@ func findSpec(root string) tool.Spec {
 			}
 			return res, nil
 		})
+	// A scan reads its whole search subtree (keys are hierarchical), so a
+	// same-batch write beneath it is ordered, not raced.
+	return tool.WithAccess(spec, func(a FindArgs) core.AccessSet {
+		return core.AccessSet{Reads: fileKeys(root, a.Path)}
+	})
 }

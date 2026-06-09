@@ -12,7 +12,8 @@ func TestIntentCodecRoundTrip(t *testing.T) {
 		core.InterruptIntent{},
 		core.ResumeIntent{SessionID: "s1"},
 		core.ApprovalResponseIntent{RequestID: "r1", Approved: true, Reason: "ok"},
-		core.ClarifyResponseIntent{RequestID: "r2", Answer: "blue"},
+		core.SetModelIntent{Model: "m1"},
+		core.CompactIntent{},
 	}
 	for _, want := range cases {
 		b, err := core.EncodeIntent(want)
@@ -43,7 +44,6 @@ func TestEventCodecRoundTrip(t *testing.T) {
 		core.ErrorEvent{Category: core.ErrProvider, Retryable: true, Err: "boom"},
 		core.Queued{Text: "later"},
 		core.ApprovalRequest{RequestID: "r", Call: core.ToolCall{Name: "rm"}, Reason: "danger"},
-		core.ClarifyRequest{RequestID: "r", Question: "which?"},
 	}
 	for _, want := range cases {
 		b, err := core.EncodeEvent(want)

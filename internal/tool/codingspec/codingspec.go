@@ -4,9 +4,8 @@
 // arg types without a bootstrap cycle. The assembler in package coding pairs
 // each spec here with its generated schema.
 //
-// This is the Go port of pi's coding-agent tools. It lands one tool per phase:
-// ls, read, find (read-only navigation) so far; grep, write, edit, and bash
-// follow. Each handler reproduces pi's model-facing output faithfully — the
+// This is the Go port of pi's coding-agent tools.
+// Each handler reproduces pi's model-facing output faithfully — the
 // result text is itself part of pi's intelligence. Deliberate divergences are
 // documented where they live: edit's matcher, errors, and result snippet
 // (editdiff.go, edit.go) and bash's background jobs (job.go) extend pi rather

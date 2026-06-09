@@ -54,7 +54,7 @@ func serve(t *testing.T, eng *engine.Engine) *harness {
 		h.done <- control.Serve(context.Background(), eng, cr, cw, func() core.SessionID {
 			id++
 			return core.SessionID("auto")
-		})
+		}, 0)
 	}()
 	t.Cleanup(func() {
 		_ = sw.Close()
@@ -199,7 +199,7 @@ func TestControlDrainOnEOF(t *testing.T) {
 	go func() {
 		done <- control.Serve(context.Background(), eng, cr, cw, func() core.SessionID {
 			return "drain-test"
-		})
+		}, 0)
 	}()
 
 	complete := make(chan struct{})

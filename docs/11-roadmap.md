@@ -19,7 +19,7 @@ satisfy and proven by the shared `porttest` contracts.
 | Reference LLM provider (OpenAI-compatible HTTP/SSE, tool-call reassembly) | `internal/provider/openai` | done |
 | Secret broker (host-bound credential injection) | `internal/secret` | done |
 | Tool runtime + build-time schema codegen + sandboxed built-ins | `internal/tool*`, `cmd/gen-tool-schemas` | done |
-| Suspend-and-await (approval / clarify) | `internal/engine` | done |
+| Suspend-and-await (approval) | `internal/engine` | done |
 | In-place context compression + token-budget policy | `internal/engine`, `internal/compaction` | done |
 | Memory provider (retrieve → log → render fenced → observe) | `internal/memory` | done |
 | Observability (Observer port, slog, secret-redacting handler) | `internal/obs` | done |

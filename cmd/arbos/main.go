@@ -63,7 +63,8 @@ func main() {
 		}
 	}
 
-	if err := run(*serve, *dbPath, task, *session, *approve, *once); err != nil {
+	cfg := piwire.LoadConfig()
+	if err := run(cfg, *serve, *dbPath, task, *session, *approve, *once); err != nil {
 		fmt.Fprintln(os.Stderr, "arbos:", err)
 		os.Exit(1)
 	}
@@ -78,34 +79,38 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-func run(serve bool, dbPath, task, session string, approve, once bool) error {
+func run(cfg piwire.Config, serve bool, dbPath, task, session string, approve, once bool) error {
 	if serve {
-		return runServe(dbPath, approve)
+		return runServe(cfg, dbPath, approve)
 	}
-	return runOneShot(dbPath, task, session, approve, once)
+	return runOneShot(cfg, dbPath, task, session, approve, once)
 }
 
-func runServe(dbPath string, approve bool) error {
-	host, cleanup, err := assemble(dbPath, approve, false)
+func runServe(cfg piwire.Config, dbPath string, approve bool) error {
+	host, cleanup, err := assemble(cfg, dbPath, approve, false)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
+
+	// A keyless host serves the deterministic fake; warn so a misconfigured
+	// headless deployment is loud instead of emitting fake transcripts.
+	cfg.WarnIfNoLLM(os.Stderr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	return control.Serve(ctx, host.Engine, os.Stdin, os.Stdout, piwire.NewSessionID)
+	return control.Serve(ctx, host.Engine, os.Stdin, os.Stdout, piwire.NewSessionID, cfg.ServeDrainTimeout)
 }
 
-func runOneShot(dbPath, task, session string, approve, once bool) error {
-	host, cleanup, err := assemble(dbPath, approve, true)
+func runOneShot(cfg piwire.Config, dbPath, task, session string, approve, once bool) error {
+	host, cleanup, err := assemble(cfg, dbPath, approve, true)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	piwire.WarnIfNoLLM(os.Stderr)
+	cfg.WarnIfNoLLM(os.Stderr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -119,7 +124,7 @@ func runOneShot(dbPath, task, session string, approve, once bool) error {
 // assemble builds the host. When quiet, diagnostics go to a debug file instead
 // of the console so an interactive one-shot run shows only its transcript; the
 // headless serve seam stays verbose on stderr.
-func assemble(dbPath string, approve, quiet bool) (*piwire.Host, func(), error) {
+func assemble(cfg piwire.Config, dbPath string, approve, quiet bool) (*piwire.Host, func(), error) {
 	store, err := piwire.OpenStore(dbPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open store: %w", err)
@@ -129,6 +134,7 @@ func assemble(dbPath string, approve, quiet bool) (*piwire.Host, func(), error) 
 		logger = piwire.NewQuietLogger()
 	}
 	host, err := piwire.Assemble(piwire.HostConfig{
+		Config:   cfg,
 		Store:    store,
 		Observer: obs.NewSlogObserver(logger),
 		Approve:  approve,

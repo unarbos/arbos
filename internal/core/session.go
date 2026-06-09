@@ -17,14 +17,17 @@ const (
 )
 
 // Session is metadata about a conversation. The conversation content lives in
-// the event log, not here.
+// the event log, not here; token accounting in particular is derived from the
+// log's usage events, never mirrored as a counter.
 type Session struct {
 	ID       SessionID
 	ParentID SessionID // fork/branch lineage (the session this was derived from);
 	// empty for a root session. NOT used by compression — compression is in-place.
-	Status     SessionStatus
-	Model      string
-	TokenCount int // derived mirror of the log's usage events; not authoritative
+	Status SessionStatus
+	// Model is the durable per-session model authority: stamped at creation,
+	// updated by SetModelIntent, and re-read on session adoption so a resumed
+	// session keeps the model it was switched to.
+	Model string
 
 	// Principal and Origin are RESERVED for the gateway/frontend phase, where
 	// auth and reply-routing need them; both are empty for local single-user

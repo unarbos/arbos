@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -23,31 +22,28 @@ import (
 	"github.com/unarbos/arbos/internal/mind"
 	"github.com/unarbos/arbos/internal/obs"
 	"github.com/unarbos/arbos/internal/ports"
-	"github.com/unarbos/arbos/internal/provider/anthropic"
-	"github.com/unarbos/arbos/internal/provider/google"
-	"github.com/unarbos/arbos/internal/provider/openai"
-	"github.com/unarbos/arbos/internal/secret"
 	"github.com/unarbos/arbos/internal/sqlite"
 	"github.com/unarbos/arbos/internal/tool"
 	"github.com/unarbos/arbos/internal/tool/codingspec"
 )
 
-// Host wires a pi session host. Store and Observer are required for production;
-// delegated children always get an ephemeral in-memory store.
+// HostConfig wires a pi session host. Config carries the resolved environment
+// (provider, model; see LoadConfig); Store and Observer are required for
+// production; delegated children always get an ephemeral in-memory store.
 type HostConfig struct {
+	Config   Config
 	Store    ports.SessionStore
 	Observer ports.Observer
 	Approve  bool
 	// Logger receives background diagnostics (e.g. memory curation failures). It
-	// MUST write to a sink that won't corrupt the frontend — leave nil under the
-	// TUI (where stderr is the transcript) to discard them.
+	// MUST write to a sink that won't corrupt the frontend — leave nil when
+	// stderr is the transcript to discard them.
 	Logger *slog.Logger
 }
 
 // Host bundles the assembled engine with a cleanup hook for MCP subprocesses.
 type Host struct {
 	Engine  *engine.Engine
-	Router  *agent.Router
 	Cleanup func()
 }
 
@@ -57,7 +53,7 @@ func Assemble(cfg HostConfig) (*Host, error) {
 	cwd, _ := os.Getwd()
 	agentDir := AgentConfigDir()
 
-	mcpCfg, err := mcp.LoadConfig(cwd, agentDir)
+	mcpCfg, err := mcp.LoadConfig(cfg.Config.MCPConfigJSON, cwd, agentDir)
 	if err != nil {
 		return nil, fmt.Errorf("mcp config: %w", err)
 	}
@@ -82,14 +78,14 @@ func Assemble(cfg HostConfig) (*Host, error) {
 	}
 
 	piOpts := pi.Options{
-		Provider:       BuildProvider(),
+		Provider:       cfg.Config.NewProvider(),
 		NewStore:       func() ports.SessionStore { return fake.NewStore() },
 		Clock:          sysClock{},
 		Cwd:            cwd,
 		AgentDir:       agentDir,
-		Model:          ModelName(),
+		Model:          cfg.Config.Model,
 		Models:         pi.SeededModelRegistry(),
-		DistillModel:   os.Getenv("ARBOS_DISTILL_MODEL"),
+		DistillModel:   cfg.Config.DistillModel,
 		CacheRetention: core.CacheShort,
 		ExtraRuntimes:  extraRT,
 	}
@@ -119,7 +115,7 @@ func Assemble(cfg HostConfig) (*Host, error) {
 	// through it. The same DB across every session is what makes this one agent
 	// that learns everywhere.
 	var theMind *mind.Mind
-	if as, ok := cfg.Store.(mind.Store); ok && HasLLMConfigured() {
+	if as, ok := cfg.Store.(mind.Store); ok && cfg.Config.HasLLM {
 		// The curator runs on the same distill model as the compaction
 		// summarizer: one tier for everything the agent does in the background.
 		theMind = mind.New(as, piOpts.Provider, piOpts.DistillerModel(), cfg.Logger)
@@ -141,7 +137,7 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		}
 		mcpMgr.Close()
 	}
-	return &Host{Engine: eng, Router: router, Cleanup: cleanup}, nil
+	return &Host{Engine: eng, Cleanup: cleanup}, nil
 }
 
 // codingReadOnlyTools is the set of coding tool names that do not mutate the
@@ -177,91 +173,6 @@ func OpenStore(path string) (*sqlite.Store, error) {
 		return nil, fmt.Errorf("create store dir: %w", err)
 	}
 	return sqlite.Open(path)
-}
-
-// BuildProvider selects the LLM adapter from ARBOS_PROVIDER (openai, anthropic,
-// google) with env-based credentials. With no provider configured it returns the
-// deterministic fake, which exercises the pi coding toolset.
-func BuildProvider() ports.LLMProvider {
-	switch os.Getenv("ARBOS_PROVIDER") {
-	case "anthropic":
-		base := os.Getenv("ARBOS_ANTHROPIC_BASE_URL")
-		if base == "" {
-			base = "https://api.anthropic.com"
-		}
-		return anthropic.New(base, anthropic.WithAuth(brokerForHost(base, "ARBOS_ANTHROPIC_API_KEY"), core.SecretRef{Name: "ARBOS_ANTHROPIC_API_KEY"}))
-	case "google":
-		base := os.Getenv("ARBOS_GOOGLE_BASE_URL")
-		if base == "" {
-			base = "https://generativelanguage.googleapis.com"
-		}
-		return google.New(base, google.WithAuth(brokerForHost(base, "ARBOS_GOOGLE_API_KEY"), core.SecretRef{Name: "ARBOS_GOOGLE_API_KEY"}))
-	default:
-		base, keyEnv := openAIConfig()
-		if base == "" {
-			return fake.Provider{}
-		}
-		return openai.New(base, openai.WithAuth(brokerForHost(base, keyEnv), core.SecretRef{Name: keyEnv}))
-	}
-}
-
-func openAIConfig() (baseURL, keyEnv string) {
-	if b := os.Getenv("ARBOS_OPENAI_BASE_URL"); b != "" {
-		baseURL = b
-	}
-	if os.Getenv("ARBOS_OPENAI_API_KEY") != "" {
-		return baseURL, "ARBOS_OPENAI_API_KEY"
-	}
-	if os.Getenv("OPENROUTER_API_KEY") != "" {
-		if baseURL == "" {
-			baseURL = "https://openrouter.ai/api/v1"
-		}
-		return baseURL, "OPENROUTER_API_KEY"
-	}
-	return baseURL, "ARBOS_OPENAI_API_KEY"
-}
-
-func brokerForHost(baseURL, secretName string) *secret.Broker {
-	host := ""
-	if u, err := url.Parse(baseURL); err == nil {
-		host = u.Hostname()
-	}
-	return secret.NewBroker(fake.EnvSecretProvider{}, secret.Binding{
-		Ref:    core.SecretRef{Name: secretName},
-		Hosts:  []string{host},
-		Inject: secret.BearerInjector,
-	})
-}
-
-func ModelName() string {
-	if m := os.Getenv("ARBOS_MODEL"); m != "" {
-		return m
-	}
-	if HasLLMConfigured() {
-		return "anthropic/claude-opus-4.8"
-	}
-	return "fake"
-}
-
-// HasLLMConfigured reports whether a real LLM provider will be selected.
-func HasLLMConfigured() bool {
-	switch os.Getenv("ARBOS_PROVIDER") {
-	case "anthropic":
-		return os.Getenv("ARBOS_ANTHROPIC_API_KEY") != ""
-	case "google":
-		return os.Getenv("ARBOS_GOOGLE_API_KEY") != ""
-	default:
-		_, keyEnv := openAIConfig()
-		return os.Getenv(keyEnv) != ""
-	}
-}
-
-// WarnIfNoLLM prints a one-line hint when no API credentials are configured.
-func WarnIfNoLLM(w io.Writer) {
-	if HasLLMConfigured() {
-		return
-	}
-	fmt.Fprintf(w, "arbos: no API key configured — set OPENROUTER_API_KEY (or see https://github.com/unarbos/arbos)\n")
 }
 
 func NewSessionID() core.SessionID {

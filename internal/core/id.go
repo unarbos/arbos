@@ -6,7 +6,6 @@ package core
 type SessionID string
 
 // RequestID correlates a mid-turn request emitted by the kernel (e.g.
-// ApprovalRequest, ClarifyRequest) with the Intent that answers it
-// (ApprovalResponseIntent, ClarifyResponseIntent). Distinct type for the same
-// type-safety reason as SessionID. See ADR-0018.
+// ApprovalRequest) with the Intent that answers it (ApprovalResponseIntent).
+// Distinct type for the same type-safety reason as SessionID. See ADR-0018.
 type RequestID string

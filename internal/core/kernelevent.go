@@ -17,7 +17,6 @@ const (
 	KernelEventError           KernelEventKind = "error"
 	KernelEventQueued          KernelEventKind = "queued"
 	KernelEventApprovalRequest KernelEventKind = "approval_request"
-	KernelEventClarifyRequest  KernelEventKind = "clarify_request"
 )
 
 // KernelEvent is something a session emits as it works. Frontends render these;
@@ -111,13 +110,6 @@ type ApprovalRequest struct {
 	Reason    string    `json:"reason,omitempty"`
 }
 
-// ClarifyRequest pauses the turn to ask the user a free-text question, answered
-// by a matching ClarifyResponseIntent.
-type ClarifyRequest struct {
-	RequestID RequestID `json:"request_id"`
-	Question  string    `json:"question"`
-}
-
 func (MessageDelta) Kind() KernelEventKind    { return KernelEventMessageDelta }
 func (ReasoningDelta) Kind() KernelEventKind  { return KernelEventReasoningDelta }
 func (ToolStarted) Kind() KernelEventKind     { return KernelEventToolStarted }
@@ -127,4 +119,3 @@ func (Interrupted) Kind() KernelEventKind     { return KernelEventInterrupted }
 func (ErrorEvent) Kind() KernelEventKind      { return KernelEventError }
 func (Queued) Kind() KernelEventKind          { return KernelEventQueued }
 func (ApprovalRequest) Kind() KernelEventKind { return KernelEventApprovalRequest }
-func (ClarifyRequest) Kind() KernelEventKind  { return KernelEventClarifyRequest }

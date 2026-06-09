@@ -62,7 +62,9 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // migrate applies the forward-only schema. Each statement is idempotent
 // (IF NOT EXISTS); future schema changes append new migration steps, never edit
-// existing ones (ADR-0005).
+// existing ones (ADR-0005). Databases created before Session.TokenCount was
+// removed may carry a vestigial token_count column (NOT NULL DEFAULT 0); no
+// statement references it, so it is left in place rather than dropped.
 func (s *Store) migrate(ctx context.Context) error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -70,7 +72,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     parent_id   TEXT    NOT NULL DEFAULT '',
     status      TEXT    NOT NULL,
     model       TEXT    NOT NULL DEFAULT '',
-    token_count INTEGER NOT NULL DEFAULT 0,
     principal   TEXT    NOT NULL DEFAULT '',
     origin      TEXT    NOT NULL DEFAULT '',
     created_at  INTEGER NOT NULL,
@@ -129,9 +130,9 @@ func (s *Store) CreateSession(ctx context.Context, sess core.Session) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, parent_id, status, model, token_count, principal, origin, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		string(sess.ID), string(sess.ParentID), string(sess.Status), sess.Model, sess.TokenCount,
+		`INSERT INTO sessions (id, parent_id, status, model, principal, origin, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		string(sess.ID), string(sess.ParentID), string(sess.Status), sess.Model,
 		sess.Principal, sess.Origin, sess.CreatedAt.UnixNano(), sess.UpdatedAt.UnixNano(),
 	)
 	if err != nil {
@@ -142,7 +143,7 @@ func (s *Store) CreateSession(ctx context.Context, sess core.Session) error {
 
 func (s *Store) Get(ctx context.Context, id core.SessionID) (core.Session, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, parent_id, status, model, token_count, principal, origin, created_at, updated_at
+		`SELECT id, parent_id, status, model, principal, origin, created_at, updated_at
 		 FROM sessions WHERE id = ?`, string(id))
 	var (
 		sess               core.Session
@@ -150,7 +151,7 @@ func (s *Store) Get(ctx context.Context, id core.SessionID) (core.Session, error
 		status             string
 		createdAt, updated int64
 	)
-	err := row.Scan(&idStr, &parentID, &status, &sess.Model, &sess.TokenCount,
+	err := row.Scan(&idStr, &parentID, &status, &sess.Model,
 		&sess.Principal, &sess.Origin, &createdAt, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.Session{}, ports.ErrSessionNotFound
@@ -170,9 +171,9 @@ func (s *Store) UpdateSession(ctx context.Context, sess core.Session) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET parent_id=?, status=?, model=?, token_count=?, principal=?, origin=?, updated_at=?
+		`UPDATE sessions SET parent_id=?, status=?, model=?, principal=?, origin=?, updated_at=?
 		 WHERE id=?`,
-		string(sess.ParentID), string(sess.Status), sess.Model, sess.TokenCount,
+		string(sess.ParentID), string(sess.Status), sess.Model,
 		sess.Principal, sess.Origin, sess.UpdatedAt.UnixNano(), string(sess.ID),
 	)
 	if err != nil {

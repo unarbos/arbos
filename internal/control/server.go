@@ -27,8 +27,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -80,20 +78,15 @@ type serverFrame struct {
 	Error     string          `json:"error,omitempty"`
 }
 
-func drainTimeout() time.Duration {
-	if s := os.Getenv("ARBOS_SERVE_DRAIN_TIMEOUT"); s != "" {
-		if sec, err := strconv.Atoi(s); err == nil && sec > 0 {
-			return time.Duration(sec) * time.Second
-		}
-	}
-	return 120 * time.Second
-}
-
 // Serve runs one client connection to completion: it reads framed requests from
 // r and writes framed responses to w until r reaches EOF or ctx is cancelled.
 // One connection drives one session (opened or resumed by id). newSessionID
-// supplies an id when the client opens without one.
-func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, newSessionID func() core.SessionID) error {
+// supplies an id when the client opens without one. drain bounds how long a
+// disconnecting client waits for an in-flight turn; zero means 120s.
+func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, newSessionID func() core.SessionID, drain time.Duration) error {
+	if drain <= 0 {
+		drain = 120 * time.Second
+	}
 	enc := &lineWriter{w: w}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -283,7 +276,7 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 		}
 		select {
 		case <-ch:
-		case <-time.After(drainTimeout()):
+		case <-time.After(drain):
 		case <-sctx.Done():
 		}
 	}

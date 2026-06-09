@@ -21,7 +21,7 @@ type versionArgs struct {
 	Detail bool `json:"detail,omitempty" desc:"Include Go runtime version."`
 }
 
-// VersionExt registers a read-only arbos_version tool and a /version slash command.
+// VersionExt registers a read-only arbos_version tool.
 func VersionExt(api extension.API) error {
 	schema, err := jsonschema.Reflect(reflect.TypeOf(versionArgs{}))
 	if err != nil {
@@ -34,11 +34,5 @@ func VersionExt(api extension.API) error {
 			}
 			return "arbos pi", nil
 		})
-	if err := api.RegisterTool(spec, schema); err != nil {
-		return err
-	}
-	api.RegisterCommand("version", "Show arbos version", func(_ string) (string, error) {
-		return "arbos pi", nil
-	})
-	return nil
+	return api.RegisterTool(spec, schema)
 }

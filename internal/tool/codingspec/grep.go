@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/tool"
 )
 
@@ -44,7 +45,7 @@ type rgEvent struct {
 // context blocks, and the match/byte/line truncation notices. rg is
 // hard-required (D11).
 func grepSpec(root string) tool.Spec {
-	return tool.NewSpec("grep",
+	spec := tool.NewSpec("grep",
 		fmt.Sprintf("Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to %d matches or %dKB (whichever is hit first). Long lines are truncated to %d chars.", grepDefaultLimit, DefaultMaxBytes/1024, GrepMaxLineLength),
 		true,
 		func(ctx context.Context, a GrepArgs) (string, error) {
@@ -209,4 +210,9 @@ func grepSpec(root string) tool.Spec {
 			}
 			return result, nil
 		})
+	// A scan reads its whole search subtree (keys are hierarchical), so a
+	// same-batch write beneath it is ordered, not raced.
+	return tool.WithAccess(spec, func(a GrepArgs) core.AccessSet {
+		return core.AccessSet{Reads: fileKeys(root, a.Path)}
+	})
 }

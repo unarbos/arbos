@@ -133,8 +133,7 @@ type Session struct {
     ID         SessionID
     ParentID   SessionID // fork/branch lineage; empty for a root session (NOT compression)
     Status     SessionStatus
-    Model      string
-    TokenCount int       // derived mirror of the log's usage events; not authoritative
+    Model      string    // durable model authority: set at creation, updated by SetModelIntent
     Principal  string    // RESERVED: who owns/authorizes (gateway/frontend phase)
     Origin     string    // RESERVED: originating surface, e.g. "telegram:chat/123"
     CreatedAt  time.Time
@@ -185,7 +184,6 @@ type Intent interface { Kind() IntentKind }        // sealed by the discriminato
     InterruptIntent{}
     ResumeIntent{ SessionID }
     ApprovalResponseIntent{ RequestID, Approved, Reason }   // answers an ApprovalRequest
-    ClarifyResponseIntent{ RequestID, Answer }              // answers a ClarifyRequest
 
 type KernelEvent interface { Kind() KernelEventKind } // sealed by the discriminator
     MessageDelta{ Text }
@@ -196,7 +194,6 @@ type KernelEvent interface { Kind() KernelEventKind } // sealed by the discrimin
     Interrupted{}
     ErrorEvent{ Err }
     ApprovalRequest{ RequestID, Call, Reason }              // pause: may this tool call proceed?
-    ClarifyRequest{ RequestID, Question }                   // pause: free-text question
 ```
 
 Both interfaces are sealed by a **`Kind()` discriminator** (not an unexported
@@ -207,11 +204,11 @@ on `Kind()` across a tagged-union wire without reflection. Variant fields carry
 `json` tags; the encode/decode codec mirrors `core/codec.go` and lands with the
 control seam. See ADR-0018.
 
-**Suspend-and-await.** `ApprovalRequest`/`ClarifyRequest` (out) pair with
-`ApprovalResponseIntent`/`ClarifyResponseIntent` (in), correlated by `RequestID`.
+**Suspend-and-await.** `ApprovalRequest` (out) pairs with
+`ApprovalResponseIntent` (in), correlated by `RequestID`.
 When a turn emits a request, the session actor blocks it until the matching
 response arrives (an interrupt still cancels). This is what lets the kernel pause
-mid-turn for tool approval or a clarifying question. Secret *values* never use
+mid-turn for tool approval. Secret *values* never use
 this path — they are resolved by the broker at the request boundary (ADR-0016).
 The actor await-wiring is built with the tool runtime; the vocabulary is fixed
 now. See ADR-0018.

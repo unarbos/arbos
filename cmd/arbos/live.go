@@ -101,8 +101,8 @@ func (r *liveRenderer) agentLabel() {
 	}
 	r.turnOpen = true
 	r.erase()
-	fmt.Fprintln(r.status)
-	fmt.Fprintln(r.status, r.agent.Render(agentIcon))
+	_, _ = fmt.Fprintln(r.status)
+	_, _ = fmt.Fprintln(r.status, r.agent.Render(agentIcon))
 }
 
 // tick advances the spinner while tools are running. Repaints happen inline on
@@ -141,7 +141,7 @@ func (r *liveRenderer) delta(text string) {
 	r.agentLabel()
 	r.erase()
 	if styled := r.md.Push(text); styled != "" {
-		fmt.Fprint(r.prose, indentStream(styled, &r.atLineStart))
+		_, _ = fmt.Fprint(r.prose, indentStream(styled, &r.atLineStart))
 	}
 	r.midText = !strings.HasSuffix(text, "\n")
 	r.repaint()
@@ -206,7 +206,7 @@ func (r *liveRenderer) approvalPrompt(call core.ToolCall) {
 	r.endProse()
 	r.suspended = true
 	label := transcript.ToolLabel(call.Name, call.Args)
-	fmt.Fprint(r.status, r.note.Render("  approve "+label+"? [y/N] "))
+	_, _ = fmt.Fprint(r.status, r.note.Render("  approve "+label+"? [y/N] "))
 }
 
 // turnComplete collapses the live region to a one-line tally and resets the
@@ -214,10 +214,10 @@ func (r *liveRenderer) approvalPrompt(call core.ToolCall) {
 func (r *liveRenderer) turnComplete(reason core.StopReason) {
 	r.finish(func() {
 		if t := r.tally(); t != "" {
-			fmt.Fprintln(r.status, r.dim.Render("· "+t))
+			_, _ = fmt.Fprintln(r.status, r.dim.Render("· "+t))
 		}
 		if reason != core.StopAnswered {
-			fmt.Fprintln(r.status, r.dim.Render("· stopped: "+string(reason)))
+			_, _ = fmt.Fprintln(r.status, r.dim.Render("· stopped: "+string(reason)))
 		}
 	})
 }
@@ -230,18 +230,18 @@ func (r *liveRenderer) promptFollowUp() {
 	r.erase()
 	r.endProse()
 	r.suspended = true
-	fmt.Fprint(r.status, r.note.Render("› "))
+	_, _ = fmt.Fprint(r.status, r.note.Render("› "))
 }
 
 func (r *liveRenderer) interrupted() {
 	r.finish(func() {
-		fmt.Fprintln(r.status, r.dim.Render("· interrupted"))
+		_, _ = fmt.Fprintln(r.status, r.dim.Render("· interrupted"))
 	})
 }
 
 func (r *liveRenderer) errorf(e core.ErrorEvent) {
 	r.finish(func() {
-		fmt.Fprintln(r.status, r.bad.Render("· error ("+string(e.Category)+"): "+e.Err))
+		_, _ = fmt.Fprintln(r.status, r.bad.Render("· error ("+string(e.Category)+"): "+e.Err))
 	})
 }
 
@@ -260,7 +260,7 @@ func (r *liveRenderer) finish(closing func()) {
 	r.endProse()
 	closing()
 	if r.turnOpen {
-		fmt.Fprintln(r.status)
+		_, _ = fmt.Fprintln(r.status)
 	}
 	r.turnOpen = false
 	r.atLineStart = true
@@ -278,7 +278,7 @@ func (r *liveRenderer) persist(lines ...string) {
 	r.erase()
 	r.endProse()
 	for _, line := range lines {
-		fmt.Fprintln(r.status, line)
+		_, _ = fmt.Fprintln(r.status, line)
 	}
 	r.repaint()
 }
@@ -287,7 +287,7 @@ func (r *liveRenderer) persist(lines ...string) {
 // persistent output should continue.
 func (r *liveRenderer) erase() {
 	if r.live > 0 {
-		fmt.Fprintf(r.status, "\x1b[%dA\x1b[J", r.live)
+		_, _ = fmt.Fprintf(r.status, "\x1b[%dA\x1b[J", r.live)
 		r.live = 0
 	}
 }
@@ -296,11 +296,11 @@ func (r *liveRenderer) erase() {
 // assistant text.
 func (r *liveRenderer) endProse() {
 	if tail := r.md.Flush(); tail != "" {
-		fmt.Fprint(r.prose, indentStream(tail, &r.atLineStart))
+		_, _ = fmt.Fprint(r.prose, indentStream(tail, &r.atLineStart))
 	}
 	r.md = newMarkdownStyler(r.prose)
 	if r.midText {
-		fmt.Fprintln(r.prose)
+		_, _ = fmt.Fprintln(r.prose)
 		r.midText = false
 		r.atLineStart = true
 	}
@@ -323,7 +323,7 @@ func (r *liveRenderer) repaint() {
 		b.WriteByte('\n')
 	}
 	r.live = len(lines)
-	io.WriteString(r.status, b.String())
+	_, _ = io.WriteString(r.status, b.String())
 }
 
 func (r *liveRenderer) liveLines() []string {

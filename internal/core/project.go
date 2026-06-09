@@ -50,12 +50,18 @@ func ProjectConversation(events []Event) []Message {
 // conversation pass and the engine's incremental in-turn extension call it, so a
 // live turn and a replay from the log cannot drift even as Message grows.
 func ProjectEvent(e Event) (Message, bool) {
-	switch p := e.Payload.(type) {
-	case MessagePayload:
-		return p.Message, true
-	case ToolResultPayload:
-		return Message{Role: RoleTool, ToolCallID: p.Result.CallID, Content: p.Result.Content, Parts: p.Result.Blocks}, true
-	case CompressionPayload, ContextPayload, UsagePayload, InterruptPayload:
+	// Switch on the Kind discriminator, not the Go type: the `exhaustive`
+	// linter checks EventKind switches, so adding a payload kind without
+	// deciding its projection fails CI — a type switch would let the new
+	// payload silently vanish from every conversation. The trailing return
+	// covers kinds from newer writers (ADR-0010: ignore unknown, never fail).
+	switch e.Payload.Kind() {
+	case EventUserMessage, EventAssistantMessage:
+		return e.Payload.(MessagePayload).Message, true
+	case EventToolResult:
+		r := e.Payload.(ToolResultPayload).Result
+		return Message{Role: RoleTool, ToolCallID: r.CallID, Content: r.Content, Parts: r.Blocks}, true
+	case EventCompressed, EventContext, EventUsage, EventInterrupted:
 		return Message{}, false
 	}
 	return Message{}, false

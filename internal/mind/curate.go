@@ -230,6 +230,9 @@ func renderEvents(delta []core.Event, budgetChars int) string {
 				for _, tc := range msg.ToolCalls {
 					parts = append(parts, fmt.Sprintf("[tool-call] %s(%s)", tc.Name, truncate(string(tc.Args), 400)))
 				}
+			default:
+				// System/tool roles never persist as MessagePayload (Validate
+				// rejects them); nothing to fold.
 			}
 		case core.ToolResultPayload:
 			if c := p.Result.Content; c != "" {

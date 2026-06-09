@@ -112,6 +112,10 @@ func (e *Engine) requiresApproval(call core.ToolCall) (reason string, required b
 // extends the in-turn projection, and emits ToolFinished. Returns false
 // (turn-fatal) on a persist failure. Both dispatch paths route through it, so
 // they can differ in HOW results are produced, not in HOW they are recorded.
+// It is the third persistence path beside engine.append (must-persist on the
+// live ctx) and engine.persistBestEffort (teardown writes): it needs append's
+// loud abort but persistBestEffort's cancellation-free write, so it composes
+// the two contracts inline.
 func (e *Engine) recordResult(ctx context.Context, c *Conversation, dr *dispatchResult, res core.ToolResult) bool {
 	pctx := context.WithoutCancel(ctx)
 	toolEv := core.NewToolResultEvent(c.id, res, e.clock.Now())
@@ -138,8 +142,8 @@ func (e *Engine) gateApproval(ctx context.Context, c *Conversation, call core.To
 	return ar.Approved, true
 }
 
-// requestAndAwait emits a mid-turn request (ApprovalRequest/ClarifyRequest) and
-// blocks until the actor routes the matching response, or the turn is cancelled.
+// requestAndAwait emits a mid-turn request (ApprovalRequest) and blocks until
+// the actor routes the matching response, or the turn is cancelled.
 //
 // Ordering is load-bearing: the waiter is registered on the unbuffered awaits
 // rendezvous BEFORE the request is emitted. The actor is a single goroutine, so
@@ -291,13 +295,13 @@ func (e *Engine) dispatchScheduled(ctx context.Context, c *Conversation, calls [
 
 // backfillInterruptedTools writes a synthetic error result for each tool_call
 // that never got dispatched, so an interrupted turn cannot leave a dangling
-// assistant tool_call with no matching result. It uses a cancellation-free
-// context derived from the turn's: the turn ctx is already cancelled, but these
-// results MUST still persist to keep the log valid for replay.
+// assistant tool_call with no matching result. These results MUST still
+// persist to keep the log valid for replay; persistBestEffort drops the
+// cancellation (the turn ctx is already cancelled) and surfaces any failure on
+// the operational plane.
 func (e *Engine) backfillInterruptedTools(ctx context.Context, c *Conversation, pending []core.ToolCall) {
-	bg := context.WithoutCancel(ctx) // keeps the turn correlation, drops cancellation
 	for _, call := range pending {
 		res := core.ToolResult{CallID: call.ID, IsError: true, Content: "interrupted before tool execution"}
-		_ = e.store.AppendEvent(bg, e.stamp(bg, core.NewToolResultEvent(c.id, res, e.clock.Now())))
+		e.persistBestEffort(ctx, c, core.NewToolResultEvent(c.id, res, e.clock.Now()))
 	}
 }

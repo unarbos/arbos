@@ -191,12 +191,13 @@ func (c *Conversation) emitEnvelope(ctx context.Context, env core.Envelope) bool
 // actor goroutine, which runs until ctx is cancelled. The returned
 // Conversation's Events channel is closed when the actor exits.
 func (e *Engine) StartSession(ctx context.Context, id core.SessionID) (*Conversation, error) {
-	if _, err := e.store.Get(ctx, id); err != nil {
+	sess, err := e.store.Get(ctx, id)
+	if err != nil {
 		if !errors.Is(err, ports.ErrSessionNotFound) {
 			return nil, fmt.Errorf("look up session %q: %w", id, err)
 		}
 		now := e.clock.Now()
-		sess := core.Session{
+		sess = core.Session{
 			ID:        id,
 			Status:    core.SessionActive,
 			Model:     e.cfg.Model,
@@ -213,6 +214,9 @@ func (e *Engine) StartSession(ctx context.Context, id core.SessionID) (*Conversa
 		events:   make(chan core.Envelope, 32),
 		awaits:   make(chan awaitReg), // unbuffered rendezvous
 		observer: e.observer,
+		// Session.Model is the durable authority; the actor caches it so a
+		// resumed session keeps the model a SetModelIntent switched it to.
+		model: sess.Model,
 	}
 	go e.runActor(ctx, c)
 	return c, nil
@@ -261,11 +265,17 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 			case core.SetModelIntent:
 				// Apply when idle: the actor owns c.model and no turn is running,
 				// so subsequent turns use the new model with no shared-state race.
+				// Persist first — Session.Model is the durable authority and a
+				// resumed session must see the switch; only then update the cache.
+				if err := e.persistModel(parent, c.id, it.Model); err != nil {
+					c.emit(parent, core.ErrorEvent{Category: core.ErrPersist, Err: "persist model: " + err.Error()})
+					continue
+				}
 				c.model = it.Model
 			case core.CompactIntent:
 				// Manual /compact: force a compaction pass now (when idle).
 				e.compactNow(parent, c)
-			case core.ApprovalResponseIntent, core.ClarifyResponseIntent:
+			case core.ApprovalResponseIntent:
 				// A response arriving while idle has no pending waiter — the turn
 				// that asked already ended or was interrupted. Drop it benignly;
 				// a late/duplicate frame is not an internal error.
@@ -338,7 +348,7 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 			<-done
 			return queued
 		case reg := <-c.awaits:
-			// The turn paused for a response (approval/clarify). Register the
+			// The turn paused for a response (approval). Register the
 			// waiter; the matching response intent below routes back to it.
 			pending[reg.id] = reg.resp
 		case intent, ok := <-c.intents:
@@ -363,7 +373,7 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 				// Best-effort interrupt marker; the conversation log is already
 				// durable, so a failed marker write must not change control flow.
 				// cctx (not the cancelled turnCtx) carries the turn correlation.
-				_ = e.store.AppendEvent(cctx, e.stamp(cctx, core.NewInterruptEvent(c.id, "user interrupt", e.clock.Now())))
+				e.persistBestEffort(cctx, c, core.NewInterruptEvent(c.id, "user interrupt", e.clock.Now()))
 				c.emit(parent, core.Interrupted{})
 				return queued
 			case core.PromptIntent:
@@ -371,8 +381,6 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 				c.emit(parent, core.Queued(it))
 				queued = append(queued, it)
 			case core.ApprovalResponseIntent:
-				routeResponse(c, pending, it.RequestID, it, parent)
-			case core.ClarifyResponseIntent:
 				routeResponse(c, pending, it.RequestID, it, parent)
 			case core.SetModelIntent, core.CompactIntent:
 				// These apply only when idle (between turns). Ignoring them
@@ -531,7 +539,6 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string) 
 			if !e.append(ctx, c, core.NewUsageEvent(c.id, *sr.usage, e.clock.Now())) {
 				return true
 			}
-			e.mirrorTokenCount(ctx, c.id, sr.usage.TotalTokens)
 		}
 
 		if len(sr.toolCalls) == 0 {
@@ -575,13 +582,39 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string) 
 
 // append persists an event, emitting an ErrorEvent and signalling abort (false)
 // on failure. The log is the source of truth; a dropped append must never be
-// silent.
+// silent. This is the must-persist path; writes that happen while a turn is
+// already tearing down go through persistBestEffort, which reports failures on
+// the operational plane instead of aborting.
 func (e *Engine) append(ctx context.Context, c *Conversation, ev *core.Event) bool {
 	if err := e.store.AppendEvent(ctx, e.stamp(ctx, ev)); err != nil {
 		c.emit(ctx, core.ErrorEvent{Category: core.ErrPersist, Err: "persist " + string(ev.Payload.Kind()) + ": " + err.Error()})
 		return false
 	}
 	return true
+}
+
+// persistBestEffort appends ev on a cancellation-free context, for writes that
+// keep the log replayable while a turn is torn down (the interrupt marker, the
+// backfill of undispatched tool_calls). The frontend may already be gone, so a
+// failure cannot abort anything — but it is never silent: it surfaces through
+// the observer, whose contract is cheap and non-blocking.
+func (e *Engine) persistBestEffort(ctx context.Context, c *Conversation, ev *core.Event) {
+	bg := context.WithoutCancel(ctx)
+	if err := e.store.AppendEvent(bg, e.stamp(bg, ev)); err != nil && c.observer != nil {
+		c.observer.ObserveEvent(bg, core.ErrorEvent{Category: core.ErrPersist, Err: "persist " + string(ev.Payload.Kind()) + ": " + err.Error()})
+	}
+}
+
+// persistModel writes a model switch to the session record, the durable
+// authority a resumed session reads at adoption.
+func (e *Engine) persistModel(ctx context.Context, id core.SessionID, model string) error {
+	sess, err := e.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	sess.Model = model
+	sess.UpdatedAt = e.clock.Now()
+	return e.store.UpdateSession(ctx, sess)
 }
 
 // stamp copies the turn correlation from ctx onto the event so every persisted
@@ -593,17 +626,4 @@ func (e *Engine) stamp(ctx context.Context, ev *core.Event) *core.Event {
 		ev.TurnID = cor.TurnID
 	}
 	return ev
-}
-
-// mirrorTokenCount updates the derived Session.TokenCount. The authoritative
-// record is the usage event already in the log, so a transient metadata-write
-// failure is non-fatal and does not abort the turn.
-func (e *Engine) mirrorTokenCount(ctx context.Context, id core.SessionID, addTokens int) {
-	sess, err := e.store.Get(ctx, id)
-	if err != nil {
-		return
-	}
-	sess.TokenCount += addTokens
-	sess.UpdatedAt = e.clock.Now()
-	_ = e.store.UpdateSession(ctx, sess)
 }

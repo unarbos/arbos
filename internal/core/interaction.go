@@ -43,8 +43,6 @@ func DecodeIntent(b []byte) (Intent, error) {
 		return unmarshalInto[ResumeIntent](f)
 	case IntentApprovalResponse:
 		return unmarshalInto[ApprovalResponseIntent](f)
-	case IntentClarifyResponse:
-		return unmarshalInto[ClarifyResponseIntent](f)
 	case IntentSetModel:
 		return unmarshalInto[SetModelIntent](f)
 	case IntentCompact:
@@ -87,8 +85,6 @@ func DecodeEvent(b []byte) (KernelEvent, error) {
 		return unmarshalEvent[Queued](f)
 	case KernelEventApprovalRequest:
 		return unmarshalEvent[ApprovalRequest](f)
-	case KernelEventClarifyRequest:
-		return unmarshalEvent[ClarifyRequest](f)
 	}
 	return nil, fmt.Errorf("decode event: unknown kind %q", f.Kind)
 }

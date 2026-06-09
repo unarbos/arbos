@@ -13,7 +13,6 @@ const (
 	IntentInterrupt        IntentKind = "interrupt"
 	IntentResume           IntentKind = "resume"
 	IntentApprovalResponse IntentKind = "approval_response"
-	IntentClarifyResponse  IntentKind = "clarify_response"
 	IntentSetModel         IntentKind = "set_model"
 	IntentCompact          IntentKind = "compact"
 )
@@ -49,15 +48,6 @@ type ApprovalResponseIntent struct {
 	Reason    string    `json:"reason,omitempty"`
 }
 
-// ClarifyResponseIntent answers a ClarifyRequest with free-text input
-// (suspend-and-await; ADR-0018). Note: this is for non-secret clarifications —
-// secret material never flows through the conversation; it is resolved by the
-// broker at the request boundary (ADR-0016).
-type ClarifyResponseIntent struct {
-	RequestID RequestID `json:"request_id"`
-	Answer    string    `json:"answer"`
-}
-
 // SetModelIntent switches the model used for subsequent turns of a session. It
 // applies between turns (when the session is idle); the engine owns the
 // per-session override so no shared state is mutated mid-turn. Mirrors pi's RPC
@@ -74,6 +64,5 @@ func (PromptIntent) Kind() IntentKind           { return IntentPrompt }
 func (InterruptIntent) Kind() IntentKind        { return IntentInterrupt }
 func (ResumeIntent) Kind() IntentKind           { return IntentResume }
 func (ApprovalResponseIntent) Kind() IntentKind { return IntentApprovalResponse }
-func (ClarifyResponseIntent) Kind() IntentKind  { return IntentClarifyResponse }
 func (SetModelIntent) Kind() IntentKind         { return IntentSetModel }
 func (CompactIntent) Kind() IntentKind          { return IntentCompact }

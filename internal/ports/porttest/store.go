@@ -139,13 +139,13 @@ func RunSessionStoreContract(t *testing.T, newStore func() ports.SessionStore) {
 		s := newStore()
 		mustCreate(t, s, "s1", now)
 		sess, _ := s.Get(ctx, "s1")
-		sess.TokenCount = 123
+		sess.Model = "switched-model"
 		sess.Status = core.SessionEnded
 		if err := s.UpdateSession(ctx, sess); err != nil {
 			t.Fatalf("UpdateSession: %v", err)
 		}
 		got, _ := s.Get(ctx, "s1")
-		if got.TokenCount != 123 || got.Status != core.SessionEnded {
+		if got.Model != "switched-model" || got.Status != core.SessionEnded {
 			t.Fatalf("update did not persist: %+v", got)
 		}
 	})

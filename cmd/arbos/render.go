@@ -101,8 +101,8 @@ func (r *renderer) agentLabel() {
 		return
 	}
 	r.turnOpen = true
-	fmt.Fprintln(r.status)
-	fmt.Fprintln(r.status, r.agent.Render(agentIcon))
+	_, _ = fmt.Fprintln(r.status)
+	_, _ = fmt.Fprintln(r.status, r.agent.Render(agentIcon))
 }
 
 // newMarkdownStyler builds a prose Markdown styler bound to w, using the shared
@@ -147,7 +147,7 @@ func styledDiff(diff string, max int, add, del, ctx lipgloss.Style) []string {
 // header prints the green Arbos banner that opens a session, with the session
 // id kept as a dim trailer (still useful for -session resume).
 func (r *renderer) header(id string) {
-	fmt.Fprintln(r.status, r.agent.Render("Arbos")+r.dim.Render("  "+id))
+	_, _ = fmt.Fprintln(r.status, r.agent.Render("Arbos")+r.dim.Render("  "+id))
 }
 
 func (r *renderer) delta(text string) {
@@ -156,7 +156,7 @@ func (r *renderer) delta(text string) {
 	}
 	r.agentLabel()
 	if styled := r.md.Push(text); styled != "" {
-		fmt.Fprint(r.out, indentStream(styled, &r.atLineStart))
+		_, _ = fmt.Fprint(r.out, indentStream(styled, &r.atLineStart))
 	}
 	r.midText = !strings.HasSuffix(text, "\n")
 }
@@ -165,11 +165,11 @@ func (r *renderer) delta(text string) {
 // into the assistant's text (the original bug).
 func (r *renderer) breakText() {
 	if tail := r.md.Flush(); tail != "" {
-		fmt.Fprint(r.out, indentStream(tail, &r.atLineStart))
+		_, _ = fmt.Fprint(r.out, indentStream(tail, &r.atLineStart))
 	}
 	r.md = newMarkdownStyler(r.out)
 	if r.midText {
-		fmt.Fprintln(r.out)
+		_, _ = fmt.Fprintln(r.out)
 		r.midText = false
 		r.atLineStart = true
 	}
@@ -180,7 +180,7 @@ func (r *renderer) toolStart(call core.ToolCall) {
 	label := transcript.ToolLabel(call.Name, call.Args)
 	r.labels[call.ID] = label
 	r.breakText()
-	fmt.Fprintln(r.status, r.tool.Render("  • "+label))
+	_, _ = fmt.Fprintln(r.status, r.tool.Render("  • "+label))
 }
 
 func (r *renderer) toolFinish(res core.ToolResult) {
@@ -193,15 +193,15 @@ func (r *renderer) toolFinish(res core.ToolResult) {
 	if res.IsError {
 		style = r.bad
 	}
-	fmt.Fprintln(r.status, "  "+style.Render(line))
+	_, _ = fmt.Fprintln(r.status, "  "+style.Render(line))
 	if diff := transcript.DiffOf(res); diff != "" {
 		for _, ln := range styledDiff(diff, 0, r.ok, r.del, r.dim) {
-			fmt.Fprintln(r.status, ln)
+			_, _ = fmt.Fprintln(r.status, ln)
 		}
 		return
 	}
 	for _, ln := range transcript.ToolOutputPreview(label, res.Content) {
-		fmt.Fprintln(r.status, r.dim.Render("    "+ln))
+		_, _ = fmt.Fprintln(r.status, r.dim.Render("    "+ln))
 	}
 }
 
@@ -210,31 +210,31 @@ func (r *renderer) toolFinish(res core.ToolResult) {
 func (r *renderer) approvalPrompt(call core.ToolCall) {
 	r.breakText()
 	label := transcript.ToolLabel(call.Name, call.Args)
-	fmt.Fprint(r.status, r.note.Render("  approve "+label+"? [y/N] "))
+	_, _ = fmt.Fprint(r.status, r.note.Render("  approve "+label+"? [y/N] "))
 }
 
 func (r *renderer) turnComplete(reason core.StopReason) {
 	r.breakText()
 	if reason != core.StopAnswered {
-		fmt.Fprintln(r.status, r.dim.Render("· stopped: "+string(reason)))
+		_, _ = fmt.Fprintln(r.status, r.dim.Render("· stopped: "+string(reason)))
 	}
 	r.turnOpen = false
-	fmt.Fprintln(r.status)
+	_, _ = fmt.Fprintln(r.status)
 }
 
 func (r *renderer) promptFollowUp() {
 	r.breakText()
-	fmt.Fprint(r.status, r.note.Render("› "))
+	_, _ = fmt.Fprint(r.status, r.note.Render("› "))
 }
 
 func (r *renderer) close() {}
 
 func (r *renderer) interrupted() {
 	r.breakText()
-	fmt.Fprintln(r.status, r.dim.Render("· interrupted"))
+	_, _ = fmt.Fprintln(r.status, r.dim.Render("· interrupted"))
 }
 
 func (r *renderer) errorf(e core.ErrorEvent) {
 	r.breakText()
-	fmt.Fprintln(r.status, r.bad.Render("· error ("+string(e.Category)+"): "+e.Err))
+	_, _ = fmt.Fprintln(r.status, r.bad.Render("· error ("+string(e.Category)+"): "+e.Err))
 }

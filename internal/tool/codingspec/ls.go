@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/tool"
 )
 
@@ -22,7 +23,7 @@ const lsDefaultLimit = 500
 // lsSpec lists a directory, sorted case-insensitively, with a "/" suffix on
 // directories and a byte/entry cap, matching pi's ls tool.
 func lsSpec(root string) tool.Spec {
-	return tool.NewSpec("ls",
+	spec := tool.NewSpec("ls",
 		fmt.Sprintf("List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to %d entries or %dKB (whichever is hit first).", lsDefaultLimit, DefaultMaxBytes/1024),
 		true,
 		func(_ context.Context, a LsArgs) (string, error) {
@@ -88,6 +89,12 @@ func lsSpec(root string) tool.Spec {
 			}
 			return out, nil
 		})
+	// The listing depends on what lives in the directory, so declare a read of
+	// its subtree (keys are hierarchical) and a same-batch write beneath it is
+	// ordered, not raced.
+	return tool.WithAccess(spec, func(a LsArgs) core.AccessSet {
+		return core.AccessSet{Reads: fileKeys(root, a.Path)}
+	})
 }
 
 const maxInt = int(^uint(0) >> 1)

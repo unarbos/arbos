@@ -31,10 +31,11 @@ type Manager struct {
 	procs    []*exec.Cmd
 }
 
-// LoadConfig reads MCP config from, in order: ARBOS_MCP_CONFIG (JSON string),
-// cwd/.arbos/mcp.json, userDir/mcp.json. Returns nil config when none found.
-func LoadConfig(cwd, userDir string) (*Config, error) {
-	if raw := strings.TrimSpace(os.Getenv("ARBOS_MCP_CONFIG")); raw != "" {
+// LoadConfig reads MCP config from, in order: inline (a JSON string the host
+// resolved from ARBOS_MCP_CONFIG), cwd/.arbos/mcp.json, userDir/mcp.json.
+// Returns nil config when none found.
+func LoadConfig(inline, cwd, userDir string) (*Config, error) {
+	if raw := strings.TrimSpace(inline); raw != "" {
 		var cfg Config
 		if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 			return nil, fmt.Errorf("ARBOS_MCP_CONFIG: %w", err)

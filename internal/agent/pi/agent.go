@@ -226,11 +226,12 @@ func NewAgent(o Options, newID func() core.SessionID) (*agent.ArbosAgent, error)
 	return agent.NewArbosAgent(factory, newID), nil
 }
 
-// validateGrantRoot resolves a delegated repo path, confirms it exists, and
-// refuses paths outside the host workspace so a child cannot operate on /etc,
-// $HOME/.ssh, or any other directory the parent did not grant.
+// validateGrantRoot resolves a delegated repo path through the same workspace
+// guard the file tools use (tool.Resolve: lexical + symlink escapes), confirms
+// it exists, and refuses paths outside the host workspace so a child cannot
+// operate on /etc, $HOME/.ssh, or any other directory the parent did not grant.
 func validateGrantRoot(hostRoot, path string) (string, error) {
-	abs, err := filepath.Abs(path)
+	abs, err := tool.Resolve(hostRoot, path)
 	if err != nil {
 		return "", fmt.Errorf("repo path %q: %w", path, err)
 	}
@@ -240,13 +241,6 @@ func validateGrantRoot(hostRoot, path string) (string, error) {
 	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("repo path %q is not a directory", path)
-	}
-	hostAbs, err := filepath.Abs(hostRoot)
-	if err != nil {
-		return "", fmt.Errorf("host workspace: %w", err)
-	}
-	if !tool.WithinRoot(abs, hostAbs) {
-		return "", fmt.Errorf("repo path %q is outside the host workspace %q", path, hostRoot)
 	}
 	return abs, nil
 }
