@@ -21,6 +21,7 @@ type NewNode struct {
 	Check    string `json:"check,omitempty" desc:"How to verify it (a command, a test, a criterion). Omit only when no check is stateable."`
 	Cmd      string `json:"cmd,omitempty" desc:"Shell command that IS this node's work: when the node becomes ready the kernel runs it as a job in the workspace and maps exit 0/non-zero to done/failed — no model turn, you are woken only on failure. Use for mechanical steps (build, test, commit, push)."`
 	Par      bool   `json:"par,omitempty" desc:"Run alongside the previous node (same order slot) instead of after it. Consecutive par nodes form a parallel group; the next non-par node joins after the whole group."`
+	Wake     bool   `json:"wake,omitempty" desc:"Callback: summon a model turn the moment this node becomes ready (its earlier siblings finished). Put it on the final no-cmd node of a pipeline when the user wants to hear about completion — without it, nothing fires on success."`
 	Kind     string `json:"kind,omitempty" desc:"achieve (default) reaches a state and terminates; maintain is a standing obligation that recurs and never completes."`
 	After    string `json:"after,omitempty" desc:"Defer readiness by this duration from now (e.g. \"30m\")."`
 	Every    string `json:"every,omitempty" desc:"Recurrence period for maintain nodes (e.g. \"1h\"). Required for maintain."`
@@ -96,13 +97,14 @@ func addOp(ctx context.Context, store Store, a Args, now time.Time) (string, err
 
 func buildNode(in NewNode, now time.Time) (Node, error) {
 	n := Node{
-		Kind:     KindAchieve,
-		Goal:     strings.TrimSpace(in.Goal),
-		Check:    strings.TrimSpace(in.Check),
-		Cmd:      strings.TrimSpace(in.Cmd),
-		Par:      in.Par,
-		Status:   StatusPending,
-		Assignee: AssigneeAgent,
+		Kind:        KindAchieve,
+		Goal:        strings.TrimSpace(in.Goal),
+		Check:       strings.TrimSpace(in.Check),
+		Cmd:         strings.TrimSpace(in.Cmd),
+		WakeOnReady: in.Wake,
+		Par:         in.Par,
+		Status:      StatusPending,
+		Assignee:    AssigneeAgent,
 	}
 	if n.Goal == "" {
 		return Node{}, fmt.Errorf("goal must not be empty")
@@ -145,6 +147,9 @@ func buildNode(in NewNode, now time.Time) (Node, error) {
 	}
 	if n.Cmd != "" && n.Assignee == AssigneeHuman {
 		return Node{}, fmt.Errorf("a cmd node cannot be assigned to the human — the kernel runs cmds")
+	}
+	if n.Cmd != "" && n.WakeOnReady {
+		return Node{}, fmt.Errorf("wake is for judgment nodes — a cmd node already fires by itself; put wake on a separate final node")
 	}
 	return n, nil
 }
@@ -285,6 +290,7 @@ func PromptInfo() codingspec.ToolPromptInfo {
 			"Timed requests — \"in 30 minutes, …\", \"message me in an hour\", \"at 3pm do X\" — are deferred plan nodes (op:add with after, assigned to the agent), and the turn ends immediately: the host clock fires the node and notify carries the result to the user. Never hold a turn open with sleep or await just to reach a moment in time.",
 			"For work with three or more steps, decompose it with the plan tool before starting, give each node a check when one is stateable, and keep exactly one node active while you work on it.",
 			"Compile pipelines instead of babysitting them: mechanical steps (build, test, commit, push) become sibling nodes with cmd — the kernel runs them in sibling order with zero model turns, par:true nodes run in parallel groups, and you are woken only if a command fails. Never await a sequence you can express as cmd nodes; create them and end the turn.",
+			"Success is silent unless asked: when the user wants to hear about completion, end the pipeline with a final no-cmd node with wake:true — the kernel summons you the moment its prerequisites finish, and you notify the user then. A plain ready node never wakes anyone; never promise a completion ping without a wake:true node.",
 			"Update the plan as facts arrive, not in batches: claim a node before working it (status active), and finish it the moment it is verified (status done, with a one-line outcome of what changed or was learned).",
 			"Never end a turn with a node still active unless you are mid-task and continuing next turn; if you are stopped by something, mark it blocked with what is needed.",
 			"Recurring obligations that need judgment (commit good progress, triage new failures) are maintain nodes with every; record each recurrence with an outcome-only update. The plan clock resolves to ~1 minute and each firing runs a model turn — purely mechanical commands on a finer cadence belong in a background loop job instead. Questions only the user can answer are nodes with assignee human — park them and continue other work.",

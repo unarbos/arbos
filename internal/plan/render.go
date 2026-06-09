@@ -132,6 +132,9 @@ func renderOpen(b *strings.Builder, parent NodeID, children map[NodeID][]Node, l
 		if n.Cmd != "" {
 			fmt.Fprintf(b, "  (cmd: %s)", clipText(n.Cmd, 48))
 		}
+		if n.WakeOnReady {
+			b.WriteString("  (callback)")
+		}
 		if n.Check != "" {
 			fmt.Fprintf(b, "  (check: %s)", n.Check)
 		}
@@ -177,7 +180,7 @@ func dueSuffix(n Node, now time.Time) string {
 		return ""
 	}
 	if !now.Before(n.NextDue) {
-		return "  [due now]"
+		return " · due now"
 	}
-	return fmt.Sprintf("  (next due %s)", n.NextDue.Format("15:04"))
+	return " · next " + n.NextDue.Format("15:04")
 }

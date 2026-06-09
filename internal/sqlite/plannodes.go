@@ -325,10 +325,10 @@ func (s *Store) LastHumanSeen(ctx context.Context) (time.Time, error) {
 	return fromNanos(at), nil
 }
 
-const planNodeSelect = `SELECT id, plan_id, parent_id, seq, kind, goal, check_expr, cmd, status, outcome,
+const planNodeSelect = `SELECT id, plan_id, parent_id, seq, kind, goal, check_expr, cmd, wake, status, outcome,
        assignee, owner, after_at, every_ns, next_due, updated_at FROM plan_nodes`
 
-const planNodeSelectN = `SELECT n.id, n.plan_id, n.parent_id, n.seq, n.kind, n.goal, n.check_expr, n.cmd, n.status, n.outcome,
+const planNodeSelectN = `SELECT n.id, n.plan_id, n.parent_id, n.seq, n.kind, n.goal, n.check_expr, n.cmd, n.wake, n.status, n.outcome,
        n.assignee, n.owner, n.after_at, n.every_ns, n.next_due, n.updated_at FROM plan_nodes n`
 
 type rowScanner interface{ Scan(dest ...any) error }
@@ -340,7 +340,7 @@ func scanPlanNode(r rowScanner) (plan.Node, error) {
 		kind, status             string
 		after, every, due, updat int64
 	)
-	if err := r.Scan(&id, &planID, &parent, &n.Seq, &kind, &n.Goal, &n.Check, &n.Cmd, &status, &n.Outcome,
+	if err := r.Scan(&id, &planID, &parent, &n.Seq, &kind, &n.Goal, &n.Check, &n.Cmd, &n.WakeOnReady, &status, &n.Outcome,
 		&n.Assignee, &n.Owner, &after, &every, &due, &updat); err != nil {
 		return plan.Node{}, fmt.Errorf("scan plan node: %w", err)
 	}

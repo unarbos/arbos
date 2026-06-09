@@ -104,6 +104,11 @@ func wakePrompt(w plan.WakeEvent) string {
 			"Kernel-run command failed: node #%d — %s. Command: `%s`. Output tail:\n%s\nDiagnose and act: fix the cause and reopen the node (status pending) so the kernel retries, adjust its cmd, or record it failed/blocked with an outcome. No conversation is open: anything the user must hear goes through the notify tool — and only what genuinely concerns them.",
 			n.ID, n.Goal, n.Cmd, detail)
 	}
+	if w.Reason == plan.WakeReady {
+		return fmt.Sprintf(
+			"Callback firing: node #%d is now ready — %s. Its earlier siblings just finished (see the <<plan>> block for their outcomes). Claim it (op:update, node %d, status active), do what it says — usually reporting completion to the user via the notify tool — and record it done with an outcome. No conversation is open: notify is your only voice.",
+			n.ID, n.Goal, n.ID)
+	}
 	if n.Kind == plan.KindMaintain {
 		return fmt.Sprintf(
 			"Scheduled firing: standing obligation #%d is due — %s. Do it now, then record the recurrence with the plan tool (op:update, node %d, outcome only). Keep it to this one obligation. No conversation is open: anything the user must hear goes through the notify tool.",

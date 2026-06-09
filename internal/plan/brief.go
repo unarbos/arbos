@@ -31,41 +31,61 @@ func Brief(open, recent []Node, attempts []Attempt, lastSeen, now time.Time) str
 
 	var b strings.Builder
 
-	// Since you left: terminal flips, plus recurrences that ran.
-	var lines []string
+	// Since you left, tally-style: one header line carrying the counts, then
+	// only the terminal flips as lines (recurrence activity folds onto the
+	// standing lines below — a goal is never printed twice).
+	var flips []string
 	for _, n := range recent {
 		if !Terminal(n.Status) || n.Kind == KindMaintain {
 			continue
 		}
 		mark := map[Status]string{StatusDone: "✓", StatusFailed: "✗", StatusCancelled: "-"}[n.Status]
-		line := fmt.Sprintf("  %s #%d %s", mark, n.ID, n.Goal)
+		line := fmt.Sprintf("  %s #%d %s", mark, n.ID, clipText(n.Goal, briefGoalWidth))
 		if n.Outcome != "" {
-			line += " — " + n.Outcome
+			line += " — " + clipText(n.Outcome, briefGoalWidth)
 		}
-		lines = append(lines, line)
+		flips = append(flips, line)
 	}
-	for id, c := range recurrenceCounts(attempts, byID) {
-		lines = append(lines, fmt.Sprintf("  ▸ #%d %s — ran %d×", id, byID[id].Goal, c))
+	counts := recurrenceCounts(attempts, byID)
+	fired, failed := 0, 0
+	for _, c := range counts {
+		fired += c
 	}
-	if len(lines) > 0 {
-		if lastSeen.IsZero() {
-			b.WriteString("while away:\n")
-		} else {
-			fmt.Fprintf(&b, "since you left (%s ago):\n", humanize(now.Sub(lastSeen)))
+	for _, a := range attempts {
+		if a.Verdict == VerdictFail {
+			failed++
 		}
-		b.WriteString(strings.Join(lines, "\n"))
-		b.WriteString("\n")
+	}
+	if len(flips) > 0 || fired > 0 {
+		header := "while away"
+		if !lastSeen.IsZero() {
+			header = fmt.Sprintf("since you left (%s)", humanize(now.Sub(lastSeen)))
+		}
+		if fired > 0 {
+			header += fmt.Sprintf(" · fired %d×", fired)
+		}
+		if failed > 0 {
+			header += fmt.Sprintf(" · %d failed", failed)
+		}
+		b.WriteString(header + "\n")
+		if len(flips) > 0 {
+			b.WriteString(strings.Join(flips, "\n") + "\n")
+		}
 	}
 
-	writeOpenSections(&b, open, now)
+	writeOpenSections(&b, open, counts, now)
 	return strings.TrimRight(b.String(), "\n")
 }
+
+// briefGoalWidth caps goal and outcome text in the human views: the greeting
+// is a glance, not a document — the ids are there for anyone who wants depth.
+const briefGoalWidth = 64
 
 // Handoff renders the leaving summary: what stays open when the human walks
 // away. Empty when nothing is open.
 func Handoff(nodes []Node, now time.Time) string {
 	var b strings.Builder
-	writeOpenSections(&b, nodes, now)
+	writeOpenSections(&b, nodes, nil, now)
 	if b.Len() == 0 {
 		return ""
 	}
@@ -80,8 +100,10 @@ func Handoff(nodes []Node, now time.Time) string {
 // timed work that has not fired yet, standing obligations, and what waits on
 // the human. Deferred nodes render with their countdown — the user who just
 // said "in 20 seconds…" must see that promise acknowledged at every door,
-// especially the one they are walking out of.
-func writeOpenSections(b *strings.Builder, nodes []Node, now time.Time) {
+// especially the one they are walking out of. counts annotates standing lines
+// with their recent activity (nil for the handoff, where nothing has run
+// "since" anything).
+func writeOpenSections(b *strings.Builder, nodes []Node, counts map[NodeID]int, now time.Time) {
 	hasChildren := map[NodeID]bool{}
 	for _, n := range nodes {
 		hasChildren[n.Parent] = true
@@ -91,16 +113,20 @@ func writeOpenSections(b *strings.Builder, nodes []Node, now time.Time) {
 		switch {
 		case Terminal(n.Status):
 		case n.Kind == KindMaintain:
-			standing = append(standing, fmt.Sprintf("  ▸ #%d %s%s", n.ID, n.Goal, dueSuffix(n, now)))
+			line := fmt.Sprintf("  ▸ #%d %s", n.ID, clipText(n.Goal, briefGoalWidth))
+			if c := counts[n.ID]; c > 0 {
+				line += fmt.Sprintf(" · ran %d×", c)
+			}
+			standing = append(standing, line+dueSuffix(n, now))
 		case n.Assignee == AssigneeHuman:
-			human = append(human, fmt.Sprintf("  ? #%d %s", n.ID, n.Goal))
+			human = append(human, fmt.Sprintf("  ? #%d %s", n.ID, clipText(n.Goal, briefGoalWidth)))
 		case n.Status == StatusPending && !n.After.IsZero() && now.Before(n.After):
-			timed = append(timed, fmt.Sprintf("  ▸ #%d %s — fires in ~%s", n.ID, n.Goal, humanize(n.After.Sub(now))))
+			timed = append(timed, fmt.Sprintf("  ▸ #%d %s · fires in ~%s", n.ID, clipText(n.Goal, briefGoalWidth), humanize(n.After.Sub(now))))
 		case n.Parent == 0 && hasChildren[n.ID]:
 			// A decomposed root is a heading; its children carry the state. A
 			// childless root is itself the work and falls through below.
 		case n.Status == StatusActive || Ready(n, GatedBySibling(nodes, n), now):
-			open = append(open, fmt.Sprintf("  ▸ #%d [%s] %s", n.ID, statusWord(n, now), n.Goal))
+			open = append(open, fmt.Sprintf("  ▸ #%d [%s] %s", n.ID, statusWord(n, now), clipText(n.Goal, briefGoalWidth)))
 		}
 	}
 	if len(human) > 0 {

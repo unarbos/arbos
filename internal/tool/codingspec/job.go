@@ -539,7 +539,7 @@ func JobsBrief(root string) string {
 			cmd = cmd[:64] + "…"
 		}
 		age := time.Since(j.Meta.StartedAt).Round(time.Second)
-		lines = append(lines, fmt.Sprintf("  ▸ %s (%s) %s", j.ID, age, cmd))
+		lines = append(lines, fmt.Sprintf("  ▸ %s %s · %s", j.ID, cmd, age))
 	}
 	if len(lines) == 0 {
 		return ""
