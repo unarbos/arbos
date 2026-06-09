@@ -95,10 +95,10 @@ func (s *Store) AddPlanNodes(ctx context.Context, parent plan.NodeID, nodes []pl
 func insertPlanNode(ctx context.Context, tx *sql.Tx, planID, parent plan.NodeID, seq int, n plan.Node, now int64) (plan.NodeID, error) {
 	res, err := tx.ExecContext(ctx,
 		`INSERT INTO plan_nodes
-		   (plan_id, parent_id, seq, kind, goal, check_expr, cmd, status, outcome, assignee, owner,
+		   (plan_id, parent_id, seq, kind, goal, check_expr, cmd, wake, status, outcome, assignee, owner,
 		    after_at, every_ns, next_due, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		int64(planID), int64(parent), seq, string(n.Kind), n.Goal, n.Check, n.Cmd, string(n.Status),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		int64(planID), int64(parent), seq, string(n.Kind), n.Goal, n.Check, n.Cmd, n.WakeOnReady, string(n.Status),
 		n.Outcome, n.Assignee, n.Owner, nanos(n.After), int64(n.Every), nanos(n.NextDue), now, now)
 	if err != nil {
 		return 0, fmt.Errorf("add plan nodes: insert: %w", err)
@@ -126,10 +126,10 @@ func (s *Store) UpdatePlanNode(ctx context.Context, n plan.Node) error {
 	defer s.writeMu.Unlock()
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE plan_nodes
-		    SET kind=?, goal=?, check_expr=?, cmd=?, status=?, outcome=?, assignee=?, owner=?,
+		    SET kind=?, goal=?, check_expr=?, cmd=?, wake=?, status=?, outcome=?, assignee=?, owner=?,
 		        after_at=?, every_ns=?, next_due=?, updated_at=?
 		  WHERE id = ?`,
-		string(n.Kind), n.Goal, n.Check, n.Cmd, string(n.Status), n.Outcome, n.Assignee, n.Owner,
+		string(n.Kind), n.Goal, n.Check, n.Cmd, n.WakeOnReady, string(n.Status), n.Outcome, n.Assignee, n.Owner,
 		nanos(n.After), int64(n.Every), nanos(n.NextDue), time.Now().UnixNano(), int64(n.ID))
 	if err != nil {
 		return fmt.Errorf("update plan node %d: %w", n.ID, err)
@@ -186,17 +186,18 @@ func (s *Store) ClaimPlanNode(ctx context.Context, id plan.NodeID, owner string)
 	return rows > 0, nil
 }
 
-// DisarmPlanNode atomically replaces a node's time arming, but only if the
-// arming still matches what the caller read — compare-and-disarm, so a firing
-// happens once per arming no matter how many schedulers tick.
-func (s *Store) DisarmPlanNode(ctx context.Context, n plan.Node, after, nextDue time.Time) (bool, error) {
+// DisarmPlanNode atomically replaces a node's triggers (time arming and the
+// one-shot wake flag), but only if they still match what the caller read —
+// compare-and-disarm, so a firing happens once per arming no matter how many
+// schedulers tick.
+func (s *Store) DisarmPlanNode(ctx context.Context, n plan.Node, after, nextDue time.Time, wakeOnReady bool) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE plan_nodes SET after_at=?, next_due=?, updated_at=?
-		  WHERE id=? AND after_at=? AND next_due=? AND status='pending'`,
-		nanos(after), nanos(nextDue), time.Now().UnixNano(),
-		int64(n.ID), nanos(n.After), nanos(n.NextDue))
+		`UPDATE plan_nodes SET after_at=?, next_due=?, wake=?, updated_at=?
+		  WHERE id=? AND after_at=? AND next_due=? AND wake=? AND status='pending'`,
+		nanos(after), nanos(nextDue), wakeOnReady, time.Now().UnixNano(),
+		int64(n.ID), nanos(n.After), nanos(n.NextDue), n.WakeOnReady)
 	if err != nil {
 		return false, fmt.Errorf("disarm plan node %d: %w", n.ID, err)
 	}

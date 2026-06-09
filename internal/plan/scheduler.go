@@ -36,8 +36,11 @@ const (
 	// WakeDue: a time-armed judgment node's moment arrived.
 	WakeDue WakeReason = "due"
 	// WakeCmdFailed: a kernel-run command exited non-zero — the exception
-	// handler case. The model appears precisely at failures, nowhere else.
+	// handler case.
 	WakeCmdFailed WakeReason = "cmd_failed"
+	// WakeReady: a callback node's prerequisites finished (WakeOnReady) — the
+	// completion-report case.
+	WakeReady WakeReason = "ready"
 )
 
 // WakeEvent is one summons: the node, why, and any mechanical context (the
@@ -161,8 +164,12 @@ func (s *Scheduler) drain(ctx context.Context) {
 				return
 			default:
 			}
-			s.log.Info("plan scheduler: firing", "node", n.ID, "goal", n.Goal)
-			if err := s.wake(ctx, WakeEvent{Node: n, Reason: WakeDue}); err != nil {
+			reason := WakeDue
+			if n.Kind != KindMaintain && n.After.IsZero() {
+				reason = WakeReady // a callback: nothing timed it, its gates cleared
+			}
+			s.log.Info("plan scheduler: firing", "node", n.ID, "goal", n.Goal, "reason", string(reason))
+			if err := s.wake(ctx, WakeEvent{Node: n, Reason: reason}); err != nil {
 				s.log.Warn("plan scheduler: wake", "node", n.ID, "err", err)
 			}
 		}
@@ -205,25 +212,27 @@ func (s *Scheduler) collect(ctx context.Context) (cmds, wakes []Node) {
 	return cmds, wakes
 }
 
-// disarm clears or advances a node's time arming via compare-and-disarm,
-// reporting whether this scheduler won the firing. Un-armed nodes (a plain
-// ready cmd in a pipeline) trivially win. n's arming fields are updated in
-// place on success so later writes do not resurrect the old arming.
+// disarm clears or advances a node's triggers via compare-and-disarm,
+// reporting whether this scheduler won the firing. Time arming clears or
+// re-arms (maintain); the WakeOnReady callback flag is one-shot and always
+// clears. Un-triggered nodes (a plain ready cmd in a pipeline) trivially win.
+// n's trigger fields are updated in place on success so later writes do not
+// resurrect the old arming.
 func (s *Scheduler) disarm(ctx context.Context, n *Node, now time.Time) bool {
-	if n.Kind != KindMaintain && n.After.IsZero() {
+	if n.Kind != KindMaintain && n.After.IsZero() && !n.WakeOnReady {
 		return true
 	}
 	after, nextDue := time.Time{}, n.NextDue
 	if n.Kind == KindMaintain {
 		nextDue = now.Add(n.Every)
 	}
-	won, err := s.store.DisarmPlanNode(ctx, *n, after, nextDue)
+	won, err := s.store.DisarmPlanNode(ctx, *n, after, nextDue, false)
 	if err != nil {
 		s.log.Warn("plan scheduler: disarm", "node", n.ID, "err", err)
 		return false
 	}
 	if won {
-		n.After, n.NextDue = after, nextDue
+		n.After, n.NextDue, n.WakeOnReady = after, nextDue, false
 	}
 	return won
 }
@@ -299,7 +308,7 @@ func Fireable(nodes []Node, now time.Time) (cmds, wakes []Node) {
 		switch {
 		case n.Cmd != "":
 			cmds = append(cmds, n)
-		case n.Kind == KindMaintain || !n.After.IsZero():
+		case n.Kind == KindMaintain || !n.After.IsZero() || n.WakeOnReady:
 			wakes = append(wakes, n)
 		}
 	}

@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS plan_nodes (
     goal       TEXT    NOT NULL,
     check_expr TEXT    NOT NULL DEFAULT '', -- how to verify done ('' = self-report)
     cmd        TEXT    NOT NULL DEFAULT '', -- mechanical payload: kernel-run shell command ('' = judgment node)
+    wake       INTEGER NOT NULL DEFAULT 0,  -- one-shot callback: summon a model turn when ready
     status     TEXT    NOT NULL,            -- pending|active|blocked|done|cancelled|failed
     outcome    TEXT    NOT NULL DEFAULT '',
     assignee   TEXT    NOT NULL DEFAULT 'agent',
@@ -187,6 +188,7 @@ CREATE INDEX IF NOT EXISTS idx_outbox_undelivered ON outbox(delivered_at) WHERE 
 	// (fresh databases get it from the CREATE above).
 	alters := []string{
 		`ALTER TABLE plan_nodes ADD COLUMN cmd TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE plan_nodes ADD COLUMN wake INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range alters {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {

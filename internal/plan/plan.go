@@ -97,6 +97,15 @@ type Node struct {
 	Assignee string // AssigneeAgent or AssigneeHuman
 	Owner    string // who claimed it: a session id, or "job:<id>" for kernel runs
 
+	// WakeOnReady is the dependency trigger — the callback node. When set, the
+	// scheduler summons a model turn the moment this node becomes ready
+	// (prerequisites finished), then clears the flag (one-shot). It is what
+	// "notify me when the pipeline completes" compiles to: cmd nodes fire by
+	// themselves, failures wake by themselves, and this is the third firing
+	// rule — success wanted a voice. Opt-in per node, deliberately: waking on
+	// EVERY ready judgment node would be the full driver.
+	WakeOnReady bool
+
 	// Par is an assignment-time directive, not persisted: append this node at
 	// the SAME Seq as the one before it, so the two run alongside each other
 	// (GatedBySibling only gates on strictly-lower Seq). Equal-Seq groups are
@@ -151,10 +160,10 @@ type Store interface {
 	// several scheduler processes share one store without double-running a
 	// node (interactive sessions and the serve host all carry clocks).
 	ClaimPlanNode(ctx context.Context, id NodeID, owner string) (bool, error)
-	// DisarmPlanNode atomically clears/advances a node's time arming, but only
-	// if the arming still matches what the caller read — the same race story
-	// as ClaimPlanNode, for wake firings.
-	DisarmPlanNode(ctx context.Context, n Node, after, nextDue time.Time) (bool, error)
+	// DisarmPlanNode atomically replaces a node's triggers — time arming and
+	// the one-shot WakeOnReady flag — but only if they still match what the
+	// caller read — the same race story as ClaimPlanNode, for wake firings.
+	DisarmPlanNode(ctx context.Context, n Node, after, nextDue time.Time, wakeOnReady bool) (bool, error)
 }
 
 // Terminal reports whether a status admits no further work.
