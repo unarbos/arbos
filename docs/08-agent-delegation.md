@@ -85,20 +85,25 @@ machinery, degenerate parameters — this is the cohesion test, and it passes.
 
 ## Delegation surface
 
-The model sees **one core `delegate` tool** with a `backend` parameter, plus
-sugar tools that desugar to it:
+The model sees **one tool, `delegate`**, parameterized rather than fanned out
+into per-use-case sugar:
 
 ```
-start_coding_session(repo, goal, backend?)  ─┐
-spawn_agent(instruction, backend?, tools?)   ├─▶ delegate(Task{...})
-ask_model(prompt, model)                     ─┘
+delegate(instruction, backend?, tools?, cwd?) ─▶ Task{Instruction, Backend, Grant{Tools, Env}}
 ```
 
-One dispatch path, no duplication. A turn that calls `delegate` instantiates the
-child Agent, runs it, and relays its `KernelEvent`s upward. Each relayed event
-carries an **envelope** (`SessionID` + `Depth`) so frontends render nested
-sub-agent activity. (Envelope is the one recorded data-model addition; see
-ADR-0013.)
+- `backend` selects the runtime; omitted, it defaults to the primary (`pi`), so
+  a bare `delegate` is "kick off a coding session."
+- `tools` is the child's allowlist; a read-only allowlist lets siblings run in
+  parallel (see Concurrency below).
+- `cwd` roots the child's workspace (`Grant.Env.Path`); omitted, it inherits the
+  parent's cwd.
+
+One tool, one dispatch path, no duplication. A turn that calls `delegate`
+instantiates the child Agent, runs it, and relays its `KernelEvent`s upward.
+Each relayed event carries an **envelope** (`SessionID` + `Depth`) so frontends
+render nested sub-agent activity. (Envelope is the one recorded data-model
+addition; see ADR-0013.)
 
 ## Sharing tools and environments (the `Grant`)
 

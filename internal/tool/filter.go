@@ -44,3 +44,15 @@ func (f filtered) Dispatch(ctx context.Context, call core.ToolCall) core.ToolRes
 	}
 	return f.inner.Dispatch(ctx, call)
 }
+
+var _ ports.ConflictAnalyzer = filtered{}
+
+// Access delegates a granted call's footprint to the inner runtime; a
+// non-granted call is unbounded (it will be refused at Dispatch, so it must not
+// be reordered around real work).
+func (f filtered) Access(call core.ToolCall) core.AccessSet {
+	if !f.allow[call.Name] {
+		return core.AccessSet{Unknown: true}
+	}
+	return ports.AccessOf(f.inner, call)
+}

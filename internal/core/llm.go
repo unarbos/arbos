@@ -63,6 +63,9 @@ type LLMChunk struct {
 	// error and aborts the turn. Runtime-only; never serialized.
 	Err  error `json:"-"`
 	Done bool
+	// FinishReason is the provider's stop reason on the final chunk (e.g.
+	// "stop", "length", "tool_calls"). Runtime-only; never serialized.
+	FinishReason string `json:"-"`
 }
 
 // Usage reports token accounting for a completed response.

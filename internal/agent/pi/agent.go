@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/unarbos/arbos/internal/agent"
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/engine"
-	"github.com/unarbos/arbos/internal/memory"
+	"github.com/unarbos/arbos/internal/mind"
 	"github.com/unarbos/arbos/internal/ports"
 	"github.com/unarbos/arbos/internal/tool"
 	"github.com/unarbos/arbos/internal/tool/coding"
@@ -28,21 +29,30 @@ type Options struct {
 	Models         *ModelRegistry
 	Reasoning      core.ReasoningLevel
 	CacheRetention core.CacheRetention
+	// DistillModel, when set, runs the background distillers — the compaction
+	// Summarizer here and the Mind curator (wired by the host) — on a cheaper,
+	// faster model than the main agent. Distillation is template extraction,
+	// so it never inherits the agent's reasoning level. Empty falls back to
+	// Model.
+	DistillModel string
 	// Approval is nil by default, which the engine treats as allow-all — matching
 	// pi's full-privileges behavior. A user opts into gating writes/shell by
 	// supplying an ApprovalPolicy here.
 	Approval      ports.ApprovalPolicy
 	Observer      ports.Observer
 	MaxIterations int
-	// MemoryStore enables the memory tool and injects stored facts into each turn.
-	MemoryStore *memory.Store
+	// Mind, when set, is the agent's long-term memory: it recalls relevant atoms
+	// at turn start and curates the finished turn into atoms at turn end. Attach
+	// it only to the top-level session — delegated children share the same global
+	// atoms through it, so they need no Mind of their own.
+	Mind *mind.Mind
 	// ExtraRuntimes are merged into the top-level toolset only (e.g. MCP servers).
 	ExtraRuntimes []ports.ToolRuntime
 	// ExtraTools, when set, is composed alongside the coding toolset for the
 	// top-level session only (via NewEngine) — this is how the primary pi agent
-	// gets the delegation tools (delegate / start_coding_session) so it can spawn
-	// sub-agents. Delegated children (NewAgent) get the pure coding toolset, which
-	// bounds delegation depth.
+	// gets the delegation tool (delegate) so it can spawn sub-agents. Delegated
+	// children (NewAgent) get the pure coding toolset, which bounds delegation
+	// depth.
 	ExtraTools ports.ToolRuntime
 }
 
@@ -57,12 +67,23 @@ func (o Options) models() *ModelRegistry {
 	return DefaultModelRegistry()
 }
 
+// DistillerModel is the model background distillation runs on: DistillModel
+// when set, otherwise the main model. It is the one home for that fallback;
+// hosts wiring other distillers (the Mind curator) call it rather than
+// restating the rule.
+func (o Options) DistillerModel() string {
+	if o.DistillModel != "" {
+		return o.DistillModel
+	}
+	return o.Model
+}
+
 // buildForRoot assembles the coding config and tool registry rooted at a
 // specific workspace directory. The tool sandbox, the prompt's cwd, and the
 // auto-loaded context files/skills all derive from root, so a delegated child
 // granted a different repo (Grant.Env.Path) genuinely operates there.
 func (o Options) buildForRoot(root string) (engine.Config, ports.ToolRuntime, error) {
-	reg, err := coding.NewRuntime(root, o.MemoryStore)
+	reg, err := coding.NewRuntime(root)
 	if err != nil {
 		return engine.Config{}, nil, err
 	}
@@ -86,23 +107,21 @@ func (o Options) buildForRoot(root string) (engine.Config, ports.ToolRuntime, er
 	return cfg, reg, nil
 }
 
-// engineOptions returns the root-independent engine options (compaction policy,
-// summarizer, approval, observer) shared by every pi session.
-func (o Options) engineOptions() []engine.Option {
+// engineOptions returns the engine options for sessions rooted at root:
+// compaction policy, summarizer, approval, observer, and the turn-start
+// context injectors — memory recall when a Mind is attached, and the
+// workspace's background-job table always (jobs are part of the coding
+// toolset, so every session that can start one can see them).
+func (o Options) engineOptions(root string) []engine.Option {
 	mi := o.models().Get(o.Model)
 	policy := CompactionPolicy{ContextWindow: mi.ContextWindow}
-	summ := Summarizer{Provider: o.Provider, Model: o.Model, Reasoning: o.Reasoning}
+	summ := Summarizer{Provider: o.Provider, Model: o.DistillerModel()}
 	opts := []engine.Option{engine.WithContextPolicy(policy, summ)}
-	if o.MemoryStore != nil {
-		store := o.MemoryStore
-		opts = append(opts, engine.WithContextInjector(func(_ context.Context, _ core.SessionID) ([]core.Segment, error) {
-			text, err := store.FormatMerged()
-			if err != nil || text == "" {
-				return nil, err
-			}
-			return []core.Segment{{Source: "memory", Content: text}}, nil
-		}))
+	if o.Mind != nil {
+		// Recall at turn start, curate at turn end — the symmetric memory seam.
+		opts = append(opts, engine.WithContextInjector(o.Mind.Recall), engine.WithTurnEnd(o.Mind.Curate))
 	}
+	opts = append(opts, engine.WithContextInjector(jobsInjector(root)))
 	if o.Approval != nil {
 		opts = append(opts, engine.WithApproval(o.Approval))
 	}
@@ -110,6 +129,32 @@ func (o Options) engineOptions() []engine.Option {
 		opts = append(opts, engine.WithObserver(o.Observer))
 	}
 	return opts
+}
+
+// jobsInjector surfaces the workspace's background-job table at the start of
+// each turn, so the model re-grounds on running and recently-finished jobs
+// without spending a tool call — including jobs that survived an arbos
+// restart, since the table is derived from the shared job directories
+// (ADR-0032).
+//
+// It implements ADR-0015's only-append-when-changed discipline: a session is
+// re-injected only when its rendered table differs from what it was last
+// shown, and a session that has never had jobs is never told "(no background
+// jobs)" — the empty table is injected only to supersede a previous table.
+func jobsInjector(root string) func(context.Context, core.SessionID) ([]core.Segment, error) {
+	var mu sync.Mutex
+	last := map[core.SessionID]string{}
+	return func(_ context.Context, sid core.SessionID) ([]core.Segment, error) {
+		content := codingspec.JobsContext(root)
+		mu.Lock()
+		defer mu.Unlock()
+		prev, seen := last[sid]
+		if content == prev || (!seen && content == codingspec.NoJobsContext) {
+			return nil, nil
+		}
+		last[sid] = content
+		return []core.Segment{{Source: core.SourceJobs, Content: content}}, nil
+	}
 }
 
 // NewEngine builds a coding-configured engine for the top-level pi session: the
@@ -130,7 +175,7 @@ func NewEngine(o Options) (*engine.Engine, error) {
 		// Compose delegation tools onto the coding (+ MCP/extension) toolset.
 		rt = tool.Multi(rt, o.ExtraTools)
 	}
-	return engine.New(o.Provider, rt, o.NewStore(), o.Clock, cfg, o.engineOptions()...), nil
+	return engine.New(o.Provider, rt, o.NewStore(), o.Clock, cfg, o.engineOptions(o.Cwd)...), nil
 }
 
 // NewAgent builds the pi coding agent as an ArbosAgent. Each delegation gets its
@@ -143,7 +188,6 @@ func NewAgent(o Options, newID func() core.SessionID) (*agent.ArbosAgent, error)
 	if _, _, err := o.buildForRoot(o.Cwd); err != nil {
 		return nil, err
 	}
-	opts := o.engineOptions()
 	factory := func(g agent.Grant) (*engine.Engine, error) {
 		// Honor Grant.Env.Path: a child granted a repo runs rooted there (its own
 		// sandbox, prompt cwd, context files), not in the parent's cwd. Empty
@@ -175,7 +219,9 @@ func NewAgent(o Options, newID func() core.SessionID) (*agent.ArbosAgent, error)
 			childCfg.MaxIterations = g.Budget.MaxIterations
 		}
 		childReg = tool.Filter(childReg, g.Tools)
-		return engine.New(o.Provider, childReg, o.NewStore(), o.Clock, childCfg, opts...), nil
+		// Options are per-root: a child granted a different repo gets that
+		// repo's background-job table injected, matching its tool sandbox.
+		return engine.New(o.Provider, childReg, o.NewStore(), o.Clock, childCfg, o.engineOptions(root)...), nil
 	}
 	return agent.NewArbosAgent(factory, newID), nil
 }
@@ -206,7 +252,7 @@ func validateGrantRoot(hostRoot, path string) (string, error) {
 }
 
 // Register adds the pi coding agent to a router under the backend name "pi", so
-// it is reachable via delegate / start_coding_session.
+// it is reachable via delegate.
 func Register(router *agent.Router, o Options, newID func() core.SessionID) error {
 	ag, err := NewAgent(o, newID)
 	if err != nil {

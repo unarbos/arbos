@@ -54,9 +54,10 @@ type ToolFinished struct {
 type StopReason string
 
 const (
-	StopAnswered   StopReason = "answered"   // model produced a final answer with no further tool calls
-	StopMaxSteps   StopReason = "max_steps"  // hit the iteration cap before answering
-	StopTerminated StopReason = "terminated" // a tool batch signalled early termination (every result set Terminate)
+	StopAnswered    StopReason = "answered"     // model produced a final answer with no further tool calls
+	StopMaxSteps    StopReason = "max_steps"    // hit the iteration cap before answering
+	StopTerminated  StopReason = "terminated"   // a tool batch signalled early termination (every result set Terminate)
+	StopLengthLimit StopReason = "length_limit" // provider stopped because the output token cap was hit
 )
 
 // TurnComplete signals the turn ended normally. StopReason distinguishes a real

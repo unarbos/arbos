@@ -8,12 +8,15 @@ import (
 	"strings"
 )
 
-// Resolve joins a user-supplied relative path to root and refuses any path that
+// Resolve joins a user-supplied path to root and refuses any path that
 // escapes root, so a file tool cannot read or clobber files outside the
-// workspace. It guards two escapes: lexical traversal ("../") and symlink
-// traversal (a symlink inside root pointing out). An empty root means the
-// current directory. This is the single home for the workspace sandbox guard
-// that every file tool shares.
+// workspace. Relative paths are joined to root; absolute paths are accepted
+// as-is when they already lie within root (models routinely echo absolute
+// paths despite the relative contract) and refused otherwise, rather than
+// being silently re-rooted into a nonexistent doubled path. It guards two
+// escapes: lexical traversal ("../") and symlink traversal (a symlink inside
+// root pointing out). An empty root means the current directory. This is the
+// single home for the workspace sandbox guard that every file tool shares.
 func Resolve(root, rel string) (string, error) {
 	if root == "" {
 		root = "."
@@ -23,8 +26,11 @@ func Resolve(root, rel string) (string, error) {
 		return "", err
 	}
 	joined := filepath.Join(absRoot, filepath.Clean("/"+rel))
+	if filepath.IsAbs(rel) {
+		joined = filepath.Clean(rel)
+	}
 	if !withinRoot(joined, absRoot) {
-		return "", fmt.Errorf("path %q escapes the workspace root", rel)
+		return "", fmt.Errorf("path %q is outside the workspace root; use a path relative to the root", rel)
 	}
 
 	// Symlink guard: resolve symlinks on the longest existing prefix of the

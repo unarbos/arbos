@@ -67,7 +67,7 @@ func main() {
 func selectSpecs(name string) []tool.Spec {
 	switch name {
 	case "coding":
-		return codingspec.Specs("", nil)
+		return codingspec.Specs("")
 	default:
 		log.Fatalf("unknown -specs %q (want coding)", name)
 		return nil

@@ -35,7 +35,7 @@ func NewArbosAgent(newEngine EngineFactory, newID func() core.SessionID) *ArbosA
 // child's events through emit, and returns the final response as the Result. A
 // child ErrorEvent becomes a Go error; a parent interrupt propagates via ctx and
 // surfaces as context.Canceled.
-func (a *ArbosAgent) Run(ctx context.Context, t Task, emit func(core.KernelEvent)) (Result, error) {
+func (a *ArbosAgent) Run(ctx context.Context, t Task, emit func(core.Envelope)) (Result, error) {
 	eng, err := a.newEngine(t.Grant)
 	if err != nil {
 		return Result{}, fmt.Errorf("delegate: build child engine: %w", err)
@@ -54,8 +54,11 @@ func (a *ArbosAgent) Run(ctx context.Context, t Task, emit func(core.KernelEvent
 	conv.Send(core.PromptIntent{Text: t.Instruction})
 
 	for env := range conv.Events() {
+		// Forward the child's envelope unchanged (its own SessionID, Depth 0).
+		// The parent's relay sink increments Depth, so nesting accumulates
+		// correctly without this layer knowing its own depth.
 		if emit != nil {
-			emit(env.Event)
+			emit(env)
 		}
 		switch e := env.Event.(type) {
 		case core.TurnComplete:

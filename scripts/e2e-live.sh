@@ -52,16 +52,11 @@ WORKDIR=$(mktemp -d)
 cd "$WORKDIR"
 OUT=$("$ARBOS" -db "$WORKDIR/fake.db" -prompt "please use the tool" 2>&1)
 echo "$OUT" | tail -8
-check "fake ls tool" contains "$OUT" '-> ls('
-check "fake turn complete" contains "$OUT" '[answered]'
+check "fake ls tool" contains "$OUT" '✓ ls'
+check "fake turn complete" contains "$OUT" 'deterministic fake response'
 
 OUT=$("$ARBOS" -db "$WORKDIR/fake.db" -prompt "please fetch the page" 2>&1)
-check "fake fetch tool" contains "$OUT" '-> fetch('
-
-echo "=== tui build smoke ==="
-cd "$ROOT"
-go build -o /tmp/arbos-tui-e2e ./cmd/arbos-tui
-check "tui builds" test -x /tmp/arbos-tui-e2e
+check "fake fetch tool" contains "$OUT" '✓ fetch'
 
 echo "=== control seam (fake) ==="
 cd "$ROOT"
@@ -139,7 +134,7 @@ echo "=== live delegation ==="
 SUBDIR="$LIVE/subrepo"
 mkdir -p "$SUBDIR"
 echo "sub content" > "$SUBDIR/inside.txt"
-OUT=$("$ARBOS" -db "$DB" -prompt "Use start_coding_session with repo=$SUBDIR and goal: read inside.txt and return its exact contents only" 2>&1)
+OUT=$("$ARBOS" -db "$DB" -prompt "Use delegate with cwd=$SUBDIR and instruction: read inside.txt and return its exact contents only" 2>&1)
 echo "$OUT" | tail -12
 check "delegation read subrepo" contains "$OUT" 'sub content'
 

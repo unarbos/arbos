@@ -35,16 +35,17 @@ type Config struct {
 // Engine wires the ports together and spawns session actors. It is safe to
 // share across sessions; per-session state lives in each actor goroutine.
 type Engine struct {
-	provider  ports.LLMProvider
-	tools     ports.ToolRuntime
-	store     ports.SessionStore
-	clock     ports.Clock
-	approval  ports.ApprovalPolicy // optional; nil = nothing requires approval
-	ctxPol    ports.ContextPolicy  // optional; nil = never compress
-	summ      ports.Summarizer     // optional; nil = marker-only summaries
-	observer  ports.Observer       // optional; nil = no observation
-	ctxInject func(context.Context, core.SessionID) ([]core.Segment, error)
-	cfg       Config
+	provider     ports.LLMProvider
+	tools        ports.ToolRuntime
+	store        ports.SessionStore
+	clock        ports.Clock
+	approval     ports.ApprovalPolicy // optional; nil = nothing requires approval
+	ctxPol       ports.ContextPolicy  // optional; nil = never compress
+	summ         ports.Summarizer     // optional; nil = marker-only summaries
+	observer     ports.Observer       // optional; nil = no observation
+	ctxInjectors []func(context.Context, core.SessionID) ([]core.Segment, error)
+	onTurnEnd    func(context.Context, core.SessionID)
+	cfg          Config
 }
 
 // Option configures optional engine dependencies without widening New's
@@ -67,10 +68,24 @@ func WithContextPolicy(p ports.ContextPolicy, s ports.Summarizer) Option {
 // fed by every emitted KernelEvent. When unset, the engine emits no telemetry.
 func WithObserver(o ports.Observer) Option { return func(e *Engine) { e.observer = o } }
 
-// WithContextInjector appends ContextPayload segments at the start of each turn,
-// before the LLM call loop. Used for memory recall and similar injected context.
+// WithContextInjector registers a context source whose segments are appended
+// as a ContextPayload at the start of each turn, before the LLM call loop.
+// Injectors accumulate: each source (memory recall, the background-job table,
+// retrieval) registers its own and they run in registration order, their
+// segments merged into one event. An injector that has nothing new to say
+// returns no segments and appends nothing.
 func WithContextInjector(fn func(context.Context, core.SessionID) ([]core.Segment, error)) Option {
-	return func(e *Engine) { e.ctxInject = fn }
+	return func(e *Engine) { e.ctxInjectors = append(e.ctxInjectors, fn) }
+}
+
+// WithTurnEnd registers a hook invoked once after every turn that completed
+// normally (not interrupted). It is the symmetric counterpart of the
+// context injector — recall at turn start, curate at turn end — and the seam
+// the agent's memory uses to fold the finished turn into durable atoms. The hook
+// MUST be cheap and non-blocking (the session actor calls it inline); real work
+// belongs on a background worker the hook merely enqueues to.
+func WithTurnEnd(fn func(context.Context, core.SessionID)) Option {
+	return func(e *Engine) { e.onTurnEnd = fn }
 }
 
 // awaitReg registers a turn's wait for a mid-turn response intent. The turn
@@ -148,16 +163,26 @@ func (c *Conversation) TrySend(i core.Intent) bool {
 // emit wedges the turn goroutine so cancellation can't preempt it — defeating
 // the actor model's core promise. Returns false if the send was abandoned.
 func (c *Conversation) emit(ctx context.Context, e core.KernelEvent) bool {
+	return c.emitEnvelope(ctx, core.Envelope{SessionID: c.id, Depth: 0, Event: e})
+}
+
+// emitEnvelope delivers a pre-built envelope on the outbound channel. emit uses
+// it for this session's own events (Depth 0); the live-relay sink uses it to
+// forward a delegated child's events (the child's SessionID, depth incremented)
+// so nested sub-agent activity streams to the frontend in real time. It is safe
+// for concurrent callers (channel sends and the Observer are both safe), which
+// is what lets a fan-out of parallel children relay into one stream.
+func (c *Conversation) emitEnvelope(ctx context.Context, env core.Envelope) bool {
 	// Observe first: the event happened regardless of whether delivery to the
 	// (possibly slow or gone) frontend succeeds, and telemetry must not depend on
 	// delivery. The observer contract requires this to be cheap and non-blocking.
 	if c.observer != nil {
-		c.observer.ObserveEvent(ctx, e)
+		c.observer.ObserveEvent(ctx, env.Event)
 	}
 	select {
 	case <-ctx.Done():
 		return false
-	case c.events <- core.Envelope{SessionID: c.id, Depth: 0, Event: e}:
+	case c.events <- env:
 		return true
 	}
 }
@@ -299,6 +324,14 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 	for {
 		select {
 		case <-done:
+			// A normally-completed turn is the single choke point every terminal
+			// outcome (final answer, terminate, max-steps) flows through, so the
+			// memory-curation hook fires here exactly once per turn. An interrupted
+			// turn (completedNormally == false) is skipped; the next turn's curation
+			// picks up the delta via the checkpoint, so nothing is lost.
+			if completedNormally && e.onTurnEnd != nil {
+				e.onTurnEnd(cctx, c.id)
+			}
 			return queued
 		case <-parent.Done():
 			cancel()
@@ -378,20 +411,34 @@ func routeResponse(c *Conversation, pending map[core.RequestID]chan core.Intent,
 // context was cancelled (an interrupt). processPrompt uses this to tell a real
 // interrupt from one that merely raced a completing turn (H1).
 func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string) bool {
+	// Attach the live-relay sink so a delegating tool can stream a child agent's
+	// events into this session's outbound stream, incrementing Depth by one for
+	// nested rendering and preserving the originating child SessionID. The depth
+	// math lives here, in one place, so it composes to any nesting level
+	// (grandchild D0 -> child relays D1 -> this session relays D2). Relayed
+	// events are presentation only and never persisted. base is the stable,
+	// cancellable turn context the sink checks before sending.
+	base := ctx
+	ctx = withRelay(ctx, func(env core.Envelope) {
+		c.emitEnvelope(base, core.Envelope{SessionID: env.SessionID, Depth: env.Depth + 1, Event: env.Event})
+	})
+
 	if !e.append(ctx, c, core.NewMessageEvent(c.id, core.Message{Role: core.RoleUser, Content: userText}, e.clock.Now())) {
 		return true
 	}
 
-	if e.ctxInject != nil {
-		segs, err := e.ctxInject(ctx, c.id)
+	var segs []core.Segment
+	for _, inject := range e.ctxInjectors {
+		s, err := inject(ctx, c.id)
 		if err != nil {
 			c.emit(ctx, core.ErrorEvent{Category: core.ErrInternal, Err: "context inject: " + err.Error()})
 			return true
 		}
-		if len(segs) > 0 {
-			if !e.append(ctx, c, core.NewContextEvent(c.id, segs, e.clock.Now())) {
-				return true
-			}
+		segs = append(segs, s...)
+	}
+	if len(segs) > 0 {
+		if !e.append(ctx, c, core.NewContextEvent(c.id, segs, e.clock.Now())) {
+			return true
 		}
 	}
 
@@ -407,14 +454,10 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string) 
 	// the per-response usage events from the log.
 	var turnUsage core.Usage
 
-	// readOnly maps tool name -> parallel-safe. Built once per turn from the
-	// runtime's advertised schemas; the engine never parses tool args, so this
-	// coarse classification is the whole basis for the parallel-dispatch
-	// decision below.
-	readOnly := make(map[string]bool)
-	for _, sc := range e.tools.Schemas() {
-		readOnly[sc.Name] = sc.ReadOnly
-	}
+	// Snapshot the toolset once per turn: it's fixed for the turn's duration,
+	// and a byte-identical Tools block across iterations keeps the provider's
+	// prompt-cache prefix stable (a changing tools block invalidates it).
+	tools := e.tools.Schemas()
 
 	for iter := 0; iter < e.cfg.MaxIterations; iter++ {
 		if ctx.Err() != nil {
@@ -439,7 +482,7 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string) 
 		req := core.LLMRequest{
 			Model:          model,
 			Messages:       msgs,
-			Tools:          e.tools.Schemas(),
+			Tools:          tools,
 			Stream:         true,
 			Reasoning:      e.cfg.Reasoning,
 			CacheRetention: e.cfg.CacheRetention,
@@ -492,18 +535,21 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string) 
 		}
 
 		if len(sr.toolCalls) == 0 {
-			c.emit(ctx, core.TurnComplete{FinalResponse: sr.content, StopReason: core.StopAnswered, Usage: turnUsage})
+			c.emit(ctx, core.TurnComplete{FinalResponse: sr.content, StopReason: stopReasonFor(sr.finishReason), Usage: turnUsage})
 			return true
 		}
 
-		// Dispatch the requested tools. A batch of exclusively read-only tools
-		// runs concurrently (each tool's cost is its I/O); anything that writes,
-		// or a mixed batch, runs sequentially to avoid ordering/same-resource
-		// hazards. Either way results are appended in call order, so the
-		// persisted Seq — and therefore replay — stays deterministic.
+		// Dispatch the requested tools. The scheduler partitions the batch by
+		// per-call resource footprint and runs independent calls concurrently
+		// (read-only calls, or writes to distinct files), serializing only
+		// conflicting ones — so a mixed batch is no longer all-or-nothing. A
+		// batch that needs human approval takes the sequential path (an approval
+		// pause is inherently interactive). Either way results are appended in
+		// call order, so the persisted Seq — and therefore replay — stays
+		// deterministic regardless of execution order.
 		var dr dispatchResult
-		if e.canParallelize(sr.toolCalls, readOnly) {
-			dr = e.dispatchParallel(ctx, c, sr.toolCalls)
+		if e.canSchedule(sr.toolCalls) {
+			dr = e.dispatchScheduled(ctx, c, sr.toolCalls)
 		} else {
 			dr = e.dispatchSequential(ctx, c, sr.toolCalls)
 		}

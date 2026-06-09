@@ -30,6 +30,12 @@ Introduce an **`Agent`** composition layer above the ports:
 - **Delegation is a capability**, exposed to the model as **one core `delegate`
   tool** (with a `backend` parameter) plus thin sugar tools
   (`start_coding_session`, `spawn_agent`) that desugar to it. One code path.
+  > **Superseded 2026-06-09:** the sugar tools were dropped. `delegate` is the
+  > single delegation tool; its parameters carry what the sugar used to —
+  > `backend` defaults to the primary (`pi`), and `cwd` folds in the working
+  > directory that `start_coding_session(repo, …)` set. Every extra near-duplicate
+  > tool only diluted the model's tool selection, and the desugaring already
+  > shared one dispatch path, so the sugar earned nothing.
 - The unit of "what a child may use" is a **`Grant`** (tools + environment +
   budget + permissions). Sharing has one concept, two transports:
   **in-process** filtered `ToolRuntime` + shared `Environment` for

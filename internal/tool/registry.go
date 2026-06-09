@@ -38,6 +38,30 @@ type Spec struct {
 	ReadOnly    bool
 	ArgSample   any
 	Invoke      func(ctx context.Context, raw json.RawMessage) (Result, error)
+	// Access, when set, reports the resources a call touches (its file paths)
+	// so the engine can schedule a batch for maximum safe parallelism. It is
+	// optional: a nil Access falls back to ReadOnly (read-only -> empty set,
+	// otherwise unbounded). Build it with WithAccess so the arg type, decoder,
+	// and footprint declaration cannot disagree.
+	Access func(raw json.RawMessage) core.AccessSet
+}
+
+// WithAccess annotates a Spec with the resources a call reads and writes,
+// turning the coarse ReadOnly flag into a precise footprint the engine can use
+// to run non-conflicting calls (e.g. edits to different files) concurrently. T
+// must be the Spec's argument type; a decode failure yields an unbounded set so
+// an un-parseable call is isolated rather than mis-scheduled.
+func WithAccess[T any](s Spec, fn func(args T) core.AccessSet) Spec {
+	s.Access = func(raw json.RawMessage) core.AccessSet {
+		var args T
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &args); err != nil {
+				return core.AccessSet{Unknown: true}
+			}
+		}
+		return fn(args)
+	}
+	return s
 }
 
 // NewSpec ties a typed handler to its argument struct T. The returned Spec
@@ -84,6 +108,7 @@ func newSpec[T any](name, description string, readOnly bool, sample T, fn func(c
 type entry struct {
 	schema core.ToolSchema
 	invoke func(ctx context.Context, raw json.RawMessage) (Result, error)
+	access func(raw json.RawMessage) core.AccessSet
 }
 
 // Registry implements ports.ToolRuntime over an in-memory map of tools.
@@ -93,7 +118,10 @@ type Registry struct {
 	entries map[string]entry
 }
 
-var _ ports.ToolRuntime = (*Registry)(nil)
+var (
+	_ ports.ToolRuntime      = (*Registry)(nil)
+	_ ports.ConflictAnalyzer = (*Registry)(nil)
+)
 
 func New() *Registry {
 	return &Registry{entries: make(map[string]entry)}
@@ -116,6 +144,7 @@ func (r *Registry) Register(s Spec, schema json.RawMessage) error {
 			ReadOnly:    s.ReadOnly,
 		},
 		invoke: s.Invoke,
+		access: s.Access,
 	}
 	r.order = append(r.order, s.Name)
 	return nil
@@ -155,6 +184,27 @@ func (r *Registry) Dispatch(ctx context.Context, call core.ToolCall) (res core.T
 		return core.ToolResult{CallID: call.ID, IsError: true, Content: err.Error()}
 	}
 	return core.ToolResult{CallID: call.ID, Content: out.Content, Blocks: out.Blocks, Details: out.Details, Terminate: out.Terminate}
+}
+
+// Access reports a call's resource footprint for parallel scheduling. A tool
+// with an explicit Access uses it; otherwise the footprint is derived from
+// ReadOnly (read-only -> empty set, conflicts with nothing; mutating -> an
+// unbounded set, conflicts with everything). An unknown tool is unbounded too,
+// since it will fail at Dispatch and must not be reordered around real work.
+func (r *Registry) Access(call core.ToolCall) core.AccessSet {
+	r.mu.RLock()
+	e, ok := r.entries[call.Name]
+	r.mu.RUnlock()
+	if !ok {
+		return core.AccessSet{Unknown: true}
+	}
+	if e.access != nil {
+		return e.access(call.Args)
+	}
+	if e.schema.ReadOnly {
+		return core.AccessSet{}
+	}
+	return core.AccessSet{Unknown: true}
 }
 
 // Names returns the registered tool names, sorted — handy for tests and the

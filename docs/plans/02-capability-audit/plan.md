@@ -53,7 +53,7 @@ gaps.
 10. **RPC surface incomplete vs pi** — `set_model` / `compact` exist as intents but no ergonomic RPC frames or slash commands documented for headless clients.
 11. **TUI not in audit/e2e** — `cmd/arbos-tui` built but not exercised in `scripts/e2e-live.sh`.
 12. **Static gate drift** — `gofmt` failure on `cmd/arbos/main.go` comment block blocked full e2e run during audit.
-13. **Delegate tool list is not validated** — `tools:["memory"]` silently runs child with empty grant instead of erroring.
+13. ~~**Delegate tool list is not validated** — `tools:["memory"]` silently runs child with empty grant instead of erroring.~~ **RESOLVED** — pi's child-engine factory rejects unknown grant tools (`internal/agent/pi/agent.go`); `tools:["memory"]` now returns `grant tool "memory" is not available to delegated agents` to the model.
 
 ## Fix plan
 
@@ -112,7 +112,7 @@ gaps.
 
 **C2. TUI smoke** — `make e2e-tui` headless or `expect`-less: build + `--help` + one scripted input.
 
-**C3. Delegate grant validation** — reject unknown tool names in `Grant.Tools` at registration or call time.
+**C3. Delegate grant validation** — ~~reject unknown tool names in `Grant.Tools` at registration or call time.~~ **DONE** — enforced in pi's child-engine factory (`internal/agent/pi/agent.go`).
 
 **C4. Fix gofmt / static gate** — normalize `cmd/arbos/main.go` comment formatting so `e2e-live.sh` passes.
 

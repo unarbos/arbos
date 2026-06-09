@@ -53,7 +53,7 @@ func TestDelegateToolRoutesAndReturnsText(t *testing.T) {
 	router.Register("arbos", newArbosAgent())
 
 	reg := tool.New()
-	if err := agent.RegisterDelegate(reg, router); err != nil {
+	if err := agent.RegisterDelegate(reg, router, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -76,7 +76,7 @@ func TestDelegateUnknownBackend(t *testing.T) {
 	router := agent.NewRouter()
 	router.Register("arbos", newArbosAgent())
 	reg := tool.New()
-	_ = agent.RegisterDelegate(reg, router)
+	_ = agent.RegisterDelegate(reg, router, nil)
 
 	res := reg.Dispatch(context.Background(), core.ToolCall{
 		ID: "1", Name: "delegate",

@@ -19,10 +19,11 @@ import (
 // pi's structured checkpoint and appends read/modified file tracking.
 //
 // Deviation, documented: pi's iterative UPDATE-merge (feeding the prior summary
-// into the next summarization) is not needed here. arbos folds in place and
-// re-projects, so a later compaction re-summarizes the full older span (a larger
-// CompressionPayload subsumes the earlier one), giving the same fidelity without
-// threading the previous summary through the Summarizer port.
+// into the next summarization) is achieved structurally instead. The engine
+// folds a span with core.ProjectConversation, so a re-compaction sees the
+// earlier span's summary in place of its raw events: each summarization's input
+// is bounded by prior-summary + newly folded turns, never total session
+// history, without threading the previous summary through the Summarizer port.
 
 const (
 	defaultReserveTokens    = 16384
@@ -129,18 +130,16 @@ Use this EXACT format:
 ## Next Steps
 1. [Ordered list of what should happen next]
 
-## Critical Context
-- [Any data, examples, or references needed to continue]
-- [Or "(none)" if not applicable]
+Keep each section concise. Preserve exact file paths, function names, and error messages. Record only what is needed to continue this task; do not restate general project knowledge that can be rediscovered from the codebase (structure, conventions, build commands).`
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`
-
-// Summarizer is the pi-faithful ports.Summarizer: it asks the model for a
-// structured checkpoint of the folded span and appends file tracking.
+// Summarizer is the ports.Summarizer for pi sessions: it asks the model for a
+// structured task-state checkpoint of the folded span and appends file
+// tracking. It deliberately carries no reasoning level — checkpointing is
+// template extraction, not problem solving — so it stays fast and cheap on
+// whatever distill model it is given.
 type Summarizer struct {
 	Provider      ports.LLMProvider
 	Model         string
-	Reasoning     core.ReasoningLevel
 	ReserveTokens int
 }
 
@@ -155,7 +154,6 @@ func (s Summarizer) Summarize(ctx context.Context, msgs []core.Message) (string,
 	}
 	req := core.LLMRequest{
 		Model:     s.Model,
-		Reasoning: s.Reasoning,
 		Stream:    true,
 		MaxTokens: reserve * 4 / 5,
 		Messages: []core.Message{
@@ -211,8 +209,13 @@ func serializeConversation(msgs []core.Message) string {
 			if m.Content != "" {
 				parts = append(parts, "[Tool result]: "+truncateForSummary(m.Content, toolResultMaxChars))
 			}
+		case core.RoleSystem:
+			// Within a folded span the only system messages are earlier
+			// compaction summaries, rendered by ProjectConversation in place of
+			// their raw events. Label them so the model merges rather than
+			// re-narrates.
+			parts = append(parts, "[Earlier summary]: "+m.Content)
 		default:
-			// System messages are not part of a summarized transcript.
 		}
 	}
 	return strings.Join(parts, "\n\n")

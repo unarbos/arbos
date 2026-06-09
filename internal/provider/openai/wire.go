@@ -73,7 +73,8 @@ type wireChunk struct {
 }
 
 type wireChoice struct {
-	Delta wireDelta `json:"delta"`
+	Delta        wireDelta `json:"delta"`
+	FinishReason string    `json:"finish_reason"`
 }
 
 type wireDelta struct {

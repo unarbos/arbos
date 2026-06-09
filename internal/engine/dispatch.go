@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/unarbos/arbos/internal/core"
+	"github.com/unarbos/arbos/internal/ports"
 )
 
 // maxParallelTools caps concurrent read-only tool dispatch so a model that
@@ -39,22 +40,61 @@ func (dr dispatchResult) persistFailed() dispatchResult {
 	return dispatchResult{msgs: dr.msgs, stop: true, completedNormally: true}
 }
 
-// canParallelize reports whether a tool batch is safe to run concurrently: more
-// than one call, every call a known read-only tool, and none requiring human
-// approval (an approval pause is inherently sequential and interactive).
-func (e *Engine) canParallelize(calls []core.ToolCall, readOnly map[string]bool) bool {
+// canSchedule reports whether a tool batch may use the concurrent scheduler:
+// more than one call and none requiring human approval (an approval pause is
+// inherently sequential and interactive, so an approval-bearing batch takes the
+// sequential path). It no longer requires every call to be read-only — the
+// scheduler partitions by per-call conflict, so a mixed batch parallelizes its
+// independent calls and serializes only the conflicting ones. A batch whose
+// calls all conflict (e.g. all writes to one file, or any unbounded call)
+// degrades to one-per-wave, i.e. sequential, with no special-casing.
+func (e *Engine) canSchedule(calls []core.ToolCall) bool {
 	if len(calls) < 2 {
 		return false
 	}
 	for _, call := range calls {
-		if !readOnly[call.Name] {
-			return false
-		}
 		if _, required := e.requiresApproval(call); required {
 			return false
 		}
 	}
 	return true
+}
+
+// partitionWaves groups call indices into sequential waves: every call in a wave
+// is conflict-free with the others in it (safe to run concurrently), and a call
+// that conflicts with an earlier one lands in a strictly later wave, preserving
+// that pair's original order (so a read before a write of the same file stays
+// ordered). A read-only batch collapses to a single wave; an all-conflicting
+// batch degrades to one call per wave. It is pure (indices + access sets in,
+// waves out) so it is testable without an engine, store, or actor.
+//
+// CONTRACT: waves are contiguous, ascending index ranges. dispatchScheduled
+// relies on this to treat the launched calls as the prefix calls[:ran] when an
+// interrupt stops later waves — a repartitioning that packs a later call into
+// an earlier wave (breaking contiguity) would silently corrupt that interrupt
+// path and must change it in step.
+func partitionWaves(access []core.AccessSet) [][]int {
+	var waves [][]int
+	var cur []int
+	conflictsCurrent := func(i int) bool {
+		for _, j := range cur {
+			if access[i].Conflicts(access[j]) {
+				return true
+			}
+		}
+		return false
+	}
+	for i := range access {
+		if len(cur) > 0 && conflictsCurrent(i) {
+			waves = append(waves, cur)
+			cur = nil
+		}
+		cur = append(cur, i)
+	}
+	if len(cur) > 0 {
+		waves = append(waves, cur)
+	}
+	return waves
 }
 
 // requiresApproval consults the optional policy. A nil policy approves
@@ -176,45 +216,71 @@ func (e *Engine) dispatchSequential(ctx context.Context, c *Conversation, calls 
 	return dr
 }
 
-// dispatchParallel runs an all-read-only batch concurrently (bounded by
-// maxParallelTools), then persists and emits results in call order. Because
-// every call is launched, the log gets a result for each one even if the turn
-// is cancelled mid-flight, so results persist on a cancellation-free context —
-// an interrupt can never leave a dangling tool_call. A tool panic degrades to
-// an error result rather than crashing the host.
-func (e *Engine) dispatchParallel(ctx context.Context, c *Conversation, calls []core.ToolCall) dispatchResult {
+// dispatchScheduled runs a batch with maximum safe concurrency: it derives each
+// call's resource footprint, partitions the batch into conflict-free waves, and
+// runs each wave concurrently (bounded by maxParallelTools) before starting the
+// next. Independent calls — read-only ones, or writes to distinct files — run
+// together; only conflicting calls (same file, or an unbounded call like bash)
+// are serialized into later waves, in call order. Results are then persisted and
+// emitted in call order, so the persisted Seq — and therefore replay — stays
+// deterministic regardless of execution order. An interrupt stops new waves
+// from launching (a write must not start after the user cancelled, matching
+// dispatchSequential's per-call check); calls that did run keep their real
+// results and the rest are backfilled, so the log gets a result for every
+// tool_call either way. A tool panic degrades to an error result.
+func (e *Engine) dispatchScheduled(ctx context.Context, c *Conversation, calls []core.ToolCall) dispatchResult {
+	access := make([]core.AccessSet, len(calls))
+	for i, call := range calls {
+		access[i] = ports.AccessOf(e.tools, call)
+	}
+	waves := partitionWaves(access)
+
 	results := make([]core.ToolResult, len(calls))
 	sem := make(chan struct{}, maxParallelTools)
-	var wg sync.WaitGroup
-	for i, call := range calls {
-		c.emit(ctx, core.ToolStarted{Call: call}) // best-effort, in call order
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, call core.ToolCall) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			defer func() {
-				if r := recover(); r != nil {
-					results[i] = core.ToolResult{CallID: call.ID, IsError: true, Content: fmt.Sprintf("panic in tool %q: %v", call.Name, r)}
-				}
-			}()
-			results[i] = e.tools.Dispatch(ctx, call)
-		}(i, call)
+	ran := 0 // waves are contiguous index ranges, so calls[:ran] have results
+	for _, wave := range waves {
+		if ctx.Err() != nil {
+			break
+		}
+		for _, idx := range wave {
+			c.emit(ctx, core.ToolStarted{Call: calls[idx]}) // best-effort, in call order
+		}
+		var wg sync.WaitGroup
+		for _, idx := range wave {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(i int) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				defer func() {
+					if r := recover(); r != nil {
+						results[i] = core.ToolResult{CallID: calls[i].ID, IsError: true, Content: fmt.Sprintf("panic in tool %q: %v", calls[i].Name, r)}
+					}
+				}()
+				results[i] = e.tools.Dispatch(ctx, calls[i])
+			}(idx)
+		}
+		wg.Wait()
+		ran += len(wave)
 	}
-	wg.Wait()
 
-	// Persist results in call order through the shared recorder (which itself
-	// persists cancellation-free). On a persist failure, backfill from the failed
-	// index (inclusive) so a failure partway through can't leave dangling
-	// tool_calls — including call i, whose own result just failed to persist.
+	// Persist the results that ran, in call order, through the shared recorder
+	// (which itself persists cancellation-free). On a persist failure, backfill
+	// from the failed index (inclusive) so a failure partway through can't leave
+	// dangling tool_calls — including call i, whose own result just failed to
+	// persist.
 	var dr dispatchResult
 	allTerm := len(calls) > 0
-	for i := range calls {
+	for i := 0; i < ran; i++ {
 		if !e.recordResult(ctx, c, &dr, results[i]) {
 			e.backfillInterruptedTools(ctx, c, calls[i:])
 			return dr.persistFailed()
 		}
 		allTerm = allTerm && results[i].Terminate
+	}
+	if ran < len(calls) {
+		e.backfillInterruptedTools(ctx, c, calls[ran:])
+		return dr.interrupted()
 	}
 	if ctx.Err() != nil {
 		return dr.interrupted()

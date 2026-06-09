@@ -58,6 +58,9 @@ func SeededModelRegistry() *ModelRegistry {
 		ModelInfo{ID: "claude-sonnet-4-20250514", ContextWindow: 200_000},
 		ModelInfo{ID: "claude-opus-4-20250514", ContextWindow: 200_000},
 		ModelInfo{ID: "claude-3-5-haiku-20241022", ContextWindow: 200_000},
+		// Anthropic via OpenRouter (slug form)
+		ModelInfo{ID: "anthropic/claude-opus-4.8", ContextWindow: 1_000_000},
+		ModelInfo{ID: "anthropic/claude-opus-4.8-fast", ContextWindow: 1_000_000},
 		// Google Gemini
 		ModelInfo{ID: "gemini-2.5-pro", ContextWindow: 1_048_576},
 		ModelInfo{ID: "gemini-2.5-flash", ContextWindow: 1_048_576},

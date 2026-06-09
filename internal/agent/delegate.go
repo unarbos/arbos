@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/unarbos/arbos/internal/core"
+	"github.com/unarbos/arbos/internal/engine"
 	"github.com/unarbos/arbos/internal/tool"
 	"github.com/unarbos/arbos/internal/tool/jsonschema"
 )
@@ -44,14 +46,24 @@ type DelegateArgs struct {
 	Instruction string   `json:"instruction" desc:"What the delegated agent should do."`
 	Backend     string   `json:"backend,omitempty" desc:"Which backend runs it; defaults to the primary."`
 	Tools       []string `json:"tools,omitempty" desc:"Tool/toolset allowlist granted to the child."`
+	Cwd         string   `json:"cwd,omitempty" desc:"Working directory / repo the child runs in (default: inherit the parent's cwd)."`
 }
 
 // RegisterDelegate adds the delegate tool to a registry, routing through r.
 //
-// Note: as a ToolRuntime tool, delegate runs the child to completion and returns
-// its final text as the tool result; it does not stream the child's events into
-// the parent's live stream (that would need engine-level streaming-tool support).
-func RegisterDelegate(reg *tool.Registry, r *Router) error {
+// The child's events stream into the parent's live stream via the relay sink the
+// engine attaches to the dispatch context (engine.Relay), so a delegated turn is
+// no longer opaque until completion — its activity renders nested under the
+// parent in real time, and the final text still returns as the tool result.
+//
+// readOnly names the tools that do not mutate the workspace. A delegation whose
+// grant is confined to those is safe to run concurrently with sibling
+// delegations (it cannot race the shared filesystem), so it advertises an empty
+// footprint and the engine fans such calls out in parallel — the map step of
+// "explore this repo with N sub-agents". Any other grant (writes, or the full
+// toolset) is unbounded and runs serially, the safe default until copy-on-write
+// worktrees isolate writers.
+func RegisterDelegate(reg *tool.Registry, r *Router, readOnly map[string]bool) error {
 	// Intentional carve-out from ADR-0004's "no runtime reflection": the codegen
 	// path covers the STATIC built-in catalog (compiled into the binary, drift-
 	// checked in CI). delegate is registered dynamically by whoever wires a
@@ -62,7 +74,7 @@ func RegisterDelegate(reg *tool.Registry, r *Router) error {
 	if err != nil {
 		return fmt.Errorf("delegate schema: %w", err)
 	}
-	spec := tool.NewSpec("delegate", "Delegate a sub-task to another agent and return its result.", false,
+	spec := tool.NewSpec("delegate", "Delegate a sub-task to another agent and return its result. Grant only read-only tools (e.g. read, grep, find, ls) to several delegations at once and they run in parallel — the way to explore a large codebase with multiple sub-agents.", false,
 		func(ctx context.Context, a DelegateArgs) (string, error) {
 			ag, err := r.resolve(BackendRef(a.Backend))
 			if err != nil {
@@ -71,47 +83,32 @@ func RegisterDelegate(reg *tool.Registry, r *Router) error {
 			res, err := ag.Run(ctx, Task{
 				Instruction: a.Instruction,
 				Backend:     BackendRef(a.Backend),
-				Grant:       Grant{Tools: a.Tools},
-			}, nil)
+				Grant:       Grant{Tools: a.Tools, Env: EnvironmentRef{Path: a.Cwd}},
+			}, engine.Relay(ctx))
 			if err != nil {
 				return "", err
 			}
 			return res.Text, nil
 		})
+	spec = tool.WithAccess(spec, func(a DelegateArgs) core.AccessSet {
+		return delegateAccess(readOnly, a.Tools)
+	})
 	return reg.Register(spec, schema)
 }
 
-// StartCodingSessionArgs are the arguments to the start_coding_session sugar
-// tool.
-type StartCodingSessionArgs struct {
-	Goal string `json:"goal" desc:"The coding goal for the session."`
-	Repo string `json:"repo,omitempty" desc:"Working directory / repo the session runs in (default: current)."`
-}
-
-// RegisterStartCodingSession adds the start_coding_session sugar tool, which
-// desugars to a delegation to the "pi" coding backend (the tool named in pi's
-// delegation docs). It is the one-call entry to spin up a coding agent; it
-// routes through the same Router as delegate, so there is one dispatch path.
-func RegisterStartCodingSession(reg *tool.Registry, r *Router) error {
-	schema, err := jsonschema.Reflect(reflect.TypeOf(StartCodingSessionArgs{}))
-	if err != nil {
-		return fmt.Errorf("start_coding_session schema: %w", err)
+// delegateAccess classifies a delegation's footprint for parallel scheduling. A
+// grant confined to read-only tools cannot mutate the shared workspace, so it is
+// conflict-free with siblings (empty set). An empty grant means the full
+// toolset (writes), and any granted write tool means it can mutate — both are
+// unbounded so they serialize.
+func delegateAccess(readOnly map[string]bool, tools []string) core.AccessSet {
+	if len(tools) == 0 {
+		return core.AccessSet{Unknown: true}
 	}
-	spec := tool.NewSpec("start_coding_session", "Start a coding session: delegate a coding goal to the pi coding agent and return its result.", false,
-		func(ctx context.Context, a StartCodingSessionArgs) (string, error) {
-			ag, err := r.resolve("pi")
-			if err != nil {
-				return "", err
-			}
-			res, err := ag.Run(ctx, Task{
-				Instruction: a.Goal,
-				Backend:     "pi",
-				Grant:       Grant{Env: EnvironmentRef{Path: a.Repo}},
-			}, nil)
-			if err != nil {
-				return "", err
-			}
-			return res.Text, nil
-		})
-	return reg.Register(spec, schema)
+	for _, t := range tools {
+		if !readOnly[t] {
+			return core.AccessSet{Unknown: true}
+		}
+	}
+	return core.AccessSet{}
 }

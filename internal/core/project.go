@@ -13,8 +13,8 @@ import "strings"
 // The projected conversation has three regions, in order:
 //
 //  1. the base system prompt (stable);
-//  2. an injected-context block (memory/skills/retrieval) — the latest segment
-//     per source, fenced (stable prefix → prefix-cache friendly);
+//  2. an injected-context block (memory/jobs/skills/retrieval) — the latest
+//     segment per source, fenced (stable prefix → prefix-cache friendly);
 //  3. the conversation, with compressed spans folded away and their summaries
 //     rendered in place at the span start.
 //
@@ -29,6 +29,16 @@ func Project(events []Event, systemPrompt string) []Message {
 	msgs = appendContextBlock(msgs, events)
 	msgs = appendConversation(msgs, events)
 	return msgs
+}
+
+// ProjectConversation renders only the conversation region of Project — no
+// system prompt, no injected-context block — folding compressed spans the same
+// way. The engine's summarizer uses it to fold a span that may already contain
+// a summary: the earlier summary renders in place of its raw events, so each
+// re-summarization's input is bounded by new material, not total session
+// history.
+func ProjectConversation(events []Event) []Message {
+	return appendConversation(make([]Message, 0, len(events)), events)
 }
 
 // ProjectEvent maps a single event to its conversation Message in isolation —

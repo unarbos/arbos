@@ -74,14 +74,20 @@ type CompressionPayload struct {
 
 func (CompressionPayload) Kind() EventKind { return EventCompressed }
 
-// Segment is a provenance-tagged piece of injected context (memory recall, a
-// skill body, a retrieved document). Source identifies the origin so the
-// projection can fence it and so the most recent segment per source supersedes
-// older ones. The kernel never interprets Content.
+// Segment is a provenance-tagged piece of injected context (memory recall, the
+// background-job table, a skill body, a retrieved document). Source identifies
+// the origin so the projection can fence it and so the most recent segment per
+// source supersedes older ones. The kernel never interprets Content.
 type Segment struct {
 	Source  string
 	Content string
 }
+
+// SourceJobs is the Segment.Source for the workspace's background-job table
+// (ADR-0032). Like SourceMemory, the stable source name is load-bearing: the
+// latest-per-source projection replaces, rather than accumulates, the table
+// each time it is injected, so the prompt always shows one current job table.
+const SourceJobs = "jobs"
 
 // ContextPayload records context that was injected into a turn (memory, skills,
 // retrieval). It is logged — rather than assembled ephemerally — so a replayed

@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 # Install arbos — one command from anywhere.
 #
-#   curl -fsSL https://raw.githubusercontent.com/unarbos/arbos/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/unarbos/arbos/main/scripts/install.sh | bash
 #
 # Or from a clone:
 #
 #   ./scripts/install.sh
+if [ -z "${BASH_VERSION:-}" ]; then
+	if command -v bash >/dev/null 2>&1; then
+		exec bash -s "$@"
+	fi
+	echo "arbos: bash is required (dash/sh is not enough). Run: curl ... | bash" >&2
+	exit 1
+fi
 set -euo pipefail
 
 MODULE=github.com/unarbos/arbos/cmd/arbos@latest

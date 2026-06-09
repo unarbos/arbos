@@ -56,18 +56,6 @@ func (Provider) Stream(ctx context.Context, req core.LLMRequest) (<-chan core.LL
 			return
 		}
 
-		if strings.Contains(strings.ToLower(lastUser), "memory") && !hasToolResult {
-			send(ctx, out, core.LLMChunk{
-				ToolCalls: []core.ToolCall{{
-					ID:   "call_memory",
-					Name: "memory",
-					Args: json.RawMessage(`{"action":"remember","key":"k","value":"v"}`),
-				}},
-			})
-			send(ctx, out, core.LLMChunk{Done: true})
-			return
-		}
-
 		if strings.Contains(lastUser, "fake__ping") && !hasToolResult {
 			send(ctx, out, core.LLMChunk{
 				ToolCalls: []core.ToolCall{{

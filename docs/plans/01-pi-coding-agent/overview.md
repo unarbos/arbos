@@ -203,7 +203,7 @@ tree and branch-summary navigation. Fork-and-own, pinned to the SHA above.
 - `internal/tool/coding` — the assembler pairing specs with generated schemas.
 - `internal/agent/pi` — model registry, system-prompt assembler, skills loader,
   prompt-template loader, the coding `ContextPolicy` and `Summarizer`, the engine
-  factory, backend registration, and the `start_coding_session` sugar tool.
+  factory, and backend registration (reachable via the `delegate` tool).
 - `cmd/arbos` — the pi entrypoint flag.
 - Reused: `engine`, `ports`, `provider/*`, `secret`, `sqlite`, `control`, `obs`,
   `tool` (registry, jsonschema, codegen), `compaction` (extended).
@@ -257,9 +257,8 @@ All 25 phases are implemented and verified — the full pi port, including the
 previously deferred bucket. pi runs as a first-class coding agent in arbos across
 every surface: the interactive Bubble Tea TUI (`arbos-tui`), headless one-shot
 (`arbos -agent pi`), the control-seam RPC surface (prompt/events/set_model/
-compact/abort/fork/switch_session), as a delegatable `pi` backend
-(`start_coding_session`), over MCP (client + server), and via the Go extension
-seam.
+compact/abort/fork/switch_session), as a delegatable `pi` backend (via the
+`delegate` tool), over MCP (client + server), and via the Go extension seam.
 
 ADRs 0021-0031 record every kernel/seam change; decisions D1-D15 are recorded
 above. The full static gate is green; no new lints (the 5 pre-existing issues in

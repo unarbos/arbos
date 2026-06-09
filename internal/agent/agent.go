@@ -16,10 +16,14 @@ import (
 	"github.com/unarbos/arbos/internal/core"
 )
 
-// Agent runs a Task to completion, streaming KernelEvents through emit (which
-// may be nil if the caller does not want live events) and returning a Result.
+// Agent runs a Task to completion, streaming the child's events through emit
+// (nil if the caller does not want live events) and returning a Result. emit
+// receives a core.Envelope — not a bare event — so the child's SessionID and
+// Depth survive the relay, which is what lets a frontend render nested
+// sub-agent activity. The parent's relay sink (engine.Relay) increments Depth;
+// an Agent just forwards the child's envelope unchanged.
 type Agent interface {
-	Run(ctx context.Context, t Task, emit func(core.KernelEvent)) (Result, error)
+	Run(ctx context.Context, t Task, emit func(core.Envelope)) (Result, error)
 }
 
 // Task is a unit of delegated work.

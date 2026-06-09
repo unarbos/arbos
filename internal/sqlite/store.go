@@ -96,6 +96,28 @@ CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
     session_id UNINDEXED,
     event_id   UNINDEXED
 );
+
+-- atoms: the agent's durable comprehensions. One global set (no scope column),
+-- so every session reads and writes the same memory — one agent learning across
+-- all conversations. Upsert by id (PRIMARY KEY) is how the curator merges.
+CREATE TABLE IF NOT EXISTS atoms (
+    id         TEXT PRIMARY KEY,
+    content    TEXT    NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS atoms_fts USING fts5(
+    content,
+    atom_id UNINDEXED
+);
+
+-- mind_checkpoints: per-session high-water mark of the last event seq the
+-- curator has folded into atoms, so curation is incremental (never re-reads the
+-- whole log).
+CREATE TABLE IF NOT EXISTS mind_checkpoints (
+    session_id TEXT PRIMARY KEY,
+    last_seq   INTEGER NOT NULL
+);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate: %w", err)

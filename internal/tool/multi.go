@@ -52,3 +52,17 @@ func (m multi) Dispatch(ctx context.Context, call core.ToolCall) core.ToolResult
 	}
 	return core.ToolResult{CallID: call.ID, IsError: true, Content: "unknown tool: " + call.Name}
 }
+
+var _ ports.ConflictAnalyzer = multi{}
+
+// Access routes to the owning runtime's footprint so finer scheduling survives
+// composition (the primary pi runtime is a Multi of the coding registry plus
+// delegation/MCP tools). The ReadOnly fallback for non-analyzing runtimes lives
+// in ports.AccessOf, the one home for that rule.
+func (m multi) Access(call core.ToolCall) core.AccessSet {
+	rt, ok := m.route[call.Name]
+	if !ok {
+		return core.AccessSet{Unknown: true}
+	}
+	return ports.AccessOf(rt, call)
+}

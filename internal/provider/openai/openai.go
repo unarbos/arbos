@@ -111,6 +111,7 @@ func (p *Provider) consume(ctx context.Context, resp *http.Response, out chan<- 
 
 	acc := providerkit.NewToolAccumulator()
 	var usage *core.Usage
+	var finishReason string
 
 	// A malformed line is skipped (return true); a cancelled send stops the loop
 	// (return false). ScanSSE handles buffering, data: framing, [DONE], and
@@ -128,6 +129,9 @@ func (p *Provider) consume(ctx context.Context, resp *http.Response, out chan<- 
 			}
 		}
 		for _, choice := range evt.Choices {
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
 			d := choice.Delta
 			if d.Content != "" && !providerkit.Send(ctx, out, core.LLMChunk{ContentDelta: d.Content}) {
 				return false
@@ -152,7 +156,7 @@ func (p *Provider) consume(ctx context.Context, resp *http.Response, out chan<- 
 
 	// acc.Calls() is nil when no tool calls streamed, so assign directly (same
 	// shape as the anthropic/google adapters).
-	providerkit.Send(ctx, out, core.LLMChunk{Done: true, Usage: usage, ToolCalls: acc.Calls()})
+	providerkit.Send(ctx, out, core.LLMChunk{Done: true, Usage: usage, ToolCalls: acc.Calls(), FinishReason: finishReason})
 }
 
 // reasoningEffort maps the neutral reasoning level to the Chat Completions

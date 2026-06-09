@@ -35,13 +35,16 @@ type PromptOptions struct {
 	Now          time.Time // injected for determinism; zero = time.Now()
 }
 
-// BuildSystemPrompt assembles pi's coding system prompt. It reproduces pi's
-// assembly mechanics (system-prompt.ts) step for step: persona, the
-// snippet-driven tools list, de-duplicated per-tool guidelines plus two
-// always-on bullets, the project-context block, the skills index, and the
-// trailing date and cwd. The persona is rewritten for arbos; pi's "you are
-// inside pi, read pi docs at <path>" block is intentionally dropped (it
-// hardcodes pi-repo paths). See ADR-0024.
+// BuildSystemPrompt assembles pi's coding system prompt: a tight persona, the
+// snippet-driven tools list, the de-duplicated per-tool guidelines, then a small
+// set of topically-grouped always-on guidelines (autonomy, exploring, editing,
+// verifying, communicating), the project-context block, the skills index, and
+// the trailing date and cwd. It keeps pi's assembly mechanics (snippet- and
+// tool-gated injection) and its fast, autonomous posture, while adopting the
+// editing/verification/communication discipline a coding agent needs and
+// shedding the earlier prompt's heavy "just do it" redundancy. pi's "you are
+// inside pi" block is intentionally omitted (it hardcoded pi-repo paths). See
+// ADR-0024.
 func BuildSystemPrompt(opts PromptOptions) string {
 	now := opts.Now
 	if now.IsZero() {
@@ -51,9 +54,10 @@ func BuildSystemPrompt(opts PromptOptions) string {
 
 	var b strings.Builder
 
-	// 1. Persona (arbos).
-	b.WriteString("You are an expert coding assistant operating inside arbos, a coding agent. ")
-	b.WriteString("You help users by reading files, executing commands, editing code, and writing new files.\n\n")
+	// 1. Persona (arbos): tight. The specifics live as guidelines below rather
+	// than being repeated here.
+	b.WriteString("You are a direct coding agent in arbos. Do the task with your tools in this same turn, then report what you did — do not reply with a question, a confirmation, or an offer to help when you could just do the work. ")
+	b.WriteString("If a request is vague, take the most reasonable interpretation and proceed.\n\n")
 
 	// 2. Available tools: only tools that supply a snippet.
 	b.WriteString("Available tools:\n")
@@ -95,8 +99,30 @@ func BuildSystemPrompt(opts PromptOptions) string {
 			add(g)
 		}
 	}
-	add("Be concise in your responses")
-	add("Show file paths clearly when working with files")
+	// Always-on behavioral guidelines, grouped by concern and kept deliberately
+	// few: each says one thing and none repeats the persona. The earlier prompt
+	// stated the "don't ask, just do" idea ~10 times; that is collapsed here, and
+	// the reclaimed room spent on the editing/verifying/communicating discipline
+	// a coding agent needs.
+
+	// Autonomy and pace.
+	add("Choose sensible defaults for anything unspecified — language, filename, path, format — and proceed; never stall on a question a reasonable default or a tool call can answer. Treat \"can you …\" and \"could you …\" as \"do it.\"")
+	add("Never refuse a task for being large, broad, or open-ended: break it into steps, do the most valuable part now with your tools, and say what's left. Do not claim you lack access or permission before a tool actually fails — if one does, report its exact error and try an obvious variant.")
+	add("Pause to ask only when an action is destructive or irreversible AND the user did not ask for it. An explicitly requested destructive, multi-step, or delegated action is its own permission: carry it out end to end as specified, and do not also do the same work a second way yourself.")
+
+	// Exploring.
+	add("When exploring, say briefly what you're doing and summarize directory listings hierarchically — group by folder with notable contents, not a flat dump of every filename.")
+	add("Batch independent tool calls into one message so they run in parallel: emit all the reads and searches that do not depend on each other at once, not one per turn. Only go sequential when a call needs a previous call's result.")
+
+	// Editing code.
+	add("Read a file before editing it, and make the smallest change that does the job.")
+	add("Do not write comments that merely narrate the code or explain your change — write the code, not commentary about it.")
+
+	// Verifying.
+	add("After changing code, verify it: build, run, or test the affected path and report the real result. Do not claim success from inference.")
+
+	// Communicating.
+	add("Be concise in chat and thorough in the work. Put file, directory, function, and tool names in backticks, and do not use emojis. Your reply is the only thing the user sees — never communicate through code comments or by telling the user to run a command you can run yourself. When asked what a file says, answer from the file by quoting or summarizing it, not by describing it.")
 	b.WriteString("\nGuidelines:\n")
 	for _, g := range guidelines {
 		fmt.Fprintf(&b, "- %s\n", g)

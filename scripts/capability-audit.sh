@@ -30,9 +30,7 @@ contains() { [[ "$1" == *"$2"* ]]; }
 
 echo "=== build ==="
 go build -o /tmp/arbos-audit ./cmd/arbos
-go build -o /tmp/arbos-tui-audit ./cmd/arbos-tui
 ARBOS=/tmp/arbos-audit
-check "tui builds" test -x /tmp/arbos-tui-audit
 
 echo "=== 1-13 fake checks ==="
 unset OPENROUTER_API_KEY ARBOS_OPENAI_BASE_URL ARBOS_OPENAI_API_KEY ARBOS_MCP_CONFIG
@@ -40,18 +38,18 @@ WORKDIR=$(mktemp -d)
 cd "$WORKDIR"
 
 OUT=$("$ARBOS" -db "$WORKDIR/f.db" -prompt "please fetch the page" 2>&1)
-check "1-web-fetch-fake" contains "$OUT" '-> fetch('
+check "1-web-fetch-fake" contains "$OUT" '✓ fetch'
 
 OUT=$("$ARBOS" -db "$WORKDIR/f.db" -prompt "please use the tool" 2>&1)
-check "2-tool-use-fake" contains "$OUT" '-> ls('
+check "2-tool-use-fake" contains "$OUT" '✓ ls'
 
 OUT=$("$ARBOS" -db "$WORKDIR/f.db" -prompt 'Use memory action remember key=k value=v. Then recall key=k.' 2>&1)
-check "10-memory-fake" contains "$OUT" '-> memory('
+check "10-memory-fake" contains "$OUT" '✓ memory'
 check "10-memory-persist" test -f .arbos/memory/memories.json
 
 export ARBOS_MCP_CONFIG='{"servers":[{"name":"fake","command":"python3","args":["'"$ROOT"'/scripts/fake-mcp-server.py"]}]}'
 OUT=$("$ARBOS" -db "$WORKDIR/mcp.db" -prompt 'You must call fake__ping with empty args now.' 2>&1)
-check "13-mcp-wired" contains "$OUT" '-> fake__ping'
+check "13-mcp-wired" contains "$OUT" '✓ fake__ping'
 check "13-mcp-call" contains "$OUT" 'pong'
 
 OUT=$("$ARBOS" -db "$WORKDIR/ext.db" -prompt 'Call arbos_version with {}. Reply with tool output only.' 2>&1)
@@ -80,7 +78,7 @@ OUT=$("$ARBOS" -db "$DB" -prompt 'Use fetch on https://example.com. Reply with O
 check "1-web-fetch-live" contains "$OUT" '200'
 
 OUT=$("$ARBOS" -db "$DB" -prompt 'Use memory action remember key=audit_color value=ultramarine' 2>&1)
-check "10-memory-live-write" contains "$OUT" '-> memory('
+check "10-memory-live-write" contains "$OUT" '✓ memory'
 
 OUT1=$("$ARBOS" -db "$DB" -prompt 'Write notes.txt with line: color=ultramarine' 2>&1)
 SID=$(echo "$OUT1" | sed -n 's/^session //p' | head -1)

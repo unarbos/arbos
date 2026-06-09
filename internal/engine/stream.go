@@ -10,11 +10,12 @@ import (
 // streamResult is the accumulated outcome of one provider response. Keeping
 // accumulation in one place means new chunk fields have a single tested home.
 type streamResult struct {
-	content   string
-	reasoning string
-	toolCalls []core.ToolCall
-	usage     *core.Usage
-	err       error // mid-stream provider failure (LLMChunk.Err)
+	content      string
+	reasoning    string
+	toolCalls    []core.ToolCall
+	usage        *core.Usage
+	finishReason string
+	err          error // mid-stream provider failure (LLMChunk.Err)
 }
 
 func (e *Engine) streamResponse(ctx context.Context, c *Conversation, chunks <-chan core.LLMChunk) streamResult {
@@ -41,6 +42,9 @@ func (e *Engine) streamResponse(ctx context.Context, c *Conversation, chunks <-c
 		if ch.Usage != nil {
 			res.usage = ch.Usage
 		}
+		if ch.FinishReason != "" {
+			res.finishReason = ch.FinishReason
+		}
 		if ch.Err != nil {
 			res.err = ch.Err
 		}
@@ -59,4 +63,13 @@ func drainChunks(chunks <-chan core.LLMChunk) {
 		for range chunks {
 		}
 	}()
+}
+
+func stopReasonFor(finishReason string) core.StopReason {
+	switch finishReason {
+	case "length", "max_tokens":
+		return core.StopLengthLimit
+	default:
+		return core.StopAnswered
+	}
 }

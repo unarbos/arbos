@@ -63,16 +63,27 @@ func (e *Engine) compactNow(ctx context.Context, c *Conversation) {
 // summarizeRange produces the summary text for the [lo,hi] span. It prefers the
 // injected Summarizer; without one it emits a deterministic marker so
 // compression still works (and tests stay hermetic).
+//
+// The span is folded with core.ProjectConversation — the same folding the live
+// projection uses — so events covered by an earlier compression render as that
+// compression's summary, not as raw history. Without this, every re-compaction
+// would re-feed the entire raw span and the summarizer's input would grow with
+// total session history; with it, each summarization costs prior-summary +
+// newly folded turns, bounded forever.
 func (e *Engine) summarizeRange(ctx context.Context, events []core.Event, lo, hi int64) string {
-	var folded []core.Message
+	var span []core.Event
 	for _, ev := range events {
-		if ev.Seq < lo || ev.Seq > hi {
-			continue
+		inRange := ev.Seq >= lo && ev.Seq <= hi
+		if p, ok := ev.Payload.(core.CompressionPayload); ok {
+			// A compression marker belongs to the span when the events it
+			// replaced do, wherever the marker itself was appended.
+			inRange = p.ReplacedSeqLo >= lo && p.ReplacedSeqHi <= hi
 		}
-		if m, ok := core.ProjectEvent(ev); ok {
-			folded = append(folded, m)
+		if inRange {
+			span = append(span, ev)
 		}
 	}
+	folded := core.ProjectConversation(span)
 	if e.summ != nil {
 		if s, err := e.summ.Summarize(ctx, folded); err == nil && s != "" {
 			return s

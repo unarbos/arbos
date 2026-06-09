@@ -44,6 +44,43 @@ type ToolRuntime interface {
 	Dispatch(ctx context.Context, call core.ToolCall) core.ToolResult
 }
 
+// ConflictAnalyzer is an OPTIONAL ToolRuntime capability for finer-grained
+// parallel scheduling than the coarse ToolSchema.ReadOnly flag. Access returns
+// the resources a specific call reads and writes — derived from its args, which
+// only the tool layer understands, keeping the kernel arg-agnostic. The engine
+// runs two calls concurrently only when their access sets do not conflict
+// (core.AccessSet.Conflicts).
+//
+// A runtime that does not implement it falls back to ReadOnly-based batching
+// (read-only calls parallel, anything else serialized), so this is purely
+// additive: it widens safe parallelism (e.g. edits to distinct files) without
+// changing the contract for runtimes that cannot describe a call's footprint.
+type ConflictAnalyzer interface {
+	Access(call core.ToolCall) core.AccessSet
+}
+
+// AccessOf is the single home for a call's scheduling footprint: a runtime that
+// implements ConflictAnalyzer answers for itself; otherwise the footprint is
+// derived from the tool's advertised ReadOnly (read-only -> empty set,
+// conflicts with nothing; mutating or unknown -> unbounded, conflicts with
+// everything). Every layer that schedules — the engine and the composing
+// runtimes (Multi, Filter) — derives footprints through this one function, so
+// the fallback semantics cannot drift between layers.
+func AccessOf(rt ToolRuntime, call core.ToolCall) core.AccessSet {
+	if an, ok := rt.(ConflictAnalyzer); ok {
+		return an.Access(call)
+	}
+	for _, s := range rt.Schemas() {
+		if s.Name == call.Name {
+			if s.ReadOnly {
+				return core.AccessSet{}
+			}
+			break
+		}
+	}
+	return core.AccessSet{Unknown: true}
+}
+
 // SessionStore persists sessions and their event logs. AppendEvent assigns Seq
 // and ID and MUST reject events that fail core.Event.Validate. Implementations
 // must be safe for concurrent use across sessions; the engine guarantees

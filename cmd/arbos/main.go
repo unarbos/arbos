@@ -1,6 +1,7 @@
-// Command arbos is the pi coding agent. Run with no arguments for an
-// interactive session; pass -q for a one-shot task; pass -serve for the
-// headless JSON-lines control seam.
+// Command arbos is the pi coding agent. Run with a task (`arbos fix the
+// tests`) or bare for an interactive session — both use the same live
+// terminal renderer and prompt for follow-ups. Pass -once for a single
+// turn; pass -serve for the headless JSON-lines control seam.
 //
 // Install:
 //
@@ -17,54 +18,75 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 
+	"github.com/charmbracelet/x/term"
+
 	"github.com/unarbos/arbos/internal/agent/pi"
 	"github.com/unarbos/arbos/internal/control"
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/engine"
+	"github.com/unarbos/arbos/internal/envfile"
 	"github.com/unarbos/arbos/internal/obs"
 	"github.com/unarbos/arbos/internal/piwire"
-	"github.com/unarbos/arbos/internal/tui"
 )
 
 func main() {
+	envfile.LoadDefault(piwire.AgentConfigDir())
+
 	var (
 		serve   = flag.Bool("serve", false, "serve the control seam over stdio (JSON lines)")
 		dbPath  = flag.String("db", piwire.DefaultDBPath(), "SQLite session store path")
 		query   = flag.String("q", "", "one-shot query (non-interactive)")
 		prompt  = flag.String("prompt", "", "one-shot query (alias for -q)")
+		p       = flag.String("p", "", "one-shot query (alias for -q)")
 		session = flag.String("session", "", "resume an existing session id (one-shot mode)")
 		approve = flag.Bool("approve", false, "gate write/edit/bash tools behind y/N confirmation")
+		once    = flag.Bool("once", false, "exit after a single turn instead of prompting for follow-ups")
 	)
 	flag.Parse()
 
-	task := *query
-	if task == "" {
-		task = *prompt
+	task := firstNonEmpty(*query, *prompt, *p)
+	// Fold any trailing positional words into the task so bare invocations
+	// like `arbos fix the tests` (and unquoted `arbos -p fix the tests`) work
+	// without shell quoting. With no args at all, task stays empty and the
+	// session opens at the follow-up prompt.
+	if rest := strings.TrimSpace(strings.Join(flag.Args(), " ")); rest != "" {
+		if task == "" {
+			task = rest
+		} else {
+			task = task + " " + rest
+		}
 	}
 
-	if err := run(*serve, *dbPath, task, *session, *approve); err != nil {
+	if err := run(*serve, *dbPath, task, *session, *approve, *once); err != nil {
 		fmt.Fprintln(os.Stderr, "arbos:", err)
 		os.Exit(1)
 	}
 }
 
-func run(serve bool, dbPath, task, session string, approve bool) error {
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func run(serve bool, dbPath, task, session string, approve, once bool) error {
 	if serve {
 		return runServe(dbPath, approve)
 	}
-	if task != "" {
-		return runOneShot(dbPath, task, session, approve)
-	}
-	return tui.Run(tui.Options{DBPath: dbPath, Approve: approve})
+	return runOneShot(dbPath, task, session, approve, once)
 }
 
 func runServe(dbPath string, approve bool) error {
-	host, cleanup, err := assemble(dbPath, approve)
+	host, cleanup, err := assemble(dbPath, approve, false)
 	if err != nil {
 		return err
 	}
@@ -76,8 +98,8 @@ func runServe(dbPath string, approve bool) error {
 	return control.Serve(ctx, host.Engine, os.Stdin, os.Stdout, piwire.NewSessionID)
 }
 
-func runOneShot(dbPath, task, session string, approve bool) error {
-	host, cleanup, err := assemble(dbPath, approve)
+func runOneShot(dbPath, task, session string, approve, once bool) error {
+	host, cleanup, err := assemble(dbPath, approve, true)
 	if err != nil {
 		return err
 	}
@@ -89,20 +111,28 @@ func runOneShot(dbPath, task, session string, approve bool) error {
 	defer stop()
 
 	cwd, _ := os.Getwd()
-	task = pi.ExpandPromptTemplate(task, pi.LoadPromptTemplates(cwd, piwire.AgentConfigDir()))
-	return oneShot(ctx, host.Engine, task, session)
+	templates := pi.LoadPromptTemplates(cwd, piwire.AgentConfigDir())
+	expand := func(s string) string { return pi.ExpandPromptTemplate(s, templates) }
+	return oneShot(ctx, host.Engine, expand(task), session, once, expand)
 }
 
-func assemble(dbPath string, approve bool) (*piwire.Host, func(), error) {
+// assemble builds the host. When quiet, diagnostics go to a debug file instead
+// of the console so an interactive one-shot run shows only its transcript; the
+// headless serve seam stays verbose on stderr.
+func assemble(dbPath string, approve, quiet bool) (*piwire.Host, func(), error) {
 	store, err := piwire.OpenStore(dbPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open store: %w", err)
 	}
 	logger := piwire.NewLogger()
+	if quiet {
+		logger = piwire.NewQuietLogger()
+	}
 	host, err := piwire.Assemble(piwire.HostConfig{
 		Store:    store,
 		Observer: obs.NewSlogObserver(logger),
 		Approve:  approve,
+		Logger:   logger,
 	})
 	if err != nil {
 		_ = store.Close()
@@ -115,7 +145,7 @@ func assemble(dbPath string, approve bool) (*piwire.Host, func(), error) {
 	return host, cleanup, nil
 }
 
-func oneShot(ctx context.Context, eng *engine.Engine, task, session string) error {
+func oneShot(ctx context.Context, eng *engine.Engine, task, session string, once bool, expand func(string) string) error {
 	id := piwire.NewSessionID()
 	if session != "" {
 		id = core.SessionID(session)
@@ -124,31 +154,141 @@ func oneShot(ctx context.Context, eng *engine.Engine, task, session string) erro
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "session %s\n", conv.ID())
+	var r uiRenderer = newRenderer(os.Stdout, os.Stderr)
+	if term.IsTerminal(os.Stderr.Fd()) {
+		width, _, err := term.GetSize(os.Stderr.Fd())
+		if err != nil {
+			width = 80
+		}
+		r = newLiveRenderer(os.Stdout, os.Stderr, width)
+	}
+	defer r.close()
+	// Keep the session open for follow-ups when a human is on the other end;
+	// -once or piped stdio means a single turn.
+	followUps := !once && term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stderr.Fd())
+
+	r.header(string(conv.ID()))
+	if task == "" && !followUps {
+		// Piped invocation with no argv task: the pipe is the task. Consume
+		// stdin fully before the line reader takes ownership of it.
+		data, _ := io.ReadAll(os.Stdin)
+		task = strings.TrimSpace(string(data))
+		if task == "" {
+			return fmt.Errorf("no task: pass one as arguments or pipe it on stdin")
+		}
+		task = expand(task)
+	}
+	in := startStdinReader()
+	if task == "" {
+		first, err := readFollowUp(ctx, r, in)
+		if err != nil || first == "" {
+			return nil
+		}
+		task = expand(first)
+	}
 	conv.Send(core.PromptIntent{Text: task})
-	stdin := bufio.NewReader(os.Stdin)
 	for env := range conv.Events() {
+		// Relayed child events (Depth > 0) contribute tool activity only.
+		// Child prose is internal narration — printing it interleaves
+		// parallel children's text mid-word — and a child's turn ending
+		// must not end the root turn.
+		child := env.Depth > 0
 		switch e := env.Event.(type) {
 		case core.MessageDelta:
-			fmt.Print(e.Text)
+			if !child {
+				r.delta(e.Text)
+			}
 		case core.ApprovalRequest:
-			fmt.Fprintf(os.Stderr, "\n  approve %s(%s)? [y/N] ", e.Call.Name, string(e.Call.Args))
-			line, _ := stdin.ReadString('\n')
+			r.approvalPrompt(e.Call)
+			line, _ := in.read(ctx)
 			approved := strings.EqualFold(strings.TrimSpace(line), "y")
 			conv.Send(core.ApprovalResponseIntent{RequestID: e.RequestID, Approved: approved})
 		case core.ToolStarted:
-			fmt.Fprintf(os.Stderr, "\n  -> %s(%s)\n", e.Call.Name, string(e.Call.Args))
+			r.toolStart(e.Call)
 		case core.ToolFinished:
-			fmt.Fprintf(os.Stderr, "  <- %s\n", e.Result.Content)
+			r.toolFinish(e.Result)
 		case core.TurnComplete:
-			fmt.Fprintln(os.Stderr, "\n["+string(e.StopReason)+"]")
-			return nil
+			if child {
+				continue
+			}
+			r.turnComplete(e.StopReason)
+			if !followUps {
+				return nil
+			}
+			next, err := readFollowUp(ctx, r, in)
+			if err != nil || next == "" {
+				return nil
+			}
+			conv.Send(core.PromptIntent{Text: expand(next)})
 		case core.Interrupted:
-			fmt.Fprintln(os.Stderr, "\n[interrupted]")
-			return nil
+			if !child {
+				r.interrupted()
+				return nil
+			}
 		case core.ErrorEvent:
-			return fmt.Errorf("%s: %s", e.Category, e.Err)
+			if !child {
+				r.errorf(e)
+				return fmt.Errorf("%s: %s", e.Category, e.Err)
+			}
 		}
 	}
 	return nil
+}
+
+// stdinReader is the single owner of stdin for the whole session, so the
+// follow-up prompt and mid-turn approval prompts never race for lines.
+type stdinReader struct {
+	lines chan string
+	errs  chan error
+}
+
+func startStdinReader() *stdinReader {
+	in := &stdinReader{lines: make(chan string), errs: make(chan error, 1)}
+	go func() {
+		br := bufio.NewReader(os.Stdin)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				in.errs <- err
+				return
+			}
+			in.lines <- line
+		}
+	}()
+	return in
+}
+
+// read returns the next stdin line, or an error on EOF or context cancel.
+func (in *stdinReader) read(ctx context.Context) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case err := <-in.errs:
+		return "", err
+	case line := <-in.lines:
+		return line, nil
+	}
+}
+
+// readFollowUp prompts for the next task in the session. It returns "" when
+// the user is done: EOF (ctrl-d), an exit word, or a cancelled context
+// (ctrl-c). Blank lines re-prompt rather than exit, so a stray enter never
+// kills the session.
+func readFollowUp(ctx context.Context, r uiRenderer, in *stdinReader) (string, error) {
+	for {
+		r.promptFollowUp()
+		line, err := in.read(ctx)
+		if err != nil {
+			fmt.Fprintln(os.Stderr)
+			return "", err
+		}
+		switch line = strings.TrimSpace(line); line {
+		case "":
+			continue
+		case "exit", "quit", "q":
+			return "", nil
+		default:
+			return line, nil
+		}
+	}
 }
