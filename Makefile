@@ -1,9 +1,14 @@
 GO ?= go
 
-.PHONY: build test vet lint run tidy generate generate-check e2e-live e2e-fake
+.PHONY: build install test vet lint run tidy generate generate-check e2e-live e2e-fake
 
 build:
 	$(GO) build ./...
+
+install:
+	$(GO) install ./cmd/arbos
+	@echo "Installed to $$($(GO) env GOPATH)/bin/arbos"
+	@echo "Run: export OPENROUTER_API_KEY=sk-or-... && arbos"
 
 generate:
 	$(GO) generate ./...

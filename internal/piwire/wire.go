@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -200,7 +201,31 @@ func ModelName() string {
 	if m := os.Getenv("ARBOS_MODEL"); m != "" {
 		return m
 	}
+	if HasLLMConfigured() {
+		return "google/gemini-2.5-flash"
+	}
 	return "fake"
+}
+
+// HasLLMConfigured reports whether a real LLM provider will be selected.
+func HasLLMConfigured() bool {
+	switch os.Getenv("ARBOS_PROVIDER") {
+	case "anthropic":
+		return os.Getenv("ARBOS_ANTHROPIC_API_KEY") != ""
+	case "google":
+		return os.Getenv("ARBOS_GOOGLE_API_KEY") != ""
+	default:
+		_, keyEnv := openAIConfig()
+		return os.Getenv(keyEnv) != ""
+	}
+}
+
+// WarnIfNoLLM prints a one-line hint when no API credentials are configured.
+func WarnIfNoLLM(w io.Writer) {
+	if HasLLMConfigured() {
+		return
+	}
+	fmt.Fprintf(w, "arbos: no API key configured — set OPENROUTER_API_KEY (or see https://github.com/unarbos/arbos)\n")
 }
 
 func NewSessionID() core.SessionID {

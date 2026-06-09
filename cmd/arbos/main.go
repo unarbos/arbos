@@ -1,13 +1,15 @@
-// Command arbos is the kernel host for the pi coding agent. It runs a one-shot
-// prompt or serves the headless control seam over stdio. With no LLM endpoint
-// configured it uses the deterministic fake provider against the real pi
-// toolset, so `go run ./cmd/arbos` works with zero setup.
+// Command arbos is the pi coding agent. Run with no arguments for an
+// interactive session; pass -q for a one-shot task; pass -serve for the
+// headless JSON-lines control seam.
 //
-// Live LLM via OpenRouter (doppler):
+// Install:
 //
-//	doppler run --project arbos --config dev -- env ARBOS_MODEL=google/gemini-2.5-flash ./cmd/arbos
+//	go install github.com/unarbos/arbos/cmd/arbos@latest
 //
-// OpenRouter is auto-selected when OPENROUTER_API_KEY is set.
+// Use (OpenRouter):
+//
+//	export OPENROUTER_API_KEY=sk-or-...
+//	arbos
 package main
 
 import (
@@ -26,31 +28,76 @@ import (
 	"github.com/unarbos/arbos/internal/engine"
 	"github.com/unarbos/arbos/internal/obs"
 	"github.com/unarbos/arbos/internal/piwire"
+	"github.com/unarbos/arbos/internal/tui"
 )
 
 func main() {
 	var (
 		serve   = flag.Bool("serve", false, "serve the control seam over stdio (JSON lines)")
 		dbPath  = flag.String("db", piwire.DefaultDBPath(), "SQLite session store path")
-		prompt  = flag.String("prompt", "list files in the workspace", "one-shot prompt (ignored with -serve)")
+		query   = flag.String("q", "", "one-shot query (non-interactive)")
+		prompt  = flag.String("prompt", "", "one-shot query (alias for -q)")
 		session = flag.String("session", "", "resume an existing session id (one-shot mode)")
-		approve = flag.Bool("approve", false, "gate write/edit/bash tools behind y/N confirmation (default off = full privileges)")
+		approve = flag.Bool("approve", false, "gate write/edit/bash tools behind y/N confirmation")
 	)
 	flag.Parse()
 
-	if err := run(*serve, *dbPath, *prompt, *session, *approve); err != nil {
+	task := *query
+	if task == "" {
+		task = *prompt
+	}
+
+	if err := run(*serve, *dbPath, task, *session, *approve); err != nil {
 		fmt.Fprintln(os.Stderr, "arbos:", err)
 		os.Exit(1)
 	}
 }
 
-func run(serve bool, dbPath, prompt, session string, approve bool) error {
+func run(serve bool, dbPath, task, session string, approve bool) error {
+	if serve {
+		return runServe(dbPath, approve)
+	}
+	if task != "" {
+		return runOneShot(dbPath, task, session, approve)
+	}
+	return tui.Run(tui.Options{DBPath: dbPath, Approve: approve})
+}
+
+func runServe(dbPath string, approve bool) error {
+	host, cleanup, err := assemble(dbPath, approve)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	return control.Serve(ctx, host.Engine, os.Stdin, os.Stdout, piwire.NewSessionID)
+}
+
+func runOneShot(dbPath, task, session string, approve bool) error {
+	host, cleanup, err := assemble(dbPath, approve)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	piwire.WarnIfNoLLM(os.Stderr)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	cwd, _ := os.Getwd()
+	task = pi.ExpandPromptTemplate(task, pi.LoadPromptTemplates(cwd, piwire.AgentConfigDir()))
+	return oneShot(ctx, host.Engine, task, session)
+}
+
+func assemble(dbPath string, approve bool) (*piwire.Host, func(), error) {
 	store, err := piwire.OpenStore(dbPath)
 	if err != nil {
-		return fmt.Errorf("open store: %w", err)
+		return nil, nil, fmt.Errorf("open store: %w", err)
 	}
-	defer func() { _ = store.Close() }()
-
 	logger := piwire.NewLogger()
 	host, err := piwire.Assemble(piwire.HostConfig{
 		Store:    store,
@@ -58,22 +105,17 @@ func run(serve bool, dbPath, prompt, session string, approve bool) error {
 		Approve:  approve,
 	})
 	if err != nil {
-		return err
+		_ = store.Close()
+		return nil, nil, err
 	}
-	defer host.Cleanup()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	if serve {
-		return control.Serve(ctx, host.Engine, os.Stdin, os.Stdout, piwire.NewSessionID)
+	cleanup := func() {
+		host.Cleanup()
+		_ = store.Close()
 	}
-	cwd, _ := os.Getwd()
-	prompt = pi.ExpandPromptTemplate(prompt, pi.LoadPromptTemplates(cwd, piwire.AgentConfigDir()))
-	return oneShot(ctx, host.Engine, prompt, session)
+	return host, cleanup, nil
 }
 
-func oneShot(ctx context.Context, eng *engine.Engine, prompt, session string) error {
+func oneShot(ctx context.Context, eng *engine.Engine, task, session string) error {
 	id := piwire.NewSessionID()
 	if session != "" {
 		id = core.SessionID(session)
@@ -82,27 +124,27 @@ func oneShot(ctx context.Context, eng *engine.Engine, prompt, session string) er
 	if err != nil {
 		return err
 	}
-	fmt.Printf("session %s\nprompt: %q\n\n", conv.ID(), prompt)
+	fmt.Fprintf(os.Stderr, "session %s\n", conv.ID())
+	conv.Send(core.PromptIntent{Text: task})
 	stdin := bufio.NewReader(os.Stdin)
-	conv.Send(core.PromptIntent{Text: prompt})
 	for env := range conv.Events() {
 		switch e := env.Event.(type) {
 		case core.MessageDelta:
 			fmt.Print(e.Text)
 		case core.ApprovalRequest:
-			fmt.Printf("\n  approve %s(%s)? [y/N] ", e.Call.Name, string(e.Call.Args))
+			fmt.Fprintf(os.Stderr, "\n  approve %s(%s)? [y/N] ", e.Call.Name, string(e.Call.Args))
 			line, _ := stdin.ReadString('\n')
 			approved := strings.EqualFold(strings.TrimSpace(line), "y")
 			conv.Send(core.ApprovalResponseIntent{RequestID: e.RequestID, Approved: approved})
 		case core.ToolStarted:
-			fmt.Printf("\n  -> %s(%s)\n", e.Call.Name, string(e.Call.Args))
+			fmt.Fprintf(os.Stderr, "\n  -> %s(%s)\n", e.Call.Name, string(e.Call.Args))
 		case core.ToolFinished:
-			fmt.Printf("  <- %s\n", e.Result.Content)
+			fmt.Fprintf(os.Stderr, "  <- %s\n", e.Result.Content)
 		case core.TurnComplete:
-			fmt.Printf("\n\n[%s]\n", e.StopReason)
+			fmt.Fprintln(os.Stderr, "\n["+string(e.StopReason)+"]")
 			return nil
 		case core.Interrupted:
-			fmt.Printf("\n\n[interrupted]\n")
+			fmt.Fprintln(os.Stderr, "\n[interrupted]")
 			return nil
 		case core.ErrorEvent:
 			return fmt.Errorf("%s: %s", e.Category, e.Err)
