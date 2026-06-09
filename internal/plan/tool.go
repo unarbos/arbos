@@ -289,6 +289,7 @@ func PromptInfo() codingspec.ToolPromptInfo {
 			"Never end a turn with a node still active unless you are mid-task and continuing next turn; if you are stopped by something, mark it blocked with what is needed.",
 			"Recurring obligations that need judgment (commit good progress, triage new failures) are maintain nodes with every; record each recurrence with an outcome-only update. The plan clock resolves to ~1 minute and each firing runs a model turn — purely mechanical commands on a finer cadence belong in a background loop job instead. Questions only the user can answer are nodes with assignee human — park them and continue other work.",
 			"The <<plan>> block in your context is the live forest — trust it over your memory of earlier turns, and use node ids (#7) when updating.",
+			"Each open node shows its last attempt outcome (\"last: …\") — that is your working memory across firings, retries, and sessions. Write outcomes as messages to whoever continues the work: include the values, readings, or conclusions the next attempt must compare against or build on. Never store task state in ad-hoc files when the outcome can carry it.",
 			"When the user asks what is running, scheduled, or happening in the background, answer from BOTH the <<plan>> block (deferred and standing nodes are scheduled work) and the jobs table (processes). A deferred node that has not fired yet is a background task.",
 		},
 	}
