@@ -1,0 +1,17 @@
+# Binaries
+/arbos
+/bin/
+*.exe
+
+# Go build/test artifacts
+*.test
+*.out
+/vendor/
+
+# Local env / secrets (use doppler)
+.env
+.env.*
+
+# Editor
+.idea/
+.vscode/

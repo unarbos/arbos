@@ -1,0 +1,177 @@
+// Package core holds the kernel's foundational data types: the event log,
+// the conversation projection, and the intent/event vocabulary that flows in
+// and out of the engine. It depends on nothing else in the tree — every other
+// package depends on it.
+package core
+
+import (
+	"errors"
+	"time"
+)
+
+// CurrentEventVersion is the schema version stamped on every event the current
+// build writes. The persisted log is append-only, so a reader must know which
+// writer produced a row to upcast it correctly when the Event/payload shapes
+// evolve (new kinds, multimodal content, etc.). Bump this and add an upcasting
+// rule whenever a payload's persisted shape changes. See ADR-0010.
+const CurrentEventVersion = 1
+
+// EventKind is the persisted discriminator for an event's payload. It is
+// derived from the payload type (Payload.Kind()) and serialized as a column so
+// stores can index/filter (e.g. FTS only over message kinds) without decoding
+// the payload.
+type EventKind string
+
+const (
+	EventUserMessage      EventKind = "user_message"
+	EventAssistantMessage EventKind = "assistant_message"
+	EventToolResult       EventKind = "tool_result"
+	EventUsage            EventKind = "usage"
+	EventCompressed       EventKind = "compressed"
+	EventContext          EventKind = "context"
+	EventInterrupted      EventKind = "interrupted"
+)
+
+// EventPayload is a sealed sum type: the kernel's event payloads are a closed
+// set, each carrying exactly the data its kind needs. This makes "exactly one
+// payload, matching the kind" a structural guarantee enforced by the compiler
+// (you cannot build an event with two payloads or none), consistent with how
+// Intent and KernelEvent are modeled. Kind() doubles as the seal marker.
+type EventPayload interface {
+	Kind() EventKind
+}
+
+// MessagePayload carries a user or assistant message. The concrete kind is
+// derived from the role so user and assistant turns share one payload type.
+type MessagePayload struct{ Message Message }
+
+func (p MessagePayload) Kind() EventKind {
+	if p.Message.Role == RoleUser {
+		return EventUserMessage
+	}
+	return EventAssistantMessage
+}
+
+// ToolResultPayload carries the outcome of a dispatched tool call.
+type ToolResultPayload struct{ Result ToolResult }
+
+func (ToolResultPayload) Kind() EventKind { return EventToolResult }
+
+// UsagePayload records token accounting for a completed LLM response. Usage
+// lives in the log (not only on session metadata) so trajectories and audits
+// reconstruct it from the event stream. See ADR-0011.
+type UsagePayload struct{ Usage Usage }
+
+func (UsagePayload) Kind() EventKind { return EventUsage }
+
+// CompressionPayload records that a span of earlier events was folded into a
+// summary. ReplacedSeqLo/Hi bound the compressed range (inclusive).
+type CompressionPayload struct {
+	Summary       string
+	ReplacedSeqLo int64
+	ReplacedSeqHi int64
+}
+
+func (CompressionPayload) Kind() EventKind { return EventCompressed }
+
+// Segment is a provenance-tagged piece of injected context (memory recall, a
+// skill body, a retrieved document). Source identifies the origin so the
+// projection can fence it and so the most recent segment per source supersedes
+// older ones. The kernel never interprets Content.
+type Segment struct {
+	Source  string
+	Content string
+}
+
+// ContextPayload records context that was injected into a turn (memory, skills,
+// retrieval). It is logged — rather than assembled ephemerally — so a replayed
+// session reproduces exactly what the model saw. Projection renders only the
+// latest segment per source (older injections stay in the log for audit but are
+// superseded), keeping the live prompt lean and prefix-cache stable. See
+// ADR-0015.
+type ContextPayload struct{ Segments []Segment }
+
+func (ContextPayload) Kind() EventKind { return EventContext }
+
+// InterruptPayload marks that a turn was cancelled before completing.
+type InterruptPayload struct{ Reason string }
+
+func (InterruptPayload) Kind() EventKind { return EventInterrupted }
+
+// Event is the spine of the kernel: sessions are an append-only sequence of
+// these. The conversation a provider sees is a projection of the log (see
+// Project), never a separately mutated structure.
+type Event struct {
+	ID        int64 // store-assigned
+	SessionID SessionID
+	Seq       int64 // monotonic within a session, store-assigned
+	// TurnID groups every event produced by one user prompt (user message ->
+	// context -> assistant -> tool results -> assistant ...). Assigned by the
+	// engine (not the store) because a turn spans multiple appends. It is the
+	// join key that isolates "everything that happened in this turn" for a
+	// debugging agent and the unit of deterministic replay. Zero means the event
+	// was not produced inside an engine turn (e.g. an out-of-band injection);
+	// it is intentionally not enforced by Validate so non-engine writers and
+	// fixtures stay valid. Operational ids (trace_id) ride in context and are
+	// stamped on logs/spans, never on this domain type. See docs/12-observability.md.
+	TurnID    int64
+	Version   int // schema version of this row; see CurrentEventVersion
+	CreatedAt time.Time
+	Payload   EventPayload
+}
+
+// Validate enforces the persistable invariants. Stores MUST call it on append
+// so a malformed event never reaches the log (the source of truth).
+func (e *Event) Validate() error {
+	if e.Payload == nil {
+		return errors.New("event has nil payload")
+	}
+	if e.SessionID == "" {
+		return errors.New("event has empty session id")
+	}
+	if e.Version == 0 {
+		return errors.New("event missing schema version")
+	}
+	// A persisted message must be a user or assistant turn. System and tool-role
+	// messages are produced by projection, never stored; a stored MessagePayload
+	// with any other role would corrupt Kind() (which maps any non-user role to
+	// "assistant") and the projection. The "malformed event never reaches the
+	// log" guarantee must not depend on a store's incidental session check.
+	if mp, ok := e.Payload.(MessagePayload); ok {
+		if mp.Message.Role != RoleUser && mp.Message.Role != RoleAssistant {
+			return errors.New("message payload role must be user or assistant")
+		}
+	}
+	return nil
+}
+
+// Per-kind constructors are the only sanctioned way the engine builds events.
+// They stamp the current schema version so no caller can forget it.
+
+func newEvent(sid SessionID, now time.Time, p EventPayload) *Event {
+	return &Event{SessionID: sid, Version: CurrentEventVersion, CreatedAt: now, Payload: p}
+}
+
+func NewMessageEvent(sid SessionID, m Message, now time.Time) *Event {
+	return newEvent(sid, now, MessagePayload{Message: m})
+}
+
+func NewToolResultEvent(sid SessionID, r ToolResult, now time.Time) *Event {
+	return newEvent(sid, now, ToolResultPayload{Result: r})
+}
+
+func NewUsageEvent(sid SessionID, u Usage, now time.Time) *Event {
+	return newEvent(sid, now, UsagePayload{Usage: u})
+}
+
+func NewCompressionEvent(sid SessionID, summary string, lo, hi int64, now time.Time) *Event {
+	return newEvent(sid, now, CompressionPayload{Summary: summary, ReplacedSeqLo: lo, ReplacedSeqHi: hi})
+}
+
+func NewContextEvent(sid SessionID, segments []Segment, now time.Time) *Event {
+	return newEvent(sid, now, ContextPayload{Segments: segments})
+}
+
+func NewInterruptEvent(sid SessionID, reason string, now time.Time) *Event {
+	return newEvent(sid, now, InterruptPayload{Reason: reason})
+}

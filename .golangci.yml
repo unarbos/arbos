@@ -1,0 +1,45 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - revive
+    # Flags non-exhaustive enum switches. Sealed sum types (Intent, KernelEvent,
+    # EventPayload) additionally use explicit default branches so unhandled
+    # variants surface loudly rather than silently no-op.
+    - exhaustive
+  settings:
+    exhaustive:
+      # An explicit default branch counts as handling the remaining cases —
+      # matches our "make the seal mean something" default-branch convention.
+      default-signifies-exhaustive: true
+    revive:
+      rules:
+        # These packages are all internal/ (no published API surface), so the
+        # "comment every exported symbol" rule is noise here. Keep the rest of
+        # revive's high-signal checks.
+        - name: exported
+          disabled: true
+  exclusions:
+    rules:
+      # The coding tools (pi port) return capitalized, model-facing message
+      # strings as Go errors (e.g. "Path not found", "Offset N is beyond end of
+      # file"). These are reproduced verbatim from pi because the exact text is
+      # part of the agent's behavior; ST1005 ("error strings should not be
+      # capitalized") is a false positive for these user/model-facing messages.
+      - path: internal/tool/codingspec/
+        text: "ST1005"
+        linters:
+          - staticcheck
+
+formatters:
+  enable:
+    - gofmt
+
+run:
+  timeout: 5m
