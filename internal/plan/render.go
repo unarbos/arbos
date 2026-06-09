@@ -59,7 +59,16 @@ func renderPlan(b *strings.Builder, root Node, children map[NodeID][]Node, last 
 	if total > 0 {
 		fmt.Fprintf(b, "  (%d/%d done)", done, total)
 	}
+	// A childless root IS the work, not a heading: a standing obligation or
+	// lone goal created as its own plan still carries timing and working
+	// memory, which otherwise only children would render.
+	if root.Kind == KindMaintain {
+		b.WriteString(dueSuffix(root, now))
+	}
 	b.WriteString("\n")
+	if len(children[root.ID]) == 0 {
+		writeLastAttempt(b, last, root.ID, "  ")
+	}
 
 	var standing, human []Node
 	renderOpen(b, root.ID, children, last, now, 1, &standing, &human)
