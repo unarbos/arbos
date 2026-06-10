@@ -8,28 +8,50 @@ import (
 	"strings"
 )
 
-// Resolve joins a user-supplied path to root and refuses any path that
-// escapes root, so a file tool cannot read or clobber files outside the
-// workspace. Relative paths are joined to root; absolute paths are accepted
-// as-is when they already lie within root (models routinely echo absolute
-// paths despite the relative contract) and refused otherwise, rather than
-// being silently re-rooted into a nonexistent doubled path. It guards two
-// escapes: lexical traversal ("../") and symlink traversal (a symlink inside
-// root pointing out). An empty root means the current directory. This is the
-// single home for the workspace sandbox guard that every file tool shares.
-func Resolve(root, rel string) (string, error) {
-	if root == "" {
-		root = "."
+// Resolve turns a user-supplied path into an absolute, cleaned path: relative
+// paths join to base (the workspace cwd), absolute paths are taken as given. It
+// does NOT confine. arbos trusts its agents and assumes a human is watching, so
+// a path that points outside base — via "../", an absolute path, or a symlink —
+// resolves like any other. This is the default every file tool shares, and it
+// is what lets an agent edit up the tree, a sibling repo, or anywhere the user
+// running arbos can. An empty base means the current directory.
+//
+// To run an agent inside a jail instead — untrusted or unattended work that must
+// stay in one tree — a host uses ResolveWithin in place of Resolve. The boundary
+// is opt-in, not the default.
+func Resolve(base, rel string) (string, error) {
+	if base == "" {
+		base = "."
+	}
+	absBase, err := filepath.Abs(base)
+	if err != nil {
+		return "", err
+	}
+	if filepath.IsAbs(rel) {
+		return filepath.Clean(rel), nil
+	}
+	// Natural join: "../" traverses above base like a shell, so an agent can
+	// reach a sibling repo or a parent dir. The boundary, if wanted, is
+	// ResolveWithin's job — not a silent clamp here.
+	return filepath.Join(absBase, rel), nil
+}
+
+// ResolveWithin is Resolve plus a workspace boundary: it refuses any path that
+// escapes root, whether lexically ("../") or through a symlink inside root that
+// points back out. It is the opt-in sandbox — wire it where Resolve would go to
+// confine a host to a single tree (e.g. running an untrusted backend, or an
+// unattended fleet where a stray write must not reach $HOME or /etc). The
+// default host does not call it; see Resolve for the rationale.
+func ResolveWithin(root, rel string) (string, error) {
+	abs, err := Resolve(root, rel)
+	if err != nil {
+		return "", err
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return "", err
 	}
-	joined := filepath.Join(absRoot, filepath.Clean("/"+rel))
-	if filepath.IsAbs(rel) {
-		joined = filepath.Clean(rel)
-	}
-	if !withinRoot(joined, absRoot) {
+	if !withinRoot(abs, absRoot) {
 		return "", fmt.Errorf("path %q is outside the workspace root; use a path relative to the root", rel)
 	}
 
@@ -42,10 +64,10 @@ func Resolve(root, rel string) (string, error) {
 	if err != nil {
 		realRoot = absRoot
 	}
-	if real, ok := evalExistingPrefix(joined); ok && !withinRoot(real, realRoot) {
+	if real, ok := evalExistingPrefix(abs); ok && !withinRoot(real, realRoot) {
 		return "", fmt.Errorf("path %q escapes the workspace root via a symlink", rel)
 	}
-	return joined, nil
+	return abs, nil
 }
 
 // withinRoot reports whether p is root itself or lies beneath it.

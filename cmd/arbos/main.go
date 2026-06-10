@@ -132,7 +132,7 @@ func runOneShot(cfg piwire.Config, dbPath, task, session string, approve, once b
 	// what happened since you left, what waits on you, what is open — from
 	// pure store reads, before any session starts.
 	if task == "" && interactive {
-		printBrief(ctx, store, cwd, os.Stderr)
+		printBrief(ctx, store, os.Stderr)
 	}
 
 	// An interactive session is a long-lived process, so it carries the clock
@@ -147,13 +147,7 @@ func runOneShot(cfg piwire.Config, dbPath, task, session string, approve, once b
 
 	templates := pi.LoadPromptTemplates(cwd, piwire.AgentConfigDir())
 	expand := func(s string) string { return pi.ExpandPromptTemplate(s, templates) }
-	err = oneShot(ctx, host.Engine, store, expand(task), session, once, expand)
-	// The handoff: on the way out, show what stays open. Fresh reads — the
-	// session that just ended usually changed the forest.
-	if interactive {
-		printHandoff(context.Background(), store, os.Stderr)
-	}
-	return err
+	return oneShot(ctx, host.Engine, store, expand(task), session, once, expand)
 }
 
 // assemble builds the host. When quiet, diagnostics go to a debug file instead

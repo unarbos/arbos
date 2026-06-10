@@ -140,7 +140,7 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		return nil, fmt.Errorf("register pi: %w", err)
 	}
 	delegation := tool.New()
-	if err := agent.RegisterDelegate(delegation, router, codingReadOnlyTools()); err != nil {
+	if err := agent.RegisterDelegate(delegation, router); err != nil {
 		if theMind != nil {
 			theMind.Close()
 		}

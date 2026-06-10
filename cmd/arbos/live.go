@@ -31,6 +31,7 @@ type liveRenderer struct {
 	midText     bool // prose cursor is mid-line; suppress repaints until newline
 	suspended   bool // approval/follow-up prompt owns the cursor; freeze the region
 	turnOpen    bool // a turn has emitted content and not yet been collapsed
+	pendingIcon bool // turn opened; its ◆ marker not yet emitted
 	atLineStart bool // next prose byte begins a fresh line (needs indent)
 
 	running []runningTool
@@ -87,9 +88,10 @@ func newLiveRenderer(prose, status io.Writer, width int) *liveRenderer {
 	return r
 }
 
-// agentLabel opens an agent turn (caller holds r.mu): a blank line then a
-// distinct colored icon so the agent's side is visibly distinct from the
-// user's, without repeating the "Arbos" name every turn.
+// agentLabel opens an agent turn (caller holds r.mu): a blank line for
+// breathing room, then the turn's ◆ marker is deferred — prose prefixes the
+// first line with it (delta), and a tool-first turn flushes it as its own line
+// (flushIconLine), so the icon always sits beside the first thing the turn says.
 func (r *liveRenderer) agentLabel() {
 	if r.turnOpen {
 		return
@@ -97,7 +99,17 @@ func (r *liveRenderer) agentLabel() {
 	r.turnOpen = true
 	r.erase()
 	_, _ = fmt.Fprintln(r.status)
-	_, _ = fmt.Fprintln(r.status, r.agent.Render(agentIcon))
+	r.pendingIcon = true
+}
+
+// flushIconLine emits the turn's ◆ on its own permanent line when the turn
+// opens with tool activity (there is no prose to prefix). No-op once the icon
+// has been emitted (e.g. prose already prefixed it).
+func (r *liveRenderer) flushIconLine() {
+	if r.pendingIcon {
+		_, _ = fmt.Fprintln(r.status, r.agent.Render(agentIcon))
+		r.pendingIcon = false
+	}
 }
 
 // tick advances the spinner while tools are running. Repaints happen inline on
@@ -120,11 +132,10 @@ func (r *liveRenderer) tick() {
 	}
 }
 
-func (r *liveRenderer) header(id string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.persist(r.agent.Render("Arbos") + r.dim.Render("  "+id))
-}
+// header is intentionally silent in the live UI: the session opens straight
+// into its footer and prompt, not a banner. The id still lands in the store for
+// -session resume.
+func (r *liveRenderer) header(string) {}
 
 func (r *liveRenderer) delta(text string) {
 	if text == "" {
@@ -135,6 +146,14 @@ func (r *liveRenderer) delta(text string) {
 	r.suspended = false
 	r.agentLabel()
 	r.erase()
+	if r.pendingIcon {
+		// Prefix the first prose line with the turn's ◆ so the icon sits beside
+		// the text, not on a line of its own. "◆ " is two columns, matching the
+		// proseIndent that aligns every following line beneath it.
+		_, _ = fmt.Fprint(r.prose, r.agent.Render(agentIcon)+" ")
+		r.atLineStart = false
+		r.pendingIcon = false
+	}
 	if styled := r.md.Push(text); styled != "" {
 		_, _ = fmt.Fprint(r.prose, indentStream(styled, &r.atLineStart))
 	}
@@ -147,6 +166,7 @@ func (r *liveRenderer) toolStart(call core.ToolCall) {
 	defer r.mu.Unlock()
 	r.suspended = false
 	r.agentLabel()
+	r.flushIconLine()
 	r.endProse()
 	r.running = append(r.running, runningTool{
 		id:    call.ID,
@@ -225,41 +245,44 @@ func (r *liveRenderer) turnComplete(reason core.StopReason) {
 	})
 }
 
-// promptFollowUp paints the persistent footer and the input marker as one
-// managed region (footer above, "› " at the bottom with the cursor inline) and
-// freezes repaints until the user submits. The footer is part of the erasable
-// region, so it never accumulates in scrollback — it is redrawn each prompt and
-// torn down on submit. Always called either first (nothing painted) or right
-// after the user pressed enter (cursor already below the old region), so the
-// erase is the ordinary above-the-cursor kind.
+// promptFollowUp paints the status bar and the input marker, then freezes
+// repaints until the user submits. The bar sits above a blank separator and the
+// "› " prompt, so the order is always output → bar → prompt. The block is
+// tracked as the erasable region only so an arriving outbox notice can lift it
+// out of the way (see notice); on submit it is left in place permanently
+// (commitPrompt), because a typed line may wrap and the renderer cannot know its
+// height — so it never tries to erase across it.
 func (r *liveRenderer) promptFollowUp() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.erase()
 	r.endProse()
 	r.suspended = true
+	lines := r.footerBlock()
+	if len(lines) > 0 {
+		lines = append(lines, "") // a blank line of breathing room above the prompt
+	}
 	var b strings.Builder
-	footer := r.footerBlock()
-	for _, ln := range footer {
+	for _, ln := range lines {
 		b.WriteString(ln)
 		b.WriteByte('\n')
 	}
 	b.WriteString(r.note.Render("› "))
-	r.live = len(footer) + 1 // footer lines plus the prompt line (cursor inline)
+	r.live = len(lines) + 1 // bar + separator above the prompt line (cursor inline)
 	_, _ = io.WriteString(r.status, b.String())
 }
 
-// commitPrompt tears down the footer+prompt region and reprints the submitted
-// line as a permanent record, so the user's question survives in scrollback
-// while the footer does not. Called once per submitted task; the cursor is
-// below the region (the user just pressed enter), so a full above-the-cursor
-// erase is correct.
-func (r *liveRenderer) commitPrompt(text string) {
+// commitPrompt finalizes the bar+prompt block as the user submits. It does NOT
+// erase: the typed line is already echoed in place, and a long prompt may have
+// wrapped to several visual rows whose count the renderer can't know, so any
+// cursor-up math would desync (the bug that stranded stale bars and double-
+// printed prose). It just drops the block from the erasable count so the turn's
+// output appends cleanly below it.
+func (r *liveRenderer) commitPrompt(string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.erase()
 	r.suspended = false
-	_, _ = fmt.Fprintln(r.status, r.note.Render("› ")+text)
+	r.live = 0
 	r.atLineStart = true
 }
 
@@ -311,6 +334,7 @@ func (r *liveRenderer) finish(closing func()) {
 		_, _ = fmt.Fprintln(r.status)
 	}
 	r.turnOpen = false
+	r.pendingIcon = false
 	r.atLineStart = true
 	r.running = nil
 	r.counts = map[string]int{}
