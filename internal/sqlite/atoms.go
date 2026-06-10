@@ -86,13 +86,25 @@ func (s *Store) AddAtom(ctx context.Context, content string) error {
 	_, _ = rand.Read(b[:])
 	id := "mem-" + hex.EncodeToString(b[:])
 	now := time.Now().UnixNano()
-	if _, err := s.db.ExecContext(ctx,
+
+	// The atom row and its FTS index are one logical write — in a transaction
+	// so a failed FTS insert can't leave an atom unsearchable (the same
+	// atomicity CommitCuration uses for its per-atom writes).
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("add atom: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO atoms (id, content, updated_at) VALUES (?, ?, ?)`, id, content, now); err != nil {
 		return fmt.Errorf("add atom: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO atoms_fts (content, atom_id) VALUES (?, ?)`, content, id); err != nil {
 		return fmt.Errorf("add atom: fts: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("add atom: commit: %w", err)
 	}
 	return nil
 }

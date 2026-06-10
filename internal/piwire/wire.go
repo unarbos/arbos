@@ -117,18 +117,18 @@ func Assemble(cfg HostConfig) (*Host, error) {
 	}
 
 	// Long-term memory, when the durable store backs atoms (SQLite, not the
-	// in-memory fake) and a real LLM can curate. Set on piOpts — BEFORE
-	// pi.Register — so every session, including delegated children, gets recall
-	// (read) and the remember tool (write): atoms are one global set, "learn
-	// once, remember everywhere". Background curation is gated separately
-	// (CurateMemory, top only) so a subordinate child's transcript isn't
-	// distilled — its value returns up to the parent that curates.
+	// in-memory fake) and a real LLM can curate. It is the SELF's: recall,
+	// curation, and the remember tool are wired only on the top engine (which
+	// the scheduler's wakes reuse), not on delegated children — a child's
+	// recall can't anchor (its events live in an ephemeral store) and a child
+	// writing global atoms would be a memory-poisoning surface. Children pass
+	// findings up via results; the self decides what to remember. Created here
+	// (before pi.Register) only so it can be Closed on an early return.
 	var theMind *mind.Mind
 	if as, ok := cfg.Store.(mind.Store); ok && cfg.Config.HasLLM {
 		// The curator runs on the same distill model as the compaction
 		// summarizer: one tier for everything the agent does in the background.
 		theMind = mind.New(as, piOpts.Provider, piOpts.DistillerModel(), cfg.Logger)
-		piOpts.Mind = theMind
 	}
 
 	router := agent.NewRouter()
@@ -152,9 +152,9 @@ func Assemble(cfg HostConfig) (*Host, error) {
 	topOpts.NewStore = func() ports.SessionStore { return cfg.Store }
 	topOpts.Observer = cfg.Observer
 	topOpts.ExtraTools = delegation
-	// Curation is the self's job — the top engine (and the scheduler wakes that
-	// reuse it). Children recall and remember but do not curate.
-	topOpts.CurateMemory = theMind != nil
+	// Memory is the self's: recall, curation, and the remember tool wire on the
+	// top engine only (the scheduler's wakes reuse it). Children get none.
+	topOpts.Mind = theMind
 
 	eng, err := pi.NewEngine(topOpts)
 	if err != nil {

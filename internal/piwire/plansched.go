@@ -11,7 +11,6 @@ import (
 	"github.com/unarbos/arbos/internal/engine"
 	"github.com/unarbos/arbos/internal/outbox"
 	"github.com/unarbos/arbos/internal/plan"
-	"github.com/unarbos/arbos/internal/ports"
 	"github.com/unarbos/arbos/internal/tool/codingspec"
 )
 
@@ -59,7 +58,7 @@ func (h *Host) StartPlanScheduler() func() {
 		func(agent.Grant) (*engine.Engine, error) { return h.Engine, nil },
 		NewSessionID,
 	)
-	sched := plan.NewScheduler(ps, sysClock{}, selfWake(self, h.store), run, notify, h.logger)
+	sched := plan.NewScheduler(ps, sysClock{}, selfWake(self), run, notify, h.logger)
 	return sched.Close
 }
 
@@ -84,22 +83,14 @@ func cmdRunner(cwd string) plan.CmdRunner {
 // the prompt says which node's moment arrived, and the agent acts on the
 // forest its context already carries. emit is nil — a wake is the schedule
 // axis, depth 0, with no caller to relay to or return a result up; the work
-// lands in durable state. The spawned session is stamped OriginScheduler so
-// the front-door brief anchors "since you left" on human-driven sessions only.
-func selfWake(self agent.Agent, store ports.SessionStore) plan.WakeFunc {
+// lands in durable state. Task.Origin stamps the session OriginScheduler at
+// creation (not after), so the front-door brief anchors "since you left" on
+// human-driven sessions only, with no window or silent-failure path.
+func selfWake(self agent.Agent) plan.WakeFunc {
 	return func(ctx context.Context, w plan.WakeEvent) error {
 		ctx, cancel := context.WithTimeout(ctx, wakeTurnTimeout)
 		defer cancel()
-		res, err := self.Run(ctx, agent.Task{Instruction: wakePrompt(w)}, nil)
-		if res.ChildSession != "" {
-			// Detached stamp: the session's events are written; LastHumanSeen
-			// filters on the session row's origin, so stamping after the run
-			// (with a fresh context) still anchors the brief correctly.
-			if sess, gerr := store.Get(context.Background(), core.SessionID(res.ChildSession)); gerr == nil {
-				sess.Origin = core.OriginScheduler
-				_ = store.UpdateSession(context.Background(), sess)
-			}
-		}
+		_, err := self.Run(ctx, agent.Task{Instruction: wakePrompt(w), Origin: core.OriginScheduler}, nil)
 		return err
 	}
 }

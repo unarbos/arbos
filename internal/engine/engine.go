@@ -166,9 +166,12 @@ func Drive(ctx context.Context, conv *Conversation, emit func(core.Envelope)) (c
 		case core.TurnComplete:
 			return e, nil
 		case core.ErrorEvent:
-			if e.Retryable {
-				continue
-			}
+			// Any error ends the turn — the engine does not auto-retry, so a
+			// retryable error is not followed by more events; waiting for one
+			// would hang the drive until ctx cancels. Retryable is a hint for
+			// an interactive frontend that can re-prompt; a spawned session
+			// (delegation, wake) has no one to re-prompt it, so a failed run
+			// returns its error to the caller.
 			return core.TurnComplete{}, fmt.Errorf("session %s error (%s): %s", conv.id, e.Category, e.Err)
 		case core.Interrupted:
 			return core.TurnComplete{}, context.Canceled
@@ -222,10 +225,23 @@ func (c *Conversation) emitEnvelope(ctx context.Context, env core.Envelope) bool
 	}
 }
 
+// SessionOption customizes a session at creation. Options apply only when the
+// session is newly created (not on adoption/resume), since they set intrinsic
+// creation-time metadata.
+type SessionOption func(*core.Session)
+
+// WithOrigin records what initiated a session (e.g. core.OriginScheduler), set
+// atomically at creation so the row is never briefly mis-attributed and a
+// later best-effort write can't silently leave it wrong.
+func WithOrigin(origin string) SessionOption {
+	return func(s *core.Session) { s.Origin = origin }
+}
+
 // StartSession creates (or, for a known id, adopts) a session and launches its
 // actor goroutine, which runs until ctx is cancelled. The returned
-// Conversation's Events channel is closed when the actor exits.
-func (e *Engine) StartSession(ctx context.Context, id core.SessionID) (*Conversation, error) {
+// Conversation's Events channel is closed when the actor exits. SessionOptions
+// apply only to a freshly created session.
+func (e *Engine) StartSession(ctx context.Context, id core.SessionID, opts ...SessionOption) (*Conversation, error) {
 	sess, err := e.store.Get(ctx, id)
 	if err != nil {
 		if !errors.Is(err, ports.ErrSessionNotFound) {
@@ -238,6 +254,9 @@ func (e *Engine) StartSession(ctx context.Context, id core.SessionID) (*Conversa
 			Model:     e.cfg.Model,
 			CreatedAt: now,
 			UpdatedAt: now,
+		}
+		for _, opt := range opts {
+			opt(&sess)
 		}
 		if err := e.store.CreateSession(ctx, sess); err != nil {
 			return nil, err

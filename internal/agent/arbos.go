@@ -47,7 +47,11 @@ func (a *ArbosAgent) Run(ctx context.Context, t Task, emit func(core.Envelope)) 
 	id := a.newID()
 	res := Result{ChildSession: string(id)}
 
-	conv, err := eng.StartSession(ctx, id)
+	var startOpts []engine.SessionOption
+	if t.Origin != "" {
+		startOpts = append(startOpts, engine.WithOrigin(t.Origin))
+	}
+	conv, err := eng.StartSession(ctx, id, startOpts...)
 	if err != nil {
 		return res, fmt.Errorf("delegate: start child session: %w", err)
 	}

@@ -31,6 +31,10 @@ type Task struct {
 	Instruction string     // the prompt / goal
 	Backend     BackendRef // which agent runtime should run it
 	Grant       Grant      // what the child may use
+	// Origin records what initiated the spawned session (e.g.
+	// core.OriginScheduler for a clock wake), set on the session row at
+	// creation. Empty leaves the default.
+	Origin string
 }
 
 // BackendRef names a backend (e.g. "pi").
