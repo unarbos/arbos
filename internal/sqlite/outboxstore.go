@@ -59,6 +59,10 @@ func (s *Store) ClaimOutbox(ctx context.Context, via string) ([]outbox.Message, 
 		m.CreatedAt = time.Unix(0, created).UTC()
 		msgs = append(msgs, m)
 	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("claim outbox: rows: %w", err)
+	}
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("claim outbox: %w", err)
 	}

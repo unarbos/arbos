@@ -18,7 +18,7 @@ satisfy and proven by the shared `porttest` contracts.
 | Parallel read-only tool dispatch | `internal/engine` | done |
 | Reference LLM provider (OpenAI-compatible HTTP/SSE, tool-call reassembly) | `internal/provider/openai` | done |
 | Secret broker (host-bound credential injection) | `internal/secret` | done |
-| Tool runtime + build-time schema codegen + sandboxed built-ins | `internal/tool*`, `cmd/gen-tool-schemas` | done |
+| Tool runtime + build-time schema codegen + built-in coding tools | `internal/tool*`, `cmd/gen-tool-schemas` | done |
 | Suspend-and-await (approval) | `internal/engine` | done |
 | In-place context compression + token-budget policy | `internal/engine`, `internal/compaction` | done |
 | Memory provider (retrieve → log → render fenced → observe) | `internal/memory` | done |

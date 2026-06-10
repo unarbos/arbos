@@ -142,6 +142,17 @@ func (c *Conversation) ID() core.SessionID           { return c.id }
 func (c *Conversation) Send(i core.Intent)           { c.intents <- i }
 func (c *Conversation) Events() <-chan core.Envelope { return c.events }
 
+// SendCtx is Send that gives up when ctx is cancelled instead of blocking
+// forever on a stalled actor. Reports whether the intent was delivered.
+func (c *Conversation) SendCtx(ctx context.Context, i core.Intent) bool {
+	select {
+	case c.intents <- i:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // Drive runs a started conversation to its own terminal event, forwarding
 // every envelope to emit (nil to ignore) so a caller can relay nested
 // activity. It is the one place the "send a prompt, drain to completion"
@@ -308,6 +319,9 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 			case core.PromptIntent:
 				turnSeq++
 				queue = append(queue, e.processPrompt(parent, c, it.Text, turnSeq)...)
+			case core.SteerIntent:
+				turnSeq++
+				queue = append(queue, e.processPrompt(parent, c, it.Text, turnSeq)...)
 			case core.InterruptIntent:
 				// Idle: there is no in-flight turn to cancel.
 			case core.ResumeIntent:
@@ -430,6 +444,16 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 				e.persistBestEffort(cctx, c, core.NewInterruptEvent(c.id, "user interrupt", e.clock.Now()))
 				c.emit(parent, core.Interrupted{})
 				return queued
+			case core.SteerIntent:
+				cancel()
+				<-done
+				// H1: if the turn finished on its own, honor the completion and
+				// still run the steer text as the next turn (user intent).
+				if completedNormally {
+					return append(queued, core.PromptIntent{Text: it.Text})
+				}
+				// Silent cut: discard intra-turn queued prompts, no Interrupted.
+				return []core.PromptIntent{{Text: it.Text}}
 			case core.PromptIntent:
 				// Don't drop it: queue it and tell the user it was kept.
 				c.emit(parent, core.Queued(it))
@@ -552,6 +576,12 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string) 
 		}
 		chunks, err := e.provider.Stream(ctx, req)
 		if err != nil {
+			// A cancelled turn (interrupt/steer) aborts the in-flight request;
+			// the transport surfaces that as an error, but it is not a provider
+			// failure — report "cancelled", not a phantom ErrorEvent.
+			if ctx.Err() != nil {
+				return false
+			}
 			// Provider/transport failures are often transient (rate limit,
 			// timeout); flag retryable so a frontend can offer "try again".
 			c.emit(ctx, core.ErrorEvent{Category: core.ErrProvider, Retryable: true, Err: err.Error()})

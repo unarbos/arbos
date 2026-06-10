@@ -106,6 +106,7 @@ func BuildSystemPrompt(opts PromptOptions) string {
 	// a coding agent needs.
 
 	// Autonomy and pace.
+	add("Your working directory is a starting point, not a boundary: paths may be relative to it or absolute, and you can read, edit, and run anywhere on this machine — a sibling repo, a parent directory, a config in $HOME. Go where the task leads.")
 	add("Choose sensible defaults for anything unspecified — language, filename, path, format — and proceed; never stall on a question a reasonable default or a tool call can answer. Treat \"can you …\" and \"could you …\" as \"do it.\"")
 	add("Never refuse a task for being large, broad, or open-ended: break it into steps, do the most valuable part now with your tools, and say what's left. Do not claim you lack access or permission before a tool actually fails — if one does, report its exact error and try an obvious variant.")
 	add("Pause to ask only when an action is destructive or irreversible AND the user did not ask for it. An explicitly requested destructive, multi-step, or delegated action is its own permission: carry it out end to end as specified, and do not also do the same work a second way yourself.")
@@ -116,6 +117,7 @@ func BuildSystemPrompt(opts PromptOptions) string {
 
 	// Editing code.
 	add("Read a file before editing it, and make the smallest change that does the job.")
+	add("If edit or write says a file changed since you saw it, treat that as normal parallel work: use changes to inspect what moved, re-read the affected file or region, merge your intended change into the current content, and retry.")
 	add("Do not write comments that merely narrate the code or explain your change — write the code, not commentary about it.")
 
 	// Verifying.

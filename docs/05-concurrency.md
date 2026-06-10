@@ -71,8 +71,18 @@ session's single-writer invariant holds.
 
 `delegate_task`-style subagents are just **child sessions**: a tool spawns a new
 session actor via the engine and relays its `KernelEvent`s. Because each session
-is independently owned, nesting is free — no shared state crosses the boundary,
-and a parent interrupt cancels the child via context propagation.
+is independently owned, nesting is free — no shared *session* state crosses the
+boundary, and a parent interrupt cancels the child via context propagation.
+Sibling delegations fan out concurrently regardless of whether they read or
+write; the one thing they do share is the live filesystem. Two guards keep that
+survivable without serializing: the read-ledger staleness check (write/edit
+refuse to clobber a file that changed since the agent last saw it this turn) and
+an automatic per-turn restore point (before a file mutation, the coding toolset
+snapshots the git repo that owns that target path, so `undo path=...` can roll
+that repo back). When a stale apply happens, the model uses `changes`, re-reads,
+and retries against the live content — the local Cursor workflow. True isolation
+— a worktree per writer — stays the opt-in for when collisions must be
+impossible rather than recoverable. See [08-agent-delegation](./08-agent-delegation.md).
 
 ## The one shared resource: SessionStore
 

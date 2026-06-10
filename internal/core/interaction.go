@@ -37,6 +37,8 @@ func DecodeIntent(b []byte) (Intent, error) {
 	switch IntentKind(f.Kind) {
 	case IntentPrompt:
 		return unmarshalInto[PromptIntent](f)
+	case IntentSteer:
+		return unmarshalInto[SteerIntent](f)
 	case IntentInterrupt:
 		return unmarshalInto[InterruptIntent](f)
 	case IntentResume:

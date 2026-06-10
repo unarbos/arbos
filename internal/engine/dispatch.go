@@ -252,9 +252,18 @@ func (e *Engine) dispatchScheduled(ctx context.Context, c *Conversation, calls [
 		var wg sync.WaitGroup
 		for _, idx := range wave {
 			wg.Add(1)
-			sem <- struct{}{}
 			go func(i int) {
 				defer wg.Done()
+				// Ctx-aware acquire: an interrupt mustn't wait behind every
+				// in-flight tool just to learn the wave was cancelled. A call
+				// skipped here still gets a result (the wave invariant), the
+				// same synthetic one backfill writes for undispatched calls.
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					results[i] = core.ToolResult{CallID: calls[i].ID, IsError: true, Content: "interrupted before tool execution"}
+					return
+				}
 				defer func() { <-sem }()
 				defer func() {
 					if r := recover(); r != nil {

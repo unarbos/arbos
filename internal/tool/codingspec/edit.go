@@ -13,7 +13,7 @@ import (
 
 // EditArgs are the arguments to edit.
 type EditArgs struct {
-	Path  string `json:"path" desc:"Path to the file to edit, relative to the workspace root."`
+	Path  string `json:"path" desc:"Path to the file to edit — relative to the working directory, or absolute (any path on the machine)."`
 	Edits []Edit `json:"edits" desc:"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead."`
 }
 
@@ -45,7 +45,7 @@ const editSnippetMaxLines = 60
 //   - Verification loop: success returns the updated regions with their NEW
 //     line numbers, and records them in the ledger, so the model can confirm
 //     placement and keep editing without a re-read.
-func editSpec(root string, ledger *readLedger) tool.Spec {
+func editSpec(root string, ledger *readLedger, cp *checkpointer) tool.Spec {
 	spec := tool.NewRichSpec("edit",
 		"Edit a single file using targeted text replacement. Matching tries exact text first, then tolerates indentation shifts and unicode punctuation differences over whole lines. Each edits[].oldText must match exactly one region of the original file unless its replaceAll is set. Matched regions must not overlap; if two changes affect the same block or nearby lines, merge them into one edit. Do not include large unchanged regions just to connect distant changes.",
 		false,
@@ -57,14 +57,17 @@ func editSpec(root string, ledger *readLedger) tool.Spec {
 			if err != nil {
 				return tool.Result{}, err
 			}
+			key := tool.ResourceKey(abs)
+			unlock := lockMutation(key)
+			defer unlock()
 			raw, err := os.ReadFile(abs)
 			if err != nil {
 				return tool.Result{}, fmt.Errorf("Could not edit file: %s. %s.", a.Path, err)
 			}
 
 			turn := turnFromContext(ctx)
-			if prev, ok := ledger.peekVersion(turn, abs); ok && prev != fileVersion(raw) {
-				return tool.Result{}, fmt.Errorf("%s changed on disk since you last read it this turn, so the content you were shown is stale. Re-read the file and retry the edit.", a.Path)
+			if prev, ok := ledger.peekVersion(turn, key); ok && prev != fileVersion(raw) {
+				return tool.Result{}, fmt.Errorf("%s changed on disk since you last read it this turn, so the content you were shown is stale. Use changes to inspect what moved, re-read the affected region, merge your intended edit into the new content, and retry.", a.Path)
 			}
 
 			bom, content := stripBom(string(raw))
@@ -76,6 +79,7 @@ func editSpec(root string, ledger *readLedger) tool.Spec {
 			}
 
 			final := bom + restoreLineEndings(newContent, ending)
+			undoCovered := cp.ensurePath(ctx, abs)
 			if err := os.WriteFile(abs, []byte(final), 0o644); err != nil {
 				return tool.Result{}, fmt.Errorf("Could not edit file: %s. %s.", a.Path, err)
 			}
@@ -83,9 +87,9 @@ func editSpec(root string, ledger *readLedger) tool.Spec {
 			ranges := changedLineRanges(normalized, applied)
 			snippet, shown := renderUpdatedRegions(newContent, ranges)
 			version := fileVersion([]byte(final))
-			ledger.noteVersion(turn, abs, version)
+			ledger.noteVersion(turn, key, version)
 			for _, r := range shown {
-				ledger.reconcile(turn, abs, version, r.start, r.end)
+				ledger.reconcile(turn, key, version, r.start, r.end)
 			}
 
 			first := 0
@@ -100,6 +104,9 @@ func editSpec(root string, ledger *readLedger) tool.Spec {
 			msg := fmt.Sprintf("Successfully replaced %d block(s) in %s.", len(applied), a.Path)
 			if snippet != "" {
 				msg += "\n\nUpdated regions (new line numbers):\n" + snippet
+			}
+			if !undoCovered {
+				msg += "\n\nNote: this path is not inside a git repository, so no restore point was recorded for undo."
 			}
 			return tool.Result{Content: msg, Details: details}, nil
 		})

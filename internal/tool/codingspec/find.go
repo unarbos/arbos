@@ -14,7 +14,7 @@ import (
 // FindArgs are the arguments to find.
 type FindArgs struct {
 	Pattern string `json:"pattern" desc:"Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'."`
-	Path    string `json:"path,omitempty" desc:"Directory to search in, relative to the workspace root (default: root)."`
+	Path    string `json:"path,omitempty" desc:"Directory to search in — relative to the working directory, or absolute (default: the working directory)."`
 	Limit   int    `json:"limit,omitempty" desc:"Maximum number of results (default: 1000)."`
 }
 

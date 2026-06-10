@@ -17,7 +17,7 @@ import (
 // GrepArgs are the arguments to grep.
 type GrepArgs struct {
 	Pattern    string `json:"pattern" desc:"Search pattern (regex or literal string)."`
-	Path       string `json:"path,omitempty" desc:"Directory or file to search, relative to the workspace root (default: root)."`
+	Path       string `json:"path,omitempty" desc:"Directory or file to search — relative to the working directory, or absolute (default: the working directory)."`
 	Glob       string `json:"glob,omitempty" desc:"Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'."`
 	IgnoreCase bool   `json:"ignoreCase,omitempty" desc:"Case-insensitive search (default: false)."`
 	Literal    bool   `json:"literal,omitempty" desc:"Treat pattern as a literal string instead of a regex (default: false)."`

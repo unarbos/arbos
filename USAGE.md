@@ -113,6 +113,8 @@ by name — you describe the goal — but knowing them shapes good prompts:
 | `edit` | exact + fuzzy match edits, line-numbered diffs | mutating |
 | `bash` | run a shell command | mutating |
 | `fetch` | HTTP GET/POST (truncated at 256KB) | read-only |
+| `changes` | show git status and changes since this session's restore point | read-only; optional path selects owning repo |
+| `undo` | restore the owning git repo to this session's restore point | mutating; optional path selects owning repo |
 
 Install the two external helpers so `find`/`grep` work:
 
@@ -209,13 +211,14 @@ export ARBOS_DISTILL_MODEL=anthropic/claude-haiku   # compaction + memory
 
 ## Level 12 — Delegation and fan-out
 
-The `delegate` tool spawns a sub-agent — optionally scoped to a different
-directory — and streams its tool activity live into the parent view.
-Read-only delegations run in **parallel**, so you can fan a task out across
-many targets.
+The `delegate` tool spawns a sub-agent — optionally rooted at a different
+directory, anywhere on the machine — and streams its tool activity live into
+the parent view. Delegations run in **parallel**, readers and writers alike,
+so you can fan a task out across many targets at once (parallel writers share
+the live tree; git is the net).
 
 ```bash
-arbos "delegate a read-only audit of each package under internal/ in parallel,
+arbos "delegate an audit of each package under internal/ in parallel,
 then summarize the findings"
 ```
 

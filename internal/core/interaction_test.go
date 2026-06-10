@@ -9,6 +9,7 @@ import (
 func TestIntentCodecRoundTrip(t *testing.T) {
 	cases := []core.Intent{
 		core.PromptIntent{Text: "hi"},
+		core.SteerIntent{Text: "correction"},
 		core.InterruptIntent{},
 		core.ResumeIntent{SessionID: "s1"},
 		core.ApprovalResponseIntent{RequestID: "r1", Approved: true, Reason: "ok"},

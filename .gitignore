@@ -15,3 +15,7 @@
 # Editor
 .idea/
 .vscode/
+
+# Web UI build deps (dist/ is committed: go:embed needs it)
+web/node_modules/
+web/tsconfig.tsbuildinfo

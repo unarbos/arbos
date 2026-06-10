@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------ */
+/* arbos web — the TUI, in a browser tab. One column, mono type, the   */
+/* sage palette from internal/theme/theme.go. No chrome beyond a       */
+/* status line and the prompt.                                         */
+/* ------------------------------------------------------------------ */
+
+@theme {
+  --color-canvas: #0d120f; /* page background */
+  --color-text: #e6e6e6; /* high-contrast foreground */
+  --color-primary: #7b9669; /* signature sage: "arbos did this" */
+  --color-accent: #bac8b1; /* pale sage: the user's side, live activity */
+  --color-muted: #6c8480; /* recede: status, tool tallies */
+  --color-deep: #404e3b; /* structure and trouble */
+  --color-danger: #c4756a;
+  --color-warn: #c9a86a;
+
+  --font-mono:
+    ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo,
+    Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-deep) transparent;
+}
+*::-webkit-scrollbar {
+  width: 6px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-deep);
+  border-radius: 3px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}

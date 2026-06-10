@@ -35,11 +35,14 @@ type BashArgs struct {
 // window the tool behaves exactly like pi's synchronous bash (verbatim status
 // strings, tail truncation); past it the command keeps running and the model
 // gets a job id for await/jobs. Not read-only. Unix process-group semantics.
-func bashSpec(root string, jobs *jobSupervisor) tool.Spec {
+func bashSpec(root string, jobs *jobSupervisor, cp *checkpointer) tool.Spec {
 	return tool.NewSpec("bash",
 		fmt.Sprintf("Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last %d lines or %dKB (whichever is hit first); the full output is always kept in a log file. A command still running after `wait` seconds (default %d) continues as a background job — check it with await or jobs. Use background:true for dev servers and other long-lived processes.", DefaultMaxLines, DefaultMaxBytes/1024, DefaultBashWaitSec),
 		false,
 		func(ctx context.Context, a BashArgs) (string, error) {
+			// A shell command can mutate the tree arbitrarily, so create a
+			// restore point before it runs — undo then covers bash-driven changes.
+			cp.ensure(ctx)
 			job, done, killIfRunning, err := jobs.spawn(a.Command)
 			if err != nil {
 				return "", err

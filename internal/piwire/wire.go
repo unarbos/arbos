@@ -26,7 +26,6 @@ import (
 	"github.com/unarbos/arbos/internal/ports"
 	"github.com/unarbos/arbos/internal/sqlite"
 	"github.com/unarbos/arbos/internal/tool"
-	"github.com/unarbos/arbos/internal/tool/codingspec"
 )
 
 // HostConfig wires a pi session host. Config carries the resolved environment
@@ -172,20 +171,6 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		mcpMgr.Close()
 	}
 	return &Host{Engine: eng, Cleanup: cleanup, store: cfg.Store, logger: cfg.Logger, approve: cfg.Approve}, nil
-}
-
-// codingReadOnlyTools is the set of coding tool names that do not mutate the
-// workspace, sourced from the specs themselves so it cannot drift from their
-// ReadOnly flags. A delegation confined to these is safe to fan out in parallel
-// (see RegisterDelegate).
-func codingReadOnlyTools() map[string]bool {
-	out := map[string]bool{}
-	for _, s := range codingspec.Specs("") {
-		if s.ReadOnly {
-			out[s.Name] = true
-		}
-	}
-	return out
 }
 
 type sysClock struct{}

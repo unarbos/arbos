@@ -101,22 +101,14 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 		turnMu        sync.Mutex
 	)
 
-	teardown := func() {
-		if sessionCancel != nil {
-			sessionCancel()
-			pump.Wait()
-			liveSessions.release(boundID)
-			sessionCancel = nil
-			conv = nil
-			boundID = ""
-		}
-	}
-	defer pump.Wait()
-	defer cancel()
-	defer teardown()
-
 	signalTurnStart := func() {
 		turnMu.Lock()
+		if turnDone != nil {
+			// A new turn started before the previous one's terminal event
+			// arrived; release any waiter on the old channel so it can't
+			// block on a turn that will never signal again.
+			close(turnDone)
+		}
 		turnDone = make(chan struct{})
 		turnMu.Unlock()
 	}
@@ -129,6 +121,23 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 		}
 		turnMu.Unlock()
 	}
+
+	teardown := func() {
+		if sessionCancel != nil {
+			sessionCancel()
+			pump.Wait()
+			liveSessions.release(boundID)
+			sessionCancel = nil
+			conv = nil
+			boundID = ""
+			// The pump exited without a terminal event (the session was
+			// cancelled mid-turn); release any drain waiting on it.
+			signalTurnEnd()
+		}
+	}
+	defer pump.Wait()
+	defer cancel()
+	defer teardown()
 
 	bind := func(id core.SessionID) error {
 		teardown()
@@ -148,13 +157,17 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 		pump.Add(1)
 		go func(c *engine.Conversation) {
 			defer pump.Done()
+			dead := false // client write side gone; keep draining, stop writing
 			for env := range c.Events() {
-				b, err := core.EncodeEnvelope(env)
-				if err != nil {
-					_ = enc.write(serverFrame{Type: "error", Error: "encode envelope: " + err.Error()})
-					continue
+				if !dead {
+					b, err := core.EncodeEnvelope(env)
+					if err != nil {
+						_ = enc.write(serverFrame{Type: "error", Error: "encode envelope: " + err.Error()})
+					} else if enc.write(serverFrame{Type: "event", Envelope: b}) != nil {
+						dead = true
+						cancel() // no client left to receive; tear the connection down
+					}
 				}
-				_ = enc.write(serverFrame{Type: "event", Envelope: b})
 				switch env.Event.(type) {
 				case core.TurnComplete, core.ErrorEvent, core.Interrupted:
 					signalTurnEnd()
@@ -214,11 +227,11 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 				_ = enc.write(serverFrame{Type: "error", Error: "fork: " + err.Error()})
 				return
 			}
-			_ = enc.write(serverFrame{Type: "forked", SessionID: newID})
 			if err := bind(newID); err != nil {
 				_ = enc.write(serverFrame{Type: "error", Error: "fork: bind: " + err.Error()})
 				return
 			}
+			_ = enc.write(serverFrame{Type: "forked", SessionID: newID})
 			_ = enc.write(serverFrame{Type: "switched", SessionID: newID})
 
 		case "set_model":
@@ -256,10 +269,19 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 			if _, isPrompt := intent.(core.PromptIntent); isPrompt {
 				signalTurnStart()
 			}
-			if _, isInterrupt := intent.(core.InterruptIntent); isInterrupt {
-				conv.Send(intent)
-			} else if !conv.TrySend(intent) {
-				_ = enc.write(serverFrame{Type: "error", Error: "busy: intent buffer full, retry"})
+			if _, isSteer := intent.(core.SteerIntent); isSteer {
+				signalTurnStart()
+			}
+			switch intent.(type) {
+			case core.InterruptIntent, core.SteerIntent:
+				// Context-aware: if the actor's intent buffer is stuck (pump
+				// stalled), a teardown still unblocks the request loop rather
+				// than wedging every subsequent frame behind this send.
+				conv.SendCtx(sctx, intent)
+			default:
+				if !conv.TrySend(intent) {
+					_ = enc.write(serverFrame{Type: "error", Error: "busy: intent buffer full, retry"})
+				}
 			}
 
 		default:

@@ -97,7 +97,7 @@ func (o Options) DistillerModel() string {
 }
 
 // buildForRoot assembles the coding config and tool registry rooted at a
-// specific workspace directory. The tool sandbox, the prompt's cwd, and the
+// specific working directory. The tools' path base, the prompt's cwd, and the
 // auto-loaded context files/skills all derive from root, so a delegated child
 // granted a different repo (Grant.Env.Path) genuinely operates there.
 func (o Options) buildForRoot(root string) (engine.Config, ports.ToolRuntime, error) {
@@ -244,7 +244,7 @@ func NewAgent(o Options, newID func() core.SessionID) (*agent.ArbosAgent, error)
 	}
 	factory := func(g agent.Grant) (*engine.Engine, error) {
 		// Honor Grant.Env.Path: a child granted a repo runs rooted there (its own
-		// sandbox, prompt cwd, context files), not in the parent's cwd. Empty
+		// path base, prompt cwd, context files), not in the parent's cwd. Empty
 		// falls back to the build-time cwd.
 		root := o.Cwd
 		if g.Env.Path != "" {
@@ -274,16 +274,19 @@ func NewAgent(o Options, newID func() core.SessionID) (*agent.ArbosAgent, error)
 		}
 		childReg = tool.Filter(childReg, g.Tools)
 		// Options are per-root: a child granted a different repo gets that
-		// repo's background-job table injected, matching its tool sandbox.
+		// repo's background-job table injected, matching where its tools run.
 		return engine.New(o.Provider, childReg, o.NewStore(), o.Clock, childCfg, o.engineOptions(root)...), nil
 	}
 	return agent.NewArbosAgent(factory, newID), nil
 }
 
-// validateGrantRoot resolves a delegated repo path through the same workspace
-// guard the file tools use (tool.Resolve: lexical + symlink escapes), confirms
-// it exists, and refuses paths outside the host workspace so a child cannot
-// operate on /etc, $HOME/.ssh, or any other directory the parent did not grant.
+// validateGrantRoot resolves a delegated repo path against the host cwd (the
+// same tool.Resolve the file tools use: relative joins to the host root, an
+// absolute path is taken as given) and confirms it is an existing directory. It
+// does not confine the child to the host tree — a child may be granted any repo
+// on the machine, matching arbos's unrestricted default (see tool.Resolve). The
+// existence check stays so a typo'd or missing grant fails loudly at build time
+// rather than running the child in the wrong place.
 func validateGrantRoot(hostRoot, path string) (string, error) {
 	abs, err := tool.Resolve(hostRoot, path)
 	if err != nil {

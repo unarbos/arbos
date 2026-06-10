@@ -17,7 +17,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -185,16 +184,41 @@ CREATE INDEX IF NOT EXISTS idx_outbox_undelivered ON outbox(delivered_at) WHERE 
 	}
 	// Forward-only column additions (ADR-0005): CREATE TABLE IF NOT EXISTS
 	// does not retrofit columns onto pre-existing databases, so each later
-	// column also appends an ALTER, tolerated when the column already exists
-	// (fresh databases get it from the CREATE above).
-	alters := []string{
-		`ALTER TABLE plan_nodes ADD COLUMN cmd TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE plan_nodes ADD COLUMN wake INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE plan_nodes ADD COLUMN notify TEXT NOT NULL DEFAULT ''`,
+	// column also appends an ALTER, skipped when the column already exists
+	// (fresh databases get it from the CREATE above). Existence is probed via
+	// table_info rather than by matching the driver's "duplicate column"
+	// error text, which is wording we don't control.
+	cols := make(map[string]bool)
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM pragma_table_info('plan_nodes')`)
+	if err != nil {
+		return fmt.Errorf("migrate: table_info: %w", err)
 	}
-	for _, stmt := range alters {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
-			return fmt.Errorf("migrate: %s: %w", stmt, err)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("migrate: table_info: %w", err)
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("migrate: table_info: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("migrate: table_info: %w", err)
+	}
+	alters := []struct{ col, stmt string }{
+		{"cmd", `ALTER TABLE plan_nodes ADD COLUMN cmd TEXT NOT NULL DEFAULT ''`},
+		{"wake", `ALTER TABLE plan_nodes ADD COLUMN wake INTEGER NOT NULL DEFAULT 0`},
+		{"notify", `ALTER TABLE plan_nodes ADD COLUMN notify TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, a := range alters {
+		if cols[a.col] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, a.stmt); err != nil {
+			return fmt.Errorf("migrate: %s: %w", a.stmt, err)
 		}
 	}
 	return nil

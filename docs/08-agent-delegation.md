@@ -94,10 +94,13 @@ delegate(instruction, backend?, tools?, cwd?) ─▶ Task{Instruction, Backend, 
 
 - `backend` selects the runtime; omitted, it defaults to the primary (`pi`), so
   a bare `delegate` is "kick off a coding session."
-- `tools` is the child's allowlist; a read-only allowlist lets siblings run in
-  parallel (see Concurrency below).
-- `cwd` roots the child's workspace (`Grant.Env.Path`); omitted, it inherits the
-  parent's cwd.
+- `tools` is the child's allowlist; omitted, the child gets the full toolset.
+- `cwd` roots the child's workspace (`Grant.Env.Path`) — any path on the machine,
+  not just under the parent's tree; omitted, it inherits the parent's cwd.
+
+All delegations fan out: siblings advertise an empty footprint and run
+concurrently whether they read or write (see Concurrency below). This is the
+"explore or edit a repo with N sub-agents at once" path.
 
 One tool, one dispatch path, no duplication. A turn that calls `delegate`
 instantiates the child Agent, runs it, and relays its `KernelEvent`s upward.
@@ -119,14 +122,34 @@ One concept, two transports:
   cwd/container** so it shares the environment. The runtime keeps its own native
   tools *and* gains ours.
 
-### Environment isolation (decided)
+### Environment isolation (opt-in, not default)
 
-Delegated environments are **copy-on-write / git-worktree isolated by default**.
-Parallel coding sessions get their own worktree over the same repo; results
-(diffs/artifacts) come back in the `Result` and are merged explicitly. Sharing
-the live directory is an explicit opt-in flag on the `Grant`. This removes the
-shared-mutable-filesystem race (the foundational concurrency corollary applied
-to delegation) without forcing every delegation to pay for a full copy.
+Delegated children **share the live directory by default**. arbos assumes a human
+is watching and git is the net, so parallel coding sub-agents edit the same tree
+at once — the way Cursor runs parallel agents — and you reconcile with version
+control. There is no filesystem sandbox in the default path (see the file tools'
+`tool.Resolve`: it resolves paths, it does not confine them).
+
+The net is not bare git, though. Three mechanisms make shared-tree work survivable:
+the read-ledger staleness guard (a write/edit is refused if the file changed
+since the agent read it this turn, so one actor cannot silently clobber
+another), the `changes` tool (status plus diff since this session's restore
+point, so the agent can inspect/re-read/retry when it collides), and automatic
+per-turn restore points — before a file mutation the coding toolset snapshots
+the git repo that owns that target path to a per-session ref
+(`refs/arbos/checkpoints/<session>`, reflog as history), which `undo path=...`
+restores. If a target is outside any git repo, the edit still proceeds but the
+tool says it is not undo-covered. `undo` is a repo restore, not a surgical
+per-agent rollback. Recoverability and rebase/retry, not confinement, are how
+arbos stays both free and safe.
+
+**Isolation is something you add when a real case demands it.** If parallel
+writers that cannot race are ever needed — untrusted backends, unattended fleets
+where a collision can't be eyeballed — that is a `Grant` flag giving each child
+its own git worktree, built then, against that spec. Likewise true confinement
+of an untrusted child is OS-level isolation (a container, a dedicated user), not
+a path check inside the tools. Neither exists today because nothing needs them
+yet: freedom is the baseline, safety is the addition.
 
 ## Self-provisioning backends (the differentiator)
 
@@ -157,12 +180,14 @@ wire. The seam we build for frontends *is* the seam for remote agent pass-off.
 ## Concurrency & budget
 
 - Each delegated agent is a child **session actor**; events stream up, no shared
-  mutable state crosses the boundary except an explicitly-shared Environment.
+  mutable state crosses the boundary except the filesystem, which is shared live
+  by default.
 - `Grant.Budget` bounds the **whole subtree** (iterations/tokens/time), so a
   runaway delegation can't exceed the parent's allowance.
 - A parent interrupt cancels the child via `context.Context` propagation.
-- The only shared mutable resource is a shared (opt-in) Environment, which is why
-  the default is COW isolation.
+- Sibling delegations run concurrently (empty footprint). The filesystem race
+  that creates is accepted by default (human-monitored, git-backed) and removed
+  only when you opt into COW/worktree isolation.
 
 ## Relationship to ports and phases
 

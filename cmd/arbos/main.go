@@ -35,6 +35,7 @@ import (
 	"github.com/unarbos/arbos/internal/obs"
 	"github.com/unarbos/arbos/internal/outbox"
 	"github.com/unarbos/arbos/internal/piwire"
+	"github.com/unarbos/arbos/internal/plan"
 	"github.com/unarbos/arbos/internal/sqlite"
 )
 
@@ -43,6 +44,8 @@ func main() {
 
 	var (
 		serve   = flag.Bool("serve", false, "serve the control seam over stdio (JSON lines)")
+		web     = flag.String("web", "", "serve the web gateway at this address (e.g. :8420)")
+		webDist = flag.String("web-dist", "", "directory of the built web UI to serve (optional; API-only when empty)")
 		dbPath  = flag.String("db", piwire.DefaultDBPath(), "SQLite session store path")
 		query   = flag.String("q", "", "one-shot query (non-interactive)")
 		prompt  = flag.String("prompt", "", "one-shot query (alias for -q)")
@@ -67,6 +70,13 @@ func main() {
 	}
 
 	cfg := piwire.LoadConfig()
+	if *web != "" {
+		if err := runWeb(cfg, *dbPath, *web, *webDist, *approve); err != nil {
+			fmt.Fprintln(os.Stderr, "arbos:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(cfg, *serve, *dbPath, task, *session, *approve, *once); err != nil {
 		fmt.Fprintln(os.Stderr, "arbos:", err)
 		os.Exit(1)
@@ -190,25 +200,40 @@ func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, task,
 	if err != nil {
 		return err
 	}
+	// Keep the session open for follow-ups when a human is on the other end;
+	// -once or piped stdio means a single turn.
+	followUps := !once && term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stderr.Fd())
 	var r uiRenderer = newRenderer(os.Stdout, os.Stderr)
-	if term.IsTerminal(os.Stderr.Fd()) {
+	var tui *tuiRenderer
+	if followUps {
 		width, _, err := term.GetSize(os.Stderr.Fd())
 		if err != nil {
 			width = 80
 		}
-		r = newLiveRenderer(os.Stdout, os.Stderr, width)
+		tui = newTUIRenderer(os.Stderr, width)
+		r = tui
 	}
 	defer r.close()
-	// Keep the session open for follow-ups when a human is on the other end;
-	// -once or piped stdio means a single turn.
-	followUps := !once && term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stderr.Fd())
 
-	cwd, _ := os.Getwd()
-	// refresh recomputes the pinned footer (the plan/schedule glance) from
-	// cheap store and on-disk reads. Called at quiet moments — session start,
-	// turn boundaries, before each prompt — so the strip stays current without
-	// a model call and without disturbing a turn in flight.
-	refresh := func() { r.setFooter(footerLines(ctx, store, cwd)) }
+	knownStanding := map[plan.NodeID]bool{}
+	// announceStanding prints standing obligations once at session start, and
+	// again only when a new recurring node appears mid-session. Spacing is the
+	// renderer's job — a raw stderr write here would desync the TUI's block
+	// accounting and orphan the prompt line.
+	announceStanding := func(onlyNew bool) {
+		if store == nil {
+			return
+		}
+		open, err := store.OpenPlanNodes(ctx)
+		if err != nil {
+			return
+		}
+		lines := collectStandingLines(open, time.Now(), knownStanding, onlyNew)
+		if len(lines) == 0 {
+			return
+		}
+		r.printStanding(lines)
+	}
 
 	// deliver drains the outbox through this terminal door: claimed messages
 	// print as ambient notice lines, only ever at quiet moments (session
@@ -230,7 +255,9 @@ func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, task,
 	}
 
 	r.header(string(conv.ID()))
-	refresh()
+	if followUps {
+		announceStanding(false)
+	}
 	deliver()
 	if task == "" && !followUps {
 		// Piped invocation with no argv task: the pipe is the task. Consume
@@ -242,63 +269,76 @@ func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, task,
 		}
 		task = expand(task)
 	}
+	if followUps {
+		return runTUISession(ctx, conv, tui, deliver, announceStanding, task, expand)
+	}
 	in := startStdinReader()
 	if task == "" {
-		first, err := readFollowUp(ctx, r, in, deliver, refresh)
+		first, err := readFollowUp(ctx, r, in, deliver)
 		if err != nil || first == "" {
 			return nil
 		}
 		task = expand(first)
 	}
 	conv.Send(core.PromptIntent{Text: task})
+	r.turnStart()
 	for env := range conv.Events() {
-		// Relayed child events (Depth > 0) contribute tool activity only.
-		// Child prose is internal narration — printing it interleaves
-		// parallel children's text mid-word — and a child's turn ending
-		// must not end the root turn.
-		child := env.Depth > 0
-		switch e := env.Event.(type) {
-		case core.MessageDelta:
-			if !child {
-				r.delta(e.Text)
-			}
-		case core.ApprovalRequest:
-			r.approvalPrompt(e.Call)
-			line, _ := in.read(ctx)
-			approved := strings.EqualFold(strings.TrimSpace(line), "y")
-			conv.Send(core.ApprovalResponseIntent{RequestID: e.RequestID, Approved: approved})
-		case core.ToolStarted:
-			r.toolStart(e.Call)
-		case core.ToolFinished:
-			r.toolFinish(e.Result)
-		case core.TurnComplete:
-			if child {
-				continue
-			}
-			r.turnComplete(e.StopReason)
-			refresh()
-			deliver()
-			if !followUps {
-				return nil
-			}
-			next, err := readFollowUp(ctx, r, in, deliver, refresh)
-			if err != nil || next == "" {
-				return nil
-			}
-			conv.Send(core.PromptIntent{Text: expand(next)})
-		case core.Interrupted:
-			if !child {
-				r.interrupted()
-				return nil
-			}
-		case core.ErrorEvent:
-			if !child {
-				r.errorf(e)
-				return fmt.Errorf("%s: %s", e.Category, e.Err)
-			}
+		done, err := handleSessionEvent(ctx, conv, r, in, env, nil, announceStanding, deliver, nil)
+		if done {
+			return err
+		}
+		if err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// handleSessionEvent processes one engine envelope. done means the session
+// should exit (one-shot turn complete, interrupt, or error).
+func handleSessionEvent(ctx context.Context, conv *engine.Conversation, r uiRenderer, in *stdinReader, env core.Envelope, turnActive *bool, announceStanding func(bool), deliver func() bool, needPrompt *bool) (done bool, err error) {
+	child := env.Depth > 0
+	switch e := env.Event.(type) {
+	case core.MessageDelta:
+		if !child {
+			r.delta(e.Text)
+		}
+	case core.ApprovalRequest:
+		r.approvalPrompt(e.Call)
+		line, _ := in.read(ctx)
+		approved := strings.EqualFold(strings.TrimSpace(line), "y")
+		conv.Send(core.ApprovalResponseIntent{RequestID: e.RequestID, Approved: approved})
+	case core.ToolStarted:
+		r.toolStart(e.Call)
+	case core.ToolFinished:
+		r.toolFinish(e.Result)
+	case core.TurnComplete:
+		if child {
+			return false, nil
+		}
+		r.turnComplete(e.StopReason)
+		announceStanding(true)
+		deliver()
+		if turnActive != nil {
+			*turnActive = false
+		}
+		if needPrompt != nil {
+			*needPrompt = true
+			return false, nil
+		}
+		return true, nil
+	case core.Interrupted:
+		if !child {
+			r.interrupted()
+			return true, nil
+		}
+	case core.ErrorEvent:
+		if !child {
+			r.errorf(e)
+			return true, fmt.Errorf("%s: %s", e.Category, e.Err)
+		}
+	}
+	return false, nil
 }
 
 // stdinReader is the single owner of stdin for the whole session, so the
@@ -346,11 +386,8 @@ const outboxPoll = 2 * time.Second
 // kills the session. While idle it polls deliver: an outbox message prints
 // as an ambient notice and the prompt redraws beneath it — the agent speaking
 // up between turns without ever owning one.
-func readFollowUp(ctx context.Context, r uiRenderer, in *stdinReader, deliver func() bool, refresh func()) (string, error) {
+func readFollowUp(ctx context.Context, r uiRenderer, in *stdinReader, deliver func() bool) (string, error) {
 	for {
-		if refresh != nil {
-			refresh() // pin a current schedule glance above each prompt
-		}
 		r.promptFollowUp()
 	wait:
 		for {
@@ -368,14 +405,12 @@ func readFollowUp(ctx context.Context, r uiRenderer, in *stdinReader, deliver fu
 				case "exit", "quit", "q":
 					return "", nil
 				default:
-					// Tear down the footer+prompt region and keep the typed
-					// line as a permanent record before the turn begins.
 					r.commitPrompt(line)
 					return line, nil
 				}
 			case <-time.After(outboxPoll):
 				if deliver != nil && deliver() {
-					break wait // redraw footer + prompt beneath the notice
+					break wait // redraw the prompt beneath the notice
 				}
 			}
 		}

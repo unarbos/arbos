@@ -10,6 +10,7 @@ type IntentKind string
 
 const (
 	IntentPrompt           IntentKind = "prompt"
+	IntentSteer            IntentKind = "steer"
 	IntentInterrupt        IntentKind = "interrupt"
 	IntentResume           IntentKind = "resume"
 	IntentApprovalResponse IntentKind = "approval_response"
@@ -28,6 +29,13 @@ type Intent interface {
 
 // PromptIntent starts a turn with user-supplied text.
 type PromptIntent struct {
+	Text string `json:"text"`
+}
+
+// SteerIntent replaces the in-flight turn with new user text. When idle it
+// behaves like PromptIntent; when a turn is active it cancels silently (no
+// Interrupted event) and discards any prompts queued during that turn.
+type SteerIntent struct {
 	Text string `json:"text"`
 }
 
@@ -61,6 +69,7 @@ type SetModelIntent struct {
 type CompactIntent struct{}
 
 func (PromptIntent) Kind() IntentKind           { return IntentPrompt }
+func (SteerIntent) Kind() IntentKind            { return IntentSteer }
 func (InterruptIntent) Kind() IntentKind        { return IntentInterrupt }
 func (ResumeIntent) Kind() IntentKind           { return IntentResume }
 func (ApprovalResponseIntent) Kind() IntentKind { return IntentApprovalResponse }

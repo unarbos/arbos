@@ -2,7 +2,9 @@ package engine_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/unarbos/arbos/internal/core"
@@ -213,6 +215,199 @@ func TestInterruptCancelsTurn(t *testing.T) {
 	if got := tr.kinds[len(tr.kinds)-1]; got != "interrupted" {
 		t.Fatalf("expected interrupted, got %q (%v)", got, tr.kinds)
 	}
+}
+
+// TestSteerWhenIdleLikePrompt treats SteerIntent as a normal turn starter when
+// no turn is in flight.
+func TestSteerWhenIdleLikePrompt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conv, err := newEngine(fake.NewStore()).StartSession(ctx, "s-steer-idle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv.Send(core.SteerIntent{Text: "hello there"})
+
+	tr := drain(t, conv)
+	if got := tr.kinds[len(tr.kinds)-1]; got != "turn_complete" {
+		t.Fatalf("expected turn_complete, got %q (%v)", got, tr.kinds)
+	}
+}
+
+// TestSteerCancelsAndStartsNew is the empirical proof for mid-turn steering: a
+// SteerIntent cancels the in-flight turn silently (no Interrupted), discards
+// intra-turn queued prompts, and starts a new turn with the steer text.
+func TestSteerCancelsAndStartsNew(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := make(chan struct{})
+	eng := engine.New(&steerProvider{started: started}, fake.Tools{}, fake.NewStore(), fake.NewClock(), engine.Config{Model: "x", MaxIterations: 5})
+	conv, err := eng.StartSession(ctx, "s-steer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conv.Send(core.PromptIntent{Text: "go"})
+	<-started
+	conv.Send(core.PromptIntent{Text: "drop-me"})
+	conv.Send(core.SteerIntent{Text: "correction"})
+
+	var kinds []string
+	var sawQueued bool
+	var finalText string
+	for env := range conv.Events() {
+		switch e := env.Event.(type) {
+		case core.Queued:
+			sawQueued = true
+		case core.Interrupted:
+			t.Fatal("steer must not emit interrupted")
+		case core.TurnComplete:
+			kinds = append(kinds, "turn_complete")
+			finalText = e.FinalResponse
+			goto done
+		case core.MessageDelta:
+			if len(kinds) == 0 || kinds[len(kinds)-1] != "delta" {
+				kinds = append(kinds, "delta")
+			}
+		case core.ErrorEvent:
+			t.Fatalf("unexpected error: %s", e.Err)
+		}
+	}
+done:
+	if !sawQueued {
+		t.Fatal("expected Queued for mid-turn prompt before steer")
+	}
+	if got := kinds[len(kinds)-1]; got != "turn_complete" {
+		t.Fatalf("expected turn_complete, got %q (%v)", got, kinds)
+	}
+	if finalText != "steered: correction " {
+		t.Fatalf("final text = %q, want steer text applied", finalText)
+	}
+}
+
+// TestSteerDuringBlockedRequestEmitsNoError reproduces the real transport
+// shape: Stream itself blocks in the HTTP request and returns an error when
+// the steer cancels the turn context. That cancellation artifact must not
+// surface as an ErrorEvent (which would kill the frontend session) — the
+// steered turn simply runs next.
+func TestSteerDuringBlockedRequestEmitsNoError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := make(chan struct{})
+	eng := engine.New(&blockedRequestProvider{started: started}, fake.Tools{}, fake.NewStore(), fake.NewClock(), engine.Config{Model: "x", MaxIterations: 5})
+	conv, err := eng.StartSession(ctx, "s-steer-blocked")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conv.Send(core.PromptIntent{Text: "go"})
+	<-started // Stream is now parked in the fake "HTTP request"
+	conv.Send(core.SteerIntent{Text: "correction"})
+
+	var finalText string
+	for env := range conv.Events() {
+		switch e := env.Event.(type) {
+		case core.ErrorEvent:
+			t.Fatalf("steer cancellation leaked as error: %s", e.Err)
+		case core.Interrupted:
+			t.Fatal("steer must not emit interrupted")
+		case core.TurnComplete:
+			finalText = e.FinalResponse
+		}
+		if finalText != "" {
+			break
+		}
+	}
+	if finalText != "steered: correction " {
+		t.Fatalf("final text = %q, want steered turn to complete", finalText)
+	}
+}
+
+// blockedRequestProvider parks the first Stream call until ctx is cancelled and
+// returns the transport error (like an aborted HTTP Post), then echoes the
+// latest user text on subsequent turns.
+type blockedRequestProvider struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (*blockedRequestProvider) Name() string                     { return "blocked-request" }
+func (*blockedRequestProvider) Capabilities() ports.Capabilities { return ports.Capabilities{} }
+
+func (p *blockedRequestProvider) Stream(ctx context.Context, req core.LLMRequest) (<-chan core.LLMChunk, error) {
+	var lastUser string
+	for _, m := range req.Messages {
+		if m.Role == core.RoleUser {
+			lastUser = m.Content
+		}
+	}
+	if lastUser == "go" {
+		p.once.Do(func() { close(p.started) })
+		<-ctx.Done()
+		return nil, fmt.Errorf("request: Post \"https://example.test\": %w", ctx.Err())
+	}
+	out := make(chan core.LLMChunk, 8)
+	go func() {
+		defer close(out)
+		for _, tok := range strings.Fields("steered: " + lastUser) {
+			select {
+			case <-ctx.Done():
+				return
+			case out <- core.LLMChunk{ContentDelta: tok + " "}:
+			}
+		}
+		select {
+		case <-ctx.Done():
+		case out <- core.LLMChunk{Done: true}:
+		}
+	}()
+	return out, nil
+}
+
+// steerProvider blocks the first turn until cancelled, then echoes the latest
+// user text on subsequent turns.
+type steerProvider struct{ started chan struct{} }
+
+func (*steerProvider) Name() string                     { return "steer" }
+func (*steerProvider) Capabilities() ports.Capabilities { return ports.Capabilities{} }
+
+func (p *steerProvider) Stream(ctx context.Context, req core.LLMRequest) (<-chan core.LLMChunk, error) {
+	out := make(chan core.LLMChunk)
+	go func() {
+		defer close(out)
+		var lastUser string
+		for _, m := range req.Messages {
+			if m.Role == core.RoleUser {
+				lastUser = m.Content
+			}
+		}
+		if lastUser == "go" {
+			select {
+			case out <- core.LLMChunk{ContentDelta: "working"}:
+			case <-ctx.Done():
+				return
+			}
+			close(p.started)
+			<-ctx.Done()
+			return
+		}
+		msg := "steered: " + lastUser
+		for _, tok := range strings.Fields(msg) {
+			select {
+			case <-ctx.Done():
+				return
+			case out <- core.LLMChunk{ContentDelta: tok + " "}:
+			}
+		}
+		select {
+		case <-ctx.Done():
+		case out <- core.LLMChunk{Done: true}:
+		}
+	}()
+	return out, nil
 }
 
 // blockingProvider emits one delta, signals, then blocks until ctx is cancelled.

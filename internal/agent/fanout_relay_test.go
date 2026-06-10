@@ -46,9 +46,9 @@ func (p childProvider) Stream(ctx context.Context, _ core.LLMRequest) (<-chan co
 	return out, nil
 }
 
-// delegatingParent asks for two read-only delegations in its first response,
-// then answers plainly once their results return. Two read-only-granted delegate
-// calls drive the parallel-fan-out + live-relay path end to end.
+// delegatingParent asks for two delegations in its first response, then answers
+// plainly once their results return. Two delegate calls drive the parallel
+// fan-out + live-relay path end to end.
 type delegatingParent struct{}
 
 func (delegatingParent) Name() string                     { return "parent" }
@@ -75,9 +75,9 @@ func (delegatingParent) Stream(_ context.Context, req core.LLMRequest) (<-chan c
 }
 
 // TestDelegateFanOutAndLiveRelay proves the whole chain: a parent emits two
-// read-only delegate calls, the engine schedules them concurrently (their
-// read-only grant makes the delegate footprint empty), each child streams a
-// message delta, and those deltas surface in the PARENT's event stream tagged
+// delegate calls, the engine schedules them concurrently (every delegation
+// advertises an empty footprint, so siblings never conflict), each child streams
+// a message delta, and those deltas surface in the PARENT's event stream tagged
 // Depth==1. It checks the real artifacts — the relayed envelopes and the peak
 // concurrency the children observed — not a self-report.
 func TestDelegateFanOutAndLiveRelay(t *testing.T) {
@@ -98,9 +98,9 @@ func TestDelegateFanOutAndLiveRelay(t *testing.T) {
 	router.Register("child", childAgent)
 
 	reg := tool.New()
-	// "read" is read-only, so a grant confined to it yields an empty delegate
-	// footprint -> the two delegate calls do not conflict -> they fan out.
-	if err := agent.RegisterDelegate(reg, router, map[string]bool{"read": true}); err != nil {
+	// Every delegation has an empty footprint, so the two delegate calls do not
+	// conflict and the engine fans them out.
+	if err := agent.RegisterDelegate(reg, router); err != nil {
 		t.Fatal(err)
 	}
 

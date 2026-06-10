@@ -15,7 +15,7 @@ import (
 
 // ReadArgs are the arguments to read.
 type ReadArgs struct {
-	Path   string `json:"path" desc:"Path to the file to read, relative to the workspace root."`
+	Path   string `json:"path" desc:"Path to the file to read — relative to the working directory, or absolute (any path on the machine)."`
 	Offset int    `json:"offset,omitempty" desc:"Line number to start reading from (1-indexed)."`
 	Limit  int    `json:"limit,omitempty" desc:"Maximum number of lines to read."`
 }
@@ -39,6 +39,7 @@ func readSpec(root string, ledger *readLedger) tool.Spec {
 			if err != nil {
 				return tool.Result{}, fmt.Errorf("read: %w", err)
 			}
+			key := tool.ResourceKey(abs)
 
 			if mime := imageMime(a.Path); mime != "" {
 				if len(data) > maxImageBytes {
@@ -54,6 +55,14 @@ func readSpec(root string, ledger *readLedger) tool.Spec {
 			}
 
 			allLines := strings.Split(string(data), "\n")
+			// A trailing newline terminates the previous line; strings.Split leaves
+			// a phantom empty element for it. Numbering (numberLines) and counting
+			// (splitLinesForCounting) both ignore it, so the reported total and the
+			// offset bound must too — otherwise a normal newline-terminated file
+			// reports one extra line and accepts an offset one past its real end.
+			if n := len(allLines); n > 1 && allLines[n-1] == "" {
+				allLines = allLines[:n-1]
+			}
 			totalFileLines := len(allLines)
 			startLine := 0
 			if a.Offset > 0 {
@@ -92,7 +101,7 @@ func readSpec(root string, ledger *readLedger) tool.Spec {
 			if tr.OutputLines > 0 {
 				shownStart := startLineDisplay
 				shownEnd := shownStart + tr.OutputLines - 1
-				switch v := ledger.reconcile(turnFromContext(ctx), abs, fileVersion(data), shownStart, shownEnd); {
+				switch v := ledger.reconcile(turnFromContext(ctx), key, fileVersion(data), shownStart, shownEnd); {
 				case v.redundant:
 					return tool.Result{Content: fmt.Sprintf(
 						"[Lines %d-%d of %s were already shown this turn and are unchanged — re-read skipped to save context. The earlier output still applies; use a different offset to see more.]",
@@ -134,17 +143,15 @@ func readSpec(root string, ledger *readLedger) tool.Spec {
 	})
 }
 
-// fileKeys returns the canonical resource key(s) for a workspace-relative path:
-// the absolute, symlink-resolved path Resolve produces, so two spellings of the
-// same file conflict. A path that cannot be resolved yields an unbounded marker
-// via an empty slice's caller (read returns it as a read with no key, which is
-// harmless; write/edit treat an unresolved path as unbounded — see their specs).
+// fileKeys returns the canonical resource key(s) for a path: Resolve determines
+// the shell-like IO path, and ResourceKey canonicalizes that path for scheduling
+// so two spellings of the same file conflict.
 func fileKeys(root, path string) []string {
 	abs, err := tool.Resolve(root, path)
 	if err != nil {
 		return nil
 	}
-	return []string{abs}
+	return []string{tool.ResourceKey(abs)}
 }
 
 // lineNumberWidth is the minimum gutter width for read's line numbers. Numbers

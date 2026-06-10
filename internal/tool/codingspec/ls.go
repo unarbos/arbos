@@ -14,7 +14,7 @@ import (
 
 // LsArgs are the arguments to ls.
 type LsArgs struct {
-	Path  string `json:"path,omitempty" desc:"Directory to list, relative to the workspace root. Defaults to the root."`
+	Path  string `json:"path,omitempty" desc:"Directory to list — relative to the working directory, or absolute. Defaults to the working directory."`
 	Limit int    `json:"limit,omitempty" desc:"Maximum number of entries to return (default: 500)."`
 }
 

@@ -48,7 +48,8 @@ type Grant struct {
 }
 
 // EnvironmentRef points at where a child runs. Path roots the child's workspace
-// (its tool sandbox and prompt cwd); empty means inherit the parent's cwd.
+// (its tools' path base and prompt cwd — a starting point, not a boundary);
+// empty means inherit the parent's cwd.
 type EnvironmentRef struct {
 	Path string
 }

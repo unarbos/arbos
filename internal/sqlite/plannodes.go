@@ -136,7 +136,11 @@ func (s *Store) SetPlanNodeStatus(ctx context.Context, id plan.NodeID, status pl
 	if err != nil {
 		return fmt.Errorf("set plan node %d status: %w", id, err)
 	}
-	if rows, _ := res.RowsAffected(); rows == 0 {
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set plan node %d status: %w", id, err)
+	}
+	if rows == 0 {
 		return fmt.Errorf("set plan node %d status: not found", id)
 	}
 	return nil
@@ -320,35 +324,6 @@ func (s *Store) PlanNodesUpdatedSince(ctx context.Context, since time.Time) ([]p
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("plan nodes updated since: %w", err)
-	}
-	return out, nil
-}
-
-// PlanAttemptsSince returns attempts recorded after since, oldest first — the
-// front-door brief's "what ran while you were away".
-func (s *Store) PlanAttemptsSince(ctx context.Context, since time.Time) ([]plan.Attempt, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT node_id, session_id, verdict, outcome, verified_by, workspace, created_at
-		   FROM plan_attempts WHERE created_at > ? ORDER BY created_at`, nanos(since))
-	if err != nil {
-		return nil, fmt.Errorf("plan attempts since: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	var out []plan.Attempt
-	for rows.Next() {
-		var (
-			a        plan.Attempt
-			node, at int64
-			verdict  string
-		)
-		if err := rows.Scan(&node, &a.Session, &verdict, &a.Outcome, &a.VerifiedBy, &a.Workspace, &at); err != nil {
-			return nil, fmt.Errorf("scan plan attempt: %w", err)
-		}
-		a.Node, a.Verdict, a.At = plan.NodeID(node), plan.Verdict(verdict), fromNanos(at)
-		out = append(out, a)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("plan attempts since: %w", err)
 	}
 	return out, nil
 }
