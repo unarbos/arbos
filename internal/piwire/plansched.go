@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/unarbos/arbos/internal/agent"
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/engine"
 	"github.com/unarbos/arbos/internal/outbox"
@@ -48,7 +49,17 @@ func (h *Host) StartPlanScheduler() func() {
 	if ob, ok := h.store.(outbox.Store); ok {
 		notify = ob.Notify
 	}
-	sched := plan.NewScheduler(ps, sysClock{}, planWake(h.Engine, h.store), run, notify, h.logger)
+	// The schedule axis (a wake) spawns through the same Agent mechanism as
+	// the call axis (delegate): "self" is the full controller engine wrapped
+	// as an Agent, so a firing is just self.Run — no hand-rolled session
+	// management. delegate passes a relay sink and joins the result up the
+	// stack; the scheduler passes nil and lets the work land in durable state.
+	// One spawn, two callers.
+	self := agent.NewArbosAgent(
+		func(agent.Grant) (*engine.Engine, error) { return h.Engine, nil },
+		NewSessionID,
+	)
+	sched := plan.NewScheduler(ps, sysClock{}, selfWake(self, h.store), run, notify, h.logger)
 	return sched.Close
 }
 
@@ -68,29 +79,27 @@ func cmdRunner(cwd string) plan.CmdRunner {
 	}
 }
 
-// planWake runs one fired node as one fresh session turn: prompt it with the
-// firing, drain its events, and let the session end with the turn. The
-// executor sees the whole forest via the plan injection; the prompt only has
-// to say which node's moment arrived and what closing the loop looks like.
-// The session is stamped OriginScheduler so the front-door brief can tell
-// machine-initiated work from sessions a human drove.
-func planWake(eng *engine.Engine, store ports.SessionStore) plan.WakeFunc {
+// selfWake runs one fired node as one fresh controller session, through the
+// Agent spawn mechanism (self.Run) rather than hand-rolled session management:
+// the prompt says which node's moment arrived, and the agent acts on the
+// forest its context already carries. emit is nil — a wake is the schedule
+// axis, depth 0, with no caller to relay to or return a result up; the work
+// lands in durable state. The spawned session is stamped OriginScheduler so
+// the front-door brief anchors "since you left" on human-driven sessions only.
+func selfWake(self agent.Agent, store ports.SessionStore) plan.WakeFunc {
 	return func(ctx context.Context, w plan.WakeEvent) error {
 		ctx, cancel := context.WithTimeout(ctx, wakeTurnTimeout)
 		defer cancel()
-		conv, err := eng.StartSession(ctx, NewSessionID())
-		if err != nil {
-			return fmt.Errorf("plan wake: start session: %w", err)
+		res, err := self.Run(ctx, agent.Task{Instruction: wakePrompt(w)}, nil)
+		if res.ChildSession != "" {
+			// Detached stamp: the session's events are written; LastHumanSeen
+			// filters on the session row's origin, so stamping after the run
+			// (with a fresh context) still anchors the brief correctly.
+			if sess, gerr := store.Get(context.Background(), core.SessionID(res.ChildSession)); gerr == nil {
+				sess.Origin = core.OriginScheduler
+				_ = store.UpdateSession(context.Background(), sess)
+			}
 		}
-		if sess, err := store.Get(ctx, conv.ID()); err == nil {
-			sess.Origin = core.OriginScheduler
-			_ = store.UpdateSession(ctx, sess) // best-effort: only the brief's anchor depends on it
-		}
-		conv.Send(core.PromptIntent{Text: wakePrompt(w)})
-		// One drain path for every spawned session (shared with delegation):
-		// runs this session to its own TurnComplete, ignoring relayed child
-		// activity from any delegation the woken controller itself performs.
-		_, err = engine.Drive(ctx, conv, nil)
 		return err
 	}
 }
