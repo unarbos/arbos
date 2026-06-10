@@ -50,8 +50,9 @@ type Host struct {
 	Engine  *engine.Engine
 	Cleanup func()
 
-	store  ports.SessionStore
-	logger *slog.Logger
+	store   ports.SessionStore
+	logger  *slog.Logger
+	approve bool
 }
 
 // Assemble builds the top-level pi engine with delegation tools, memory, MCP, and
@@ -159,7 +160,7 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		}
 		mcpMgr.Close()
 	}
-	return &Host{Engine: eng, Cleanup: cleanup, store: cfg.Store, logger: cfg.Logger}, nil
+	return &Host{Engine: eng, Cleanup: cleanup, store: cfg.Store, logger: cfg.Logger, approve: cfg.Approve}, nil
 }
 
 // codingReadOnlyTools is the set of coding tool names that do not mutate the

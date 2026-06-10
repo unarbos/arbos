@@ -8,6 +8,7 @@ import (
 
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/engine"
+	"github.com/unarbos/arbos/internal/outbox"
 	"github.com/unarbos/arbos/internal/plan"
 	"github.com/unarbos/arbos/internal/ports"
 	"github.com/unarbos/arbos/internal/tool/codingspec"
@@ -33,7 +34,21 @@ func (h *Host) StartPlanScheduler() func() {
 		return nil
 	}
 	cwd, _ := os.Getwd()
-	sched := plan.NewScheduler(ps, sysClock{}, planWake(h.Engine, h.store), cmdRunner(cwd), h.logger)
+	// Under -approve the user has asked to gate every workspace mutation, so
+	// the kernel must not auto-run shell: with a nil runner, cmd nodes stay
+	// [ready] and are executed only inside a turn, through the approval-gated
+	// bash tool. Timed and callback wakes still fire — they spawn a session
+	// that is itself gated. The notify executor is not a workspace mutation,
+	// so it runs regardless of approval.
+	var run plan.CmdRunner
+	if !h.approve {
+		run = cmdRunner(cwd)
+	}
+	var notify plan.NotifyFunc
+	if ob, ok := h.store.(outbox.Store); ok {
+		notify = ob.Notify
+	}
+	sched := plan.NewScheduler(ps, sysClock{}, planWake(h.Engine, h.store), run, notify, h.logger)
 	return sched.Close
 }
 
@@ -72,30 +87,18 @@ func planWake(eng *engine.Engine, store ports.SessionStore) plan.WakeFunc {
 			_ = store.UpdateSession(ctx, sess) // best-effort: only the brief's anchor depends on it
 		}
 		conv.Send(core.PromptIntent{Text: wakePrompt(w)})
-		for {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case env, ok := <-conv.Events():
-				if !ok {
-					return nil
-				}
-				switch ev := env.Event.(type) {
-				case core.TurnComplete:
-					return nil
-				case core.ErrorEvent:
-					if env.SessionID == conv.ID() && !ev.Retryable {
-						return fmt.Errorf("plan wake: %s", ev.Err)
-					}
-				}
-			}
-		}
+		// One drain path for every spawned session (shared with delegation):
+		// runs this session to its own TurnComplete, ignoring relayed child
+		// activity from any delegation the woken controller itself performs.
+		_, err = engine.Drive(ctx, conv, nil)
+		return err
 	}
 }
 
 func wakePrompt(w plan.WakeEvent) string {
 	n := w.Node
-	if w.Reason == plan.WakeCmdFailed {
+	switch w.Reason {
+	case plan.WakeCmdFailed:
 		detail := w.Detail
 		if detail == "" {
 			detail = "(no output captured)"
@@ -103,18 +106,21 @@ func wakePrompt(w plan.WakeEvent) string {
 		return fmt.Sprintf(
 			"Kernel-run command failed: node #%d — %s. Command: `%s`. Output tail:\n%s\nDiagnose and act: fix the cause and reopen the node (status pending) so the kernel retries, adjust its cmd, or record it failed/blocked with an outcome. No conversation is open: anything the user must hear goes through the notify tool — and only what genuinely concerns them.",
 			n.ID, n.Goal, n.Cmd, detail)
-	}
-	if w.Reason == plan.WakeReady {
+	case plan.WakeReady:
 		return fmt.Sprintf(
 			"Callback firing: node #%d is now ready — %s. Its earlier siblings just finished (see the <<plan>> block for their outcomes). Claim it (op:update, node %d, status active), do what it says — usually reporting completion to the user via the notify tool — and record it done with an outcome. No conversation is open: notify is your only voice.",
 			n.ID, n.Goal, n.ID)
-	}
-	if n.Kind == plan.KindMaintain {
+	case plan.WakeDue:
+		if n.Recurring() {
+			return fmt.Sprintf(
+				"Scheduled firing: standing obligation #%d is due — %s. Do it now, then record the recurrence with the plan tool (op:update, node %d, outcome only). Keep it to this one obligation. No conversation is open: anything the user must hear goes through the notify tool.",
+				n.ID, n.Goal, n.ID)
+		}
 		return fmt.Sprintf(
-			"Scheduled firing: standing obligation #%d is due — %s. Do it now, then record the recurrence with the plan tool (op:update, node %d, outcome only). Keep it to this one obligation. No conversation is open: anything the user must hear goes through the notify tool.",
+			"Scheduled firing: deferred task #%d is now due — %s. Claim it with the plan tool (op:update, node %d, status active), do it, and record the result (done or failed, with an outcome). No conversation is open: anything the user must hear goes through the notify tool.",
 			n.ID, n.Goal, n.ID)
 	}
-	return fmt.Sprintf(
-		"Scheduled firing: deferred task #%d is now due — %s. Claim it with the plan tool (op:update, node %d, status active), do it, and record the result (done or failed, with an outcome). No conversation is open: anything the user must hear goes through the notify tool.",
-		n.ID, n.Goal, n.ID)
+	// WakeReason is a closed enum; a new value must add a branch above rather
+	// than silently inherit a prompt.
+	return fmt.Sprintf("Node #%d (%s) needs attention. Inspect the plan and act.", n.ID, n.Goal)
 }

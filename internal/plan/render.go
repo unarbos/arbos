@@ -62,7 +62,7 @@ func renderPlan(b *strings.Builder, root Node, children map[NodeID][]Node, last 
 	// A childless root IS the work, not a heading: a standing obligation or
 	// lone goal created as its own plan still carries timing and working
 	// memory, which otherwise only children would render.
-	if root.Kind == KindMaintain {
+	if root.Recurring() {
 		b.WriteString(dueSuffix(root, now))
 	}
 	b.WriteString("\n")
@@ -110,7 +110,7 @@ func renderOpen(b *strings.Builder, parent NodeID, children map[NodeID][]Node, l
 	siblings := children[parent]
 	for _, n := range siblings {
 		switch {
-		case n.Kind == KindMaintain:
+		case n.Recurring():
 			if !Terminal(n.Status) {
 				*standing = append(*standing, n)
 			}
@@ -141,6 +141,9 @@ func renderOpen(b *strings.Builder, parent NodeID, children map[NodeID][]Node, l
 		if n.Cmd != "" {
 			fmt.Fprintf(b, "  (cmd: %s)", clipText(n.Cmd, 48))
 		}
+		if n.Notify != "" {
+			fmt.Fprintf(b, "  (notify: %s)", clipText(n.Notify, 48))
+		}
 		if n.WakeOnReady {
 			b.WriteString("  (callback)")
 		}
@@ -156,11 +159,12 @@ func renderOpen(b *strings.Builder, parent NodeID, children map[NodeID][]Node, l
 	}
 }
 
-// countAchieve counts terminal-done and total achieve nodes in a subtree, for
-// the mission line's progress fraction.
+// countAchieve counts terminal-done and total one-shot agent nodes in a
+// subtree, for the mission line's progress fraction (recurring obligations
+// have no "done" to count toward progress).
 func countAchieve(parent NodeID, children map[NodeID][]Node) (done, total int) {
 	for _, n := range children[parent] {
-		if n.Kind == KindAchieve && n.Assignee == AssigneeAgent {
+		if !n.Recurring() && n.Assignee == AssigneeAgent {
 			total++
 			if n.Status == StatusDone {
 				done++

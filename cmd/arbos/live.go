@@ -246,7 +246,7 @@ func (r *liveRenderer) notice(msgs []string) {
 		r.suspended = false
 	}
 	for _, m := range msgs {
-		_, _ = fmt.Fprintln(r.status, r.note.Render("◇ ")+m)
+		_, _ = fmt.Fprintln(r.status, r.note.Render("◇ ")+sanitizeNotice(m))
 	}
 }
 

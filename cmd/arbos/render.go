@@ -234,8 +234,26 @@ func (r *renderer) notice(msgs []string) {
 	r.breakText()
 	_, _ = fmt.Fprintln(r.status)
 	for _, m := range msgs {
-		_, _ = fmt.Fprintln(r.status, r.note.Render("◇ ")+m)
+		_, _ = fmt.Fprintln(r.status, r.note.Render("◇ ")+sanitizeNotice(m))
 	}
+}
+
+// sanitizeNotice strips control bytes (notably ESC) from an outbox message
+// before it reaches the terminal. Outbox text is model-authored and may carry
+// content the model read from the web or files; without this a crafted
+// message could inject ANSI escapes (cursor moves, color, title rewrites)
+// into the user's terminal. Tabs and newlines survive; everything else below
+// 0x20 and the DEL byte are dropped.
+func sanitizeNotice(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func (r *renderer) close() {}

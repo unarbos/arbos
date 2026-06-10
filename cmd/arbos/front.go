@@ -39,7 +39,10 @@ func printBrief(ctx context.Context, store *sqlite.Store, cwd string, w io.Write
 		out += jobs
 	}
 	if out != "" {
-		_, _ = fmt.Fprintln(w, out)
+		// The brief embeds model-authored goals, outcomes, and job commands —
+		// the same prompt-injection-reachable text the outbox sanitizes — so
+		// strip control bytes before it reaches the terminal.
+		_, _ = fmt.Fprintln(w, sanitizeNotice(out))
 		_, _ = fmt.Fprintln(w)
 	}
 }
@@ -52,6 +55,6 @@ func printHandoff(ctx context.Context, store *sqlite.Store, w io.Writer) {
 		return
 	}
 	if out := plan.Handoff(open, time.Now()); out != "" {
-		_, _ = fmt.Fprintln(w, "\n"+out)
+		_, _ = fmt.Fprintln(w, "\n"+sanitizeNotice(out))
 	}
 }

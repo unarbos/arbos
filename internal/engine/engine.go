@@ -142,6 +142,41 @@ func (c *Conversation) ID() core.SessionID           { return c.id }
 func (c *Conversation) Send(i core.Intent)           { c.intents <- i }
 func (c *Conversation) Events() <-chan core.Envelope { return c.events }
 
+// Drive runs a started conversation to its own terminal event, forwarding
+// every envelope to emit (nil to ignore) so a caller can relay nested
+// activity. It is the one place the "send a prompt, drain to completion"
+// loop lives — shared by every caller that spawns a session and waits for it
+// (delegation, scheduler wakes), so they cannot drift.
+//
+// Termination keys on this conversation's own session: relayed descendant
+// envelopes (a delegated child's events, Depth>0 with a different SessionID)
+// are forwarded to emit but never end the drive — only this session's
+// TurnComplete (returned), a non-retryable ErrorEvent (Go error), or an
+// Interrupted (context.Canceled) does. A closed channel without a terminal
+// event returns ctx.Err (the actor closes its events when ctx is cancelled).
+func Drive(ctx context.Context, conv *Conversation, emit func(core.Envelope)) (core.TurnComplete, error) {
+	for env := range conv.Events() {
+		if emit != nil {
+			emit(env)
+		}
+		if env.SessionID != conv.id {
+			continue // relayed descendant activity; not this session's terminal
+		}
+		switch e := env.Event.(type) {
+		case core.TurnComplete:
+			return e, nil
+		case core.ErrorEvent:
+			if e.Retryable {
+				continue
+			}
+			return core.TurnComplete{}, fmt.Errorf("session %s error (%s): %s", conv.id, e.Category, e.Err)
+		case core.Interrupted:
+			return core.TurnComplete{}, context.Canceled
+		}
+	}
+	return core.TurnComplete{}, ctx.Err()
+}
+
 // TrySend delivers an intent without blocking, returning false if the actor's
 // intent buffer is full. A frontend uses it for non-urgent intents so a flood
 // cannot stall its frame reader (which would starve a later interrupt); urgent

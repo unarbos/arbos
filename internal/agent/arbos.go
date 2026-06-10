@@ -53,24 +53,14 @@ func (a *ArbosAgent) Run(ctx context.Context, t Task, emit func(core.Envelope)) 
 	}
 	conv.Send(core.PromptIntent{Text: t.Instruction})
 
-	for env := range conv.Events() {
-		// Forward the child's envelope unchanged (its own SessionID, Depth 0).
-		// The parent's relay sink increments Depth, so nesting accumulates
-		// correctly without this layer knowing its own depth.
-		if emit != nil {
-			emit(env)
-		}
-		switch e := env.Event.(type) {
-		case core.TurnComplete:
-			res.Text = e.FinalResponse
-			res.Usage = e.Usage
-			return res, nil
-		case core.ErrorEvent:
-			return res, fmt.Errorf("delegate: child error (%s): %s", e.Category, e.Err)
-		case core.Interrupted:
-			return res, context.Canceled
-		}
+	// engine.Drive forwards the child's envelopes to emit (the parent's relay
+	// sink increments Depth, so nesting accumulates) and returns on the child's
+	// own TurnComplete.
+	tc, err := engine.Drive(ctx, conv, emit)
+	if err != nil {
+		return res, err
 	}
-	// Channel closed without a terminal event (e.g. parent ctx cancelled).
-	return res, ctx.Err()
+	res.Text = tc.FinalResponse
+	res.Usage = tc.Usage
+	return res, nil
 }

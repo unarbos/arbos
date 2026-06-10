@@ -36,7 +36,7 @@ func Brief(open, recent []Node, attempts []Attempt, lastSeen, now time.Time) str
 	// standing lines below — a goal is never printed twice).
 	var flips []string
 	for _, n := range recent {
-		if !Terminal(n.Status) || n.Kind == KindMaintain {
+		if !Terminal(n.Status) || n.Recurring() {
 			continue
 		}
 		mark := map[Status]string{StatusDone: "✓", StatusFailed: "✗", StatusCancelled: "-"}[n.Status]
@@ -90,8 +90,8 @@ func Handoff(nodes []Node, now time.Time) string {
 		return ""
 	}
 	out := "left open:\n" + b.String()
-	if hasTimeArmed(nodes) {
-		out += "(timed items fire while `arbos -serve` is running)\n"
+	if hasArmed(nodes) {
+		out += "(scheduled items fire while `arbos -serve` is running)\n"
 	}
 	return strings.TrimRight(out, "\n")
 }
@@ -112,7 +112,7 @@ func writeOpenSections(b *strings.Builder, nodes []Node, counts map[NodeID]int, 
 	for _, n := range nodes {
 		switch {
 		case Terminal(n.Status):
-		case n.Kind == KindMaintain:
+		case n.Recurring():
 			line := fmt.Sprintf("  ▸ #%d %s", n.ID, clipText(n.Goal, briefGoalWidth))
 			if c := counts[n.ID]; c > 0 {
 				line += fmt.Sprintf(" · ran %d×", c)
@@ -159,19 +159,18 @@ func statusWord(n Node, now time.Time) string {
 func recurrenceCounts(attempts []Attempt, byID map[NodeID]Node) map[NodeID]int {
 	counts := map[NodeID]int{}
 	for _, a := range attempts {
-		if n, ok := byID[a.Node]; ok && n.Kind == KindMaintain {
+		if n, ok := byID[a.Node]; ok && n.Recurring() {
 			counts[a.Node]++
 		}
 	}
 	return counts
 }
 
-func hasTimeArmed(nodes []Node) bool {
+// hasArmed reports whether any open node carries a scheduler-owned trigger, so
+// the handoff can note that those items only fire while `arbos -serve` runs.
+func hasArmed(nodes []Node) bool {
 	for _, n := range nodes {
-		if Terminal(n.Status) {
-			continue
-		}
-		if n.Kind == KindMaintain || !n.After.IsZero() {
+		if !Terminal(n.Status) && n.Armed() {
 			return true
 		}
 	}

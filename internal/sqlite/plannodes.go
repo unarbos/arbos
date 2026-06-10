@@ -20,9 +20,12 @@ import (
 // first node becomes the root (its plan_id is its own id) and the rest its
 // children. Otherwise all nodes append as children of parent, after its
 // existing children. IDs are returned in input order.
-func (s *Store) AddPlanNodes(ctx context.Context, parent plan.NodeID, nodes []plan.Node) ([]plan.NodeID, error) {
+func (s *Store) AddPlanNodes(ctx context.Context, parent plan.NodeID, nodes []plan.Node, par []bool) ([]plan.NodeID, error) {
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("add plan nodes: no nodes")
+	}
+	if len(par) != len(nodes) {
+		return nil, fmt.Errorf("add plan nodes: par length %d != nodes %d", len(par), len(nodes))
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -35,6 +38,7 @@ func (s *Store) AddPlanNodes(ctx context.Context, parent plan.NodeID, nodes []pl
 
 	now := time.Now().UnixNano()
 	rest := nodes
+	restPar := par
 	var ids []plan.NodeID
 
 	if parent == 0 {
@@ -50,40 +54,32 @@ func (s *Store) AddPlanNodes(ctx context.Context, parent plan.NodeID, nodes []pl
 		ids = append(ids, id)
 		parent = id
 		rest = nodes[1:]
+		restPar = par[1:]
 	}
 
 	parentRow, err := planNodeTx(ctx, tx, parent)
 	if err != nil {
 		return nil, err
 	}
-	// Sibling order is the dependency relation, and equal seq is the parallel
-	// group (GatedBySibling gates on strictly-lower seq only). Par appends a
-	// node at the PREVIOUS node's slot — for the batch's first node, the last
-	// existing sibling's — so a fan-out reads 1,1,1,2: three alongside, then
-	// the join.
+	// The store is dumb about ordering: it asks plan for the seq slots (the
+	// dependency/parallel-group policy lives there, pure and tested) and just
+	// writes rows. existingMax is -1 when the parent has no children yet.
 	var maxSeq sql.NullInt64
 	if err := tx.QueryRowContext(ctx,
 		`SELECT MAX(seq) FROM plan_nodes WHERE parent_id = ?`, int64(parent)).Scan(&maxSeq); err != nil {
 		return nil, fmt.Errorf("add plan nodes: next seq: %w", err)
 	}
-	next := 0
-	prev := -1
+	existingMax := -1
 	if maxSeq.Valid {
-		next = int(maxSeq.Int64) + 1
-		prev = int(maxSeq.Int64)
+		existingMax = int(maxSeq.Int64)
 	}
-	for _, n := range rest {
-		seq := next
-		if n.Par && prev >= 0 {
-			seq = prev
-		}
-		id, err := insertPlanNode(ctx, tx, parentRow.Plan, parent, seq, n, now)
+	seqs := plan.AssignSeqs(existingMax, restPar)
+	for i, n := range rest {
+		id, err := insertPlanNode(ctx, tx, parentRow.Plan, parent, seqs[i], n, now)
 		if err != nil {
 			return nil, err
 		}
 		ids = append(ids, id)
-		prev = seq
-		next = seq + 1
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -93,12 +89,19 @@ func (s *Store) AddPlanNodes(ctx context.Context, parent plan.NodeID, nodes []pl
 }
 
 func insertPlanNode(ctx context.Context, tx *sql.Tx, planID, parent plan.NodeID, seq int, n plan.Node, now int64) (plan.NodeID, error) {
+	// kind is a vestigial NOT-NULL column (the domain dropped the field —
+	// recurrence is derived from every_ns). Write a derived label for DB
+	// readability; nothing reads it back.
+	kind := "achieve"
+	if n.Recurring() {
+		kind = "maintain"
+	}
 	res, err := tx.ExecContext(ctx,
 		`INSERT INTO plan_nodes
-		   (plan_id, parent_id, seq, kind, goal, check_expr, cmd, wake, status, outcome, assignee, owner,
+		   (plan_id, parent_id, seq, kind, goal, check_expr, cmd, notify, wake, status, outcome, assignee, owner,
 		    after_at, every_ns, next_due, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		int64(planID), int64(parent), seq, string(n.Kind), n.Goal, n.Check, n.Cmd, n.WakeOnReady, string(n.Status),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		int64(planID), int64(parent), seq, kind, n.Goal, n.Check, n.Cmd, n.Notify, n.WakeOnReady, string(n.Status),
 		n.Outcome, n.Assignee, n.Owner, nanos(n.After), int64(n.Every), nanos(n.NextDue), now, now)
 	if err != nil {
 		return 0, fmt.Errorf("add plan nodes: insert: %w", err)
@@ -119,25 +122,65 @@ func planNodeTx(ctx context.Context, tx *sql.Tx, id plan.NodeID) (plan.Node, err
 	return scanPlanNode(tx.QueryRowContext(ctx, planNodeSelect+` WHERE id = ?`, int64(id)))
 }
 
-// UpdatePlanNode persists a node's mutable fields by ID. The caller
-// (internal/plan) has already validated the transition; storage stays dumb.
-func (s *Store) UpdatePlanNode(ctx context.Context, n plan.Node) error {
+// SetPlanNodeStatus persists only a node's lifecycle columns — status,
+// outcome, owner — leaving the trigger columns (after_at, next_due, wake) and
+// definition columns untouched. Those triggers belong to DisarmPlanNode
+// alone, so a lifecycle transition (model or kernel) can never write back a
+// stale arming the scheduler just cleared.
+func (s *Store) SetPlanNodeStatus(ctx context.Context, id plan.NodeID, status plan.Status, outcome, owner string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE plan_nodes
-		    SET kind=?, goal=?, check_expr=?, cmd=?, wake=?, status=?, outcome=?, assignee=?, owner=?,
-		        after_at=?, every_ns=?, next_due=?, updated_at=?
-		  WHERE id = ?`,
-		string(n.Kind), n.Goal, n.Check, n.Cmd, n.WakeOnReady, string(n.Status), n.Outcome, n.Assignee, n.Owner,
-		nanos(n.After), int64(n.Every), nanos(n.NextDue), time.Now().UnixNano(), int64(n.ID))
+		`UPDATE plan_nodes SET status=?, outcome=?, owner=?, updated_at=? WHERE id = ?`,
+		string(status), outcome, owner, time.Now().UnixNano(), int64(id))
 	if err != nil {
-		return fmt.Errorf("update plan node %d: %w", n.ID, err)
+		return fmt.Errorf("set plan node %d status: %w", id, err)
 	}
 	if rows, _ := res.RowsAffected(); rows == 0 {
-		return fmt.Errorf("update plan node %d: not found", n.ID)
+		return fmt.Errorf("set plan node %d status: not found", id)
 	}
 	return nil
+}
+
+// SetPlanNodeStatusIf is the compare-and-set form of SetPlanNodeStatus: the
+// WHERE status=? clause makes it apply only when the node is still in the
+// expected status, so two sessions racing to claim the same node cannot both
+// win. Reports whether this caller's write took effect.
+func (s *Store) SetPlanNodeStatusIf(ctx context.Context, id plan.NodeID, from, to plan.Status, outcome, owner string) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE plan_nodes SET status=?, outcome=?, owner=?, updated_at=? WHERE id=? AND status=?`,
+		string(to), outcome, owner, time.Now().UnixNano(), int64(id), string(from))
+	if err != nil {
+		return false, fmt.Errorf("set plan node %d status if: %w", id, err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("set plan node %d status if: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// ReclaimStaleKernelNodes resets to pending any kernel-owned node still active
+// past olderThan — an orphan from a host that died mid-cmd. Scoped to
+// owner='kernel' so a node a human or model session holds active is never
+// disturbed. Bumps updated_at so the reclaimed node reads as freshly pending.
+func (s *Store) ReclaimStaleKernelNodes(ctx context.Context, olderThan time.Time) (int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE plan_nodes SET status='pending', owner='', updated_at=?
+		  WHERE status='active' AND owner='kernel' AND updated_at < ?`,
+		time.Now().UnixNano(), nanos(olderThan))
+	if err != nil {
+		return 0, fmt.Errorf("reclaim stale kernel nodes: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("reclaim stale kernel nodes: %w", err)
+	}
+	return int(rows), nil
 }
 
 // OpenPlanNodes returns every node of every plan whose root is not terminal,
@@ -325,10 +368,10 @@ func (s *Store) LastHumanSeen(ctx context.Context) (time.Time, error) {
 	return fromNanos(at), nil
 }
 
-const planNodeSelect = `SELECT id, plan_id, parent_id, seq, kind, goal, check_expr, cmd, wake, status, outcome,
+const planNodeSelect = `SELECT id, plan_id, parent_id, seq, kind, goal, check_expr, cmd, notify, wake, status, outcome,
        assignee, owner, after_at, every_ns, next_due, updated_at FROM plan_nodes`
 
-const planNodeSelectN = `SELECT n.id, n.plan_id, n.parent_id, n.seq, n.kind, n.goal, n.check_expr, n.cmd, n.wake, n.status, n.outcome,
+const planNodeSelectN = `SELECT n.id, n.plan_id, n.parent_id, n.seq, n.kind, n.goal, n.check_expr, n.cmd, n.notify, n.wake, n.status, n.outcome,
        n.assignee, n.owner, n.after_at, n.every_ns, n.next_due, n.updated_at FROM plan_nodes n`
 
 type rowScanner interface{ Scan(dest ...any) error }
@@ -337,15 +380,16 @@ func scanPlanNode(r rowScanner) (plan.Node, error) {
 	var (
 		n                        plan.Node
 		id, planID, parent       int64
-		kind, status             string
+		kind, status             string // kind is vestigial; recurrence derives from every_ns
 		after, every, due, updat int64
 	)
-	if err := r.Scan(&id, &planID, &parent, &n.Seq, &kind, &n.Goal, &n.Check, &n.Cmd, &n.WakeOnReady, &status, &n.Outcome,
+	if err := r.Scan(&id, &planID, &parent, &n.Seq, &kind, &n.Goal, &n.Check, &n.Cmd, &n.Notify, &n.WakeOnReady, &status, &n.Outcome,
 		&n.Assignee, &n.Owner, &after, &every, &due, &updat); err != nil {
 		return plan.Node{}, fmt.Errorf("scan plan node: %w", err)
 	}
+	_ = kind
 	n.ID, n.Plan, n.Parent = plan.NodeID(id), plan.NodeID(planID), plan.NodeID(parent)
-	n.Kind, n.Status = plan.Kind(kind), plan.Status(status)
+	n.Status = plan.Status(status)
 	n.After, n.NextDue = fromNanos(after), fromNanos(due)
 	n.Every = time.Duration(every)
 	n.UpdatedAt = fromNanos(updat)
