@@ -209,6 +209,13 @@ func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, task,
 	// -once or piped stdio means a single turn.
 	followUps := !once && term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stderr.Fd())
 
+	cwd, _ := os.Getwd()
+	// refresh recomputes the pinned footer (the plan/schedule glance) from
+	// cheap store and on-disk reads. Called at quiet moments — session start,
+	// turn boundaries, before each prompt — so the strip stays current without
+	// a model call and without disturbing a turn in flight.
+	refresh := func() { r.setFooter(footerLines(ctx, store, cwd)) }
+
 	// deliver drains the outbox through this terminal door: claimed messages
 	// print as ambient notice lines, only ever at quiet moments (session
 	// start, turn boundaries, idle at the prompt) — never mid-stream.
@@ -229,6 +236,7 @@ func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, task,
 	}
 
 	r.header(string(conv.ID()))
+	refresh()
 	deliver()
 	if task == "" && !followUps {
 		// Piped invocation with no argv task: the pipe is the task. Consume
@@ -242,7 +250,7 @@ func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, task,
 	}
 	in := startStdinReader()
 	if task == "" {
-		first, err := readFollowUp(ctx, r, in, deliver)
+		first, err := readFollowUp(ctx, r, in, deliver, refresh)
 		if err != nil || first == "" {
 			return nil
 		}
@@ -274,11 +282,12 @@ func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, task,
 				continue
 			}
 			r.turnComplete(e.StopReason)
+			refresh()
 			deliver()
 			if !followUps {
 				return nil
 			}
-			next, err := readFollowUp(ctx, r, in, deliver)
+			next, err := readFollowUp(ctx, r, in, deliver, refresh)
 			if err != nil || next == "" {
 				return nil
 			}
@@ -343,8 +352,11 @@ const outboxPoll = 2 * time.Second
 // kills the session. While idle it polls deliver: an outbox message prints
 // as an ambient notice and the prompt redraws beneath it — the agent speaking
 // up between turns without ever owning one.
-func readFollowUp(ctx context.Context, r uiRenderer, in *stdinReader, deliver func() bool) (string, error) {
+func readFollowUp(ctx context.Context, r uiRenderer, in *stdinReader, deliver func() bool, refresh func()) (string, error) {
 	for {
+		if refresh != nil {
+			refresh() // pin a current schedule glance above each prompt
+		}
 		r.promptFollowUp()
 	wait:
 		for {
@@ -362,11 +374,14 @@ func readFollowUp(ctx context.Context, r uiRenderer, in *stdinReader, deliver fu
 				case "exit", "quit", "q":
 					return "", nil
 				default:
+					// Tear down the footer+prompt region and keep the typed
+					// line as a permanent record before the turn begins.
+					r.commitPrompt(line)
 					return line, nil
 				}
 			case <-time.After(outboxPoll):
 				if deliver != nil && deliver() {
-					break wait // redraw the prompt beneath the notice
+					break wait // redraw footer + prompt beneath the notice
 				}
 			}
 		}

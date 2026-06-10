@@ -15,24 +15,26 @@ import (
 )
 
 // liveRenderer is the TTY one-shot front-end. The permanent transcript is the
-// assistant's prose plus anything that went wrong; successful tool activity
-// only ever exists in a bounded repaintable region at the bottom — capped
-// spinner rows for running tools, a small rounded box through which recent
-// output rotates, and a running tally. When the turn completes the region
-// collapses to a single dim summary line, so a 100-tool repo crawl leaves a
-// one-line footprint instead of a scrollback full of checkmarks.
+// assistant's prose plus anything that went wrong; in-flight tool activity only
+// ever exists as a bounded repaintable region at the bottom — one spinner line
+// per kind of work in progress ("reading files", "running commands"), never the
+// tools' output. When the turn completes the region collapses to a single dim
+// tally, so a 100-tool repo crawl leaves a one-line footprint instead of a
+// scrollback full of dumps. A persistent footer (the plan/schedule glance) is
+// pinned at the bottom of the same region, so the schedule is something you
+// look at while you work rather than state reprinted at every door.
 type liveRenderer struct {
 	mu     sync.Mutex
 	prose  io.Writer // assistant text (stdout)
 	status io.Writer // live region + persistent failure lines (stderr, a TTY)
 
 	midText     bool // prose cursor is mid-line; suppress repaints until newline
-	suspended   bool // approval prompt is waiting on stdin; freeze the region
+	suspended   bool // approval/follow-up prompt owns the cursor; freeze the region
 	turnOpen    bool // a turn has emitted content and not yet been collapsed
 	atLineStart bool // next prose byte begins a fresh line (needs indent)
 
 	running []runningTool
-	box     []string // rotating tail of recent tool output
+	footer  []string // cached status strip, painted at the bottom of the region
 	live    int      // lines currently painted in the live region
 	frame   int
 	width   int
@@ -46,20 +48,18 @@ type liveRenderer struct {
 
 	md *transcript.MarkdownStyler
 
-	dim, ok, bad, tool, note, del lipgloss.Style
-	agent                         lipgloss.Style
-	boxStyle                      lipgloss.Style
+	dim, ok, bad, tool, note lipgloss.Style
+	agent                    lipgloss.Style
 }
 
 type runningTool struct {
 	id    string
-	label string
+	label string // precise label (read foo.go) for the permanent diff/error line
+	verb  string // gerund phrase (reading files) for the live spinner line
 }
 
 const (
-	liveBoxLines    = 4
-	liveSpinnerRows = 4
-	liveDiffLines   = 24
+	liveSpinnerRows = 5
 	liveTick        = 120 * time.Millisecond
 )
 
@@ -80,12 +80,7 @@ func newLiveRenderer(prose, status io.Writer, width int) *liveRenderer {
 		bad:    lr.NewStyle().Bold(true).Foreground(theme.Text).Background(theme.Deep),
 		tool:   lr.NewStyle().Foreground(theme.Accent),
 		note:   lr.NewStyle().Bold(true).Foreground(theme.Accent),
-		del:    lr.NewStyle().Foreground(theme.Muted).Strikethrough(true),
 		agent:  lr.NewStyle().Bold(true).Foreground(theme.Primary),
-		boxStyle: lr.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(theme.Deep).
-			PaddingLeft(1).PaddingRight(1),
 	}
 	r.atLineStart = true
 	go r.tick()
@@ -153,7 +148,11 @@ func (r *liveRenderer) toolStart(call core.ToolCall) {
 	r.suspended = false
 	r.agentLabel()
 	r.endProse()
-	r.running = append(r.running, runningTool{id: call.ID, label: transcript.ToolLabel(call.Name, call.Args)})
+	r.running = append(r.running, runningTool{
+		id:    call.ID,
+		label: transcript.ToolLabel(call.Name, call.Args),
+		verb:  transcript.ToolVerb(call.Name),
+	})
 	r.repaint()
 }
 
@@ -171,28 +170,32 @@ func (r *liveRenderer) toolFinish(res core.ToolResult) {
 	r.total++
 	name, _, _ := strings.Cut(label, " ")
 	r.counts[name]++
-	// Failures and edit diffs earn permanent lines — they're what went wrong
-	// and what changed. Everything else is just a tick in the tally.
+	// Two things earn a permanent line: a failure (what went wrong) and an
+	// edit (what changed, as a one-line +/- stat — never the whole diff).
+	// Everything else is just a tick in the tally that collapses at turn end.
 	if res.IsError {
 		r.fails++
 		r.persist("  " + r.bad.Render(transcript.ToolDone(label, res)))
 		return
 	}
 	if diff := transcript.DiffOf(res); diff != "" {
-		lines := append(
-			[]string{"  " + r.ok.Render(transcript.ToolDone(label, res))},
-			styledDiff(diff, liveDiffLines, r.ok, r.del, r.dim)...,
-		)
-		r.persist(lines...)
+		add, del := transcript.DiffStat(diff)
+		r.persist("  " + r.ok.Render(fmt.Sprintf("%s (+%d −%d)", transcript.ToolDone(label, res), add, del)))
 		return
 	}
-	if lines := transcript.ToolOutputPreview(label, res.Content); len(lines) > 0 {
-		r.box = append(r.box, lines...)
-		if len(r.box) > liveBoxLines {
-			r.box = r.box[len(r.box)-liveBoxLines:]
-		}
-	}
 	r.repaint()
+}
+
+// setFooter swaps the cached status strip and, if a turn is on screen, repaints
+// so the schedule glance stays current. At the prompt the next promptFollowUp
+// paints it; while typing (suspended) the cache just updates silently.
+func (r *liveRenderer) setFooter(lines []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.footer = lines
+	if r.turnOpen && !r.suspended {
+		r.repaint()
+	}
 }
 
 func (r *liveRenderer) tally() string {
@@ -222,29 +225,57 @@ func (r *liveRenderer) turnComplete(reason core.StopReason) {
 	})
 }
 
-// promptFollowUp paints the input marker and freezes repaints until the next
-// turn's events arrive (the user owns the cursor while typing).
+// promptFollowUp paints the persistent footer and the input marker as one
+// managed region (footer above, "› " at the bottom with the cursor inline) and
+// freezes repaints until the user submits. The footer is part of the erasable
+// region, so it never accumulates in scrollback — it is redrawn each prompt and
+// torn down on submit. Always called either first (nothing painted) or right
+// after the user pressed enter (cursor already below the old region), so the
+// erase is the ordinary above-the-cursor kind.
 func (r *liveRenderer) promptFollowUp() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.erase()
 	r.endProse()
 	r.suspended = true
-	_, _ = fmt.Fprint(r.status, r.note.Render("› "))
+	var b strings.Builder
+	footer := r.footerBlock()
+	for _, ln := range footer {
+		b.WriteString(ln)
+		b.WriteByte('\n')
+	}
+	b.WriteString(r.note.Render("› "))
+	r.live = len(footer) + 1 // footer lines plus the prompt line (cursor inline)
+	_, _ = io.WriteString(r.status, b.String())
 }
 
-// notice prints outbox messages as permanent ambient lines. When the cursor
-// is parked on the follow-up prompt (suspended), it first steps off that line;
-// the caller redraws the prompt beneath the notice.
-func (r *liveRenderer) notice(msgs []string) {
+// commitPrompt tears down the footer+prompt region and reprints the submitted
+// line as a permanent record, so the user's question survives in scrollback
+// while the footer does not. Called once per submitted task; the cursor is
+// below the region (the user just pressed enter), so a full above-the-cursor
+// erase is correct.
+func (r *liveRenderer) commitPrompt(text string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.erase()
-	r.endProse()
+	r.suspended = false
+	_, _ = fmt.Fprintln(r.status, r.note.Render("› ")+text)
+	r.atLineStart = true
+}
+
+// notice prints outbox messages as permanent ambient lines. When the cursor is
+// parked inline on the follow-up prompt, the region's last line holds the
+// cursor, so erase one line shallower; the caller redraws footer+prompt beneath.
+func (r *liveRenderer) notice(msgs []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.suspended {
-		_, _ = fmt.Fprintln(r.status)
+		r.clearLive(true) // cursor is inline on the prompt line
 		r.suspended = false
+	} else {
+		r.erase()
 	}
+	r.endProse()
 	for _, m := range msgs {
 		_, _ = fmt.Fprintln(r.status, r.note.Render("◇ ")+sanitizeNotice(m))
 	}
@@ -281,7 +312,6 @@ func (r *liveRenderer) finish(closing func()) {
 	}
 	r.turnOpen = false
 	r.atLineStart = true
-	r.box = nil
 	r.running = nil
 	r.counts = map[string]int{}
 	r.total = 0
@@ -300,13 +330,28 @@ func (r *liveRenderer) persist(lines ...string) {
 	r.repaint()
 }
 
-// erase removes the currently painted live region, leaving the cursor where
-// persistent output should continue.
-func (r *liveRenderer) erase() {
-	if r.live > 0 {
-		_, _ = fmt.Fprintf(r.status, "\x1b[%dA\x1b[J", r.live)
-		r.live = 0
+// erase removes the painted live region when the cursor sits on a fresh line
+// below it — the common case (after a trailing newline, or after the user
+// pressed enter at the prompt).
+func (r *liveRenderer) erase() { r.clearLive(false) }
+
+// clearLive removes the painted live region and parks the cursor at its top,
+// column 0, ready for persistent output. inline means the cursor is currently
+// on the region's last line (the idle prompt the user is typing on), so the
+// climb is one line shallower.
+func (r *liveRenderer) clearLive(inline bool) {
+	if r.live <= 0 {
+		return
 	}
+	up := r.live
+	if inline {
+		up--
+	}
+	if up > 0 {
+		_, _ = fmt.Fprintf(r.status, "\x1b[%dA", up)
+	}
+	_, _ = io.WriteString(r.status, "\r\x1b[J")
+	r.live = 0
 }
 
 // endProse terminates a mid-line prose stream so status output never runs into
@@ -323,9 +368,10 @@ func (r *liveRenderer) endProse() {
 	}
 }
 
-// repaint redraws the live region: one spinner line per running tool, then the
-// rotating output box. Painted in a single write to avoid flicker. Suppressed
-// while prose is mid-line or an approval prompt owns the cursor.
+// repaint redraws the live region: the spinner activity lines, the running
+// tally, then the pinned footer. Painted in a single write to avoid flicker.
+// Suppressed while prose is mid-line or a prompt owns the cursor (in which case
+// the cursor is inline and repaint's above-the-cursor erase would not apply).
 func (r *liveRenderer) repaint() {
 	if r.midText || r.suspended {
 		return
@@ -333,7 +379,7 @@ func (r *liveRenderer) repaint() {
 	lines := r.liveLines()
 	var b strings.Builder
 	if r.live > 0 {
-		fmt.Fprintf(&b, "\x1b[%dA\x1b[J", r.live)
+		fmt.Fprintf(&b, "\x1b[%dA\r\x1b[J", r.live)
 	}
 	for _, ln := range lines {
 		b.WriteString(ln)
@@ -343,32 +389,64 @@ func (r *liveRenderer) repaint() {
 	_, _ = io.WriteString(r.status, b.String())
 }
 
+// liveLines is the repaintable region: one spinner line per kind of work in
+// flight (grouped by verb so parallel reads read as "reading files (3)" rather
+// than a churn of paths, and never their output), the running tally, then the
+// pinned footer.
 func (r *liveRenderer) liveLines() []string {
 	var out []string
 	spin := transcript.Spinner[r.frame%len(transcript.Spinner)]
-	for i, rt := range r.running {
+	for i, g := range r.activity() {
 		if i == liveSpinnerRows {
-			out = append(out, "  "+r.dim.Render(fmt.Sprintf("… +%d more", len(r.running)-liveSpinnerRows)))
+			out = append(out, "  "+r.dim.Render("…"))
 			break
 		}
-		out = append(out, "  "+r.tool.Render(spin+" "+clip(rt.label, r.width-5)))
-	}
-	if len(r.box) > 0 {
-		w := r.width - 6
-		if w > 100 {
-			w = 100
+		label := g.verb
+		if g.n > 1 {
+			label = fmt.Sprintf("%s (%d)", g.verb, g.n)
 		}
-		var content []string
-		for _, ln := range r.box {
-			content = append(content, r.dim.Render(clip(ln, w-2)))
-		}
-		box := r.boxStyle.Width(w).Render(strings.Join(content, "\n"))
-		for _, ln := range strings.Split(box, "\n") {
-			out = append(out, "  "+ln)
-		}
+		out = append(out, "  "+r.tool.Render(spin+" "+clip(label, r.width-5)))
 	}
 	if t := r.tally(); t != "" {
 		out = append(out, "  "+r.dim.Render(clip("· "+t, r.width-3)))
+	}
+	return append(out, r.footerBlock()...)
+}
+
+type verbGroup struct {
+	verb string
+	n    int
+}
+
+// activity groups the running tools by verb, preserving first-seen order so the
+// list stays stable as parallel calls come and go.
+func (r *liveRenderer) activity() []verbGroup {
+	var groups []verbGroup
+	idx := map[string]int{}
+	for _, rt := range r.running {
+		if i, ok := idx[rt.verb]; ok {
+			groups[i].n++
+			continue
+		}
+		idx[rt.verb] = len(groups)
+		groups = append(groups, verbGroup{verb: rt.verb, n: 1})
+	}
+	return groups
+}
+
+// footerBlock styles the cached status strip with a dim rule above it. Empty
+// when there is no footer, so an empty forest pins nothing.
+func (r *liveRenderer) footerBlock() []string {
+	if len(r.footer) == 0 {
+		return nil
+	}
+	w := r.width
+	if w > 80 {
+		w = 80
+	}
+	out := []string{"  " + r.dim.Render(strings.Repeat("─", max(w-2, 1)))}
+	for _, ln := range r.footer {
+		out = append(out, r.dim.Render(clip(ln, r.width-1)))
 	}
 	return out
 }

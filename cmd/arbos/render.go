@@ -28,6 +28,8 @@ type uiRenderer interface {
 	approvalPrompt(call core.ToolCall)
 	turnComplete(reason core.StopReason)
 	promptFollowUp()
+	commitPrompt(text string)
+	setFooter(lines []string)
 	notice(msgs []string)
 	interrupted()
 	errorf(e core.ErrorEvent)
@@ -52,7 +54,6 @@ type renderer struct {
 	bad   lipgloss.Style
 	tool  lipgloss.Style
 	note  lipgloss.Style
-	del   lipgloss.Style
 	agent lipgloss.Style
 }
 
@@ -89,7 +90,6 @@ func newRenderer(out, status io.Writer) *renderer {
 		bad:         lr.NewStyle().Bold(true).Foreground(theme.Text).Background(theme.Deep),
 		tool:        lr.NewStyle().Foreground(theme.Accent),
 		note:        lr.NewStyle().Bold(true).Foreground(theme.Accent),
-		del:         lr.NewStyle().Foreground(theme.Muted).Strikethrough(true),
 		agent:       lr.NewStyle().Bold(true).Foreground(theme.Primary),
 	}
 }
@@ -118,31 +118,6 @@ func newMarkdownStyler(w io.Writer) *transcript.MarkdownStyler {
 		Bullet:  lr.NewStyle().Foreground(theme.Primary),
 		Body:    lr.NewStyle(),
 	})
-}
-
-// styledDiff renders a display diff with +/- coloring, indented under its tool
-// line. max caps the body (0 = unlimited); overflow appends a dim count line.
-func styledDiff(diff string, max int, add, del, ctx lipgloss.Style) []string {
-	lines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
-	total := len(lines)
-	if max > 0 && total > max {
-		lines = lines[:max]
-	}
-	out := make([]string, 0, len(lines)+1)
-	for _, ln := range lines {
-		switch {
-		case strings.HasPrefix(ln, "+"):
-			out = append(out, "    "+add.Render(ln))
-		case strings.HasPrefix(ln, "-"):
-			out = append(out, "    "+del.Render(ln))
-		default:
-			out = append(out, "    "+ctx.Render(ln))
-		}
-	}
-	if max > 0 && total > max {
-		out = append(out, "    "+ctx.Render(fmt.Sprintf("… (%d more lines)", total-max)))
-	}
-	return out
 }
 
 // header prints the green Arbos banner that opens a session, with the session
@@ -189,21 +164,19 @@ func (r *renderer) toolFinish(res core.ToolResult) {
 	if label == "" {
 		label = "tool"
 	}
-	line := transcript.ToolDone(label, res)
-	style := r.ok
 	if res.IsError {
-		style = r.bad
-	}
-	_, _ = fmt.Fprintln(r.status, "  "+style.Render(line))
-	if diff := transcript.DiffOf(res); diff != "" {
-		for _, ln := range styledDiff(diff, 0, r.ok, r.del, r.dim) {
-			_, _ = fmt.Fprintln(r.status, ln)
-		}
+		_, _ = fmt.Fprintln(r.status, "  "+r.bad.Render(transcript.ToolDone(label, res)))
 		return
 	}
-	for _, ln := range transcript.ToolOutputPreview(label, res.Content) {
-		_, _ = fmt.Fprintln(r.status, r.dim.Render("    "+ln))
+	// One concise line per tool — a +/- stat for edits, never the whole diff
+	// or a dump of tool output. Even redirected to a file the status stream
+	// stays a readable activity log.
+	line := transcript.ToolDone(label, res)
+	if diff := transcript.DiffOf(res); diff != "" {
+		add, del := transcript.DiffStat(diff)
+		line = fmt.Sprintf("%s (+%d −%d)", line, add, del)
 	}
+	_, _ = fmt.Fprintln(r.status, "  "+r.ok.Render(line))
 }
 
 // approvalPrompt asks whether a gated tool call may run. It returns the prompt
@@ -227,6 +200,13 @@ func (r *renderer) promptFollowUp() {
 	r.breakText()
 	_, _ = fmt.Fprint(r.status, r.note.Render("› "))
 }
+
+// commitPrompt and setFooter are live-only affordances; the static renderer is
+// used for pipes and dumb terminals (no follow-up prompt, no pinned region),
+// so both are no-ops here.
+func (r *renderer) commitPrompt(string) {}
+
+func (r *renderer) setFooter([]string) {}
 
 // notice prints outbox messages as ambient lines: the agent's voice arriving
 // between turns, dimly marked so it never reads as a turn of its own.

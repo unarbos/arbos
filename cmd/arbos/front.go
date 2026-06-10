@@ -47,6 +47,35 @@ func printBrief(ctx context.Context, store *sqlite.Store, cwd string, w io.Write
 	}
 }
 
+// footerLines builds the persistent status strip the live terminal pins
+// beneath its prompt: the plan forest's standing/timed/open glance plus a
+// count of running background jobs. Pure store and on-disk reads, like the
+// brief and handoff — never a model call — so refreshing it is instant. Nil
+// when there is nothing to show (a fresh tree pins no footer).
+func footerLines(ctx context.Context, store *sqlite.Store, cwd string) []string {
+	if store == nil {
+		return nil
+	}
+	open, err := store.OpenPlanNodes(ctx)
+	if err != nil {
+		return nil
+	}
+	lines := plan.Footer(open, time.Now())
+	if jobs := codingspec.JobsRunningCount(cwd); jobs > 0 {
+		noun := "job"
+		if jobs > 1 {
+			noun = "jobs"
+		}
+		lines = append(lines, fmt.Sprintf("  ⚙ %d running %s", jobs, noun))
+	}
+	// The footer can embed model-authored goal text; strip control bytes for
+	// the same reason the outbox and brief do.
+	for i, ln := range lines {
+		lines[i] = sanitizeNotice(ln)
+	}
+	return lines
+}
+
 // printHandoff renders what stays open as the human leaves. Read fresh: the
 // session that just ended usually changed the forest.
 func printHandoff(ctx context.Context, store *sqlite.Store, w io.Writer) {

@@ -525,6 +525,18 @@ func journalTail(dir string, max int64) string {
 // history, not a greeting — one line each: id, age, and the first line of the
 // command, clipped. Returns "" when nothing is running so the caller prints no
 // section at all.
+// JobsRunningCount reports how many background jobs are currently running under
+// root, for the interactive footer's at-a-glance status.
+func JobsRunningCount(root string) int {
+	n := 0
+	for _, j := range listJobs(jobsRoot(root)) {
+		if j.Status == JobRunning {
+			n++
+		}
+	}
+	return n
+}
+
 func JobsBrief(root string) string {
 	var lines []string
 	for _, j := range listJobs(jobsRoot(root)) {

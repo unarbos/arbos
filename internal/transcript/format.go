@@ -15,6 +15,57 @@ import (
 // Spinner is the shared animation frame set for in-flight tool activity.
 var Spinner = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
+// ToolVerb maps a tool name to a short gerund phrase for the live activity
+// line — "reading files", "running commands" — so the spinner region reads as
+// what the agent is doing rather than a churn of raw tool calls and their
+// output. Unknown tools (including MCP `server__tool` names) fall back to the
+// bare name.
+func ToolVerb(name string) string {
+	switch name {
+	case "read":
+		return "reading files"
+	case "ls":
+		return "listing files"
+	case "find":
+		return "finding files"
+	case "grep":
+		return "searching"
+	case "write":
+		return "writing files"
+	case "edit":
+		return "editing files"
+	case "bash":
+		return "running commands"
+	case "fetch":
+		return "fetching"
+	case "await":
+		return "waiting on jobs"
+	case "jobs":
+		return "checking jobs"
+	case "plan":
+		return "updating the plan"
+	case "delegate":
+		return "delegating"
+	default:
+		return name
+	}
+}
+
+// DiffStat counts added and removed lines in a display diff (lines beginning
+// with + or -), for the compact "(+a −b)" summary the renderers show in place
+// of dumping the whole diff into the terminal.
+func DiffStat(diff string) (add, del int) {
+	for _, ln := range strings.Split(diff, "\n") {
+		switch {
+		case strings.HasPrefix(ln, "+"):
+			add++
+		case strings.HasPrefix(ln, "-"):
+			del++
+		}
+	}
+	return add, del
+}
+
 // Tally renders per-tool totals, most-used first, e.g.
 // "41 tools · read 30 · ls 6 · find 5 · 2 failed". Empty when nothing ran.
 func Tally(total, fails int, counts map[string]int) string {
@@ -131,51 +182,6 @@ func DiffOf(res core.ToolResult) string {
 		return ""
 	}
 	return d.Diff
-}
-
-// ToolOutputPreview returns a short preview of exploratory tool output
-// (ls/bash/grep/find), similar to how Cursor shows raw listings before the
-// summary. Returns nil for tools whose output is not worth previewing.
-func ToolOutputPreview(label, content string) []string {
-	if !previewableTool(label) {
-		return nil
-	}
-	content = strings.TrimSpace(content)
-	if content == "" {
-		return nil
-	}
-	const maxLines = 12
-	lines := strings.Split(content, "\n")
-	var out []string
-	for _, ln := range lines {
-		ln = strings.TrimRight(ln, " ")
-		if ln == "" {
-			continue
-		}
-		out = append(out, ln)
-		if len(out) >= maxLines {
-			if len(lines) > maxLines {
-				out = append(out, fmt.Sprintf("… (%d more lines)", len(lines)-maxLines))
-			}
-			break
-		}
-	}
-	return out
-}
-
-func previewableTool(label string) bool {
-	switch {
-	case label == "ls", strings.HasPrefix(label, "ls "):
-		return true
-	case strings.HasPrefix(label, "bash "):
-		return true
-	case strings.HasPrefix(label, "grep "):
-		return true
-	case strings.HasPrefix(label, "find "):
-		return true
-	default:
-		return false
-	}
 }
 
 func truncate(s string, n int) string {
