@@ -59,6 +59,9 @@ type Store interface {
 	AtomCheckpoint(ctx context.Context, sid core.SessionID) (int64, error)
 	CommitCuration(ctx context.Context, sid core.SessionID, set []core.Atom, forget []string, newSeq int64) error
 	Events(ctx context.Context, sid core.SessionID) ([]core.Event, error)
+	// AddAtom writes one atom the agent chose to remember — the explicit
+	// write the remember tool drives, complementing background curation.
+	AddAtom(ctx context.Context, content string) error
 }
 
 // Mind owns recall and a single background curation worker. It is safe to share
@@ -136,6 +139,17 @@ func (m *Mind) Recall(ctx context.Context, sid core.SessionID) ([]core.Segment, 
 		return nil, nil
 	}
 	return []core.Segment{{Source: recallSource, Content: content}}, nil
+}
+
+// Remember writes one atom the agent deliberately chose to keep — the explicit
+// write half of memory, symmetric with Recall's read. It is synchronous and
+// durable (unlike Curate, which is best-effort background distillation): when
+// the agent is told "remember X" or learns a durable fact, this persists it
+// now rather than hoping the curator catches it. Available from any session,
+// any depth — atoms are one global set, so a subagent's remembered fact is the
+// agent's knowledge everywhere.
+func (m *Mind) Remember(ctx context.Context, content string) error {
+	return m.store.AddAtom(ctx, content)
 }
 
 // Curate is the turn-end curation hook (engine.WithTurnEnd). It enqueues the

@@ -34,6 +34,30 @@ func TestSQLiteStoreContract(t *testing.T) {
 	})
 }
 
+// TestAddAtomThenRecall proves the explicit memory write (the remember tool's
+// store call) lands and is findable by recall — the read/write symmetry the
+// agent needs to deliberately use memory.
+func TestAddAtomThenRecall(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	if err := s.AddAtom(ctx, "the user's name is Const"); err != nil {
+		t.Fatalf("add atom: %v", err)
+	}
+	hits, err := s.RecallAtoms(ctx, "Const", 5)
+	if err != nil {
+		t.Fatalf("recall: %v", err)
+	}
+	found := false
+	for _, a := range hits {
+		if a.Content == "the user's name is Const" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("remembered atom not recalled; got %d hits: %+v", len(hits), hits)
+	}
+}
+
 // TestPersistsAcrossReopen proves durability: events written by one handle are
 // readable after closing and reopening the same file — the property the
 // in-memory fake cannot have and the reason the SQLite store exists.

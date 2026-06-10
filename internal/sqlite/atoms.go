@@ -2,9 +2,12 @@ package sqlite
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/unarbos/arbos/internal/core"
@@ -65,6 +68,33 @@ func (s *Store) AtomCheckpoint(ctx context.Context, sid core.SessionID) (int64, 
 		return -1, fmt.Errorf("atom checkpoint: %w", err)
 	}
 	return seq, nil
+}
+
+// AddAtom writes one atom the agent chose to remember — the explicit,
+// deliberate write that complements background curation. It assigns a fresh id
+// (curation may later merge it with similar atoms by content); the agent need
+// not manage ids. Insert + FTS index in one statement pair, under the write
+// lock, like CommitCuration's per-atom write.
+func (s *Store) AddAtom(ctx context.Context, content string) error {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return fmt.Errorf("add atom: empty content")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	id := "mem-" + hex.EncodeToString(b[:])
+	now := time.Now().UnixNano()
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO atoms (id, content, updated_at) VALUES (?, ?, ?)`, id, content, now); err != nil {
+		return fmt.Errorf("add atom: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO atoms_fts (content, atom_id) VALUES (?, ?)`, content, id); err != nil {
+		return fmt.Errorf("add atom: fts: %w", err)
+	}
+	return nil
 }
 
 // CommitCuration applies one curation pass atomically: upsert each set atom,

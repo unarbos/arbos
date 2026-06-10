@@ -116,13 +116,34 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		piOpts.Outbox = os
 	}
 
+	// Long-term memory, when the durable store backs atoms (SQLite, not the
+	// in-memory fake) and a real LLM can curate. Set on piOpts — BEFORE
+	// pi.Register — so every session, including delegated children, gets recall
+	// (read) and the remember tool (write): atoms are one global set, "learn
+	// once, remember everywhere". Background curation is gated separately
+	// (CurateMemory, top only) so a subordinate child's transcript isn't
+	// distilled — its value returns up to the parent that curates.
+	var theMind *mind.Mind
+	if as, ok := cfg.Store.(mind.Store); ok && cfg.Config.HasLLM {
+		// The curator runs on the same distill model as the compaction
+		// summarizer: one tier for everything the agent does in the background.
+		theMind = mind.New(as, piOpts.Provider, piOpts.DistillerModel(), cfg.Logger)
+		piOpts.Mind = theMind
+	}
+
 	router := agent.NewRouter()
 	if err := pi.Register(router, piOpts, NewSessionID); err != nil {
+		if theMind != nil {
+			theMind.Close()
+		}
 		mcpMgr.Close()
 		return nil, fmt.Errorf("register pi: %w", err)
 	}
 	delegation := tool.New()
 	if err := agent.RegisterDelegate(delegation, router, codingReadOnlyTools()); err != nil {
+		if theMind != nil {
+			theMind.Close()
+		}
 		mcpMgr.Close()
 		return nil, fmt.Errorf("register delegate: %w", err)
 	}
@@ -131,19 +152,9 @@ func Assemble(cfg HostConfig) (*Host, error) {
 	topOpts.NewStore = func() ports.SessionStore { return cfg.Store }
 	topOpts.Observer = cfg.Observer
 	topOpts.ExtraTools = delegation
-
-	// Long-term memory: only when the durable store backs atoms (SQLite, not the
-	// in-memory fake) and a real LLM is configured to curate. Attached to the
-	// top-level engine only; delegated children share the same global atoms
-	// through it. The same DB across every session is what makes this one agent
-	// that learns everywhere.
-	var theMind *mind.Mind
-	if as, ok := cfg.Store.(mind.Store); ok && cfg.Config.HasLLM {
-		// The curator runs on the same distill model as the compaction
-		// summarizer: one tier for everything the agent does in the background.
-		theMind = mind.New(as, piOpts.Provider, piOpts.DistillerModel(), cfg.Logger)
-		topOpts.Mind = theMind
-	}
+	// Curation is the self's job — the top engine (and the scheduler wakes that
+	// reuse it). Children recall and remember but do not curate.
+	topOpts.CurateMemory = theMind != nil
 
 	eng, err := pi.NewEngine(topOpts)
 	if err != nil {

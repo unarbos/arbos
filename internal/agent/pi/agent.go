@@ -43,11 +43,16 @@ type Options struct {
 	Approval      ports.ApprovalPolicy
 	Observer      ports.Observer
 	MaxIterations int
-	// Mind, when set, is the agent's long-term memory: it recalls relevant atoms
-	// at turn start and curates the finished turn into atoms at turn end. Attach
-	// it only to the top-level session — delegated children share the same global
-	// atoms through it, so they need no Mind of their own.
+	// Mind, when set, is the agent's long-term memory: recall (read) is injected
+	// at turn start and the remember tool (write) is offered, for every session
+	// including delegated children — atoms are one global set. Curation
+	// (background distillation) is gated separately by CurateMemory so it runs
+	// only at the self; children contribute knowledge by returning results up
+	// to the parent that curates, plus any explicit remember calls.
 	Mind *mind.Mind
+	// CurateMemory enables the turn-end background curation hook. Set only on
+	// the top engine (the self), not on delegated children.
+	CurateMemory bool
 	// Plan, when set, is the agent's durable intent (internal/plan): the plan
 	// tool joins the toolset and the forest is injected at each turn start.
 	// Unlike Mind it threads into delegated children too — the forest is
@@ -117,6 +122,14 @@ func (o Options) buildForRoot(root string) (engine.Config, ports.ToolRuntime, er
 		}
 		infos = append(infos, outbox.PromptInfo())
 	}
+	if o.Mind != nil {
+		// The explicit write half of memory — universal across sessions
+		// (atoms are one global set), so a delegated child can remember too.
+		if err := mind.RegisterRememberTool(extras, o.Mind); err != nil {
+			return engine.Config{}, nil, err
+		}
+		infos = append(infos, mind.RememberPromptInfo())
+	}
 	if len(extras.Schemas()) > 0 {
 		rt = tool.Multi(reg, extras)
 	}
@@ -152,8 +165,16 @@ func (o Options) engineOptions(root string) []engine.Option {
 	summ := Summarizer{Provider: o.Provider, Model: o.DistillerModel()}
 	opts := []engine.Option{engine.WithContextPolicy(policy, summ)}
 	if o.Mind != nil {
-		// Recall at turn start, curate at turn end — the symmetric memory seam.
-		opts = append(opts, engine.WithContextInjector(o.Mind.Recall), engine.WithTurnEnd(o.Mind.Curate))
+		// Recall (read) is universal — every session, any depth, reads the one
+		// global atom set. Curation (background distillation of the transcript)
+		// runs only at the self (CurateMemory, set on the top engine): a
+		// subordinate child's value returns up to its parent, which curates the
+		// integrated work, so per-child curation would only add noise. The
+		// explicit write (the remember tool) is universal regardless.
+		opts = append(opts, engine.WithContextInjector(o.Mind.Recall))
+		if o.CurateMemory {
+			opts = append(opts, engine.WithTurnEnd(o.Mind.Curate))
+		}
 	}
 	if o.Plan != nil {
 		opts = append(opts, engine.WithContextInjector(plan.Injector(o.Plan)))
