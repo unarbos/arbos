@@ -44,6 +44,10 @@ type Server struct {
 	// KillJob stops a background job by id (the UI's ✕ on a running job).
 	// Wired by the host to the workspace's job table; nil disables the route.
 	KillJob func(id string) error
+	// FindJob resolves a background job by id for the terminal tab's tail
+	// poll (status + journal). Wired by the host like KillJob; nil disables
+	// the route.
+	FindJob func(id string) (JobSnapshot, error)
 	// Voice captures speech from the host machine's microphone and transcribes
 	// it on the host (the composer's mic button). Wired by the host to the
 	// local mic + transcriber; nil disables the voice routes.
@@ -66,6 +70,11 @@ type Server struct {
 
 	mu      sync.Mutex
 	clients map[*wsLineWriter]bool
+
+	// terms owns the interactive shells this gateway has spawned (the
+	// browser's terminal tabs). Process-local on purpose: a shell is live
+	// conversational state, not a durable artifact like a job.
+	terms termHost
 }
 
 // VoiceRecorder captures speech from the host machine's microphone and
@@ -202,6 +211,16 @@ func (s *Server) Handler() http.Handler {
 	if s.KillJob != nil {
 		mux.HandleFunc("POST /api/jobs/{id}/kill", sameOrigin(s.handleKillJob))
 	}
+	if s.FindJob != nil {
+		// Same-origin even though it's a GET: it reads job journals (process
+		// output), which a drive-by page must not be able to probe.
+		mux.HandleFunc("GET /api/jobs/{id}/tail", sameOrigin(s.handleJobTail))
+	}
+	if s.Root != "" {
+		mux.HandleFunc("POST /api/terminals", sameOrigin(s.handleTermCreate))
+		mux.HandleFunc("DELETE /api/terminals/{id}", sameOrigin(s.handleTermClose))
+		mux.HandleFunc("GET /api/terminals/{id}/ws", s.handleTermWS)
+	}
 	if s.Voice != nil {
 		mux.HandleFunc("POST /api/voice/start", sameOrigin(s.handleVoiceStart))
 		mux.HandleFunc("POST /api/voice/stop", sameOrigin(s.handleVoiceStop))
@@ -214,6 +233,7 @@ func (s *Server) Handler() http.Handler {
 		// Same-origin even though these are GETs: they read workspace files,
 		// which a drive-by page must not be able to embed or probe.
 		mux.HandleFunc("GET /api/file", sameOrigin(s.handleFile))
+		mux.HandleFunc("PUT /api/file", sameOrigin(s.handleFileWrite))
 		mux.HandleFunc("GET /raw/{path...}", sameOrigin(s.handleRaw))
 	}
 	if s.Dist != nil {
@@ -334,10 +354,13 @@ func (s *Server) handleStopRun(w http.ResponseWriter, r *http.Request) {
 // CommandInfo is one slash command the composer's popup can offer: the name
 // the user types after "/", a one-line description, and an argument hint.
 // Expansion stays server-side (the seam's expand hook); this is discovery only.
+// Path is the template's source file (workspace-relative when under the root),
+// so the popup's edit affordance can open it in a prompt-editor panel.
 type CommandInfo struct {
 	Name         string `json:"name"`
 	Description  string `json:"description,omitempty"`
 	ArgumentHint string `json:"argument_hint,omitempty"`
+	Path         string `json:"path,omitempty"`
 }
 
 // handleCommands lists the slash commands for the composer's popup. The list

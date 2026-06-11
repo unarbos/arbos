@@ -2,6 +2,7 @@ package codingspec
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -39,17 +40,24 @@ type BashArgs struct {
 // strings, tail truncation); past it the command keeps running and the model
 // gets a job id for await/jobs. Not read-only. Unix process-group semantics.
 func bashSpec(root string, jobs *jobSupervisor, cp *checkpointer) tool.Spec {
-	return tool.NewSpec("bash",
+	return tool.NewRichSpec("bash",
 		fmt.Sprintf("Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last %d lines or %dKB (whichever is hit first); the full output is always kept in a log file. A command still running after `wait` seconds (default %d) continues as a background job — check it with await or jobs. Use background:true for dev servers and other long-lived processes.", DefaultMaxLines, DefaultMaxBytes/1024, DefaultBashWaitSec),
 		false,
-		func(ctx context.Context, a BashArgs) (string, error) {
+		func(ctx context.Context, a BashArgs) (tool.Result, error) {
 			// A shell command can mutate the tree arbitrarily, so create a
 			// restore point before it runs — undo then covers bash-driven changes.
 			cp.ensure(ctx)
 			job, done, killIfRunning, err := jobs.spawn(a.Command)
 			if err != nil {
-				return "", err
+				return tool.Result{}, err
 			}
+			// The renderer-facing job reference (ToolResult.Details, the same
+			// channel show uses for surfaces): the web UI opens the card as a
+			// live terminal tab tailing the job's journal. The model never
+			// sees it.
+			details, _ := json.Marshal(struct {
+				Job string `json:"job"`
+			}{job.ID})
 
 			var timedOut atomic.Bool
 			if a.Timeout > 0 {
@@ -86,7 +94,10 @@ func bashSpec(root string, jobs *jobSupervisor, cp *checkpointer) tool.Spec {
 			// A job still running when the wait expires is backgrounded; if it
 			// completed in that same instant, fall through and report it.
 			if waitExpired && jobs.markBackgrounded(job.ID, done) {
-				return jobs.withNotices(backgroundReport(jobs, job, a.Background)), nil
+				return tool.Result{
+					Content: jobs.withNotices(backgroundReport(jobs, job, a.Background)),
+					Details: details,
+				}, nil
 			}
 
 			output, skipped := jobs.readNew(job.ID, job.JournalPath())
@@ -94,19 +105,22 @@ func bashSpec(root string, jobs *jobSupervisor, cp *checkpointer) tool.Spec {
 			noDefault := formatBashOutput(output, "", job.JournalPath(), skipped)
 
 			if aborted {
-				return "", fmt.Errorf("%s", appendStatus(noDefault, "Command aborted"))
+				return tool.Result{}, fmt.Errorf("%s", appendStatus(noDefault, "Command aborted"))
 			}
 			if timedOut.Load() {
-				return "", fmt.Errorf("%s", appendStatus(noDefault, fmt.Sprintf("Command timed out after %d seconds", a.Timeout)))
+				return tool.Result{}, fmt.Errorf("%s", appendStatus(noDefault, fmt.Sprintf("Command timed out after %d seconds", a.Timeout)))
 			}
 			info, err := jobs.lookup(job.ID)
 			if err != nil || info.Status != JobExited {
-				return "", fmt.Errorf("%s", appendStatus(noDefault, "Command was killed before completing"))
+				return tool.Result{}, fmt.Errorf("%s", appendStatus(noDefault, "Command was killed before completing"))
 			}
 			if info.ExitCode != 0 {
-				return "", fmt.Errorf("%s", appendStatus(withDefault, fmt.Sprintf("Command exited with code %d", info.ExitCode)))
+				return tool.Result{}, fmt.Errorf("%s", appendStatus(withDefault, fmt.Sprintf("Command exited with code %d", info.ExitCode)))
 			}
-			return jobs.withNotices(withDefault, job.ID), nil
+			return tool.Result{
+				Content: jobs.withNotices(withDefault, job.ID),
+				Details: details,
+			}, nil
 		})
 }
 

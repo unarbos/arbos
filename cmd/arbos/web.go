@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/unarbos/arbos/internal/agent/pi"
@@ -55,6 +57,22 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist string, approve bool) error {
 		KillJob: func(id string) error {
 			_, err := codingspec.KillJob(cwd, id)
 			return err
+		},
+		// The terminal tab's tail poll: a job derived from the same on-disk
+		// dirs the tools use, mapped to the gateway's snapshot shape.
+		FindJob: func(id string) (gateway.JobSnapshot, error) {
+			j, err := codingspec.FindJob(cwd, id)
+			if err != nil {
+				return gateway.JobSnapshot{}, err
+			}
+			return gateway.JobSnapshot{
+				ID:          j.ID,
+				Command:     j.Meta.Command,
+				Cwd:         j.Meta.Cwd,
+				Status:      string(j.Status),
+				ExitCode:    j.ExitCode,
+				JournalPath: j.JournalPath(),
+			}, nil
 		},
 		// The composer's mic button: capture + transcribe from this machine's
 		// own microphone, on-device.
@@ -105,10 +123,17 @@ func slashCommands(cwd string) []gateway.CommandInfo {
 	ts := pi.LoadPromptTemplates(cwd, piwire.AgentConfigDir())
 	out := make([]gateway.CommandInfo, 0, len(ts))
 	for _, t := range ts {
+		// Workspace-relative when under the root (show's normalization), so
+		// the editor panel and a doc surface for the same file share a tab.
+		path := t.Path
+		if rel, err := filepath.Rel(cwd, t.Path); err == nil && !strings.HasPrefix(rel, "..") {
+			path = rel
+		}
 		out = append(out, gateway.CommandInfo{
 			Name:         t.Name,
 			Description:  t.Description,
 			ArgumentHint: t.ArgumentHint,
+			Path:         path,
 		})
 	}
 	return out

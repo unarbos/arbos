@@ -11,12 +11,13 @@ import {
 
 import { ApprovalCard } from "./ApprovalCard";
 import { BackgroundBar } from "./BackgroundBar";
+import { QuestionCard, type QuestionCardHandle } from "./QuestionCard";
 import { ChatView } from "./ChatView";
-import { ChildPanel } from "./ChildPanel";
 import { CommandMenu } from "./CommandMenu";
 import { ContextCircle } from "./ContextCircle";
 import { ModelPicker } from "./ModelPicker";
 import { QueuedMessages, type QueuedMessage } from "./QueuedMessages";
+import type { RunRef } from "./RunView";
 import {
   cancelPlanNode,
   fetchChildren,
@@ -26,13 +27,15 @@ import {
   startVoice,
   stopRun,
   stopVoice,
+  writeFile,
   type ChildRun,
   type ModelOption,
 } from "@/lib/api";
 import { useSlashCommands } from "@/lib/useSlashCommands";
 import { SeamClient, type ConnectionState } from "@/lib/seam";
-import { detailsSurface, type Surface } from "@/lib/surface";
-import type { ContentBlock } from "@/lib/types";
+import { detailsSurface, promptSurface, type Surface } from "@/lib/surface";
+import type { TermRef } from "@/lib/term";
+import type { ContentBlock, QuestionAnswer } from "@/lib/types";
 import { useAutosize } from "@/lib/useAutosize";
 import {
   chatReducer,
@@ -46,18 +49,22 @@ const REBIND_MS = 1000;
 const REBIND_MAX = 5;
 const COMPOSER_MAX_PX = 200;
 const RUNS_POLL_MS = 5000;
-const RUN_REPLAY_POLL_MS = 2000;
 // An edit mid-turn: the interrupt needs a beat to wind the engine down before
 // the fork lands; retry on "fork: busy" until it does (or give up).
 const FORK_RETRY_MS = 250;
 const FORK_RETRY_MAX = 8;
-/** Cap per-file text folded into a prompt so an attach never blows the turn. */
-const ATTACH_MAX_CHARS = 100_000;
+/** Cap per attached file so a spool never PUTs an unbounded blob (matches the
+ *  gateway's 2 MiB /api/file read cap — anything bigger truncates anyway). */
+const ATTACH_MAX_CHARS = 2_000_000;
+/** Where attached files spool in the workspace (gitignored). */
+const ATTACH_DIR = ".arbos/attachments";
 
 /**
- * A file picked into the composer. Text files fold their contents into the
- * prompt as fenced blocks; images ride along as base64 multimodal parts the
- * seam carries to a vision model (ADR-0022).
+ * A file picked into the composer. Text files spool to the workspace on send
+ * and the prompt carries a one-line path reference (the agent reads the file
+ * with its own tools; the transcript renders the line as an openable chip).
+ * Images ride along as base64 multimodal parts the seam carries to a vision
+ * model (ADR-0022).
  */
 interface Attachment {
   aid: number;
@@ -72,21 +79,43 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** A spooled file's destination: a short unique prefix keeps re-attaches of
+ *  the same name apart while the original name stays readable in the path. */
+function attachmentPath(name: string): string {
+  const safe = name.replace(/[^\w.-]+/g, "_");
+  return `${ATTACH_DIR}/${Date.now().toString(36)}-${safe}`;
+}
+
 /**
- * Fold text attachments into the prompt the seam carries: each file as a fenced
- * block under its name, then the typed message. Images are not folded — they go
- * as parts. Empty pieces drop out, so an image-only send still works.
+ * Spool the composer's text attachments to the workspace through the
+ * gateway's file door and return one reference line per file. The line is
+ * the whole contract: the model reads the path with its own tools, and the
+ * transcript parses it back into a chip that opens the file in a panel
+ * (ChatView's splitAttachments) — which is why its shape must not drift.
+ */
+async function spoolAttachments(attachments: Attachment[]): Promise<string[]> {
+  return Promise.all(
+    attachments
+      .filter((a) => a.kind === "text")
+      .map(async (a) => {
+        const saved = await writeFile(attachmentPath(a.name), a.text ?? "");
+        return `Attached file "${a.name}": \`${saved.path}\``;
+      }),
+  );
+}
+
+/**
+ * Compose the prompt the seam carries: the attachments' reference lines, then
+ * the typed message. Images are not folded — they go as parts. Empty pieces
+ * drop out, so an image-only send still works.
  *
  * A slash command must stay at position 0 — the engine's template expansion
  * keys on the leading "/" — so for `/cmd …` the typed text leads and the
  * attachments follow (folding into the command's arguments).
  */
-function composeMessage(text: string, attachments: Attachment[]): string {
+function composeMessage(text: string, fileLines: string[]): string {
   const typed = text.trim();
-  const files = attachments
-    .filter((a) => a.kind === "text")
-    .map((a) => `Attached file \`${a.name}\`:\n\n\`\`\`\n${a.text ?? ""}\n\`\`\``);
-  const pieces = typed.startsWith("/") ? [typed, ...files] : [...files, typed];
+  const pieces = typed.startsWith("/") ? [typed, ...fileLines] : [...fileLines, typed];
   return pieces.filter(Boolean).join("\n\n");
 }
 
@@ -109,6 +138,12 @@ export interface ChatTabHandle {
   onSession?: (id: string) => void;
   /** The agent (or a chip click) opened a surface — show it beside the chat. */
   onOpenSurface?: (surface: Surface) => void;
+  /** A sub-agent run was clicked — open its transcript in a tab beside the
+   *  chat, where a long-running run stays watchable. */
+  onOpenRun?: (run: RunRef) => void;
+  /** A terminal card (or background-bar job) was expanded — open it as a
+   *  terminal tab tailing the job's live journal. */
+  onOpenTerminal?: (term: TermRef) => void;
 }
 
 /**
@@ -140,12 +175,9 @@ export function ChatTab({
   const [chat, dispatch] = useReducer(chatReducer, initialChatState);
   const [connState, setConnState] = useState<ConnectionState>("idle");
   const [text, setText] = useState("");
-  // Sub-agent windows: which child is open, the chat's scheduled runs (plan
-  // node firings, from the gateway), and a polled replay for a child whose
-  // events never relayed live (a scheduled wake).
-  const [openChild, setOpenChild] = useState<{ session: string; label: string } | null>(null);
+  // The chat's scheduled runs (plan node firings, from the gateway), for the
+  // background bar's rows; clicking one opens it in a run tab beside us.
   const [runs, setRuns] = useState<ChildRun[]>([]);
-  const [childReplay, setChildReplay] = useState<TranscriptItem[]>([]);
   const [boundSession, setBoundSession] = useState<string | null>(resumeId);
   // Messages composed while a turn runs wait here (Cursor's queue): each can
   // be edited back into the composer, deleted, or pushed (sent now as a
@@ -166,8 +198,9 @@ export function ChatTab({
     parts: ContentBlock[];
     retries: number;
   } | null>(null);
-  // Files picked into the composer (paperclip): their text folds into the next
-  // prompt and the chips clear once it's sent.
+  // Files picked into the composer (paperclip): text files spool to the
+  // workspace on send (the prompt carries path references) and the chips
+  // clear once it's sent.
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const aidRef = useRef(1);
   // The active model, shown in the composer's picker. Seeds from the host's
@@ -380,35 +413,10 @@ export function ChatTab({
     };
   }, [active, boundSession]);
 
-  // A live (relayed) child renders straight from the reducer's children map;
-  // a scheduled wake never relayed, so its transcript is fetched — and
-  // re-fetched while the run is active, which is what makes the panel "live".
-  const liveChild = openChild ? chat.children[openChild.session] : undefined;
-  const openRun = openChild
-    ? runs.find((r) => r.id === openChild.session)
-    : undefined;
-  useEffect(() => {
-    if (!openChild || liveChild) return;
-    let stop = false;
-    const load = () => {
-      fetchReplay(openChild.session)
-        .then((events) => {
-          if (!stop) setChildReplay(replayToItems(events));
-        })
-        .catch(() => {});
-    };
-    load();
-    if (!openRun?.active) return () => { stop = true; };
-    const id = window.setInterval(load, RUN_REPLAY_POLL_MS);
-    return () => {
-      stop = true;
-      window.clearInterval(id);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openChild?.session, liveChild != null, openRun?.active]);
-
   const connected = connState === "open";
   const approval = chat.pendingApproval;
+  const questions = chat.pendingQuestions;
+  const questionRef = useRef<QuestionCardHandle>(null);
 
   const onPickFiles = useCallback((files: FileList | null) => {
     if (!files) return;
@@ -432,7 +440,7 @@ export function ChatTab({
         };
         reader.readAsDataURL(file);
       } else {
-        // Everything else is read as text and folded into the prompt.
+        // Everything else is read as text now and spooled to disk on send.
         file
           .text()
           .then((content) =>
@@ -517,31 +525,53 @@ export function ChatTab({
   }, [voice]);
 
   // The slash-command menu (Cursor's popup over the host's prompt templates).
+  // Editing or creating a command opens its template file in a prompt-editor
+  // panel beside the chat (the same panel mechanics as show).
   const focusComposer = useCallback(() => taRef.current?.focus(), []);
-  const slash = useSlashCommands(text, setText, focusComposer);
+  const openPrompt = useCallback((name: string, path?: string) => {
+    handleRef.current.onOpenSurface?.(promptSurface(name, path));
+  }, []);
+  const slash = useSlashCommands(text, setText, focusComposer, openPrompt);
 
-  const submit = useCallback(() => {
-    const body = composeMessage(text, attachments);
-    const parts = imageParts(attachments);
-    if ((!body && parts.length === 0) || !seamRef.current) return;
-    const echo = body || attachments.map((a) => a.name).join(", ") || "(attachment)";
-    // Enter while a turn runs queues the message (Cursor's rule); the queue
-    // flushes at turn end. Enter while idle starts a turn.
-    if (chat.turnActive) {
-      setQueue((q) => [...q, { qid: qidRef.current++, text: body, parts }]);
-      setText("");
-      setAttachments([]);
-      return;
-    }
-    if (seamRef.current.prompt(body, parts)) {
-      if (chat.items.length === 0) {
-        handleRef.current.onTitle?.(text.trim() || attachments[0]?.name || echo);
+  // Sends overlap only through the spool await; the guard keeps a double
+  // Enter from spooling (and sending) the same attachments twice.
+  const sendingRef = useRef(false);
+  const submit = useCallback(async () => {
+    if (sendingRef.current || !seamRef.current) return;
+    if (!text.trim() && attachments.length === 0) return;
+    sendingRef.current = true;
+    try {
+      let fileLines: string[];
+      try {
+        fileLines = await spoolAttachments(attachments);
+      } catch (e) {
+        dispatch({ type: "seam-error", message: `attach: ${errMsg(e)}` });
+        return;
       }
-      dispatch({ type: "user", text: body, parts });
-      setText("");
-      setAttachments([]);
+      const body = composeMessage(text, fileLines);
+      const parts = imageParts(attachments);
+      if (!body && parts.length === 0) return;
+      const echo = body || attachments.map((a) => a.name).join(", ") || "(attachment)";
+      // Enter while a turn runs queues the message (Cursor's rule); the queue
+      // flushes at turn end. Enter while idle starts a turn.
+      if (turnActiveRef.current) {
+        setQueue((q) => [...q, { qid: qidRef.current++, text: body, parts }]);
+        setText("");
+        setAttachments([]);
+        return;
+      }
+      if (seamRef.current.prompt(body, parts)) {
+        if (chat.items.length === 0) {
+          handleRef.current.onTitle?.(text.trim() || attachments[0]?.name || echo);
+        }
+        dispatch({ type: "user", text: body, parts });
+        setText("");
+        setAttachments([]);
+      }
+    } finally {
+      sendingRef.current = false;
     }
-  }, [text, attachments, chat.turnActive, chat.items.length]);
+  }, [text, attachments, chat.items.length]);
 
   // Flush the queue head when the turn ends: sending dispatches a user item
   // and re-arms turnActive, so exactly one queued message runs per turn.
@@ -658,10 +688,58 @@ export function ChatTab({
     [approval],
   );
 
+  // Answer (or skip) the ask tool's pending form. The composer's text rides
+  // along as "Add more optional details" and clears once delivered; a skip
+  // keeps whatever was typed.
+  const answerQuestions = useCallback(
+    (answers: QuestionAnswer[], skipped: boolean) => {
+      if (!questions) return;
+      const details = skipped ? "" : text.trim();
+      if (
+        seamRef.current?.answerQuestions(
+          questions.requestId,
+          answers,
+          details,
+          skipped,
+        )
+      ) {
+        dispatch({ type: "questions-answered" });
+        if (!skipped) setText("");
+      }
+    },
+    [questions, text],
+  );
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // The command menu owns navigation keys while it is open (Enter on a
     // fully typed command falls through and sends it).
     if (slash.handleKey(e)) return;
+    // A pending question form owns the keyboard (Cursor's panel): Enter
+    // continues (composer text becomes the optional details), Esc skips, and
+    // with an empty composer a bare letter toggles that option.
+    if (questions) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        questionRef.current?.skip();
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        questionRef.current?.submit();
+        return;
+      }
+      if (
+        text === "" &&
+        /^[a-zA-Z]$/.test(e.key) &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        questionRef.current?.press(e.key)
+      ) {
+        e.preventDefault();
+        return;
+      }
+    }
     if (approval && text === "") {
       if (e.key === "y" || e.key === "Y") {
         e.preventDefault();
@@ -676,7 +754,7 @@ export function ChatTab({
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      submit();
+      void submit();
     }
     if (e.key === "Escape" && chat.turnActive) {
       e.preventDefault();
@@ -686,9 +764,11 @@ export function ChatTab({
 
   const placeholder = !connected
     ? "connecting…"
-    : chat.turnActive
-      ? "queue a follow-up (enter) · stop (esc)"
-      : "Plan, build, ask anything";
+    : questions
+      ? "Add more optional details"
+      : chat.turnActive
+        ? "queue a follow-up (enter) · stop (esc)"
+        : "Plan, build, ask anything";
 
   // A brand-new tab opens Cursor-style: the composer sits at the top of the
   // empty page, then drops to the bottom the instant the first transcript
@@ -696,33 +776,16 @@ export function ChatTab({
   // fresh — their history is already on its way.
   const fresh = !resumeId && chat.items.length === 0;
 
-  // A sub-agent opened from the transcript takes over the tab — the child's
-  // chat renders as a normal full-width panel (back header, same transcript
-  // column), not a side sheet. Esc / back returns to the parent.
-  if (openChild) {
-    return (
-      <div className={active ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-        <ChildPanel
-          title={openChild.label}
-          items={liveChild ? liveChild.items : childReplay}
-          running={liveChild ? liveChild.turnActive : (openRun?.active ?? false)}
-          onClose={() => setOpenChild(null)}
-        />
-      </div>
-    );
-  }
-
   return (
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       <ChatView
         items={chat.items}
         hooks={{
           children: chat.children,
-          onOpenChild: (session, label) => {
-            setChildReplay([]);
-            setOpenChild({ session, label });
-          },
+          onOpenChild: (session, label) =>
+            handleRef.current.onOpenRun?.({ session, label }),
           onOpenSurface: (surface) => handleRef.current.onOpenSurface?.(surface),
+          onOpenTerminal: (term) => handleRef.current.onOpenTerminal?.(term),
           edit: {
             editingId,
             canEdit: connected,
@@ -740,13 +803,19 @@ export function ChatTab({
               jobs={chat.jobs}
               scheduled={chat.scheduled}
               runs={runs}
-              onOpenRun={(r) => {
-                setChildReplay([]);
-                setOpenChild({
+              onOpenRun={(r) =>
+                handleRef.current.onOpenRun?.({
                   session: r.id,
                   label: r.node ? `Scheduled run · node #${r.node}` : "Scheduled run",
-                });
-              }}
+                })
+              }
+              onOpenJob={(j) =>
+                handleRef.current.onOpenTerminal?.({
+                  kind: "job",
+                  job: j.id,
+                  command: j.command,
+                })
+              }
               onKillJob={(id) => {
                 killJob(id)
                   .then(() => dispatch({ type: "job-removed", id }))
@@ -785,6 +854,14 @@ export function ChatTab({
           {approval && (
             <ApprovalCard approval={approval} onAnswer={answerApproval} />
           )}
+          {questions && (
+            <QuestionCard
+              key={questions.requestId}
+              request={questions}
+              onAnswer={answerQuestions}
+              handleRef={questionRef}
+            />
+          )}
 
           <div className="relative rounded-[10px] border border-line bg-panel transition-colors focus-within:border-line/0 focus-within:ring-1 focus-within:ring-accent/40">
             {slash.open && (
@@ -792,8 +869,11 @@ export function ChatTab({
                 commands={slash.matches}
                 highlight={slash.highlight}
                 below={fresh}
+                createName={slash.createName}
                 onHover={slash.setHighlight}
                 onPick={slash.pick}
+                onEdit={slash.pickEdit}
+                onCreate={slash.pickCreate}
               />
             )}
             {attachments.length > 0 && (
@@ -894,7 +974,7 @@ export function ChatTab({
                 ) : (
                   <button
                     type="button"
-                    onClick={submit}
+                    onClick={() => void submit()}
                     disabled={!connected || (!text.trim() && attachments.length === 0)}
                     title="Send (enter)"
                     className="flex size-6 cursor-pointer items-center justify-center rounded-full bg-btn text-canvas transition-opacity disabled:cursor-default disabled:opacity-30"

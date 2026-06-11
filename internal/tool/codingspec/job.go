@@ -498,6 +498,18 @@ func RunWorkspaceCmd(ctx context.Context, root, command string) (jobID string, e
 	return info.ID, code, journalTail(info.Dir, 4096), nil
 }
 
+// FindJob derives one job's current state from the shared on-disk directories
+// by workspace root and id — the same derivation every other reader uses, so
+// any frontend door (the web gateway's terminal tab, a future TUI inspector)
+// sees a job regardless of which process spawned it.
+func FindJob(root, id string) (JobInfo, error) {
+	info, err := loadJob(filepath.Join(jobsRoot(root), id))
+	if err != nil {
+		return JobInfo{}, fmt.Errorf("no such job %q", id)
+	}
+	return info, nil
+}
+
 // KillJob SIGKILLs a running background job's whole process group, by id,
 // deriving the job from the shared on-disk directories like every other
 // reader — so any frontend door (the web gateway's kill endpoint, a future

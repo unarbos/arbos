@@ -11,11 +11,17 @@ import { fetchCommands, type SlashCommand } from "@/lib/api";
  * protocol (↑/↓ move, Tab/Enter accept, Esc dismisses until the text changes
  * shape). Expansion happens server-side at projection; this is discovery and
  * completion only.
+ *
+ * The menu is also where commands are made: every row carries an edit pencil,
+ * and a typed name matching nothing gets a trailing "create" row — both open
+ * the template file in a prompt-editor panel (openPrompt) and clear the
+ * composer, since the action moved to the panel.
  */
 export function useSlashCommands(
   text: string,
   setText: (s: string) => void,
   focus: () => void,
+  openPrompt: (name: string, path?: string) => void,
 ) {
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   const [highlight, setHighlight] = useState(0);
@@ -43,14 +49,23 @@ export function useSlashCommands(
     return commands.filter((c) => c.name.toLowerCase().startsWith(q));
   }, [commands, query]);
 
+  // A typed name matching no command exactly can become one: the menu offers
+  // a trailing "create /name" row (valid names only — a name is a filename).
+  const createName = useMemo(() => {
+    if (!query || !/^[\w-]+$/.test(query)) return undefined;
+    const q = query.toLowerCase();
+    return matches.some((c) => c.name.toLowerCase() === q) ? undefined : query;
+  }, [matches, query]);
+  const rowCount = matches.length + (createName ? 1 : 0);
+
   useEffect(() => setHighlight(0), [query]);
   // Clamp when an async refetch shrinks the list under the highlight —
   // otherwise Enter could fall through the menu and send a partial "/p" raw.
   useEffect(() => {
-    setHighlight((h) => Math.min(h, Math.max(0, matches.length - 1)));
-  }, [matches.length]);
+    setHighlight((h) => Math.min(h, Math.max(0, rowCount - 1)));
+  }, [rowCount]);
 
-  const open = active && !dismissed && matches.length > 0;
+  const open = active && !dismissed && rowCount > 0;
 
   // Accept a command: the name lands in the composer with a trailing space so
   // the user types args and sends.
@@ -62,6 +77,26 @@ export function useSlashCommands(
     [setText, focus],
   );
 
+  // Open a command's template in the editor panel; the composer empties —
+  // the action moved to the panel, there is nothing left to send.
+  const pickEdit = useCallback(
+    (c: SlashCommand) => {
+      openPrompt(c.name, c.path);
+      setText("");
+    },
+    [openPrompt, setText],
+  );
+
+  // Create: same panel, but the file doesn't exist yet — the editor opens
+  // seeded and saves it into existence.
+  const pickCreate = useCallback(
+    (name: string) => {
+      openPrompt(name);
+      setText("");
+    },
+    [openPrompt, setText],
+  );
+
   /**
    * The menu's slice of the composer's keydown. Returns true when the key was
    * consumed; Enter on a command already typed out in full is NOT consumed,
@@ -71,7 +106,7 @@ export function useSlashCommands(
     if (!open) return false;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setHighlight((h) => Math.min(h + 1, matches.length - 1));
+      setHighlight((h) => Math.min(h + 1, rowCount - 1));
       return true;
     }
     if (e.key === "ArrowUp") {
@@ -85,6 +120,12 @@ export function useSlashCommands(
       return true;
     }
     if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+      // The trailing create row: Enter/Tab on it opens the editor panel.
+      if (createName && highlight === matches.length) {
+        e.preventDefault();
+        pickCreate(createName);
+        return true;
+      }
       const c = matches[highlight];
       if (c && c.name.toLowerCase() !== query?.toLowerCase()) {
         e.preventDefault();
@@ -99,5 +140,15 @@ export function useSlashCommands(
     return false;
   };
 
-  return { open, matches, highlight, setHighlight, pick, handleKey };
+  return {
+    open,
+    matches,
+    highlight,
+    setHighlight,
+    pick,
+    pickEdit,
+    createName,
+    pickCreate,
+    handleKey,
+  };
 }

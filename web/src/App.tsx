@@ -2,9 +2,11 @@ import { useCallback, useRef, useState } from "react";
 
 import { ActivityPanel } from "./components/ActivityPanel";
 import { ChatTab } from "./components/ChatTab";
+import { RunView, type RunRef } from "./components/RunView";
 import { SurfaceView } from "./components/SurfaceView";
+import { TerminalView } from "./components/TerminalView";
 import { GlobalActions, TabStrip, type TabInfo } from "./components/TabStrip";
-import type { SessionSummary } from "./lib/api";
+import { closeTerminal, createTerminal, type SessionSummary } from "./lib/api";
 import {
   computePlaces,
   panesOf,
@@ -16,6 +18,7 @@ import {
   type SplitDir,
 } from "./lib/layout";
 import { surfaceTitle, type Surface } from "./lib/surface";
+import { sameTerm, termTitle, type TermRef } from "./lib/term";
 
 interface TabState extends TabInfo {
   /** Session to resume (from history); null opens fresh. */
@@ -28,6 +31,10 @@ interface TabState extends TabInfo {
   pane: number;
   /** kind "surface": the opened artifact this tab renders instead of a chat. */
   surface?: Surface;
+  /** kind "run": the sub-agent run this tab watches instead of a chat. */
+  run?: RunRef;
+  /** kind "terminal": the job or shell this tab is a window onto. */
+  term?: TermRef;
 }
 
 /**
@@ -76,6 +83,34 @@ function surfaceTab(key: number, pane: number, surface: Surface): TabState {
     busy: false,
     kind: "surface",
     surface,
+    resumeId: null,
+    sessionId: null,
+    titlePinned: false,
+    pane,
+  };
+}
+
+function runTab(key: number, pane: number, run: RunRef): TabState {
+  return {
+    key,
+    title: run.label,
+    busy: false,
+    kind: "run",
+    run,
+    resumeId: null,
+    sessionId: null,
+    titlePinned: false,
+    pane,
+  };
+}
+
+function termTab(key: number, pane: number, term: TermRef): TabState {
+  return {
+    key,
+    title: termTitle(term),
+    busy: false,
+    kind: "terminal",
+    term,
     resumeId: null,
     sessionId: null,
     titlePinned: false,
@@ -161,6 +196,12 @@ export default function App() {
 
   const closeTab = useCallback((key: number) => {
     setLayout((s) => {
+      // Closing a shell tab hangs up its PTY — the tab IS the shell's
+      // lifetime. Job terminals are only windows; the job runs on.
+      const closing = s.tabs.find((t) => t.key === key);
+      if (closing?.kind === "terminal" && closing.term?.kind === "shell") {
+        void closeTerminal(closing.term.id);
+      }
       const rest = s.tabs.filter((t) => t.key !== key);
       if (rest.length === 0) {
         // The last chat anywhere: the window resets to one pane, one fresh tab.
@@ -269,51 +310,139 @@ export default function App() {
   }, []);
 
   /**
-   * Show a surface beside the chat that produced it: in the next pane over
-   * if one exists, else in a fresh split to the chat's right. Re-showing an
-   * already-open path re-uses its tab (refreshed reference, raised to front).
-   * The keyboard stays with the chat — a surface is something to look at,
-   * not type into.
+   * Open (or refresh) a companion tab beside the chat that produced it —
+   * the one mechanic every non-chat tab kind shares: re-use a matching open
+   * tab (reference refreshed, raised to front); else the next pane over;
+   * else a fresh split to the chat's right. The keyboard stays with the
+   * chat — companions are something to look at, not type into (a shell the
+   * user asks for takes focus separately, in newShellTab).
    */
-  const openSurface = useCallback((fromKey: number, surface: Surface) => {
-    setLayout((s) => {
-      const from = s.tabs.find((t) => t.key === fromKey);
-      if (!from) return s;
-      const existing = s.tabs.find(
-        (t) => t.kind === "surface" && t.surface?.path === surface.path,
-      );
-      if (existing) {
+  const openAside = useCallback(
+    (
+      fromKey: number,
+      matches: (t: TabState) => boolean,
+      refresh: (t: TabState) => TabState,
+      make: (key: number, pane: number) => TabState,
+    ) => {
+      setLayout((s) => {
+        const from = s.tabs.find((t) => t.key === fromKey);
+        if (!from) return s;
+        const existing = s.tabs.find(matches);
+        if (existing) {
+          return {
+            ...s,
+            tabs: s.tabs.map((t) => (t.key === existing.key ? refresh(t) : t)),
+            paneActive: { ...s.paneActive, [existing.pane]: existing.key },
+          };
+        }
+        const panes = panesOf(s.root);
+        const beside = panes[panes.indexOf(from.pane) + 1];
+        if (beside !== undefined) {
+          const tab = make(nextKey.current++, beside);
+          return {
+            ...s,
+            tabs: [...s.tabs, tab],
+            paneActive: { ...s.paneActive, [beside]: tab.key },
+          };
+        }
+        const splitId = nextId.current++;
+        const paneId = nextId.current++;
+        const tab = make(nextKey.current++, paneId);
         return {
           ...s,
-          tabs: s.tabs.map((t) =>
-            t.key === existing.key
-              ? { ...t, surface, title: t.titlePinned ? t.title : surfaceTitle(surface) }
-              : t,
-          ),
-          paneActive: { ...s.paneActive, [existing.pane]: existing.key },
-        };
-      }
-      const panes = panesOf(s.root);
-      const beside = panes[panes.indexOf(from.pane) + 1];
-      if (beside !== undefined) {
-        const tab = surfaceTab(nextKey.current++, beside, surface);
-        return {
-          ...s,
+          root: splitPane(s.root, from.pane, "right", splitId, paneId),
           tabs: [...s.tabs, tab],
-          paneActive: { ...s.paneActive, [beside]: tab.key },
+          paneActive: { ...s.paneActive, [paneId]: tab.key },
         };
-      }
-      const splitId = nextId.current++;
-      const paneId = nextId.current++;
-      const tab = surfaceTab(nextKey.current++, paneId, surface);
-      return {
-        ...s,
-        root: splitPane(s.root, from.pane, "right", splitId, paneId),
-        tabs: [...s.tabs, tab],
-        paneActive: { ...s.paneActive, [paneId]: tab.key },
-      };
-    });
+      });
+    },
+    [],
+  );
+
+  /** Show a surface (a shown file) beside the chat that produced it. */
+  const openSurface = useCallback(
+    (fromKey: number, surface: Surface) =>
+      openAside(
+        fromKey,
+        (t) => t.kind === "surface" && t.surface?.path === surface.path,
+        (t) => ({ ...t, surface, title: t.titlePinned ? t.title : surfaceTitle(surface) }),
+        (key, pane) => surfaceTab(key, pane, surface),
+      ),
+    [openAside],
+  );
+
+  /**
+   * Show a sub-agent run beside the chat that spawned it. The run tab polls
+   * on its own, so it stays live however long the run takes — and survives
+   * the parent chat's tab closing.
+   */
+  const openRun = useCallback(
+    (fromKey: number, run: RunRef) =>
+      openAside(
+        fromKey,
+        (t) => t.kind === "run" && t.run?.session === run.session,
+        (t) => ({ ...t, run, title: t.titlePinned ? t.title : run.label }),
+        (key, pane) => runTab(key, pane, run),
+      ),
+    [openAside],
+  );
+
+  /**
+   * Show a terminal beside the chat: an agent command's live journal (a job
+   * terminal, from its card or the background bar) or an interactive shell.
+   * A job already open re-uses its tab — the same job seen from two cards is
+   * one terminal.
+   */
+  const openTerminal = useCallback(
+    (fromKey: number, term: TermRef) =>
+      openAside(
+        fromKey,
+        (t) => t.kind === "terminal" && !!t.term && sameTerm(t.term, term),
+        (t) => ({ ...t, term, title: t.titlePinned ? t.title : termTitle(term) }),
+        (key, pane) => termTab(key, pane, term),
+      ),
+    [openAside],
+  );
+
+  /**
+   * A fresh interactive shell, user-initiated: spawned on the host, opened
+   * as a tab in the focused pane, and given the keyboard — unlike the
+   * companion tabs, a shell the user asked for is something to type into.
+   */
+  const newShellTab = useCallback(() => {
+    createTerminal()
+      .then((info) => {
+        setLayout((s) => {
+          const into = s.focusedPane;
+          const tab = termTab(nextKey.current++, into, {
+            kind: "shell",
+            id: info.id,
+            cwd: info.cwd,
+          });
+          return normalize({
+            ...s,
+            tabs: [...s.tabs, tab],
+            paneActive: { ...s.paneActive, [into]: tab.key },
+            focusedPane: into,
+            focusTick: s.focusTick + 1,
+          });
+        });
+      })
+      .catch(() => {});
   }, []);
+
+  /** A job terminal's "shell here": continue the job's work by hand, in its
+   * directory, in a live shell beside it. */
+  const openShellBeside = useCallback(
+    (fromKey: number, cwd?: string) => {
+      createTerminal(cwd)
+        .then((info) =>
+          openTerminal(fromKey, { kind: "shell", id: info.id, cwd: info.cwd }),
+        )
+        .catch(() => {});
+    },
+    [openTerminal],
+  );
 
   const focusPane = useCallback((pane: number) => {
     setLayout((s) => (s.focusedPane === pane ? s : { ...s, focusedPane: pane }));
@@ -390,6 +519,7 @@ export default function App() {
                   activityOpen={activityOpen}
                   onToggleActivity={() => setActivityOpen((v) => !v)}
                   onSplit={splitFocused}
+                  onNewTerminal={newShellTab}
                 />
               ) : undefined
             }
@@ -422,6 +552,19 @@ export default function App() {
           >
             {tab.kind === "surface" && tab.surface ? (
               <SurfaceView surface={tab.surface} active={visible} />
+            ) : tab.kind === "terminal" && tab.term ? (
+              <TerminalView
+                term={tab.term}
+                active={visible}
+                onBusy={(busy) => patchTab(tab.key, { busy })}
+                onOpenShell={(cwd) => openShellBeside(tab.key, cwd)}
+              />
+            ) : tab.kind === "run" && tab.run ? (
+              <RunView
+                run={tab.run}
+                active={visible}
+                onBusy={(busy) => patchTab(tab.key, { busy })}
+              />
             ) : (
               <ChatTab
                 active={visible}
@@ -441,6 +584,8 @@ export default function App() {
                     })),
                   onSession: (id) => patchTab(tab.key, { sessionId: id }),
                   onOpenSurface: (surface) => openSurface(tab.key, surface),
+                  onOpenRun: (run) => openRun(tab.key, run),
+                  onOpenTerminal: (term) => openTerminal(tab.key, term),
                 }}
               />
             )}

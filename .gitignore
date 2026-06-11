@@ -20,6 +20,9 @@
 /scratch/
 /edit_demo.txt
 
+# Files attached to a chat (the composer's paperclip spools them here)
+.arbos/attachments/
+
 # Web UI build deps (dist/ is committed: go:embed needs it)
 web/node_modules/
 web/tsconfig.tsbuildinfo

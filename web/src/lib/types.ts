@@ -45,6 +45,27 @@ export interface Usage {
 
 export type StopReason = "answered" | "max_steps" | "terminated" | "length_limit";
 
+/** One selectable answer to a Question (mirrors core.QuestionOption). */
+export interface QuestionOption {
+  id: string;
+  label: string;
+}
+
+/** One multiple-choice question put to the user (mirrors core.Question). */
+export interface Question {
+  id: string;
+  prompt: string;
+  options: QuestionOption[];
+  allow_multiple?: boolean;
+}
+
+/** The user's answer to one Question (mirrors core.QuestionAnswer). */
+export interface QuestionAnswer {
+  question_id: string;
+  selected_ids?: string[];
+  other_text?: string;
+}
+
 export type KernelEvent =
   | { kind: "message_delta"; data: { text: string } }
   | { kind: "reasoning_delta"; data: { text: string } }
@@ -60,6 +81,10 @@ export type KernelEvent =
   | {
       kind: "approval_request";
       data: { request_id: string; call: ToolCall; reason?: string };
+    }
+  | {
+      kind: "question_request";
+      data: { request_id: string; title?: string; questions: Question[] };
     };
 
 export interface Envelope {
@@ -75,6 +100,15 @@ export type Intent =
   | {
       kind: "approval_response";
       data: { request_id: string; approved: boolean; reason?: string };
+    }
+  | {
+      kind: "question_response";
+      data: {
+        request_id: string;
+        answers?: QuestionAnswer[];
+        details?: string;
+        skipped?: boolean;
+      };
     };
 
 export type ClientFrame =

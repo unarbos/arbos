@@ -21,6 +21,9 @@ type PromptTemplate struct {
 	Description  string
 	ArgumentHint string
 	Content      string
+	// Path is the source file the template was loaded from (absolute), so a
+	// frontend can offer to open it for editing.
+	Path string
 }
 
 // LoadPromptTemplates loads templates from the project scope (cwd/.arbos/prompts)
@@ -74,6 +77,7 @@ func loadTemplatesFromDir(dir string) []PromptTemplate {
 			Description:  desc,
 			ArgumentHint: fm["argument-hint"],
 			Content:      body,
+			Path:         filepath.Join(dir, e.Name()),
 		})
 	}
 	return out

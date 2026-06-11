@@ -24,9 +24,12 @@ PORT="${ARBOS_PORT:-8420}"
 BIN=/tmp/arbos-dev # outside the repo so builds never churn the watchers
 
 cleanup() {
-  # Take the whole process group down: vite, supervisor, server, watcher.
+  # Stop the loops FIRST (vite, supervisor, watcher — they're our jobs),
+  # then the server they tend; otherwise the supervisor respawns it.
+  trap - EXIT INT TERM
+  # shellcheck disable=SC2046
+  kill $(jobs -p) 2>/dev/null || true
   pkill -f "/tmp/arbos-dev[ ]--web" 2>/dev/null || true
-  kill 0 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -45,7 +48,9 @@ go build -o "$BIN" ./cmd/arbos
 ) &
 
 echo "dev: watching Go sources (server on http://localhost:$PORT)"
-exec watchexec --postpone -e go,mod,sum -w cmd -w internal -w go.mod -w go.sum -- bash -c '
+# No exec: the trap above must survive to tear everything down on exit.
+# --shell=none: run bash -c directly instead of wrapping it in another shell.
+watchexec --postpone --shell=none -e go,mod,sum -w cmd -w internal -w go.mod -w go.sum -- bash -c '
   echo "dev: change detected — rebuilding…" &&
   go generate ./internal/tool/coding &&
   go build -o /tmp/arbos-dev.new ./cmd/arbos &&

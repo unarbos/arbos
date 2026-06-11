@@ -11,7 +11,9 @@ Port `read` and `find` with pi's exact model-facing output, including images.
 ## Status: done
 
 `read`, `find`, and an upgraded full-parity `ls` are implemented in `codingspec`
-(read.go, find.go, ls.go, truncate.go). `find` hard-requires `fd` (D11). Three
+(read.go, find.go, ls.go, truncate.go). `find` originally hard-required `fd`
+(D11) but is now a native gitignore-aware walker (glob.go, ignore.go) with no
+external dependency — see the D11 amendment in the overview. Three
 deliberate, documented deviations on `read` image handling: image type is
 detected by file extension (pi uses magic bytes), images are not auto-resized
 (no image library in the kernel), and the non-vision downgrade note is omitted

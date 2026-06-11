@@ -158,11 +158,20 @@ type sketches and the site-by-site trace live in the Phase 1 to 3 docs.
   scaffold uses `ls` (a real, dependency-free read-only tool). `ls` ships in
   Phase 4; Phase 5 covers `read` and `find`. A shared `tool.Resolve` sandbox
   guard was added so every file tool shares one security-critical path resolver.
-- **D11. `grep` and `find` hard-require `rg` and `fd` on PATH, with a clear error
-  and no auto-download.** pi shells these too but auto-downloads them; an agent
-  that fetches binaries contradicts arbos's broker-and-allowlist posture, and a
-  pure-Go reimplementation of ripgrep's gitignore+regex would be a worse tool.
-  The environment provides them (installed via cargo during the build-out).
+- **D11. No external binaries are required, bundled, or auto-downloaded.**
+  Originally `grep` and `find` hard-required `rg` and `fd` on PATH: pi shells
+  these too but auto-downloads them, and an agent that fetches binaries
+  contradicts arbos's broker-and-allowlist posture. *Amended:* hard failures
+  broke basic navigation on clean machines, and bundling was rejected — arbos
+  distributes via `go install`, so embedded rg/fd would mean committing
+  per-platform third-party binaries to the repo plus runtime extraction, a
+  supply-chain and codesigning burden for two tools whose access patterns
+  (gitignore-pruned trees, early stop at the match/result limit) don't need
+  ripgrep-class throughput. Instead both tools are native: a shared
+  gitignore-aware walker (codingspec walk.go, ignore.go, glob.go) backs `find`
+  entirely and `grep`'s fallback regexp scan, while `grep` still prefers `rg`
+  when present for its throughput on huge trees. Go's regexp and rust's regex
+  are both RE2-family, so the pattern dialect is consistent across paths.
 - **D12. ST1005 (capitalized error strings) is excluded for
   `internal/tool/codingspec`.** The coding tools return capitalized, model-facing
   message strings as Go errors (e.g. "Path not found", "Offset N is beyond end of

@@ -11,6 +11,7 @@ import type { ReplayEvent } from "./api";
 import type {
   ContentBlock,
   Envelope,
+  Question,
   StopReason,
   ToolCall,
   ToolResult,
@@ -62,6 +63,13 @@ export interface PendingApproval {
   reason?: string;
 }
 
+/** The ask tool's pending form: questions awaiting the user's answers. */
+export interface PendingQuestions {
+  requestId: string;
+  title?: string;
+  questions: Question[];
+}
+
 /** A bash command that outlived its wait and continues as a kernel job. */
 export interface BackgroundJob {
   id: string;
@@ -79,6 +87,7 @@ export interface ChatState {
   items: TranscriptItem[];
   turnActive: boolean;
   pendingApproval: PendingApproval | null;
+  pendingQuestions: PendingQuestions | null;
   /** Live background work, shown above the composer like Cursor's terminals. */
   jobs: BackgroundJob[];
   scheduled: ScheduledTask[];
@@ -96,6 +105,7 @@ export const initialChatState: ChatState = {
   items: [],
   turnActive: false,
   pendingApproval: null,
+  pendingQuestions: null,
   jobs: [],
   scheduled: [],
   children: {},
@@ -107,6 +117,7 @@ export type ChatAction =
   | { type: "user"; text: string; parts?: ContentBlock[] }
   | { type: "seam-error"; message: string }
   | { type: "approval-answered" }
+  | { type: "questions-answered" }
   | { type: "replay"; items: TranscriptItem[] }
   | { type: "notice"; text: string }
   /** The user killed a background job / cancelled a scheduled node. */
@@ -129,6 +140,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       });
     case "approval-answered":
       return { ...state, pendingApproval: null };
+    case "questions-answered":
+      return { ...state, pendingQuestions: null };
     case "notice":
       return push(state, {
         kind: "notice",
@@ -291,11 +304,16 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
           // A delegating tool's result names its true child session. The live
           // guess paired relays to rows by arrival order, which parallel
           // children can scramble — the result is authoritative, so re-pair.
-          const s = replaceAt(state, i, {
+          let s = replaceAt(state, i, {
             ...it,
             result: ev.data.result,
             childSession: detailsChildSession(ev.data.result) ?? it.childSession,
           });
+          // An ask answered elsewhere (another frontend, the TUI) resolves
+          // here too — its panel must not linger once the result lands.
+          if (it.call.Name === "ask" && s.pendingQuestions) {
+            s = { ...s, pendingQuestions: null };
+          }
           return trackBackground(s, it.call, ev.data.result);
         }
       }
@@ -335,6 +353,7 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
         ...push(s, { kind: "interrupted", id: s.nextId }),
         turnActive: false,
         pendingApproval: null,
+        pendingQuestions: null,
       };
     }
 
@@ -349,6 +368,7 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
         }),
         turnActive: false,
         pendingApproval: null,
+        pendingQuestions: null,
       };
     }
 
@@ -364,6 +384,18 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
           requestId: ev.data.request_id,
           call: ev.data.call,
           reason: ev.data.reason,
+        },
+      };
+
+    case "question_request":
+      // The ask tool paused the turn for the user's structured answers — the
+      // panel renders above the composer until they Continue or Skip.
+      return {
+        ...state,
+        pendingQuestions: {
+          requestId: ev.data.request_id,
+          title: ev.data.title,
+          questions: ev.data.questions,
         },
       };
 

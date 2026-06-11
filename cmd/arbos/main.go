@@ -272,6 +272,15 @@ func handleSessionEvent(ctx context.Context, conv *engine.Conversation, r uiRend
 		line, _ := in.read(ctx)
 		approved := strings.EqualFold(strings.TrimSpace(line), "y")
 		conv.Send(core.ApprovalResponseIntent{RequestID: e.RequestID, Approved: approved})
+	case core.QuestionRequest:
+		// The ask tool: print each question, read one answer line per question.
+		answers := make([]core.QuestionAnswer, 0, len(e.Questions))
+		for i, q := range e.Questions {
+			r.notice(questionLines(e, i))
+			line, _ := in.read(ctx)
+			answers = append(answers, parseQuestionAnswer(q, line))
+		}
+		conv.Send(core.QuestionResponseIntent{RequestID: e.RequestID, Answers: answers, Skipped: questionsSkipped(answers)})
 	case core.ToolStarted:
 		r.toolStart(e.Call)
 	case core.ToolFinished:

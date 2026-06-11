@@ -13,6 +13,7 @@ import (
 
 	"github.com/unarbos/arbos/internal/agent"
 	"github.com/unarbos/arbos/internal/agent/pi"
+	"github.com/unarbos/arbos/internal/ask"
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/engine"
 	"github.com/unarbos/arbos/internal/extension"
@@ -139,19 +140,29 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		mcpMgr.Close()
 		return nil, fmt.Errorf("register pi: %w", err)
 	}
-	delegation := tool.New()
-	if err := agent.RegisterDelegate(delegation, router); err != nil {
+	// Tools for the top-level session only: delegation (which bounds nesting)
+	// and ask (a question needs the user watching this conversation — a
+	// delegated child or scheduler wake has no one to answer).
+	topTools := tool.New()
+	if err := agent.RegisterDelegate(topTools, router); err != nil {
 		if theMind != nil {
 			theMind.Close()
 		}
 		mcpMgr.Close()
 		return nil, fmt.Errorf("register delegate: %w", err)
 	}
+	if err := ask.RegisterTool(topTools); err != nil {
+		if theMind != nil {
+			theMind.Close()
+		}
+		mcpMgr.Close()
+		return nil, fmt.Errorf("register ask: %w", err)
+	}
 
 	topOpts := piOpts
 	topOpts.NewStore = func() ports.SessionStore { return cfg.Store }
 	topOpts.Observer = cfg.Observer
-	topOpts.ExtraTools = delegation
+	topOpts.ExtraTools = topTools
 	// Memory is the self's: recall, curation, and the remember tool wire on the
 	// top engine only (the scheduler's wakes reuse it). Children get none.
 	topOpts.Mind = theMind

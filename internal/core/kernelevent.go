@@ -17,6 +17,7 @@ const (
 	KernelEventError           KernelEventKind = "error"
 	KernelEventQueued          KernelEventKind = "queued"
 	KernelEventApprovalRequest KernelEventKind = "approval_request"
+	KernelEventQuestionRequest KernelEventKind = "question_request"
 )
 
 // KernelEvent is something a session emits as it works. Frontends render these;
@@ -110,6 +111,30 @@ type ApprovalRequest struct {
 	Reason    string    `json:"reason,omitempty"`
 }
 
+// QuestionOption is one selectable answer to a Question.
+type QuestionOption struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+// Question is one multiple-choice question put to the user.
+type Question struct {
+	ID            string           `json:"id"`
+	Prompt        string           `json:"prompt"`
+	Options       []QuestionOption `json:"options"`
+	AllowMultiple bool             `json:"allow_multiple,omitempty"`
+}
+
+// QuestionRequest pauses the turn to collect structured answers from the user
+// (the ask tool). The turn blocks until a matching QuestionResponseIntent
+// (same RequestID) arrives — the same suspend-and-await control flow as
+// ApprovalRequest (ADR-0018).
+type QuestionRequest struct {
+	RequestID RequestID  `json:"request_id"`
+	Title     string     `json:"title,omitempty"`
+	Questions []Question `json:"questions"`
+}
+
 func (MessageDelta) Kind() KernelEventKind    { return KernelEventMessageDelta }
 func (ReasoningDelta) Kind() KernelEventKind  { return KernelEventReasoningDelta }
 func (ToolStarted) Kind() KernelEventKind     { return KernelEventToolStarted }
@@ -119,3 +144,4 @@ func (Interrupted) Kind() KernelEventKind     { return KernelEventInterrupted }
 func (ErrorEvent) Kind() KernelEventKind      { return KernelEventError }
 func (Queued) Kind() KernelEventKind          { return KernelEventQueued }
 func (ApprovalRequest) Kind() KernelEventKind { return KernelEventApprovalRequest }
+func (QuestionRequest) Kind() KernelEventKind { return KernelEventQuestionRequest }

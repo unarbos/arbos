@@ -3,8 +3,8 @@ package codingspec
 import (
 	"context"
 	"fmt"
-	"os/exec"
-	"path/filepath"
+	"os"
+	"path"
 	"strings"
 
 	"github.com/unarbos/arbos/internal/core"
@@ -20,9 +20,11 @@ type FindArgs struct {
 
 const findDefaultLimit = 1000
 
-// findSpec searches for files by glob via fd, respecting .gitignore, matching
-// pi's find tool. fd is hard-required (clear error if absent); there is no
-// auto-download (the broker-and-allowlist posture, D11).
+// findSpec searches for files by glob with a native gitignore-aware walker,
+// matching pi's find tool. It used to shell out to fd (D11), but a missing
+// binary broke basic navigation on clean machines; a tree walk + glob needs
+// none of ripgrep's regex machinery, so find is self-contained while grep
+// keeps its rg requirement.
 func findSpec(root string) tool.Spec {
 	spec := tool.NewSpec("find",
 		fmt.Sprintf("Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to %d results or %dKB (whichever is hit first).", findDefaultLimit, DefaultMaxBytes/1024),
@@ -32,65 +34,42 @@ func findSpec(root string) tool.Spec {
 			if err != nil {
 				return "", err
 			}
-			fdPath, err := exec.LookPath("fd")
+			info, err := os.Stat(searchPath)
 			if err != nil {
-				return "", fmt.Errorf("fd is not available on PATH; install fd to use find")
+				return "", fmt.Errorf("Path not found: %s", a.Path)
+			}
+			if !info.IsDir() {
+				return "", fmt.Errorf("Not a directory: %s", a.Path)
 			}
 			limit := a.Limit
 			if limit <= 0 {
 				limit = findDefaultLimit
 			}
 
-			args := []string{"--glob", "--color=never", "--hidden", "--no-require-git", "--max-results", fmt.Sprint(limit)}
+			// A bare-name pattern matches against filenames; one with '/'
+			// matches the path relative to the search directory, floating
+			// (**/ prefixed) unless anchored with a leading '/'.
 			pattern := a.Pattern
-			if strings.Contains(pattern, "/") {
-				args = append(args, "--full-path")
-				if !strings.HasPrefix(pattern, "/") && !strings.HasPrefix(pattern, "**/") && pattern != "**" {
+			fullPath := strings.Contains(pattern, "/")
+			if fullPath {
+				if strings.HasPrefix(pattern, "/") {
+					pattern = strings.TrimPrefix(pattern, "/")
+				} else if !strings.HasPrefix(pattern, "**/") && pattern != "**" {
 					pattern = "**/" + pattern
 				}
 			}
-			args = append(args, "--", pattern, searchPath)
-
-			out, err := exec.CommandContext(ctx, fdPath, args...).Output()
-			if err != nil {
-				if ctx.Err() != nil {
-					return "", ctx.Err()
-				}
-				// fd exits non-zero with no output on no matches in some modes;
-				// surface stderr only when there is genuinely no output.
-				if ee, ok := err.(*exec.ExitError); ok && len(out) == 0 {
-					msg := strings.TrimSpace(string(ee.Stderr))
-					if msg == "" {
-						msg = "fd failed"
-					}
-					return "", fmt.Errorf("%s", msg)
-				}
+			if !validGlob(pattern) {
+				return "", fmt.Errorf("Invalid glob pattern: %s", a.Pattern)
 			}
 
-			var rel []string
-			for _, raw := range strings.Split(string(out), "\n") {
-				line := strings.TrimRight(strings.TrimRight(raw, "\r"), " ")
-				if line == "" {
-					continue
-				}
-				trailingSlash := strings.HasSuffix(line, "/") || strings.HasSuffix(line, "\\")
-				p := line
-				if strings.HasPrefix(line, searchPath) {
-					p = strings.TrimPrefix(line, searchPath+string(filepath.Separator))
-				} else if r, e := filepath.Rel(searchPath, line); e == nil {
-					p = r
-				}
-				p = filepath.ToSlash(p)
-				if trailingSlash && !strings.HasSuffix(p, "/") {
-					p += "/"
-				}
-				rel = append(rel, p)
+			rel, limitReached, err := findWalk(ctx, searchPath, pattern, fullPath, limit)
+			if err != nil {
+				return "", err
 			}
 			if len(rel) == 0 {
 				return "No files found matching pattern", nil
 			}
 
-			limitReached := len(rel) >= limit
 			tr := TruncateHead(strings.Join(rel, "\n"), maxInt, DefaultMaxBytes)
 			res := tr.Content
 			var notices []string
@@ -110,4 +89,42 @@ func findSpec(root string) tool.Spec {
 	return tool.WithAccess(spec, func(a FindArgs) core.AccessSet {
 		return core.AccessSet{Reads: fileKeys(root, a.Path)}
 	})
+}
+
+// findWalk matches names (or root-relative paths when fullPath) against
+// pattern over the shared gitignore-aware walk, returning slash-separated
+// relative matches (directories suffixed "/") in sorted order up to limit.
+// An all-lowercase pattern matches case-insensitively (fd-style smart case).
+func findWalk(ctx context.Context, searchPath, pattern string, fullPath bool, limit int) ([]string, bool, error) {
+	caseFold := pattern == strings.ToLower(pattern)
+	match := func(s string) bool {
+		if caseFold {
+			s = strings.ToLower(s)
+		}
+		return matchGlob(pattern, s)
+	}
+
+	var results []string
+	err := walkTree(ctx, searchPath, func(_, rel string, isDir bool) error {
+		target := rel
+		if !fullPath {
+			target = path.Base(rel)
+		}
+		if !match(target) {
+			return nil
+		}
+		out := rel
+		if isDir {
+			out += "/"
+		}
+		results = append(results, out)
+		if len(results) >= limit {
+			return errWalkStop
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return results, len(results) >= limit, nil
 }

@@ -6,8 +6,10 @@ import {
   Columns2,
   Loader2,
   MessageSquare,
+  Orbit,
   Plus,
   Rows2,
+  SquareTerminal,
   X,
 } from "lucide-react";
 
@@ -19,8 +21,9 @@ export interface TabInfo {
   key: number;
   title: string | null;
   busy: boolean;
-  /** What the tab holds: an agent chat (default) or an opened surface. */
-  kind?: "chat" | "surface";
+  /** What the tab holds: an agent chat (default), an opened surface, a
+   *  machine-spawned run's transcript, or a terminal (job tail / shell). */
+  kind?: "chat" | "surface" | "run" | "terminal";
 }
 
 /**
@@ -111,16 +114,22 @@ export function GlobalActions({
   activityOpen,
   onToggleActivity,
   onSplit,
+  onNewTerminal,
 }: {
   onOpenSession: (s: SessionSummary) => void;
   activityOpen: boolean;
   onToggleActivity: () => void;
   onSplit: (dir: SplitDir) => void;
+  /** Open a fresh interactive shell as a tab in the focused pane. */
+  onNewTerminal: () => void;
 }) {
   const [historyOpen, setHistoryOpen] = useState(false);
 
   return (
     <>
+      <IconButton title="New terminal" onClick={onNewTerminal}>
+        <SquareTerminal size={13} />
+      </IconButton>
       <IconButton
         title="History"
         onClick={() => setHistoryOpen((v) => !v)}
@@ -260,6 +269,10 @@ function Tab({
         <Loader2 size={11} className="shrink-0 animate-spin text-faint" />
       ) : tab.kind === "surface" ? (
         <AppWindow size={11} className="shrink-0 text-faint" />
+      ) : tab.kind === "run" ? (
+        <Orbit size={11} className="shrink-0 text-faint" />
+      ) : tab.kind === "terminal" ? (
+        <SquareTerminal size={11} className="shrink-0 text-faint" />
       ) : (
         <MessageSquare size={11} className="shrink-0 text-faint" />
       )}

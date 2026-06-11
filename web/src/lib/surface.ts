@@ -12,7 +12,7 @@
 import type { Theme } from "./themes";
 import type { ToolResult } from "./types";
 
-export type SurfaceKind = "canvas" | "image" | "doc" | "code";
+export type SurfaceKind = "canvas" | "image" | "doc" | "code" | "prompt";
 
 export interface Surface {
   kind: SurfaceKind;
@@ -22,7 +22,34 @@ export interface Surface {
   title?: string;
 }
 
+// The kinds the agent's show tool can present. "prompt" (the slash-command
+// editor) is opened by the user from the / menu, never by a tool result.
 const KINDS = new Set<string>(["canvas", "image", "doc", "code"]);
+
+const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "avif"]);
+
+/**
+ * The surface for a plain file reference (a clicked filename in the chat's
+ * diff cards), kind inferred from the extension the way show's default
+ * presentation would: markdown reads as a document, images render, anything
+ * else is code.
+ */
+export function fileSurface(path: string): Surface {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  const kind: SurfaceKind =
+    ext === "md" || ext === "markdown" ? "doc" : IMAGE_EXT.has(ext) ? "image" : "code";
+  return { kind, path };
+}
+
+/** The editor surface for one slash command's template file. A command not
+ * yet on disk (the menu's create row) lands in the project prompts dir. */
+export function promptSurface(name: string, path?: string): Surface {
+  return {
+    kind: "prompt",
+    path: path || `.arbos/prompts/${name}.md`,
+    title: `/${name}`,
+  };
+}
 
 /** The surface a show tool recorded in its result's Details. */
 export function detailsSurface(result: ToolResult): Surface | undefined {

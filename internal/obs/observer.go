@@ -51,6 +51,8 @@ func (o *SlogObserver) ObserveEvent(ctx context.Context, ev core.KernelEvent) {
 		o.log.LogAttrs(ctx, slog.LevelInfo, "turn interrupted", attrs...)
 	case core.ApprovalRequest:
 		o.log.LogAttrs(ctx, slog.LevelInfo, "approval requested", append(attrs, slog.String("tool", e.Call.Name))...)
+	case core.QuestionRequest:
+		o.log.LogAttrs(ctx, slog.LevelInfo, "questions asked", append(attrs, slog.Int("questions", len(e.Questions)))...)
 	default:
 		// Streaming deltas and other high-frequency events log at debug so they
 		// don't drown the operational stream by default.

@@ -31,6 +31,7 @@ export function BackgroundBar({
   scheduled,
   runs,
   onOpenRun,
+  onOpenJob,
   onKillJob,
   onCancelTask,
   onStopRun,
@@ -39,6 +40,8 @@ export function BackgroundBar({
   scheduled: ScheduledTask[];
   runs: ChildRun[];
   onOpenRun: (r: ChildRun) => void;
+  /** Open a background terminal as a tab tailing its live journal. */
+  onOpenJob: (j: BackgroundJob) => void;
   onKillJob: (id: string) => void;
   onCancelTask: (id: number) => void;
   onStopRun: (r: ChildRun) => void;
@@ -84,10 +87,18 @@ export function BackgroundBar({
               key={j.id}
               className="group flex min-w-0 items-center gap-2 text-[12px] text-muted"
             >
-              <SquareTerminal size={12} className="shrink-0 text-faint" />
-              <span className="min-w-0 flex-1 truncate font-mono text-[11.5px]">
-                {j.command || j.id}
-              </span>
+              <button
+                type="button"
+                onClick={() => onOpenJob(j)}
+                title={`Open ${j.id} as a terminal tab`}
+                className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded text-left transition-colors hover:text-text"
+              >
+                <SquareTerminal size={12} className="shrink-0 text-faint" />
+                <span className="min-w-0 flex-1 truncate font-mono text-[11.5px]">
+                  {j.command || j.id}
+                </span>
+                <ChevronRight size={12} className="shrink-0 text-faint" />
+              </button>
               <button
                 type="button"
                 onClick={() => onKillJob(j.id)}

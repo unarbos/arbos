@@ -8,8 +8,10 @@ import {
   Circle,
   CircleHelp,
   Clock,
+  FileText,
   ListTodo,
   Loader2,
+  Maximize2,
   Orbit,
   Pencil,
   Repeat,
@@ -20,7 +22,8 @@ import {
 import { Highlight, Markdown } from "./Markdown";
 import { PartImages } from "./PartImages";
 import { argsPreview } from "@/lib/format";
-import { detailsSurface, type Surface } from "@/lib/surface";
+import { detailsSurface, fileSurface, type Surface } from "@/lib/surface";
+import { detailsJob, type TermRef } from "@/lib/term";
 import type { ChatState, TranscriptItem } from "@/lib/transcript";
 import type { ContentBlock, ToolCall } from "@/lib/types";
 import { useAutosize } from "@/lib/useAutosize";
@@ -33,6 +36,8 @@ export interface TranscriptHooks {
   onOpenChild?: (session: string, label: string) => void;
   /** Open a surface (a shown file) in a panel beside the chat. */
   onOpenSurface?: (surface: Surface) => void;
+  /** Open a terminal tab (a bash card's live job tail, or a shell). */
+  onOpenTerminal?: (term: TermRef) => void;
   /**
    * Rewind-and-edit (Cursor's edit-a-previous-turn): clicking a past user
    * message opens it for editing; submitting forks the session at that point
@@ -112,7 +117,13 @@ export function TranscriptList({
 function Item({ item, hooks }: { item: TranscriptItem; hooks?: TranscriptHooks }) {
   switch (item.kind) {
     case "user":
-      return <UserItem item={item} edit={hooks?.edit} />;
+      return (
+        <UserItem
+          item={item}
+          edit={hooks?.edit}
+          onOpenSurface={hooks?.onOpenSurface}
+        />
+      );
 
     case "assistant":
       return (
@@ -185,7 +196,72 @@ function Item({ item, hooks }: { item: TranscriptItem; hooks?: TranscriptHooks }
   }
 }
 
-/** Inline image attachments shown in a user prompt bubble. */
+/** One reference line the composer spools per attached file (ChatTab's
+ *  spoolAttachments — the formats must agree): name for the chip's label,
+ *  workspace path for opening the spooled file in a panel. */
+const ATTACH_LINE = /^Attached file "([^"]+)": `([^`]+)`$/;
+
+interface AttachedFile {
+  name: string;
+  path: string;
+}
+
+/**
+ * Pull the attachment reference lines out of a user message so the card can
+ * render them as file chips instead of raw text. Parsing the persisted text
+ * (rather than carrying structure) keeps replayed sessions identical to live
+ * ones for free. Everything else stays as the typed body.
+ */
+function splitAttachments(text: string): { body: string; files: AttachedFile[] } {
+  if (!text.includes("Attached file ")) return { body: text, files: [] };
+  const files: AttachedFile[] = [];
+  const rest: string[] = [];
+  for (const line of text.split("\n")) {
+    const m = ATTACH_LINE.exec(line);
+    if (m) files.push({ name: m[1], path: m[2] });
+    else rest.push(line);
+  }
+  return { body: rest.join("\n").trim(), files };
+}
+
+/** The chips themselves: filename rows that open the spooled file in a
+ *  surface panel beside the chat (the same viewer show and diffs use). */
+function AttachmentChips({
+  files,
+  onOpenSurface,
+}: {
+  files: AttachedFile[];
+  onOpenSurface?: (surface: Surface) => void;
+}) {
+  if (files.length === 0) return null;
+  return (
+    <div
+      className="flex flex-wrap gap-1.5"
+      // The card's double-click opens edit mode; a fast double-click on a
+      // chip should just open the file, not both.
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      {files.map((f) => (
+        <button
+          key={f.path}
+          type="button"
+          disabled={!onOpenSurface}
+          onClick={() =>
+            onOpenSurface?.({ ...fileSurface(f.path), title: f.name })
+          }
+          title={onOpenSurface ? `Open ${f.path}` : f.path}
+          className={`flex items-center gap-1 rounded-md border border-line bg-canvas/60 px-2 py-0.5 text-[11.5px] text-muted transition-colors ${
+            onOpenSurface ? "cursor-pointer hover:border-accent/50 hover:text-text" : ""
+          }`}
+        >
+          <FileText size={11} className="shrink-0 text-faint" />
+          <span className="max-w-[220px] truncate">{f.name}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /**
  * A past prompt. Sticky like Cursor: the card pins to the top of the scroll
  * area while its turn streams beneath it; the next prompt displaces it. The
@@ -200,11 +276,14 @@ function Item({ item, hooks }: { item: TranscriptItem; hooks?: TranscriptHooks }
 function UserItem({
   item,
   edit,
+  onOpenSurface,
 }: {
   item: Extract<TranscriptItem, { kind: "user" }>;
   edit?: TranscriptEditHooks;
+  onOpenSurface?: (surface: Surface) => void;
 }) {
   const editing = edit?.editingId === item.id;
+  const { body, files } = splitAttachments(item.text);
   return (
     <div className="sticky top-0 z-10 -mx-3.5 bg-canvas px-3.5 pt-1 pb-1">
       {editing && edit ? (
@@ -215,10 +294,11 @@ function UserItem({
             edit?.canEdit ? () => edit.onStart(item.id) : undefined
           }
           title={edit?.canEdit ? "Double-click to edit and resubmit from here" : undefined}
-          className="group relative rounded-md border border-line/70 bg-card px-3 py-2 text-bright"
+          className="group relative space-y-1.5 rounded-md border border-line/70 bg-card px-3 py-2 text-bright"
         >
-          {item.text && (
-            <div className="whitespace-pre-wrap break-words">{item.text}</div>
+          <AttachmentChips files={files} onOpenSurface={onOpenSurface} />
+          {body && (
+            <div className="whitespace-pre-wrap break-words">{body}</div>
           )}
           <UserAttachments parts={item.parts} />
           {edit?.canEdit && (
@@ -361,10 +441,10 @@ type ToolTranscriptItem = Extract<TranscriptItem, { kind: "tool" }>;
 function ToolItem({ item, hooks }: { item: ToolTranscriptItem; hooks?: TranscriptHooks }) {
   switch (item.call.Name) {
     case "bash":
-      return <TerminalCard item={item} />;
+      return <TerminalCard item={item} hooks={hooks} />;
     case "edit":
     case "write":
-      return <DiffCard item={item} />;
+      return <DiffCard item={item} hooks={hooks} />;
     case "plan":
       return <PlanItem item={item} />;
     case "delegate":
@@ -373,9 +453,107 @@ function ToolItem({ item, hooks }: { item: ToolTranscriptItem; hooks?: Transcrip
       return <ShowChip item={item} hooks={hooks} />;
     case "remember":
       return <MemoryCard item={item} />;
+    case "ask":
+      return <AskCard item={item} />;
     default:
       return <SummaryRow item={item} />;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Ask: the question form in the transcript. While it runs the live    */
+/* panel above the composer collects answers; this row is the durable  */
+/* record — each prompt with the answer the user gave.                 */
+/* ------------------------------------------------------------------ */
+
+type AskQuestionArg = {
+  id?: string;
+  prompt?: string;
+  options?: { id?: string; label?: string }[];
+};
+
+type AskAnswer = {
+  question_id?: string;
+  selected_ids?: string[];
+  other_text?: string;
+};
+
+type AskDetails = {
+  answers?: AskAnswer[];
+  details?: string;
+  skipped?: boolean;
+};
+
+function askDetails(item: ToolTranscriptItem): AskDetails {
+  const d = item.result?.Details;
+  return typeof d === "object" && d !== null ? (d as AskDetails) : {};
+}
+
+/** The labels the user chose for one question, "their own words" included. */
+function askAnswerText(q: AskQuestionArg, answers: AskAnswer[]): string {
+  const a = answers.find((x) => x.question_id === q.id);
+  if (!a) return "";
+  const labels = (a.selected_ids ?? []).map(
+    (id) => q.options?.find((o) => o.id === id)?.label ?? id,
+  );
+  if (a.other_text) labels.push(a.other_text);
+  return labels.join(", ");
+}
+
+function AskCard({ item }: { item: ToolTranscriptItem }) {
+  const running = !item.result;
+  const failed = item.result?.IsError ?? false;
+  const a = args(item.call);
+  const qs = Array.isArray(a.questions) ? (a.questions as AskQuestionArg[]) : [];
+  const d = askDetails(item);
+
+  return (
+    <div className="rounded-md border border-line/60 bg-card/60 px-3 py-2">
+      <div className="flex items-center gap-1.5">
+        <CircleHelp size={12} className="shrink-0 text-muted" />
+        <span className="text-[11px] font-medium uppercase tracking-wider text-faint">
+          Questions
+        </span>
+        <span className="flex-1" />
+        {running && (
+          <Loader2 size={12} className="shrink-0 animate-spin text-faint" />
+        )}
+        {failed && <X size={12} className="shrink-0 text-red" />}
+        {!running && !failed && d.skipped && (
+          <span className="text-[11px] text-faint">skipped</span>
+        )}
+        {!running && !failed && !d.skipped && (
+          <span className="flex items-center gap-1 text-[11px] text-faint">
+            <Check size={12} className="shrink-0 text-green" />
+            answered
+          </span>
+        )}
+      </div>
+      <div className="mt-1 space-y-1.5">
+        {qs.map((q, i) => {
+          const answer = askAnswerText(q, d.answers ?? []);
+          return (
+            <div key={q.id ?? i} className="min-w-0 text-[12.5px] leading-relaxed">
+              <div className="break-words text-text">{q.prompt}</div>
+              {answer && (
+                <div className="break-words text-muted">↳ {answer}</div>
+              )}
+            </div>
+          );
+        })}
+        {d.details && (
+          <div className="break-words text-[12.5px] italic leading-relaxed text-muted">
+            “{d.details}”
+          </div>
+        )}
+      </div>
+      {failed && item.result && (
+        <div className="mt-1 truncate text-[11.5px] text-red/80">
+          {item.result.Content.slice(0, ERROR_PREVIEW_MAX)}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -692,8 +870,10 @@ function trimJobReport(output: string): { text: string; job?: string } {
 /**
  * A bash call as Cursor's terminal card: `[icon] Description command` in the
  * header (the description is the tool's display-only arg), dim output below.
+ * Expandable into a terminal tab — every command is a journaled job, and the
+ * job id rides the result's Details — where the full output tails live.
  */
-function TerminalCard({ item }: { item: ToolTranscriptItem }) {
+function TerminalCard({ item, hooks }: { item: ToolTranscriptItem; hooks?: TranscriptHooks }) {
   const [open, setOpen] = useState(true);
   const [stopped, setStopped] = useState(false);
   const running = !item.result;
@@ -703,6 +883,17 @@ function TerminalCard({ item }: { item: ToolTranscriptItem }) {
   const description = str(a.description);
   const { text: output, job } = trimJobReport(item.result?.Content.trimEnd() ?? "");
   const tail = output.split("\n").slice(-TERMINAL_TAIL_LINES).join("\n");
+
+  // The job behind this card: Details when the result carries it, else the
+  // backgrounded-report text (older transcripts). Errors carry no Details.
+  const jobId = item.result ? (detailsJob(item.result) ?? job) : undefined;
+  const expand =
+    jobId && hooks?.onOpenTerminal
+      ? (e: React.MouseEvent) => {
+          e.stopPropagation();
+          hooks.onOpenTerminal?.({ kind: "job", job: jobId, command });
+        }
+      : undefined;
 
   const stopJob = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -733,6 +924,15 @@ function TerminalCard({ item }: { item: ToolTranscriptItem }) {
           <Loader2 size={12} className="shrink-0 animate-spin text-faint" />
         )}
         {failed && <X size={12} className="shrink-0 text-red" />}
+        {expand && (
+          <span
+            onClick={expand}
+            title="Open as terminal tab"
+            className="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-hover hover:text-text"
+          >
+            <Maximize2 size={11} />
+          </span>
+        )}
       </button>
       {open && (tail || job) && (
         <div className="border-t border-line/60">
@@ -919,15 +1119,27 @@ const DIFF_LINE_BG: Record<DiffLine["kind"], string> = {
   gap: "",
 };
 
-/** An edit/write call as Cursor's diff card: filename + counts, tinted lines. */
-function DiffCard({ item }: { item: ToolTranscriptItem }) {
+/** An edit/write call as Cursor's diff card: filename + counts, tinted lines.
+ * The filename opens the file in a panel beside the chat (like Cursor's
+ * click-through from a diff to the editor); the rest of the header toggles
+ * the diff. */
+function DiffCard({ item, hooks }: { item: ToolTranscriptItem; hooks?: TranscriptHooks }) {
   const [open, setOpen] = useState(true);
   const running = !item.result;
   const failed = item.result?.IsError ?? false;
-  const name = basename(str(args(item.call).path));
+  const path = str(args(item.call).path);
+  const name = basename(path);
   const lines = diffLines(item);
   const adds = lines.filter((l) => l.kind === "add").length;
   const dels = lines.filter((l) => l.kind === "del").length;
+
+  const openFile =
+    path && hooks?.onOpenSurface
+      ? (e: React.MouseEvent) => {
+          e.stopPropagation();
+          hooks.onOpenSurface?.(fileSurface(path));
+        }
+      : undefined;
 
   return (
     <div className="overflow-hidden rounded-md border border-line/80">
@@ -937,7 +1149,15 @@ function DiffCard({ item }: { item: ToolTranscriptItem }) {
         className="flex w-full cursor-pointer items-center gap-2 bg-card px-3 py-1.5 text-left"
       >
         <span className="size-1.5 shrink-0 rounded-full bg-accent" />
-        <span className="min-w-0 truncate text-[12px] text-text">{name}</span>
+        <span
+          onClick={openFile}
+          title={openFile ? `Open ${path}` : undefined}
+          className={`min-w-0 truncate text-[12px] text-text ${
+            openFile ? "hover:text-accent hover:underline" : ""
+          }`}
+        >
+          {name}
+        </span>
         {!running && !failed && (
           <span className="shrink-0 font-mono text-[11px]">
             {adds > 0 && <span className="text-green">+{adds}</span>}{" "}

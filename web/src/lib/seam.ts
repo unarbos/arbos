@@ -12,6 +12,7 @@ import type {
   ContentBlock,
   Envelope,
   Intent,
+  QuestionAnswer,
   ServerFrame,
 } from "./types";
 
@@ -150,5 +151,21 @@ export class SeamClient {
       kind: "approval_response",
       data: { request_id: requestId, approved },
     });
+  }
+
+  /** Answer (or skip) a pending question form — the ask tool's panel. */
+  answerQuestions(
+    requestId: string,
+    answers: QuestionAnswer[],
+    details: string,
+    skipped: boolean,
+  ): boolean {
+    const data: Extract<Intent, { kind: "question_response" }>["data"] = {
+      request_id: requestId,
+    };
+    if (answers.length > 0) data.answers = answers;
+    if (details) data.details = details;
+    if (skipped) data.skipped = true;
+    return this.intent({ kind: "question_response", data });
   }
 }

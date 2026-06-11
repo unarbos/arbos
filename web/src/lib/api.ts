@@ -49,6 +49,8 @@ export interface SlashCommand {
   name: string;
   description?: string;
   argument_hint?: string;
+  /** The template's source file, for the popup's edit affordance. */
+  path?: string;
 }
 
 /** The slash commands available to this host (expansion stays server-side). */
@@ -133,6 +135,53 @@ export async function killJob(id: string): Promise<void> {
   if (!res.ok) throw new Error(`kill job: ${res.status}`);
 }
 
+/** One poll of a job terminal tab: current status plus the journal bytes
+ * since `offset` (base64 — process output is not guaranteed UTF-8). */
+export interface JobTail {
+  id: string;
+  command: string;
+  cwd: string;
+  status: "running" | "exited" | "killed";
+  exit_code: number;
+  data: string; // base64
+  offset: number; // next poll's offset
+  size: number;
+}
+
+/** Tail a background job's journal. offset −1 starts at the recent window. */
+export async function fetchJobTail(id: string, offset: number): Promise<JobTail> {
+  const res = await fetch(
+    `/api/jobs/${encodeURIComponent(id)}/tail?offset=${offset}`,
+  );
+  if (!res.ok) {
+    throw new HttpError(await errorText(res, `job tail: ${res.status}`), res.status);
+  }
+  return (await res.json()) as JobTail;
+}
+
+/** An interactive shell the gateway spawned for a terminal tab. */
+export interface TerminalInfo {
+  id: string;
+  cwd: string;
+}
+
+/** Spawn a shell on the host (optionally in a specific cwd) for a new
+ * terminal tab; the tab attaches to its byte stream over /ws. */
+export async function createTerminal(cwd?: string): Promise<TerminalInfo> {
+  const res = await fetch("/api/terminals", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cwd ? { cwd } : {}),
+  });
+  if (!res.ok) throw new Error(await errorText(res, `terminal: ${res.status}`));
+  return (await res.json()) as TerminalInfo;
+}
+
+/** Hang up a shell (the terminal tab closed). */
+export async function closeTerminal(id: string): Promise<void> {
+  await fetch(`/api/terminals/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
 /** Cancel a plan node (the ✕ on a scheduled task) — ends its recurrence. */
 export async function cancelPlanNode(node: number): Promise<void> {
   const res = await fetch(`/api/plan/${node}/cancel`, { method: "POST" });
@@ -157,6 +206,17 @@ export interface FileInfo {
   binary?: boolean;
 }
 
+/** A failed gateway request, with the HTTP status for callers that branch on
+ * it (the prompt editor treats a 404 as "new file", not an error). */
+export class HttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 /**
  * Read a workspace file for a surface panel. `statOnly` skips the content —
  * the cheap change-poll that keeps an open panel live.
@@ -165,7 +225,26 @@ export async function fetchFile(path: string, statOnly = false): Promise<FileInf
   const qs = new URLSearchParams({ path });
   if (statOnly) qs.set("stat", "1");
   const res = await fetch(`/api/file?${qs}`);
-  if (!res.ok) throw new Error(await errorText(res, `file: ${res.status}`));
+  if (!res.ok) {
+    throw new HttpError(await errorText(res, `file: ${res.status}`), res.status);
+  }
+  return (await res.json()) as FileInfo;
+}
+
+/**
+ * Write a text file back through the gateway (the prompt editor's save).
+ * Parent directories are created server-side; returns the fresh stat so the
+ * editor's change-poll baseline is its own write.
+ */
+export async function writeFile(path: string, content: string): Promise<FileInfo> {
+  const res = await fetch("/api/file", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, content }),
+  });
+  if (!res.ok) {
+    throw new HttpError(await errorText(res, `write: ${res.status}`), res.status);
+  }
   return (await res.json()) as FileInfo;
 }
 

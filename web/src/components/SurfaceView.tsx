@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { ExternalLink, Loader2, RotateCw } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Check, ExternalLink, Loader2, Pencil, RotateCw } from "lucide-react";
 
 import { Highlight, Markdown } from "./Markdown";
-import { fetchFile } from "@/lib/api";
+import { PromptEditor } from "./PromptEditor";
+import { fetchFile, writeFile } from "@/lib/api";
 import { rawUrl, surfaceTitle, themedCanvasDoc, type Surface } from "@/lib/surface";
 import { useTheme } from "@/lib/theme";
 
@@ -27,9 +28,16 @@ export function SurfaceView({
   // iframe / refetches the content.
   const [tick, setTick] = useState(0);
   const mtimeRef = useRef(0);
+  const [editing, setEditing] = useState(false);
+
+  const editor = surface.kind === "prompt";
+  // Text surfaces can flip into an editor; canvas/image stay view-only.
+  const editable = surface.kind === "doc" || surface.kind === "code";
 
   useEffect(() => {
-    if (!active) return;
+    // While editing, the panel's text is the user's draft — don't let the
+    // change-poll reload it out from under them.
+    if (!active || editor || editing) return;
     let stop = false;
     const check = () => {
       fetchFile(surface.path, true)
@@ -48,9 +56,15 @@ export function SurfaceView({
       stop = true;
       window.clearInterval(id);
     };
-  }, [active, surface.path]);
+  }, [active, editor, editing, surface.path]);
 
   const src = `${rawUrl(surface.path)}?v=${tick}`;
+
+  // A prompt surface is the slash-command editor — its own header (Save, not
+  // reload/open-raw) and its own change-watching, so it takes the whole tab.
+  if (editor) {
+    return <PromptEditor surface={surface} active={active} />;
+  }
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -61,6 +75,18 @@ export function SurfaceView({
         <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint">
           {surface.path}
         </span>
+        {editable && (
+          <button
+            type="button"
+            title={editing ? "Stop editing" : "Edit"}
+            onClick={() => setEditing((v) => !v)}
+            className={`flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-hover ${
+              editing ? "text-accent" : "text-muted hover:text-text"
+            }`}
+          >
+            <Pencil size={12} />
+          </button>
+        )}
         <button
           type="button"
           title="Reload"
@@ -93,7 +119,15 @@ export function SurfaceView({
             />
           </div>
         ) : (
-          <TextSurface surface={surface} tick={tick} />
+          <TextSurface
+            surface={surface}
+            tick={tick}
+            editing={editing}
+            onDoneEditing={() => setEditing(false)}
+            onSaved={(mtime) => {
+              mtimeRef.current = mtime;
+            }}
+          />
         )}
       </div>
     </div>
@@ -147,13 +181,37 @@ function CanvasSurface({ surface, tick }: { surface: Surface; tick: number }) {
   );
 }
 
-/** Markdown documents and code files: fetched text, rendered read-only. */
-function TextSurface({ surface, tick }: { surface: Surface; tick: number }) {
+/**
+ * Markdown documents and code files: fetched text, rendered read-only —
+ * or, with the header's pencil on, as a plain editor saving back through
+ * the gateway (⌘S or the footer's Save), like the prompt editor.
+ */
+function TextSurface({
+  surface,
+  tick,
+  editing,
+  onDoneEditing,
+  onSaved,
+}: {
+  surface: Surface;
+  tick: number;
+  editing: boolean;
+  onDoneEditing: () => void;
+  /** Report the save's mtime so the panel's change-poll baseline is our own write. */
+  onSaved: (mtime: number) => void;
+}) {
   const [state, setState] = useState<
     | { phase: "loading" }
     | { phase: "error"; message: string }
     | { phase: "ready"; content: string; truncated: boolean; binary: boolean }
   >({ phase: "loading" });
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const taRef = useRef<HTMLTextAreaElement>(null);
+
+  const dirty =
+    state.phase === "ready" && editing && draft !== state.content;
 
   useEffect(() => {
     let stale = false;
@@ -166,6 +224,7 @@ function TextSurface({ surface, tick }: { surface: Surface; tick: number }) {
           truncated: info.truncated ?? false,
           binary: info.binary ?? false,
         });
+        setDraft(info.content ?? "");
       })
       .catch((e: unknown) => {
         if (!stale) {
@@ -179,6 +238,31 @@ function TextSurface({ surface, tick }: { surface: Surface; tick: number }) {
       stale = true;
     };
   }, [surface.path, tick]);
+
+  // Entering edit mode: start the draft from what's on screen and hand over
+  // the keyboard.
+  useEffect(() => {
+    if (!editing || state.phase !== "ready") return;
+    setDraft(state.content);
+    setSaveError("");
+    taRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing]);
+
+  const save = useCallback(() => {
+    if (saving || state.phase !== "ready") return;
+    setSaving(true);
+    setSaveError("");
+    writeFile(surface.path, draft)
+      .then((info) => {
+        onSaved(info.mtime);
+        setState({ ...state, content: draft });
+      })
+      .catch((e: unknown) => {
+        setSaveError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => setSaving(false));
+  }, [surface.path, draft, saving, state, onSaved]);
 
   if (state.phase === "loading") {
     return (
@@ -194,6 +278,64 @@ function TextSurface({ surface, tick }: { surface: Surface; tick: number }) {
     return (
       <div className="p-4 text-faint">
         Binary file — open it in a browser tab instead.
+      </div>
+    );
+  }
+
+  if (editing) {
+    return (
+      <div className="flex size-full flex-col">
+        <textarea
+          ref={taRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+              e.preventDefault();
+              if (dirty) save();
+            }
+          }}
+          spellCheck={false}
+          className="min-h-0 w-full flex-1 resize-none bg-transparent px-4 py-3 font-mono text-[12px] leading-[1.55] text-text outline-none"
+        />
+        <div className="flex h-8 shrink-0 select-none items-center gap-2 border-t border-line/70 px-3 text-[11px]">
+          {saveError ? (
+            <span className="min-w-0 flex-1 truncate text-red">{saveError}</span>
+          ) : (
+            <span className="min-w-0 flex-1 truncate text-faint">
+              {state.truncated
+                ? "Truncated read — saving would write back only what's shown."
+                : dirty
+                  ? "Unsaved changes"
+                  : "No changes"}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={onDoneEditing}
+            className="flex h-6 shrink-0 cursor-pointer items-center rounded-md px-2.5 text-muted transition-colors hover:bg-hover hover:text-text"
+          >
+            Done
+          </button>
+          <button
+            type="button"
+            onClick={save}
+            disabled={!dirty || saving || state.truncated}
+            title="Save (⌘S)"
+            className={`flex h-6 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2.5 transition-colors disabled:cursor-default ${
+              dirty && !state.truncated
+                ? "bg-btn text-canvas hover:opacity-90"
+                : "text-faint"
+            }`}
+          >
+            {saving ? (
+              <Loader2 size={11} className="animate-spin" />
+            ) : (
+              !dirty && <Check size={11} />
+            )}
+            {dirty ? "Save" : "Saved"}
+          </button>
+        </div>
       </div>
     );
   }

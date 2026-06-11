@@ -10,8 +10,11 @@ Full grep parity over ripgrep, respecting `.gitignore`, with pi's exact notices.
 
 Implemented in `codingspec/grep.go`: `rg --json` parse, the `path:line:` and
 `-line-` context formats, `--ignore-case`/`--fixed-strings`/`--glob`, match-limit
-early stop, byte and long-line truncation, and the verbatim notices. `rg` is
-hard-required (D11). Runtime-proven against a `git init` fixture: row format,
+early stop, byte and long-line truncation, and the verbatim notices. `rg` was
+originally hard-required (D11); it is now the preferred fast path, with a
+native Go regexp fallback over the shared gitignore walker when rg is absent —
+see the D11 amendment in the overview. Runtime-proven against a `git init`
+fixture: row format,
 `.gitignore` exclusion, context blocks, the `Use limit=2` notice, `No matches
 found`, and glob filtering. (rg honors `.gitignore` only inside a git repo, pi's
 normal environment.)

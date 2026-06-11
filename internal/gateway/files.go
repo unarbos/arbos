@@ -9,8 +9,10 @@
 package gateway
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"unicode/utf8"
 
 	"github.com/unarbos/arbos/internal/tool"
@@ -77,6 +79,45 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, out)
+}
+
+// handleFileWrite is the prompt editor's save: it writes a text file back
+// through the same resolution the read door uses, creating parent directories
+// so a brand-new prompt (".arbos/prompts/name.md") lands without ceremony.
+// The response is the fresh stat, so the editor's change-poll baseline is the
+// write it just made — its own save never reads back as an external change.
+func (s *Server) handleFileWrite(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Path == "" {
+		http.Error(w, "path and content are required", http.StatusBadRequest)
+		return
+	}
+	abs, err := tool.Resolve(s.Root, body.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := os.WriteFile(abs, []byte(body.Content), 0o644); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"path":  body.Path,
+		"mtime": info.ModTime().UnixMilli(),
+		"size":  info.Size(),
+	})
 }
 
 // handleRaw serves a file as itself — content-type, ranges, caching all from

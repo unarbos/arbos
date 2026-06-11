@@ -423,7 +423,7 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 			case core.CompactIntent:
 				// Manual /compact: force a compaction pass now (when idle).
 				e.compactNow(parent, c)
-			case core.ApprovalResponseIntent:
+			case core.ApprovalResponseIntent, core.QuestionResponseIntent:
 				// A response arriving while idle has no pending waiter — the turn
 				// that asked already ended or was interrupted. Drop it benignly;
 				// a late/duplicate frame is not an internal error.
@@ -496,7 +496,7 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 			<-done
 			return queued
 		case reg := <-c.awaits:
-			// The turn paused for a response (approval). Register the
+			// The turn paused for a response (approval, question). Register the
 			// waiter; the matching response intent below routes back to it.
 			pending[reg.id] = reg.resp
 		case intent, ok := <-c.intents:
@@ -539,6 +539,8 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 				c.emit(parent, core.Queued{Text: it.Text})
 				queued = append(queued, it)
 			case core.ApprovalResponseIntent:
+				routeResponse(c, pending, it.RequestID, it, parent)
+			case core.QuestionResponseIntent:
 				routeResponse(c, pending, it.RequestID, it, parent)
 			case core.SetModelIntent, core.CompactIntent:
 				// These apply only when idle (between turns). Ignoring them
@@ -604,6 +606,18 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, 
 	base := ctx
 	ctx = withRelay(ctx, func(env core.Envelope) {
 		c.emitEnvelope(base, core.Envelope{SessionID: env.SessionID, Depth: env.Depth + 1, Event: env.Event})
+	})
+	// Attach the suspend-and-ask capability so a questioning tool (ask) can
+	// pause the turn for the user's structured answer — the approval gate's
+	// requestAndAwait, reached from inside a tool instead of before one.
+	ctx = withAsker(ctx, func(title string, questions []core.Question) (core.QuestionResponseIntent, bool) {
+		id := nextRequestID()
+		intent, ok := e.requestAndAwait(base, c, id, core.QuestionRequest{RequestID: id, Title: title, Questions: questions})
+		if !ok {
+			return core.QuestionResponseIntent{}, false
+		}
+		qr, _ := intent.(core.QuestionResponseIntent)
+		return qr, true
 	})
 
 	if !e.append(ctx, c, core.NewMessageEvent(c.id, core.Message{Role: core.RoleUser, Content: userText, Parts: userParts}, e.clock.Now())) {

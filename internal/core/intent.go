@@ -14,6 +14,7 @@ const (
 	IntentInterrupt        IntentKind = "interrupt"
 	IntentResume           IntentKind = "resume"
 	IntentApprovalResponse IntentKind = "approval_response"
+	IntentQuestionResponse IntentKind = "question_response"
 	IntentSetModel         IntentKind = "set_model"
 	IntentCompact          IntentKind = "compact"
 )
@@ -62,6 +63,27 @@ type ApprovalResponseIntent struct {
 	Reason    string    `json:"reason,omitempty"`
 }
 
+// QuestionAnswer is the user's answer to one Question: the selected option ids,
+// or free text when they typed their own answer instead. Both empty = the
+// question went unanswered.
+type QuestionAnswer struct {
+	QuestionID  string   `json:"question_id"`
+	SelectedIDs []string `json:"selected_ids,omitempty"`
+	OtherText   string   `json:"other_text,omitempty"`
+}
+
+// QuestionResponseIntent answers a QuestionRequest, unblocking a turn that
+// paused to collect structured answers (suspend-and-await; ADR-0018).
+// RequestID correlates the answer to the originating request. Details carries
+// optional free text the user added alongside their selections; Skipped means
+// they dismissed the form without answering.
+type QuestionResponseIntent struct {
+	RequestID RequestID        `json:"request_id"`
+	Answers   []QuestionAnswer `json:"answers,omitempty"`
+	Details   string           `json:"details,omitempty"`
+	Skipped   bool             `json:"skipped,omitempty"`
+}
+
 // SetModelIntent switches the model used for subsequent turns of a session. It
 // applies between turns (when the session is idle); the engine owns the
 // per-session override so no shared state is mutated mid-turn. Mirrors pi's RPC
@@ -79,5 +101,6 @@ func (SteerIntent) Kind() IntentKind            { return IntentSteer }
 func (InterruptIntent) Kind() IntentKind        { return IntentInterrupt }
 func (ResumeIntent) Kind() IntentKind           { return IntentResume }
 func (ApprovalResponseIntent) Kind() IntentKind { return IntentApprovalResponse }
+func (QuestionResponseIntent) Kind() IntentKind { return IntentQuestionResponse }
 func (SetModelIntent) Kind() IntentKind         { return IntentSetModel }
 func (CompactIntent) Kind() IntentKind          { return IntentCompact }

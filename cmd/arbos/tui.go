@@ -931,6 +931,14 @@ func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRendere
 	inputs := startRawInput(ctx, os.Stdin)
 	turnActive := false
 	var approvalID core.RequestID
+	// A pending ask-tool form: questions answered one Enter at a time, then
+	// the accumulated answers unblock the turn (mirrors the web's panel).
+	type askForm struct {
+		req     core.QuestionRequest
+		idx     int
+		answers []core.QuestionAnswer
+	}
+	var pendingAsk *askForm
 
 	sendPrompt := func(text string, echo bool) {
 		if echo {
@@ -997,6 +1005,27 @@ func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRendere
 					}
 					continue
 				}
+				if pendingAsk != nil {
+					q := pendingAsk.req.Questions[pendingAsk.idx]
+					pendingAsk.answers = append(pendingAsk.answers, parseQuestionAnswer(q, line))
+					pendingAsk.idx++
+					if pendingAsk.idx < len(pendingAsk.req.Questions) {
+						r.notice(questionLines(pendingAsk.req, pendingAsk.idx))
+						continue
+					}
+					conv.Send(core.QuestionResponseIntent{
+						RequestID: pendingAsk.req.RequestID,
+						Answers:   pendingAsk.answers,
+						Skipped:   questionsSkipped(pendingAsk.answers),
+					})
+					pendingAsk = nil
+					if turnActive {
+						r.steeringPrompt()
+					} else {
+						r.promptFollowUp()
+					}
+					continue
+				}
 				switch line {
 				case "":
 					// submitLine already re-rendered the block.
@@ -1026,6 +1055,9 @@ func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRendere
 			case core.ApprovalRequest:
 				approvalID = e.RequestID
 				r.approvalPrompt(e.Call)
+			case core.QuestionRequest:
+				pendingAsk = &askForm{req: e}
+				r.notice(questionLines(e, 0))
 			case core.ToolStarted:
 				if child {
 					r.withChildUpdate(func() { r.childToolStart(env.SessionID, e.Call) })
