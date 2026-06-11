@@ -912,7 +912,7 @@ func printSessionResume(out io.Writer, sessionID string) {
 	_, _ = fmt.Fprintln(out, cmd.Render("arbos resume "+sessionID))
 }
 
-func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRenderer, sessionID string, deliver func() bool, announceStanding func(bool), task string, expand func(string) string) error {
+func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRenderer, sessionID string, deliver func() bool, announceStanding func(bool), task string) error {
 	r.sessionID = sessionID
 	oldState, err := term.MakeRaw(os.Stdin.Fd())
 	if err != nil {
@@ -943,7 +943,7 @@ func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRendere
 	}
 	steer := func(text string) {
 		r.steerCut()
-		conv.Send(core.SteerIntent{Text: expand(text)})
+		conv.Send(core.SteerIntent{Text: text})
 		turnActive = true
 		r.turnStart()
 		r.steeringPrompt()
@@ -1006,7 +1006,7 @@ func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRendere
 					if turnActive {
 						steer(line)
 					} else {
-						sendPrompt(expand(line), false)
+						sendPrompt(line, false)
 					}
 				}
 			}

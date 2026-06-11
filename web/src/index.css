@@ -23,6 +23,15 @@
   --color-add-bg: #3b3a30; /* diff: added line background */
   --color-del-bg: #422c31; /* diff: removed line background */
   --color-btn: #b0aaae; /* light primary: send circle, Allow */
+  /* Hover/pressed overlay. Derived from bright (near-white on dark themes,
+     near-black on light ones) so affordances stay visible on every theme. */
+  --color-hover: color-mix(in srgb, var(--color-bright) 8%, transparent);
+
+  /* Code highlighting — overridden per theme (see lib/themes.ts). */
+  --color-syntax-comment: #7d8a6f;
+  --color-syntax-string: #c69a7b;
+  --color-syntax-number: #a8b58e;
+  --color-syntax-keyword: #b48cb4;
 
   --font-sans:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
@@ -45,6 +54,11 @@ body,
   line-height: 1.6;
   color-scheme: dark;
   -webkit-font-smoothing: antialiased;
+  /* Disable WebKit/Chromium text autosizing ("font boosting"): a long,
+     unbroken block (e.g. a pasted/attached transcript that is one huge line)
+     would otherwise get its font inflated, rendering attachment text giant. */
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
 }
 
 ::selection {

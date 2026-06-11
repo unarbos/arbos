@@ -9,16 +9,17 @@ export interface SessionSummary {
 }
 
 export type ReplayEvent =
-  | { type: "user"; text: string; parts?: ContentBlock[] }
-  | { type: "assistant"; text?: string; tool_calls?: ToolCall[] }
+  | { type: "user"; seq: number; text: string; parts?: ContentBlock[] }
+  | { type: "assistant"; seq: number; text?: string; tool_calls?: ToolCall[] }
   | {
       type: "tool_result";
+      seq: number;
       call_id: string;
       content?: string;
       is_error?: boolean;
       details?: unknown;
     }
-  | { type: "interrupted" };
+  | { type: "interrupted"; seq: number };
 
 /** One selectable model from the provider's catalog (OpenRouter's listing). */
 export interface ModelOption {
@@ -41,6 +42,21 @@ export async function fetchModels(): Promise<ModelCatalog> {
     current?: string;
   };
   return { models: body.models ?? [], current: body.current ?? "" };
+}
+
+/** One slash command (a prompt template) the composer's popup offers. */
+export interface SlashCommand {
+  name: string;
+  description?: string;
+  argument_hint?: string;
+}
+
+/** The slash commands available to this host (expansion stays server-side). */
+export async function fetchCommands(): Promise<SlashCommand[]> {
+  const res = await fetch("/api/commands");
+  if (!res.ok) throw new Error(`commands: ${res.status}`);
+  const body = (await res.json()) as { commands?: SlashCommand[] };
+  return body.commands ?? [];
 }
 
 export async function fetchSessions(): Promise<SessionSummary[]> {
@@ -129,6 +145,28 @@ export async function stopRun(id: string): Promise<void> {
     method: "POST",
   });
   if (!res.ok) throw new Error(`stop run: ${res.status}`);
+}
+
+/** A workspace file as the surface viewers read it through the gateway. */
+export interface FileInfo {
+  path: string;
+  mtime: number; // unix milliseconds
+  size: number;
+  content?: string; // absent for stat-only reads and binary files
+  truncated?: boolean;
+  binary?: boolean;
+}
+
+/**
+ * Read a workspace file for a surface panel. `statOnly` skips the content —
+ * the cheap change-poll that keeps an open panel live.
+ */
+export async function fetchFile(path: string, statOnly = false): Promise<FileInfo> {
+  const qs = new URLSearchParams({ path });
+  if (statOnly) qs.set("stat", "1");
+  const res = await fetch(`/api/file?${qs}`);
+  if (!res.ok) throw new Error(await errorText(res, `file: ${res.status}`));
+  return (await res.json()) as FileInfo;
 }
 
 async function errorText(res: Response, fallback: string): Promise<string> {

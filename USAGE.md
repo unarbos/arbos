@@ -159,7 +159,10 @@ endpoints rather than whole pages.
 
 **Slash commands** are reusable prompt templates. Drop a markdown file in
 `./.arbos/prompts/` (project) or `~/.config/arbos/prompts/` (user), then call
-it with `/name` — arbos expands it before the turn:
+it with `/name` — arbos expands it before the turn. They work everywhere: the
+CLI, `-serve`, and the web composer, where typing `/` opens a Cursor-style
+popup of available commands. This repo ships `/plan`, `/goal`, `/ralph`,
+`/poteto`, and `/canvas`:
 
 ```bash
 # ./.arbos/prompts/review.md  ->  "Review {{args}} for bugs and style."
@@ -274,6 +277,11 @@ Client → server frames:
 | `compact` | — | compact the context |
 | `switch_session` | `session_id` | bind a different session |
 | `fork` | `session_id`, `new_session_id`, `through_seq` | branch a session |
+
+`through_seq` is the last source event copied into the branch: omit it to copy
+the whole log; a negative value copies nothing (rewind to before the first
+message). A fork is refused while a turn is in flight (`fork: busy`) —
+interrupt first.
 
 Server → client: `opened`, `switched`, `forked`, `event`, `error`.
 

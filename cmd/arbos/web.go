@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/unarbos/arbos/internal/agent/pi"
 	"github.com/unarbos/arbos/internal/gateway"
 	"github.com/unarbos/arbos/internal/piwire"
 	"github.com/unarbos/arbos/internal/tool/codingspec"
@@ -47,6 +48,10 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist string, approve bool) error {
 		Drain:        cfg.ServeDrainTimeout,
 		Model:        cfg.Model,
 		ModelsURL:    cfg.ModelsURL(),
+		Commands:     func() []gateway.CommandInfo { return slashCommands(cwd) },
+		// The surface panels (show's canvases, code, docs) read workspace
+		// files back through the gateway, rooted where the tools run.
+		Root: cwd,
 		KillJob: func(id string) error {
 			_, err := codingspec.KillJob(cwd, id)
 			return err
@@ -90,6 +95,23 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist string, approve bool) error {
 		}
 		return err
 	}
+}
+
+// slashCommands maps the agent's prompt templates to the gateway's wire shape
+// for the composer's popup. Re-read per call so a freshly added prompt file
+// shows up without a restart; expansion itself happens in the engine at
+// projection time, never here.
+func slashCommands(cwd string) []gateway.CommandInfo {
+	ts := pi.LoadPromptTemplates(cwd, piwire.AgentConfigDir())
+	out := make([]gateway.CommandInfo, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, gateway.CommandInfo{
+			Name:         t.Name,
+			Description:  t.Description,
+			ArgumentHint: t.ArgumentHint,
+		})
+	}
+	return out
 }
 
 // displayAddr turns ":8420" into a clickable "localhost:8420".

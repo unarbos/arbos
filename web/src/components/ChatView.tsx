@@ -1,24 +1,29 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  AppWindow,
   Bell,
+  Brain,
   Check,
   ChevronDown,
-  ChevronRight,
   Circle,
   CircleHelp,
   Clock,
   ListTodo,
   Loader2,
   Orbit,
+  Pencil,
   Repeat,
   SquareTerminal,
   X,
 } from "lucide-react";
 
 import { Highlight, Markdown } from "./Markdown";
+import { PartImages } from "./PartImages";
 import { argsPreview } from "@/lib/format";
+import { detailsSurface, type Surface } from "@/lib/surface";
 import type { ChatState, TranscriptItem } from "@/lib/transcript";
 import type { ContentBlock, ToolCall } from "@/lib/types";
+import { useAutosize } from "@/lib/useAutosize";
 
 /** Hooks the transcript needs from its host (sub-agent tab opening). */
 export interface TranscriptHooks {
@@ -26,6 +31,24 @@ export interface TranscriptHooks {
   children?: Record<string, ChatState>;
   /** Open a sub-agent's transcript panel. */
   onOpenChild?: (session: string, label: string) => void;
+  /** Open a surface (a shown file) in a panel beside the chat. */
+  onOpenSurface?: (surface: Surface) => void;
+  /**
+   * Rewind-and-edit (Cursor's edit-a-previous-turn): clicking a past user
+   * message opens it for editing; submitting forks the session at that point
+   * and resubmits. Absent in sub-agent panels, which are read-only.
+   */
+  edit?: TranscriptEditHooks;
+}
+
+export interface TranscriptEditHooks {
+  /** Item id currently being edited inline, if any. */
+  editingId: number | null;
+  /** Whether edit can start now (seam connected). */
+  canEdit: boolean;
+  onStart: (id: number) => void;
+  onCancel: () => void;
+  onSubmit: (id: number, text: string) => void;
 }
 
 /**
@@ -78,7 +101,7 @@ export function TranscriptList({
   hooks?: TranscriptHooks;
 }) {
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-2 px-3.5 py-4">
+    <div className="mx-auto w-full max-w-4xl space-y-2 px-3.5 py-4">
       {items.map((item) => (
         <Item key={item.id} item={item} hooks={hooks} />
       ))}
@@ -89,20 +112,7 @@ export function TranscriptList({
 function Item({ item, hooks }: { item: TranscriptItem; hooks?: TranscriptHooks }) {
   switch (item.kind) {
     case "user":
-      // Sticky like Cursor: the prompt pins to the top of the scroll area
-      // while its turn streams beneath it; the next prompt displaces it. The
-      // full-bleed canvas wrapper masks content scrolling past behind the
-      // card's rounded corners.
-      return (
-        <div className="sticky top-0 z-10 -mx-3.5 bg-canvas px-3.5 pt-1 pb-1">
-          <div className="rounded-md border border-line/70 bg-card px-3 py-2 text-bright">
-            {item.text && (
-              <div className="whitespace-pre-wrap break-words">{item.text}</div>
-            )}
-            <UserAttachments parts={item.parts} />
-          </div>
-        </div>
-      );
+      return <UserItem item={item} edit={hooks?.edit} />;
 
     case "assistant":
       return (
@@ -127,6 +137,7 @@ function Item({ item, hooks }: { item: TranscriptItem; hooks?: TranscriptHooks }
       return (
         <SubagentChip
           label={item.label}
+          status={child ? childActivity(child) : ""}
           running={child?.turnActive ?? false}
           failed={false}
           onOpen={
@@ -149,7 +160,7 @@ function Item({ item, hooks }: { item: TranscriptItem; hooks?: TranscriptHooks }
       // finished background work speaking up, ambient like Cursor's rows.
       return (
         <div className="flex items-start gap-2 rounded-md border border-line/60 bg-card/60 px-3 py-2">
-          <Bell size={12} className="mt-1 shrink-0 text-accent" />
+          <Bell size={12} className="mt-1 shrink-0 text-muted" />
           <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-text">
             {item.text}
           </span>
@@ -175,22 +186,137 @@ function Item({ item, hooks }: { item: TranscriptItem; hooks?: TranscriptHooks }
 }
 
 /** Inline image attachments shown in a user prompt bubble. */
-function UserAttachments({ parts }: { parts?: ContentBlock[] }) {
-  const images = (parts ?? []).filter((p) => p.type === "image");
-  if (images.length === 0) return null;
+/**
+ * A past prompt. Sticky like Cursor: the card pins to the top of the scroll
+ * area while its turn streams beneath it; the next prompt displaces it. The
+ * full-bleed canvas wrapper masks content scrolling past behind the card's
+ * rounded corners.
+ *
+ * With edit hooks, double-clicking (or the hover pencil) turns the card into
+ * an inline composer — submitting forks the session at this message and
+ * resubmits the edited text (Cursor's edit-a-previous-turn). Works mid-turn
+ * too: the fork cancels the in-flight turn, like Cursor's checkpoint restore.
+ */
+function UserItem({
+  item,
+  edit,
+}: {
+  item: Extract<TranscriptItem, { kind: "user" }>;
+  edit?: TranscriptEditHooks;
+}) {
+  const editing = edit?.editingId === item.id;
   return (
-    <div className="mt-2 flex flex-wrap gap-2">
-      {images.map((p, i) =>
-        p.type === "image" ? (
-          <img
-            key={i}
-            src={`data:${p.image.mimeType};base64,${p.image.data}`}
-            alt=""
-            className="max-h-48 max-w-full rounded-md border border-line/60 object-contain"
-          />
-        ) : null,
+    <div className="sticky top-0 z-10 -mx-3.5 bg-canvas px-3.5 pt-1 pb-1">
+      {editing && edit ? (
+        <UserEditCard item={item} edit={edit} />
+      ) : (
+        <div
+          onDoubleClick={
+            edit?.canEdit ? () => edit.onStart(item.id) : undefined
+          }
+          title={edit?.canEdit ? "Double-click to edit and resubmit from here" : undefined}
+          className="group relative rounded-md border border-line/70 bg-card px-3 py-2 text-bright"
+        >
+          {item.text && (
+            <div className="whitespace-pre-wrap break-words">{item.text}</div>
+          )}
+          <UserAttachments parts={item.parts} />
+          {edit?.canEdit && (
+            <button
+              type="button"
+              onClick={() => edit.onStart(item.id)}
+              title="Edit and resubmit from here"
+              className="absolute right-1.5 top-1.5 flex size-6 cursor-pointer items-center justify-center rounded bg-card text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-hover hover:text-text"
+            >
+              <Pencil size={12} />
+            </button>
+          )}
+        </div>
       )}
     </div>
+  );
+}
+
+/** The user card in edit mode: Enter resubmits (forking here), Esc cancels. */
+function UserEditCard({
+  item,
+  edit,
+}: {
+  item: Extract<TranscriptItem, { kind: "user" }>;
+  edit: TranscriptEditHooks;
+}) {
+  const [draft, setDraft] = useState(item.text);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }, []);
+
+  // Autosize to content so the whole message stays visible while editing.
+  useAutosize(taRef, draft);
+
+  const submit = () => {
+    if (draft.trim()) edit.onSubmit(item.id, draft);
+  };
+
+  return (
+    <div className="rounded-md border border-accent/50 bg-card px-3 py-2 text-bright ring-1 ring-accent/30">
+      <textarea
+        ref={taRef}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            submit();
+          }
+          if (e.key === "Escape") {
+            e.preventDefault();
+            edit.onCancel();
+          }
+        }}
+        rows={1}
+        className="block w-full resize-none bg-transparent leading-relaxed text-bright outline-none"
+      />
+      <UserAttachments parts={item.parts} />
+      <div className="mt-1.5 flex items-center justify-between">
+        <span className="text-[11px] text-faint select-none">
+          resubmits from here — the turns below are discarded
+        </span>
+        <span className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={edit.onCancel}
+            title="Cancel (esc)"
+            className="cursor-pointer rounded-md border border-line px-2 py-0.5 text-[12px] text-muted transition-colors hover:text-text"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!draft.trim()}
+            title="Resubmit (enter)"
+            className="cursor-pointer rounded-md bg-btn px-2 py-0.5 text-[12px] font-medium text-canvas transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-30"
+          >
+            Send
+          </button>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function UserAttachments({ parts }: { parts?: ContentBlock[] }) {
+  return (
+    <PartImages
+      parts={parts}
+      wrap="mt-2 flex flex-wrap gap-2"
+      className="max-h-48 max-w-full rounded-md border border-line/60 object-contain"
+    />
   );
 }
 
@@ -243,25 +369,136 @@ function ToolItem({ item, hooks }: { item: ToolTranscriptItem; hooks?: Transcrip
       return <PlanItem item={item} />;
     case "delegate":
       return <DelegateChip item={item} hooks={hooks} />;
+    case "show":
+      return <ShowChip item={item} hooks={hooks} />;
+    case "remember":
+      return <MemoryCard item={item} />;
     default:
       return <SummaryRow item={item} />;
   }
 }
 
 /**
- * A delegation as Cursor renders a sub-agent: one clickable chip that opens
- * the child's own chat. Label is the delegated instruction; status follows
- * the tool result (the parent's record of the child's turn).
+ * A remember call as Cursor renders a saved memory: a quiet bordered card
+ * with a caption row (icon + "Memory" + state) over the fact itself, instead
+ * of a raw `remember fact=…` args dump.
+ */
+function MemoryCard({ item }: { item: ToolTranscriptItem }) {
+  const running = !item.result;
+  const failed = item.result?.IsError ?? false;
+  const fact = str(args(item.call).fact);
+
+  return (
+    <div className="rounded-md border border-line/60 bg-card/60 px-3 py-2">
+      <div className="flex items-center gap-1.5">
+        <Brain size={12} className="shrink-0 text-muted" />
+        <span className="text-[11px] font-medium uppercase tracking-wider text-faint">
+          Memory
+        </span>
+        <span className="flex-1" />
+        {running && (
+          <Loader2 size={12} className="shrink-0 animate-spin text-faint" />
+        )}
+        {failed && <X size={12} className="shrink-0 text-red" />}
+        {!running && !failed && (
+          <span className="flex items-center gap-1 text-[11px] text-faint">
+            <Check size={12} className="shrink-0 text-green" />
+            saved
+          </span>
+        )}
+      </div>
+      <div className="mt-1 whitespace-pre-wrap break-words text-[12.5px] leading-relaxed text-text">
+        {fact}
+      </div>
+      {failed && item.result && (
+        <div className="mt-1 truncate text-[11.5px] text-red/80">
+          {item.result.Content.slice(0, ERROR_PREVIEW_MAX)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A show call: the agent opened a file in a panel beside the chat. The row
+ * stays clickable forever — on a resumed session it is what re-opens the
+ * surface (the reference rides the result's Details through replay).
+ */
+function ShowChip({ item, hooks }: { item: ToolTranscriptItem; hooks?: TranscriptHooks }) {
+  const running = !item.result;
+  const failed = item.result?.IsError ?? false;
+  const surface = item.result && !failed ? detailsSurface(item.result) : undefined;
+  const a = args(item.call);
+  const label = surface?.title || str(a.title) || basename(str(a.path));
+
+  if (failed) {
+    return (
+      <div className="text-muted">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <X size={12} className="shrink-0 text-red" />
+          <span className="shrink-0">Present</span>
+          <span className="truncate font-mono text-[11.5px] text-muted/80">
+            {str(a.path)}
+          </span>
+        </div>
+        {item.result && (
+          <div className="truncate pl-[18px] text-[11.5px] text-red/80">
+            {item.result.Content.slice(0, ERROR_PREVIEW_MAX)}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const open = surface && hooks?.onOpenSurface
+    ? () => hooks.onOpenSurface?.(surface)
+    : undefined;
+  return (
+    <button
+      type="button"
+      onClick={open}
+      disabled={!open}
+      title={open ? "Open in a panel" : undefined}
+      className={`-mx-2 flex w-[calc(100%+1rem)] min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors ${
+        open ? "cursor-pointer hover:bg-card" : "cursor-default"
+      }`}
+    >
+      {running ? (
+        <Loader2 size={13} className="shrink-0 animate-spin text-faint" />
+      ) : (
+        <AppWindow size={13} className="shrink-0 text-muted" />
+      )}
+      <span className="min-w-0 truncate text-text">{label}</span>
+      <span className="min-w-0 truncate font-mono text-[11px] text-faint">
+        {surface?.path ?? str(a.path)}
+      </span>
+    </button>
+  );
+}
+
+/**
+ * A delegation as Cursor renders a sub-agent: a quiet two-line row — icon,
+ * task title, muted backend label — over a dim live-activity line (the
+ * child's latest action while it runs, its final word once it's done).
+ * Clicking opens the child's own chat.
  */
 function DelegateChip({ item, hooks }: { item: ToolTranscriptItem; hooks?: TranscriptHooks }) {
-  const label =
-    str(args(item.call).instruction).split("\n")[0] || "Sub-agent task";
+  const a = args(item.call);
+  const label = str(a.instruction).split("\n")[0] || "Sub-agent task";
   const sid = item.childSession;
+  const child = sid ? hooks?.children?.[sid] : undefined;
+  const running = !item.result;
+  const failed = item.result?.IsError ?? false;
+  const status = running
+    ? (child && childActivity(child)) || "Starting"
+    : firstLine(item.result?.Content ?? "");
   return (
     <SubagentChip
       label={label}
-      running={!item.result}
-      failed={item.result?.IsError ?? false}
+      meta={str(a.backend)}
+      status={status}
+      running={running}
+      failed={failed}
       onOpen={
         sid && hooks?.onOpenChild
           ? () => hooks.onOpenChild?.(sid, label)
@@ -271,14 +508,62 @@ function DelegateChip({ item, hooks }: { item: ToolTranscriptItem; hooks?: Trans
   );
 }
 
-/** The chip itself: `[bot] label … status ›`, a tab into the child's chat. */
+/**
+ * The child's latest visible action as one dim line — what Cursor shows
+ * under a running sub-agent ("Testing message edit functionality").
+ */
+function childActivity(child: ChatState): string {
+  for (let i = child.items.length - 1; i >= 0; i--) {
+    const it = child.items[i];
+    switch (it.kind) {
+      case "tool": {
+        if (it.call.Name === "bash") {
+          const a = args(it.call);
+          return str(a.description) || str(a.command) || "Running a command";
+        }
+        const { verb, arg } = summary(it.call);
+        return arg ? `${verb} ${arg}` : verb;
+      }
+      case "thinking":
+        return "Thinking";
+      case "assistant": {
+        const line = firstLine(it.text);
+        if (line) return line;
+        continue;
+      }
+      case "user":
+      case "queued":
+      case "interrupted":
+      case "error":
+      case "notice":
+      case "subagent":
+        continue;
+      default: {
+        const never: never = it;
+        void never;
+        continue;
+      }
+    }
+  }
+  return "";
+}
+
+function firstLine(text: string): string {
+  return text.trim().split("\n")[0] ?? "";
+}
+
+/** The row itself: `[orbit] title  backend` over a dim status line. */
 function SubagentChip({
   label,
+  meta,
+  status,
   running,
   failed,
   onOpen,
 }: {
   label: string;
+  meta?: string;
+  status?: string;
   running: boolean;
   failed: boolean;
   onOpen?: () => void;
@@ -289,20 +574,30 @@ function SubagentChip({
       onClick={onOpen}
       disabled={!onOpen}
       title={onOpen ? "Open sub-agent" : "Sub-agent transcript unavailable"}
-      className={`flex w-full items-center gap-2 rounded-lg border border-line/80 px-3 py-2 text-left transition-colors ${
+      className={`-mx-2 block w-[calc(100%+1rem)] rounded-md px-2 py-1 text-left transition-colors ${
         onOpen ? "cursor-pointer hover:bg-card" : "cursor-default"
       }`}
     >
-      <Orbit size={13} className="shrink-0 text-accent" />
-      <span className="min-w-0 flex-1 truncate text-text">{label}</span>
-      {running ? (
-        <Loader2 size={12} className="shrink-0 animate-spin text-faint" />
-      ) : failed ? (
-        <X size={12} className="shrink-0 text-red" />
-      ) : (
-        <Check size={12} className="shrink-0 text-green" />
+      <span className="flex min-w-0 items-center gap-2">
+        <Orbit
+          size={13}
+          className={`shrink-0 text-muted ${running ? "animate-[spin_3s_linear_infinite]" : ""}`}
+        />
+        <span className="min-w-0 truncate text-text">{label}</span>
+        {meta && (
+          <span className="shrink-0 text-[11.5px] text-faint">{meta}</span>
+        )}
+        {failed && <X size={12} className="ml-auto shrink-0 text-red" />}
+      </span>
+      {status && (
+        <span
+          className={`mt-0.5 block truncate pl-[21px] text-[12px] ${
+            failed ? "text-red/80" : "text-faint"
+          } ${running ? "shimmer" : ""}`}
+        >
+          {status}
+        </span>
       )}
-      {onOpen && <ChevronRight size={13} className="shrink-0 text-faint" />}
     </button>
   );
 }
@@ -461,7 +756,7 @@ function TerminalCard({ item }: { item: ToolTranscriptItem }) {
                     type="button"
                     onClick={stopJob}
                     title={`Stop ${job}`}
-                    className="ml-1 flex size-4 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-white/[0.06] hover:text-red"
+                    className="ml-1 flex size-4 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-hover hover:text-red"
                   >
                     <X size={11} />
                   </button>

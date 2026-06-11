@@ -8,7 +8,7 @@ import (
 )
 
 // ForkSession branches source into newID, copying its events with seq <=
-// throughSeq (negative = the whole log) and recording the lineage. It is a
+// throughSeq (negative = an empty branch) and recording the lineage. It is a
 // control-plane operation over the store (no running turn) — the arbos mapping
 // of pi's RPC fork. The caller is responsible for not forking a session that is
 // being actively written by a live actor.

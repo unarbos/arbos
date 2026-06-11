@@ -23,14 +23,25 @@ type PromptTemplate struct {
 	Content      string
 }
 
-// LoadPromptTemplates loads templates from the user scope (agentDir/prompts) and
-// the project scope (cwd/.arbos/prompts).
+// LoadPromptTemplates loads templates from the project scope (cwd/.arbos/prompts)
+// and the user scope (agentDir/prompts). A name present in both scopes resolves
+// to the project's version — the repo's conventions override personal defaults,
+// matching how context files and skills already layer — and appears once in the
+// listing (names compare case-insensitively, same as expansion).
 func LoadPromptTemplates(cwd, agentDir string) []PromptTemplate {
-	var out []PromptTemplate
-	if agentDir != "" {
-		out = append(out, loadTemplatesFromDir(filepath.Join(agentDir, "prompts"))...)
+	out := loadTemplatesFromDir(filepath.Join(cwd, projectPromptsDir))
+	if agentDir == "" {
+		return out
 	}
-	out = append(out, loadTemplatesFromDir(filepath.Join(cwd, projectPromptsDir))...)
+	seen := make(map[string]bool, len(out))
+	for _, t := range out {
+		seen[strings.ToLower(t.Name)] = true
+	}
+	for _, t := range loadTemplatesFromDir(filepath.Join(agentDir, "prompts")) {
+		if !seen[strings.ToLower(t.Name)] {
+			out = append(out, t)
+		}
+	}
 	return out
 }
 
@@ -68,6 +79,19 @@ func loadTemplatesFromDir(dir string) []PromptTemplate {
 	return out
 }
 
+// TemplateExpander returns an expand function for the control seam. Templates
+// are reloaded on each slash-prefixed message, so editing a prompt file takes
+// effect on the next message without a host restart; non-slash input never
+// touches the disk.
+func TemplateExpander(cwd, agentDir string) func(string) string {
+	return func(s string) string {
+		if !strings.HasPrefix(s, "/") {
+			return s
+		}
+		return ExpandPromptTemplate(s, LoadPromptTemplates(cwd, agentDir))
+	}
+}
+
 var slashRe = regexp.MustCompile(`^/([^\s]+)(?:\s+([\s\S]*))?$`)
 
 // ExpandPromptTemplate expands a leading `/name args` into the matching
@@ -83,8 +107,10 @@ func ExpandPromptTemplate(text string, templates []PromptTemplate) string {
 	}
 	name, argsStr := m[1], m[2]
 	for _, t := range templates {
-		if t.Name == name {
-			return substituteArgs(t.Content, parseCommandArgs(argsStr))
+		// Case-insensitive: the composer's popup filters case-insensitively,
+		// so "/Plan" must expand the same template it offered.
+		if strings.EqualFold(t.Name, name) {
+			return substituteArgs(t.Content, argsStr, parseCommandArgs(argsStr))
 		}
 	}
 	return text
@@ -128,7 +154,10 @@ var (
 
 // substituteArgs replaces $1/$2, ${@:N}/${@:N:L}, $ARGUMENTS, and $@ in order,
 // matching pi. Positional first so wildcard replacements are not re-substituted.
-func substituteArgs(content string, args []string) string {
+// $ARGUMENTS and $@ substitute the raw argument string, not the re-joined
+// parsed tokens: prose like "don't break the user's API" must reach the
+// template verbatim — quote parsing exists for positional args only.
+func substituteArgs(content, raw string, args []string) string {
 	at := func(i int) string {
 		if i >= 0 && i < len(args) {
 			return args[i]
@@ -159,7 +188,7 @@ func substituteArgs(content string, args []string) string {
 		}
 		return strings.Join(args[start:], " ")
 	})
-	all := strings.Join(args, " ")
+	all := strings.TrimSpace(raw)
 	out = strings.ReplaceAll(out, "$ARGUMENTS", all)
 	out = strings.ReplaceAll(out, "$@", all)
 	return out

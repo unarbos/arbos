@@ -150,6 +150,10 @@ func (o Options) buildForRoot(root string) (engine.Config, ports.ToolRuntime, er
 		MaxIterations:  maxIter,
 		Reasoning:      o.Reasoning,
 		CacheRetention: o.CacheRetention,
+		// Slash commands expand at projection, never in the log: every host
+		// (CLI, TUI, serve, web) gets them by construction, and the persisted
+		// transcript keeps exactly what the user typed.
+		ExpandUser: TemplateExpander(root, o.AgentDir),
 	}
 	return cfg, rt, nil
 }

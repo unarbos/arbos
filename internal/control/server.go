@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 	"time"
 
@@ -68,7 +69,7 @@ type clientFrame struct {
 	Intent       json.RawMessage `json:"intent,omitempty"`
 	Model        string          `json:"model,omitempty"`
 	NewSessionID core.SessionID  `json:"new_session_id,omitempty"` // fork: id for the new branch (optional)
-	ThroughSeq   *int64          `json:"through_seq,omitempty"`    // fork: last source seq to include; nil = whole log
+	ThroughSeq   *int64          `json:"through_seq,omitempty"`    // fork: last source seq to include; nil = whole log, negative = empty branch
 }
 
 type serverFrame struct {
@@ -214,20 +215,41 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 				}
 				source = conv.ID()
 			}
+			// Refuse to fork under an in-flight turn: the source log is being
+			// written, and the rebind below would silently cancel the turn.
+			turnMu.Lock()
+			busy := turnDone != nil
+			turnMu.Unlock()
+			if busy {
+				_ = enc.write(serverFrame{Type: "error", Error: "fork: busy: a turn is in flight, interrupt it first"})
+				return
+			}
 			newID := f.NewSessionID
 			if newID == "" {
 				newID = newSessionID()
 			}
-			through := int64(-1)
+			// Omitted through_seq copies the whole log; an explicit negative
+			// copies nothing (rewind to before the first message).
+			through := int64(math.MaxInt64)
 			if f.ThroughSeq != nil {
 				through = *f.ThroughSeq
 			}
-			teardown()
+			// Fork is a store copy, safe while the source is bound but idle
+			// (no turn — checked above; frames are serial, so nothing can
+			// start one underneath). Copying before teardown means a failure
+			// leaves this connection bound to the source, transcript intact.
 			if err := eng.ForkSession(sctx, source, newID, through); err != nil {
 				_ = enc.write(serverFrame{Type: "error", Error: "fork: " + err.Error()})
 				return
 			}
 			if err := bind(newID); err != nil {
+				// The branch exists but can't be driven from here; rebind the
+				// source (released by bind's teardown) so the connection
+				// isn't left wedged with no session.
+				if rerr := bind(source); rerr != nil {
+					_ = enc.write(serverFrame{Type: "error", Error: "fork: bind: " + err.Error() + "; rebind source: " + rerr.Error()})
+					return
+				}
 				_ = enc.write(serverFrame{Type: "error", Error: "fork: bind: " + err.Error()})
 				return
 			}

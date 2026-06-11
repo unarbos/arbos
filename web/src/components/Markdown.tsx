@@ -1,5 +1,7 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
+import { parsePlotSpec } from "../lib/plot";
+import { Chart } from "./Chart";
 
 /* ------------------------------------------------------------------ */
 /* Highlight — a tiny regex tokenizer for code blocks and diff lines.  */
@@ -22,10 +24,10 @@ const TOKEN_RE =
   /(\/\/[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/)|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d[\d_.]*\b)|(\b[A-Za-z_][A-Za-z0-9_]*\b)/g;
 
 const TOKEN_CLASS = {
-  comment: "text-[#7d8a6f]",
-  string: "text-[#c69a7b]",
-  number: "text-[#a8b58e]",
-  keyword: "text-[#b48cb4]",
+  comment: "text-syntax-comment",
+  string: "text-syntax-string",
+  number: "text-syntax-number",
+  keyword: "text-syntax-keyword",
 } as const;
 
 /** Syntax-tinted code text, used by code blocks and diff cards. */
@@ -289,6 +291,45 @@ function CodeBlock({
   );
 }
 
+/**
+ * A ```chart fence: JSON plot spec rendered as an inline SVG chart.
+ * While the spec is still streaming in (or simply malformed), fall back —
+ * placeholder mid-stream, code block + error once the message is final —
+ * so a broken spec is always debuggable rather than invisible.
+ */
+function ChartFence({ content, caret }: { content: string; caret?: ReactNode }) {
+  const parsed = useMemo(() => parsePlotSpec(content), [content]);
+
+  if (!parsed.ok) {
+    if (caret) {
+      return (
+        <div className="rounded-md border border-line/80 bg-card/50 px-3 py-2 text-[11.5px] text-faint">
+          rendering chart…{caret}
+        </div>
+      );
+    }
+    return (
+      <div className="space-y-1">
+        <CodeBlock lang="chart" content={content} />
+        <div className="text-[11.5px] text-red">chart: {parsed.error}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-hidden rounded-md border border-line/80">
+      <div className="flex items-center justify-between bg-card px-3 py-1">
+        <span className="text-[11px] text-faint select-none">chart</span>
+        <CopyButton text={content} />
+      </div>
+      <div className="px-2 py-2">
+        <Chart plot={parsed.plot} />
+        {caret}
+      </div>
+    </div>
+  );
+}
+
 const HEADING_CLASS: Record<number, string> = {
   1: "text-[1.15em]",
   2: "text-[1.08em]",
@@ -299,6 +340,9 @@ const HEADING_CLASS: Record<number, string> = {
 function Block({ block, caret }: { block: BlockNode; caret?: ReactNode }) {
   switch (block.type) {
     case "code":
+      if (block.lang === "chart") {
+        return <ChartFence content={block.content} caret={caret} />;
+      }
       return <CodeBlock lang={block.lang} content={block.content} caret={caret} />;
 
     case "heading": {
@@ -447,7 +491,7 @@ function InlineContent({ text }: { text: string }) {
             return (
               <code
                 key={i}
-                className="rounded-[4px] bg-white/[0.08] px-[5px] py-px font-mono text-[0.85em] text-bright"
+                className="rounded-[4px] bg-hover px-[5px] py-px font-mono text-[0.85em] text-bright"
               >
                 {node.content}
               </code>

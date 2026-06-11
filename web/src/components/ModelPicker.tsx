@@ -164,7 +164,7 @@ export function ModelPicker({
                 onMouseEnter={() => setHighlight(i)}
                 onClick={() => pick(m.id)}
                 className={`flex w-full cursor-pointer flex-col items-start gap-0.5 px-3 py-1.5 text-left transition-colors ${
-                  i === highlight ? "bg-white/[0.06]" : ""
+                  i === highlight ? "bg-hover" : ""
                 }`}
               >
                 <span className="flex w-full items-center gap-2">

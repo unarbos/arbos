@@ -1,24 +1,22 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   ArrowUp,
-  ChevronRight,
-  Clock,
   FileText,
   Loader2,
   Mic,
-  Orbit,
   Paperclip,
-  Pencil,
   Square,
-  SquareTerminal,
-  Trash2,
   X,
 } from "lucide-react";
 
+import { ApprovalCard } from "./ApprovalCard";
+import { BackgroundBar } from "./BackgroundBar";
 import { ChatView } from "./ChatView";
 import { ChildPanel } from "./ChildPanel";
+import { CommandMenu } from "./CommandMenu";
 import { ContextCircle } from "./ContextCircle";
 import { ModelPicker } from "./ModelPicker";
+import { QueuedMessages, type QueuedMessage } from "./QueuedMessages";
 import {
   cancelPlanNode,
   fetchChildren,
@@ -31,16 +29,15 @@ import {
   type ChildRun,
   type ModelOption,
 } from "@/lib/api";
-import { argsPreview } from "@/lib/format";
+import { useSlashCommands } from "@/lib/useSlashCommands";
 import { SeamClient, type ConnectionState } from "@/lib/seam";
+import { detailsSurface, type Surface } from "@/lib/surface";
 import type { ContentBlock } from "@/lib/types";
+import { useAutosize } from "@/lib/useAutosize";
 import {
   chatReducer,
   initialChatState,
   replayToItems,
-  type BackgroundJob,
-  type PendingApproval,
-  type ScheduledTask,
   type TranscriptItem,
 } from "@/lib/transcript";
 
@@ -50,6 +47,10 @@ const REBIND_MAX = 5;
 const COMPOSER_MAX_PX = 200;
 const RUNS_POLL_MS = 5000;
 const RUN_REPLAY_POLL_MS = 2000;
+// An edit mid-turn: the interrupt needs a beat to wind the engine down before
+// the fork lands; retry on "fork: busy" until it does (or give up).
+const FORK_RETRY_MS = 250;
+const FORK_RETRY_MAX = 8;
 /** Cap per-file text folded into a prompt so an attach never blows the turn. */
 const ATTACH_MAX_CHARS = 100_000;
 
@@ -75,12 +76,18 @@ function errMsg(e: unknown): string {
  * Fold text attachments into the prompt the seam carries: each file as a fenced
  * block under its name, then the typed message. Images are not folded — they go
  * as parts. Empty pieces drop out, so an image-only send still works.
+ *
+ * A slash command must stay at position 0 — the engine's template expansion
+ * keys on the leading "/" — so for `/cmd …` the typed text leads and the
+ * attachments follow (folding into the command's arguments).
  */
 function composeMessage(text: string, attachments: Attachment[]): string {
+  const typed = text.trim();
   const files = attachments
     .filter((a) => a.kind === "text")
     .map((a) => `Attached file \`${a.name}\`:\n\n\`\`\`\n${a.text ?? ""}\n\`\`\``);
-  return [...files, text.trim()].filter(Boolean).join("\n\n");
+  const pieces = typed.startsWith("/") ? [typed, ...files] : [...files, typed];
+  return pieces.filter(Boolean).join("\n\n");
 }
 
 /** The image attachments as multimodal content blocks for the prompt. */
@@ -100,6 +107,8 @@ export interface ChatTabHandle {
   onTitle?: (title: string) => void;
   /** The session id this tab is bound to (assigned or resumed). */
   onSession?: (id: string) => void;
+  /** The agent (or a chip click) opened a surface — show it beside the chat. */
+  onOpenSurface?: (surface: Surface) => void;
 }
 
 /**
@@ -109,13 +118,22 @@ export interface ChatTabHandle {
  *
  * A tab given `resumeId` seeds its transcript from the session's persisted
  * history, then binds the live seam to the same id.
+ *
+ * `active` means visible in its pane; with a split two tabs are active at
+ * once, so the singular concerns (ambient notices, owning the keyboard) key
+ * off `focused` — true for exactly one tab, the focused pane's visible one.
  */
 export function ChatTab({
   active,
+  focused,
+  focusTick,
   resumeId,
   handle,
 }: {
   active: boolean;
+  focused: boolean;
+  /** Bumped by explicit activation (tab click, new tab, split): grab focus. */
+  focusTick: number;
   resumeId: string | null;
   handle: ChatTabHandle;
 }) {
@@ -132,10 +150,22 @@ export function ChatTab({
   // Messages composed while a turn runs wait here (Cursor's queue): each can
   // be edited back into the composer, deleted, or pushed (sent now as a
   // steer). The head auto-sends when the turn completes.
-  const [queue, setQueue] = useState<
-    { qid: number; text: string; parts: ContentBlock[] }[]
-  >([]);
+  const [queue, setQueue] = useState<QueuedMessage[]>([]);
   const qidRef = useRef(1);
+  // A past user message opened for inline editing (rewind-and-resubmit).
+  const [editingId, setEditingId] = useState<number | null>(null);
+  // An edit whose fork was requested but not yet confirmed: the truncated
+  // transcript and replacement prompt to apply when the forked frame lands.
+  // Kept out of the transcript until then so a failed fork changes nothing.
+  // An edit mid-turn rides this too: the server refuses to fork under an
+  // in-flight turn, so the busy error interrupts it and retries the fork.
+  const pendingEditRef = useRef<{
+    throughSeq: number;
+    keep: TranscriptItem[];
+    text: string;
+    parts: ContentBlock[];
+    retries: number;
+  } | null>(null);
   // Files picked into the composer (paperclip): their text folds into the next
   // prompt and the chips clear once it's sent.
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -155,15 +185,20 @@ export function ChatTab({
 
   const seamRef = useRef<SeamClient | null>(null);
   const sessionRef = useRef<string | null>(resumeId);
+  const rootRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const handleRef = useRef(handle);
   handleRef.current = handle;
-  const activeRef = useRef(active);
-  activeRef.current = active;
+  const focusedRef = useRef(focused);
+  focusedRef.current = focused;
+  // Fresh turn state for async callbacks (resubmitEdit reads it post-await).
+  const turnActiveRef = useRef(chat.turnActive);
+  turnActiveRef.current = chat.turnActive;
 
   useEffect(() => {
     let retry: number | undefined;
+    let forkRetry: number | undefined;
     let rebinds = 0;
     let closed = false;
     const seam = new SeamClient({
@@ -175,8 +210,13 @@ export function ChatTab({
           // thread.
           seam.open(sessionRef.current ?? undefined);
         }
-        if (s === "closed" && !closed) {
-          retry = window.setTimeout(() => seam.connect(), RECONNECT_MS);
+        if (s === "closed") {
+          // Any fork awaiting confirmation died with the socket; the rebind
+          // below reattaches the original session, transcript intact.
+          pendingEditRef.current = null;
+          if (!closed) {
+            retry = window.setTimeout(() => seam.connect(), RECONNECT_MS);
+          }
         }
       },
       onSession: (id) => {
@@ -185,18 +225,62 @@ export function ChatTab({
         setBoundSession(id);
         handleRef.current.onSession?.(id);
       },
-      onEnvelope: (env) => dispatch({ type: "envelope", env }),
+      onForked: () => {
+        // The server confirmed a rewind-and-edit fork and rebound this
+        // connection to the branch — now it is safe to truncate the visible
+        // transcript and restart the thread from the edited message.
+        const edit = pendingEditRef.current;
+        if (!edit) return;
+        pendingEditRef.current = null;
+        dispatch({ type: "replay", items: edit.keep });
+        if (seam.prompt(edit.text, edit.parts)) {
+          dispatch({ type: "user", text: edit.text, parts: edit.parts });
+        }
+      },
+      onEnvelope: (env) => {
+        // The agent presenting a file (the show tool) opens its panel the
+        // moment the result streams in — live only, top-level only: a
+        // resumed transcript renders chips to re-open, and a delegated
+        // child's shows stay quiet until clicked.
+        if (env.depth === 0 && env.event.kind === "tool_finished") {
+          const surface = detailsSurface(env.event.data.result);
+          if (surface) handleRef.current.onOpenSurface?.(surface);
+        }
+        dispatch({ type: "envelope", env });
+      },
       onNotice: (text, session) => {
         // A notice addressed to THIS chat always renders here, focused or
         // not — it was claimed for this tab and exists nowhere else. Ambient
         // ones (broadcast-class, or a stale sweep for a chat nobody has
-        // open) fan out to every connection; only the visible tab renders
-        // those, so the user sees them exactly once.
-        if (session === sessionRef.current || activeRef.current) {
+        // open) fan out to every connection; only the focused tab renders
+        // those (with a split two tabs are visible, exactly one is focused),
+        // so the user sees them exactly once.
+        if (session === sessionRef.current || focusedRef.current) {
           dispatch({ type: "notice", text });
         }
       },
       onError: (msg) => {
+        // An edit landed while a turn was in flight: the server refuses to
+        // fork under it. Interrupt the turn (a no-op once it has ended) and
+        // retry the fork until the engine has wound down.
+        if (pendingEditRef.current && msg.startsWith("fork: busy")) {
+          const edit = pendingEditRef.current;
+          if (edit.retries++ < FORK_RETRY_MAX) {
+            seam.interrupt();
+            forkRetry = window.setTimeout(() => {
+              if (pendingEditRef.current === edit) seam.fork(edit.throughSeq);
+            }, FORK_RETRY_MS);
+            return;
+          }
+          pendingEditRef.current = null;
+          dispatch({ type: "seam-error", message: `edit: ${msg}` });
+          return;
+        }
+        // Any other failed fork leaves the server bound to the original
+        // session and the transcript untouched; just drop the waiting edit.
+        if (pendingEditRef.current && msg.startsWith("fork:")) {
+          pendingEditRef.current = null;
+        }
         // A reconnect can land while the server still drains the previous
         // connection's hold on the session. Quietly retry the re-bind; fall
         // back to a fresh session only if it never frees up.
@@ -230,6 +314,7 @@ export function ChatTab({
     return () => {
       closed = true;
       window.clearTimeout(retry);
+      window.clearTimeout(forkRetry);
       seam.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -239,17 +324,19 @@ export function ChatTab({
     handleRef.current.onBusy?.(chat.turnActive);
   }, [chat.turnActive]);
 
-  // The page is the prompt: clicking anywhere in the active tab focuses it.
-  // But a click landing on its own focusable control (a popup's search box,
-  // another input) must keep that focus — otherwise the composer steals every
-  // keystroke. `[data-keep-focus]` lets a popup opt its whole subtree out.
+  // The page is the prompt: clicking anywhere in this pane focuses its
+  // composer (scoped by containment — with a split each pane focuses its
+  // own). But a click landing on its own focusable control (a popup's search
+  // box, another input) must keep that focus — otherwise the composer steals
+  // every keystroke. `[data-keep-focus]` lets a popup opt its subtree out.
   useEffect(() => {
     if (!active) return;
     const focus = (e: MouseEvent) => {
       if (window.getSelection()?.toString()) return; // don't steal a selection
       const target = e.target as HTMLElement | null;
+      if (!target || !rootRef.current?.contains(target)) return;
       if (
-        target?.closest(
+        target.closest(
           'input, textarea, select, [contenteditable="true"], [data-keep-focus]',
         )
       ) {
@@ -258,17 +345,19 @@ export function ChatTab({
       taRef.current?.focus();
     };
     document.addEventListener("click", focus);
-    taRef.current?.focus();
     return () => document.removeEventListener("click", focus);
   }, [active]);
 
-  // Autosize the composer to its content, capped so it never eats the page.
+  // Explicit activation — a tab click, a new tab, a split — hands the
+  // keyboard to the focused pane's composer. Plain clicks inside a pane are
+  // handled above; pane focus shifting under a click on an inner input must
+  // NOT re-grab (the user aimed at that input), hence the tick, not `focused`.
   useEffect(() => {
-    const ta = taRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    ta.style.height = `${Math.min(ta.scrollHeight, COMPOSER_MAX_PX)}px`;
-  }, [text]);
+    if (active && focusedRef.current) taRef.current?.focus();
+  }, [active, focusTick]);
+
+  // Autosize the composer to its content, capped so it never eats the page.
+  useAutosize(taRef, text, COMPOSER_MAX_PX);
 
   // Poll this chat's scheduled runs (plan-node agent firings) so they appear
   // as openable tabs. Scoped server-side: only runs whose node THIS chat
@@ -427,6 +516,10 @@ export function ChatTab({
     }
   }, [voice]);
 
+  // The slash-command menu (Cursor's popup over the host's prompt templates).
+  const focusComposer = useCallback(() => taRef.current?.focus(), []);
+  const slash = useSlashCommands(text, setText, focusComposer);
+
   const submit = useCallback(() => {
     const body = composeMessage(text, attachments);
     const parts = imageParts(attachments);
@@ -452,8 +545,11 @@ export function ChatTab({
 
   // Flush the queue head when the turn ends: sending dispatches a user item
   // and re-arms turnActive, so exactly one queued message runs per turn.
+  // A pending edit owns the turn-end it caused — its fork must land before
+  // anything else starts a turn, or the server would report busy forever.
   useEffect(() => {
     if (chat.turnActive || connState !== "open" || queue.length === 0) return;
+    if (pendingEditRef.current) return;
     const head = queue[0];
     if (seamRef.current?.prompt(head.text, head.parts)) {
       setQueue((q) => q.filter((m) => m.qid !== head.qid));
@@ -475,6 +571,69 @@ export function ChatTab({
       }
     },
     [queue, chat.turnActive],
+  );
+
+  /**
+   * Rewind-and-resubmit (Cursor's edit-a-previous-turn): fork the session
+   * just before the edited user message — preserving the original thread —
+   * rebind this tab to the branch, and prompt it with the edited text. The
+   * fork point comes from a fresh replay; the transcript only truncates once
+   * the server confirms the fork (onForked), so a failure changes nothing.
+   * Editing mid-turn works like Cursor: the in-flight turn is interrupted,
+   * then the fork lands once the engine has wound down (onError retries it
+   * while the server still reports busy).
+   */
+  const resubmitEdit = useCallback(
+    async (itemId: number, newText: string) => {
+      const seam = seamRef.current;
+      const session = sessionRef.current;
+      if (!seam || !session) return;
+      const userItems = chat.items.filter((it) => it.kind === "user");
+      const k = userItems.findIndex((it) => it.id === itemId);
+      if (k < 0) return;
+      const target = userItems[k];
+      const parts = target.parts ?? [];
+      try {
+        const events = await fetchReplay(session);
+        // Locate the edited message in the log: by its replayed seq when it
+        // has one, else as the k-th user event. Either way the log entry must
+        // match the item's text — an optimistic item whose prompt never
+        // landed, or a queued turn driven from another frontend, would skew
+        // the mapping and silently fork at the wrong turn otherwise.
+        let cut: number;
+        if (target.seq != null) {
+          cut = events.findIndex((e) => e.type === "user" && e.seq === target.seq);
+        } else {
+          cut = -1;
+          let seen = -1;
+          for (let i = 0; i < events.length; i++) {
+            if (events[i].type === "user" && ++seen === k) {
+              cut = i;
+              break;
+            }
+          }
+        }
+        const ev = cut >= 0 ? events[cut] : undefined;
+        if (!ev || ev.type !== "user" || ev.text !== target.text) {
+          throw new Error("transcript is out of sync with the session log — reload the tab");
+        }
+        // Mid-turn: stop the stream first; the busy-retry in onError covers
+        // the gap until the engine has actually wound down.
+        if (turnActiveRef.current) seam.interrupt();
+        if (!seam.fork(ev.seq - 1)) throw new Error("not connected");
+        pendingEditRef.current = {
+          throughSeq: ev.seq - 1,
+          keep: replayToItems(events.slice(0, cut)),
+          text: newText,
+          parts,
+          retries: 0,
+        };
+        setEditingId(null);
+      } catch (e) {
+        dispatch({ type: "seam-error", message: `edit: ${errMsg(e)}` });
+      }
+    },
+    [chat.items],
   );
 
   /** Edit: pull a queued message back into the composer. */
@@ -500,6 +659,9 @@ export function ChatTab({
   );
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // The command menu owns navigation keys while it is open (Enter on a
+    // fully typed command falls through and sends it).
+    if (slash.handleKey(e)) return;
     if (approval && text === "") {
       if (e.key === "y" || e.key === "Y") {
         e.preventDefault();
@@ -528,8 +690,30 @@ export function ChatTab({
       ? "queue a follow-up (enter) · stop (esc)"
       : "Plan, build, ask anything";
 
+  // A brand-new tab opens Cursor-style: the composer sits at the top of the
+  // empty page, then drops to the bottom the instant the first transcript
+  // item lands (the optimistic user item on Enter). Resumed tabs never start
+  // fresh — their history is already on its way.
+  const fresh = !resumeId && chat.items.length === 0;
+
+  // A sub-agent opened from the transcript takes over the tab — the child's
+  // chat renders as a normal full-width panel (back header, same transcript
+  // column), not a side sheet. Esc / back returns to the parent.
+  if (openChild) {
+    return (
+      <div className={active ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+        <ChildPanel
+          title={openChild.label}
+          items={liveChild ? liveChild.items : childReplay}
+          running={liveChild ? liveChild.turnActive : (openRun?.active ?? false)}
+          onClose={() => setOpenChild(null)}
+        />
+      </div>
+    );
+  }
+
   return (
-    <div className={active ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+    <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       <ChatView
         items={chat.items}
         hooks={{
@@ -538,20 +722,19 @@ export function ChatTab({
             setChildReplay([]);
             setOpenChild({ session, label });
           },
+          onOpenSurface: (surface) => handleRef.current.onOpenSurface?.(surface),
+          edit: {
+            editingId,
+            canEdit: connected,
+            onStart: setEditingId,
+            onCancel: () => setEditingId(null),
+            onSubmit: (id, text) => void resubmitEdit(id, text),
+          },
         }}
       />
 
-      {openChild && (
-        <ChildPanel
-          title={openChild.label}
-          items={liveChild ? liveChild.items : childReplay}
-          running={liveChild ? liveChild.turnActive : (openRun?.active ?? false)}
-          onClose={() => setOpenChild(null)}
-        />
-      )}
-
-      <div className="shrink-0">
-        <div className="mx-auto w-full max-w-3xl space-y-2 px-3.5 pb-3.5 pt-1">
+      <div className={fresh ? "order-first shrink-0 pt-2" : "shrink-0"}>
+        <div className="mx-auto w-full max-w-4xl space-y-2 px-3.5 pb-3.5 pt-1">
           {(chat.jobs.length > 0 || chat.scheduled.length > 0 || runs.length > 0) && (
             <BackgroundBar
               jobs={chat.jobs}
@@ -603,7 +786,16 @@ export function ChatTab({
             <ApprovalCard approval={approval} onAnswer={answerApproval} />
           )}
 
-          <div className="rounded-[10px] border border-line bg-panel transition-colors focus-within:border-line/0 focus-within:ring-1 focus-within:ring-accent/40">
+          <div className="relative rounded-[10px] border border-line bg-panel transition-colors focus-within:border-line/0 focus-within:ring-1 focus-within:ring-accent/40">
+            {slash.open && (
+              <CommandMenu
+                commands={slash.matches}
+                highlight={slash.highlight}
+                below={fresh}
+                onHover={slash.setHighlight}
+                onPick={slash.pick}
+              />
+            )}
             {attachments.length > 0 && (
               <div className="flex flex-wrap gap-1.5 px-2 pt-2">
                 {attachments.map((a) => (
@@ -656,18 +848,18 @@ export function ChatTab({
             />
             <div className="flex items-center justify-between px-2 pb-2">
               <span className="flex items-center gap-2 select-none">
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  title="Attach files"
-                  className="flex size-6 cursor-pointer items-center justify-center rounded-full text-faint transition-colors hover:bg-white/[0.06] hover:text-text"
-                >
-                  <Paperclip size={14} />
-                </button>
                 <ModelPicker current={model} onSelect={selectModel} />
                 <ContextCircle used={usedTokens} total={contextLength} />
               </span>
               <span className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Attach files"
+                  className="flex size-6 cursor-pointer items-center justify-center rounded-full text-faint transition-colors hover:bg-hover hover:text-text"
+                >
+                  <Paperclip size={14} />
+                </button>
                 <button
                   type="button"
                   onClick={toggleVoice}
@@ -681,7 +873,7 @@ export function ChatTab({
                   className={`flex size-6 cursor-pointer items-center justify-center rounded-full transition-colors disabled:cursor-default ${
                     voice === "recording"
                       ? "animate-pulse bg-red text-canvas"
-                      : "text-faint hover:bg-white/[0.06] hover:text-text"
+                      : "text-faint hover:bg-hover hover:text-text"
                   }`}
                 >
                   {voice === "starting" || voice === "transcribing" ? (
@@ -714,244 +906,6 @@ export function ChatTab({
             </div>
           </div>
         </div>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Messages waiting their turn, Cursor-style: quiet cards under the transcript
- * with hover affordances — edit (back into the composer), push (send now,
- * steering the in-flight turn), delete.
- */
-function QueuedMessages({
-  queue,
-  onPush,
-  onEdit,
-  onDelete,
-}: {
-  queue: { qid: number; text: string; parts: ContentBlock[] }[];
-  onPush: (qid: number) => void;
-  onEdit: (qid: number) => void;
-  onDelete: (qid: number) => void;
-}) {
-  return (
-    <div className="space-y-1">
-      {queue.map((m) => (
-        <div
-          key={m.qid}
-          className="group flex items-center gap-2 rounded-md border border-line/60 bg-card/60 px-3 py-1.5"
-        >
-          <span className="min-w-0 flex-1 truncate text-muted">
-            {m.text ||
-              `${m.parts.length} image${m.parts.length === 1 ? "" : "s"}`}
-          </span>
-          <span className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-            <button
-              type="button"
-              onClick={() => onEdit(m.qid)}
-              title="Edit"
-              className="flex size-5 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-white/[0.06] hover:text-text"
-            >
-              <Pencil size={11} />
-            </button>
-            <button
-              type="button"
-              onClick={() => onPush(m.qid)}
-              title="Send now"
-              className="flex size-5 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-white/[0.06] hover:text-text"
-            >
-              <ArrowUp size={12} />
-            </button>
-            <button
-              type="button"
-              onClick={() => onDelete(m.qid)}
-              title="Delete"
-              className="flex size-5 cursor-pointer items-center justify-center rounded text-faint transition-colors hover:bg-white/[0.06] hover:text-red"
-            >
-              <Trash2 size={11} />
-            </button>
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-const RUNS_SHOWN = 5;
-
-function runAge(ms: number): string {
-  const sec = Math.max(0, (Date.now() - ms) / 1000);
-  if (sec < 60) return `${Math.round(sec)}s ago`;
-  if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
-  return `${Math.round(sec / 3600)}h ago`;
-}
-
-/**
- * Live background work, pinned above the composer like Cursor's
- * "1 background terminal" rows: collapsed counts that expand into the
- * running commands, the plan's armed clocks/callbacks, and this chat's
- * scheduled agent runs — each run an openable sub-agent window.
- */
-function BackgroundBar({
-  jobs,
-  scheduled,
-  runs,
-  onOpenRun,
-  onKillJob,
-  onCancelTask,
-  onStopRun,
-}: {
-  jobs: BackgroundJob[];
-  scheduled: ScheduledTask[];
-  runs: ChildRun[];
-  onOpenRun: (r: ChildRun) => void;
-  onKillJob: (id: string) => void;
-  onCancelTask: (id: number) => void;
-  onStopRun: (r: ChildRun) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const activeRuns = runs.filter((r) => r.active).length;
-
-  const parts: string[] = [];
-  if (jobs.length > 0) {
-    parts.push(`${jobs.length} background terminal${jobs.length > 1 ? "s" : ""}`);
-  }
-  if (scheduled.length > 0) {
-    parts.push(`${scheduled.length} scheduled task${scheduled.length > 1 ? "s" : ""}`);
-  }
-  if (runs.length > 0) {
-    parts.push(
-      activeRuns > 0
-        ? `${activeRuns} agent run${activeRuns > 1 ? "s" : ""} live`
-        : `${runs.length} agent run${runs.length > 1 ? "s" : ""}`,
-    );
-  }
-
-  return (
-    <div className="select-none">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="flex w-full cursor-pointer items-center gap-1 rounded-md px-1 py-0.5 text-[12px] text-muted transition-colors hover:text-text"
-      >
-        <ChevronRight
-          size={12}
-          className={`shrink-0 text-faint transition-transform ${open ? "rotate-90" : ""}`}
-        />
-        {parts.join(" · ")}
-        {!open && activeRuns > 0 && (
-          <Loader2 size={11} className="ml-1 shrink-0 animate-spin text-faint" />
-        )}
-      </button>
-      {open && (
-        <div className="space-y-1 py-1 pl-5">
-          {jobs.map((j) => (
-            <div
-              key={j.id}
-              className="group flex min-w-0 items-center gap-2 text-[12px] text-muted"
-            >
-              <SquareTerminal size={12} className="shrink-0 text-faint" />
-              <span className="min-w-0 flex-1 truncate font-mono text-[11.5px]">
-                {j.command || j.id}
-              </span>
-              <button
-                type="button"
-                onClick={() => onKillJob(j.id)}
-                title={`Kill ${j.id}`}
-                className="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-white/[0.06] hover:text-red"
-              >
-                <X size={11} />
-              </button>
-            </div>
-          ))}
-          {scheduled.map((t) => (
-            <div
-              key={t.id}
-              className="group flex min-w-0 items-center gap-2 text-[12px] text-muted"
-            >
-              <Clock size={12} className="shrink-0 text-faint" />
-              <span className="min-w-0 flex-1 truncate">
-                {t.goal} <span className="text-faint">· {t.when}</span>
-              </span>
-              <button
-                type="button"
-                onClick={() => onCancelTask(t.id)}
-                title={`Cancel #${t.id}`}
-                className="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-white/[0.06] hover:text-red"
-              >
-                <X size={11} />
-              </button>
-            </div>
-          ))}
-          {runs.slice(0, RUNS_SHOWN).map((r) => (
-            <div
-              key={r.id}
-              className="group flex min-w-0 items-center gap-2 text-[12px] text-muted"
-            >
-              <button
-                type="button"
-                onClick={() => onOpenRun(r)}
-                className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded text-left transition-colors hover:text-text"
-              >
-                <Orbit size={12} className="shrink-0 text-accent" />
-                <span className="min-w-0 truncate">
-                  {r.node ? `Run · node #${r.node}` : "Run"}{" "}
-                  <span className="text-faint">· {runAge(r.updated_at)}</span>
-                </span>
-                {r.active && (
-                  <Loader2 size={11} className="shrink-0 animate-spin text-faint" />
-                )}
-                <ChevronRight size={12} className="shrink-0 text-faint" />
-              </button>
-              <button
-                type="button"
-                onClick={() => onStopRun(r)}
-                title={r.active ? "Stop run" : "Stop / cancel schedule"}
-                className="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-white/[0.06] hover:text-red"
-              >
-                <X size={11} />
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ApprovalCard({
-  approval,
-  onAnswer,
-}: {
-  approval: PendingApproval;
-  onAnswer: (approved: boolean) => void;
-}) {
-  return (
-    <div className="rounded-[10px] border border-line bg-card px-3 py-2.5">
-      <div className="break-words font-mono text-[11.5px]">
-        <span className="text-bright">{approval.call.Name}</span>{" "}
-        <span className="text-muted">{argsPreview(approval.call, 200)}</span>
-      </div>
-      {approval.reason && (
-        <div className="mt-0.5 text-[12px] text-muted">{approval.reason}</div>
-      )}
-      <div className="mt-2 flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => onAnswer(true)}
-          className="cursor-pointer rounded-md bg-btn px-3 py-0.5 text-[12px] font-medium text-canvas transition-opacity hover:opacity-90"
-        >
-          Run
-        </button>
-        <button
-          type="button"
-          onClick={() => onAnswer(false)}
-          className="cursor-pointer rounded-md border border-line px-3 py-0.5 text-[12px] text-muted transition-colors hover:text-text"
-        >
-          Skip
-        </button>
-        <span className="ml-1 text-[11px] text-faint select-none">y / n</span>
       </div>
     </div>
   );

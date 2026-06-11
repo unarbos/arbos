@@ -31,6 +31,11 @@ type Config struct {
 	// Both flow onto each LLMRequest unchanged (the provider adapter maps them).
 	Reasoning      core.ReasoningLevel
 	CacheRetention core.CacheRetention
+	// ExpandUser rewrites user-message text at projection time — the
+	// slash-command hook. The log persists what the user typed (so replay,
+	// titles, and edits see the raw command); only the provider-facing
+	// conversation sees the expansion. nil = no rewriting.
+	ExpandUser func(string) string
 }
 
 // Engine wires the ports together and spawns session actors. It is safe to
@@ -561,6 +566,23 @@ func routeResponse(c *Conversation, pending map[core.RequestID]chan core.Intent,
 	delete(pending, id)
 }
 
+// project folds the log into the provider-facing conversation: core.Project,
+// then the ExpandUser hook over user messages. Expansion lives here — at the
+// read side, not the write side — so the persisted log keeps exactly what the
+// user typed and every other consumer (replay, titles, edit-by-text) sees the
+// raw message.
+func (e *Engine) project(events []core.Event) []core.Message {
+	msgs := core.Project(events, e.cfg.SystemPrompt)
+	if f := e.cfg.ExpandUser; f != nil {
+		for i := range msgs {
+			if msgs[i].Role == core.RoleUser {
+				msgs[i].Content = f(msgs[i].Content)
+			}
+		}
+	}
+	return msgs
+}
+
 // runTurn is the agentic loop. The event log is the source of truth: any append
 // or history-load failure aborts the turn with an ErrorEvent rather than letting
 // the in-memory turn diverge from the persisted log. The conversation
@@ -608,7 +630,7 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, 
 		c.emit(ctx, core.ErrorEvent{Category: core.ErrHistory, Err: "load history: " + err.Error()})
 		return true
 	}
-	msgs := core.Project(events, e.cfg.SystemPrompt)
+	msgs := e.project(events)
 
 	// turnUsage aggregates token accounting across every LLM call in this turn,
 	// so TurnComplete can report the turn's cost without the frontend re-reading

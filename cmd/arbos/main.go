@@ -26,7 +26,6 @@ import (
 
 	"github.com/charmbracelet/x/term"
 
-	"github.com/unarbos/arbos/internal/agent/pi"
 	"github.com/unarbos/arbos/internal/control"
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/engine"
@@ -97,7 +96,6 @@ func runOneShot(cfg piwire.Config, dbPath, task, session string, approve, once b
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cwd, _ := os.Getwd()
 	interactive := term.IsTerminal(os.Stderr.Fd())
 	if !interactive {
 		cfg.WarnIfNoLLM(os.Stderr)
@@ -119,9 +117,7 @@ func runOneShot(cfg piwire.Config, dbPath, task, session string, approve, once b
 		}
 	}
 
-	templates := pi.LoadPromptTemplates(cwd, piwire.AgentConfigDir())
-	expand := func(s string) string { return pi.ExpandPromptTemplate(s, templates) }
-	return oneShot(ctx, host.Engine, store, cfg, expand(task), session, approve, once, expand)
+	return oneShot(ctx, host.Engine, store, cfg, task, session, approve, once)
 }
 
 // assemble builds the host. When quiet, diagnostics go to a debug file instead
@@ -155,7 +151,7 @@ func assemble(cfg piwire.Config, dbPath string, approve, quiet bool) (*piwire.Ho
 	return host, store, cleanup, nil
 }
 
-func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, cfg piwire.Config, task, session string, approve, once bool, expand func(string) string) error {
+func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, cfg piwire.Config, task, session string, approve, once bool) error {
 	id := piwire.NewSessionID()
 	if session != "" {
 		id = core.SessionID(session)
@@ -236,10 +232,9 @@ func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, cfg p
 		if task == "" {
 			return fmt.Errorf("no task: pass one as arguments or pipe it on stdin")
 		}
-		task = expand(task)
 	}
 	if followUps {
-		return runTUISession(ctx, conv, tui, string(conv.ID()), deliver, announceStanding, task, expand)
+		return runTUISession(ctx, conv, tui, string(conv.ID()), deliver, announceStanding, task)
 	}
 	in := startStdinReader()
 	if task == "" {
@@ -247,7 +242,7 @@ func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, cfg p
 		if err != nil || first == "" {
 			return nil
 		}
-		task = expand(first)
+		task = first
 	}
 	conv.Send(core.PromptIntent{Text: task})
 	r.turnStart()

@@ -20,6 +20,8 @@ export type ConnectionState = "idle" | "connecting" | "open" | "closed";
 export interface SeamHandlers {
   onState?: (s: ConnectionState) => void;
   onSession?: (id: string) => void;
+  /** A fork this connection requested succeeded and is now bound. */
+  onForked?: (id: string) => void;
   onEnvelope?: (env: Envelope) => void;
   onError?: (msg: string) => void;
   /** Outbox delivery (gateway broadcast): an ambient message between turns. */
@@ -73,8 +75,11 @@ export class SeamClient {
       switch (frame.type) {
         case "opened":
         case "switched":
+          this.handlers.onSession?.(frame.session_id);
+          break;
         case "forked":
           this.handlers.onSession?.(frame.session_id);
+          this.handlers.onForked?.(frame.session_id);
           break;
         case "event":
           this.handlers.onEnvelope?.(frame.envelope);
@@ -125,6 +130,15 @@ export class SeamClient {
   /** Switch the model for this session (server's set_model shorthand). */
   setModel(model: string): boolean {
     return this.send({ type: "set_model", model });
+  }
+
+  /**
+   * Branch the bound session at throughSeq (last event kept; negative keeps
+   * nothing) and rebind this connection to the branch. The server answers
+   * forked + switched, which route to onSession.
+   */
+  fork(throughSeq: number): boolean {
+    return this.send({ type: "fork", through_seq: throughSeq });
   }
 
   interrupt(): boolean {

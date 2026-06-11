@@ -20,6 +20,10 @@ export default defineConfig({
         target: `http://127.0.0.1:${process.env.ARBOS_GW_PORT ?? "8420"}`,
         ws: true,
       },
+      // Surface panels read raw workspace files (canvas iframes, images).
+      "/raw": {
+        target: `http://127.0.0.1:${process.env.ARBOS_GW_PORT ?? "8420"}`,
+      },
     },
   },
   build: {

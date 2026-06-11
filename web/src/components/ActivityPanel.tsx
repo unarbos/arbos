@@ -95,7 +95,7 @@ export function ActivityPanel({
   return (
     <div className="fixed inset-y-0 right-0 z-30 flex w-[min(440px,92vw)] flex-col border-l border-line bg-canvas shadow-[-24px_0_48px_rgba(0,0,0,0.35)]">
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line/70 px-3.5 select-none">
-        <ActivityIcon size={14} className="shrink-0 text-accent" />
+        <ActivityIcon size={14} className="shrink-0 text-muted" />
         <span className="min-w-0 flex-1 truncate text-[12.5px] text-bright">
           Agent activity
         </span>
@@ -195,7 +195,7 @@ function StandingRow({
         type="button"
         onClick={onCancel}
         title={`Cancel #${task.node}`}
-        className="mt-0.5 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-white/[0.06] hover:text-red"
+        className="mt-0.5 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-hover hover:text-red"
       >
         <X size={11} />
       </button>
@@ -232,7 +232,7 @@ function RunRow({
       >
         <Orbit
           size={12}
-          className={`shrink-0 ${run.stale ? "text-faint" : "text-accent"}`}
+          className={`shrink-0 ${run.stale ? "text-faint" : "text-muted"}`}
         />
         <span className="min-w-0 flex-1 truncate text-[12.5px] text-muted">
           {label} <span className="text-faint">· {age(run.updated_at)}</span>
@@ -247,7 +247,7 @@ function RunRow({
           type="button"
           onClick={onStop}
           title={run.active ? "Stop run" : "Stop / cancel schedule"}
-          className="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-white/[0.06] hover:text-red"
+          className="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-hover hover:text-red"
         >
           <X size={11} />
         </button>

@@ -4,9 +4,9 @@
 // needs no event-log schema change because core.Session already reserves
 // ParentID for fork lineage. It lives in its own package so both the engine
 // (for the control-seam RPC) and the agent layer can reach it without an import
-// cycle. A whole-log copy is just Fork with a negative throughSeq (what the
-// control seam's `fork` frame does when through_seq is omitted), so no separate
-// clone operation is needed.
+// cycle. A whole-log copy is just Fork with a throughSeq at or past the last
+// event's seq (what the control seam's `fork` frame does when through_seq is
+// omitted), so no separate clone operation is needed.
 package sessiontree
 
 import (
@@ -18,9 +18,10 @@ import (
 )
 
 // Fork creates newID as a branch of source, copying source's events with
-// seq <= throughSeq (a negative throughSeq copies the whole log) and recording
-// source as the parent. Copied events keep their payload, turn id, version, and
-// timestamp; the store reassigns fresh per-branch seq/id on append.
+// seq <= throughSeq (a negative throughSeq copies nothing — an empty branch,
+// the rewind-before-first-message case) and recording source as the parent.
+// Copied events keep their payload, turn id, version, and timestamp; the store
+// reassigns fresh per-branch seq/id on append.
 func Fork(ctx context.Context, store ports.SessionStore, source, newID core.SessionID, throughSeq int64, now time.Time) error {
 	src, err := store.Get(ctx, source)
 	if err != nil {
@@ -42,7 +43,7 @@ func Fork(ctx context.Context, store ports.SessionStore, source, newID core.Sess
 	}
 	for i := range events {
 		ev := events[i]
-		if throughSeq >= 0 && ev.Seq > throughSeq {
+		if ev.Seq > throughSeq {
 			break
 		}
 		cp := core.Event{

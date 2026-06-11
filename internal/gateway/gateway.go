@@ -55,6 +55,14 @@ type Server struct {
 	// Model is the host's configured default model, returned as the active
 	// selection so the composer can show what's running before a switch.
 	Model string
+	// Commands lists the available slash commands for the composer's popup.
+	// Wired by the host to the agent's template loader; nil disables the route.
+	Commands func() []CommandInfo
+	// Root is the workspace the file routes resolve against (the same root
+	// the session's tools use), so a surface the agent presented with show
+	// is fetchable back by the panel that renders it. Empty disables the
+	// file routes.
+	Root string
 
 	mu      sync.Mutex
 	clients map[*wsLineWriter]bool
@@ -182,6 +190,9 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/ws", s.handleWS)
 	mux.HandleFunc("GET /api/models", s.handleModels)
+	if s.Commands != nil {
+		mux.HandleFunc("GET /api/commands", s.handleCommands)
+	}
 	if s.Store != nil {
 		mux.HandleFunc("GET /api/sessions", s.handleSessions)
 		mux.HandleFunc("GET /api/sessions/{id}/events", s.handleSessionEvents)
@@ -198,6 +209,12 @@ func (s *Server) Handler() http.Handler {
 	if s.Store != nil {
 		mux.HandleFunc("POST /api/plan/{id}/cancel", sameOrigin(s.handleCancelPlanNode))
 		mux.HandleFunc("POST /api/runs/{id}/stop", sameOrigin(s.handleStopRun))
+	}
+	if s.Root != "" {
+		// Same-origin even though these are GETs: they read workspace files,
+		// which a drive-by page must not be able to embed or probe.
+		mux.HandleFunc("GET /api/file", sameOrigin(s.handleFile))
+		mux.HandleFunc("GET /raw/{path...}", sameOrigin(s.handleRaw))
 	}
 	if s.Dist != nil {
 		mux.Handle("/", spaHandler(s.Dist))
@@ -312,6 +329,26 @@ func (s *Server) handleStopRun(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Engine.Interrupt(id)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// CommandInfo is one slash command the composer's popup can offer: the name
+// the user types after "/", a one-line description, and an argument hint.
+// Expansion stays server-side (the seam's expand hook); this is discovery only.
+type CommandInfo struct {
+	Name         string `json:"name"`
+	Description  string `json:"description,omitempty"`
+	ArgumentHint string `json:"argument_hint,omitempty"`
+}
+
+// handleCommands lists the slash commands for the composer's popup. The list
+// is re-read per request so a freshly added prompt file shows up on the next
+// popup open without restarting the host.
+func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
+	cmds := s.Commands()
+	if cmds == nil {
+		cmds = []CommandInfo{}
+	}
+	writeJSON(w, map[string]any{"commands": cmds})
 }
 
 // modelJSON is one selectable model from the provider's catalog — the fields
@@ -553,6 +590,7 @@ func planWhen(n plan.Node) string {
 // server-side.
 type replayJSON struct {
 	Type      string              `json:"type"` // user | assistant | tool_result | interrupted
+	Seq       int64               `json:"seq"`  // source event seq, the fork point for rewind/edit
 	Text      string              `json:"text,omitempty"`
 	Parts     []core.ContentBlock `json:"parts,omitempty"` // user-attached images, for re-render
 	ToolCalls []core.ToolCall     `json:"tool_calls,omitempty"`
@@ -578,20 +616,21 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 			m := p.Message
 			switch m.Role {
 			case core.RoleUser:
-				out = append(out, replayJSON{Type: "user", Text: m.Content, Parts: m.Parts})
+				out = append(out, replayJSON{Type: "user", Seq: ev.Seq, Text: m.Content, Parts: m.Parts})
 			case core.RoleAssistant:
-				out = append(out, replayJSON{Type: "assistant", Text: m.Content, ToolCalls: m.ToolCalls})
+				out = append(out, replayJSON{Type: "assistant", Seq: ev.Seq, Text: m.Content, ToolCalls: m.ToolCalls})
 			}
 		case core.ToolResultPayload:
 			out = append(out, replayJSON{
 				Type:    "tool_result",
+				Seq:     ev.Seq,
 				CallID:  p.Result.CallID,
 				Content: p.Result.Content,
 				IsError: p.Result.IsError,
 				Details: p.Result.Details,
 			})
 		case core.InterruptPayload:
-			out = append(out, replayJSON{Type: "interrupted"})
+			out = append(out, replayJSON{Type: "interrupted", Seq: ev.Seq})
 		}
 	}
 	writeJSON(w, map[string]any{"events": out})

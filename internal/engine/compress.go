@@ -35,7 +35,7 @@ func (e *Engine) maybeCompress(ctx context.Context, c *Conversation, msgs []core
 		c.emit(ctx, core.ErrorEvent{Category: core.ErrHistory, Err: "compress: reload: " + err.Error()})
 		return msgs, true, false
 	}
-	return core.Project(reloaded, e.cfg.SystemPrompt), false, true
+	return e.project(reloaded), false, true
 }
 
 // compactNow forces a compaction pass regardless of the budget trigger — the

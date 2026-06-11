@@ -80,7 +80,17 @@ export type Intent =
 export type ClientFrame =
   | { type: "open"; session_id?: string }
   | { type: "intent"; intent: Intent }
-  | { type: "set_model"; model: string };
+  | { type: "set_model"; model: string }
+  /**
+   * Branch the bound session at through_seq (last source event to keep;
+   * negative = empty branch, omitted = whole log) and rebind to the branch.
+   */
+  | {
+      type: "fork";
+      session_id?: string;
+      new_session_id?: string;
+      through_seq?: number;
+    };
 
 export type ServerFrame =
   | { type: "opened"; session_id: string }

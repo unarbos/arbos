@@ -49,5 +49,10 @@ func PromptInfos() []ToolPromptInfo {
 		{Name: "fetch", Snippet: "Fetch a URL and return the response body as text", Guidelines: []string{
 			"Use fetch for HTTP/HTTPS requests instead of curl in bash when possible.",
 		}},
+		{Name: "show", Snippet: "Present a file to the user in a panel beside the chat (HTML canvas, image, markdown document, or code file)", Guidelines: []string{
+			"After producing a visual artifact (an HTML canvas, a chart image, a report), call show on the file so it opens beside the chat — never tell the user to open it themselves.",
+			"An HTML canvas renders inside the arbos panel, which injects the user's active theme as `--color-*` CSS custom properties — never invent a palette or hardcode colors. Write every color as `var(--color-<token>, fallback)` with these tokens: canvas (page bg), card (section cards), panel (nested surfaces), bar (code/chart bg), line (borders, axes), text (body), bright (headings), muted (secondary text, labels), faint (hints), accent (links, primary series), green/red/warn (status series); fonts via `--font-sans`/`--font-mono`. Fallbacks are used only when the file is opened standalone; default-theme fallbacks: canvas #2c262a, card #332a2f, panel #312b2f, bar #262024, line #3e373c, text #d6d0d4, bright #ece7ea, muted #968f94, faint #6e676c, accent #85aab3, green #87a883, red #c97f77, warn #c9a86a. The user may run a light theme: never assume darkness.",
+			"When a canvas draws with JS (e.g. a 2D <canvas> context), resolve colors at draw time — `getComputedStyle(document.documentElement).getPropertyValue('--color-accent').trim() || fallback` — and draw on DOMContentLoaded: the panel injects the theme late in the document, so a synchronous read sees only fallbacks.",
+		}},
 	}
 }

@@ -18,7 +18,12 @@ import type {
 } from "./types";
 
 export type TranscriptItem =
-  | { kind: "user"; id: number; text: string; parts?: ContentBlock[] }
+  /**
+   * `seq` is the event's position in the persisted session log, present only
+   * on items seeded from a replay. Rewind-and-edit forks at it directly;
+   * optimistic live items carry none and fall back to text-verified matching.
+   */
+  | { kind: "user"; id: number; text: string; parts?: ContentBlock[]; seq?: number }
   | {
       kind: "assistant";
       id: number;
@@ -477,7 +482,7 @@ export function replayToItems(events: ReplayEvent[]): TranscriptItem[] {
   for (const ev of events) {
     switch (ev.type) {
       case "user":
-        items.push({ kind: "user", id: id++, text: ev.text, parts: ev.parts });
+        items.push({ kind: "user", id: id++, text: ev.text, parts: ev.parts, seq: ev.seq });
         break;
       case "assistant": {
         if (ev.text) {

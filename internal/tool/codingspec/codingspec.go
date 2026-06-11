@@ -43,6 +43,7 @@ func Specs(root string) []tool.Spec {
 		awaitSpec(jobs),
 		jobsSpec(jobs),
 		fetchSpec(),
+		showSpec(root),
 		changesSpec(cp),
 		undoSpec(cp),
 	}
