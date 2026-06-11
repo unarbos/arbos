@@ -27,16 +27,22 @@ type Intent interface {
 	Kind() IntentKind
 }
 
-// PromptIntent starts a turn with user-supplied text.
+// PromptIntent starts a turn with user-supplied text. Parts carries optional
+// non-text content (images) attached to the prompt; it lands on the user
+// Message's Parts so a vision-capable model sees it (ADR-0022). Text-only
+// prompts leave Parts nil and behave exactly as before.
 type PromptIntent struct {
-	Text string `json:"text"`
+	Text  string         `json:"text"`
+	Parts []ContentBlock `json:"parts,omitempty"`
 }
 
 // SteerIntent replaces the in-flight turn with new user text. When idle it
 // behaves like PromptIntent; when a turn is active it cancels silently (no
-// Interrupted event) and discards any prompts queued during that turn.
+// Interrupted event) and discards any prompts queued during that turn. Parts
+// mirrors PromptIntent: optional attached non-text content.
 type SteerIntent struct {
-	Text string `json:"text"`
+	Text  string         `json:"text"`
+	Parts []ContentBlock `json:"parts,omitempty"`
 }
 
 // InterruptIntent cancels the in-flight turn, if any.

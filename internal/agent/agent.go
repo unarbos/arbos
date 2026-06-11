@@ -35,6 +35,12 @@ type Task struct {
 	// core.OriginScheduler for a clock wake), set on the session row at
 	// creation. Empty leaves the default.
 	Origin string
+	// Owner is the conversation the spawned session serves — where its voice
+	// and UI visibility route. Empty for sessions that serve no chat.
+	Owner core.SessionID
+	// SpawnedBy records what created the session (core.SpawnedByNode(id) for
+	// a plan firing, "delegate" for a delegation). Display metadata.
+	SpawnedBy string
 }
 
 // BackendRef names a backend (e.g. "pi").

@@ -22,10 +22,13 @@ const backgroundGraceWait = 500 * time.Millisecond
 
 // BashArgs are the arguments to bash.
 type BashArgs struct {
-	Command    string `json:"command" desc:"Bash command to execute."`
-	Wait       int    `json:"wait,omitempty" desc:"Seconds to wait for completion before the command continues as a background job (default 120). The command is never killed by this; check it later with await or jobs."`
-	Background bool   `json:"background,omitempty" desc:"Return immediately and run the command as a background job (for dev servers, watchers, long builds). Overrides wait."`
-	Timeout    int    `json:"timeout,omitempty" desc:"Optional hard limit in seconds: the command is killed when it expires, even after being backgrounded. Omit for no kill."`
+	Command string `json:"command" desc:"Bash command to execute."`
+	// Description is display-only: frontends caption the command with it (the
+	// terminal card header); the kernel and the executor ignore it entirely.
+	Description string `json:"description,omitempty" desc:"A clear, concise description of what this command does in 5-10 words, shown to the user, e.g. \"Print current working directory\"."`
+	Wait        int    `json:"wait,omitempty" desc:"Seconds to wait for completion before the command continues as a background job (default 120). The command is never killed by this; check it later with await or jobs."`
+	Background  bool   `json:"background,omitempty" desc:"Return immediately and run the command as a background job (for dev servers, watchers, long builds). Overrides wait."`
+	Timeout     int    `json:"timeout,omitempty" desc:"Optional hard limit in seconds: the command is killed when it expires, even after being backgrounded. Omit for no kill."`
 }
 
 // bashSpec runs a shell command in the workspace root. Every command is a

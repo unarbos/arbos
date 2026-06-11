@@ -17,6 +17,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +75,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     model       TEXT    NOT NULL DEFAULT '',
     principal   TEXT    NOT NULL DEFAULT '',
     origin      TEXT    NOT NULL DEFAULT '',
+    owner       TEXT    NOT NULL DEFAULT '', -- chat this session serves ('' = a chat itself)
+    spawned_by  TEXT    NOT NULL DEFAULT '', -- what spawned it, e.g. 'node:12'
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
 );
@@ -134,12 +137,14 @@ CREATE TABLE IF NOT EXISTS plan_nodes (
     goal       TEXT    NOT NULL,
     check_expr TEXT    NOT NULL DEFAULT '', -- how to verify done ('' = self-report)
     cmd        TEXT    NOT NULL DEFAULT '', -- shell executor: kernel-run command ('' = not a shell node)
+    cond       TEXT    NOT NULL DEFAULT '', -- gate: shell predicate; do fires only on exit 0 ('' = no gate)
     notify     TEXT    NOT NULL DEFAULT '', -- notify executor: message emitted to the outbox, no model turn
     wake       INTEGER NOT NULL DEFAULT 0,  -- one-shot callback: summon a model turn when ready
     status     TEXT    NOT NULL,            -- pending|active|blocked|done|cancelled|failed
     outcome    TEXT    NOT NULL DEFAULT '',
     assignee   TEXT    NOT NULL DEFAULT 'agent',
     owner      TEXT    NOT NULL DEFAULT '', -- claiming session
+    origin     TEXT    NOT NULL DEFAULT '', -- creating session: where its voice routes
     after_at   INTEGER NOT NULL DEFAULT 0,  -- not ready before
     every_ns   INTEGER NOT NULL DEFAULT 0,  -- recurrence period
     next_due   INTEGER NOT NULL DEFAULT 0,  -- next firing for recurring nodes
@@ -188,50 +193,73 @@ CREATE INDEX IF NOT EXISTS idx_outbox_undelivered ON outbox(delivered_at) WHERE 
 	// (fresh databases get it from the CREATE above). Existence is probed via
 	// table_info rather than by matching the driver's "duplicate column"
 	// error text, which is wording we don't control.
-	cols := make(map[string]bool)
-	rows, err := s.db.QueryContext(ctx, `SELECT name FROM pragma_table_info('plan_nodes')`)
-	if err != nil {
-		return fmt.Errorf("migrate: table_info: %w", err)
+	for _, t := range []struct {
+		table  string
+		alters []struct{ col, stmt string }
+	}{
+		{"plan_nodes", []struct{ col, stmt string }{
+			{"cmd", `ALTER TABLE plan_nodes ADD COLUMN cmd TEXT NOT NULL DEFAULT ''`},
+			{"wake", `ALTER TABLE plan_nodes ADD COLUMN wake INTEGER NOT NULL DEFAULT 0`},
+			{"notify", `ALTER TABLE plan_nodes ADD COLUMN notify TEXT NOT NULL DEFAULT ''`},
+			{"origin", `ALTER TABLE plan_nodes ADD COLUMN origin TEXT NOT NULL DEFAULT ''`},
+			{"cond", `ALTER TABLE plan_nodes ADD COLUMN cond TEXT NOT NULL DEFAULT ''`},
+		}},
+		{"sessions", []struct{ col, stmt string }{
+			{"owner", `ALTER TABLE sessions ADD COLUMN owner TEXT NOT NULL DEFAULT ''`},
+			{"spawned_by", `ALTER TABLE sessions ADD COLUMN spawned_by TEXT NOT NULL DEFAULT ''`},
+		}},
+		{"outbox", []struct{ col, stmt string }{
+			{"principal", `ALTER TABLE outbox ADD COLUMN principal TEXT NOT NULL DEFAULT ''`},
+			{"source", `ALTER TABLE outbox ADD COLUMN source TEXT NOT NULL DEFAULT ''`},
+		}},
+	} {
+		cols, err := s.tableColumns(ctx, t.table)
+		if err != nil {
+			return err
+		}
+		for _, a := range t.alters {
+			if cols[a.col] {
+				continue
+			}
+			if _, err := s.db.ExecContext(ctx, a.stmt); err != nil {
+				return fmt.Errorf("migrate: %s: %w", a.stmt, err)
+			}
+		}
 	}
+	return nil
+}
+
+// tableColumns probes a table's existing columns for the forward-only ALTER
+// pass (ADR-0005): existence via table_info, not by matching driver error text.
+func (s *Store) tableColumns(ctx context.Context, table string) (map[string]bool, error) {
+	cols := make(map[string]bool)
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return nil, fmt.Errorf("migrate: table_info %s: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("migrate: table_info: %w", err)
+			return nil, fmt.Errorf("migrate: table_info %s: %w", table, err)
 		}
 		cols[name] = true
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return fmt.Errorf("migrate: table_info: %w", err)
+		return nil, fmt.Errorf("migrate: table_info %s: %w", table, err)
 	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("migrate: table_info: %w", err)
-	}
-	alters := []struct{ col, stmt string }{
-		{"cmd", `ALTER TABLE plan_nodes ADD COLUMN cmd TEXT NOT NULL DEFAULT ''`},
-		{"wake", `ALTER TABLE plan_nodes ADD COLUMN wake INTEGER NOT NULL DEFAULT 0`},
-		{"notify", `ALTER TABLE plan_nodes ADD COLUMN notify TEXT NOT NULL DEFAULT ''`},
-	}
-	for _, a := range alters {
-		if cols[a.col] {
-			continue
-		}
-		if _, err := s.db.ExecContext(ctx, a.stmt); err != nil {
-			return fmt.Errorf("migrate: %s: %w", a.stmt, err)
-		}
-	}
-	return nil
+	return cols, nil
 }
 
 func (s *Store) CreateSession(ctx context.Context, sess core.Session) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, parent_id, status, model, principal, origin, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (id, parent_id, status, model, principal, origin, owner, spawned_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(sess.ID), string(sess.ParentID), string(sess.Status), sess.Model,
-		sess.Principal, sess.Origin, sess.CreatedAt.UnixNano(), sess.UpdatedAt.UnixNano(),
+		sess.Principal, sess.Origin, string(sess.Owner), sess.SpawnedBy,
+		sess.CreatedAt.UnixNano(), sess.UpdatedAt.UnixNano(),
 	)
 	if err != nil {
 		return fmt.Errorf("create session %q: %w", sess.ID, err)
@@ -241,16 +269,16 @@ func (s *Store) CreateSession(ctx context.Context, sess core.Session) error {
 
 func (s *Store) Get(ctx context.Context, id core.SessionID) (core.Session, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, parent_id, status, model, principal, origin, created_at, updated_at
+		`SELECT id, parent_id, status, model, principal, origin, owner, spawned_by, created_at, updated_at
 		 FROM sessions WHERE id = ?`, string(id))
 	var (
 		sess               core.Session
 		idStr, parentID    string
-		status             string
+		status, owner      string
 		createdAt, updated int64
 	)
 	err := row.Scan(&idStr, &parentID, &status, &sess.Model,
-		&sess.Principal, &sess.Origin, &createdAt, &updated)
+		&sess.Principal, &sess.Origin, &owner, &sess.SpawnedBy, &createdAt, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.Session{}, ports.ErrSessionNotFound
 	}
@@ -260,6 +288,7 @@ func (s *Store) Get(ctx context.Context, id core.SessionID) (core.Session, error
 	sess.ID = core.SessionID(idStr)
 	sess.ParentID = core.SessionID(parentID)
 	sess.Status = core.SessionStatus(status)
+	sess.Owner = core.SessionID(owner)
 	sess.CreatedAt = time.Unix(0, createdAt).UTC()
 	sess.UpdatedAt = time.Unix(0, updated).UTC()
 	return sess, nil
@@ -269,10 +298,11 @@ func (s *Store) UpdateSession(ctx context.Context, sess core.Session) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET parent_id=?, status=?, model=?, principal=?, origin=?, updated_at=?
+		`UPDATE sessions SET parent_id=?, status=?, model=?, principal=?, origin=?, owner=?, spawned_by=?, updated_at=?
 		 WHERE id=?`,
 		string(sess.ParentID), string(sess.Status), sess.Model,
-		sess.Principal, sess.Origin, sess.UpdatedAt.UnixNano(), string(sess.ID),
+		sess.Principal, sess.Origin, string(sess.Owner), sess.SpawnedBy,
+		sess.UpdatedAt.UnixNano(), string(sess.ID),
 	)
 	if err != nil {
 		return fmt.Errorf("update session %q: %w", sess.ID, err)
@@ -391,6 +421,184 @@ func (s *Store) Events(ctx context.Context, id core.SessionID) ([]core.Event, er
 		return nil, fmt.Errorf("events %q: %w", id, err)
 	}
 	return out, nil
+}
+
+// SessionSummary is one row of the front-door session list: enough to render
+// a history picker without loading event logs.
+type SessionSummary struct {
+	ID        core.SessionID
+	Title     string // first user prompt, first line; "" when no turn ran
+	UpdatedAt time.Time
+}
+
+const sessionTitleMax = 80
+
+// ListSessions returns top-level human sessions (delegated children and
+// scheduler-spawned executors are internal), most recently active first,
+// titled by their first user prompt. It is not part of ports.SessionStore —
+// it is a frontend listing capability, like Search. Machine-spawned sessions
+// carry an owner; the origin filter additionally hides legacy scheduler rows
+// from before the owner column.
+func (s *Store) ListSessions(ctx context.Context, limit int) ([]SessionSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.id, s.updated_at,
+		       (SELECT e.payload FROM events e
+		        WHERE e.session_id = s.id AND e.kind = 'user_message'
+		        ORDER BY e.seq ASC LIMIT 1)
+		FROM sessions s
+		WHERE s.parent_id = '' AND s.owner = '' AND s.origin NOT LIKE ? || '%'
+		ORDER BY s.updated_at DESC
+		LIMIT ?`, core.OriginScheduler, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []SessionSummary
+	for rows.Next() {
+		var (
+			id      string
+			updated int64
+			payload []byte
+		)
+		if err := rows.Scan(&id, &updated, &payload); err != nil {
+			return nil, fmt.Errorf("list sessions: scan: %w", err)
+		}
+		sum := SessionSummary{
+			ID:        core.SessionID(id),
+			UpdatedAt: time.Unix(0, updated).UTC(),
+		}
+		if len(payload) > 0 {
+			if p, err := core.DecodePayload(core.EventUserMessage, payload); err == nil {
+				if mp, ok := p.(core.MessagePayload); ok {
+					sum.Title = sessionTitle(mp.Message.Content)
+				}
+			}
+		}
+		// A session nobody ever prompted (an opened-then-abandoned connection)
+		// has nothing to resume; keep it out of the picker.
+		if sum.Title == "" {
+			continue
+		}
+		out = append(out, sum)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	return out, nil
+}
+
+// ChildSession is one machine-spawned session belonging to a chat: a
+// scheduler wake fired for a plan node that chat created. SpawnedBy carries
+// the provenance ("node:12"); Status is live while the wake runs.
+type ChildSession struct {
+	ID        core.SessionID
+	SpawnedBy string
+	Status    core.SessionStatus
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+const childSessionLimit = 100
+
+// OwnedSession is one machine-spawned session with its owning chat — a row
+// of the cross-chat activity feed.
+type OwnedSession struct {
+	ID        core.SessionID
+	Owner     core.SessionID
+	SpawnedBy string
+	Origin    string
+	Status    core.SessionStatus
+	UpdatedAt time.Time
+}
+
+// RecentOwnedSessions lists the latest machine-spawned sessions across every
+// chat, newest first — the "what has the agent been doing on its own" half of
+// the activity surface (the standing-obligation half comes from the plan).
+func (s *Store) RecentOwnedSessions(ctx context.Context, limit int) ([]OwnedSession, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, owner, spawned_by, origin, status, updated_at
+		FROM sessions
+		WHERE owner <> ''
+		ORDER BY updated_at DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("recent owned sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []OwnedSession
+	for rows.Next() {
+		var (
+			o          OwnedSession
+			id, owner  string
+			status     string
+			updatedRaw int64
+		)
+		if err := rows.Scan(&id, &owner, &o.SpawnedBy, &o.Origin, &status, &updatedRaw); err != nil {
+			return nil, fmt.Errorf("recent owned sessions: scan: %w", err)
+		}
+		o.ID = core.SessionID(id)
+		o.Owner = core.SessionID(owner)
+		o.Status = core.SessionStatus(status)
+		o.UpdatedAt = time.Unix(0, updatedRaw).UTC()
+		out = append(out, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("recent owned sessions: %w", err)
+	}
+	return out, nil
+}
+
+// ScheduledChildren lists the scheduler-spawned sessions owned by one chat,
+// newest first — the runs a frontend offers as openable sub-agent tabs.
+// Scoped by the owner column, so one chat's runs never appear in another.
+func (s *Store) ScheduledChildren(ctx context.Context, chat string) ([]ChildSession, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, spawned_by, status, created_at, updated_at
+		FROM sessions
+		WHERE owner = ? AND origin = ?
+		ORDER BY updated_at DESC
+		LIMIT ?`,
+		chat, core.OriginScheduler, childSessionLimit)
+	if err != nil {
+		return nil, fmt.Errorf("scheduled children: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []ChildSession
+	for rows.Next() {
+		var (
+			c                ChildSession
+			id, status       string
+			created, updated int64
+		)
+		if err := rows.Scan(&id, &c.SpawnedBy, &status, &created, &updated); err != nil {
+			return nil, fmt.Errorf("scheduled children: scan: %w", err)
+		}
+		c.ID = core.SessionID(id)
+		c.Status = core.SessionStatus(status)
+		c.CreatedAt = time.Unix(0, created).UTC()
+		c.UpdatedAt = time.Unix(0, updated).UTC()
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("scheduled children: %w", err)
+	}
+	return out, nil
+}
+
+// sessionTitle reduces a prompt to one list-row line.
+func sessionTitle(prompt string) string {
+	line := prompt
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	line = strings.TrimSpace(line)
+	if len(line) > sessionTitleMax {
+		line = line[:sessionTitleMax] + "…"
+	}
+	return line
 }
 
 // SearchHit is one FTS5 match: the matching event and its session.

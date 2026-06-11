@@ -16,7 +16,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -41,43 +40,7 @@ import (
 
 func main() {
 	envfile.LoadDefault(piwire.AgentConfigDir())
-
-	var (
-		serve   = flag.Bool("serve", false, "serve the control seam over stdio (JSON lines)")
-		web     = flag.String("web", "", "serve the web gateway at this address (e.g. :8420)")
-		webDist = flag.String("web-dist", "", "directory of the built web UI to serve (optional; API-only when empty)")
-		dbPath  = flag.String("db", piwire.DefaultDBPath(), "SQLite session store path")
-		query   = flag.String("q", "", "one-shot query (non-interactive)")
-		prompt  = flag.String("prompt", "", "one-shot query (alias for -q)")
-		p       = flag.String("p", "", "one-shot query (alias for -q)")
-		session = flag.String("session", "", "resume an existing session id (one-shot mode)")
-		approve = flag.Bool("approve", false, "gate write/edit/bash tools behind y/N confirmation")
-		once    = flag.Bool("once", false, "exit after a single turn instead of prompting for follow-ups")
-	)
-	flag.Parse()
-
-	task := firstNonEmpty(*query, *prompt, *p)
-	// Fold any trailing positional words into the task so bare invocations
-	// like `arbos fix the tests` (and unquoted `arbos -p fix the tests`) work
-	// without shell quoting. With no args at all, task stays empty and the
-	// session opens at the follow-up prompt.
-	if rest := strings.TrimSpace(strings.Join(flag.Args(), " ")); rest != "" {
-		if task == "" {
-			task = rest
-		} else {
-			task = task + " " + rest
-		}
-	}
-
-	cfg := piwire.LoadConfig()
-	if *web != "" {
-		if err := runWeb(cfg, *dbPath, *web, *webDist, *approve); err != nil {
-			fmt.Fprintln(os.Stderr, "arbos:", err)
-			os.Exit(1)
-		}
-		return
-	}
-	if err := run(cfg, *serve, *dbPath, task, *session, *approve, *once); err != nil {
+	if err := dispatch(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "arbos:", err)
 		os.Exit(1)
 	}
@@ -131,13 +94,14 @@ func runOneShot(cfg piwire.Config, dbPath, task, session string, approve, once b
 	}
 	defer cleanup()
 
-	cfg.WarnIfNoLLM(os.Stderr)
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	cwd, _ := os.Getwd()
 	interactive := term.IsTerminal(os.Stderr.Fd())
+	if !interactive {
+		cfg.WarnIfNoLLM(os.Stderr)
+	}
 	// The front door: a bare interactive `arbos` greets with the brief —
 	// what happened since you left, what waits on you, what is open — from
 	// pure store reads, before any session starts.
@@ -157,7 +121,7 @@ func runOneShot(cfg piwire.Config, dbPath, task, session string, approve, once b
 
 	templates := pi.LoadPromptTemplates(cwd, piwire.AgentConfigDir())
 	expand := func(s string) string { return pi.ExpandPromptTemplate(s, templates) }
-	return oneShot(ctx, host.Engine, store, expand(task), session, once, expand)
+	return oneShot(ctx, host.Engine, store, cfg, expand(task), session, approve, once, expand)
 }
 
 // assemble builds the host. When quiet, diagnostics go to a debug file instead
@@ -191,7 +155,7 @@ func assemble(cfg piwire.Config, dbPath string, approve, quiet bool) (*piwire.Ho
 	return host, store, cleanup, nil
 }
 
-func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, task, session string, once bool, expand func(string) string) error {
+func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, cfg piwire.Config, task, session string, approve, once bool, expand func(string) string) error {
 	id := piwire.NewSessionID()
 	if session != "" {
 		id = core.SessionID(session)
@@ -210,7 +174,7 @@ func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, task,
 		if err != nil {
 			width = 80
 		}
-		tui = newTUIRenderer(os.Stderr, width)
+		tui = newTUIRenderer(os.Stderr, width, newTUIMeta(cfg.Model, approve))
 		r = tui
 	}
 	defer r.close()
@@ -237,12 +201,17 @@ func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, task,
 
 	// deliver drains the outbox through this terminal door: claimed messages
 	// print as ambient notice lines, only ever at quiet moments (session
-	// start, turn boundaries, idle at the prompt) — never mid-stream.
+	// start, turn boundaries, idle at the prompt) — never mid-stream. Scoped
+	// to this session plus broadcast-class messages, so the terminal never
+	// steals a notice belonging to a live web chat; messages stale past the
+	// grace window (their chat never reopened — e.g. an earlier, ended
+	// terminal session's reminder) deliver here rather than being lost.
 	deliver := func() bool {
 		if store == nil {
 			return false
 		}
-		msgs, err := store.ClaimOutbox(ctx, outbox.ViaTerminal)
+		msgs, err := store.ClaimOutboxFor(ctx, outbox.ViaTerminal, core.PrincipalLocal,
+			[]string{string(conv.ID())}, time.Now().Add(-outbox.StaleAfter))
 		if err != nil || len(msgs) == 0 {
 			return false
 		}
@@ -270,7 +239,7 @@ func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, task,
 		task = expand(task)
 	}
 	if followUps {
-		return runTUISession(ctx, conv, tui, deliver, announceStanding, task, expand)
+		return runTUISession(ctx, conv, tui, string(conv.ID()), deliver, announceStanding, task, expand)
 	}
 	in := startStdinReader()
 	if task == "" {

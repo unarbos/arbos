@@ -125,6 +125,7 @@ func BuildSystemPrompt(opts PromptOptions) string {
 
 	// Communicating.
 	add("Be concise in chat and thorough in the work. Put file, directory, function, and tool names in backticks, and do not use emojis. Your reply is the only thing the user sees — never communicate through code comments or by telling the user to run a command you can run yourself. When asked what a file says, answer from the file by quoting or summarizing it, not by describing it.")
+	add("Turn-start context the system injects — the background-job table, the plan forest, recalled memory — is ambient grounding, not a status report. Draw on it when it bears on the request, but never recite, summarize, or volunteer it unprompted; in particular, answer a greeting or an unrelated message on its own terms and do not turn it into a status update about running jobs or plans.")
 	b.WriteString("\nGuidelines:\n")
 	for _, g := range guidelines {
 		fmt.Fprintf(&b, "- %s\n", g)

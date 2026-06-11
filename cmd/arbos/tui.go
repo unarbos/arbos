@@ -35,6 +35,7 @@ import (
 type tuiRenderer struct {
 	mu    sync.Mutex
 	out   io.Writer
+	fd    uintptr
 	width int
 
 	turnOpen bool
@@ -51,7 +52,8 @@ type tuiRenderer struct {
 	answerLines []string
 	tail        string
 	started     bool
-	blockLines  int // physical lines the block currently occupies (0 = none)
+	blockLines int // physical lines the block currently occupies (0 = none)
+	promptIdx  int // 0-based row offset of the → input within the block
 
 	// ephemeral is a one-line live preview of activity that never reaches the
 	// permanent transcript: the model's reasoning stream, or a delegated
@@ -61,14 +63,20 @@ type tuiRenderer struct {
 	proseWrap proseWrapper
 	md        *transcript.MarkdownStyler
 
-	running []runningTool
-	counts  map[string]int
-	total   int
-	fails   int
+	running   []runningTool
+	subagents []subagentRun
+	counts    map[string]int
+	total     int
+	fails     int
+
+	meta tuiMeta
 
 	dim, ok, bad, tool, note, standing lipgloss.Style
 	standingText                       lipgloss.Style
-	agent                              lipgloss.Style
+	bright, faint, muted, cmd lipgloss.Style
+	working                   lipgloss.Style
+
+	sessionID string
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -103,33 +111,94 @@ const (
 	promptApproval
 )
 
-func newTUIRenderer(out io.Writer, width int) *tuiRenderer {
+const followUpHint = "Add a follow-up"
+
+// Explicit ANSI for placeholder — lipgloss alone was rendering too bright
+// in raw mode on some terminals.
+const ansiDim = "\x1b[38;2;110;103;108m"
+const ansiReset = "\x1b[0m"
+
+const (
+	bandPad        = 2 // horizontal inset inside a band (matches Padding(0, 2))
+	bandBodyOffset = 1 // row within bandLines where the text body lives
+)
+
+func indentTranscript(line string) string {
+	if line == "" {
+		return ""
+	}
+	return tuiProseIndent + line
+}
+
+func indentTranscriptLines(lines []string) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	out := make([]string, len(lines))
+	for i, ln := range lines {
+		out[i] = indentTranscript(ln)
+	}
+	return out
+}
+
+func (r *tuiRenderer) printTranscriptLine(line string) {
+	_, _ = fmt.Fprintln(r.out, indentTranscript(line))
+}
+
+func newTUIRenderer(out io.Writer, width int, meta tuiMeta) *tuiRenderer {
 	if width <= 0 {
 		width = 80
 	}
 	out = rawTerminalWriter{w: out}
 	lr := lipgloss.NewRenderer(out)
+	lr.SetHasDarkBackground(true)
 	r := &tuiRenderer{
 		out:          out,
+		fd:           os.Stderr.Fd(),
 		width:        width,
+		meta:         meta,
 		counts:       map[string]int{},
 		stop:         make(chan struct{}),
-		proseWrap:    newProseWrapper(width),
-		md:           newMarkdownStyler(out),
-		dim:          lr.NewStyle().Foreground(theme.Muted),
+		proseWrap:    newTUIProseWrapper(width),
+		md:           newTUIMarkdownStyler(out),
+		dim:          lr.NewStyle().Foreground(theme.Faint),
 		ok:           lr.NewStyle().Foreground(theme.Primary),
 		bad:          lr.NewStyle().Bold(true).Foreground(theme.Text).Background(theme.Deep),
-		tool:         lr.NewStyle().Foreground(theme.Accent),
-		note:         lr.NewStyle().Bold(true).Foreground(theme.Accent),
+		tool:         lr.NewStyle().Foreground(theme.Muted),
+		note:         lr.NewStyle().Foreground(theme.Accent),
 		standing:     lr.NewStyle().Bold(true).Foreground(theme.Accent),
-		standingText: lr.NewStyle().Bold(true),
-		agent:        lr.NewStyle().Bold(true).Foreground(theme.Primary),
+		standingText: lr.NewStyle().Bold(true).Foreground(theme.Text),
+		bright:       lr.NewStyle().Foreground(theme.Text),
+		faint:        lr.NewStyle().Foreground(theme.Faint),
+		muted:        lr.NewStyle().Foreground(theme.Muted),
+		working: lr.NewStyle().Bold(true).Foreground(theme.Text),
+		cmd:     lr.NewStyle().Foreground(theme.Command),
 	}
+	initTerminalChrome(out)
 	go r.tick()
 	return r
 }
 
-func (r *tuiRenderer) header(string) {}
+func initTerminalChrome(out io.Writer) {
+	// Canvas background only — stay on the main screen so scrollback works.
+	_, _ = fmt.Fprintf(out, "\x1b[48;2;44;38;42m")
+}
+
+func (r *tuiRenderer) hintLine() string {
+	if r.meta.Approve {
+		return "hint: write/edit/bash require approval"
+	}
+	return "hint: use -approve to gate dangerous tools"
+}
+
+func (r *tuiRenderer) header(string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, _ = fmt.Fprintln(r.out, r.bright.Render("Arbos Agent"))
+	_, _ = fmt.Fprintln(r.out, r.muted.Render(r.meta.Version))
+	_, _ = fmt.Fprintln(r.out, r.faint.Render(r.hintLine()))
+	_, _ = fmt.Fprintln(r.out)
+}
 
 // turnStart opens the agent's side immediately on submit: the block with
 // ◆ + spinner and the steer prompt below. The separating blank line is owned
@@ -162,8 +231,8 @@ func (r *tuiRenderer) delta(text string) {
 	}
 	if !r.started {
 		r.started = true
-		r.tail = r.agent.Render(agentIcon) + " "
-		r.proseWrap.startAfterPrefix(agentIcon + " ")
+		r.tail = ""
+		r.proseWrap.startAfterPrefix("")
 	}
 	out := r.proseWrap.write(styled)
 	if out == "" {
@@ -253,9 +322,13 @@ func (r *tuiRenderer) toolStart(call core.ToolCall) {
 	}
 	r.running = append(r.running, runningTool{
 		id:    call.ID,
+		name:  call.Name,
 		label: transcript.ToolLabel(call.Name, call.Args),
 		verb:  transcript.ToolVerb(call.Name),
 	})
+	if call.Name == "delegate" {
+		r.startSubagent(call)
+	}
 	r.clearBlock()
 	r.renderBlock()
 }
@@ -268,6 +341,9 @@ func (r *tuiRenderer) toolFinish(res core.ToolResult) {
 		if rt.id == res.CallID {
 			label = rt.label
 			r.running = append(r.running[:i], r.running[i+1:]...)
+			if rt.name == "delegate" {
+				r.finishSubagent(res.CallID)
+			}
 			break
 		}
 	}
@@ -277,18 +353,13 @@ func (r *tuiRenderer) toolFinish(res core.ToolResult) {
 	if res.IsError {
 		r.fails++
 		r.clearBlock()
-		_, _ = fmt.Fprintln(r.out, "  "+r.bad.Render(transcript.ToolDone(label, res)))
+		r.printTranscriptLine(r.formatToolDone(label, res, ""))
 		r.renderBlock()
 		return
 	}
-	if diff := transcript.DiffOf(res); diff != "" {
-		add, del := transcript.DiffStat(diff)
-		r.clearBlock()
-		_, _ = fmt.Fprintln(r.out, "  "+r.ok.Render(fmt.Sprintf("%s (+%d -%d)", transcript.ToolDone(label, res), add, del)))
-		r.renderBlock()
-		return
-	}
+	diff := transcript.DiffOf(res)
 	r.clearBlock()
+	r.printTranscriptLine(r.formatToolDone(label, res, diff))
 	r.renderBlock()
 }
 
@@ -308,7 +379,7 @@ func (r *tuiRenderer) turnComplete(reason core.StopReason) {
 	r.clearBlock()
 	r.printFinalAnswer()
 	if reason != core.StopAnswered {
-		_, _ = fmt.Fprintln(r.out, r.dim.Render("· stopped: "+string(reason)))
+		r.printTranscriptLine(r.dim.Render("· stopped: " + string(reason)))
 	}
 	r.printTally()
 	_, _ = fmt.Fprintln(r.out)
@@ -339,11 +410,23 @@ func (r *tuiRenderer) printStanding(lines []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.clearBlock()
-	for _, ln := range lines {
-		_, _ = fmt.Fprintln(r.out, renderStandingLine(r.standing, r.standingText, ln))
+	const maxStanding = 3
+	for i, ln := range lines {
+		if i == maxStanding {
+			_, _ = fmt.Fprintln(r.out, r.faint.Render(fmt.Sprintf("  … and %d more standing obligations", len(lines)-maxStanding)))
+			break
+		}
+		_, _ = fmt.Fprintln(r.out, r.formatStandingLine(ln))
 	}
 	_, _ = fmt.Fprintln(r.out)
 	r.renderBlock()
+}
+
+func (r *tuiRenderer) formatStandingLine(ln string) string {
+	if rest, found := strings.CutPrefix(ln, "↻ "); found {
+		return r.faint.Render("↻ ") + r.muted.Render(rest)
+	}
+	return r.muted.Render(ln)
 }
 
 func (r *tuiRenderer) notice(msgs []string) {
@@ -362,7 +445,7 @@ func (r *tuiRenderer) interrupted() {
 	defer r.mu.Unlock()
 	r.clearBlock()
 	r.printFinalAnswer()
-	_, _ = fmt.Fprintln(r.out, r.dim.Render("· interrupted"))
+	r.printTranscriptLine(r.dim.Render("· interrupted"))
 	_, _ = fmt.Fprintln(r.out)
 	r.resetTurn()
 	r.promptKind = promptIdle
@@ -385,7 +468,7 @@ func (r *tuiRenderer) errorf(e core.ErrorEvent) {
 	defer r.mu.Unlock()
 	r.clearBlock()
 	r.printFinalAnswer()
-	_, _ = fmt.Fprintln(r.out, r.bad.Render("· error ("+string(e.Category)+"): "+e.Err))
+	r.printTranscriptLine(r.bad.Render("· error (" + string(e.Category) + "): " + e.Err))
 	_, _ = fmt.Fprintln(r.out)
 	r.resetTurn()
 	r.promptKind = promptIdle
@@ -401,13 +484,20 @@ func (r *tuiRenderer) setInput(s string) {
 	defer r.mu.Unlock()
 	r.input.Reset()
 	r.input.WriteString(s)
-	if r.blockLines == 0 {
-		r.renderBlock()
+	// Rewrite only the prompt row in place — a full block repaint on every
+	// keystroke was appending lines into scrollback (the staircase bug).
+	if r.blockLines > 0 {
+		r.redrawPromptLine()
 		return
 	}
-	// The cursor already sits on the prompt line (last block line); rewrite it
-	// in place without disturbing the rest of the block.
-	_, _ = fmt.Fprint(r.out, "\r\x1b[K"+r.promptLine())
+	r.renderBlock()
+}
+
+func (r *tuiRenderer) redrawPromptLine() {
+	_, _ = fmt.Fprint(r.out, "\r\x1b[2K")
+	_, _ = fmt.Fprint(r.out, r.bandBodyLine(r.promptText(), theme.Panel))
+	col := r.promptCursorCol()
+	_, _ = fmt.Fprintf(r.out, "\x1b[%dG", col)
 }
 
 func (r *tuiRenderer) inputString() string {
@@ -434,9 +524,78 @@ func (r *tuiRenderer) submitLine() string {
 		r.printFinalAnswer()
 		_, _ = fmt.Fprintln(r.out)
 	}
-	_, _ = fmt.Fprintln(r.out, r.note.Render("› ")+line)
-	_, _ = fmt.Fprintln(r.out)
+	r.printQueryUnlocked(line)
 	return line
+}
+
+func (r *tuiRenderer) printQueryUnlocked(line string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	r.printLines(r.formatQueryBand(line))
+	_, _ = fmt.Fprintln(r.out)
+}
+
+func (r *tuiRenderer) formatQueryBand(line string) string {
+	body := lipgloss.NewStyle().Foreground(theme.Text).Render(line)
+	lines := r.bandLines(body, theme.Card)
+	return strings.Join(lines, "\n")
+}
+
+func (r *tuiRenderer) formatToolDone(label string, res core.ToolResult, diff string) string {
+	if res.IsError {
+		return r.bad.Render(transcript.ToolDone(label, res))
+	}
+	tool, arg, _ := strings.Cut(label, " ")
+	var line string
+	switch tool {
+	case "write":
+		line = r.ok.Render("Wrote ") + r.cmd.Render(arg)
+	case "edit":
+		line = r.ok.Render("Edited ") + r.cmd.Render(arg)
+	case "bash":
+		line = r.ok.Render("Ran ") + r.muted.Render(clip(arg, 60))
+	default:
+		line = r.ok.Render("✓ ") + r.muted.Render(label)
+	}
+	if diff != "" {
+		add, del := transcript.DiffStat(diff)
+		line += r.faint.Render(fmt.Sprintf(" (+%d -%d)", add, del))
+	}
+	return line
+}
+
+func expandPhysicalLines(lines []string) []string {
+	var out []string
+	for _, ln := range lines {
+		ln = strings.TrimRight(ln, "\r\n")
+		if ln == "" {
+			out = append(out, "")
+			continue
+		}
+		out = append(out, strings.Split(ln, "\n")...)
+	}
+	return out
+}
+
+func (r *tuiRenderer) printLines(styled string) {
+	for _, ln := range expandPhysicalLines([]string{styled}) {
+		_, _ = fmt.Fprintln(r.out, ln)
+	}
+}
+
+// printQuery commits a user message into the permanent transcript as a
+// full-width query band — the Cursor-style highlighted prompt row.
+func (r *tuiRenderer) printQuery(line string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clearBlock()
+	r.printQueryUnlocked(line)
 }
 
 // tick animates the spinners while the block is showing any: waiting for the
@@ -450,7 +609,7 @@ func (r *tuiRenderer) tick() {
 			return
 		case <-t.C:
 			r.mu.Lock()
-			if r.turnOpen && (r.tail == "" || len(r.running) > 0) {
+			if r.turnOpen {
 				r.frame++
 				r.clearBlock()
 				r.renderBlock()
@@ -462,34 +621,65 @@ func (r *tuiRenderer) tick() {
 
 // --- block painting (callers hold r.mu) ---
 
-// clearBlock erases the repaintable block. The cursor always rests at the end
-// of the block's last line, so climbing blockLines-1 rows reaches its top.
+// clearBlock erases the repaintable block. The cursor usually rests on the
+// prompt row (not the block's last line), so we descend to the bottom row
+// first — otherwise climbing blockLines-1 overshoots into scrollback and
+// deletes transcript lines (the cascading-delete bug).
 func (r *tuiRenderer) clearBlock() {
 	if r.blockLines == 0 {
 		return
+	}
+	if down := r.blockLines - 1 - r.promptIdx; down > 0 {
+		_, _ = fmt.Fprintf(r.out, "\x1b[%dB", down)
 	}
 	if r.blockLines > 1 {
 		_, _ = fmt.Fprintf(r.out, "\x1b[%dA", r.blockLines-1)
 	}
 	_, _ = fmt.Fprint(r.out, "\r\x1b[J")
 	r.blockLines = 0
+	r.promptIdx = 0
 }
 
-// renderBlock paints the block and records its exact line count: during a turn
-// the in-progress line (spinner or streaming tail), live tool activity (one
-// spinner line per verb, plus the running tally), a blank, then the prompt;
-// idle, just the prompt.
-func (r *tuiRenderer) renderBlock() {
-	var lines []string
+func (r *tuiRenderer) refreshSize() {
+	if w, _, err := term.GetSize(r.fd); err == nil && w > 0 {
+		r.width = w
+	}
+}
+
+// blockContent builds the live chrome below scrollback: turn activity, the
+// follow-up prompt, and the model/path footer.
+// promptIdx is the 0-based row of the input line within the expanded block.
+func (r *tuiRenderer) blockContent() (lines []string, promptIdx int) {
 	if r.turnOpen && r.promptKind != promptApproval {
 		lines = append(lines, r.windowLines()...)
-		if r.ephemeral != "" {
-			lines = append(lines, proseIndent+r.dim.Render(r.previewLine()))
+		if r.subagentPanelActive() {
+			lines = append(lines, r.subagentLines()...)
+		} else {
+			if r.ephemeral != "" {
+				lines = append(lines, indentTranscript(r.dim.Render(r.previewLine())))
+			}
+			lines = append(lines, indentTranscriptLines(r.activityLines())...)
+			lines = append(lines, indentTranscript(r.workingLine()))
 		}
-		lines = append(lines, r.activityLines()...)
 		lines = append(lines, "")
 	}
-	lines = append(lines, r.promptLine())
+	pre := len(expandPhysicalLines(lines))
+	band := r.bandLines(r.promptText(), theme.Panel)
+	promptIdx = pre + bandBodyOffset
+	lines = append(lines, band...)
+	lines = append(lines, "")
+	lines = append(lines, r.footerLines()...)
+	return lines, promptIdx
+}
+
+// renderBlock paints the block inline after scrollback — no absolute positioning,
+// so the transcript stays scrollable and there is no dead space gap.
+func (r *tuiRenderer) renderBlock() {
+	r.refreshSize()
+	r.clearBlock()
+	raw, promptIdx := r.blockContent()
+	lines := expandPhysicalLines(raw)
+	r.promptIdx = promptIdx
 	for i, ln := range lines {
 		if i < len(lines)-1 {
 			_, _ = fmt.Fprintln(r.out, ln)
@@ -498,20 +688,49 @@ func (r *tuiRenderer) renderBlock() {
 		}
 	}
 	r.blockLines = len(lines)
+	r.placePromptCursor(promptIdx)
+}
+
+// placePromptCursor moves the terminal cursor onto the input line, right after
+// the → prefix — not on the footer row at the bottom of the block.
+func (r *tuiRenderer) placePromptCursor(promptIdx int) {
+	if r.blockLines == 0 || promptIdx < 0 {
+		return
+	}
+	up := r.blockLines - 1 - promptIdx
+	if up > 0 {
+		_, _ = fmt.Fprintf(r.out, "\x1b[%dA", up)
+	}
+	_, _ = fmt.Fprint(r.out, "\r")
+	col := r.promptCursorCol()
+	_, _ = fmt.Fprintf(r.out, "\x1b[%dG", col)
+}
+
+func (r *tuiRenderer) promptCursorCol() int {
+	const arrow = "→ "
+	if r.promptKind == promptApproval {
+		prefix := "approve " + r.approval + "? [y/N] "
+		return bandPad + lipgloss.Width(arrow+prefix+r.input.String()) + 1
+	}
+	in := r.clipInput()
+	if in != "" {
+		return bandPad + lipgloss.Width(arrow+in) + 1
+	}
+	return bandPad + lipgloss.Width(arrow) + 1
 }
 
 // answerWindow is how many lines of the streaming answer stay visible in the
 // block; older lines roll off (the full answer lands in scrollback at the end).
 const answerWindow = 6
 
-// windowLines is the block's streaming region: a ◆ spinner before the first
-// token, then the last few wrapped lines of the in-flight answer, with a dim
-// spinner row whenever the model is between lines (thinking, tools running).
+// windowLines is the block's streaming region: the last few wrapped lines of
+// the in-flight answer, with a dim spinner row whenever the model is between
+// lines (thinking, tools running). The "Working" status line is separate.
 func (r *tuiRenderer) windowLines() []string {
-	spin := transcript.Spinner[r.frame%len(transcript.Spinner)]
 	if !r.started {
-		return []string{r.agent.Render(agentIcon) + " " + r.dim.Render(spin)}
+		return nil
 	}
+	spin := transcript.Spinner[r.frame%len(transcript.Spinner)]
 	window := r.answerLines
 	if r.tail != "" {
 		window = append(window[:len(window):len(window)], r.tail)
@@ -520,9 +739,25 @@ func (r *tuiRenderer) windowLines() []string {
 		window = window[len(window)-answerWindow:]
 	}
 	if r.tail == "" {
-		window = append(window[:len(window):len(window)], proseIndent+r.dim.Render(spin))
+		window = append(window[:len(window):len(window)], indentTranscript(r.dim.Render(spin)))
 	}
 	return window
+}
+
+func (r *tuiRenderer) workingLine() string {
+	dots := lipgloss.NewStyle().Foreground(theme.Status).Render("::")
+	return dots + " " + r.working.Render("Working")
+}
+
+func (r *tuiRenderer) footerLines() []string {
+	path := r.meta.CWD
+	if r.meta.Branch != "" {
+		path += " · " + r.meta.Branch
+	}
+	return []string{
+		r.muted.Render(r.meta.Model),
+		r.muted.Render(path),
+	}
 }
 
 // activityLines is the live tool telemetry: one spinner line per kind of work
@@ -530,33 +765,35 @@ func (r *tuiRenderer) windowLines() []string {
 // capped, plus the running tally.
 func (r *tuiRenderer) activityLines() []string {
 	groups := r.activity()
-	if len(groups) == 0 && r.total == 0 {
+	if len(groups) == 0 {
 		return nil
 	}
 	spin := transcript.Spinner[r.frame%len(transcript.Spinner)]
 	var out []string
 	for i, g := range groups {
 		if i == liveSpinnerRows {
-			out = append(out, "  "+r.dim.Render("…"))
+			out = append(out, r.dim.Render("…"))
 			break
 		}
 		label := g.verb
 		if g.n > 1 {
 			label = fmt.Sprintf("%s (%d)", g.verb, g.n)
 		}
-		out = append(out, "  "+r.tool.Render(spin+" "+clip(label, r.width-5)))
-	}
-	if t := r.tally(); t != "" {
-		out = append(out, "  "+r.dim.Render(clip("· "+t, r.width-3)))
+		out = append(out, r.tool.Render(spin+" "+clip(label, r.width-5)))
 	}
 	return out
 }
 
-func (r *tuiRenderer) promptLine() string {
+func (r *tuiRenderer) promptText() string {
 	if r.promptKind == promptApproval {
-		return r.note.Render("  approve "+r.approval+"? [y/N] ") + r.input.String()
+		return ansiDim + "→ " + ansiReset + r.bright.Render("approve "+r.approval+"? [y/N] ") + r.bright.Render(r.input.String())
 	}
-	return r.note.Render("› ") + r.clipInput()
+	in := r.clipInput()
+	if in != "" {
+		return ansiDim + "→ " + ansiReset + r.bright.Render(in)
+	}
+	// Placeholder ghost text — dim, not body-bright.
+	return ansiDim + "→ " + followUpHint + ansiReset
 }
 
 // clipInput keeps the prompt to one physical line (the block's line math
@@ -585,14 +822,14 @@ func (r *tuiRenderer) printFinalAnswer() {
 	r.tail = ""
 	r.started = false
 	r.ephemeral = ""
-	r.md = newMarkdownStyler(r.out)
-	r.proseWrap = newProseWrapper(r.width)
+	r.md = newTUIMarkdownStyler(r.out)
+	r.proseWrap = newTUIProseWrapper(r.width)
 	if raw == "" {
 		return
 	}
-	md := newMarkdownStyler(r.out)
-	w := newProseWrapper(r.width)
-	w.startAfterPrefix(agentIcon + " ")
+	md := newTUIMarkdownStyler(r.out)
+	w := newTUIProseWrapper(r.width)
+	w.startAfterPrefix("")
 	styled := md.Push(raw)
 	if t := md.Flush(); t != "" {
 		styled += t
@@ -601,7 +838,6 @@ func (r *tuiRenderer) printFinalAnswer() {
 	if t := w.flush(); t != "" {
 		text += t
 	}
-	_, _ = fmt.Fprint(r.out, r.agent.Render(agentIcon)+" ")
 	_, _ = fmt.Fprint(r.out, text)
 	if !strings.HasSuffix(text, "\n") {
 		_, _ = fmt.Fprintln(r.out)
@@ -635,6 +871,9 @@ func (r *tuiRenderer) activity() []verbGroup {
 	var groups []verbGroup
 	idx := map[string]int{}
 	for _, rt := range r.running {
+		if rt.name == "delegate" {
+			continue
+		}
 		if i, ok := idx[rt.verb]; ok {
 			groups[i].n++
 			continue
@@ -653,28 +892,50 @@ func (r *tuiRenderer) resetTurn() {
 	r.answerLines = nil
 	r.ephemeral = ""
 	r.running = nil
+	r.subagents = nil
 	r.counts = map[string]int{}
 	r.total = 0
 	r.fails = 0
-	r.proseWrap = newProseWrapper(r.width)
-	r.md = newMarkdownStyler(r.out)
+	r.proseWrap = newTUIProseWrapper(r.width)
+	r.md = newTUIMarkdownStyler(r.out)
 }
 
-func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRenderer, deliver func() bool, announceStanding func(bool), task string, expand func(string) string) error {
+func printSessionResume(out io.Writer, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	lr := lipgloss.NewRenderer(out)
+	muted := lr.NewStyle().Foreground(theme.Muted)
+	cmd := lr.NewStyle().Foreground(theme.Command)
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprint(out, muted.Render("To resume this session: "))
+	_, _ = fmt.Fprintln(out, cmd.Render("arbos resume "+sessionID))
+}
+
+func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRenderer, sessionID string, deliver func() bool, announceStanding func(bool), task string, expand func(string) string) error {
+	r.sessionID = sessionID
 	oldState, err := term.MakeRaw(os.Stdin.Fd())
 	if err != nil {
 		return err
 	}
 	defer func() {
+		r.mu.Lock()
+		r.clearBlock()
+		sid := r.sessionID
+		r.mu.Unlock()
 		_ = term.Restore(os.Stdin.Fd(), oldState)
-		fmt.Fprintln(os.Stderr)
+		_, _ = fmt.Fprint(os.Stderr, "\x1b[0m\n")
+		printSessionResume(os.Stderr, sid)
 	}()
 
 	inputs := startRawInput(ctx, os.Stdin)
 	turnActive := false
 	var approvalID core.RequestID
 
-	sendPrompt := func(text string) {
+	sendPrompt := func(text string, echo bool) {
+		if echo {
+			r.printQuery(text)
+		}
 		conv.Send(core.PromptIntent{Text: text})
 		turnActive = true
 		r.turnStart()
@@ -689,7 +950,7 @@ func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRendere
 	}
 
 	if task != "" {
-		sendPrompt(task)
+		sendPrompt(task, true)
 	} else {
 		r.promptFollowUp()
 	}
@@ -745,7 +1006,7 @@ func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRendere
 					if turnActive {
 						steer(line)
 					} else {
-						sendPrompt(expand(line))
+						sendPrompt(expand(line), false)
 					}
 				}
 			}
@@ -757,23 +1018,29 @@ func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRendere
 			switch e := env.Event.(type) {
 			case core.MessageDelta:
 				if child {
-					// A delegated child's prose is internal narration, not this
-					// turn's answer — preview it live, keep it out of scrollback.
-					r.preview(e.Text)
-				} else {
-					r.delta(e.Text)
+					continue
 				}
+				r.delta(e.Text)
 			case core.ReasoningDelta:
 				r.preview(e.Text)
 			case core.ApprovalRequest:
 				approvalID = e.RequestID
 				r.approvalPrompt(e.Call)
 			case core.ToolStarted:
-				r.toolStart(e.Call)
+				if child {
+					r.withChildUpdate(func() { r.childToolStart(env.SessionID, e.Call) })
+				} else {
+					r.toolStart(e.Call)
+				}
 			case core.ToolFinished:
-				r.toolFinish(e.Result)
+				if child {
+					r.withChildUpdate(func() { r.childToolFinish(env.SessionID, e.Result) })
+				} else {
+					r.toolFinish(e.Result)
+				}
 			case core.TurnComplete:
 				if child {
+					r.withChildUpdate(func() { r.childTurnComplete(env.SessionID, e.Usage) })
 					continue
 				}
 				r.turnComplete(e.StopReason)

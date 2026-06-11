@@ -13,6 +13,7 @@ import (
 
 	"github.com/unarbos/arbos/internal/gateway"
 	"github.com/unarbos/arbos/internal/piwire"
+	"github.com/unarbos/arbos/internal/tool/codingspec"
 	"github.com/unarbos/arbos/web"
 )
 
@@ -21,7 +22,7 @@ import (
 // long-lived body for the agent, so it carries the clock — the plan scheduler
 // fires deferred tasks, standing obligations, and callbacks here.
 func runWeb(cfg piwire.Config, dbPath, addr, dist string, approve bool) error {
-	host, _, cleanup, err := assemble(cfg, dbPath, approve, false)
+	host, store, cleanup, err := assemble(cfg, dbPath, approve, false)
 	if err != nil {
 		return err
 	}
@@ -36,10 +37,23 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist string, approve bool) error {
 		defer stopSched()
 	}
 
+	// Jobs are keyed by workspace root (= this process's cwd, same as the
+	// toolset); the ✕ on a running job in the UI lands here.
+	cwd, _ := os.Getwd()
 	gw := &gateway.Server{
 		Engine:       host.Engine,
+		Store:        store,
 		NewSessionID: piwire.NewSessionID,
 		Drain:        cfg.ServeDrainTimeout,
+		Model:        cfg.Model,
+		ModelsURL:    cfg.ModelsURL(),
+		KillJob: func(id string) error {
+			_, err := codingspec.KillJob(cwd, id)
+			return err
+		},
+		// The composer's mic button: capture + transcribe from this machine's
+		// own microphone, on-device.
+		Voice: &hostVoice{},
 	}
 	if dist != "" {
 		// Override the embedded bundle with a directory (UI development).
@@ -47,6 +61,10 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist string, approve bool) error {
 	} else if sub, err := fs.Sub(web.Dist, "dist"); err == nil {
 		gw.Dist = sub
 	}
+
+	// The browser door on the outbox: scheduled firings and finished
+	// background work reach open tabs as ambient notices.
+	go gw.DeliverOutbox(ctx)
 
 	// BaseContext ties every request — including hijacked WebSocket seam
 	// connections, which Shutdown cannot reach — to the signal context, so a

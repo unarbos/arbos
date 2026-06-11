@@ -41,6 +41,28 @@ type Message struct {
 	CreatedAt time.Time
 }
 
+// BroadcastSessions are session markers with no chat to route to — rows from
+// before session scoping, and kernel-claimed mechanical nodes that never
+// recorded an origin. Doors deliver these everywhere; everything else routes
+// to the conversation that created the work.
+var BroadcastSessions = []string{"", "kernel"}
+
+// IsBroadcast reports whether a message's session marker is broadcast-class.
+func IsBroadcast(session string) bool {
+	for _, b := range BroadcastSessions {
+		if session == b {
+			return true
+		}
+	}
+	return false
+}
+
+// StaleAfter is how long a session-scoped message waits for its own chat to
+// reopen before any door may deliver it. Within the window, scoping is strict
+// (no cross-chat leaks); past it, being heard somewhere beats being lost —
+// the chat may belong to an ended terminal session that will never return.
+const StaleAfter = 10 * time.Minute
+
 // Store is the storage the outbox needs, satisfied by *sqlite.Store. Narrow on
 // purpose (the mind.Store / plan.Store pattern).
 type Store interface {

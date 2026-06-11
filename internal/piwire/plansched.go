@@ -45,8 +45,19 @@ func (h *Host) StartPlanScheduler() func() {
 		run = cmdRunner(cwd)
 	}
 	var notify plan.NotifyFunc
-	if ob, ok := h.store.(outbox.Store); ok {
-		notify = ob.Notify
+	if nf, ok := h.store.(interface {
+		NotifyFrom(ctx context.Context, text, session, source string) error
+	}); ok {
+		// The node id is the coalescing source: a recurring ping's new firing
+		// replaces its own undelivered predecessor, so a closed door gets the
+		// latest reading on reopen, never the backlog.
+		notify = func(ctx context.Context, msg, session string, node plan.NodeID) error {
+			return nf.NotifyFrom(ctx, msg, session, core.SpawnedByNode(int64(node)))
+		}
+	} else if ob, ok := h.store.(outbox.Store); ok {
+		notify = func(ctx context.Context, msg, session string, _ plan.NodeID) error {
+			return ob.Notify(ctx, msg, session)
+		}
 	}
 	// The schedule axis (a wake) spawns through the same Agent mechanism as
 	// the call axis (delegate): "self" is the full controller engine wrapped
@@ -90,7 +101,16 @@ func selfWake(self agent.Agent) plan.WakeFunc {
 	return func(ctx context.Context, w plan.WakeEvent) error {
 		ctx, cancel := context.WithTimeout(ctx, wakeTurnTimeout)
 		defer cancel()
-		_, err := self.Run(ctx, agent.Task{Instruction: wakePrompt(w), Origin: core.OriginScheduler}, nil)
+		// Owner ties the wake to the conversation whose node fired: its
+		// notifications route back there (sqlite.Store.Notify resolves the
+		// owner), and the gateway lists the chat's runs so its UI can open
+		// the wake's transcript as a tab.
+		_, err := self.Run(ctx, agent.Task{
+			Instruction: wakePrompt(w),
+			Origin:      core.OriginScheduler,
+			Owner:       core.SessionID(w.Node.Origin),
+			SpawnedBy:   core.SpawnedByNode(int64(w.Node.ID)),
+		}, nil)
 		return err
 	}
 }
@@ -119,6 +139,14 @@ func wakePrompt(w plan.WakeEvent) string {
 		return fmt.Sprintf(
 			"Scheduled firing: deferred task #%d is now due — %s. Claim it with the plan tool (op:update, node %d, status active), do it, and record the result (done or failed, with an outcome). No conversation is open: anything the user must hear goes through the notify tool.",
 			n.ID, n.Goal, n.ID)
+	case plan.WakeCondition:
+		detail := w.Detail
+		if detail == "" {
+			detail = "(predicate produced no output)"
+		}
+		return fmt.Sprintf(
+			"Condition met: the watch on node #%d held — %s. Predicate: `%s`. Its latest output:\n%s\nThe kernel keeps polling this node, so do NOT manage its status; just act on the goal now. No conversation is open: anything the user must hear goes through the notify tool.",
+			n.ID, n.Goal, n.Cond, detail)
 	}
 	// WakeReason is a closed enum; a new value must add a branch above rather
 	// than silently inherit a prompt.

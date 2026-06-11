@@ -36,11 +36,15 @@ type NewNode struct {
 	Par   bool   `json:"par,omitempty" desc:"Run alongside the previous node (same order slot) instead of after it. Consecutive par nodes form a parallel group; the next non-par node joins after the whole group."`
 }
 
-// When is the trigger axis: at most one of its fields. Empty = ready.
+// When is the trigger axis: at most one of after/every/onDeps (empty = ready),
+// plus an optional condition gate that composes with every.
 type When struct {
 	After  string `json:"after,omitempty" desc:"Defer readiness by this duration from now (e.g. \"30m\"). One-shot."`
 	Every  string `json:"every,omitempty" desc:"Recur on this period (e.g. \"1h\"). A standing obligation that never terminates — no separate 'kind'."`
 	OnDeps bool   `json:"onDeps,omitempty" desc:"Fire a model turn the moment earlier siblings finish — the callback (\"tell me when the pipeline is done\"). Without it a ready agent task waits to be picked up by a working turn; only meaningful for agent tasks."`
+	// Condition is a gate, not a trigger: it pairs with every (the poll
+	// cadence) and fires the node's Do only when the predicate holds.
+	Condition string `json:"condition,omitempty" desc:"A shell predicate (exit 0 = holds) the kernel checks every poll period; the node's do fires only when it holds. Pair with every (the poll cadence) and an agent or notify do. The cheap \"watch then act\" trigger — only the predicate runs each period, never the model, until it holds: when:{condition:\"test $(curl -s …) -lt 60000\", every:\"1m\"} with an agent do (wake and act) or a notify do (alert, no model turn)."`
 }
 
 // Do is the executor axis: at most one of its fields. Empty = an agent task.
@@ -100,11 +104,15 @@ func addOp(ctx context.Context, store Store, a Args, now time.Time) (string, err
 	}
 	nodes := make([]Node, len(a.Nodes))
 	par := make([]bool, len(a.Nodes))
+	origin := sessionFrom(ctx)
 	for i, in := range a.Nodes {
 		n, err := buildNode(in, now)
 		if err != nil {
 			return "", fmt.Errorf("plan add: nodes[%d]: %w", i, err)
 		}
+		// The forest is global, the voice is not: remember which session
+		// created the node so its firings speak into that chat alone.
+		n.Origin = origin
 		nodes[i] = n
 		par[i] = in.Par
 	}
@@ -177,6 +185,19 @@ func buildNode(in NewNode, now time.Time) (Node, error) {
 	}
 	if n.WakeOnReady && n.Executor() != ExecAgent {
 		return Node{}, fmt.Errorf("when.onDeps is for agent tasks — a %s node already fires when ready", n.Executor())
+	}
+	// Condition is a gate on the cadence, not a standalone trigger: it needs a
+	// poll period to be re-checked, and it discharges the node's Do (agent
+	// wake or notify) — never a shell node, whose own Cmd would race the
+	// predicate for the meaning of "the work".
+	if c := strings.TrimSpace(w.Condition); c != "" {
+		if n.Every == 0 {
+			return Node{}, fmt.Errorf("when.condition needs when.every (the poll period to re-check it on)")
+		}
+		if n.Executor() != ExecAgent && n.Executor() != ExecNotify {
+			return Node{}, fmt.Errorf("when.condition fires an agent or notify do, not a %s node", n.Executor())
+		}
+		n.Cond = c
 	}
 	return n, nil
 }

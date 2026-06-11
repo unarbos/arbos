@@ -1,21 +1,31 @@
 @import "tailwindcss";
 
 /* ------------------------------------------------------------------ */
-/* arbos web — the TUI, in a browser tab. One column, mono type, the   */
-/* sage palette from internal/theme/theme.go. No chrome beyond a       */
-/* status line and the prompt.                                         */
+/* arbos web — a faithful clone of Cursor's agent chat panel. Warm     */
+/* desaturated dark palette sampled from Cursor itself; sans prose,    */
+/* mono for code, dim single-line tool activity, tinted diff lines.    */
 /* ------------------------------------------------------------------ */
 
 @theme {
-  --color-canvas: #0d120f; /* page background */
-  --color-text: #e6e6e6; /* high-contrast foreground */
-  --color-primary: #7b9669; /* signature sage: "arbos did this" */
-  --color-accent: #bac8b1; /* pale sage: the user's side, live activity */
-  --color-muted: #6c8480; /* recede: status, tool tallies */
-  --color-deep: #404e3b; /* structure and trouble */
-  --color-danger: #c4756a;
+  --color-canvas: #2c262a; /* chat panel background */
+  --color-bar: #262024; /* top bar (Cursor's tab strip) */
+  --color-card: #332a2f; /* raised: user messages, card headers */
+  --color-panel: #312b2f; /* composer body */
+  --color-line: #3e373c; /* hairline borders */
+  --color-text: #d6d0d4; /* body prose */
+  --color-bright: #ece7ea; /* emphasis: headings, user text */
+  --color-muted: #968f94; /* tool summary rows, secondary */
+  --color-faint: #6e676c; /* hints, placeholders, terminal output */
+  --color-accent: #85aab3; /* links, the modified-file dot */
+  --color-green: #87a883; /* success, added lines */
+  --color-red: #c97f77; /* errors, removed lines */
   --color-warn: #c9a86a;
+  --color-add-bg: #3b3a30; /* diff: added line background */
+  --color-del-bg: #422c31; /* diff: removed line background */
+  --color-btn: #b0aaae; /* light primary: send circle, Allow */
 
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
   --font-mono:
     ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo,
     Consolas, monospace;
@@ -30,20 +40,50 @@ body,
   margin: 0;
   background: var(--color-canvas);
   color: var(--color-text);
-  font-family: var(--font-mono);
-  font-size: 14px;
+  font-family: var(--font-sans);
+  font-size: 13px;
   line-height: 1.6;
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 28%, transparent);
+}
+
+/* Cursor's "thinking" shimmer: a highlight sweeping through dim text. */
+@keyframes shimmer-sweep {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--color-faint) 40%,
+    var(--color-bright) 50%,
+    var(--color-faint) 60%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer-sweep 2.2s linear infinite;
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--color-deep) transparent;
+  scrollbar-color: var(--color-line) transparent;
 }
 *::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
 }
 *::-webkit-scrollbar-thumb {
-  background: var(--color-deep);
+  background: var(--color-line);
   border-radius: 3px;
 }
 *::-webkit-scrollbar-track {

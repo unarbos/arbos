@@ -498,6 +498,28 @@ func RunWorkspaceCmd(ctx context.Context, root, command string) (jobID string, e
 	return info.ID, code, journalTail(info.Dir, 4096), nil
 }
 
+// KillJob SIGKILLs a running background job's whole process group, by id,
+// deriving the job from the shared on-disk directories like every other
+// reader — so any frontend door (the web gateway's kill endpoint, a future
+// TUI affordance) can stop a job regardless of which process spawned it.
+// Killing an already-finished job is a no-op, not an error.
+func KillJob(root, id string) (JobInfo, error) {
+	info, err := loadJob(filepath.Join(jobsRoot(root), id))
+	if err != nil {
+		return JobInfo{}, fmt.Errorf("no such job %q", id)
+	}
+	if info.Status != JobRunning {
+		return info, nil
+	}
+	// The wrapper subshell leads its own group (Setpgid at spawn), so -pid
+	// reaches the command and all its descendants. ESRCH means it finished
+	// between the load and the kill — the outcome the caller wanted.
+	if err := syscall.Kill(-info.Meta.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		return info, fmt.Errorf("kill job %s: %w", id, err)
+	}
+	return info, nil
+}
+
 // journalTail reads the last max bytes of a job's output log, trimmed.
 func journalTail(dir string, max int64) string {
 	f, err := os.Open(filepath.Join(dir, "out.log"))

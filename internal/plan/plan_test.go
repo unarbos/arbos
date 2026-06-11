@@ -29,7 +29,7 @@ func TestFireable_ClassifiesReasonBeforeMutation(t *testing.T) {
 	cmd := node(5, func(n *Node) { n.Cmd = "echo hi" })
 	future := node(6, func(n *Node) { n.After = now.Add(time.Hour) }) // not yet due
 
-	cmds, wakes := Fireable([]Node{deferred, maintain, callback, cmd, future}, now)
+	cmds, _, wakes := Fireable([]Node{deferred, maintain, callback, cmd, future}, now)
 
 	if len(cmds) != 1 || cmds[0].ID != 5 {
 		t.Fatalf("cmds = %+v, want just #5", cmds)
@@ -54,7 +54,7 @@ func TestFireable_DueOrdering(t *testing.T) {
 	a := node(2, func(n *Node) { n.After = now.Add(-3 * time.Minute) })
 	b := node(3, func(n *Node) { n.After = now.Add(-1 * time.Minute) })
 	c := node(4, func(n *Node) { n.After = now.Add(-2 * time.Minute) })
-	_, wakes := Fireable([]Node{b, c, a}, now)
+	_, _, wakes := Fireable([]Node{b, c, a}, now)
 	order := []NodeID{}
 	for _, w := range wakes {
 		order = append(order, w.Node.ID)
@@ -210,7 +210,7 @@ func TestFireable_NotifyIsMechanical(t *testing.T) {
 	// A deferred notify node is mechanical — it belongs in mech, not wakes, so
 	// it fires with no model turn.
 	n := node(2, func(n *Node) { n.Notify = "ping"; n.After = now.Add(-time.Minute) })
-	mech, wakes := Fireable([]Node{n}, now)
+	mech, _, wakes := Fireable([]Node{n}, now)
 	if len(mech) != 1 || mech[0].ID != 2 {
 		t.Fatalf("notify node should be mechanical, got mech=%v wakes=%v", mech, wakes)
 	}

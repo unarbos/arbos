@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"github.com/unarbos/arbos/internal/core"
@@ -46,6 +47,15 @@ type Engine struct {
 	ctxInjectors []func(context.Context, core.SessionID) ([]core.Segment, error)
 	onTurnEnd    func(context.Context, core.SessionID)
 	cfg          Config
+
+	// live indexes the currently-running session actors by id so an outside
+	// caller can signal one without holding its Conversation — the seam the
+	// browser door uses to interrupt a scheduler-spawned run it never started.
+	// A session registers on StartSession and removes itself when its actor
+	// exits; the actor model otherwise keeps per-session state lock-free, so
+	// this map is the one shared structure and carries its own mutex.
+	liveMu sync.Mutex
+	live   map[core.SessionID]*Conversation
 }
 
 // Option configures optional engine dependencies without widening New's
@@ -248,6 +258,23 @@ func WithOrigin(origin string) SessionOption {
 	return func(s *core.Session) { s.Origin = origin }
 }
 
+// WithOwner records the conversation a machine-spawned session serves and
+// what spawned it (e.g. core.SpawnedByNode(12)); its voice and UI visibility
+// route to that chat. Set at creation for the same atomicity reason as
+// WithOrigin.
+func WithOwner(owner core.SessionID, spawnedBy string) SessionOption {
+	return func(s *core.Session) {
+		s.Owner = owner
+		s.SpawnedBy = spawnedBy
+	}
+}
+
+// WithPrincipal records who owns/authorizes the session — the address of the
+// agent's voice (core.PrincipalLocal on single-user hosts).
+func WithPrincipal(principal string) SessionOption {
+	return func(s *core.Session) { s.Principal = principal }
+}
+
 // StartSession creates (or, for a known id, adopts) a session and launches its
 // actor goroutine, which runs until ctx is cancelled. The returned
 // Conversation's Events channel is closed when the actor exits. SessionOptions
@@ -269,6 +296,12 @@ func (e *Engine) StartSession(ctx context.Context, id core.SessionID, opts ...Se
 		for _, opt := range opts {
 			opt(&sess)
 		}
+		// Every session has an addressable principal: the agent's voice
+		// targets a person, not a conversation. Single-user hosts default to
+		// the local principal; a multi-user door overrides via WithPrincipal.
+		if sess.Principal == "" {
+			sess.Principal = core.PrincipalLocal
+		}
 		if err := e.store.CreateSession(ctx, sess); err != nil {
 			return nil, err
 		}
@@ -283,8 +316,49 @@ func (e *Engine) StartSession(ctx context.Context, id core.SessionID, opts ...Se
 		// resumed session keeps the model a SetModelIntent switched it to.
 		model: sess.Model,
 	}
+	e.registerConv(c)
 	go e.runActor(ctx, c)
 	return c, nil
+}
+
+// registerConv indexes a live conversation so Interrupt can find it.
+func (e *Engine) registerConv(c *Conversation) {
+	e.liveMu.Lock()
+	defer e.liveMu.Unlock()
+	if e.live == nil {
+		e.live = make(map[core.SessionID]*Conversation)
+	}
+	e.live[c.id] = c
+}
+
+// unregisterConv drops a conversation from the live index, but only if it is
+// still the one registered under that id — a resumed session may have replaced
+// it, and the departing actor must not evict its successor.
+func (e *Engine) unregisterConv(c *Conversation) {
+	e.liveMu.Lock()
+	defer e.liveMu.Unlock()
+	if e.live[c.id] == c {
+		delete(e.live, c.id)
+	}
+}
+
+// Interrupt cancels the in-flight turn of a live session by id, reporting
+// whether a live session was found to signal (a session that already finished
+// returns false — there is nothing to stop). It is the external seam the
+// browser door uses to stop a scheduler-spawned run: delivery is non-blocking
+// so a stalled actor cannot wedge the caller, with a goroutine fallback for the
+// rare full intent buffer so a momentary backlog does not drop the interrupt.
+func (e *Engine) Interrupt(id core.SessionID) bool {
+	e.liveMu.Lock()
+	c := e.live[id]
+	e.liveMu.Unlock()
+	if c == nil {
+		return false
+	}
+	if !c.TrySend(core.InterruptIntent{}) {
+		go c.Send(core.InterruptIntent{})
+	}
+	return true
 }
 
 // runActor is the single owner of a session. It processes one intent at a time;
@@ -292,6 +366,7 @@ func (e *Engine) StartSession(ctx context.Context, id core.SessionID, opts ...Se
 // Every intent variant is handled explicitly — no silent no-ops.
 func (e *Engine) runActor(parent context.Context, c *Conversation) {
 	defer close(c.events)
+	defer e.unregisterConv(c)
 	// turnSeq is owned solely by this goroutine (the session actor), so it needs
 	// no synchronization — it is the per-session monotonic turn counter stamped
 	// on every event a turn produces.
@@ -305,7 +380,7 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 			next := queue[0]
 			queue = queue[1:]
 			turnSeq++
-			queue = append(queue, e.processPrompt(parent, c, next.Text, turnSeq)...)
+			queue = append(queue, e.processPrompt(parent, c, next.Text, next.Parts, turnSeq)...)
 			continue
 		}
 		select {
@@ -318,10 +393,10 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 			switch it := intent.(type) {
 			case core.PromptIntent:
 				turnSeq++
-				queue = append(queue, e.processPrompt(parent, c, it.Text, turnSeq)...)
+				queue = append(queue, e.processPrompt(parent, c, it.Text, it.Parts, turnSeq)...)
 			case core.SteerIntent:
 				turnSeq++
-				queue = append(queue, e.processPrompt(parent, c, it.Text, turnSeq)...)
+				queue = append(queue, e.processPrompt(parent, c, it.Text, it.Parts, turnSeq)...)
 			case core.InterruptIntent:
 				// Idle: there is no in-flight turn to cancel.
 			case core.ResumeIntent:
@@ -357,7 +432,7 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 // processPrompt runs a turn in a child context and races it against incoming
 // interrupts. An InterruptIntent cancels the turn's context — the structural
 // payoff of the actor model.
-func (e *Engine) processPrompt(parent context.Context, c *Conversation, text string, turnID int64) []core.PromptIntent {
+func (e *Engine) processPrompt(parent context.Context, c *Conversation, text string, parts []core.ContentBlock, turnID int64) []core.PromptIntent {
 	// Attach turn correlation once, here, so every downstream append and (later)
 	// log line/span joins on the same SessionID+TurnID. cctx is not cancellable
 	// itself (only turnCtx is), so it is the right context for must-persist
@@ -388,7 +463,7 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 				completedNormally = true // a panic is a terminal outcome, not an interrupt
 			}
 		}()
-		completedNormally = e.runTurn(turnCtx, c, text)
+		completedNormally = e.runTurn(turnCtx, c, text, parts)
 	}()
 
 	// queued collects prompts that arrive while this turn runs; the actor runs
@@ -450,13 +525,13 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 				// H1: if the turn finished on its own, honor the completion and
 				// still run the steer text as the next turn (user intent).
 				if completedNormally {
-					return append(queued, core.PromptIntent{Text: it.Text})
+					return append(queued, core.PromptIntent{Text: it.Text, Parts: it.Parts})
 				}
 				// Silent cut: discard intra-turn queued prompts, no Interrupted.
-				return []core.PromptIntent{{Text: it.Text}}
+				return []core.PromptIntent{{Text: it.Text, Parts: it.Parts}}
 			case core.PromptIntent:
 				// Don't drop it: queue it and tell the user it was kept.
-				c.emit(parent, core.Queued(it))
+				c.emit(parent, core.Queued{Text: it.Text})
 				queued = append(queued, it)
 			case core.ApprovalResponseIntent:
 				routeResponse(c, pending, it.RequestID, it, parent)
@@ -496,7 +571,7 @@ func routeResponse(c *Conversation, pending map[core.RequestID]chan core.Intent,
 // surfaced error, or persist failure) and false when it returned because the
 // context was cancelled (an interrupt). processPrompt uses this to tell a real
 // interrupt from one that merely raced a completing turn (H1).
-func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string) bool {
+func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, userParts []core.ContentBlock) bool {
 	// Attach the live-relay sink so a delegating tool can stream a child agent's
 	// events into this session's outbound stream, incrementing Depth by one for
 	// nested rendering and preserving the originating child SessionID. The depth
@@ -509,7 +584,7 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string) 
 		c.emitEnvelope(base, core.Envelope{SessionID: env.SessionID, Depth: env.Depth + 1, Event: env.Event})
 	})
 
-	if !e.append(ctx, c, core.NewMessageEvent(c.id, core.Message{Role: core.RoleUser, Content: userText}, e.clock.Now())) {
+	if !e.append(ctx, c, core.NewMessageEvent(c.id, core.Message{Role: core.RoleUser, Content: userText, Parts: userParts}, e.clock.Now())) {
 		return true
 	}
 
@@ -697,6 +772,25 @@ func (e *Engine) persistModel(ctx context.Context, id core.SessionID, model stri
 		return err
 	}
 	sess.Model = model
+	sess.UpdatedAt = e.clock.Now()
+	return e.store.UpdateSession(ctx, sess)
+}
+
+// EndSession marks a one-shot spawned session ended — the active -> ended
+// lifecycle transition. A scheduler wake or a delegated child runs exactly one
+// turn and is never resumed, so its session must not linger active forever
+// (which would leave the activity panel spinning on a run that finished long
+// ago). Interactive chats are NOT ended here: they persist across turns and
+// stay active so they remain resumable. Already-ended sessions are a no-op.
+func (e *Engine) EndSession(ctx context.Context, id core.SessionID) error {
+	sess, err := e.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if sess.Status == core.SessionEnded {
+		return nil
+	}
+	sess.Status = core.SessionEnded
 	sess.UpdatedAt = e.clock.Now()
 	return e.store.UpdateSession(ctx, sess)
 }

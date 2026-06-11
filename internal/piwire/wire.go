@@ -93,6 +93,7 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		Model:          cfg.Config.Model,
 		Models:         pi.SeededModelRegistry(),
 		DistillModel:   cfg.Config.DistillModel,
+		Reasoning:      cfg.Config.Reasoning,
 		CacheRetention: core.CacheShort,
 		ExtraRuntimes:  extraRT,
 	}

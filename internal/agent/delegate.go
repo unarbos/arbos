@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/engine"
+	"github.com/unarbos/arbos/internal/obs"
 	"github.com/unarbos/arbos/internal/tool"
 	"github.com/unarbos/arbos/internal/tool/jsonschema"
 )
@@ -73,21 +75,34 @@ func RegisterDelegate(reg *tool.Registry, r *Router) error {
 	if err != nil {
 		return fmt.Errorf("delegate schema: %w", err)
 	}
-	spec := tool.NewSpec("delegate", "Delegate a sub-task to another agent and return its result. Issue several delegate calls at once and they run in parallel — the way to explore or edit a large codebase with multiple sub-agents working concurrently.", false,
-		func(ctx context.Context, a DelegateArgs) (string, error) {
+	spec := tool.NewRichSpec("delegate", "Delegate a sub-task to another agent and return its result. Issue several delegate calls at once and they run in parallel — the way to explore or edit a large codebase with multiple sub-agents working concurrently.", false,
+		func(ctx context.Context, a DelegateArgs) (tool.Result, error) {
 			ag, err := r.resolve(BackendRef(a.Backend))
 			if err != nil {
-				return "", err
+				return tool.Result{}, err
 			}
+			// Owner is the DIRECT spawning session; a nested chain (chat →
+			// wake → delegate) resolves to its root chat at delivery time
+			// (sqlite.Store.Notify walks the chain), so writes stay simple
+			// and every link in the chain remains inspectable.
+			c, _ := obs.From(ctx)
 			res, err := ag.Run(ctx, Task{
 				Instruction: a.Instruction,
 				Backend:     BackendRef(a.Backend),
 				Grant:       Grant{Tools: a.Tools, Env: EnvironmentRef{Path: a.Cwd}},
+				Owner:       core.SessionID(c.SessionID),
+				SpawnedBy:   "delegate",
 			}, engine.Relay(ctx))
 			if err != nil {
-				return "", err
+				return tool.Result{}, err
 			}
-			return res.Text, nil
+			// The child session id rides in Details (never shown to the model):
+			// it is how a frontend reopens the sub-agent's transcript after the
+			// live relay is gone — the parent's log keeps only this result.
+			details, _ := json.Marshal(struct {
+				ChildSession string `json:"childSession"`
+			}{res.ChildSession})
+			return tool.Result{Content: res.Text, Details: details}, nil
 		})
 	// A delegation's footprint is always empty: siblings never conflict, so the
 	// engine fans them out concurrently. Isolation between parallel writers is a

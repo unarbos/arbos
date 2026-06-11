@@ -47,14 +47,31 @@ func (a *ArbosAgent) Run(ctx context.Context, t Task, emit func(core.Envelope)) 
 	id := a.newID()
 	res := Result{ChildSession: string(id)}
 
-	var startOpts []engine.SessionOption
+	startOpts := []engine.SessionOption{engine.WithPrincipal(core.PrincipalLocal)}
 	if t.Origin != "" {
 		startOpts = append(startOpts, engine.WithOrigin(t.Origin))
+	}
+	if t.Owner != "" || t.SpawnedBy != "" {
+		startOpts = append(startOpts, engine.WithOwner(t.Owner, t.SpawnedBy))
 	}
 	conv, err := eng.StartSession(ctx, id, startOpts...)
 	if err != nil {
 		return res, fmt.Errorf("delegate: start child session: %w", err)
 	}
+	// A spawned session is one-shot: it runs this single turn and is never
+	// resumed, so mark it ended once the work returns (success or error).
+	// Otherwise it lingers active forever — the bug that left the activity
+	// panel spinning on scheduler wakes whose turns finished long ago. A
+	// detached context records the transition even when ctx is already
+	// cancelled (parent interrupt / host shutdown); the engine's store handle
+	// is open through the call.
+	defer func() {
+		if e := eng.EndSession(context.WithoutCancel(ctx), id); e != nil {
+			// Best-effort: a failed end-write must not mask the turn's own
+			// result, and the stale-run UI guard already dims orphaned rows.
+			_ = e
+		}
+	}()
 	conv.Send(core.PromptIntent{Text: t.Instruction})
 
 	// engine.Drive forwards the child's envelopes to emit (the parent's relay

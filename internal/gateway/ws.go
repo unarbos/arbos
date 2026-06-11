@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"sync"
@@ -26,7 +28,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.Close(websocket.StatusInternalError, "gateway teardown")
-	c.SetReadLimit(1 << 20)
+	// A prompt can carry base64-encoded image attachments (ADR-0022), which dwarf
+	// a text turn; 1 MiB would reject them. 32 MiB covers several inline images
+	// while still bounding a hostile client.
+	c.SetReadLimit(32 << 20)
 
 	ctx := r.Context()
 
@@ -53,7 +58,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	err = control.Serve(ctx, s.Engine, pr, &wsLineWriter{ctx: ctx, c: c}, s.NewSessionID, s.Drain)
+	lw := &wsLineWriter{ctx: ctx, c: c}
+	s.register(lw) // join the outbox fan-out for the connection's lifetime
+	defer s.unregister(lw)
+
+	err = control.Serve(ctx, s.Engine, pr, lw, s.NewSessionID, s.Drain)
 	if err != nil && ctx.Err() == nil {
 		c.Close(websocket.StatusInternalError, "seam: "+err.Error())
 		return
@@ -65,13 +74,54 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 // lineWriter emits exactly one line (with trailing newline) per Write, so the
 // 1:1 mapping holds without buffering; the trailing newline is stripped since
 // the message boundary already is the frame.
+//
+// It also watches the frames it carries: opened/switched/forked name the
+// session this connection is bound to, which is what lets the outbox fan-out
+// deliver a chat's notices to that chat alone. Sniffing the stream keeps
+// control.Serve ignorant of the gateway (the seam stays frontend-agnostic).
 type wsLineWriter struct {
 	ctx context.Context
 	c   *websocket.Conn
 	mu  sync.Mutex
+
+	sessMu  sync.Mutex
+	session string
+}
+
+// boundFrame is the slice of a server frame that names a session binding.
+type boundFrame struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+}
+
+func (w *wsLineWriter) sniffSession(p []byte) {
+	// Event frames dominate the stream and never carry a binding; serverFrame
+	// marshals Type first, so the prefix check skips them cheaply.
+	if bytes.HasPrefix(p, []byte(`{"type":"event"`)) {
+		return
+	}
+	var f boundFrame
+	if json.Unmarshal(p, &f) != nil || f.SessionID == "" {
+		return
+	}
+	switch f.Type {
+	case "opened", "switched", "forked":
+		w.sessMu.Lock()
+		w.session = f.SessionID
+		w.sessMu.Unlock()
+	}
+}
+
+// boundSession is the session this connection currently drives ("" before
+// the first open).
+func (w *wsLineWriter) boundSession() string {
+	w.sessMu.Lock()
+	defer w.sessMu.Unlock()
+	return w.session
 }
 
 func (w *wsLineWriter) Write(p []byte) (int, error) {
+	w.sniffSession(p)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	n := len(p)

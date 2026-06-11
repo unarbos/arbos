@@ -7,7 +7,13 @@
  * arbos frontend — it never re-implements turn logic.
  */
 
-import type { ClientFrame, Envelope, Intent, ServerFrame } from "./types";
+import type {
+  ClientFrame,
+  ContentBlock,
+  Envelope,
+  Intent,
+  ServerFrame,
+} from "./types";
 
 export type ConnectionState = "idle" | "connecting" | "open" | "closed";
 
@@ -16,6 +22,9 @@ export interface SeamHandlers {
   onSession?: (id: string) => void;
   onEnvelope?: (env: Envelope) => void;
   onError?: (msg: string) => void;
+  /** Outbox delivery (gateway broadcast): an ambient message between turns. */
+  /** Outbox delivery; session is the owning chat ("" = ambient broadcast). */
+  onNotice?: (text: string, session: string) => void;
 }
 
 function wsUrl(): string {
@@ -73,6 +82,9 @@ export class SeamClient {
         case "error":
           this.handlers.onError?.(frame.error);
           break;
+        case "notice":
+          this.handlers.onNotice?.(frame.text, frame.session ?? "");
+          break;
       }
     };
   }
@@ -100,12 +112,19 @@ export class SeamClient {
     return this.send({ type: "intent", intent });
   }
 
-  prompt(text: string): boolean {
-    return this.intent({ kind: "prompt", data: { text } });
+  prompt(text: string, parts?: ContentBlock[]): boolean {
+    const data = parts && parts.length > 0 ? { text, parts } : { text };
+    return this.intent({ kind: "prompt", data });
   }
 
-  steer(text: string): boolean {
-    return this.intent({ kind: "steer", data: { text } });
+  steer(text: string, parts?: ContentBlock[]): boolean {
+    const data = parts && parts.length > 0 ? { text, parts } : { text };
+    return this.intent({ kind: "steer", data });
+  }
+
+  /** Switch the model for this session (server's set_model shorthand). */
+  setModel(model: string): boolean {
+    return this.send({ type: "set_model", model });
   }
 
   interrupt(): boolean {

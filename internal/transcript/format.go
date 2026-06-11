@@ -148,6 +148,11 @@ func ToolLabel(name string, args json.RawMessage) string {
 		if u := str("url"); u != "" {
 			return name + " " + truncate(u, 50)
 		}
+	case "delegate":
+		if inst := str("instruction"); inst != "" {
+			line, _, _ := strings.Cut(strings.TrimSpace(inst), "\n")
+			return truncate(line, 60)
+		}
 	}
 	return name
 }

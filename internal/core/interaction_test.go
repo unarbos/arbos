@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/unarbos/arbos/internal/core"
@@ -28,7 +29,7 @@ func TestIntentCodecRoundTrip(t *testing.T) {
 		if got.Kind() != want.Kind() {
 			t.Fatalf("kind mismatch: got %q want %q", got.Kind(), want.Kind())
 		}
-		if got != want {
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("round-trip mismatch: got %#v want %#v", got, want)
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/unarbos/arbos/internal/core"
@@ -33,6 +34,10 @@ type Config struct {
 	HasLLM       bool   // a key is present; false selects the deterministic fake
 	Model        string
 	DistillModel string
+	// Reasoning is the requested thinking effort for every turn
+	// (ARBOS_REASONING: off|minimal|low|medium|high). Empty leaves the
+	// provider default (usually no reasoning stream).
+	Reasoning core.ReasoningLevel
 	// MCPConfigJSON is an inline MCP server config (ARBOS_MCP_CONFIG); empty
 	// falls back to the mcp.json files.
 	MCPConfigJSON string
@@ -123,6 +128,7 @@ func LoadConfig() Config {
 		HasLLM:        os.Getenv(keyEnv) != "",
 		Model:         os.Getenv("ARBOS_MODEL"),
 		DistillModel:  os.Getenv("ARBOS_DISTILL_MODEL"),
+		Reasoning:     core.ReasoningLevel(os.Getenv("ARBOS_REASONING")),
 		MCPConfigJSON: os.Getenv("ARBOS_MCP_CONFIG"),
 	}
 	if cfg.Model == "" {
@@ -138,6 +144,18 @@ func LoadConfig() Config {
 		cfg.ServeDrainTimeout = time.Duration(sec) * time.Second
 	}
 	return cfg
+}
+
+// ModelsURL is the provider's model-catalog endpoint, derived from the base
+// URL the same way the chat endpoint is. OpenRouter and OpenAI-compatible
+// bases serve the listing at {base}/models. Empty when no LLM is configured
+// (the fake has no catalog), which leaves the UI's picker with just the
+// current model.
+func (c Config) ModelsURL() string {
+	if !c.HasLLM || c.BaseURL == "" {
+		return ""
+	}
+	return strings.TrimRight(c.BaseURL, "/") + "/models"
 }
 
 // NewProvider builds the configured LLM adapter. Without a key it returns the

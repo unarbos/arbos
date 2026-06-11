@@ -17,7 +17,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8420",
+        target: `http://127.0.0.1:${process.env.ARBOS_GW_PORT ?? "8420"}`,
         ws: true,
       },
     },

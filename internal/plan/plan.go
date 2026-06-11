@@ -100,6 +100,15 @@ type Node struct {
 	// Judgment was exercised once, when the command was written; the model is
 	// woken again only if it fails. "" = not a shell node (see Executor).
 	Cmd string
+	// Cond is the node's GATE: a shell predicate the kernel evaluates on the
+	// node's poll cadence (Every). The node's Do — an agent wake or a notify —
+	// fires only when the predicate exits 0; a non-zero exit re-arms quietly,
+	// no model turn spent. This is the cheap "watch for X, then act" trigger
+	// ("poll the price every minute; when it drops below 60k, wake and write
+	// the script" / "tell me when the build is green"): only the predicate
+	// runs each period, never the brain, until the condition holds. "" = no
+	// gate (the node fires whenever its cadence makes it due). See Gated().
+	Cond string
 	// Notify is the node's message-to-the-user payload: a node with it set is
 	// discharged by emitting the message to the outbox, no model turn. It is
 	// the mechanical effect for "remind me at 5pm" / "tell me when the build
@@ -109,6 +118,11 @@ type Node struct {
 	Outcome  string // what happened / was learned; set at terminal statuses
 	Assignee string // AssigneeAgent or AssigneeHuman
 	Owner    string // who claimed it: a session id, or "job:<id>" for kernel runs
+	// Origin is the session that created the node. The plan forest is global —
+	// intent outlives any conversation — but the node's VOICE is not: its
+	// notify firings and wake-session notifications route back to the chat
+	// that asked for the work, never to unrelated open conversations.
+	Origin string
 
 	// WakeOnReady is the dependency trigger — the callback node. When set, the
 	// scheduler summons a model turn the moment this node becomes ready
@@ -210,6 +224,13 @@ func (n Node) Armed() bool {
 // separate "kind" field. A recurring node never terminates on success; it
 // re-arms and is ended only by cancellation.
 func (n Node) Recurring() bool { return n.Every != 0 }
+
+// Gated reports whether the node carries a shell predicate that must hold
+// before its Do fires. A gated node is evaluated on its cadence like any
+// armed node, but the kernel runs the predicate first and only discharges the
+// Do (wake or notify) on a zero exit — so the brain is summoned (or the user
+// pinged) only when the world is in the state the node is watching for.
+func (n Node) Gated() bool { return n.Cond != "" }
 
 // ExecutorKind names what discharges a node — the second axis of the design
 // (the first being the trigger, "when"). It is derived from the node's fields

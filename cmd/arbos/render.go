@@ -76,6 +76,10 @@ func renderStandingLine(glyph, text lipgloss.Style, ln string) string {
 // agent's turn is visibly set off from the user's flush-left input.
 const proseIndent = "  "
 
+// tuiProseIndent matches the horizontal inset inside query bands so assistant
+// prose lines up with the text inside shaded user/follow-up rows.
+const tuiProseIndent = "  "
+
 const (
 	maxProseWidth = 88
 	minProseWidth = 48
@@ -88,6 +92,7 @@ const (
 
 type runningTool struct {
 	id    string
+	name  string // tool name (delegate, read, …)
 	label string // precise label (read foo.go) for permanent diff/error lines
 	verb  string // gerund phrase (reading files) for live activity lines
 }
@@ -109,16 +114,37 @@ type proseWrapper struct {
 	atLineStart bool
 	col         int
 	width       int
+	indent      string
 	word        strings.Builder
 }
 
 func newProseWrapper(width int) proseWrapper {
-	return proseWrapper{atLineStart: true, width: proseWidth(width)}
+	return newProseWrapperWithIndent(width, proseIndent)
+}
+
+func newTUIProseWrapper(width int) proseWrapper {
+	return newProseWrapperWithIndent(width, tuiProseIndent)
+}
+
+func newProseWrapperWithIndent(termWidth int, indent string) proseWrapper {
+	w := termWidth - len(indent)
+	if w > maxProseWidth {
+		w = maxProseWidth
+	}
+	if w < minProseWidth {
+		w = minProseWidth
+	}
+	return proseWrapper{atLineStart: true, width: w, indent: indent}
 }
 
 func (w *proseWrapper) startAfterPrefix(prefix string) {
-	w.atLineStart = false
-	w.col = lipgloss.Width(prefix)
+	if prefix == "" {
+		w.atLineStart = true
+		w.col = 0
+	} else {
+		w.atLineStart = false
+		w.col = lipgloss.Width(prefix)
+	}
 	w.word.Reset()
 }
 
@@ -157,14 +183,14 @@ func (w *proseWrapper) flushWord(b *strings.Builder) {
 	word := w.word.String()
 	wordWidth := lipgloss.Width(word)
 	if w.atLineStart {
-		b.WriteString(proseIndent)
-		w.col = len(proseIndent)
+		b.WriteString(w.indent)
+		w.col = len(w.indent)
 		w.atLineStart = false
 	}
-	if w.col > len(proseIndent) && w.col+1+wordWidth > w.width {
+	if w.col > len(w.indent) && w.col+1+wordWidth > w.width {
 		b.WriteByte('\n')
-		b.WriteString(proseIndent)
-		w.col = len(proseIndent)
+		b.WriteString(w.indent)
+		w.col = len(w.indent)
 	}
 	b.WriteString(word)
 	w.col += wordWidth
@@ -181,13 +207,13 @@ func newRenderer(out, status io.Writer) *renderer {
 		labels:       map[string]string{},
 		proseWrap:    newProseWrapper(80),
 		md:           newMarkdownStyler(out),
-		dim:          lr.NewStyle().Foreground(theme.Muted),
+		dim:          lr.NewStyle().Foreground(theme.Faint),
 		ok:           lr.NewStyle().Foreground(theme.Primary),
 		bad:          lr.NewStyle().Bold(true).Foreground(theme.Text).Background(theme.Deep),
-		tool:         lr.NewStyle().Foreground(theme.Accent),
-		note:         lr.NewStyle().Bold(true).Foreground(theme.Accent),
+		tool:         lr.NewStyle().Foreground(theme.Muted),
+		note:         lr.NewStyle().Foreground(theme.Accent),
 		standing:     lr.NewStyle().Bold(true).Foreground(theme.Accent),
-		standingText: lr.NewStyle().Bold(true),
+		standingText: lr.NewStyle().Bold(true).Foreground(theme.Text),
 		agent:        lr.NewStyle().Bold(true).Foreground(theme.Primary),
 	}
 }
@@ -211,21 +237,35 @@ func (r *renderer) turnStart() { r.agentLabel() }
 // newMarkdownStyler builds a prose Markdown styler bound to w, using the shared
 // theme so headings, code, and emphasis read consistently across front-ends.
 func newMarkdownStyler(w io.Writer) *transcript.MarkdownStyler {
+	return newMarkdownStylerWithBody(w, lipgloss.NewStyle())
+}
+
+func newTUIMarkdownStyler(w io.Writer) *transcript.MarkdownStyler {
+	lr := lipgloss.NewRenderer(w)
+	return newMarkdownStylerWithBody(w, lr.NewStyle().Foreground(theme.Text))
+}
+
+func newMarkdownStylerWithBody(w io.Writer, body lipgloss.Style) *transcript.MarkdownStyler {
 	lr := lipgloss.NewRenderer(w)
 	return transcript.NewMarkdownStyler(transcript.MarkdownStyles{
-		Heading: lr.NewStyle().Bold(true).Foreground(theme.Primary),
+		Heading: lr.NewStyle().Bold(true).Foreground(theme.Text),
 		Bold:    lr.NewStyle().Bold(true).Foreground(theme.Text),
-		Italic:  lr.NewStyle().Italic(true),
+		Italic:  lr.NewStyle().Italic(true).Foreground(theme.Muted),
 		Code:    lr.NewStyle().Foreground(theme.Accent),
-		Bullet:  lr.NewStyle().Foreground(theme.Primary),
-		Body:    lr.NewStyle(),
+		Bullet:  lr.NewStyle().Foreground(theme.Muted),
+		Body:    body,
 	})
 }
 
 // header prints the green Arbos banner that opens a session, with the session
 // id kept as a dim trailer (still useful for -session resume).
 func (r *renderer) header(id string) {
-	_, _ = fmt.Fprintln(r.status, r.agent.Render("Arbos")+r.dim.Render("  "+id))
+	_, _ = fmt.Fprintln(r.status, r.agent.Render("Arbos Agent"))
+	_, _ = fmt.Fprintln(r.status, r.dim.Render(buildVersion()))
+	if id != "" {
+		_, _ = fmt.Fprintln(r.status, r.dim.Render(id))
+	}
+	_, _ = fmt.Fprintln(r.status)
 }
 
 func (r *renderer) delta(text string) {
@@ -303,7 +343,7 @@ func (r *renderer) turnComplete(reason core.StopReason) {
 
 func (r *renderer) promptFollowUp() {
 	r.breakText()
-	_, _ = fmt.Fprint(r.status, r.note.Render("› "))
+	_, _ = fmt.Fprint(r.status, r.dim.Render("→ "+followUpHint))
 }
 
 func (r *renderer) steeringPrompt() {}

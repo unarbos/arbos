@@ -1,6 +1,11 @@
 package core
 
-import "time"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+)
 
 // SessionStatus tracks a session's lifecycle.
 //
@@ -29,17 +34,26 @@ type Session struct {
 	// session keeps the model it was switched to.
 	Model string
 
-	// Principal and Origin are RESERVED for the gateway/frontend phase, where
-	// auth and reply-routing need them; both are empty for local single-user
-	// sessions today. Reserved now (cheap) rather than threaded through later
-	// (a migration). See ADR-0019.
-	//
-	// Principal: who owns/authorizes this session (a user or account id).
+	// Principal: who owns/authorizes this session — the ADDRESS of the
+	// agent's voice. Single-user hosts use PrincipalLocal; a multi-user
+	// gateway sets real account ids. See ADR-0019.
 	// Origin: where it was created from — frontend/platform plus its native
 	// addressing, e.g. "cli" or "telegram:chat/123" — so a reply reaches the
 	// right surface.
 	Principal string
 	Origin    string
+
+	// Owner is the conversation this session ultimately serves: empty for a
+	// chat itself; the chat's id for a scheduler wake or delegated child
+	// spawned on its behalf (inherited transitively, so nested spawns still
+	// route to the right conversation). It scopes the voice and the UI —
+	// a chat's sub-agents belong to that chat — while the work itself (plan,
+	// memory, jobs) stays agent-global.
+	Owner SessionID
+	// SpawnedBy records what created a machine-spawned session, e.g.
+	// SpawnedByNode(12) for a plan-node firing. Display/listing metadata;
+	// the kernel never branches on it.
+	SpawnedBy string
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -50,3 +64,22 @@ type Session struct {
 // you left" on the last session a human actually drove; future doors set their
 // own origins ("telegram:chat/123") per the reservation above.
 const OriginScheduler = "scheduler"
+
+// PrincipalLocal is the principal of every session on a single-user local
+// host — the address the agent's voice targets until real accounts exist.
+const PrincipalLocal = "local"
+
+// SpawnedByNode encodes a plan-node firing as a Session.SpawnedBy value.
+func SpawnedByNode(node int64) string {
+	return fmt.Sprintf("node:%d", node)
+}
+
+// ParseSpawnedByNode inverts SpawnedByNode; ok is false for other spawners.
+func ParseSpawnedByNode(s string) (node int64, ok bool) {
+	rest, found := strings.CutPrefix(s, "node:")
+	if !found {
+		return 0, false
+	}
+	node, err := strconv.ParseInt(rest, 10, 64)
+	return node, err == nil
+}

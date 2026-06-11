@@ -98,11 +98,11 @@ func insertPlanNode(ctx context.Context, tx *sql.Tx, planID, parent plan.NodeID,
 	}
 	res, err := tx.ExecContext(ctx,
 		`INSERT INTO plan_nodes
-		   (plan_id, parent_id, seq, kind, goal, check_expr, cmd, notify, wake, status, outcome, assignee, owner,
+		   (plan_id, parent_id, seq, kind, goal, check_expr, cmd, cond, notify, wake, status, outcome, assignee, owner, origin,
 		    after_at, every_ns, next_due, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		int64(planID), int64(parent), seq, kind, n.Goal, n.Check, n.Cmd, n.Notify, n.WakeOnReady, string(n.Status),
-		n.Outcome, n.Assignee, n.Owner, nanos(n.After), int64(n.Every), nanos(n.NextDue), now, now)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		int64(planID), int64(parent), seq, kind, n.Goal, n.Check, n.Cmd, n.Cond, n.Notify, n.WakeOnReady, string(n.Status),
+		n.Outcome, n.Assignee, n.Owner, n.Origin, nanos(n.After), int64(n.Every), nanos(n.NextDue), now, now)
 	if err != nil {
 		return 0, fmt.Errorf("add plan nodes: insert: %w", err)
 	}
@@ -343,11 +343,11 @@ func (s *Store) LastHumanSeen(ctx context.Context) (time.Time, error) {
 	return fromNanos(at), nil
 }
 
-const planNodeSelect = `SELECT id, plan_id, parent_id, seq, kind, goal, check_expr, cmd, notify, wake, status, outcome,
-       assignee, owner, after_at, every_ns, next_due, updated_at FROM plan_nodes`
+const planNodeSelect = `SELECT id, plan_id, parent_id, seq, kind, goal, check_expr, cmd, cond, notify, wake, status, outcome,
+       assignee, owner, origin, after_at, every_ns, next_due, updated_at FROM plan_nodes`
 
-const planNodeSelectN = `SELECT n.id, n.plan_id, n.parent_id, n.seq, n.kind, n.goal, n.check_expr, n.cmd, n.notify, n.wake, n.status, n.outcome,
-       n.assignee, n.owner, n.after_at, n.every_ns, n.next_due, n.updated_at FROM plan_nodes n`
+const planNodeSelectN = `SELECT n.id, n.plan_id, n.parent_id, n.seq, n.kind, n.goal, n.check_expr, n.cmd, n.cond, n.notify, n.wake, n.status, n.outcome,
+       n.assignee, n.owner, n.origin, n.after_at, n.every_ns, n.next_due, n.updated_at FROM plan_nodes n`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -358,8 +358,8 @@ func scanPlanNode(r rowScanner) (plan.Node, error) {
 		kind, status             string // kind is vestigial; recurrence derives from every_ns
 		after, every, due, updat int64
 	)
-	if err := r.Scan(&id, &planID, &parent, &n.Seq, &kind, &n.Goal, &n.Check, &n.Cmd, &n.Notify, &n.WakeOnReady, &status, &n.Outcome,
-		&n.Assignee, &n.Owner, &after, &every, &due, &updat); err != nil {
+	if err := r.Scan(&id, &planID, &parent, &n.Seq, &kind, &n.Goal, &n.Check, &n.Cmd, &n.Cond, &n.Notify, &n.WakeOnReady, &status, &n.Outcome,
+		&n.Assignee, &n.Owner, &n.Origin, &after, &every, &due, &updat); err != nil {
 		return plan.Node{}, fmt.Errorf("scan plan node: %w", err)
 	}
 	_ = kind

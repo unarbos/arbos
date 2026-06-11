@@ -16,6 +16,10 @@
 .idea/
 .vscode/
 
+# Throwaway experiments / demo scratch
+/scratch/
+/edit_demo.txt
+
 # Web UI build deps (dist/ is committed: go:embed needs it)
 web/node_modules/
 web/tsconfig.tsbuildinfo
