@@ -113,9 +113,33 @@ type tgMessage struct {
 	Sticker   *struct{}     `json:"sticker"`
 }
 
+// tgCallbackQuery is an inline-keyboard button tap: Data is the button's
+// callback_data, Message the message the keyboard was attached to (so the
+// bridge knows which chat to act on).
+type tgCallbackQuery struct {
+	ID      string     `json:"id"`
+	From    *tgUser    `json:"from"`
+	Message *tgMessage `json:"message"`
+	Data    string     `json:"data"`
+}
+
 type tgUpdate struct {
-	UpdateID int64      `json:"update_id"`
-	Message  *tgMessage `json:"message"`
+	UpdateID      int64            `json:"update_id"`
+	Message       *tgMessage       `json:"message"`
+	CallbackQuery *tgCallbackQuery `json:"callback_query"`
+}
+
+// tgInlineButton is one inline-keyboard button. A tap sends CallbackData back
+// as a callback_query update.
+type tgInlineButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
+}
+
+// inlineKeyboard wraps rows of buttons in the reply_markup shape the Bot API
+// expects.
+type inlineKeyboard struct {
+	InlineKeyboard [][]tgInlineButton `json:"inline_keyboard"`
 }
 
 // call performs one Bot API method and decodes its result payload.
@@ -166,7 +190,7 @@ func (c *tgClient) getUpdates(ctx context.Context, offset int64) ([]tgUpdate, er
 	params := map[string]any{
 		"offset":          offset,
 		"timeout":         int(pollTimeout.Seconds()),
-		"allowed_updates": []string{"message"},
+		"allowed_updates": []string{"message", "callback_query"},
 	}
 	var ups []tgUpdate
 	err := c.call(ctx, "getUpdates", params, &ups)
@@ -193,6 +217,35 @@ func (c *tgClient) sendMessageID(ctx context.Context, chatID int64, text string)
 	}
 	err := c.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text}, &m)
 	return m.MessageID, err
+}
+
+// sendMessageMarkup sends one message carrying an inline keyboard and returns
+// its id, so a later edit can strip the buttons once the question is answered.
+func (c *tgClient) sendMessageMarkup(ctx context.Context, chatID int64, text string, kb inlineKeyboard) (int64, error) {
+	var m struct {
+		MessageID int64 `json:"message_id"`
+	}
+	err := c.call(ctx, "sendMessage", map[string]any{
+		"chat_id": chatID, "text": text, "reply_markup": kb,
+	}, &m)
+	return m.MessageID, err
+}
+
+// answerCallbackQuery acknowledges a button tap so the client clears its
+// loading spinner. Best-effort; a failed ack only leaves the spinner briefly.
+func (c *tgClient) answerCallbackQuery(ctx context.Context, id, text string) {
+	_ = c.call(ctx, "answerCallbackQuery", map[string]any{
+		"callback_query_id": id, "text": text,
+	}, nil)
+}
+
+// editMessageReplyMarkup removes (or replaces) a message's inline keyboard —
+// used to strip the buttons once a choice is made so the form can't be
+// answered twice. Passing an empty keyboard clears it.
+func (c *tgClient) clearReplyMarkup(ctx context.Context, chatID, messageID int64) error {
+	return c.call(ctx, "editMessageReplyMarkup", map[string]any{
+		"chat_id": chatID, "message_id": messageID,
+	}, nil)
 }
 
 // editMessageText replaces a sent message's text — how a reply "streams" on

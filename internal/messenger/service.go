@@ -588,6 +588,10 @@ func (s *Service) runBot(ctx context.Context, b *botRunner) {
 		}
 		for _, u := range ups {
 			offset = u.UpdateID + 1
+			if u.CallbackQuery != nil {
+				s.onCallback(ctx, b, *u.CallbackQuery)
+				continue
+			}
 			if u.Message == nil || u.Message.From == nil {
 				continue
 			}

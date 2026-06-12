@@ -81,9 +81,124 @@ func (s *Service) observeAsk(ctx context.Context, b *botRunner, cv *convo, conv 
 }
 
 func (s *Service) presentAsk(ctx context.Context, b *botRunner, chatID int64, q core.QuestionRequest) {
+	// A single question whose options each fit a 64-byte callback_data gets
+	// tappable buttons (one tap answers). Multi-question and multi-select forms
+	// keep the plain-text path: those need accumulate-then-confirm state a
+	// single tap can't express, so the typed reply stays their answer.
+	if kb, ok := askKeyboard(q); ok {
+		if _, err := b.client.sendMessageMarkup(ctx, chatID, renderAsk(q), kb); err == nil {
+			return
+		}
+		// Fall through to plain text if the keyboard send was rejected.
+	}
 	if err := b.client.sendMessage(ctx, chatID, renderAsk(q)); err != nil {
 		s.logf("messenger: @%s ask: %v", b.cfg.Username, err)
 	}
+}
+
+// askKeyboard builds an inline keyboard for a single-select, single-question
+// ask: one button per option, the callback_data encoding the request and the
+// chosen option. ok is false when the form isn't a fit (multiple questions,
+// multi-select, no options, or any callback_data over Telegram's 64-byte cap)
+// — the caller then uses the plain-text form.
+func askKeyboard(q core.QuestionRequest) (inlineKeyboard, bool) {
+	if len(q.Questions) != 1 {
+		return inlineKeyboard{}, false
+	}
+	question := q.Questions[0]
+	if question.AllowMultiple || len(question.Options) == 0 {
+		return inlineKeyboard{}, false
+	}
+	rows := make([][]tgInlineButton, 0, len(question.Options))
+	for oi, opt := range question.Options {
+		data := askCallbackData(q.RequestID, oi)
+		if len(data) > 64 {
+			return inlineKeyboard{}, false
+		}
+		rows = append(rows, []tgInlineButton{{Text: opt.Label, CallbackData: data}})
+	}
+	return inlineKeyboard{InlineKeyboard: rows}, true
+}
+
+// askCallbackData encodes a tapped option as "a|<requestID>|<optionIdx>". The
+// request id is carried verbatim so the tap is matched to the exact pending
+// ask, never a stale one; onCallback re-validates it against cv.ask.
+func askCallbackData(reqID core.RequestID, optionIdx int) string {
+	return fmt.Sprintf("a|%s|%d", reqID, optionIdx)
+}
+
+// parseAskCallback decodes askCallbackData back into the request id and option
+// index. ok is false for any string that isn't our encoding.
+func parseAskCallback(data string) (core.RequestID, int, bool) {
+	parts := strings.SplitN(data, "|", 3)
+	if len(parts) != 3 || parts[0] != "a" {
+		return "", 0, false
+	}
+	oi, err := strconv.Atoi(parts[2])
+	if err != nil || oi < 0 {
+		return "", 0, false
+	}
+	return core.RequestID(parts[1]), oi, true
+}
+
+// onCallback handles an inline-keyboard tap: resolve the chat's conversation,
+// confirm the tap matches the live pending ask, and send the answer intent
+// down the same path a typed reply takes. The button's encoded option index
+// is validated against the live question's options (boundary discipline: the
+// callback is external input), so a stale or malformed tap is acknowledged
+// and dropped rather than answering a dead request.
+func (s *Service) onCallback(ctx context.Context, b *botRunner, cb tgCallbackQuery) {
+	if cb.Message == nil || cb.From == nil {
+		return
+	}
+	chatID := cb.Message.Chat.ID
+	if b.cfg.BoundUser != 0 && b.cfg.BoundUser != cb.From.ID {
+		b.client.answerCallbackQuery(ctx, cb.ID, "This arbos is private.")
+		return
+	}
+	reqID, optIdx, ok := parseAskCallback(cb.Data)
+	if !ok {
+		b.client.answerCallbackQuery(ctx, cb.ID, "")
+		return
+	}
+
+	key := fmt.Sprintf("%d:%d", b.cfg.ID, chatID)
+	s.mu.Lock()
+	cv := s.convos[key]
+	s.mu.Unlock()
+	if cv == nil {
+		b.client.answerCallbackQuery(ctx, cb.ID, "That question has expired.")
+		return
+	}
+
+	// Match against the live ask before consuming it: a tap on an old form
+	// (its turn long over, or already answered) must not fire a dead intent.
+	s.mu.Lock()
+	live := cv.ask != nil && cv.ask.id == reqID
+	s.mu.Unlock()
+	if !live {
+		b.client.answerCallbackQuery(ctx, cb.ID, "That question has expired.")
+		return
+	}
+	ask := s.takeAsk(cv)
+	if ask == nil || ask.id != reqID || len(ask.questions) != 1 {
+		b.client.answerCallbackQuery(ctx, cb.ID, "That question has expired.")
+		return
+	}
+	question := ask.questions[0]
+	if optIdx >= len(question.Options) {
+		b.client.answerCallbackQuery(ctx, cb.ID, "")
+		return
+	}
+	opt := question.Options[optIdx]
+
+	resp := core.QuestionResponseIntent{
+		RequestID: ask.id,
+		Answers:   []core.QuestionAnswer{{QuestionID: question.ID, SelectedIDs: []string{opt.ID}}},
+	}
+	ask.conv.Send(resp)
+	b.client.answerCallbackQuery(ctx, cb.ID, "Selected: "+opt.Label)
+	_ = b.client.clearReplyMarkup(ctx, chatID, cb.Message.MessageID)
 }
 
 // renderAsk formats a question form as one plain-text message the phone can
