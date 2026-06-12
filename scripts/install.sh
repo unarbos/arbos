@@ -2,10 +2,12 @@
 # Install arbos — one command from anywhere.
 #
 #   curl -fsSL https://raw.githubusercontent.com/unarbos/arbos/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/unarbos/arbos/main/scripts/install.sh | bash -s -- web
 #
 # Or from a clone:
 #
 #   ./scripts/install.sh
+#   ./scripts/install.sh web
 if [ -z "${BASH_VERSION:-}" ]; then
 	if command -v bash >/dev/null 2>&1; then
 		exec bash -s "$@"
@@ -16,11 +18,71 @@ fi
 set -euo pipefail
 
 MODULE=github.com/unarbos/arbos/cmd/arbos@latest
+GO_VERSION=1.26.4
+GO_ROOT="${HOME}/.local/go"
 
-if ! command -v go >/dev/null 2>&1; then
-	echo "arbos: Go is required. Install from https://go.dev/dl/ then re-run this script." >&2
-	exit 1
-fi
+ensure_go() {
+	if command -v go >/dev/null 2>&1; then
+		return 0
+	fi
+	if [[ -x "${GO_ROOT}/bin/go" ]]; then
+		export GOROOT="${GO_ROOT}"
+		export PATH="${GO_ROOT}/bin:${PATH}"
+		return 0
+	fi
+
+	OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+	ARCH="$(uname -m)"
+	case "${ARCH}" in
+	x86_64 | amd64) ARCH=amd64 ;;
+	aarch64 | arm64) ARCH=arm64 ;;
+	*)
+		echo "arbos: unsupported architecture ${ARCH} — install Go from https://go.dev/dl/ then re-run." >&2
+		exit 1
+		;;
+	esac
+	case "${OS}" in
+	linux | darwin) ;;
+	*)
+		echo "arbos: unsupported OS ${OS} — install Go from https://go.dev/dl/ then re-run." >&2
+		exit 1
+		;;
+	esac
+
+	TAR="go${GO_VERSION}.${OS}-${ARCH}.tar.gz"
+	URL="https://go.dev/dl/${TAR}"
+	echo "arbos: Go not found — downloading ${GO_VERSION} for ${OS}/${ARCH}..."
+	TMP="$(mktemp -d)"
+	trap 'rm -rf "${TMP}"' RETURN
+	if ! curl -fsSL -o "${TMP}/${TAR}" "${URL}"; then
+		echo "arbos: failed to download Go from ${URL}" >&2
+		exit 1
+	fi
+	mkdir -p "$(dirname "${GO_ROOT}")"
+	rm -rf "${GO_ROOT}"
+	tar -C "$(dirname "${GO_ROOT}")" -xzf "${TMP}/${TAR}"
+
+	export GOROOT="${GO_ROOT}"
+	export PATH="${GO_ROOT}/bin:${PATH}"
+
+	GO_LINE='export PATH="$HOME/.local/go/bin:$PATH"'
+	for rc in "${HOME}/.bashrc" "${HOME}/.zshrc"; do
+		if [[ -f "${rc}" ]] && ! grep -qF '.local/go/bin' "${rc}" 2>/dev/null; then
+			echo "" >>"${rc}"
+			echo "# arbos (Go toolchain)" >>"${rc}"
+			echo "${GO_LINE}" >>"${rc}"
+			echo "Added Go to PATH via ${rc}"
+		fi
+	done
+
+	if ! command -v go >/dev/null 2>&1; then
+		echo "arbos: Go bootstrap failed — install from https://go.dev/dl/ then re-run." >&2
+		exit 1
+	fi
+	echo "Installed Go ${GO_VERSION} to ${GO_ROOT}"
+}
+
+ensure_go
 
 echo "Installing arbos..."
 go install "${MODULE}"
@@ -105,6 +167,10 @@ ensure_browser() {
 	echo "  Other:         install Google Chrome or Chromium and ensure it is on PATH"
 }
 ensure_browser
+
+if [[ $# -gt 0 ]]; then
+	exec env PATH="${BIN_DIR}:${PATH}" arbos "$@"
+fi
 
 echo ""
 echo "Next:"
