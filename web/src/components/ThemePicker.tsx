@@ -3,6 +3,7 @@ import { Check, Palette } from "lucide-react";
 
 import { setTheme, useTheme } from "@/lib/theme";
 import { THEMES, type Theme } from "@/lib/themes";
+import { Tooltip } from "./Tooltip";
 
 /** Three-dot palette preview pulled straight from the theme's own colors. */
 function Swatch({ theme }: { theme: Theme }) {
@@ -47,16 +48,18 @@ export function ThemePicker() {
 
   return (
     <div ref={rootRef} className="relative">
-      <button
-        type="button"
-        title="Theme"
-        onClick={() => setOpen((v) => !v)}
-        className={`flex size-6 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-hover ${
-          open ? "bg-hover text-text" : "text-muted hover:text-text"
-        }`}
-      >
-        <Palette size={13} />
-      </button>
+      <Tooltip label="Theme">
+        <button
+          type="button"
+          aria-label="Theme"
+          onClick={() => setOpen((v) => !v)}
+          className={`flex size-6 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-hover ${
+            open ? "bg-hover text-text" : "text-muted hover:text-text"
+          }`}
+        >
+          <Palette size={13} />
+        </button>
+      </Tooltip>
 
       {open && (
         <div className="absolute right-0 top-8 z-30 flex max-h-96 w-60 flex-col overflow-y-auto rounded-lg border border-line bg-card py-1 shadow-xl shadow-black/40">

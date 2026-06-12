@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>US Immigration, By the Numbers</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 24px 64px;
+    background: var(--color-canvas, #2c262a);
+    color: var(--color-text, #d6d0d4);
+    font: 13px/1.6 var(--font-sans, -apple-system, "Segoe UI", sans-serif);
+  }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  h1 { color: var(--color-bright, #ece7ea); font-size: 26px; margin: 0 0 6px; letter-spacing: -0.02em; }
+  .summary { color: var(--color-muted, #968f94); font-size: 15px; margin: 0 0 4px; max-width: 72ch; }
+  .date { color: var(--color-faint, #6e676c); font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; margin: 0 0 28px; }
+  .card {
+    background: var(--color-card, #332a2f);
+    border: 1px solid var(--color-line, #3e373c);
+    border-radius: 8px;
+    padding: 20px 22px;
+    margin: 0 0 18px;
+  }
+  .card > h2 {
+    color: var(--color-accent, #85aab3);
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
+    margin: 0 0 16px; font-weight: 600;
+  }
+  .card > h2 .sub { color: var(--color-faint, #6e676c); text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 8px; }
+  p { margin: 0 0 12px; max-width: 76ch; }
+  strong { color: var(--color-bright, #ece7ea); font-weight: 600; }
+  .muted { color: var(--color-muted, #968f94); }
+
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .tile {
+    background: var(--color-panel, #312b2f);
+    border: 1px solid var(--color-line, #3e373c);
+    border-radius: 6px; padding: 14px 16px;
+  }
+  .tile .num { color: var(--color-bright, #ece7ea); font-family: var(--font-mono, ui-monospace, monospace); font-size: 22px; font-weight: 600; }
+  .tile .lbl { color: var(--color-muted, #968f94); font-size: 11px; margin-top: 4px; }
+  .tile .delta { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; margin-top: 6px; }
+  .pos { color: var(--color-green, #87a883); }
+  .neg { color: var(--color-red, #c97f77); }
+  .warn { color: var(--color-warn, #c9a86a); }
+
+  svg { display: block; max-width: 100%; }
+  .axis { fill: var(--color-muted, #968f94); font: 11px var(--font-mono, ui-monospace, monospace); }
+  .axis-faint { fill: var(--color-faint, #6e676c); font: 10px var(--font-mono, ui-monospace, monospace); }
+  .gridline { stroke: var(--color-line, #3e373c); stroke-width: 1; }
+  .vlabel { fill: var(--color-bright, #ece7ea); font: 11px var(--font-mono, ui-monospace, monospace); }
+
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin: 12px 0 4px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--color-muted, #968f94); font-family: var(--font-mono, ui-monospace, monospace); }
+  .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--color-line, #3e373c); }
+  thead th { background: var(--color-panel, #312b2f); color: var(--color-muted, #968f94); font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; }
+  td.n { font-family: var(--font-mono, ui-monospace, monospace); text-align: right; color: var(--color-bright, #ece7ea); }
+  tbody tr:hover { background: var(--color-panel, #312b2f); }
+
+  .bar-row { display: grid; grid-template-columns: 150px 1fr 70px; align-items: center; gap: 10px; margin: 0 0 8px; }
+  .bar-row .name { color: var(--color-text, #d6d0d4); font-size: 12px; }
+  .bar-track { background: var(--color-bar, #262024); border-radius: 3px; height: 16px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 3px; background: var(--color-accent, #85aab3); }
+  .bar-row .val { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; text-align: right; color: var(--color-bright, #ece7ea); }
+
+  ul { margin: 0; padding-left: 18px; }
+  li { margin: 0 0 8px; }
+  .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  .note { color: var(--color-faint, #6e676c); font-size: 11px; margin-top: 14px; }
+  .note a { color: var(--color-accent, #85aab3); text-decoration: none; }
+  .note a:hover { text-decoration: underline; }
+  @media (max-width: 680px) {
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+    .twocol { grid-template-columns: 1fr; }
+    .bar-row { grid-template-columns: 110px 1fr 60px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>US Immigration, By the Numbers</h1>
+  <p class="summary">Roughly 1 in 7 US residents was born abroad &mdash; the highest share in over a century. Immigration is now the engine of national population growth, even as the unauthorized population, the border, and the legal pipeline all sit at the center of fierce debate.</p>
+  <p class="date">2026-06-12 &middot; figures from US Census Bureau (ACS / Vintage 2024), DHS Office of Homeland Security Statistics, CBP, and Pew Research Center estimates</p>
+
+  <div class="card">
+    <h2>The headline numbers</h2>
+    <div class="tiles">
+      <div class="tile">
+        <div class="num">~47.8M</div>
+        <div class="lbl">Foreign-born residents</div>
+        <div class="delta pos">all-time high</div>
+      </div>
+      <div class="tile">
+        <div class="num">14.3%</div>
+        <div class="lbl">Share of US population that is foreign-born</div>
+        <div class="delta warn">highest since ~1910</div>
+      </div>
+      <div class="tile">
+        <div class="num">~2.8M</div>
+        <div class="lbl">Net international migration, 2023&ndash;24</div>
+        <div class="delta pos">~84% of all US growth</div>
+      </div>
+      <div class="tile">
+        <div class="num">~11&ndash;13M</div>
+        <div class="lbl">Unauthorized immigrant population (est.)</div>
+        <div class="delta warn">~23% of foreign-born</div>
+      </div>
+    </div>
+    <p class="note">The foreign-born share peaked near 14.7% in 1890&ndash;1910, fell below 5% by 1970, and has climbed steadily ever since. Estimates vary by source and year; figures here are rounded for clarity.</p>
+  </div>
+
+  <div class="card">
+    <h2>Foreign-born share of US population <span class="sub">% of total residents, 1850&ndash;2024</span></h2>
+    <svg viewBox="0 0 880 280" width="880" height="280" role="img" aria-label="Foreign-born share of US population over time">
+      <!-- plot area: x 60..860, y 20..240; value 0..16% -->
+      <!-- gridlines at 0,4,8,12,16 -->
+      <g class="gridline-group">
+        <line class="gridline" x1="60" y1="240" x2="860" y2="240"/>
+        <line class="gridline" x1="60" y1="185" x2="860" y2="185"/>
+        <line class="gridline" x1="60" y1="130" x2="860" y2="130"/>
+        <line class="gridline" x1="60" y1="75" x2="860" y2="75"/>
+        <line class="gridline" x1="60" y1="20" x2="860" y2="20"/>
+      </g>
+      <text class="axis" x="52" y="244" text-anchor="end">0%</text>
+      <text class="axis" x="52" y="189" text-anchor="end">4%</text>
+      <text class="axis" x="52" y="134" text-anchor="end">8%</text>
+      <text class="axis" x="52" y="79" text-anchor="end">12%</text>
+      <text class="axis" x="52" y="24" text-anchor="end">16%</text>
+      <!-- data: (year, pct). x = 60 + (year-1850)/(2024-1850)*800 ; y = 240 - pct/16*220 -->
+      <!-- 1850 9.7, 1870 14.4, 1890 14.8, 1910 14.7, 1930 11.6, 1950 6.9, 1970 4.7, 1990 7.9, 2000 11.1, 2010 12.9, 2024 14.3 -->
+      <polyline fill="none" stroke="var(--color-accent,#85aab3)" stroke-width="2.5"
+        points="60,106 92,42 152,37 244,38 336,80 428,145 520,175 612,131 657,87 703,63 860,43"/>
+      <!-- markers -->
+      <g fill="var(--color-accent,#85aab3)">
+        <circle cx="60" cy="106" r="3"/>
+        <circle cx="152" cy="37" r="3"/>
+        <circle cx="428" cy="145" r="3"/>
+        <circle cx="520" cy="175" r="3"/>
+        <circle cx="703" cy="63" r="3"/>
+        <circle cx="860" cy="43" r="3"/>
+      </g>
+      <!-- x labels -->
+      <text class="axis-faint" x="60" y="262" text-anchor="middle">1850</text>
+      <text class="axis-faint" x="152" y="262" text-anchor="middle">1890</text>
+      <text class="axis-faint" x="336" y="262" text-anchor="middle">1930</text>
+      <text class="axis-faint" x="520" y="262" text-anchor="middle">1970</text>
+      <text class="axis-faint" x="703" y="262" text-anchor="middle">2010</text>
+      <text class="axis-faint" x="860" y="262" text-anchor="end">2024</text>
+      <!-- annotations -->
+      <text class="vlabel" x="152" y="28" text-anchor="middle">14.8% peak</text>
+      <text class="vlabel" x="520" y="170" text-anchor="middle">4.7% low (1970)</text>
+    </svg>
+    <p class="note">A classic U-shape: high during the great Ellis Island wave, bottoming out mid-century after restrictive 1920s quotas, then rising again after the 1965 Immigration and Nationality Act abolished national-origin quotas.</p>
+  </div>
+
+  <div class="card">
+    <h2>Where today's immigrants come from <span class="sub">foreign-born population by region of birth, approx. share</span></h2>
+    <div class="bar-row"><span class="name">Mexico</span><span class="bar-track"><span class="bar-fill" style="width:50%"></span></span><span class="val">~23%</span></div>
+    <div class="bar-row"><span class="name">Other Latin America</span><span class="bar-track"><span class="bar-fill" style="width:55%"></span></span><span class="val">~27%</span></div>
+    <div class="bar-row"><span class="name">East/South/SE Asia</span><span class="bar-track"><span class="bar-fill" style="width:62%"></span></span><span class="val">~31%</span></div>
+    <div class="bar-row"><span class="name">Europe</span><span class="bar-track"><span class="bar-fill" style="width:20%"></span></span><span class="val">~10%</span></div>
+    <div class="bar-row"><span class="name">Africa</span><span class="bar-track"><span class="bar-fill" style="width:12%"></span></span><span class="val">~6%</span></div>
+    <div class="bar-row"><span class="name">Canada / Other</span><span class="bar-track"><span class="bar-fill" style="width:6%"></span></span><span class="val">~3%</span></div>
+    <p class="note">Mexico is still the single largest origin country (~10.6M), but its numbers have been flat-to-declining since ~2010. Asia (led by India and China) and other Latin American countries now drive most new arrivals. India and China are the top sources of recent immigrants.</p>
+  </div>
+
+  <div class="card">
+    <h2>Legal immigration pathways <span class="sub">how people enter the system each year, recent typical figures</span></h2>
+    <table>
+      <thead>
+        <tr><th>Pathway</th><th>What it is</th><th style="text-align:right">Approx. / year</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Lawful permanent residents ("green cards")</td><td>New LPRs, ~60% family-based</td><td class="n">~1.1&ndash;1.2M</td></tr>
+        <tr><td>&nbsp;&nbsp;&middot; Family-sponsored</td><td>Spouses, children, parents, siblings</td><td class="n">~65%</td></tr>
+        <tr><td>&nbsp;&nbsp;&middot; Employment-based</td><td>Skilled/needed workers + families</td><td class="n">~15%</td></tr>
+        <tr><td>&nbsp;&nbsp;&middot; Refugees / diversity / other</td><td>Lottery, humanitarian, etc.</td><td class="n">~20%</td></tr>
+        <tr><td>New citizens (naturalizations)</td><td>LPRs becoming US citizens</td><td class="n">~800K&ndash;1M</td></tr>
+        <tr><td>Refugees admitted</td><td>Resettled from abroad (capped)</td><td class="n">~60&ndash;100K</td></tr>
+        <tr><td>Asylum grants</td><td>Protection claimed at/inside border</td><td class="n">~50&ndash;100K+</td></tr>
+        <tr><td>Temporary visas (nonimmigrant)</td><td>Students (F), workers (H-1B/H-2), visitors</td><td class="n">Millions</td></tr>
+      </tbody>
+    </table>
+    <p class="note">The US grants ~1.1&ndash;1.2M green cards a year. The H-1B skilled-worker visa is capped at 85,000/yr and is heavily oversubscribed (selected by lottery). About 46% of immigrants are naturalized US citizens.</p>
+  </div>
+
+  <div class="card">
+    <h2>The border: encounters surged, then fell sharply <span class="sub">Southwest border encounters, fiscal year, millions</span></h2>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--color-warn,#c9a86a)"></i> CBP Southwest land border encounters</span>
+    </div>
+    <svg viewBox="0 0 880 270" width="880" height="270" role="img" aria-label="Southwest border encounters by fiscal year">
+      <!-- y 0..2.5M ; plot y 20..220 ; bars for FY2019..FY2025est -->
+      <g class="gridline-group">
+        <line class="gridline" x1="60" y1="220" x2="860" y2="220"/>
+        <line class="gridline" x1="60" y1="180" x2="860" y2="180"/>
+        <line class="gridline" x1="60" y1="140" x2="860" y2="140"/>
+        <line class="gridline" x1="60" y1="100" x2="860" y2="100"/>
+        <line class="gridline" x1="60" y1="60" x2="860" y2="60"/>
+        <line class="gridline" x1="60" y1="20" x2="860" y2="20"/>
+      </g>
+      <text class="axis" x="52" y="224" text-anchor="end">0</text>
+      <text class="axis" x="52" y="184" text-anchor="end">0.5M</text>
+      <text class="axis" x="52" y="144" text-anchor="end">1.0M</text>
+      <text class="axis" x="52" y="104" text-anchor="end">1.5M</text>
+      <text class="axis" x="52" y="64" text-anchor="end">2.0M</text>
+      <text class="axis" x="52" y="24" text-anchor="end">2.5M</text>
+      <!-- scale: y = 220 - value/2.5*200 ; bar width 70, gap layout -->
+      <!-- FY19 0.86, FY20 0.46, FY21 1.73, FY22 2.38, FY23 2.48, FY24 2.14, FY25e 0.50 -->
+      <g>
+        <rect x="80"  y="151" width="70" height="69"  fill="var(--color-warn,#c9a86a)" opacity="0.85"/>
+        <rect x="190" y="183" width="70" height="37"  fill="var(--color-warn,#c9a86a)" opacity="0.85"/>
+        <rect x="300" y="82"  width="70" height="138" fill="var(--color-warn,#c9a86a)" opacity="0.85"/>
+        <rect x="410" y="30"  width="70" height="190" fill="var(--color-warn,#c9a86a)" opacity="0.85"/>
+        <rect x="520" y="22"  width="70" height="198" fill="var(--color-warn,#c9a86a)" opacity="0.85"/>
+        <rect x="630" y="49"  width="70" height="171" fill="var(--color-warn,#c9a86a)" opacity="0.85"/>
+        <rect x="740" y="180" width="70" height="40"  fill="var(--color-accent,#85aab3)" opacity="0.85"/>
+      </g>
+      <g class="vlabel" text-anchor="middle">
+        <text x="115" y="146">0.86M</text>
+        <text x="225" y="178">0.46M</text>
+        <text x="335" y="77">1.73M</text>
+        <text x="445" y="25">2.38M</text>
+        <text x="555" y="17">2.48M</text>
+        <text x="665" y="44">2.14M</text>
+        <text x="775" y="175">~0.5M</text>
+      </g>
+      <g class="axis-faint" text-anchor="middle">
+        <text x="115" y="238">FY19</text>
+        <text x="225" y="238">FY20</text>
+        <text x="335" y="238">FY21</text>
+        <text x="445" y="238">FY22</text>
+        <text x="555" y="238">FY23</text>
+        <text x="665" y="238">FY24</text>
+        <text x="775" y="238">FY25*</text>
+      </g>
+      <text class="axis-faint" x="775" y="256" text-anchor="middle">*partial / est.</text>
+    </svg>
+    <p class="note">Encounters &ne; people: one person can be encountered multiple times, and an "encounter" includes both apprehensions and expulsions. Numbers crashed in 2020 (COVID + Title 42), spiked to record highs in FY2022&ndash;23, then fell steeply in 2024&ndash;25 after policy changes. FY2025 figures are partial/estimated.</p>
+  </div>
+
+  <div class="twocol">
+    <div class="card">
+      <h2>Economic footprint</h2>
+      <ul>
+        <li><strong>~18%</strong> of the US civilian labor force is foreign-born &mdash; ~30M+ workers.</li>
+        <li>Immigrants are overrepresented in <strong>agriculture, construction, hospitality, health care, and STEM</strong>.</li>
+        <li>Foreign-born workers fill both ends: ~<strong>1/4 of US physicians</strong> and a large share of farm and home-care labor.</li>
+        <li>Immigrant-founded firms include a large share of <strong>Fortune 500 and major startups</strong>; CBO has credited the recent migration surge with boosting GDP and tax revenue.</li>
+        <li>Immigrants and their children are projected to drive <strong>nearly all future labor-force growth</strong> as native birth rates fall.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h2>Who they are</h2>
+      <ul>
+        <li><strong>~46%</strong> of immigrants are naturalized US citizens; the rest are LPRs, temporary residents, or unauthorized.</li>
+        <li><strong>~1 in 4</strong> US children has at least one immigrant parent.</li>
+        <li>Immigrants are <strong>more likely to hold a college degree</strong> than in past decades, especially Asian arrivals.</li>
+        <li>The unauthorized population has shifted: <strong>more visa overstays</strong>, fewer border crossers, than in the 2000s.</li>
+        <li><strong>California, Texas, Florida, New York,</strong> and New Jersey host the largest immigrant populations.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>The big picture</h2>
+    <p>Three facts define US immigration today. <strong>First, scale:</strong> ~47.8M foreign-born residents, the most ever in absolute terms and the highest population share in over a century. <strong>Second, dependence:</strong> with fertility below replacement and deaths rising, immigration now accounts for the large majority of US population growth &mdash; without it, the country would be barely growing or shrinking. <strong>Third, contention:</strong> the legal pipeline (~1.1M green cards/yr) is dwarfed by demand, the border swung from record highs to sharp declines within two years, and an estimated 11&ndash;13M people live here without authorization &mdash; making immigration simultaneously the nation's demographic lifeline and its most polarizing policy fight.</p>
+    <p class="note">Figures are rounded and drawn from US Census Bureau (ACS &amp; population estimates), DHS / Office of Homeland Security Statistics yearbooks, US Customs and Border Protection encounter data, and Pew Research Center estimates. Estimates differ across sources, methods, and years; treat all numbers as approximate.</p>
+  </div>
+</div>
+</body>
+</html>

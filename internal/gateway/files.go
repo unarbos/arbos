@@ -9,10 +9,13 @@
 package gateway
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/unarbos/arbos/internal/tool"
@@ -21,6 +24,17 @@ import (
 // fileMaxBytes caps /api/file content so a panel never pulls a giant blob
 // into the page; the viewer shows the head and says so.
 const fileMaxBytes = 2 << 20
+
+// dirMaxEntries caps a directory listing (node_modules exists); the browser
+// shows the head and says so.
+const dirMaxEntries = 1000
+
+// fileWriteMaxBody bounds a PUT /api/file request body so a hostile (but
+// authenticated) caller can't OOM the host with a multi-GB upload. It sits
+// above the composer's 24 MiB attachment cap (ADR-0022) inflated by base64
+// (~33%) plus JSON framing, so every legitimate spooled attachment still
+// fits while an unbounded body is refused.
+const fileWriteMaxBody = 48 << 20
 
 // resolveFile turns a panel's path reference back into the file on disk.
 // References are workspace-relative when the file lives under the root
@@ -53,14 +67,29 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if info.IsDir() {
-		http.Error(w, "not a file", http.StatusBadRequest)
-		return
-	}
 	out := map[string]any{
 		"path":  p,
 		"mtime": info.ModTime().UnixMilli(),
 		"size":  info.Size(),
+	}
+	if info.IsDir() {
+		// A directory answers on the same route with the same stat shape, so
+		// the panel's change-poll (mtime — bumped by entry add/remove) works
+		// for a browser tab exactly as for a file. Content is the listing.
+		out["dir"] = true
+		if r.URL.Query().Get("stat") == "" {
+			entries, truncated, err := listDir(abs)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			out["entries"] = entries
+			if truncated {
+				out["truncated"] = true
+			}
+		}
+		writeJSON(w, out)
+		return
 	}
 	if r.URL.Query().Get("stat") == "" {
 		b, err := os.ReadFile(abs)
@@ -81,6 +110,44 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// dirEntryJSON is one row of a directory listing.
+type dirEntryJSON struct {
+	Name  string `json:"name"`
+	Dir   bool   `json:"dir,omitempty"`
+	Size  int64  `json:"size,omitempty"`
+	Mtime int64  `json:"mtime,omitempty"` // unix milliseconds
+}
+
+// listDir reads a directory for the browser panel: directories first, then
+// files, each group case-insensitively by name, capped at dirMaxEntries.
+func listDir(abs string) ([]dirEntryJSON, bool, error) {
+	ents, err := os.ReadDir(abs)
+	if err != nil {
+		return nil, false, err
+	}
+	out := make([]dirEntryJSON, 0, len(ents))
+	for _, e := range ents {
+		row := dirEntryJSON{Name: e.Name(), Dir: e.IsDir()}
+		if fi, err := e.Info(); err == nil {
+			row.Mtime = fi.ModTime().UnixMilli()
+			if !row.Dir {
+				row.Size = fi.Size()
+			}
+		}
+		out = append(out, row)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Dir != out[j].Dir {
+			return out[i].Dir
+		}
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	if len(out) > dirMaxEntries {
+		return out[:dirMaxEntries], true, nil
+	}
+	return out, false, nil
+}
+
 // handleFileWrite is the prompt editor's save: it writes a text file back
 // through the same resolution the read door uses, creating parent directories
 // so a brand-new prompt (".arbos/prompts/name.md") lands without ceremony.
@@ -90,10 +157,23 @@ func (s *Server) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
+		// Encoding "base64" decodes Content into raw bytes before writing, so a
+		// binary attachment (e.g. a PDF spooled from the composer) lands intact
+		// rather than as mangled UTF-8. Empty means the content is written as-is.
+		Encoding string `json:"encoding,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Path == "" {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, fileWriteMaxBody)).Decode(&body); err != nil || body.Path == "" {
 		http.Error(w, "path and content are required", http.StatusBadRequest)
 		return
+	}
+	data := []byte(body.Content)
+	if body.Encoding == "base64" {
+		decoded, err := base64.StdEncoding.DecodeString(body.Content)
+		if err != nil {
+			http.Error(w, "invalid base64 content", http.StatusBadRequest)
+			return
+		}
+		data = decoded
 	}
 	abs, err := tool.Resolve(s.Root, body.Path)
 	if err != nil {
@@ -104,7 +184,7 @@ func (s *Server) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := os.WriteFile(abs, []byte(body.Content), 0o644); err != nil {
+	if err := os.WriteFile(abs, data, 0o644); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

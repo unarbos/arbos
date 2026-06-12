@@ -127,15 +127,68 @@ HTTP 429
 
 The client surfaces `message` as a notice (not a stack trace).
 
-## Node directory (P4) — Bearer
+## Node directory — Bearer
 
 | Method | Path | Body / result |
 |---|---|---|
-| `POST` | `/v1/nodes/heartbeat` | `{ "id","host","cwd","caps":["..."],"control":"<optional -serve endpoint>" }` |
+| `POST` | `/v1/nodes/heartbeat` | `{ "host","cwd","caps":["..."] }` → lease (below) |
 | `GET` | `/v1/nodes` | `[Node...]` (also embedded in `GET /v1/profile`) |
 
-`control` points at a node's existing `-serve` control seam (ADR-0027);
-cross-node delegation later dials it directly. No new protocol.
+For the anonymous tier the heartbeat **is** the lease (ADR-0034): the first
+beat assigns a random name, every beat extends it, and silence expires it.
+The response carries the head-controlled knobs so abuse pressure is tunable
+server-side:
+
+```json
+{
+  "name": "fuzzy-otter-3f2",
+  "url": "https://fuzzy-otter-3f2.onarbos.net",
+  "ttl_seconds": 3600,
+  "heartbeat_seconds": 30
+}
+```
+
+Cross-node delegation later dials a node's existing `-serve` control seam
+(ADR-0027) directly. No new protocol.
+
+## Forest: gateway login broker, subdomain claim, relay (ADR-0034)
+
+### `GET /auth?device=dev_...&redirect=<url>` — browser flow
+
+The forest head brokers human login for a node's gateway. Runs the identity
+provider (GitHub et al.), checks the authenticated user is linked to the
+account owning `device`, then redirects to `redirect` with a short-lived
+**assertion**: a signed statement `{device_id, account_id, sub, exp}` over the
+backend's signing key. The gateway verifies it against the **pinned backend
+public key** (offline-capable) and sets its own session cookie. The relay
+never participates in the auth decision.
+
+### `GET /v1/keys` — no auth
+
+Backend signing pubkey(s) for assertion verification, fetched once and pinned
+client-side: `{ "keys": [{ "kid": "...", "public_key": "<base64 ed25519>" }] }`.
+
+### `POST /v1/nodes/claim` — Bearer, linked accounts only (P4)
+
+Claim a stable, *chosen* subdomain — the linked-account tier's upgrade over
+the heartbeat's assigned ephemeral name. Anonymous accounts get `403
+identity_required`.
+
+```json
+{ "name": "kitchen" }
+```
+
+Response `200`: `{ "host": "kitchen.onarbos.net" }`. `409` if taken by
+another account; idempotent for the owner.
+
+### Relay handshake — `wss://relay.<forest>/v1/tunnel`
+
+The node dials outbound and authenticates with its device key (same
+challenge/signature shape as `/v1/devices/token`). After the handshake the
+connection is a multiplexed stream (yamux) carrying HTTP + WebSocket traffic
+for the node's claimed host, reverse-proxied to the local gateway listener.
+TLS terminates at the relay (`*.arbos.life` wildcard); auth terminates at the
+node.
 
 ## Account linking (P2)
 

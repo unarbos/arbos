@@ -4,27 +4,51 @@ import {
   AppWindow,
   Clock,
   Columns2,
+  FolderTree,
+  Globe,
   Loader2,
   MessageSquare,
   Orbit,
   Plus,
   Rows2,
+  Send,
+  Settings,
   SquareTerminal,
   X,
 } from "lucide-react";
 
-import { fetchSessions, type SessionSummary } from "@/lib/api";
 import type { SplitDir } from "@/lib/layout";
 import { ThemePicker } from "./ThemePicker";
+import { Tooltip } from "./Tooltip";
 
 export interface TabInfo {
   key: number;
   title: string | null;
   busy: boolean;
   /** What the tab holds: an agent chat (default), an opened surface, a
-   *  machine-spawned run's transcript, or a terminal (job tail / shell). */
-  kind?: "chat" | "surface" | "run" | "terminal";
+   *  machine-spawned run's transcript, a terminal (job tail / shell), the
+   *  agent activity view, session history, the messenger panel, or the
+   *  settings panel. */
+  kind?:
+    | "chat"
+    | "surface"
+    | "run"
+    | "terminal"
+    | "activity"
+    | "history"
+    | "messenger"
+    | "settings";
 }
+
+/** What the + menu can open: a fresh chat, or one of the companion views. */
+export type NewTabKind =
+  | "chat"
+  | "terminal"
+  | "files"
+  | "browser"
+  | "history"
+  | "activity"
+  | "messenger";
 
 /**
  * Drag wiring shared across strips (the drag state lives in App, so a tab can
@@ -32,17 +56,18 @@ export interface TabInfo {
  */
 export interface TabDrag {
   onStart: (key: number) => void;
-  /** Fired while a drag hovers a tab; before = cursor on the left half. */
-  onOverTab: (key: number, before: boolean) => void;
+  /** Commit: drop the dragged tab next to `key`; before = left of it. */
+  onDropTab: (key: number, before: boolean) => void;
   onEnd: () => void;
   /** A tab dropped on the strip's empty background: append to this pane. */
   onDropStrip: () => void;
 }
 
 /**
- * Cursor's tab strip, one per pane: a tab per open agent and a + for a fresh
- * chat in this pane. Global actions (history, activity, split, theme) render
- * once, on the top-right strip, via `actions`.
+ * Cursor's tab strip, one per pane: a tab per open agent and a + menu that
+ * opens any tab type in this pane. Global actions (split, theme) render
+ * once, on the top-right strip, via `actions`; the settings gear renders
+ * once, on the top-left strip, via `leading`.
  */
 export function TabStrip({
   tabs,
@@ -53,6 +78,7 @@ export function TabStrip({
   onRename,
   onNew,
   drag,
+  leading,
   actions,
 }: {
   tabs: TabInfo[];
@@ -61,10 +87,22 @@ export function TabStrip({
   onActivate: (key: number) => void;
   onClose: (key: number) => void;
   onRename: (key: number, title: string) => void;
-  onNew: () => void;
+  onNew: (kind: NewTabKind) => void;
   drag: TabDrag;
+  leading?: React.ReactNode;
   actions?: React.ReactNode;
 }) {
+  // The insertion point (which tab edge a drop would land on) and which tab is
+  // being dragged, so we can paint the drop line and dim the source tab. Both
+  // are purely visual — the actual reorder is committed on drop, in App.
+  const [indicator, setIndicator] = useState<{ key: number; before: boolean } | null>(null);
+  const [draggingKey, setDraggingKey] = useState<number | null>(null);
+
+  const clearDrag = () => {
+    setIndicator(null);
+    setDraggingKey(null);
+  };
+
   return (
     <div
       className="relative flex h-9 select-none items-stretch bg-bar"
@@ -72,11 +110,20 @@ export function TabStrip({
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
       }}
+      onDragLeave={(e) => {
+        // Only clear when the cursor actually leaves the strip, not when it
+        // crosses between child tabs (relatedTarget still inside the strip).
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+          setIndicator(null);
+        }
+      }}
       onDrop={(e) => {
         e.preventDefault();
         drag.onDropStrip();
+        clearDrag();
       }}
     >
+      {leading && <div className="flex items-center gap-0.5 px-2">{leading}</div>}
       <div role="tablist" className="flex min-w-0 flex-1 items-stretch overflow-x-auto">
         {tabs.map((tab) => (
           <Tab
@@ -84,18 +131,30 @@ export function TabStrip({
             tab={tab}
             active={tab.key === activeKey}
             closable={canClose}
+            dragging={tab.key === draggingKey}
+            indicator={
+              indicator?.key === tab.key ? (indicator.before ? "before" : "after") : null
+            }
             onActivate={() => onActivate(tab.key)}
             onClose={() => onClose(tab.key)}
             onRename={(title) => onRename(tab.key, title)}
-            onDragStart={() => drag.onStart(tab.key)}
-            onDragOverTab={(before) => drag.onOverTab(tab.key, before)}
-            onDragEnd={drag.onEnd}
+            onDragStart={() => {
+              setDraggingKey(tab.key);
+              drag.onStart(tab.key);
+            }}
+            onDragOverTab={(before) => setIndicator({ key: tab.key, before })}
+            onDropTab={(before) => {
+              drag.onDropTab(tab.key, before);
+              clearDrag();
+            }}
+            onDragEnd={() => {
+              drag.onEnd();
+              clearDrag();
+            }}
           />
         ))}
         <div className="flex items-center px-1.5">
-          <IconButton title="New chat" onClick={onNew}>
-            <Plus size={14} />
-          </IconButton>
+          <NewTabMenu onNew={onNew} />
         </div>
       </div>
       {actions && <div className="flex items-center gap-0.5 px-2">{actions}</div>}
@@ -104,46 +163,15 @@ export function TabStrip({
 }
 
 /**
- * The once-per-window action cluster: session history, agent activity, the
- * two split actions (each divides the FOCUSED pane, editor-style — splits
- * nest), and the theme picker. Lives on the top-right strip. A pane closes
- * by closing its last tab.
+ * The once-per-window action cluster: the two split actions (each divides
+ * the FOCUSED pane, editor-style — splits nest) and the theme picker. Lives
+ * on the top-right strip. A pane closes by closing its last tab. Tab types
+ * (terminal, files, browser, history, activity) open from each strip's +
+ * menu instead.
  */
-export function GlobalActions({
-  onOpenSession,
-  activityOpen,
-  onToggleActivity,
-  onSplit,
-  onNewTerminal,
-}: {
-  onOpenSession: (s: SessionSummary) => void;
-  activityOpen: boolean;
-  onToggleActivity: () => void;
-  onSplit: (dir: SplitDir) => void;
-  /** Open a fresh interactive shell as a tab in the focused pane. */
-  onNewTerminal: () => void;
-}) {
-  const [historyOpen, setHistoryOpen] = useState(false);
-
+export function GlobalActions({ onSplit }: { onSplit: (dir: SplitDir) => void }) {
   return (
     <>
-      <IconButton title="New terminal" onClick={onNewTerminal}>
-        <SquareTerminal size={13} />
-      </IconButton>
-      <IconButton
-        title="History"
-        onClick={() => setHistoryOpen((v) => !v)}
-        pressed={historyOpen}
-      >
-        <Clock size={13} />
-      </IconButton>
-      <IconButton
-        title="Agent activity"
-        onClick={onToggleActivity}
-        pressed={activityOpen}
-      >
-        <Activity size={13} />
-      </IconButton>
       <IconButton title="Split pane right" onClick={() => onSplit("right")}>
         <Columns2 size={13} />
       </IconButton>
@@ -151,16 +179,92 @@ export function GlobalActions({
         <Rows2 size={13} />
       </IconButton>
       <ThemePicker />
-      {historyOpen && (
-        <HistoryDropdown
-          onPick={(s) => {
-            setHistoryOpen(false);
-            onOpenSession(s);
-          }}
-          onDismiss={() => setHistoryOpen(false)}
-        />
-      )}
     </>
+  );
+}
+
+const NEW_TAB_ITEMS: { kind: NewTabKind; label: string; icon: React.ReactNode }[] = [
+  { kind: "chat", label: "New agent", icon: <MessageSquare size={13} /> },
+  { kind: "terminal", label: "Terminal", icon: <SquareTerminal size={13} /> },
+  { kind: "files", label: "Files", icon: <FolderTree size={13} /> },
+  { kind: "browser", label: "Browser", icon: <Globe size={13} /> },
+  { kind: "history", label: "History", icon: <Clock size={13} /> },
+  { kind: "activity", label: "Agent activity", icon: <Activity size={13} /> },
+  { kind: "messenger", label: "Messenger", icon: <Send size={13} /> },
+];
+
+/**
+ * The strip's + button: drops a menu of tab types instead of opening a chat
+ * straight away. Mirrors the theme picker's click-away behavior. The menu is
+ * fixed-positioned from the button's rect — the tablist it lives in scrolls
+ * horizontally (overflow-x: auto), which would clip an absolute child.
+ */
+function NewTabMenu({ onNew }: { onNew: (kind: NewTabKind) => void }) {
+  const [menuAt, setMenuAt] = useState<{ left: number; top: number } | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menuAt) return;
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setMenuAt(null);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [menuAt]);
+
+  const toggle = () => {
+    if (menuAt) {
+      setMenuAt(null);
+      return;
+    }
+    const rect = rootRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    // Keep the menu (w-44 = 176px) inside the viewport's right edge.
+    setMenuAt({
+      left: Math.min(rect.left, window.innerWidth - 184),
+      top: rect.bottom + 4,
+    });
+  };
+
+  return (
+    <div ref={rootRef} className="relative flex">
+      <IconButton title="New tab" pressed={menuAt !== null} onClick={toggle}>
+        <Plus size={14} />
+      </IconButton>
+      {menuAt && (
+        <div
+          style={{ left: menuAt.left, top: menuAt.top }}
+          className="fixed z-50 flex w-44 flex-col rounded-lg border border-line bg-card py-1 shadow-xl shadow-black/40"
+        >
+          {NEW_TAB_ITEMS.map((item) => (
+            <button
+              key={item.kind}
+              type="button"
+              onClick={() => {
+                setMenuAt(null);
+                onNew(item.kind);
+              }}
+              className="flex w-full cursor-pointer items-center gap-2.5 px-3 py-1.5 text-left text-[12.5px] text-text transition-colors hover:bg-hover"
+            >
+              <span className="shrink-0 text-muted">{item.icon}</span>
+              <span className="min-w-0 flex-1 truncate">{item.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The settings gear — the once-per-window leading action on the top-left
+ *  strip. Opens (or focuses) the settings panel as a singleton tab. */
+export function SettingsButton({ onOpen }: { onOpen: () => void }) {
+  return (
+    <IconButton title="Settings" onClick={onOpen}>
+      <Settings size={13} />
+    </IconButton>
   );
 }
 
@@ -176,16 +280,18 @@ function IconButton({
   children: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      title={title}
-      onClick={onClick}
-      className={`flex size-6 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-hover ${
-        pressed ? "bg-hover text-text" : "text-muted hover:text-text"
-      }`}
-    >
-      {children}
-    </button>
+    <Tooltip label={title}>
+      <button
+        type="button"
+        aria-label={title}
+        onClick={onClick}
+        className={`flex size-6 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-hover ${
+          pressed ? "bg-hover text-text" : "text-muted hover:text-text"
+        }`}
+      >
+        {children}
+      </button>
+    </Tooltip>
   );
 }
 
@@ -193,22 +299,31 @@ function Tab({
   tab,
   active,
   closable,
+  dragging,
+  indicator,
   onActivate,
   onClose,
   onRename,
   onDragStart,
   onDragOverTab,
+  onDropTab,
   onDragEnd,
 }: {
   tab: TabInfo;
   active: boolean;
   closable: boolean;
+  /** This tab is the one currently being dragged (dim it). */
+  dragging: boolean;
+  /** Paint a drop line on this tab's left ("before") or right ("after") edge. */
+  indicator: "before" | "after" | null;
   onActivate: () => void;
   onClose: () => void;
   onRename: (title: string) => void;
   onDragStart: () => void;
   /** Fired while a drag hovers this tab; before = cursor on the left half. */
   onDragOverTab: (before: boolean) => void;
+  /** Fired when a tab is dropped on this tab; before = left half. */
+  onDropTab: (before: boolean) => void;
   onDragEnd: () => void;
 }) {
   // Double-click a tab to rename it: the label becomes an input seeded with the
@@ -253,16 +368,30 @@ function Tab({
         onDragOverTab(e.clientX < rect.left + rect.width / 2);
       }}
       onDrop={(e) => {
-        // The hover already live-reordered next to this tab; don't let the
-        // strip's background drop ALSO append it to the end of the pane.
+        // Commit the move next to this tab, and keep the strip's background
+        // drop from ALSO appending it to the end of the pane.
         e.preventDefault();
         e.stopPropagation();
+        const rect = e.currentTarget.getBoundingClientRect();
+        onDropTab(e.clientX < rect.left + rect.width / 2);
       }}
       onDragEnd={onDragEnd}
       onClick={onActivate}
       onDoubleClick={startEdit}
-      className={`group flex min-w-0 max-w-[180px] cursor-pointer items-center gap-1.5 border-r border-line/40 px-3 text-[12px] ${
+      title={tab.title || "New Agent"}
+      // min-w keeps a readable label floor when the strip is crowded — the
+      // tablist scrolls horizontally past that point instead of crushing
+      // every title down to one character.
+      className={`group flex min-w-[88px] max-w-[180px] cursor-pointer items-center gap-1.5 border-r border-line/40 px-3 text-[12px] ${
         active ? "bg-canvas text-bright" : "text-muted hover:text-text"
+      } ${dragging ? "opacity-40" : ""} ${
+        // The drop line is an inset shadow, not an absolutely-positioned child:
+        // a `position: relative` flex item breaks the native drag image here.
+        indicator === "before"
+          ? "shadow-[inset_2px_0_0_0_var(--color-bright)]"
+          : indicator === "after"
+            ? "shadow-[inset_-2px_0_0_0_var(--color-bright)]"
+            : ""
       }`}
     >
       {tab.busy ? (
@@ -273,6 +402,14 @@ function Tab({
         <Orbit size={11} className="shrink-0 text-faint" />
       ) : tab.kind === "terminal" ? (
         <SquareTerminal size={11} className="shrink-0 text-faint" />
+      ) : tab.kind === "activity" ? (
+        <Activity size={11} className="shrink-0 text-faint" />
+      ) : tab.kind === "history" ? (
+        <Clock size={11} className="shrink-0 text-faint" />
+      ) : tab.kind === "messenger" ? (
+        <Send size={11} className="shrink-0 text-faint" />
+      ) : tab.kind === "settings" ? (
+        <Settings size={11} className="shrink-0 text-faint" />
       ) : (
         <MessageSquare size={11} className="shrink-0 text-faint" />
       )}
@@ -317,91 +454,3 @@ function Tab({
   );
 }
 
-/** Start of the local "today" for the Today / Older grouping. */
-function startOfToday(): number {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
-function HistoryDropdown({
-  onPick,
-  onDismiss,
-}: {
-  onPick: (s: SessionSummary) => void;
-  onDismiss: () => void;
-}) {
-  const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
-  const [query, setQuery] = useState("");
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    fetchSessions().then(setSessions).catch(() => setSessions([]));
-  }, []);
-
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        onDismiss();
-      }
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [onDismiss]);
-
-  const q = query.trim().toLowerCase();
-  const visible = (sessions ?? []).filter(
-    (s) => !q || (s.title || s.id).toLowerCase().includes(q),
-  );
-  const today = startOfToday();
-  const groups: [string, SessionSummary[]][] = [
-    ["Today", visible.filter((s) => s.updated_at >= today)],
-    ["Older", visible.filter((s) => s.updated_at < today)],
-  ];
-
-  return (
-    <div
-      ref={rootRef}
-      className="absolute right-2 top-9 z-20 flex max-h-96 w-72 flex-col overflow-hidden rounded-lg border border-line bg-card shadow-xl shadow-black/40"
-    >
-      <input
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        onKeyDown={(e) => e.key === "Escape" && onDismiss()}
-        placeholder="Search Agents…"
-        autoFocus
-        className="border-b border-line/60 bg-transparent px-3 py-2 text-[12.5px] text-bright outline-none placeholder:text-faint"
-      />
-      <div className="min-h-0 flex-1 overflow-y-auto py-1">
-        {sessions === null && (
-          <div className="px-3 py-2 text-[12px] text-faint">Loading…</div>
-        )}
-        {sessions !== null && visible.length === 0 && (
-          <div className="px-3 py-2 text-[12px] text-faint">No agents found</div>
-        )}
-        {groups.map(([label, items]) =>
-          items.length === 0 ? null : (
-            <div key={label}>
-              <div className="px-3 pb-0.5 pt-1.5 text-[11px] text-faint">
-                {label}
-              </div>
-              {items.map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  onClick={() => onPick(s)}
-                  className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-text transition-colors hover:bg-hover"
-                >
-                  <MessageSquare size={12} className="shrink-0 text-faint" />
-                  <span className="min-w-0 flex-1 truncate">
-                    {s.title || s.id}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ),
-        )}
-      </div>
-    </div>
-  );
-}

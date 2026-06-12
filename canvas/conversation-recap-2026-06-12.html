@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Session Recap — BTC Pings, Diagram, Memory</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 28px 22px 60px;
+    background: var(--color-canvas, #2c262a);
+    color: var(--color-text, #d6d0d4);
+    font: 13px/1.6 var(--font-sans, -apple-system, "Segoe UI", sans-serif);
+    max-width: 880px;
+    margin-inline: auto;
+  }
+  h1 { font-size: 22px; color: var(--color-bright, #ece7ea); margin: 0 0 6px; font-weight: 650; letter-spacing: -.01em; }
+  .summary { color: var(--color-muted, #968f94); margin: 0 0 4px; font-size: 13.5px; }
+  .date { font: 11px var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace); color: var(--color-faint, #6e676c); }
+  .card {
+    background: var(--color-card, #332a2f);
+    border: 1px solid var(--color-line, #3e373c);
+    border-radius: 8px;
+    padding: 18px 20px;
+    margin-top: 16px;
+  }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--color-accent, #85aab3); margin: 0 0 12px; font-weight: 600; }
+  h3 { font-size: 13px; color: var(--color-bright, #ece7ea); margin: 16px 0 6px; font-weight: 600; }
+  p { margin: 6px 0; }
+  ul { margin: 6px 0; padding-left: 18px; }
+  li { margin: 3px 0; }
+  code { font: 11.5px var(--font-mono, ui-monospace, Menlo, monospace); background: var(--color-bar, #262024); padding: 1px 5px; border-radius: 4px; color: var(--color-bright, #ece7ea); }
+  pre { background: var(--color-bar, #262024); border: 1px solid var(--color-line, #3e373c); border-radius: 6px; padding: 12px 14px; overflow-x: auto; font: 11.5px/1.5 var(--font-mono, ui-monospace, Menlo, monospace); color: var(--color-text, #d6d0d4); margin: 6px 0; }
+  .cap { font: 11px var(--font-mono, ui-monospace, Menlo, monospace); color: var(--color-muted, #968f94); margin: 12px 0 2px; }
+  .muted { color: var(--color-muted, #968f94); }
+  .tiles { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+  .tile { background: var(--color-panel, #312b2f); border: 1px solid var(--color-line, #3e373c); border-radius: 6px; padding: 12px 14px; flex: 1 1 150px; }
+  .tile .n { font: 20px var(--font-mono, ui-monospace, Menlo, monospace); color: var(--color-bright, #ece7ea); }
+  .tile .l { font-size: 11px; color: var(--color-muted, #968f94); margin-top: 2px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 6px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--color-line, #3e373c); font-size: 12.5px; }
+  th { background: var(--color-panel, #312b2f); color: var(--color-muted, #968f94); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+  td.mono { font: 11.5px var(--font-mono, ui-monospace, Menlo, monospace); }
+  .down { color: var(--color-red, #c97f77); }
+  .pill { display: inline-block; font: 10.5px var(--font-mono, ui-monospace, Menlo, monospace); padding: 1px 7px; border-radius: 10px; border: 1px solid var(--color-line, #3e373c); }
+  .pill.live { color: var(--color-green, #87a883); }
+  .pill.dead { color: var(--color-faint, #6e676c); }
+  .flow { display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .node { background: var(--color-panel, #312b2f); border: 1px solid var(--color-line, #3e373c); border-radius: 6px; padding: 8px 11px; font-size: 11.5px; flex: 1 1 130px; }
+  .node .t { color: var(--color-bright, #ece7ea); font-weight: 600; display: block; margin-bottom: 2px; }
+  .arrow { align-self: center; color: var(--color-accent, #85aab3); font: 13px var(--font-mono); }
+  a { color: var(--color-accent, #85aab3); }
+</style>
+</head>
+<body>
+  <h1>Session Recap</h1>
+  <p class="summary">A short working session: a per-minute BTC price feed stood up and torn down on request, a research diagram unpacked, and a tour of accumulated long-term memory.</p>
+  <p class="date">2026-06-12 · via Telegram (@Arbos88_iwiwies_bot)</p>
+
+  <div class="card">
+    <h2>What happened</h2>
+    <ul>
+      <li><strong>BTC per-minute feed</strong> — requested, created as a recurring plan node (<code>#50</code>), seeded with a live price, then <strong>cancelled</strong> one message later on "Stop".</li>
+      <li><strong>Diagram analysis</strong> — "Per-Composer Adapters on a Shared Surrogate" explained as a shared-surrogate + tiny residual-adapter (MoE / federated) design.</li>
+      <li><strong>Memory review</strong> — enumerated the durable facts accumulated to date: deep arbos codebase knowledge, a few build/tooling notes, operational gotchas; nothing personal yet.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>BTC price feed — lifecycle</h2>
+    <p>Built as a <code>when:{every:"1m"}</code> plan node hitting Coinbase spot. Live for one exchange of messages, then cancelled cleanly. The hourly 1%+ move-watch (<code>#49</code>) was untouched and keeps running.</p>
+    <div class="flow">
+      <div class="node"><span class="t">Request</span>"send me the bitcoin price every minute"</div>
+      <div class="arrow">&rarr;</div>
+      <div class="node"><span class="t">Create #50</span>every 1m, fetch spot, notify with delta</div>
+      <div class="arrow">&rarr;</div>
+      <div class="node"><span class="t">Seed</span>fetched $63,905.99 live, sent first reading</div>
+      <div class="arrow">&rarr;</div>
+      <div class="node"><span class="t">"Stop" &rarr; cancel</span>node #50 cancelled, feed off</div>
+    </div>
+
+    <p class="cap">plan node #50 (cancelled)</p>
+    <pre>when: { every: "1m" }
+goal: fetch BTC-USD spot (coinbase data.amount) and notify
+      ChairmanTao with current price + delta vs prior minute;
+      carry prior price forward in last: outcome.</pre>
+
+    <h3>Live prices observed this session</h3>
+    <table>
+      <thead><tr><th>Source</th><th>Price (USD)</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td>spot fetch (feed seed)</td><td class="mono">63,905.995</td><td class="muted">first reading sent</td></tr>
+        <tr><td>hourly watch (#49 last)</td><td class="mono">63,786.415</td><td class="mono down">-0.634% vs prev, below 1% gate</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Numbers</h2>
+    <div class="tiles">
+      <div class="tile"><div class="n">2</div><div class="l">live spot prices fetched</div></div>
+      <div class="tile"><div class="n">1</div><div class="l">plan node created &amp; cancelled</div></div>
+      <div class="tile"><div class="n">~$120</div><div class="l">spread between the two reads</div></div>
+    </div>
+
+    <h3>Two readings, USD</h3>
+    <svg viewBox="0 0 360 130" width="100%" height="130" role="img" aria-label="Bar chart of two BTC prices">
+      <!-- baseline -->
+      <line x1="48" y1="100" x2="340" y2="100" stroke="var(--color-line, #3e373c)" stroke-width="1"/>
+      <!-- y labels -->
+      <text x="44" y="34" text-anchor="end" font-size="10" font-family="var(--font-mono, monospace)" fill="var(--color-muted, #968f94)">63,950</text>
+      <text x="44" y="103" text-anchor="end" font-size="10" font-family="var(--font-mono, monospace)" fill="var(--color-muted, #968f94)">63,750</text>
+      <!-- bar 1: 63905.995 -> within 63750..63950 window -> (905.995/200)*90 ... map 63750=0,63950=90 -->
+      <rect x="90" y="29.7" width="70" height="70.3" rx="2" fill="var(--color-accent, #85aab3)"/>
+      <text x="125" y="116" text-anchor="middle" font-size="10" font-family="var(--font-mono, monospace)" fill="var(--color-muted, #968f94)">feed seed</text>
+      <text x="125" y="24" text-anchor="middle" font-size="10" font-family="var(--font-mono, monospace)" fill="var(--color-bright, #ece7ea)">63,906</text>
+      <!-- bar 2: 63786.415 -> (36.415/200)*90 = 16.4 -->
+      <rect x="220" y="83.6" width="70" height="16.4" rx="2" fill="var(--color-red, #c97f77)"/>
+      <text x="255" y="116" text-anchor="middle" font-size="10" font-family="var(--font-mono, monospace)" fill="var(--color-muted, #968f94)">hourly #49</text>
+      <text x="255" y="78" text-anchor="middle" font-size="10" font-family="var(--font-mono, monospace)" fill="var(--color-bright, #ece7ea)">63,786</text>
+    </svg>
+    <p class="muted" style="font-size:11px;">Two distinct moments, not a continuous series — the per-minute feed was cancelled before a second tick.</p>
+  </div>
+
+  <div class="card">
+    <h2>Diagram unpacked — Per-Composer Adapters on a Shared Surrogate</h2>
+    <p>Distribute one shared surrogate of an expert; let each consumer attach a tiny residual adapter that corrects it for their own routed-token distribution, without replacing the authoritative expert.</p>
+    <ul>
+      <li><strong>Owner Composer A</strong> holds the real expert <code>E&#8202;&#7522;</code> and fits a <strong>canonical surrogate <code>S&#8202;&#7522;</code></strong> from it — A owns the authoritative meaning.</li>
+      <li><code>S&#8202;&#7522;</code> is <strong>distributed once</strong> to all remote composers.</li>
+      <li>Composers B, C run base <code>S&#8202;&#7522;</code> + own adapter; local view <code>S&#8202;&#7522;,&#8202;X(x) = S&#8202;&#7522;(x) + A&#8202;&#7522;,&#8202;X(x)</code>.</li>
+      <li><strong>Constraint:</strong> adapters are trained/approved against the real <code>E&#8202;&#7522;</code>, not allowed to drift on local loss alone.</li>
+      <li><strong>Win:</strong> one object captures the global expert; each consumer pays only for a tiny residual; canonical expert stays single source of truth.</li>
+    </ul>
+    <p class="muted" style="font-size:11px;">Reads as a mixture-of-experts / federated framing — "expert i", "routed-token distribution".</p>
+  </div>
+
+  <div class="card">
+    <h2>Standing background work</h2>
+    <table>
+      <thead><tr><th>Item</th><th>Cadence</th><th>State</th></tr></thead>
+      <tbody>
+        <tr><td>BTC 1%+ move watch + Reddit explainer (#49)</td><td class="mono">hourly</td><td><span class="pill live">running</span></td></tr>
+        <tr><td>BTC per-minute price ping (#50)</td><td class="mono">1m</td><td><span class="pill dead">cancelled</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Open items</h2>
+    <ul>
+      <li>No personal/preference memory about the user yet — reply style, timezone, projects. Awaiting anything worth persisting.</li>
+      <li>The diagram could be turned into a written spec, an implementation sketch, a design critique, or a native canvas version on request.</li>
+    </ul>
+  </div>
+</body>
+</html>

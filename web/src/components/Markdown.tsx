@@ -1,7 +1,15 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { lazy, memo, Suspense, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
 import { parsePlotSpec } from "../lib/plot";
 import { Chart } from "./Chart";
+
+// Code-split: mermaid is a heavyweight bundle, only fetched when a
+// transcript actually contains a ```mermaid fence.
+const MermaidDiagram = lazy(() => import("./Mermaid"));
+
+// Same deal for katex (math typesetting) — only fetched when a message
+// actually contains $…$ / $$…$$ math.
+const Katex = lazy(() => import("./Katex"));
 
 /* ------------------------------------------------------------------ */
 /* Highlight — a tiny regex tokenizer for code blocks and diff lines.  */
@@ -74,7 +82,64 @@ export function Markdown({
   content: string;
   streaming?: boolean;
 }) {
-  const blocks = useMemo(() => parseBlocks(content), [content]);
+  // Streaming appends only grow the tail, so re-parsing the whole message per
+  // delta is O(n²) over its length. Cache the parse and re-parse only from the
+  // last COMMITTED boundary: a blank line at fence depth 0 (see safeBoundary).
+  // Everything before such a separator is immutable under further appends — a
+  // later line can't reach back across a blank line to merge into an earlier
+  // block — so committed blocks keep their object identity and the memoized
+  // <Block> rows below bail out per delta. (Resuming from merely the last block
+  // is unsound: a trailing list/paragraph can still merge with its predecessor
+  // as more lines arrive — verified by a differential fuzz against full parse.)
+  const cacheRef = useRef<ParseCache | null>(null);
+  const blocks = useMemo(() => {
+    const cache = cacheRef.current;
+    let committedBlocks: BlockNode[] = [];
+    let committedStarts: number[] = [];
+    let committedLen = 0;
+    if (
+      streaming &&
+      cache &&
+      content.length > cache.committedLen &&
+      content.startsWith(cache.text.slice(0, cache.committedLen))
+    ) {
+      committedBlocks = cache.committedBlocks;
+      committedStarts = cache.committedStarts;
+      committedLen = cache.committedLen;
+    }
+
+    const tail = parseBlocks(content.slice(committedLen));
+    const blocks = committedBlocks.concat(tail.blocks);
+    const starts = committedStarts.concat(
+      tail.starts.map((s) => s + committedLen),
+    );
+
+    // Advance the committed boundary to the last fence-safe blank separator,
+    // so the next delta re-parses only from there.
+    if (streaming) {
+      const boundary = safeBoundary(content, committedLen);
+      if (boundary > committedLen) {
+        let k = starts.length;
+        while (k > 0 && starts[k - 1] >= boundary) k--;
+        cacheRef.current = {
+          text: content,
+          committedLen: boundary,
+          committedBlocks: blocks.slice(0, k),
+          committedStarts: starts.slice(0, k),
+        };
+      } else {
+        cacheRef.current = {
+          text: content,
+          committedLen,
+          committedBlocks,
+          committedStarts,
+        };
+      }
+    } else {
+      cacheRef.current = null;
+    }
+    return blocks;
+  }, [content, streaming]);
   const caret = streaming ? <StreamingCaret /> : null;
 
   return (
@@ -89,6 +154,46 @@ export function Markdown({
       {blocks.length === 0 && caret}
     </div>
   );
+}
+
+/** The incremental parse state: the text it covers, the prefix length the
+ *  parse has committed through (always a fence-safe blank-line boundary),
+ *  and the blocks of that committed prefix with their char offsets. */
+interface ParseCache {
+  text: string;
+  committedLen: number;
+  committedBlocks: BlockNode[];
+  committedStarts: number[];
+}
+
+/**
+ * The furthest char offset (≥ `from`) the incremental parse may commit
+ * through: just past the last blank line that sits at fence depth 0. Inside
+ * an open ``` fence a blank line is fence *content* — its block is still
+ * growing — so only blank lines outside any fence count. The scan starts at
+ * `from`, which is itself always a depth-0 boundary, so the committed prefix
+ * never needs its fence state recomputed. Mirrors parseBlocks' fence rules:
+ * any `{3,} run opens, and only a bare run at least as long closes.
+ */
+function safeBoundary(text: string, from: number): number {
+  let boundary = from;
+  let fence = 0; // the open fence's backtick-run length; 0 = outside fences
+  let i = from;
+  while (i < text.length) {
+    const nl = text.indexOf("\n", i);
+    if (nl === -1) break; // the final, unterminated line can still grow
+    const line = text.slice(i, nl);
+    if (fence === 0) {
+      const open = line.match(/^(`{3,})/);
+      if (open) fence = open[1].length;
+      else if (line.trim() === "") boundary = nl + 1;
+    } else {
+      const close = line.match(/^(`{3,})\s*$/);
+      if (close && close[1].length >= fence) fence = 0;
+    }
+    i = nl + 1;
+  }
+  return boundary;
 }
 
 function StreamingCaret() {
@@ -129,13 +234,26 @@ function isTableSeparator(line: string): boolean {
   return cells.length > 0 && cells.every((c) => /^:?-{2,}:?$/.test(c));
 }
 
-function parseBlocks(text: string): BlockNode[] {
+function parseBlocks(text: string): { blocks: BlockNode[]; starts: number[] } {
   const lines = text.split("\n");
+  // Char offset of each line's start, so every block can record where it
+  // begins — the resume point for the streaming tail re-parse.
+  const lineStart: number[] = new Array(lines.length);
+  for (let n = 0, off = 0; n < lines.length; n++) {
+    lineStart[n] = off;
+    off += lines[n].length + 1;
+  }
   const blocks: BlockNode[] = [];
+  const starts: number[] = [];
   let i = 0;
 
   while (i < lines.length) {
     const line = lines[i];
+    const blockStart = lineStart[i];
+    const open = (b: BlockNode) => {
+      blocks.push(b);
+      starts.push(blockStart);
+    };
 
     // A fence closes only on a backtick run at least as long as the opener
     // (CommonMark), so ````-wrapped output containing ``` blocks stays one
@@ -153,13 +271,13 @@ function parseBlocks(text: string): BlockNode[] {
         i++;
       }
       i++;
-      blocks.push({ type: "code", lang, content: codeLines.join("\n") });
+      open({ type: "code", lang, content: codeLines.join("\n") });
       continue;
     }
 
     const headingMatch = line.match(/^(#{1,4})\s+(.+)/);
     if (headingMatch) {
-      blocks.push({
+      open({
         type: "heading",
         level: headingMatch[1].length,
         content: headingMatch[2],
@@ -169,7 +287,7 @@ function parseBlocks(text: string): BlockNode[] {
     }
 
     if (/^[-*_]{3,}\s*$/.test(line)) {
-      blocks.push({ type: "hr" });
+      open({ type: "hr" });
       i++;
       continue;
     }
@@ -180,7 +298,7 @@ function parseBlocks(text: string): BlockNode[] {
         items.push(lines[i].replace(/^[-*+]\s/, ""));
         i++;
       }
-      blocks.push({ type: "list", ordered: false, items });
+      open({ type: "list", ordered: false, items });
       continue;
     }
 
@@ -190,7 +308,7 @@ function parseBlocks(text: string): BlockNode[] {
         items.push(lines[i].replace(/^\d+[.)]\s/, ""));
         i++;
       }
-      blocks.push({ type: "list", ordered: true, items });
+      open({ type: "list", ordered: true, items });
       continue;
     }
 
@@ -202,7 +320,7 @@ function parseBlocks(text: string): BlockNode[] {
         rows.push(splitTableRow(lines[i]));
         i++;
       }
-      blocks.push({ type: "table", header, rows });
+      open({ type: "table", header, rows });
       continue;
     }
 
@@ -230,16 +348,18 @@ function parseBlocks(text: string): BlockNode[] {
       i++;
     }
     if (paraLines.length > 0) {
-      blocks.push({ type: "paragraph", content: paraLines.join("\n") });
+      open({ type: "paragraph", content: paraLines.join("\n") });
     }
   }
 
-  return blocks;
+  return { blocks, starts };
 }
 
 const COPIED_MS = 1500;
 
-function CopyButton({ text }: { text: string }) {
+/** A click-to-copy icon button (flashes a green check), shared by code-block
+ *  headers here and the transcript's per-message copy in ChatView. */
+export function CopyButton({ text, title }: { text: string; title?: string }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | undefined>(undefined);
 
@@ -254,7 +374,7 @@ function CopyButton({ text }: { text: string }) {
     <button
       type="button"
       onClick={copy}
-      title="Copy"
+      title={title ?? "Copy"}
       className={`cursor-pointer transition-colors ${
         copied ? "text-green" : "text-faint hover:text-text"
       }`}
@@ -283,7 +403,11 @@ function CodeBlock({
       </div>
       <pre className="overflow-x-auto px-3 py-2 font-mono text-[11.5px] leading-relaxed text-text/90">
         <code>
-          <Highlight text={content} />
+          {/* While the fence is still streaming (caret present) the text is
+              plain — re-tokenizing a growing block per delta is O(n²) churn.
+              The block re-renders highlighted once the fence closes (it stops
+              being the tail) or the message finalizes. */}
+          {caret ? content : <Highlight text={content} />}
           {caret}
         </code>
       </pre>
@@ -330,6 +454,32 @@ function ChartFence({ content, caret }: { content: string; caret?: ReactNode }) 
   );
 }
 
+/**
+ * A ```mermaid fence: diagram source rendered as an inline SVG. The header
+ * (label + copy) stays put while the lazily loaded renderer handles the
+ * stream-tolerant placeholder / error fallback in the body.
+ */
+function MermaidFence({ content, caret }: { content: string; caret?: ReactNode }) {
+  return (
+    <div className="overflow-hidden rounded-md border border-line/80">
+      <div className="flex items-center justify-between bg-card px-3 py-1">
+        <span className="text-[11px] text-faint select-none">mermaid</span>
+        <CopyButton text={content} />
+      </div>
+      <Suspense
+        fallback={
+          <div className="px-3 py-2 text-[11.5px] text-faint">
+            rendering diagram…
+          </div>
+        }
+      >
+        <MermaidDiagram content={content} streaming={!!caret} />
+      </Suspense>
+      {caret}
+    </div>
+  );
+}
+
 const HEADING_CLASS: Record<number, string> = {
   1: "text-[1.15em]",
   2: "text-[1.08em]",
@@ -337,11 +487,19 @@ const HEADING_CLASS: Record<number, string> = {
   4: "text-[1em]",
 };
 
-function Block({ block, caret }: { block: BlockNode; caret?: ReactNode }) {
+/**
+ * One block row, memoized: the streaming tail re-parse keeps every settled
+ * block's object identity, so per delta only the growing tail block (and the
+ * one losing the caret) re-renders instead of the whole message.
+ */
+const Block = memo(function Block({ block, caret }: { block: BlockNode; caret?: ReactNode }) {
   switch (block.type) {
     case "code":
       if (block.lang === "chart") {
         return <ChartFence content={block.content} caret={caret} />;
+      }
+      if (block.lang === "mermaid") {
+        return <MermaidFence content={block.content} caret={caret} />;
       }
       return <CodeBlock lang={block.lang} content={block.content} caret={caret} />;
 
@@ -425,21 +583,28 @@ function Block({ block, caret }: { block: BlockNode; caret?: ReactNode }) {
         </p>
       );
   }
-}
+});
 
 type InlineNode =
   | { type: "text"; content: string }
   | { type: "code"; content: string }
+  | { type: "math"; content: string; display: boolean }
   | { type: "bold"; content: string }
   | { type: "italic"; content: string }
+  | { type: "image"; alt: string; src: string }
   | { type: "link"; text: string; href: string }
   | { type: "br" };
 
 function parseInline(text: string): InlineNode[] {
   const nodes: InlineNode[] = [];
-  // Pattern priority: code > link > bold > italic > bare URL > line break
+  // Pattern priority: code > math > image > link > bold > italic > bare URL >
+  // line break. Math comes right after code so TeX containing * _ [ ] isn't
+  // shredded by the emphasis/link rules. Display math ($$…$$ / \[…\]) may
+  // span newlines; inline math ($…$ / \(…\)) must stay on one line, must not
+  // hug whitespace, and the closing $ can't be followed by a digit — so
+  // "$5 and $10" reads as money, not math.
   const pattern =
-    /(``[^`]+``|`[^`]+`)|(\[([^\]]+)\]\(([^)]+)\))|(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(\bhttps?:\/\/[^\s<>)\]]+)|(\n)/g;
+    /(``[^`]+``|`[^`]+`)|(\$\$([\s\S]+?)\$\$)|(\\\[([\s\S]+?)\\\])|(\$([^\s$](?:[^$\n]*?[^\s$])?)\$(?!\d))|(\\\(([^\n]+?)\\\))|(!\[([^\]]*)\]\(([^)]+)\))|(\[([^\]]+)\]\(([^)]+)\))|(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(\bhttps?:\/\/[^\s<>)\]]+)|(\n)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -457,14 +622,24 @@ function parseInline(text: string): InlineNode[] {
         .replace(/^ (.+) $/, "$1");
       nodes.push({ type: "code", content });
     } else if (match[2]) {
-      nodes.push({ type: "link", text: match[3], href: match[4] });
-    } else if (match[5]) {
-      nodes.push({ type: "bold", content: match[6] });
-    } else if (match[7]) {
-      nodes.push({ type: "italic", content: match[8] });
-    } else if (match[9]) {
-      nodes.push({ type: "link", text: match[9], href: match[9] });
+      nodes.push({ type: "math", content: match[3].trim(), display: true });
+    } else if (match[4]) {
+      nodes.push({ type: "math", content: match[5].trim(), display: true });
+    } else if (match[6]) {
+      nodes.push({ type: "math", content: match[7], display: false });
+    } else if (match[8]) {
+      nodes.push({ type: "math", content: match[9].trim(), display: false });
     } else if (match[10]) {
+      nodes.push({ type: "image", alt: match[11], src: match[12] });
+    } else if (match[13]) {
+      nodes.push({ type: "link", text: match[14], href: match[15] });
+    } else if (match[16]) {
+      nodes.push({ type: "bold", content: match[17] });
+    } else if (match[18]) {
+      nodes.push({ type: "italic", content: match[19] });
+    } else if (match[20]) {
+      nodes.push({ type: "link", text: match[20], href: match[20] });
+    } else if (match[21]) {
       nodes.push({ type: "br" });
     }
 
@@ -475,7 +650,16 @@ function parseInline(text: string): InlineNode[] {
     nodes.push({ type: "text", content: text.slice(lastIndex) });
   }
 
-  return nodes;
+  // Display math renders as its own block, so a \n that streamed in right
+  // next to it would otherwise add a stray blank line above/below.
+  return nodes.filter((node, i) => {
+    if (node.type !== "br") return true;
+    const prev = nodes[i - 1];
+    const next = nodes[i + 1];
+    const isDisplay = (n: InlineNode | undefined) =>
+      n?.type === "math" && n.display;
+    return !isDisplay(prev) && !isDisplay(next);
+  });
 }
 
 function InlineContent({ text }: { text: string }) {
@@ -496,6 +680,15 @@ function InlineContent({ text }: { text: string }) {
                 {node.content}
               </code>
             );
+          case "math":
+            return (
+              <Suspense
+                key={i}
+                fallback={<span className="font-mono text-[0.9em]">{node.content}</span>}
+              >
+                <Katex tex={node.content} display={node.display} />
+              </Suspense>
+            );
           case "bold":
             return (
               <strong key={i} className="font-bold">
@@ -504,6 +697,24 @@ function InlineContent({ text }: { text: string }) {
             );
           case "italic":
             return <em key={i}>{node.content}</em>;
+          case "image": {
+            // An embedded image in model output — e.g. the hosted URL the
+            // image_generation server tool hands back. Same scheme rules as
+            // links, plus inline base64 data: images; anything else drops to
+            // the alt text.
+            const src = node.src.trim();
+            if (!/^(https?:|data:image\/)/i.test(src)) {
+              return <span key={i}>{node.alt}</span>;
+            }
+            return (
+              <img
+                key={i}
+                src={src}
+                alt={node.alt}
+                className="my-2 block max-h-96 max-w-full rounded-md border border-line/60"
+              />
+            );
+          }
           case "link": {
             // Security: only http(s)/mailto links render as anchors; other
             // schemes (javascript:, data:) drop to plain text so a crafted

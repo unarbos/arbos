@@ -21,13 +21,15 @@ func (t ToolCall) ArgsOrEmpty() json.RawMessage {
 }
 
 // ContentType discriminates a ContentBlock. The set is closed and small on
-// purpose: text and inline image are the shapes a coding tool result (and, from
-// the multimodal phase, a message) needs.
+// purpose: text, inline image, and inline file (a document like a PDF the
+// provider parses natively) are the shapes a coding tool result (and, from the
+// multimodal phase, a message) needs.
 type ContentType string
 
 const (
 	BlockText  ContentType = "text"
 	BlockImage ContentType = "image"
+	BlockFile  ContentType = "file"
 )
 
 // ImageData is an inline, base64-encoded image.
@@ -36,15 +38,27 @@ type ImageData struct {
 	MimeType string `json:"mimeType"`
 }
 
+// FileData is an inline, base64-encoded document (e.g. a PDF). Providers that
+// accept native document input parse it themselves (text extraction and, for
+// scanned pages, OCR); the kernel never decodes it. Name labels the file on the
+// wire where the provider surfaces it (OpenAI's file input wants a filename).
+type FileData struct {
+	Data     string `json:"data"`
+	MimeType string `json:"mimeType"`
+	Name     string `json:"name,omitempty"`
+}
+
 // ContentBlock is one piece of multimodal content. Exactly one payload field is
-// set, selected by Type (Text for BlockText, Image for BlockImage). It is the
-// shared shape for non-text tool output today and multimodal message content
-// later, mirroring the text|image content union real providers expose. Tagged
-// for stable JSON round-trip through the event log and the provider wire.
+// set, selected by Type (Text for BlockText, Image for BlockImage, File for
+// BlockFile). It is the shared shape for non-text tool output today and
+// multimodal message content, mirroring the text|image|document content union
+// real providers expose. Tagged for stable JSON round-trip through the event
+// log and the provider wire.
 type ContentBlock struct {
 	Type  ContentType `json:"type"`
 	Text  string      `json:"text,omitempty"`
 	Image *ImageData  `json:"image,omitempty"`
+	File  *FileData   `json:"file,omitempty"`
 }
 
 // ToolResult is the outcome of dispatching a ToolCall.

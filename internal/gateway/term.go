@@ -196,7 +196,7 @@ func (s *Server) handleTermCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Cwd string `json:"cwd"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, jsonBodyMax)).Decode(&req)
 	cwd := s.Root
 	if req.Cwd != "" {
 		c := req.Cwd
@@ -227,11 +227,14 @@ func (s *Server) handleTermWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no such terminal", http.StatusNotFound)
 		return
 	}
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	c, err := websocket.Accept(w, r, s.wsAccept(r))
 	if err != nil {
 		return
 	}
 	defer c.Close(websocket.StatusInternalError, "gateway teardown")
+	// An idle shell (user reading output, long-running quiet command) must
+	// not be reaped by intermediaries; attach's read loop answers the pongs.
+	go keepAlive(r.Context(), c)
 	t.attach(r, c)
 	c.Close(websocket.StatusNormalClosure, "")
 }

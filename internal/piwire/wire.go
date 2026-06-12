@@ -25,6 +25,7 @@ import (
 	"github.com/unarbos/arbos/internal/outbox"
 	"github.com/unarbos/arbos/internal/plan"
 	"github.com/unarbos/arbos/internal/ports"
+	"github.com/unarbos/arbos/internal/settings"
 	"github.com/unarbos/arbos/internal/sqlite"
 	"github.com/unarbos/arbos/internal/tool"
 )
@@ -49,10 +50,40 @@ type HostConfig struct {
 type Host struct {
 	Engine  *engine.Engine
 	Cleanup func()
+	// Settings is the durable host preference file (the Settings tab's
+	// agent-behavior knobs, e.g. the subagent model). Nil when the agent
+	// config dir is unavailable or the file is unreadable — the host runs on
+	// defaults and the gateway's settings routes stay disabled.
+	Settings *settings.Store
 
-	store   ports.SessionStore
-	logger  *slog.Logger
-	approve bool
+	store    ports.SessionStore
+	logger   *slog.Logger
+	approve  bool
+	provider ports.LLMProvider
+	model    string
+	distill  string
+	models   *pi.ModelRegistry
+	cwd      string
+}
+
+// GuestEngine builds a chat-only engine — the host's provider and durable
+// store, but an empty toolset — for doors that carry untrusted principals
+// (e.g. a guest Telegram bot handed to a friend). A guest can converse but
+// can never touch files, shell, memory, or delegation; the door supplies the
+// system prompt that frames the guest's standing. Sessions land in the same
+// durable store, so they replay in history like any other conversation.
+func (h *Host) GuestEngine(systemPrompt string) *engine.Engine {
+	cfg := engine.Config{
+		Model:        h.model,
+		SystemPrompt: systemPrompt,
+		// Slash commands expand at projection here too — a chat-only door
+		// still speaks the host's prompt templates.
+		ExpandUser: pi.TemplateExpander(h.cwd, AgentConfigDir()),
+	}
+	policy := pi.CompactionPolicy{ContextWindow: h.models.Get(h.model).ContextWindow}
+	summ := pi.Summarizer{Provider: h.provider, Model: h.distill}
+	return engine.New(h.provider, tool.New(), h.store, sysClock{}, cfg,
+		engine.WithContextPolicy(policy, summ))
 }
 
 // Assemble builds the top-level pi engine with delegation tools, memory, MCP, and
@@ -85,6 +116,18 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		extraRT = append(extraRT, extReg)
 	}
 
+	// Durable host preferences (the Settings tab's agent knobs). A missing or
+	// unreadable file is non-fatal: the host runs on defaults, and the web
+	// door's settings surface stays disabled rather than blocking assembly.
+	var prefs *settings.Store
+	if agentDir != "" {
+		st, err := settings.Open(filepath.Join(agentDir, "settings.json"))
+		if err != nil && cfg.Logger != nil {
+			cfg.Logger.Warn("host settings unavailable", "err", err)
+		}
+		prefs = st
+	}
+
 	piOpts := pi.Options{
 		Provider:       cfg.Config.NewProvider(),
 		NewStore:       func() ports.SessionStore { return fake.NewStore() },
@@ -97,6 +140,11 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		Reasoning:      cfg.Config.Reasoning,
 		CacheRetention: core.CacheShort,
 		ExtraRuntimes:  extraRT,
+	}
+	if prefs != nil {
+		// A live hook, not a snapshot: each delegation reads the latest saved
+		// preference, so a Settings-tab change applies without reassembly.
+		piOpts.SubagentModel = prefs.SubagentModel
 	}
 	if cfg.Approve {
 		piOpts.Approval = pi.CodingApprovalPolicy{}
@@ -182,7 +230,12 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		}
 		mcpMgr.Close()
 	}
-	return &Host{Engine: eng, Cleanup: cleanup, store: cfg.Store, logger: cfg.Logger, approve: cfg.Approve}, nil
+	return &Host{
+		Engine: eng, Cleanup: cleanup, Settings: prefs,
+		store: cfg.Store, logger: cfg.Logger, approve: cfg.Approve,
+		provider: piOpts.Provider, model: piOpts.Model,
+		distill: piOpts.DistillerModel(), models: piOpts.Models, cwd: cwd,
+	}, nil
 }
 
 type sysClock struct{}

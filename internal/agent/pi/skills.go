@@ -86,7 +86,15 @@ func loadSkillFile(path string) (Skill, bool) {
 	}
 	name := fm["name"]
 	if name == "" {
-		name = filepath.Base(filepath.Dir(path)) // fall back to parent dir name
+		// A skill-root SKILL.md is named by its directory; a loose .md file
+		// directly under the scope root is named by its filename — otherwise
+		// every loose skill would collide on the scope dir's name ("skills").
+		base := filepath.Base(path)
+		if base == "SKILL.md" {
+			name = filepath.Base(filepath.Dir(path))
+		} else {
+			name = strings.TrimSuffix(base, ".md")
+		}
 	}
 	return Skill{
 		Name:                   name,

@@ -1,5 +1,6 @@
 # Binaries
 /arbos
+/forest
 /bin/
 *.exe
 
@@ -19,6 +20,10 @@
 # Throwaway experiments / demo scratch
 /scratch/
 /edit_demo.txt
+/dog.png
+/dog.svg
+/ibm-canvas.html
+/canvas/austin-population.html
 
 # Files attached to a chat (the composer's paperclip spools them here)
 .arbos/attachments/

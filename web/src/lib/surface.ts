@@ -12,7 +12,15 @@
 import type { Theme } from "./themes";
 import type { ToolResult } from "./types";
 
-export type SurfaceKind = "canvas" | "image" | "doc" | "code" | "prompt";
+export type SurfaceKind =
+  | "canvas"
+  | "image"
+  | "doc"
+  | "pdf"
+  | "code"
+  | "prompt"
+  | "dir"
+  | "screencast";
 
 export interface Surface {
   kind: SurfaceKind;
@@ -24,21 +32,39 @@ export interface Surface {
 
 // The kinds the agent's show tool can present. "prompt" (the slash-command
 // editor) is opened by the user from the / menu, never by a tool result.
-const KINDS = new Set<string>(["canvas", "image", "doc", "code"]);
+const KINDS = new Set<string>(["canvas", "image", "doc", "pdf", "code", "dir", "screencast"]);
 
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "avif"]);
 
 /**
  * The surface for a plain file reference (a clicked filename in the chat's
  * diff cards), kind inferred from the extension the way show's default
- * presentation would: markdown reads as a document, images render, anything
- * else is code.
+ * presentation would: markdown reads as a document, images render, PDFs open
+ * in the browser's native viewer, anything else is code.
  */
 export function fileSurface(path: string): Surface {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   const kind: SurfaceKind =
-    ext === "md" || ext === "markdown" ? "doc" : IMAGE_EXT.has(ext) ? "image" : "code";
+    ext === "md" || ext === "markdown"
+      ? "doc"
+      : ext === "pdf"
+        ? "pdf"
+        : IMAGE_EXT.has(ext)
+          ? "image"
+          : "code";
   return { kind, path };
+}
+
+/** The browser surface for a directory. "." is the workspace root. */
+export function dirSurface(path: string, title?: string): Surface {
+  return { kind: "dir", path, title };
+}
+
+/** A directory reference's child path ("." is the workspace root itself). */
+export function joinDirPath(dir: string, name: string): string {
+  if (dir === "." || dir === "") return name;
+  if (dir === "/") return "/" + name;
+  return dir + "/" + name;
 }
 
 /** The editor surface for one slash command's template file. A command not
@@ -66,13 +92,73 @@ export function detailsSurface(result: ToolResult): Surface | undefined {
   };
 }
 
+/**
+ * A UI-control command the agent issued (the `ui` tool): operate on the app's
+ * own layout — open, close, or focus side panels. Rides the same tool-result
+ * Details channel a surface does, executed on tool_finished.
+ */
+export type UIPanel =
+  | "chat"
+  | "terminal"
+  | "browser"
+  | "files"
+  | "activity"
+  | "history"
+  | "settings";
+
+export type UICommand =
+  | {
+      action: "close" | "focus";
+      /** "all" or a substring matching a panel's title or file path. */
+      target: string;
+    }
+  | {
+      action: "open";
+      panel: UIPanel;
+      /** Starting directory for a terminal panel's shell. */
+      cwd?: string;
+    };
+
+const UI_PANELS = new Set<string>([
+  "chat",
+  "terminal",
+  "browser",
+  "files",
+  "activity",
+  "history",
+  "settings",
+]);
+
+/** The UI-control command a `ui` tool recorded in its result's Details. */
+export function detailsUI(result: ToolResult): UICommand | undefined {
+  const d = result.Details;
+  if (typeof d !== "object" || d === null || !("ui" in d)) return undefined;
+  const u = (d as { ui?: unknown }).ui;
+  if (typeof u !== "object" || u === null) return undefined;
+  const { action, target, panel, cwd } = u as Record<string, unknown>;
+  if (action === "open") {
+    if (typeof panel !== "string" || !UI_PANELS.has(panel)) return undefined;
+    return {
+      action,
+      panel: panel as UIPanel,
+      cwd: typeof cwd === "string" && cwd ? cwd : undefined,
+    };
+  }
+  if ((action !== "close" && action !== "focus") || typeof target !== "string" || !target) {
+    return undefined;
+  }
+  return { action, target };
+}
+
 /** URL serving the file raw (iframe src, img src, open-in-browser). */
 export function rawUrl(path: string): string {
   return "/raw/" + path.split("/").map(encodeURIComponent).join("/");
 }
 
 export function surfaceTitle(s: Surface): string {
-  return s.title || s.path.split("/").pop() || s.path;
+  if (s.title) return s.title;
+  if (s.kind === "dir" && (s.path === "." || s.path === "")) return "Files";
+  return s.path.split("/").pop() || s.path;
 }
 
 /* ------------------------------------------------------------------ */

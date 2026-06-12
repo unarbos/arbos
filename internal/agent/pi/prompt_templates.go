@@ -1,11 +1,14 @@
 package pi
 
 import (
+	"embed"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Prompt templates (slash commands), ported from pi's prompt-templates.ts. A
@@ -14,6 +17,33 @@ import (
 // body with argument substitution before it becomes a turn.
 
 const projectPromptsDir = ".arbos/prompts"
+
+// The default command set ships inside the binary so a fresh deployment has a
+// working `/` menu with no project or user prompt files on disk. Built-ins sit
+// at the bottom of the precedence order (project > user > built-in): dropping
+// a same-named file in either scope overrides the shipped version.
+//
+//go:embed prompts/*.md
+var builtinPromptsFS embed.FS
+
+var builtinTemplates = sync.OnceValue(func() []PromptTemplate {
+	entries, err := fs.ReadDir(builtinPromptsFS, "prompts")
+	if err != nil {
+		return nil
+	}
+	var out []PromptTemplate
+	for _, e := range entries {
+		raw, err := fs.ReadFile(builtinPromptsFS, "prompts/"+e.Name())
+		if err != nil {
+			continue
+		}
+		// Path stays empty: there is no file to open, and the popup's edit
+		// affordance then falls through to its create flow, which writes a
+		// project-scope override — exactly how a built-in gets customized.
+		out = append(out, parseTemplate(e.Name(), string(raw), ""))
+	}
+	return out
+})
 
 // PromptTemplate is a loaded slash-command template.
 type PromptTemplate struct {
@@ -26,25 +56,30 @@ type PromptTemplate struct {
 	Path string
 }
 
-// LoadPromptTemplates loads templates from the project scope (cwd/.arbos/prompts)
-// and the user scope (agentDir/prompts). A name present in both scopes resolves
-// to the project's version — the repo's conventions override personal defaults,
-// matching how context files and skills already layer — and appears once in the
-// listing (names compare case-insensitively, same as expansion).
+// LoadPromptTemplates loads templates from the project scope (cwd/.arbos/prompts),
+// the user scope (agentDir/prompts), and the built-in set shipped in the binary,
+// in that precedence order. A name present in more than one scope resolves to
+// the highest scope's version — the repo's conventions override personal
+// defaults, which override what ships — and appears once in the listing (names
+// compare case-insensitively, same as expansion).
 func LoadPromptTemplates(cwd, agentDir string) []PromptTemplate {
 	out := loadTemplatesFromDir(filepath.Join(cwd, projectPromptsDir))
-	if agentDir == "" {
-		return out
-	}
 	seen := make(map[string]bool, len(out))
 	for _, t := range out {
 		seen[strings.ToLower(t.Name)] = true
 	}
-	for _, t := range loadTemplatesFromDir(filepath.Join(agentDir, "prompts")) {
-		if !seen[strings.ToLower(t.Name)] {
-			out = append(out, t)
+	add := func(templates []PromptTemplate) {
+		for _, t := range templates {
+			if !seen[strings.ToLower(t.Name)] {
+				seen[strings.ToLower(t.Name)] = true
+				out = append(out, t)
+			}
 		}
 	}
+	if agentDir != "" {
+		add(loadTemplatesFromDir(filepath.Join(agentDir, "prompts")))
+	}
+	add(builtinTemplates())
 	return out
 }
 
@@ -62,25 +97,32 @@ func loadTemplatesFromDir(dir string) []PromptTemplate {
 		if err != nil {
 			continue
 		}
-		fm, body := splitFrontmatter(string(raw))
-		desc := fm["description"]
-		if desc == "" {
-			if first := firstNonEmptyLine(body); first != "" {
-				desc = first
-				if len(first) > 60 {
-					desc = first[:60] + "..."
-				}
-			}
-		}
-		out = append(out, PromptTemplate{
-			Name:         strings.TrimSuffix(e.Name(), ".md"),
-			Description:  desc,
-			ArgumentHint: fm["argument-hint"],
-			Content:      body,
-			Path:         filepath.Join(dir, e.Name()),
-		})
+		out = append(out, parseTemplate(e.Name(), string(raw), filepath.Join(dir, e.Name())))
 	}
 	return out
+}
+
+// parseTemplate turns one `.md` file into a template: name from the filename,
+// description from frontmatter (or the body's first line, truncated), body
+// with frontmatter stripped.
+func parseTemplate(filename, raw, path string) PromptTemplate {
+	fm, body := splitFrontmatter(raw)
+	desc := fm["description"]
+	if desc == "" {
+		if first := firstNonEmptyLine(body); first != "" {
+			desc = first
+			if len(first) > 60 {
+				desc = first[:60] + "..."
+			}
+		}
+	}
+	return PromptTemplate{
+		Name:         strings.TrimSuffix(filename, ".md"),
+		Description:  desc,
+		ArgumentHint: fm["argument-hint"],
+		Content:      body,
+		Path:         path,
+	}
 }
 
 // TemplateExpander returns an expand function for the control seam. Templates

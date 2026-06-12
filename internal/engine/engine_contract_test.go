@@ -55,6 +55,7 @@ func TestEventLogFullFidelity(t *testing.T) {
 
 			wantKinds := []core.EventKind{
 				core.EventUserMessage,
+				core.EventConfig,           // the turn's model/prompt/toolset snapshot
 				core.EventAssistantMessage, // requests the tool
 				core.EventToolResult,
 				core.EventAssistantMessage, // final answer
@@ -90,17 +91,20 @@ func TestEventLogFullFidelity(t *testing.T) {
 			if mp, ok := events[0].Payload.(core.MessagePayload); !ok || mp.Message.Content != "please use the tool" {
 				t.Fatalf("event 0 payload: %#v", events[0].Payload)
 			}
-			if mp, ok := events[1].Payload.(core.MessagePayload); !ok || len(mp.Message.ToolCalls) != 1 || mp.Message.ToolCalls[0].Name != "ls" {
-				t.Fatalf("event 1 must carry the ls tool call: %#v", events[1].Payload)
+			if cp, ok := events[1].Payload.(core.ConfigPayload); !ok || cp.Model == "" {
+				t.Fatalf("event 1 must snapshot the turn config with its model: %#v", events[1].Payload)
 			}
-			if tp, ok := events[2].Payload.(core.ToolResultPayload); !ok || tp.Result.Content != ".\n" {
-				t.Fatalf("event 2 tool result: %#v", events[2].Payload)
+			if mp, ok := events[2].Payload.(core.MessagePayload); !ok || len(mp.Message.ToolCalls) != 1 || mp.Message.ToolCalls[0].Name != "ls" {
+				t.Fatalf("event 2 must carry the ls tool call: %#v", events[2].Payload)
 			}
-			if mp, ok := events[3].Payload.(core.MessagePayload); !ok || mp.Message.Content != "This is a deterministic fake response." {
-				t.Fatalf("event 3 final answer: %#v", events[3].Payload)
+			if tp, ok := events[3].Payload.(core.ToolResultPayload); !ok || tp.Result.Content != ".\n" {
+				t.Fatalf("event 3 tool result: %#v", events[3].Payload)
 			}
-			if up, ok := events[4].Payload.(core.UsagePayload); !ok || up.Usage.TotalTokens != 42 {
-				t.Fatalf("event 4 usage: %#v", events[4].Payload)
+			if mp, ok := events[4].Payload.(core.MessagePayload); !ok || mp.Message.Content != "This is a deterministic fake response." {
+				t.Fatalf("event 4 final answer: %#v", events[4].Payload)
+			}
+			if up, ok := events[5].Payload.(core.UsagePayload); !ok || up.Usage.TotalTokens != 42 {
+				t.Fatalf("event 5 usage: %#v", events[5].Payload)
 			}
 		})
 	}

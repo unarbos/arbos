@@ -127,6 +127,7 @@ func TestEventLogIsTheSourceOfTruth(t *testing.T) {
 
 	wantKinds := []core.EventKind{
 		core.EventUserMessage,
+		core.EventConfig,           // the turn's model/prompt/toolset snapshot
 		core.EventAssistantMessage, // requests the tool
 		core.EventToolResult,
 		core.EventAssistantMessage, // final answer
@@ -148,9 +149,9 @@ func TestEventLogIsTheSourceOfTruth(t *testing.T) {
 	}
 
 	// Tool result payload content must round-trip.
-	tr, ok := events[2].Payload.(core.ToolResultPayload)
+	tr, ok := events[3].Payload.(core.ToolResultPayload)
 	if !ok || tr.Result.Content != ".\n" {
-		t.Fatalf("tool result payload mismatch: %#v", events[2].Payload)
+		t.Fatalf("tool result payload mismatch: %#v", events[3].Payload)
 	}
 }
 

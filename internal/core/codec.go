@@ -36,6 +36,8 @@ func DecodePayload(kind EventKind, data []byte) (EventPayload, error) {
 		return unmarshalPayload[ContextPayload](kind, data)
 	case EventInterrupted:
 		return unmarshalPayload[InterruptPayload](kind, data)
+	case EventConfig:
+		return unmarshalPayload[ConfigPayload](kind, data)
 	}
 	// Unknown discriminator: a newer log read by an older binary. The caller
 	// (loader) decides whether to skip or fail; we do not guess. See ADR-0010.

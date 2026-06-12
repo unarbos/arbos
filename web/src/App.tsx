@@ -1,12 +1,40 @@
-import { useCallback, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useRef, useState } from "react";
 
-import { ActivityPanel } from "./components/ActivityPanel";
+import { ActivityView } from "./components/ActivityView";
 import { ChatTab } from "./components/ChatTab";
+import { HistoryView } from "./components/HistoryView";
 import { RunView, type RunRef } from "./components/RunView";
-import { SurfaceView } from "./components/SurfaceView";
-import { TerminalView } from "./components/TerminalView";
-import { GlobalActions, TabStrip, type TabInfo } from "./components/TabStrip";
-import { closeTerminal, createTerminal, type SessionSummary } from "./lib/api";
+
+// Code-split the heavy companion-tab bodies out of the main bundle: xterm
+// (TerminalView), the surface viewers (SurfaceView), and the settings panel
+// load on first use instead of on every cold start. Chat is the start page,
+// so its path stays eager.
+const MessengerView = lazy(() =>
+  import("./components/MessengerView").then((m) => ({ default: m.MessengerView })),
+);
+const SettingsView = lazy(() =>
+  import("./components/SettingsView").then((m) => ({ default: m.SettingsView })),
+);
+const SurfaceView = lazy(() =>
+  import("./components/SurfaceView").then((m) => ({ default: m.SurfaceView })),
+);
+const TerminalView = lazy(() =>
+  import("./components/TerminalView").then((m) => ({ default: m.TerminalView })),
+);
+import {
+  GlobalActions,
+  SettingsButton,
+  TabStrip,
+  type NewTabKind,
+  type TabInfo,
+} from "./components/TabStrip";
+import {
+  closeTerminal,
+  createTerminal,
+  createBrowserTab,
+  listBrowserTabs,
+  type SessionSummary,
+} from "./lib/api";
 import {
   computePlaces,
   panesOf,
@@ -17,8 +45,10 @@ import {
   type LayoutNode,
   type SplitDir,
 } from "./lib/layout";
-import { surfaceTitle, type Surface } from "./lib/surface";
+import { dirSurface, surfaceTitle, type Surface, type UICommand } from "./lib/surface";
 import { sameTerm, termTitle, type TermRef } from "./lib/term";
+import { errMsg, toastError } from "./lib/toast";
+import { Toasts } from "./components/Toasts";
 
 interface TabState extends TabInfo {
   /** Session to resume (from history); null opens fresh. */
@@ -35,6 +65,9 @@ interface TabState extends TabInfo {
   run?: RunRef;
   /** kind "terminal": the job or shell this tab is a window onto. */
   term?: TermRef;
+  /** kind "messenger": the connected bot this tab is the chat for
+   *  (undefined until its token is entered). */
+  messengerBot?: number;
 }
 
 /**
@@ -118,6 +151,45 @@ function termTab(key: number, pane: number, term: TermRef): TabState {
   };
 }
 
+function activityTab(key: number, pane: number): TabState {
+  return {
+    key,
+    title: "Agent activity",
+    busy: false,
+    kind: "activity",
+    resumeId: null,
+    sessionId: null,
+    titlePinned: false,
+    pane,
+  };
+}
+
+function historyTab(key: number, pane: number): TabState {
+  return {
+    key,
+    title: "History",
+    busy: false,
+    kind: "history",
+    resumeId: null,
+    sessionId: null,
+    titlePinned: false,
+    pane,
+  };
+}
+
+function settingsTab(key: number, pane: number): TabState {
+  return {
+    key,
+    title: "Settings",
+    busy: false,
+    kind: "settings",
+    resumeId: null,
+    sessionId: null,
+    titlePinned: false,
+    pane,
+  };
+}
+
 /**
  * Re-establish the layout invariants after any mutation: a pane left with no
  * tabs collapses out of the tree (its sibling inherits the space), and focus
@@ -167,10 +239,9 @@ export default function App() {
     focusedPane: 1,
     focusTick: 0,
   });
-  const [activityOpen, setActivityOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  // Key of the tab being dragged; live-reorders (across panes too) as it
-  // crosses neighbors' midpoints, so drop is just cleanup.
+  // Key of the tab being dragged; the strip paints a drop line at the hovered
+  // insertion point and the actual move (across panes too) commits on drop.
   const dragTab = useRef<number | null>(null);
 
   const patchTab = useCallback((key: number, patch: Partial<TabState>) => {
@@ -428,8 +499,129 @@ export default function App() {
           });
         });
       })
-      .catch(() => {});
+      .catch((e: unknown) => toastError(`New terminal failed: ${errMsg(e)}`));
   }, []);
+
+  /**
+   * Open (or focus) a singleton tab in the focused pane: a place you return
+   * to, not one you accumulate. An already-open match is raised and given
+   * focus; otherwise a fresh one opens in the focused pane and takes the
+   * keyboard. This is the user-initiated counterpart to openAside, and the
+   * shared mechanic behind the files browser, activity, and history tabs.
+   */
+  const openSingleton = useCallback(
+    (matches: (t: TabState) => boolean, make: (key: number, pane: number) => TabState) => {
+      setLayout((s) => {
+        const existing = s.tabs.find(matches);
+        if (existing) {
+          return {
+            ...s,
+            paneActive: { ...s.paneActive, [existing.pane]: existing.key },
+            focusedPane: existing.pane,
+            focusTick: s.focusTick + 1,
+          };
+        }
+        const into = s.focusedPane;
+        const tab = make(nextKey.current++, into);
+        return normalize({
+          ...s,
+          tabs: [...s.tabs, tab],
+          paneActive: { ...s.paneActive, [into]: tab.key },
+          focusTick: s.focusTick + 1,
+        });
+      });
+    },
+    [],
+  );
+
+  /**
+   * The file browser, user-initiated: one tab browsing the workspace root.
+   * An already-open browser is focused, wherever its navigation has taken
+   * it — "the files" is a place you return to, not a tab you accumulate.
+   * (More browsers can still exist: the agent's show on a directory opens
+   * its own, deduped by path like any surface.)
+   */
+  const openFilesTab = useCallback(
+    () =>
+      openSingleton(
+        (t) => t.kind === "surface" && t.surface?.kind === "dir",
+        (key, pane) => surfaceTab(key, pane, dirSurface(".")),
+      ),
+    [openSingleton],
+  );
+
+  /**
+   * The live browser, user-initiated: focus the active tab's panel, creating
+   * a fresh browser tab when none are open. Each browser tab has its own
+   * stream and its own panel (deduped per stream), so this and the agent's
+   * auto-opened panels are windows onto the same shared Chrome's tab table.
+   */
+  const openBrowserTab = useCallback(() => {
+    listBrowserTabs()
+      .then(async (tabs) => {
+        const target =
+          tabs.find((t) => t.active) ?? tabs[0] ?? (await createBrowserTab());
+        openSingleton(
+          (t) => t.kind === "surface" && t.surface?.path === target.stream,
+          (key, pane) =>
+            surfaceTab(key, pane, {
+              kind: "screencast",
+              path: target.stream,
+              title: `Browser ${target.id}`,
+            }),
+        );
+      })
+      .catch((e: unknown) =>
+        // A dead endpoint or downed Chrome must not be a silent no-op.
+        toastError(`Browser failed to open: ${errMsg(e)}`),
+      );
+  }, [openSingleton]);
+
+  /** The agent activity view as a singleton tab — one place to see every
+   *  standing obligation and recent run across all chats. */
+  const openActivityTab = useCallback(
+    () => openSingleton((t) => t.kind === "activity", activityTab),
+    [openSingleton],
+  );
+
+  /** Session history as a singleton tab — the searchable list of past
+   *  agents, picking one opens (or focuses) its chat. */
+  const openHistoryTab = useCallback(
+    () => openSingleton((t) => t.kind === "history", historyTab),
+    [openSingleton],
+  );
+
+  /** A fresh messenger tab — each one is its own Telegram connector: enter
+   *  a bot token (or reattach to a connected bot) and the tab becomes that
+   *  bot's conversation. Open as many as you have bots. */
+  const newMessengerTab = useCallback((pane?: number) => {
+    setLayout((s) => {
+      const into = pane ?? s.focusedPane;
+      const tab: TabState = {
+        key: nextKey.current++,
+        title: "Messenger",
+        busy: false,
+        kind: "messenger",
+        resumeId: null,
+        sessionId: null,
+        titlePinned: false,
+        pane: into,
+      };
+      return normalize({
+        ...s,
+        tabs: [...s.tabs, tab],
+        paneActive: { ...s.paneActive, [into]: tab.key },
+        focusedPane: into,
+        focusTick: s.focusTick + 1,
+      });
+    });
+  }, []);
+
+  /** The settings panel as a singleton tab, opened from the top-left gear. */
+  const openSettingsTab = useCallback(
+    () => openSingleton((t) => t.kind === "settings", settingsTab),
+    [openSingleton],
+  );
 
   /** A job terminal's "shell here": continue the job's work by hand, in its
    * directory, in a live shell beside it. */
@@ -439,14 +631,138 @@ export default function App() {
         .then((info) =>
           openTerminal(fromKey, { kind: "shell", id: info.id, cwd: info.cwd }),
         )
-        .catch(() => {});
+        .catch((e: unknown) => toastError(`New terminal failed: ${errMsg(e)}`));
     },
     [openTerminal],
+  );
+
+  /**
+   * Execute a UI command from the agent's `ui` tool. Open spawns a panel:
+   * a terminal (fresh shell beside the chat that asked — the companion
+   * mechanic, the chat keeps the keyboard) or one of the singleton views.
+   * Close targets companion tabs only (never a chat — closing the
+   * conversation out from under the user would be hostile); focus may raise
+   * any tab. "all" closes every companion panel. Matching is a
+   * case-insensitive substring of a tab's title or its surface path, so the
+   * agent can name a panel the way it sees it ("Browser", a filename).
+   */
+  const controlUI = useCallback(
+    (fromKey: number, cmd: UICommand) => {
+      if (cmd.action === "open") {
+        switch (cmd.panel) {
+          case "chat":
+            newTab();
+            return;
+          case "terminal":
+            openShellBeside(fromKey, cmd.cwd);
+            return;
+          case "browser":
+            openBrowserTab();
+            return;
+          case "files":
+            openFilesTab();
+            return;
+          case "activity":
+            openActivityTab();
+            return;
+          case "history":
+            openHistoryTab();
+            return;
+          case "settings":
+            openSettingsTab();
+            return;
+          default: {
+            const exhaustive: never = cmd.panel;
+            return exhaustive;
+          }
+        }
+      }
+      const q = cmd.target.toLowerCase();
+      const hit = (t: TabState) =>
+        (t.title ?? "").toLowerCase().includes(q) ||
+        (t.surface?.path ?? "").toLowerCase().includes(q);
+      if (cmd.action === "close") {
+        // Companion tabs only — never a conversation. A chat tab's kind is
+        // UNDEFINED (freshTab sets no kind; "chat" is the default), so the
+        // guard must treat missing-kind as chat too.
+        const targets = layout.tabs.filter(
+          (t) => t.kind !== undefined && t.kind !== "chat" && (cmd.target === "all" || hit(t)),
+        );
+        targets.forEach((t) => closeTab(t.key));
+        return;
+      }
+      const focusTarget =
+        cmd.target === "all" ? undefined : layout.tabs.find(hit);
+      if (focusTarget) activateTab(focusTarget.key);
+    },
+    [
+      layout.tabs,
+      closeTab,
+      activateTab,
+      newTab,
+      openShellBeside,
+      openBrowserTab,
+      openFilesTab,
+      openActivityTab,
+      openHistoryTab,
+      openSettingsTab,
+    ],
   );
 
   const focusPane = useCallback((pane: number) => {
     setLayout((s) => (s.focusedPane === pane ? s : { ...s, focusedPane: pane }));
   }, []);
+
+  /**
+   * The strip's + menu picked a tab type. Non-chat kinds open in the focused
+   * pane, so focus the strip's pane first — the queued updates apply in order.
+   */
+  const newTabOfKind = useCallback(
+    (kind: NewTabKind, pane: number) => {
+      switch (kind) {
+        case "chat":
+          newTab(undefined, pane);
+          break;
+        case "terminal":
+          focusPane(pane);
+          newShellTab();
+          break;
+        case "files":
+          focusPane(pane);
+          openFilesTab();
+          break;
+        case "browser":
+          focusPane(pane);
+          openBrowserTab();
+          break;
+        case "history":
+          focusPane(pane);
+          openHistoryTab();
+          break;
+        case "activity":
+          focusPane(pane);
+          openActivityTab();
+          break;
+        case "messenger":
+          newMessengerTab(pane);
+          break;
+        default: {
+          const exhaustive: never = kind;
+          throw new Error(`unknown tab kind: ${String(exhaustive)}`);
+        }
+      }
+    },
+    [
+      newTab,
+      focusPane,
+      newShellTab,
+      openFilesTab,
+      openBrowserTab,
+      openHistoryTab,
+      openActivityTab,
+      newMessengerTab,
+    ],
+  );
 
   const openSession = useCallback(
     (summary: SessionSummary) => {
@@ -465,9 +781,10 @@ export default function App() {
     onStart: (key: number) => {
       dragTab.current = key;
     },
-    onOverTab: (key: number, before: boolean) => {
+    onDropTab: (key: number, before: boolean) => {
       const from = dragTab.current;
       if (from !== null && from !== key) moveTab(from, key, before);
+      dragTab.current = null;
     },
     onEnd: () => {
       dragTab.current = null;
@@ -485,9 +802,13 @@ export default function App() {
   const activeKey = new Map(
     places.panes.map((p) => [p.pane, activeKeyIn(tabs, p.pane, paneActive[p.pane])]),
   );
-  // Global actions live on whichever strip touches the window's top-right.
+  // Global actions live on whichever strip touches the window's top-right;
+  // the settings gear on whichever touches the top-left.
   const actionsPane = places.panes.reduce((best, p) =>
     p.rect.y < 0.001 && p.rect.x + p.rect.w > best.rect.x + best.rect.w ? p : best,
+  ).pane;
+  const leadingPane = places.panes.reduce((best, p) =>
+    p.rect.y < 0.001 && p.rect.x < best.rect.x ? p : best,
   ).pane;
 
   return (
@@ -510,18 +831,15 @@ export default function App() {
             onActivate={activateTab}
             onClose={closeTab}
             onRename={renameTab}
-            onNew={() => newTab(undefined, pane)}
+            onNew={(kind) => newTabOfKind(kind, pane)}
             drag={dragHandlers(pane)}
-            actions={
-              pane === actionsPane ? (
-                <GlobalActions
-                  onOpenSession={openSession}
-                  activityOpen={activityOpen}
-                  onToggleActivity={() => setActivityOpen((v) => !v)}
-                  onSplit={splitFocused}
-                  onNewTerminal={newShellTab}
-                />
+            leading={
+              pane === leadingPane ? (
+                <SettingsButton onOpen={openSettingsTab} />
               ) : undefined
+            }
+            actions={
+              pane === actionsPane ? <GlobalActions onSplit={splitFocused} /> : undefined
             }
           />
         </div>
@@ -550,8 +868,22 @@ export default function App() {
             }
             onPointerDownCapture={() => focusPane(tab.pane)}
           >
+            <Suspense
+              fallback={<div className="px-4 py-4 text-faint">Loading…</div>}
+            >
             {tab.kind === "surface" && tab.surface ? (
-              <SurfaceView surface={tab.surface} active={visible} />
+              <SurfaceView
+                surface={tab.surface}
+                active={visible}
+                onNavigate={(s) =>
+                  patchTab(tab.key, {
+                    surface: s,
+                    ...(tab.titlePinned ? {} : { title: surfaceTitle(s) }),
+                  })
+                }
+                onOpenFile={(s) => openSurface(tab.key, s)}
+                onCloseSelf={() => closeTab(tab.key)}
+              />
             ) : tab.kind === "terminal" && tab.term ? (
               <TerminalView
                 term={tab.term}
@@ -565,6 +897,50 @@ export default function App() {
                 active={visible}
                 onBusy={(busy) => patchTab(tab.key, { busy })}
               />
+            ) : tab.kind === "activity" ? (
+              <ActivityView
+                onOpenChat={(chat) =>
+                  openSession({ id: chat, title: "", updated_at: 0 })
+                }
+                onBusy={(busy) => patchTab(tab.key, { busy })}
+              />
+            ) : tab.kind === "history" ? (
+              <HistoryView active={visible} onOpenSession={openSession} />
+            ) : tab.kind === "messenger" ? (
+              <MessengerView
+                botId={tab.messengerBot}
+                onBot={(id, title) =>
+                  patchTab(tab.key, {
+                    messengerBot: id,
+                    ...(tab.titlePinned ? {} : { title: title ?? "Messenger" }),
+                  })
+                }
+                renderChat={(sessionId) => (
+                  // The bridged session rendered as a REAL agent chat — the
+                  // same component, surfaces, runs, and composer as any chat
+                  // tab; the bridge mirrors this session to Telegram.
+                  <ChatTab
+                    key={sessionId}
+                    active={visible}
+                    focused={visible && tab.pane === focusedPane}
+                    focusTick={focusTick}
+                    resumeId={sessionId}
+                    handle={{
+                      onBusy: (busy) => patchTab(tab.key, { busy }),
+                      // The tab is named for its connector, not the first
+                      // prompt — @bot is the identity that matters here.
+                      onTitle: () => {},
+                      onSession: (id) => patchTab(tab.key, { sessionId: id }),
+                      onOpenSurface: (surface) => openSurface(tab.key, surface),
+                      onControlUI: (cmd) => controlUI(tab.key, cmd),
+                      onOpenRun: (run) => openRun(tab.key, run),
+                      onOpenTerminal: (term) => openTerminal(tab.key, term),
+                    }}
+                  />
+                )}
+              />
+            ) : tab.kind === "settings" ? (
+              <SettingsView />
             ) : (
               <ChatTab
                 active={visible}
@@ -584,24 +960,17 @@ export default function App() {
                     })),
                   onSession: (id) => patchTab(tab.key, { sessionId: id }),
                   onOpenSurface: (surface) => openSurface(tab.key, surface),
+                  onControlUI: (cmd) => controlUI(tab.key, cmd),
                   onOpenRun: (run) => openRun(tab.key, run),
                   onOpenTerminal: (term) => openTerminal(tab.key, term),
                 }}
               />
             )}
+            </Suspense>
           </div>
         );
       })}
-
-      {activityOpen && (
-        <ActivityPanel
-          onOpenChat={(chat) => {
-            setActivityOpen(false);
-            openSession({ id: chat, title: "", updated_at: 0 });
-          }}
-          onClose={() => setActivityOpen(false)}
-        />
-      )}
+      <Toasts />
     </div>
   );
 }

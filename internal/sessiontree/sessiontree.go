@@ -32,10 +32,16 @@ func Fork(ctx context.Context, store ports.SessionStore, source, newID core.Sess
 		return err
 	}
 	if err := store.CreateSession(ctx, core.Session{
-		ID:        newID,
-		ParentID:  source,
-		Status:    core.SessionActive,
-		Model:     src.Model,
+		ID:       newID,
+		ParentID: source,
+		Status:   core.SessionActive,
+		Model:    src.Model,
+		// The provider toggles travel with the conversation like the model:
+		// a rewind-and-edit fork that silently disarmed web search would
+		// contradict the toggle the user still sees armed.
+		WebSearch: src.WebSearch,
+		WebFetch:  src.WebFetch,
+		ImageGen:  src.ImageGen,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {

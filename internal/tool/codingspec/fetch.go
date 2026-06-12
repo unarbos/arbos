@@ -17,7 +17,12 @@ const (
 	defaultFetchMaxBody = 256 * 1024
 )
 
-var htmlTagRe = regexp.MustCompile(`(?s)<[^>]*>`)
+var (
+	htmlTagRe = regexp.MustCompile(`(?s)<[^>]*>`)
+	// errNoVault is what auth requests hit when no host wired a vault (CLI
+	// one-shots, tests). Named so the message stays in one place.
+	errNoVault = fmt.Errorf("no managed-secret vault is available in this arbos")
+)
 
 // FetchArgs are the arguments to fetch.
 type FetchArgs struct {
@@ -25,6 +30,7 @@ type FetchArgs struct {
 	Method  string        `json:"method,omitempty" desc:"HTTP method (GET or POST). Default GET."`
 	Body    string        `json:"body,omitempty" desc:"Request body for POST."`
 	Headers []fetchHeader `json:"headers,omitempty" desc:"Optional request headers."`
+	Auth    string        `json:"auth,omitempty" desc:"Name of a managed secret to attach as credentials (Authorization: Bearer). The destination host must be on that secret's allowlist; HTTPS only. You never see the value."`
 }
 
 type fetchHeader struct {
@@ -34,7 +40,7 @@ type fetchHeader struct {
 
 func fetchSpec() tool.Spec {
 	return tool.NewSpec("fetch",
-		"Fetch a URL and return the response body as text. Responses are truncated to 256KB. HTML tags are stripped for text/html responses.",
+		"Fetch a URL and return the response body as text. Responses are truncated to 256KB. HTML tags are stripped for text/html responses. To call an API that needs credentials, pass the managed secret's name as `auth` — the value is attached at the boundary (host-allowlisted, HTTPS only) and never enters your context.",
 		true,
 		func(ctx context.Context, a FetchArgs) (string, error) {
 			if strings.TrimSpace(a.URL) == "" {
@@ -61,6 +67,16 @@ func fetchSpec() tool.Spec {
 			}
 			if method == http.MethodPost && req.Header.Get("Content-Type") == "" {
 				req.Header.Set("Content-Type", "application/json")
+			}
+			if name := strings.TrimSpace(a.Auth); name != "" {
+				// Broker-attached credentials ride only TLS: a plaintext URL
+				// would hand the value to every hop on the path.
+				if req.URL.Scheme != "https" {
+					return "", fmt.Errorf("fetch: auth %q requires an https URL", name)
+				}
+				if err := applySecret(ctx, name, req); err != nil {
+					return "", fmt.Errorf("fetch: %w", err)
+				}
 			}
 
 			cctx, cancel := context.WithTimeout(ctx, defaultFetchTimeout)

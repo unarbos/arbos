@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2, Orbit } from "lucide-react";
 
 import { TranscriptList } from "./ChatView";
-import { fetchActivity, fetchReplay } from "@/lib/api";
+import { fetchReplay } from "@/lib/api";
+import { subscribeActivity } from "@/lib/activity";
 import { replayToItems, type TranscriptItem } from "@/lib/transcript";
+import { useDocumentVisible } from "@/lib/useDocumentVisible";
 
 const REPLAY_POLL_MS = 2000;
-const STATUS_POLL_MS = 5000;
 
 /** A machine-spawned run (scheduled firing or delegated sub-agent) opened in
  *  its own tab: a typed reference, never content — the view fetches live. */
@@ -41,27 +42,18 @@ export function RunView({
   const onBusyRef = useRef(onBusy);
   onBusyRef.current = onBusy;
 
-  // Status: is the run still live? Polled even while the tab is hidden (it's
-  // one cheap request) so the spinner on the tab itself tells the truth. A
-  // run that has aged out of the activity window is finished.
-  useEffect(() => {
-    let stop = false;
-    const check = () => {
-      fetchActivity()
-        .then((a) => {
-          if (stop) return;
-          const me = a.runs.find((r) => r.id === run.session);
-          setRunning(me?.active ?? false);
-        })
-        .catch(() => {});
-    };
-    check();
-    const id = window.setInterval(check, STATUS_POLL_MS);
-    return () => {
-      stop = true;
-      window.clearInterval(id);
-    };
-  }, [run.session]);
+  // Status: is the run still live? Rides the shared activity poller (one
+  // /api/activity interval per window, even with many run tabs open) so the
+  // spinner on the tab itself stays truthful while the tab is hidden. A run
+  // that has aged out of the activity window is finished.
+  useEffect(
+    () =>
+      subscribeActivity((a) => {
+        const me = a.runs.find((r) => r.id === run.session);
+        setRunning(me?.active ?? false);
+      }),
+    [run.session],
+  );
 
   useEffect(() => {
     onBusyRef.current?.(running);
@@ -69,9 +61,11 @@ export function RunView({
 
   // Transcript: fetched when the tab shows, re-fetched while the run is live.
   // When `running` flips false this effect re-runs once more — the final load
-  // catches the run's last events, then the interval stops.
+  // catches the run's last events, then the interval stops. Pauses with the
+  // window hidden; the visibility flip re-runs the effect, refreshing at once.
+  const docVisible = useDocumentVisible();
   useEffect(() => {
-    if (!active) return;
+    if (!active || !docVisible) return;
     let stop = false;
     const load = () => {
       fetchReplay(run.session)
@@ -87,7 +81,7 @@ export function RunView({
       stop = true;
       window.clearInterval(id);
     };
-  }, [active, running, run.session]);
+  }, [active, docVisible, running, run.session]);
 
   // Follow the tail while pinned to the bottom (a scroll up unpins).
   useEffect(() => {
@@ -129,7 +123,7 @@ export function RunView({
                 : "No transcript."}
           </div>
         ) : (
-          <TranscriptList items={items} />
+          <TranscriptList items={items} working={running} />
         )}
       </div>
     </div>

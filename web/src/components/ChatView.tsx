@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   AppWindow,
   Bell,
@@ -9,23 +9,24 @@ import {
   CircleHelp,
   Clock,
   FileText,
+  Globe,
   ListTodo,
   Loader2,
   Maximize2,
-  Orbit,
   Pencil,
   Repeat,
   SquareTerminal,
   X,
 } from "lucide-react";
 
-import { Highlight, Markdown } from "./Markdown";
+import { CopyButton, Highlight, Markdown } from "./Markdown";
 import { PartImages } from "./PartImages";
+import { fetchJobTail, HttpError } from "@/lib/api";
 import { argsPreview } from "@/lib/format";
-import { detailsSurface, fileSurface, type Surface } from "@/lib/surface";
+import { detailsSurface, dirSurface, fileSurface, type Surface } from "@/lib/surface";
 import { detailsJob, type TermRef } from "@/lib/term";
 import type { ChatState, TranscriptItem } from "@/lib/transcript";
-import type { ContentBlock, ToolCall } from "@/lib/types";
+import type { Citation, ContentBlock, ToolCall } from "@/lib/types";
 import { useAutosize } from "@/lib/useAutosize";
 
 /** Hooks the transcript needs from its host (sub-agent tab opening). */
@@ -64,18 +65,29 @@ export interface TranscriptEditHooks {
  */
 export function ChatView({
   items,
+  working,
   hooks,
 }: {
   items: TranscriptItem[];
+  /** The turn is live but nothing is visibly streaming — show the "working"
+   *  line so the page reacts the instant a prompt is sent. */
+  working?: boolean;
   hooks?: TranscriptHooks;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
 
+  // Follow the tail while pinned, batched to one scroll per frame: streaming
+  // deltas arrive faster than the display refreshes, and setting scrollTop
+  // synchronously on each one forces extra layout work for frames nobody sees.
   useEffect(() => {
     const el = scrollRef.current;
-    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
-  }, [items]);
+    if (!el || !pinnedRef.current) return;
+    const id = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [items, working]);
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -89,7 +101,7 @@ export function ChatView({
       onScroll={onScroll}
       className="min-h-0 flex-1 overflow-y-auto"
     >
-      <TranscriptList items={items} hooks={hooks} />
+      <TranscriptList items={items} working={working} hooks={hooks} />
     </div>
   );
 }
@@ -100,21 +112,122 @@ export function ChatView({
  */
 export function TranscriptList({
   items,
+  working,
   hooks,
 }: {
   items: TranscriptItem[];
+  working?: boolean;
   hooks?: TranscriptHooks;
 }) {
+  // The heartbeat only shows when nothing is already moving: prose/thinking
+  // streaming or a tool spinning carry their own motion, so a second line
+  // under them would just be noise.
+  const last = items[items.length - 1];
+  const liveTail =
+    (last?.kind === "assistant" && last.streaming) ||
+    (last?.kind === "thinking" && last.streaming) ||
+    (last?.kind === "tool" && !last.result);
+
+  // …but a streaming prose/thinking tail that has stopped GROWING is not
+  // actually moving: the model has gone on to compose a tool call's arguments
+  // (e.g. a canvas's whole HTML body), which stream invisibly — the kernel
+  // emits nothing between the last delta and the tool landing. The caret just
+  // blinks on frozen text. So once the tail goes quiet, treat it as not-live
+  // and let the heartbeat resurface, the way the TUI keeps a "Working" spinner
+  // animating through the same gap. A running tool tail (its own spinner) is
+  // genuine motion and is left alone.
+  const stale = useStaleTail(last, working ?? false);
+
+  // Each user prompt and the items under it form one turn wrapper. The
+  // prompt card is sticky WITHIN its wrapper, so the next turn's arrival
+  // pushes the previous card off-screen instead of layering on top of it —
+  // only one pinned prompt is ever visible.
+  const turns = groupTurns(items);
+
   return (
     <div className="mx-auto w-full max-w-4xl space-y-2 px-3.5 py-4">
-      {items.map((item) => (
-        <Item key={item.id} item={item} hooks={hooks} />
+      {turns.map((turn) => (
+        <div key={turn[0].id} className="space-y-2">
+          {turn.map((item) => (
+            <Item key={item.id} item={item} hooks={hooks} />
+          ))}
+        </div>
       ))}
+      {working && (!liveTail || stale) && <WorkingIndicator last={last} />}
     </div>
   );
 }
 
-function Item({ item, hooks }: { item: TranscriptItem; hooks?: TranscriptHooks }) {
+/** Split the flat item list into turns: every user message starts a new
+ *  group (a leading group without one holds any pre-prompt items). */
+function groupTurns(items: TranscriptItem[]): TranscriptItem[][] {
+  const turns: TranscriptItem[][] = [];
+  for (const item of items) {
+    if (item.kind === "user" || turns.length === 0) turns.push([item]);
+    else turns[turns.length - 1].push(item);
+  }
+  return turns;
+}
+
+/** How long a streaming tail may go without growing before it counts as
+ *  stalled — long enough to ignore normal between-token pauses, short enough
+ *  that a tool-argument gap doesn't read as a freeze. */
+const STALE_TAIL_MS = 1000;
+
+/**
+ * Whether the live tail has stopped producing output. While a turn is active
+ * and the last item is a streaming assistant/thinking block, arm a timer that
+ * fires once its text hasn't grown for STALE_TAIL_MS; every new delta (the
+ * text changing) resets it, and a non-streaming tail clears it outright.
+ */
+function useStaleTail(last: TranscriptItem | undefined, working: boolean): boolean {
+  const growing =
+    last && (last.kind === "assistant" || last.kind === "thinking") && last.streaming
+      ? last.text
+      : null;
+  const [stale, setStale] = useState(false);
+
+  useEffect(() => {
+    setStale(false);
+    if (!working || growing === null) return;
+    const id = window.setTimeout(() => setStale(true), STALE_TAIL_MS);
+    return () => window.clearTimeout(id);
+  }, [growing, working]);
+
+  return stale;
+}
+
+/**
+ * The between-steps heartbeat: the moment a prompt is sent (and again whenever
+ * the model is deciding its next move with nothing streaming yet) a shimmering
+ * line keeps the page alive, the way Cursor never leaves a sent message
+ * sitting in silence. The copy leans on what just happened — a fresh prompt is
+ * "Planning next moves", a lull mid-turn is "Working".
+ */
+function WorkingIndicator({ last }: { last?: TranscriptItem }) {
+  const label = !last || last.kind === "user" ? "Planning next moves" : "Working";
+  return (
+    <div className="flex items-center gap-2 py-0.5 text-muted">
+      <Loader2 size={13} className="shrink-0 animate-spin text-faint" />
+      <span className="shimmer">{label}</span>
+    </div>
+  );
+}
+
+/**
+ * One transcript row, memoized: a streaming delta replaces only the growing
+ * item in the array, so every other row keeps its identity and bails out
+ * here instead of re-rendering the whole transcript per token. Requires the
+ * `hooks` object to be referentially stable across deltas (ChatTab builds it
+ * with useMemo over refs) — rebuilding it inline would defeat the memo.
+ */
+const Item = memo(function Item({
+  item,
+  hooks,
+}: {
+  item: TranscriptItem;
+  hooks?: TranscriptHooks;
+}) {
   switch (item.kind) {
     case "user":
       return (
@@ -127,11 +240,26 @@ function Item({ item, hooks }: { item: TranscriptItem; hooks?: TranscriptHooks }
 
     case "assistant":
       return (
-        <div className="break-words py-1">
+        <div className="group/msg break-words py-1">
           <Markdown content={item.text} streaming={item.streaming} />
+          {item.images && item.images.length > 0 && (
+            <PartImages
+              parts={item.images}
+              className="max-h-96 max-w-full rounded-md border border-line/60"
+              wrap="mt-2 flex flex-wrap gap-2"
+            />
+          )}
+          {item.citations && item.citations.length > 0 && (
+            <SourcesStrip citations={item.citations} />
+          )}
           {!item.streaming && item.stopReason && item.stopReason !== "answered" && (
             <div className="mt-1 text-[12px] text-warn">
               stopped: {item.stopReason}
+            </div>
+          )}
+          {!item.streaming && item.text.trim() && (
+            <div className="mt-1 flex justify-end opacity-0 transition-opacity group-hover/msg:opacity-100">
+              <CopyButton text={item.text} title="Copy message" />
             </div>
           )}
         </div>
@@ -161,6 +289,28 @@ function Item({ item, hooks }: { item: TranscriptItem; hooks?: TranscriptHooks }
     }
 
     case "queued":
+      // A prompt from another door (the Telegram bridge, a sibling browser
+      // window on the same session) renders as the user speaking through it;
+      // a same-door prompt queued behind a busy turn keeps the queue
+      // acknowledgment. Seam connections tag prompts "web:<n>" — the counter
+      // is meaningless to a person, so label the door, not the connection.
+      if (item.origin) {
+        return (
+          <div className="flex justify-end py-1">
+            <div className="max-w-[85%] rounded-md border border-line/70 bg-card px-3 py-2">
+              <div className="mb-0.5 text-[10.5px] uppercase tracking-wider text-faint select-none">
+                via {item.origin.startsWith("web:") ? "another window" : item.origin}
+              </div>
+              <div className="whitespace-pre-wrap break-words text-bright">{item.text}</div>
+              <PartImages
+                parts={item.parts}
+                wrap="mt-2 flex flex-wrap gap-2"
+                className="max-h-48 max-w-full rounded-md border border-line/60 object-contain"
+              />
+            </div>
+          </div>
+        );
+      }
       return <div className="text-muted">Queued · {item.text}</div>;
 
     case "interrupted":
@@ -194,6 +344,46 @@ function Item({ item, hooks }: { item: TranscriptItem; hooks?: TranscriptHooks }
       return null;
     }
   }
+});
+
+/** The host of a citation URL, for a compact source label ("nytimes.com"). */
+function citationHost(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Web-search sources under an assistant message: a row of source chips the
+ * provider grounded its answer on (OpenRouter's web_search annotations). The
+ * search ran provider-side, so this is the only UI trace of it — there is no
+ * tool card. Duplicate URLs collapse to one chip.
+ */
+function SourcesStrip({ citations }: { citations: Citation[] }) {
+  const seen = new Set<string>();
+  const unique = citations.filter((c) =>
+    c.url && !seen.has(c.url) ? (seen.add(c.url), true) : false,
+  );
+  if (unique.length === 0) return null;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+      <Globe size={11} className="shrink-0 text-faint" />
+      {unique.map((c, i) => (
+        <a
+          key={c.url}
+          href={c.url}
+          target="_blank"
+          rel="noreferrer"
+          title={c.title || c.url}
+          className="max-w-[16rem] truncate rounded-full border border-line/60 bg-card/60 px-2 py-0.5 text-[11px] text-muted hover:text-bright"
+        >
+          <span className="text-faint">{i + 1}.</span> {c.title || citationHost(c.url)}
+        </a>
+      ))}
+    </div>
+  );
 }
 
 /** One reference line the composer spools per attached file (ChatTab's
@@ -294,7 +484,12 @@ function UserItem({
             edit?.canEdit ? () => edit.onStart(item.id) : undefined
           }
           title={edit?.canEdit ? "Double-click to edit and resubmit from here" : undefined}
-          className="group relative space-y-1.5 rounded-md border border-line/70 bg-card px-3 py-2 text-bright"
+          // Cursor's alignment: the card's TEXT shares the body prose column,
+          // while the rounded background bleeds outward by its own padding (the
+          // negative margin cancels the px), so a prompt and the answer beneath
+          // it line up on the same left edge instead of the card text sitting
+          // indented from the prose.
+          className="group relative -mx-3 space-y-1.5 rounded-md border border-line/70 bg-card px-3 py-2 text-bright"
         >
           <AttachmentChips files={files} onOpenSurface={onOpenSurface} />
           {body && (
@@ -343,7 +538,7 @@ function UserEditCard({
   };
 
   return (
-    <div className="rounded-md border border-accent/50 bg-card px-3 py-2 text-bright ring-1 ring-accent/30">
+    <div className="-mx-3 rounded-md border border-accent/50 bg-card px-3 py-2 text-bright ring-1 ring-accent/30">
       <textarea
         ref={taRef}
         value={draft}
@@ -439,6 +634,9 @@ type ToolTranscriptItem = Extract<TranscriptItem, { kind: "tool" }>;
 
 /** Route each tool to its Cursor-style rendering. */
 function ToolItem({ item, hooks }: { item: ToolTranscriptItem; hooks?: TranscriptHooks }) {
+  // Still streaming its arguments in: the live composing card, until the
+  // finished call lands and the row becomes its real (diff/terminal/…) card.
+  if (item.composing && !item.result) return <ComposingRow item={item} />;
   switch (item.call.Name) {
     case "bash":
       return <TerminalCard item={item} hooks={hooks} />;
@@ -455,9 +653,59 @@ function ToolItem({ item, hooks }: { item: ToolTranscriptItem; hooks?: Transcrip
       return <MemoryCard item={item} />;
     case "ask":
       return <AskCard item={item} />;
+    case "ls": {
+      // The listed directory opens as a browser tab — same reference the
+      // Files button and show-on-a-folder use.
+      const path = str(args(item.call).path) || ".";
+      const open =
+        item.result && !item.result.IsError && hooks?.onOpenSurface
+          ? () => hooks.onOpenSurface?.(dirSurface(path))
+          : undefined;
+      return <SummaryRow item={item} onArg={open} argTitle={`Browse ${path}`} />;
+    }
     default:
       return <SummaryRow item={item} />;
   }
+}
+
+/** A present-tense label for a call whose arguments are still streaming in. */
+function composingVerb(name: string): string {
+  switch (name) {
+    case "write":
+      return "Writing";
+    case "edit":
+      return "Editing";
+    default:
+      return "Preparing";
+  }
+}
+
+/** Bytes as a short human size — the streamed argument length, a stand-in for
+ *  the artifact's size while it's still being composed. */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * A tool call whose arguments are still streaming — the live "composing" card
+ * that fills the gap a big call (a canvas's whole HTML body) would otherwise
+ * leave silent: a spinner, a present-tense verb, and the bytes so far ticking
+ * up. It becomes the call's real card (diff, terminal, …) the moment the
+ * finished call lands.
+ */
+function ComposingRow({ item }: { item: ToolTranscriptItem }) {
+  const bytes = item.composing?.bytes ?? 0;
+  return (
+    <div className="flex min-w-0 items-center gap-1.5 text-muted">
+      <Loader2 size={12} className="shrink-0 animate-spin text-faint" />
+      <span className="shrink-0 shimmer">{composingVerb(item.call.Name)}</span>
+      {bytes > 0 && (
+        <span className="shrink-0 font-mono text-[11px] text-faint">{fmtBytes(bytes)}</span>
+      )}
+    </div>
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -647,9 +895,13 @@ function ShowChip({ item, hooks }: { item: ToolTranscriptItem; hooks?: Transcrip
         <AppWindow size={13} className="shrink-0 text-muted" />
       )}
       <span className="min-w-0 truncate text-text">{label}</span>
-      <span className="min-w-0 truncate font-mono text-[11px] text-faint">
-        {surface?.path ?? str(a.path)}
-      </span>
+      {/* The path earns its spot only when it says more than the label —
+          "demo.md demo.md" told the user nothing twice. */}
+      {(surface?.path ?? str(a.path)) !== label && (
+        <span className="min-w-0 truncate font-mono text-[11px] text-faint">
+          {surface?.path ?? str(a.path)}
+        </span>
+      )}
     </button>
   );
 }
@@ -730,7 +982,24 @@ function firstLine(text: string): string {
   return text.trim().split("\n")[0] ?? "";
 }
 
-/** The row itself: `[orbit] title  backend` over a dim status line. */
+/** The TUI's braille spinner frames (internal/transcript/format.go). */
+const BRAILLE_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const BRAILLE_TICK_MS = 80;
+
+/** The animated braille spinner the TUI uses for in-flight activity. */
+function BrailleSpinner() {
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(
+      () => setFrame((f) => (f + 1) % BRAILLE_FRAMES.length),
+      BRAILLE_TICK_MS,
+    );
+    return () => window.clearInterval(id);
+  }, []);
+  return <>{BRAILLE_FRAMES[frame]}</>;
+}
+
+/** The row itself: `[spinner] title  backend` over a dim status line. */
 function SubagentChip({
   label,
   meta,
@@ -757,10 +1026,9 @@ function SubagentChip({
       }`}
     >
       <span className="flex min-w-0 items-center gap-2">
-        <Orbit
-          size={13}
-          className={`shrink-0 text-muted ${running ? "animate-[spin_3s_linear_infinite]" : ""}`}
-        />
+        <span className="w-[13px] shrink-0 text-center font-mono text-[13px] leading-none text-muted">
+          {running ? <BrailleSpinner /> : "⠿"}
+        </span>
         <span className="min-w-0 truncate text-text">{label}</span>
         {meta && (
           <span className="shrink-0 text-[11.5px] text-faint">{meta}</span>
@@ -821,8 +1089,17 @@ function summary(call: ToolCall): { verb: string; arg: string } {
   }
 }
 
-/** One dim line per quiet tool call, e.g. `Read web/src/App.tsx`. */
-function SummaryRow({ item }: { item: ToolTranscriptItem }) {
+/** One dim line per quiet tool call, e.g. `Read web/src/App.tsx`. With
+ * `onArg`, the argument is a door (ls rows open the browser there). */
+function SummaryRow({
+  item,
+  onArg,
+  argTitle,
+}: {
+  item: ToolTranscriptItem;
+  onArg?: () => void;
+  argTitle?: string;
+}) {
   const running = !item.result;
   const failed = item.result?.IsError ?? false;
   const { verb, arg } = summary(item.call);
@@ -835,11 +1112,20 @@ function SummaryRow({ item }: { item: ToolTranscriptItem }) {
         )}
         {failed && <X size={12} className="shrink-0 text-red" />}
         <span className="shrink-0">{verb}</span>
-        {arg && (
+        {arg && (onArg ? (
+          <button
+            type="button"
+            onClick={onArg}
+            title={argTitle}
+            className="cursor-pointer truncate font-mono text-[11.5px] text-muted/80 hover:text-accent hover:underline"
+          >
+            {arg}
+          </button>
+        ) : (
           <span className="truncate font-mono text-[11.5px] text-muted/80">
             {arg}
           </span>
-        )}
+        ))}
       </div>
       {failed && item.result && (
         <div className="truncate pl-[18px] text-[11.5px] text-red/80">
@@ -866,6 +1152,9 @@ function trimJobReport(output: string): { text: string; job?: string } {
   const rest = output.slice(0, m.index).trimEnd();
   return { text: rest === "(no output yet)" ? "" : rest, job: m[1] };
 }
+
+/** How often a card's "running in background" badge re-checks the job. */
+const JOB_BADGE_POLL_MS = 2000;
 
 /**
  * A bash call as Cursor's terminal card: `[icon] Description command` in the
@@ -908,6 +1197,40 @@ function TerminalCard({ item, hooks }: { item: ToolTranscriptItem; hooks?: Trans
     }
   };
 
+  // The "running in background" report is a snapshot of the moment the tool
+  // returned — the job usually outlives it. Poll the job's live status while
+  // the badge claims it's running, so the spinner stops when the job does
+  // instead of spinning forever over an exited process.
+  const [done, setDone] = useState<{ status: string; exitCode: number } | null>(
+    null,
+  );
+  const live = !!job && !stopped && !done;
+  useEffect(() => {
+    if (!job || !live) return;
+    let stop = false;
+    const check = () => {
+      fetchJobTail(job, 0)
+        .then((t) => {
+          if (!stop && t.status !== "running") {
+            setDone({ status: t.status, exitCode: t.exit_code });
+          }
+        })
+        .catch((e: unknown) => {
+          // A job the gateway no longer knows can't still be running; a
+          // network blip keeps polling.
+          if (!stop && e instanceof HttpError && e.status === 404) {
+            setDone({ status: "ended", exitCode: 0 });
+          }
+        });
+    };
+    check();
+    const id = window.setInterval(check, JOB_BADGE_POLL_MS);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, [job, live]);
+
   return (
     <div className="overflow-hidden rounded-lg border border-line/80">
       <button
@@ -948,6 +1271,18 @@ function TerminalCard({ item, hooks }: { item: ToolTranscriptItem; hooks?: Trans
                   <X size={11} />
                   stopped · {job}
                 </>
+              ) : done ? (
+                done.status === "exited" ? (
+                  <>
+                    <Check size={11} />
+                    finished · exit {done.exitCode} · {job}
+                  </>
+                ) : (
+                  <>
+                    <X size={11} />
+                    {done.status} · {job}
+                  </>
+                )
               ) : (
                 <>
                   <Loader2 size={11} className="animate-spin" />

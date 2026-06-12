@@ -13,6 +13,8 @@ type streamResult struct {
 	content      string
 	reasoning    string
 	toolCalls    []core.ToolCall
+	citations    []core.Citation
+	images       []core.ContentBlock
 	usage        *core.Usage
 	finishReason string
 	err          error // mid-stream provider failure (LLMChunk.Err)
@@ -36,8 +38,27 @@ func (e *Engine) streamResponse(ctx context.Context, c *Conversation, chunks <-c
 				break
 			}
 		}
+		if ch.ToolProgress != nil {
+			// A tool call's arguments accumulating mid-stream: forward it as a
+			// live progress event (never logged) so the frontend can show a
+			// composing card in the gap before the finished call lands.
+			if !c.emit(ctx, core.ToolProgress{
+				CallID: ch.ToolProgress.ID,
+				Name:   ch.ToolProgress.Name,
+				Bytes:  ch.ToolProgress.Bytes,
+			}) {
+				drainChunks(chunks)
+				break
+			}
+		}
 		if len(ch.ToolCalls) > 0 {
 			res.toolCalls = append(res.toolCalls, ch.ToolCalls...)
+		}
+		if len(ch.Citations) > 0 {
+			res.citations = append(res.citations, ch.Citations...)
+		}
+		if len(ch.Images) > 0 {
+			res.images = append(res.images, ch.Images...)
 		}
 		if ch.Usage != nil {
 			res.usage = ch.Usage

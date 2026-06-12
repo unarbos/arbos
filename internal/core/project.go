@@ -61,7 +61,7 @@ func ProjectEvent(e Event) (Message, bool) {
 	case EventToolResult:
 		r := e.Payload.(ToolResultPayload).Result
 		return Message{Role: RoleTool, ToolCallID: r.CallID, Content: r.Content, Parts: r.Blocks}, true
-	case EventCompressed, EventContext, EventUsage, EventInterrupted:
+	case EventCompressed, EventContext, EventUsage, EventInterrupted, EventConfig:
 		return Message{}, false
 	}
 	return Message{}, false

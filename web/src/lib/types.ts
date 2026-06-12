@@ -21,13 +21,22 @@ export interface ImageData {
   mimeType: string;
 }
 
+/** Inline base64 document, e.g. a PDF (mirrors core.FileData). */
+export interface FileData {
+  data: string;
+  mimeType: string;
+  name?: string;
+}
+
 /**
  * One piece of multimodal content (mirrors core.ContentBlock). A prompt's
- * attached images ride along as image blocks so a vision model sees them.
+ * attached images ride along as image blocks so a vision model sees them, and
+ * documents (PDFs) as file blocks the provider parses natively.
  */
 export type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "image"; image: ImageData };
+  | { type: "image"; image: ImageData }
+  | { type: "file"; file: FileData };
 
 export interface ToolResult {
   CallID: string;
@@ -35,6 +44,20 @@ export interface ToolResult {
   IsError: boolean;
   /** Structured per-tool data the model never sees (e.g. edit's diff). */
   Details?: unknown;
+}
+
+/**
+ * One web-search source the provider grounded an assistant message on (mirrors
+ * core.Citation). It has Go json tags, so its fields are snake_case. Unlike a
+ * tool call it is not dispatched — the provider runs the search server-side and
+ * reports the sources it used.
+ */
+export interface Citation {
+  url: string;
+  title?: string;
+  content?: string;
+  start_index?: number;
+  end_index?: number;
 }
 
 export interface Usage {
@@ -69,6 +92,9 @@ export interface QuestionAnswer {
 export type KernelEvent =
   | { kind: "message_delta"; data: { text: string } }
   | { kind: "reasoning_delta"; data: { text: string } }
+  | { kind: "citations"; data: { citations: Citation[] } }
+  | { kind: "images"; data: { images: ContentBlock[] } }
+  | { kind: "tool_progress"; data: { call_id: string; name: string; bytes: number } }
   | { kind: "tool_started"; data: { call: ToolCall } }
   | { kind: "tool_finished"; data: { result: ToolResult } }
   | {
@@ -77,7 +103,7 @@ export type KernelEvent =
     }
   | { kind: "interrupted"; data?: Record<string, never> }
   | { kind: "error"; data: { category: string; retryable: boolean; error: string } }
-  | { kind: "queued"; data: { text: string } }
+  | { kind: "queued"; data: { text: string; origin?: string; parts?: ContentBlock[] } }
   | {
       kind: "approval_request";
       data: { request_id: string; call: ToolCall; reason?: string };
@@ -115,6 +141,9 @@ export type ClientFrame =
   | { type: "open"; session_id?: string }
   | { type: "intent"; intent: Intent }
   | { type: "set_model"; model: string }
+  | { type: "set_web_search"; enabled: boolean }
+  | { type: "set_web_fetch"; enabled: boolean }
+  | { type: "set_image_gen"; enabled: boolean }
   /**
    * Branch the bound session at through_seq (last source event to keep;
    * negative = empty branch, omitted = whole log) and rebind to the branch.

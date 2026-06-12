@@ -26,4 +26,24 @@ type Message struct {
 	Reasoning  string         // assistant reasoning/thinking trace text, when provided
 	ToolCalls  []ToolCall     // set on assistant messages that request tools
 	ToolCallID string         // set on RoleTool messages, links back to a ToolCall
+	// Citations are web-search sources the provider grounded this message on
+	// (an assistant turn). They are additive: a turn with no web search leaves
+	// them nil and serializes exactly as before. Unlike a tool call, a citation
+	// is not dispatched — the provider runs the search server-side (e.g.
+	// OpenRouter's web_search server tool) and reports the sources it used. See
+	// ADR-0027.
+	Citations []Citation `json:",omitempty"`
+}
+
+// Citation is one web-search source a provider used to ground an assistant
+// message. It is provider-neutral: each adapter maps its native annotation
+// shape (OpenRouter standardizes on OpenAI's url_citation) into this. Start/End
+// are character offsets into Message.Content that the cited span backs, when
+// the provider reports them (0,0 = unanchored).
+type Citation struct {
+	URL        string `json:"url"`
+	Title      string `json:"title,omitempty"`
+	Content    string `json:"content,omitempty"`
+	StartIndex int    `json:"start_index,omitempty"`
+	EndIndex   int    `json:"end_index,omitempty"`
 }

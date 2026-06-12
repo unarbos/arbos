@@ -9,6 +9,8 @@ Enter plan mode for the following task. Do NOT write or edit any source code yet
 $ARGUMENTS
 </task>
 
+If the task block is empty, plan the task currently under discussion in this conversation; if there is none, ask for one in a single line and stop.
+
 Work in two phases:
 
 ## Phase 1 — Research
@@ -31,4 +33,4 @@ Write the plan to `plans/<short-task-slug>.md` with this structure:
 
 Order the steps so each one leaves the tree buildable. Prefer the smallest plan that fully solves the task; flag any scope you deliberately cut.
 
-When the plan file is written, summarize it in a few bullets and stop. Wait for approval before implementing.
+When the plan file is written, present it with the `show` tool when available (title = the task) so it opens beside the chat; otherwise give the path. Summarize it in a few bullets and stop. Wait for approval before implementing.

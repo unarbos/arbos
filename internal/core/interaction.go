@@ -49,6 +49,12 @@ func DecodeIntent(b []byte) (Intent, error) {
 		return unmarshalInto[QuestionResponseIntent](f)
 	case IntentSetModel:
 		return unmarshalInto[SetModelIntent](f)
+	case IntentSetWebSearch:
+		return unmarshalInto[SetWebSearchIntent](f)
+	case IntentSetWebFetch:
+		return unmarshalInto[SetWebFetchIntent](f)
+	case IntentSetImageGen:
+		return unmarshalInto[SetImageGenIntent](f)
 	case IntentCompact:
 		return unmarshalInto[CompactIntent](f)
 	}
@@ -75,6 +81,12 @@ func DecodeEvent(b []byte) (KernelEvent, error) {
 		return unmarshalEvent[MessageDelta](f)
 	case KernelEventReasoningDelta:
 		return unmarshalEvent[ReasoningDelta](f)
+	case KernelEventCitations:
+		return unmarshalEvent[Citations](f)
+	case KernelEventImages:
+		return unmarshalEvent[Images](f)
+	case KernelEventToolProgress:
+		return unmarshalEvent[ToolProgress](f)
 	case KernelEventToolStarted:
 		return unmarshalEvent[ToolStarted](f)
 	case KernelEventToolFinished:

@@ -122,7 +122,11 @@ func (p *Provider) consume(ctx context.Context, resp *http.Response, out chan<- 
 			}
 		case "content_block_start":
 			if ev.ContentBlock != nil && ev.ContentBlock.Type == "tool_use" {
-				acc.Add(ev.Index, ev.ContentBlock.ID, ev.ContentBlock.Name, "")
+				// Announce the call the instant it opens (zero bytes yet) so the
+				// composing card appears before any arguments stream.
+				if !providerkit.EmitToolProgress(ctx, out, acc, ev.Index, ev.ContentBlock.ID, ev.ContentBlock.Name, "") {
+					return false
+				}
 			}
 		case "content_block_delta":
 			if ev.Delta == nil {
@@ -138,7 +142,9 @@ func (p *Provider) consume(ctx context.Context, resp *http.Response, out chan<- 
 					return false
 				}
 			case "input_json_delta":
-				acc.Add(ev.Index, "", "", ev.Delta.PartialJSON)
+				if !providerkit.EmitToolProgress(ctx, out, acc, ev.Index, "", "", ev.Delta.PartialJSON) {
+					return false
+				}
 			}
 		case "message_delta":
 			if ev.Usage != nil {

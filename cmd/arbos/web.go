@@ -7,13 +7,13 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/unarbos/arbos/internal/agent/pi"
 	"github.com/unarbos/arbos/internal/core"
@@ -50,40 +50,49 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 		defer stopSched()
 	}
 
-	// Graceful self-restart (dev loop, ADR self-edit safety): when a rebuild
-	// touches the sentinel, swap to the new binary at the next idle turn
-	// boundary instead of being pkill-ed mid-turn. Opt-in via env so it only
-	// runs under scripts/dev.sh; the watcher re-execs this same process in
-	// place, so it must share the signal ctx and stop with it.
-	if sentinel := os.Getenv("ARBOS_RESTART_SENTINEL"); sentinel != "" {
-		go host.Engine.WatchRestart(ctx, engine.RestartConfig{
-			Sentinel: sentinel,
-			Poll:     500 * time.Millisecond,
-			Logf:     func(f string, a ...any) { fmt.Fprintf(os.Stderr, "arbos "+f+"\n", a...) },
-		})
+	// Graceful self-restart: arbos is safe to rebuild in place while it runs.
+	// The watcher stats this process's own executable; when the file on disk
+	// is replaced — `arbos upgrade`, the dev loop, or the agent editing its
+	// own source and running `go build` — it re-execs the new binary at the
+	// next idle turn boundary, never mid-turn. Always on: it costs one stat
+	// per poll and does nothing until the binary actually changes. The
+	// watcher re-execs this same process in place, so it shares the signal
+	// ctx and stops with it.
+	//
+	// ARBOS_EXE advertises the watched path to every child process (tool
+	// shells inherit this environment), so `arbos upgrade` run from inside an
+	// agent turn replaces the server that spawned it — not whichever arbos
+	// happens to be first on PATH. Set on our own environment rather than
+	// per-child: it is not a secret, and the re-exec passes os.Environ()
+	// through, so the value stays correct across swaps.
+	if exe, err := os.Executable(); err == nil {
+		os.Setenv("ARBOS_EXE", exe)
 	}
+	go host.Engine.WatchRestart(ctx, engine.RestartConfig{
+		Logf: func(f string, a ...any) { fmt.Fprintf(os.Stderr, "arbos "+f+"\n", a...) },
+	})
 
-	// The managed-secret vault behind the Settings tab. Opening it wires the
-	// bash toolset's env injection (codingspec.SetEnvSource) so opted-in
-	// secrets reach tool subprocesses without ever entering this process's
-	// own environment, and the fetch tool's broker (SetSecretApplier) so
+	// The managed-secret vault behind the Settings tab — the same instance
+	// LoadConfig opened for the provider's key chain, so a key saved here is
+	// resolvable by the very next LLM request. Having it wires the bash
+	// toolset's env injection (codingspec.SetEnvSource) so opted-in secrets
+	// reach tool subprocesses without ever entering this process's own
+	// environment, and the fetch tool's broker (SetSecretApplier) so
 	// host-allowlisted secrets attach to outbound HTTPS without the agent
-	// ever holding the value. A vault failure is non-fatal — the web door
+	// ever holding the value. A missing vault is non-fatal — the web door
 	// still serves, just without the secrets surface.
-	var secrets *secret.Store
-	if dir := piwire.AgentConfigDir(); dir != "" {
-		if vault, err := secret.Open(filepath.Join(dir, "secrets")); err != nil {
-			fmt.Fprintf(os.Stderr, "arbos: secret vault unavailable: %v\n", err)
-		} else {
-			secrets = vault
-			codingspec.SetEnvSource(vault.EnvValues)
-			codingspec.SetSecretApplier(func(ctx context.Context, name string, req *http.Request) error {
-				// Bindings are rebuilt per call so a secret added in the
-				// Settings tab mid-session is attachable immediately.
-				br := secret.NewBroker(vault, vault.Bindings(secret.BearerInjector)...)
-				return br.Apply(ctx, core.SecretRef{Name: name}, req)
-			})
-		}
+	secrets := cfg.Vault
+	if secrets == nil {
+		fmt.Fprintf(os.Stderr, "arbos: secret vault unavailable — secrets settings disabled\n")
+	} else {
+		vault := secrets
+		codingspec.SetEnvSource(vault.EnvValues)
+		codingspec.SetSecretApplier(func(ctx context.Context, name string, req *http.Request) error {
+			// Bindings are rebuilt per call so a secret added in the
+			// Settings tab mid-session is attachable immediately.
+			br := secret.NewBroker(vault, vault.Bindings(secret.BearerInjector)...)
+			return br.Apply(ctx, core.SecretRef{Name: name}, req)
+		})
 	}
 
 	// Jobs are keyed by workspace root (= this process's cwd, same as the
@@ -132,6 +141,8 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 		// The Settings tab's agent knobs (subagent model). nil when the
 		// preference file was unavailable at assembly.
 		HostSettings: settingsAdmin(host.Settings),
+		// The Settings tab's provider panel (endpoint, key, credits).
+		LLM: llmAdmin(cfg, host, secrets),
 	}
 	if dist != "" {
 		// Override the embedded bundle with a directory (UI development).
@@ -284,6 +295,85 @@ func settingsAdmin(s *settings.Store) gateway.SettingsStore {
 		return nil
 	}
 	return s
+}
+
+// llmKeyName is the vault entry the provider panel's key saves under — the
+// same name the install flow exports and LoadConfig's onboarding path
+// resolves, so a pasted key and an exported one are one credential.
+const llmKeyName = "OPENROUTER_API_KEY"
+
+// llmAdmin wires the Settings tab's provider panel: read the effective
+// endpoint/key state, persist changes (endpoint into the preference file,
+// key into the vault), and apply them by scheduling a graceful self-restart —
+// the new provider is rebuilt by LoadConfig's one assembly path at the next
+// idle turn instead of hot-swapping half the host's organs. nil (routes
+// disabled) when either backing store is unavailable.
+func llmAdmin(cfg piwire.Config, host *piwire.Host, vault *secret.Store) *gateway.LLMAdmin {
+	if host.Settings == nil || vault == nil {
+		return nil
+	}
+	// effectiveEndpoint is where a saved key will be sent: the stored
+	// endpoint when the user set one, else the boot-resolved base — except a
+	// keyless default host, which LoadConfig onboards onto OpenRouter once a
+	// key lands, so that is what the panel shows and binds to.
+	effectiveEndpoint := func() string {
+		if s := host.Settings.Get().LLMBaseURL; s != "" {
+			return s
+		}
+		if !cfg.HasLLM && cfg.ProviderName == "openai" {
+			return piwire.OpenRouterBase
+		}
+		return cfg.BaseURL
+	}
+	// keySet reads live (env or vault) rather than the boot snapshot, so the
+	// panel reflects a just-saved key during the restart window.
+	keySet := func() bool {
+		if cfg.HasLLM {
+			return true
+		}
+		for _, e := range vault.List() {
+			if e.Name == llmKeyName {
+				return true
+			}
+		}
+		return false
+	}
+	credits := cfg.CreditsFetcher()
+	admin := &gateway.LLMAdmin{
+		Info: func() gateway.LLMInfo {
+			return gateway.LLMInfo{
+				Endpoint:   effectiveEndpoint(),
+				Provider:   cfg.ProviderName,
+				Model:      cfg.Model,
+				KeySet:     keySet(),
+				OpenRouter: credits != nil,
+			}
+		},
+		SetEndpoint: func(u string) error {
+			cur := host.Settings.Get()
+			cur.LLMBaseURL = u
+			return host.Settings.Set(cur)
+		},
+		SetKey: func(v string) error {
+			hostName := ""
+			if u, err := url.Parse(effectiveEndpoint()); err == nil {
+				hostName = u.Hostname()
+			}
+			return vault.Set(secret.Entry{
+				Name:  llmKeyName,
+				Label: "LLM API key (Settings → Model Provider)",
+				Hosts: []string{hostName},
+			}, v)
+		},
+		Apply: func() { host.Engine.RequestRestart() },
+	}
+	if credits != nil {
+		admin.Credits = func(ctx context.Context) (gateway.LLMCredits, error) {
+			ci, err := credits(ctx)
+			return gateway.LLMCredits{TotalCredits: ci.TotalCredits, TotalUsage: ci.TotalUsage}, err
+		}
+	}
+	return admin
 }
 
 // slashCommands maps the agent's prompt templates to the gateway's wire shape

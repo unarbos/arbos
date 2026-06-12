@@ -143,6 +143,13 @@ func (s *jobSupervisor) spawn(command string) (JobInfo, <-chan struct{}, func() 
 	cmd.Dir = s.root
 	cmd.Stdout = journal
 	cmd.Stderr = journal
+	// Managed secrets the user opted into tool use (ADR-0016): resolved from
+	// the vault and appended only to this child's environment, never the
+	// arbos parent's. Empty when no vault is wired, leaving the inherited
+	// environment untouched.
+	if extra := extraEnv(); len(extra) > 0 {
+		cmd.Env = append(os.Environ(), extra...)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		_ = journal.Close()

@@ -7,11 +7,37 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 
 	"github.com/unarbos/arbos/internal/control"
 )
+
+// wsPingInterval keeps browser-facing sockets warm. The seam is silent
+// between turns, and every hop in between (forest relay, TLS terminator,
+// NAT) reaps idle connections — pings make the quiet socket look alive.
+const wsPingInterval = 20 * time.Second
+
+// keepAlive pings until the connection or ctx dies. The caller's read loop
+// must be running (that's what processes the pongs).
+func keepAlive(ctx context.Context, c *websocket.Conn) {
+	t := time.NewTicker(wsPingInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		pctx, cancel := context.WithTimeout(ctx, wsPingInterval)
+		err := c.Ping(pctx)
+		cancel()
+		if err != nil {
+			return
+		}
+	}
+}
 
 // handleWS carries the control seam over one WebSocket connection: each text
 // message from the browser is one client frame (a line), each server line is
@@ -19,11 +45,7 @@ import (
 // bridge below adapts message framing to the seam's line framing, so the
 // browser speaks the exact protocol documented in internal/control.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// The gateway binds localhost and has no cookie auth to ride; the
-		// origin check would only refuse the Vite dev server.
-		InsecureSkipVerify: true,
-	})
+	c, err := websocket.Accept(w, r, s.wsAccept(r))
 	if err != nil {
 		return
 	}
@@ -34,6 +56,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	c.SetReadLimit(32 << 20)
 
 	ctx := r.Context()
+	go keepAlive(ctx, c)
 
 	// Browser -> seam: messages become newline-terminated lines on a pipe the
 	// seam's scanner reads. Closing the pipe on read failure is what lets

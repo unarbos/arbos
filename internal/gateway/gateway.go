@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"regexp"
@@ -16,8 +17,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/engine"
+	"github.com/unarbos/arbos/internal/messenger"
 	"github.com/unarbos/arbos/internal/outbox"
 	"github.com/unarbos/arbos/internal/plan"
 	"github.com/unarbos/arbos/internal/sqlite"
@@ -52,6 +56,14 @@ type Server struct {
 	// it on the host (the composer's mic button). Wired by the host to the
 	// local mic + transcriber; nil disables the voice routes.
 	Voice VoiceRecorder
+	// Transcribe converts recorded audio (base64 + container format) to text —
+	// the mic button's cloud fallback for hosts without on-device dictation,
+	// and the transcriber for voice-memo attachments. Wired by the host to the
+	// provider's audio endpoint; nil disables the route.
+	Transcribe func(ctx context.Context, dataB64, format string) (string, error)
+	// Speak synthesizes text to MP3 — the "spoken responses" setting. Wired by
+	// the host to the provider's audio endpoint; nil disables the route.
+	Speak func(ctx context.Context, text string) (io.ReadCloser, error)
 	// ModelsURL is the provider's model-catalog endpoint (e.g. OpenRouter's
 	// public {base}/models). Empty leaves the picker with just the current
 	// model and no catalog to filter.
@@ -67,6 +79,24 @@ type Server struct {
 	// is fetchable back by the panel that renders it. Empty disables the
 	// file routes.
 	Root string
+	// Secrets is the managed-secret vault behind the Settings tab's CRUD
+	// routes (list/upsert/delete). Wired by the host to internal/secret's
+	// Store; nil disables the routes.
+	Secrets SecretStore
+	// HostSettings is the durable preference file behind the Settings tab's
+	// agent knobs (e.g. the subagent model). Wired by the host to
+	// internal/settings' Store; nil disables the routes.
+	HostSettings SettingsStore
+	// LLM is the provider-configuration seam behind the Settings tab's
+	// endpoint/key panel and credits display. nil disables the routes.
+	LLM *LLMAdmin
+	// Auth gates every route when the bind address is reachable beyond
+	// loopback (ADR-0034). nil means a loopback-only bind: no gate, today's
+	// frictionless localhost behavior.
+	Auth *Auth
+	// Messenger is the Telegram bridge behind the Messenger tab (bot
+	// registry + live conversation stream). nil disables the routes.
+	Messenger *messenger.Service
 
 	mu      sync.Mutex
 	clients map[*wsLineWriter]bool
@@ -198,6 +228,17 @@ func (s *Server) DeliverOutbox(ctx context.Context) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/ws", s.handleWS)
+	// Same-origin: the screencast socket carries INPUT into the user's
+	// logged-in browser (clicks, keys, navigation), so a drive-by page must
+	// never reach it — browsers stamp Sec-Fetch-Site on WS handshakes too.
+	mux.HandleFunc("GET /api/browser/screencast", sameOrigin(s.handleScreencast))
+	if s.Root != "" {
+		// Same-origin: creating/closing tabs in the user's browser must never
+		// be reachable from a drive-by page.
+		mux.HandleFunc("GET /api/browser/tabs", sameOrigin(s.handleBrowserTabs))
+		mux.HandleFunc("POST /api/browser/tabs", sameOrigin(s.handleBrowserTabs))
+		mux.HandleFunc("DELETE /api/browser/tabs/{id}", sameOrigin(s.handleBrowserTabClose))
+	}
 	mux.HandleFunc("GET /api/models", s.handleModels)
 	if s.Commands != nil {
 		mux.HandleFunc("GET /api/commands", s.handleCommands)
@@ -225,6 +266,12 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /api/voice/start", sameOrigin(s.handleVoiceStart))
 		mux.HandleFunc("POST /api/voice/stop", sameOrigin(s.handleVoiceStop))
 	}
+	if s.Transcribe != nil {
+		mux.HandleFunc("POST /api/voice/transcribe", sameOrigin(s.handleVoiceTranscribe))
+	}
+	if s.Speak != nil {
+		mux.HandleFunc("POST /api/tts", sameOrigin(s.handleTTS))
+	}
 	if s.Store != nil {
 		mux.HandleFunc("POST /api/plan/{id}/cancel", sameOrigin(s.handleCancelPlanNode))
 		mux.HandleFunc("POST /api/runs/{id}/stop", sameOrigin(s.handleStopRun))
@@ -236,24 +283,79 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("PUT /api/file", sameOrigin(s.handleFileWrite))
 		mux.HandleFunc("GET /raw/{path...}", sameOrigin(s.handleRaw))
 	}
+	if s.Secrets != nil {
+		// Same-origin throughout: the list leaks no values, but a write or
+		// delete from a drive-by page must never reach the user's vault.
+		mux.HandleFunc("GET /api/secrets", sameOrigin(s.handleSecretsList))
+		mux.HandleFunc("PUT /api/secrets/{name}", sameOrigin(s.handleSecretUpsert))
+		mux.HandleFunc("DELETE /api/secrets/{name}", sameOrigin(s.handleSecretDelete))
+	}
+	if s.HostSettings != nil {
+		// Same-origin: a drive-by page must never rewrite the host's agent
+		// preferences (e.g. silently swapping the subagent model).
+		mux.HandleFunc("GET /api/settings", sameOrigin(s.handleSettingsGet))
+		mux.HandleFunc("PUT /api/settings", sameOrigin(s.handleSettingsPut))
+	}
+	if s.LLM != nil {
+		// Same-origin: a drive-by page must never repoint the host's LLM at
+		// a hostile endpoint or replace its key; the credits proxy spends
+		// the stored credential server-side.
+		mux.HandleFunc("GET /api/llm", sameOrigin(s.handleLLMGet))
+		mux.HandleFunc("PUT /api/llm", sameOrigin(s.handleLLMPut))
+		mux.HandleFunc("GET /api/llm/credits", sameOrigin(s.handleLLMCredits))
+	}
+	if s.Messenger != nil {
+		// Same-origin throughout: registering a bot hands the agent's tools
+		// to a Telegram token, and the stream carries private conversation —
+		// neither must be reachable from a drive-by page.
+		mux.HandleFunc("GET /api/messenger/state", sameOrigin(s.handleMessengerState))
+		mux.HandleFunc("POST /api/messenger/bots", sameOrigin(s.handleMessengerAddBot))
+		mux.HandleFunc("PATCH /api/messenger/bots/{id}", sameOrigin(s.handleMessengerSetTools))
+		mux.HandleFunc("DELETE /api/messenger/bots/{id}", sameOrigin(s.handleMessengerRemoveBot))
+		mux.HandleFunc("GET /api/messenger/ws", sameOrigin(s.handleMessengerWS))
+	}
 	if s.Dist != nil {
 		mux.Handle("/", spaHandler(s.Dist))
+	}
+	if s.Auth != nil {
+		mux.HandleFunc("GET "+loginPath, s.Auth.handleLogin)
+		return s.Auth.wrap(mux)
 	}
 	return mux
 }
 
-// sameOrigin guards the mutating routes against cross-site requests: any web
+// wsAccept builds the WebSocket accept posture for one request. With auth on
+// and a non-loopback caller, the cookie gate already passed (the route table
+// is wrapped), so the Origin check is real protection against a drive-by page
+// riding the cookie — enforce it. Loopback and auth-less binds keep skipping
+// it: there is no cookie to ride, and the check would only refuse the Vite
+// dev server.
+func (s *Server) wsAccept(r *http.Request) *websocket.AcceptOptions {
+	return &websocket.AcceptOptions{
+		InsecureSkipVerify: s.Auth == nil || loopbackAddr(r.RemoteAddr),
+	}
+}
+
+// sameOrigin guards the mutating routes against cross-origin requests: any web
 // page can POST to localhost without a preflight, so a drive-by site could
 // otherwise kill jobs in the user's arbos. Modern browsers stamp Sec-Fetch-Site
-// on every request; "cross-site" is refused, anything else (same-origin, or
-// absent for curl and other non-browser clients) passes.
+// on every request, and the forest relay forwards it untouched.
+//
+// "same-site" is refused, not just "cross-site": forest nodes are sibling
+// subdomains of one apex, so a page on a hostile node is *same-site* to every
+// other node — and the Lax auth cookie rides along on its POSTs. SameSite=
+// Strict on the cookie would not help for the same reason (siblings share the
+// site), so the gate must live here. What passes: "same-origin" (the SPA
+// talking to its own node), "none" (user-typed URLs), and absent (curl and
+// other non-browser clients, which carry no ambient cookie to ride).
 func sameOrigin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
-			http.Error(w, "cross-site request refused", http.StatusForbidden)
-			return
+		switch r.Header.Get("Sec-Fetch-Site") {
+		case "", "same-origin", "none":
+			next(w, r)
+		default:
+			http.Error(w, "cross-origin request refused", http.StatusForbidden)
 		}
-		next(w, r)
 	}
 }
 
@@ -294,6 +396,64 @@ func (s *Server) handleVoiceStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"text": text})
+}
+
+// transcribeMaxBody caps an uploaded recording (base64). 32 MiB of base64 is
+// ~24 MiB of audio — comfortably above any composer dictation or voice memo
+// worth transcribing, and matches the attachment cap client-side.
+const transcribeMaxBody = 32 * 1024 * 1024
+
+// jsonBodyMax bounds the small JSON control bodies (secrets, settings, terminal
+// create) so an authenticated caller can't OOM the host with an unbounded
+// upload. These payloads are a handful of fields; 1 MiB is generous.
+const jsonBodyMax = 1 << 20
+
+// handleVoiceTranscribe converts a browser- or client-recorded clip to text:
+// the mic fallback for hosts without on-device dictation, and the voice-memo
+// attachment path.
+func (s *Server) handleVoiceTranscribe(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Data   string `json:"data"`   // base64 audio bytes (no data: prefix)
+		Format string `json:"format"` // container: webm, m4a, wav, mp3, ogg, …
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, transcribeMaxBody)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Data == "" || req.Format == "" {
+		http.Error(w, "data and format are required", http.StatusBadRequest)
+		return
+	}
+	text, err := s.Transcribe(r.Context(), req.Data, req.Format)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]any{"text": text})
+}
+
+// handleTTS speaks the given text, streaming MP3 back — the "spoken
+// responses" setting's voice. Input length is clamped provider-side.
+func (s *Server) handleTTS(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Text) == "" {
+		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+	audio, err := s.Speak(r.Context(), req.Text)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer func() { _ = audio.Close() }()
+	w.Header().Set("Content-Type", "audio/mpeg")
+	_, _ = io.Copy(w, audio)
 }
 
 // handleCancelPlanNode is the UI's ✕ on a scheduled task: it moves the node
@@ -615,22 +775,44 @@ type replayJSON struct {
 	Type      string              `json:"type"` // user | assistant | tool_result | interrupted
 	Seq       int64               `json:"seq"`  // source event seq, the fork point for rewind/edit
 	Text      string              `json:"text,omitempty"`
-	Parts     []core.ContentBlock `json:"parts,omitempty"` // user-attached images, for re-render
+	Parts     []core.ContentBlock `json:"parts,omitempty"` // user-attached or assistant-generated images, for re-render
 	ToolCalls []core.ToolCall     `json:"tool_calls,omitempty"`
+	Citations []core.Citation     `json:"citations,omitempty"` // assistant web-search sources, for re-render
 	CallID    string              `json:"call_id,omitempty"`
 	Content   string              `json:"content,omitempty"`
 	IsError   bool                `json:"is_error,omitempty"`
 	Details   json.RawMessage     `json:"details,omitempty"`
 }
 
+// sessionMetaJSON is the durable per-session state a resumed tab seeds its
+// controls from (the model chip and the provider toggles). Without it the
+// composer would show host defaults for a session whose record says otherwise.
+type sessionMetaJSON struct {
+	Model     string `json:"model,omitempty"`
+	WebSearch bool   `json:"web_search"`
+	WebFetch  bool   `json:"web_fetch"`
+	ImageGen  bool   `json:"image_gen"`
+}
+
 // handleSessionEvents replays a session's visible history so a resumed tab
-// renders the past transcript before live events stream in.
+// renders the past transcript before live events stream in, plus the session
+// record's durable control state (model, provider toggles) so the composer
+// reflects the session it joined rather than host defaults.
 func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 	id := core.SessionID(r.PathValue("id"))
 	events, err := s.Store.Events(r.Context(), id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	var meta *sessionMetaJSON
+	if sess, err := s.Store.Get(r.Context(), id); err == nil {
+		meta = &sessionMetaJSON{
+			Model:     sess.Model,
+			WebSearch: sess.WebSearch,
+			WebFetch:  sess.WebFetch,
+			ImageGen:  sess.ImageGen,
+		}
 	}
 	out := make([]replayJSON, 0, len(events))
 	for _, ev := range events {
@@ -641,7 +823,7 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 			case core.RoleUser:
 				out = append(out, replayJSON{Type: "user", Seq: ev.Seq, Text: m.Content, Parts: m.Parts})
 			case core.RoleAssistant:
-				out = append(out, replayJSON{Type: "assistant", Seq: ev.Seq, Text: m.Content, ToolCalls: m.ToolCalls})
+				out = append(out, replayJSON{Type: "assistant", Seq: ev.Seq, Text: m.Content, Parts: m.Parts, ToolCalls: m.ToolCalls, Citations: m.Citations})
 			}
 		case core.ToolResultPayload:
 			out = append(out, replayJSON{
@@ -656,14 +838,20 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 			out = append(out, replayJSON{Type: "interrupted", Seq: ev.Seq})
 		}
 	}
-	writeJSON(w, map[string]any{"events": out})
+	writeJSON(w, map[string]any{"events": out, "session": meta})
 }
 
 // spaHandler serves the built SPA: real files as-is, everything else (client
-// routes) falls back to index.html.
+// routes) falls back to index.html. API paths never fall back: a missing or
+// removed /api route must 404, not answer 200 with HTML — a stale frontend
+// calling a dead endpoint should fail loudly, not silently mis-parse a page.
 func spaHandler(dist fs.FS) http.Handler {
 	fileServer := http.FileServerFS(dist)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			http.NotFound(w, r)
+			return
+		}
 		p := strings.TrimPrefix(r.URL.Path, "/")
 		if p != "" {
 			if f, err := dist.Open(p); err == nil {
@@ -672,6 +860,11 @@ func spaHandler(dist fs.FS) http.Handler {
 				return
 			}
 		}
+		// index.html must never be cached: it names the content-hashed asset
+		// bundles, and a heuristically-cached copy keeps a browser pinned to a
+		// bundle that no longer exists after a rebuild — a stale UI calling
+		// removed APIs. The hashed assets themselves stay cacheable.
+		w.Header().Set("Cache-Control", "no-store")
 		r2 := r.Clone(r.Context())
 		r2.URL.Path = "/"
 		fileServer.ServeHTTP(w, r2)

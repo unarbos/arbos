@@ -1,13 +1,56 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, ExternalLink, Loader2, Pencil, RotateCw } from "lucide-react";
+import {
+  Check,
+  ChevronRight,
+  ExternalLink,
+  FileText,
+  Folder,
+  Loader2,
+  Plus,
+  RotateCw,
+  X,
+} from "lucide-react";
 
 import { Highlight, Markdown } from "./Markdown";
 import { PromptEditor } from "./PromptEditor";
-import { fetchFile, writeFile } from "@/lib/api";
-import { rawUrl, surfaceTitle, themedCanvasDoc, type Surface } from "@/lib/surface";
+import {
+  closeBrowserTab,
+  createBrowserTab,
+  fetchFile,
+  HttpError,
+  writeFile,
+  type FileInfo,
+} from "@/lib/api";
+import {
+  dirSurface,
+  fileSurface,
+  joinDirPath,
+  rawUrl,
+  surfaceTitle,
+  themedCanvasDoc,
+  type Surface,
+} from "@/lib/surface";
 import { useTheme } from "@/lib/theme";
+import { errMsg, toastError } from "@/lib/toast";
+import { useDocumentVisible } from "@/lib/useDocumentVisible";
 
 const STAT_POLL_MS = 2000;
+
+/** Marks a poll failure that means the file is gone, not a network blip. */
+function isGone(e: unknown): boolean {
+  return e instanceof HttpError && e.status === 404;
+}
+
+/** The quiet banner a surface wears when its file vanished from disk: the
+ * last loaded content stays useful, but the panel stops pretending it's
+ * still a live view. */
+function MissingNotice() {
+  return (
+    <div className="shrink-0 select-none border-b border-line/60 px-3 py-1.5 text-[11.5px] text-warn">
+      File no longer exists on disk — showing the last loaded version.
+    </div>
+  );
+}
 
 /**
  * A surface tab's body: one openable artifact, rendered by kind. A canvas
@@ -20,35 +63,53 @@ const STAT_POLL_MS = 2000;
 export function SurfaceView({
   surface,
   active,
+  onNavigate,
+  onOpenFile,
+  onCloseSelf,
 }: {
   surface: Surface;
   active: boolean;
+  /** A browser tab navigated — re-reference THIS tab to the new directory. */
+  onNavigate?: (surface: Surface) => void;
+  /** A browser row opened a file — show it the way every surface opens. */
+  onOpenFile?: (surface: Surface) => void;
+  /** Close this panel's own tab (a screencast panel closing its browser tab). */
+  onCloseSelf?: () => void;
 }) {
   // Bumped when the file changes on disk (or on manual reload): re-srcs the
   // iframe / refetches the content.
   const [tick, setTick] = useState(0);
+  const [missing, setMissing] = useState(false);
   const mtimeRef = useRef(0);
-  const [editing, setEditing] = useState(false);
 
   const editor = surface.kind === "prompt";
-  // Text surfaces can flip into an editor; canvas/image stay view-only.
+  const browser = surface.kind === "dir";
+  const live = surface.kind === "screencast";
+  // Text surfaces ARE their own editor (headerless); canvas/image keep a slim
+  // header since there's nothing to type into.
   const editable = surface.kind === "doc" || surface.kind === "code";
 
+  const docVisible = useDocumentVisible();
   useEffect(() => {
-    // While editing, the panel's text is the user's draft — don't let the
-    // change-poll reload it out from under them.
-    if (!active || editor || editing) return;
+    // Canvas/image refresh by re-srcing on this poll; text surfaces own their
+    // own change-watching (TextSurface), and the browser owns its (DirSurface).
+    if (!active || !docVisible || editor || browser || editable || live) return;
     let stop = false;
     const check = () => {
       fetchFile(surface.path, true)
         .then((info) => {
           if (stop) return;
+          setMissing(false);
           if (mtimeRef.current && info.mtime !== mtimeRef.current) {
             setTick((t) => t + 1);
           }
           mtimeRef.current = info.mtime;
         })
-        .catch(() => {});
+        .catch((e: unknown) => {
+          // A vanished file is worth saying out loud; a network blip just
+          // waits for the next poll.
+          if (!stop && isGone(e)) setMissing(true);
+        });
     };
     check();
     const id = window.setInterval(check, STAT_POLL_MS);
@@ -56,7 +117,7 @@ export function SurfaceView({
       stop = true;
       window.clearInterval(id);
     };
-  }, [active, editor, editing, surface.path]);
+  }, [active, docVisible, editor, browser, editable, surface.path]);
 
   const src = `${rawUrl(surface.path)}?v=${tick}`;
 
@@ -65,7 +126,40 @@ export function SurfaceView({
   if (editor) {
     return <PromptEditor surface={surface} active={active} />;
   }
+  // A dir surface is the file browser — its own header (breadcrumb) and its
+  // own change-watching, same takeover as the editor.
+  if (browser) {
+    return (
+      <DirSurface
+        surface={surface}
+        active={active}
+        onNavigate={onNavigate}
+        onOpenFile={onOpenFile}
+      />
+    );
+  }
 
+  // A code or markdown file opens as the editor itself — no header, no chrome,
+  // just the file the way a normal editor opens one (it autosaves).
+  if (editable) {
+    return <TextSurface surface={surface} active={active} />;
+  }
+
+  // A live browser screencast: frames stream over a WebSocket, painted as they
+  // arrive. Not file-backed, so it owns its own connection and header.
+  if (live) {
+    return (
+      <ScreencastSurface
+        surface={surface}
+        active={active}
+        onOpenTab={onOpenFile}
+        onCloseSelf={onCloseSelf}
+      />
+    );
+  }
+
+  // Canvas/image keep a slim header: reload + open-in-tab, since there's
+  // nothing to type into.
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="flex h-9 shrink-0 select-none items-center gap-2 border-b border-line/70 px-3">
@@ -75,18 +169,6 @@ export function SurfaceView({
         <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint">
           {surface.path}
         </span>
-        {editable && (
-          <button
-            type="button"
-            title={editing ? "Stop editing" : "Edit"}
-            onClick={() => setEditing((v) => !v)}
-            className={`flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-hover ${
-              editing ? "text-accent" : "text-muted hover:text-text"
-            }`}
-          >
-            <Pencil size={12} />
-          </button>
-        )}
         <button
           type="button"
           title="Reload"
@@ -106,10 +188,18 @@ export function SurfaceView({
         </a>
       </div>
 
+      {missing && <MissingNotice />}
       <div className="min-h-0 min-w-0 flex-1">
         {surface.kind === "canvas" ? (
           <CanvasSurface surface={surface} tick={tick} />
-        ) : surface.kind === "image" ? (
+        ) : surface.kind === "pdf" ? (
+          <iframe
+            key={tick}
+            src={src}
+            title={surfaceTitle(surface)}
+            className="size-full border-0 bg-white"
+          />
+        ) : (
           <div className="flex size-full items-center justify-center overflow-auto p-4">
             <img
               key={tick}
@@ -118,16 +208,6 @@ export function SurfaceView({
               className="max-h-full max-w-full rounded-md border border-line/60 object-contain"
             />
           </div>
-        ) : (
-          <TextSurface
-            surface={surface}
-            tick={tick}
-            editing={editing}
-            onDoneEditing={() => setEditing(false)}
-            onSaved={(mtime) => {
-              mtimeRef.current = mtime;
-            }}
-          />
         )}
       </div>
     </div>
@@ -181,50 +261,253 @@ function CanvasSurface({ surface, tick }: { surface: Surface; tick: number }) {
   );
 }
 
+/** The screencast WebSocket for a given stream id (the agent's live browser). */
+function screencastUrl(id: string): string {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${window.location.host}/api/browser/screencast?id=${encodeURIComponent(id)}`;
+}
+
 /**
- * Markdown documents and code files: fetched text, rendered read-only —
- * or, with the header's pencil on, as a plain editor saving back through
- * the gateway (⌘S or the footer's Save), like the prompt editor.
+ * A live, USABLE view of the agent's browser: JPEG frames stream over a
+ * WebSocket (CDP screencast, relayed by the gateway) and paint as they arrive,
+ * and the user's clicks, scrolling, and typing forward back over the same
+ * socket into the page. That return path is what makes logins work without any
+ * special mode: the agent opens a sign-in page, the user clicks into the panel
+ * and types their credentials, and the browser's persistent profile keeps the
+ * session for every later run. The connection lives only while the panel is
+ * visible — hidden, it disconnects so Chrome isn't streaming to nobody; shown
+ * again, it reconnects and the hub's cached last frame paints immediately.
+ * surface.path is the stream id.
+ */
+function ScreencastSurface({
+  surface,
+  active,
+  onOpenTab,
+  onCloseSelf,
+}: {
+  surface: Surface;
+  active: boolean;
+  /** Open another browser tab's panel beside this one (the header's +). */
+  onOpenTab?: (surface: Surface) => void;
+  /** Close this panel after its browser tab is closed (the header's ✕). */
+  onCloseSelf?: () => void;
+}) {
+  const [frame, setFrame] = useState<string | null>(null);
+  const [url, setUrl] = useState("");
+  // The address bar's in-progress edit; null = not editing, show the live URL.
+  const [draft, setDraft] = useState<string | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    if (!active) return;
+    let stop = false;
+    const ws = new WebSocket(screencastUrl(surface.path));
+    wsRef.current = ws;
+    ws.onmessage = (e) => {
+      if (stop) return;
+      let u: { frame?: string; url?: string };
+      try {
+        u = JSON.parse(e.data as string) as { frame?: string; url?: string };
+      } catch {
+        return;
+      }
+      if (u.frame) setFrame(u.frame);
+      if (u.url) setUrl(u.url);
+    };
+    return () => {
+      stop = true;
+      if (wsRef.current === ws) wsRef.current = null;
+      ws.close();
+    };
+  }, [surface.path, active]);
+
+  const send = useCallback((ev: Record<string, unknown>) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(ev));
+  }, []);
+
+  /** Normalized [0,1] coordinates of a mouse event within the frame image. */
+  const norm = (e: React.MouseEvent<HTMLImageElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    return {
+      x: Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1),
+      y: Math.min(Math.max((e.clientY - r.top) / r.height, 0), 1),
+    };
+  };
+
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="flex h-9 shrink-0 select-none items-center gap-2 border-b border-line/70 px-3">
+        <span className="shrink-0 truncate text-[12.5px] text-bright">
+          {surfaceTitle(surface)}
+        </span>
+        {/* The address bar: shows where the browser is, and navigates it —
+            type a URL (or a search) and press Enter. Esc abandons the edit. */}
+        <input
+          value={draft ?? url}
+          placeholder="Enter a URL or search"
+          spellCheck={false}
+          onFocus={(e) => {
+            setDraft(url);
+            e.currentTarget.select();
+          }}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => setDraft(null)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              // Read the DOM value, not the draft state: a paste or a
+              // programmatic fill can land without the per-key onChange that
+              // feeds draft, and Enter must navigate to what's visibly there.
+              const target = e.currentTarget.value.trim();
+              if (target) send({ t: "nav", s: target });
+              setDraft(null);
+              e.currentTarget.blur();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              setDraft(null);
+              e.currentTarget.blur();
+            }
+          }}
+          className="min-w-0 flex-1 truncate rounded-md border border-line/60 bg-canvas/60 px-2 py-0.5 font-mono text-[11px] text-muted outline-none transition-colors focus:border-accent/60 focus:text-text"
+        />
+        <button
+          type="button"
+          title="New browser tab"
+          onClick={() => {
+            createBrowserTab()
+              .then((t) =>
+                onOpenTab?.({
+                  kind: "screencast",
+                  path: t.stream,
+                  title: `Browser ${t.id}`,
+                }),
+              )
+              .catch((e: unknown) =>
+                toastError(`New browser tab failed: ${errMsg(e)}`),
+              );
+          }}
+          className="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted transition-colors hover:bg-hover hover:text-text"
+        >
+          <Plus size={12} />
+        </button>
+        <button
+          type="button"
+          title="Close this browser tab"
+          onClick={() => {
+            const tabID = surface.path.split("/").pop() ?? "";
+            closeBrowserTab(tabID)
+              .catch(() => {})
+              .finally(() => onCloseSelf?.());
+          }}
+          className="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted transition-colors hover:bg-hover hover:text-red"
+        >
+          <X size={12} />
+        </button>
+      </div>
+      <div
+        tabIndex={0}
+        onKeyDown={(e) => {
+          // The panel owns the keyboard while focused: printable characters
+          // insert as text, editing/navigation keys forward by name. Browser
+          // shortcuts (⌘L etc.) are left to the real browser chrome.
+          if (e.metaKey || e.ctrlKey || e.altKey) return;
+          e.preventDefault();
+          if (e.key.length === 1) {
+            send({ t: "text", s: e.key });
+          } else {
+            send({ t: "key", key: e.key });
+          }
+        }}
+        className="flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto bg-black/40 p-2 outline-none"
+      >
+        {frame && url && url !== "about:blank" ? (
+          <img
+            src={`data:image/jpeg;base64,${frame}`}
+            alt={surfaceTitle(surface)}
+            title="Click to interact — you can type, click, and sign in here"
+            draggable={false}
+            onClick={(e) => {
+              send({ t: "click", ...norm(e) });
+              e.currentTarget.parentElement?.focus();
+            }}
+            onWheel={(e) => send({ t: "wheel", ...norm(e), dy: e.deltaY })}
+            className="max-h-full max-w-full cursor-pointer select-none object-contain"
+          />
+        ) : (
+          // No frame yet — or only about:blank's featureless black frame,
+          // which used to paint as a void over this message. Say where to
+          // go instead of showing nothing.
+          <div className="flex items-center gap-2 text-faint">
+            Blank tab — enter a URL or search above.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** How long to wait after the last keystroke before autosaving. */
+const AUTOSAVE_MS = 600;
+
+/**
+ * Markdown documents and code files — headerless, the file *is* the panel.
+ * Code opens straight into the editor; a markdown doc renders by default and
+ * a double-click drops into its source (Esc returns to the rendered view). The
+ * editor *just works* like a normal file — type and it autosaves back through
+ * the gateway a beat after you stop (⌘S forces it now), so there's no Save
+ * step. While clean it polls disk, so an agent rewriting the open file still
+ * refreshes; a dirty draft is never clobbered.
  */
 function TextSurface({
   surface,
-  tick,
-  editing,
-  onDoneEditing,
-  onSaved,
+  active,
 }: {
   surface: Surface;
-  tick: number;
-  editing: boolean;
-  onDoneEditing: () => void;
-  /** Report the save's mtime so the panel's change-poll baseline is our own write. */
-  onSaved: (mtime: number) => void;
+  active: boolean;
 }) {
   const [state, setState] = useState<
     | { phase: "loading" }
     | { phase: "error"; message: string }
-    | { phase: "ready"; content: string; truncated: boolean; binary: boolean }
+    | { phase: "ready"; truncated: boolean; binary: boolean }
   >({ phase: "loading" });
+  // `draft` is what's on screen; `saved` is the file as last written/read.
   const [draft, setDraft] = useState("");
+  const [saved, setSaved] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
-  const taRef = useRef<HTMLTextAreaElement>(null);
+  const [missing, setMissing] = useState(false);
+  const mtimeRef = useRef(0);
 
-  const dirty =
-    state.phase === "ready" && editing && draft !== state.content;
+  // Code is an editor on open; a doc renders until you double-click into it.
+  // Reset when the tab is re-referenced to a different file.
+  const [editMode, setEditMode] = useState(surface.kind === "code");
+  useEffect(() => {
+    setEditMode(surface.kind === "code");
+  }, [surface.kind, surface.path]);
 
+  const ready = state.phase === "ready";
+  const truncated = ready && state.truncated;
+  // A truncated read can't be edited — saving would write back only the slice
+  // we hold, so it stays read-only.
+  const canEdit = editMode && ready && !truncated && !(ready && state.binary);
+  const dirty = ready && draft !== saved;
+
+  // Load the file (and reload it whenever the tab points at a new path).
   useEffect(() => {
     let stale = false;
     fetchFile(surface.path)
       .then((info) => {
         if (stale) return;
+        mtimeRef.current = info.mtime;
         setState({
           phase: "ready",
-          content: info.content ?? "",
           truncated: info.truncated ?? false,
           binary: info.binary ?? false,
         });
         setDraft(info.content ?? "");
+        setSaved(info.content ?? "");
+        setSaveError("");
       })
       .catch((e: unknown) => {
         if (!stale) {
@@ -237,32 +520,76 @@ function TextSurface({
     return () => {
       stale = true;
     };
-  }, [surface.path, tick]);
+  }, [surface.path]);
 
-  // Entering edit mode: start the draft from what's on screen and hand over
-  // the keyboard.
+  // Pick up external writes (the agent rewriting an open file) while the panel
+  // is clean; a dirty draft is left alone so we never clobber the user's edits.
+  const docVisible = useDocumentVisible();
   useEffect(() => {
-    if (!editing || state.phase !== "ready") return;
-    setDraft(state.content);
-    setSaveError("");
-    taRef.current?.focus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editing]);
+    if (!active || !docVisible || !ready || dirty) return;
+    let stop = false;
+    const id = window.setInterval(() => {
+      fetchFile(surface.path)
+        .then((info) => {
+          if (stop) return;
+          setMissing(false);
+          if (info.mtime === mtimeRef.current) return;
+          mtimeRef.current = info.mtime;
+          setDraft(info.content ?? "");
+          setSaved(info.content ?? "");
+          setState((s) =>
+            s.phase === "ready"
+              ? { ...s, truncated: info.truncated ?? false }
+              : s,
+          );
+        })
+        .catch((e: unknown) => {
+          // Deleted under us: keep the content, stop pretending it's live.
+          if (!stop && isGone(e)) setMissing(true);
+        });
+    }, STAT_POLL_MS);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, [active, docVisible, ready, dirty, surface.path]);
 
-  const save = useCallback(() => {
-    if (saving || state.phase !== "ready") return;
-    setSaving(true);
-    setSaveError("");
-    writeFile(surface.path, draft)
-      .then((info) => {
-        onSaved(info.mtime);
-        setState({ ...state, content: draft });
-      })
-      .catch((e: unknown) => {
-        setSaveError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => setSaving(false));
-  }, [surface.path, draft, saving, state, onSaved]);
+  const flush = useCallback(
+    (text: string) => {
+      setSaving(true);
+      setSaveError("");
+      writeFile(surface.path, text)
+        .then((info) => {
+          mtimeRef.current = info.mtime;
+          setSaved(text);
+        })
+        .catch((e: unknown) => {
+          setSaveError(e instanceof Error ? e.message : String(e));
+        })
+        .finally(() => setSaving(false));
+    },
+    [surface.path],
+  );
+
+  // Autosave: a beat after typing stops, write the draft back. Rescheduled on
+  // every keystroke, so a save fires only once you pause.
+  useEffect(() => {
+    if (!canEdit || !dirty) return;
+    const id = window.setTimeout(() => flush(draft), AUTOSAVE_MS);
+    return () => window.clearTimeout(id);
+  }, [draft, canEdit, dirty, flush]);
+
+  // Flush any pending edit when the tab is closed or re-referenced before the
+  // debounce fired, so a quick close never drops the last keystrokes.
+  const pending = useRef<{ path: string; text: string } | null>(null);
+  pending.current = dirty ? { path: surface.path, text: draft } : null;
+  useEffect(
+    () => () => {
+      const p = pending.current;
+      if (p) writeFile(p.path, p.text).catch(() => {});
+    },
+    [surface.path],
+  );
 
   if (state.phase === "loading") {
     return (
@@ -282,84 +609,343 @@ function TextSurface({
     );
   }
 
-  if (editing) {
+  if (canEdit) {
+    const doc = surface.kind === "doc";
     return (
       <div className="flex size-full flex-col">
-        <textarea
-          ref={taRef}
+        {missing && <MissingNotice />}
+        <CodeEditor
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "s") {
-              e.preventDefault();
-              if (dirty) save();
-            }
+          onChange={setDraft}
+          highlight={!doc}
+          onSave={() => {
+            if (dirty) flush(draft);
           }}
-          spellCheck={false}
-          className="min-h-0 w-full flex-1 resize-none bg-transparent px-4 py-3 font-mono text-[12px] leading-[1.55] text-text outline-none"
+          // A doc drops back to its rendered view on Esc; code stays an editor.
+          onExit={doc ? () => setEditMode(false) : undefined}
         />
-        <div className="flex h-8 shrink-0 select-none items-center gap-2 border-t border-line/70 px-3 text-[11px]">
+        <div className="flex h-7 shrink-0 select-none items-center gap-2 border-t border-line/70 px-3 text-[11px]">
           {saveError ? (
             <span className="min-w-0 flex-1 truncate text-red">{saveError}</span>
           ) : (
-            <span className="min-w-0 flex-1 truncate text-faint">
-              {state.truncated
-                ? "Truncated read — saving would write back only what's shown."
-                : dirty
-                  ? "Unsaved changes"
-                  : "No changes"}
-            </span>
+            <SaveStatus saving={saving} dirty={dirty} hint={doc ? "Esc to preview" : ""} />
           )}
-          <button
-            type="button"
-            onClick={onDoneEditing}
-            className="flex h-6 shrink-0 cursor-pointer items-center rounded-md px-2.5 text-muted transition-colors hover:bg-hover hover:text-text"
-          >
-            Done
-          </button>
-          <button
-            type="button"
-            onClick={save}
-            disabled={!dirty || saving || state.truncated}
-            title="Save (⌘S)"
-            className={`flex h-6 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2.5 transition-colors disabled:cursor-default ${
-              dirty && !state.truncated
-                ? "bg-btn text-canvas hover:opacity-90"
-                : "text-faint"
-            }`}
-          >
-            {saving ? (
-              <Loader2 size={11} className="animate-spin" />
-            ) : (
-              !dirty && <Check size={11} />
-            )}
-            {dirty ? "Save" : "Saved"}
-          </button>
         </div>
       </div>
     );
   }
 
+  // Read-only: a rendered markdown doc (double-click to edit its source), or a
+  // truncated code read we can't safely save back.
   return (
-    <div className="size-full overflow-auto">
+    <div className="flex size-full flex-col">
+      {missing && <MissingNotice />}
+      <div className="min-h-0 flex-1 overflow-auto">
       {surface.kind === "doc" ? (
-        <div className="mx-auto w-full max-w-4xl px-4 py-4">
-          <Markdown content={state.content} />
+        <div
+          onDoubleClick={() => !truncated && setEditMode(true)}
+          title={truncated ? undefined : "Double-click to edit"}
+          className="mx-auto w-full max-w-4xl px-4 py-4"
+        >
+          <Markdown content={draft} />
         </div>
       ) : (
         <pre className="px-4 py-3 font-mono text-[12px] leading-[1.55] text-text/90">
-          {state.content.split("\n").map((line, i) => (
+          {draft.split("\n").map((line, i) => (
             <div key={i} className="whitespace-pre">
               {line ? <Highlight text={line} /> : " "}
             </div>
           ))}
         </pre>
       )}
-      {state.truncated && (
+      {truncated && (
         <div className="px-4 pb-3 text-[11.5px] text-faint">
-          Truncated — the file is larger than the panel reads.
+          Truncated — the file is larger than the panel reads, so it opens
+          read-only.
         </div>
       )}
+      </div>
+    </div>
+  );
+}
+
+/** The autosave indicator: a quiet "Saving…/Saved", never a button to press. */
+function SaveStatus({
+  saving,
+  dirty,
+  hint,
+}: {
+  saving: boolean;
+  dirty: boolean;
+  hint?: string;
+}) {
+  const tail = hint ? <span className="text-faint/60"> · {hint}</span> : null;
+  if (saving) {
+    return (
+      <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-faint">
+        <Loader2 size={11} className="animate-spin" /> Saving…{tail}
+      </span>
+    );
+  }
+  if (dirty) {
+    return (
+      <span className="min-w-0 flex-1 truncate text-faint">Editing…{tail}</span>
+    );
+  }
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-faint">
+      <Check size={11} /> Saved{tail}
+    </span>
+  );
+}
+
+/**
+ * A plain editable text area that *reads* like a code editor: a highlighted
+ * copy of the text sits behind a transparent textarea, the two share font,
+ * padding and wrapping exactly, and the overlay scrolls with the caret. For a
+ * markdown doc the highlight is skipped (its `#`/`*` aren't code tokens).
+ */
+function CodeEditor({
+  value,
+  onChange,
+  highlight,
+  onSave,
+  onExit,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  highlight: boolean;
+  onSave: () => void;
+  /** Esc handler — a doc uses it to drop back to its rendered view. */
+  onExit?: () => void;
+}) {
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const preRef = useRef<HTMLPreElement>(null);
+
+  useEffect(() => {
+    taRef.current?.focus();
+  }, []);
+
+  const syncScroll = () => {
+    const ta = taRef.current;
+    const pre = preRef.current;
+    if (ta && pre) {
+      pre.scrollTop = ta.scrollTop;
+      pre.scrollLeft = ta.scrollLeft;
+    }
+  };
+
+  const shared =
+    "m-0 size-full whitespace-pre-wrap break-words border-0 px-4 py-3 font-mono text-[12px] leading-[1.55]";
+
+  return (
+    <div className="relative min-h-0 w-full flex-1 overflow-hidden">
+      {highlight && (
+        <pre
+          ref={preRef}
+          aria-hidden
+          className={`${shared} pointer-events-none absolute inset-0 overflow-hidden text-text/90`}
+        >
+          {/* Trailing newline keeps the last line's height in step with the
+              textarea, which always reserves a row after a final newline. */}
+          <Highlight text={value + "\n"} />
+        </pre>
+      )}
+      <textarea
+        ref={taRef}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onScroll={syncScroll}
+        onKeyDown={(e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+            e.preventDefault();
+            onSave();
+          } else if (e.key === "Escape" && onExit) {
+            e.preventDefault();
+            onExit();
+          }
+        }}
+        spellCheck={false}
+        className={`${shared} resize-none overflow-auto bg-transparent outline-none ${
+          highlight ? "text-transparent caret-text" : "text-text"
+        }`}
+      />
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* The file browser: a surface whose path is a directory. Same typed   */
+/* reference as every surface — navigation just re-references the tab, */
+/* and opening a file goes through the same door every surface opens.  */
+/* ------------------------------------------------------------------ */
+
+/** The breadcrumb's segments: each one a directory reference to jump to. */
+function crumbs(path: string): { label: string; path: string }[] {
+  if (path === "." || path === "") return [{ label: "workspace", path: "." }];
+  const abs = path.startsWith("/");
+  const out = abs
+    ? [{ label: "/", path: "/" }]
+    : [{ label: "workspace", path: "." }];
+  let cur = "";
+  for (const part of path.split("/").filter(Boolean)) {
+    cur = cur ? cur + "/" + part : part;
+    out.push({ label: part, path: abs ? "/" + cur : cur });
+  }
+  return out;
+}
+
+function fmtSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * One directory, as a browsable panel: breadcrumb header, entries below
+ * (directories first, dotfiles dimmed). Clicking a directory re-references
+ * this same tab (the breadcrumb walks back up); clicking a file opens it as
+ * a surface — viewer chosen by extension, exactly like a chip in the chat.
+ * Watched like every surface: the dir's mtime is polled while visible, so an
+ * agent writing files refreshes an open browser within a beat.
+ */
+function DirSurface({
+  surface,
+  active,
+  onNavigate,
+  onOpenFile,
+}: {
+  surface: Surface;
+  active: boolean;
+  onNavigate?: (surface: Surface) => void;
+  onOpenFile?: (surface: Surface) => void;
+}) {
+  const [info, setInfo] = useState<FileInfo | null>(null);
+  const [error, setError] = useState("");
+  const [tick, setTick] = useState(0);
+  const mtimeRef = useRef(0);
+
+  useEffect(() => {
+    let stale = false;
+    fetchFile(surface.path)
+      .then((i) => {
+        if (stale) return;
+        setInfo(i);
+        setError("");
+        mtimeRef.current = i.mtime;
+      })
+      .catch((e: unknown) => {
+        if (!stale) setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      stale = true;
+    };
+  }, [surface.path, tick]);
+
+  const docVisible = useDocumentVisible();
+  useEffect(() => {
+    if (!active || !docVisible) return;
+    let stop = false;
+    const id = window.setInterval(() => {
+      fetchFile(surface.path, true)
+        .then((i) => {
+          if (stop) return;
+          if (mtimeRef.current && i.mtime !== mtimeRef.current) {
+            setTick((t) => t + 1);
+          }
+          mtimeRef.current = i.mtime;
+        })
+        .catch(() => {});
+    }, STAT_POLL_MS);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, [active, docVisible, surface.path]);
+
+  const segments = crumbs(surface.path);
+  const entries = info?.entries ?? [];
+
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="flex h-9 shrink-0 select-none items-center gap-1 overflow-hidden border-b border-line/70 px-3">
+        <Folder size={13} className="mr-1 shrink-0 text-muted" />
+        {segments.map((seg, i) => {
+          const last = i === segments.length - 1;
+          return (
+            <span key={seg.path} className="flex min-w-0 shrink items-center gap-1">
+              {i > 0 && <ChevronRight size={11} className="shrink-0 text-faint" />}
+              {last ? (
+                <span className="truncate text-[12.5px] text-bright">{seg.label}</span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onNavigate?.(dirSurface(seg.path))}
+                  className="cursor-pointer truncate text-[12.5px] text-muted transition-colors hover:text-text"
+                >
+                  {seg.label}
+                </button>
+              )}
+            </span>
+          );
+        })}
+        <span className="flex-1" />
+        <button
+          type="button"
+          title="Reload"
+          onClick={() => setTick((t) => t + 1)}
+          className="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted transition-colors hover:bg-hover hover:text-text"
+        >
+          <RotateCw size={12} />
+        </button>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto py-1">
+        {error && <div className="px-4 py-3 text-[12.5px] text-red">{error}</div>}
+        {!error && info === null && (
+          <div className="flex items-center gap-2 px-4 py-3 text-faint">
+            <Loader2 size={13} className="animate-spin" /> Loading…
+          </div>
+        )}
+        {!error && info !== null && entries.length === 0 && (
+          <div className="px-4 py-3 text-[12.5px] text-faint">Empty directory.</div>
+        )}
+        {entries.map((e) => {
+          const child = joinDirPath(surface.path, e.name);
+          const dim = e.name.startsWith(".");
+          return (
+            <button
+              key={e.name}
+              type="button"
+              onClick={() =>
+                e.dir ? onNavigate?.(dirSurface(child)) : onOpenFile?.(fileSurface(child))
+              }
+              className="flex w-full cursor-pointer items-center gap-2 px-3 py-[3px] text-left transition-colors hover:bg-hover"
+            >
+              {e.dir ? (
+                <Folder size={13} className="shrink-0 text-accent/80" />
+              ) : (
+                <FileText size={13} className="shrink-0 text-faint" />
+              )}
+              <span
+                className={`min-w-0 flex-1 truncate text-[12.5px] ${
+                  dim ? "text-faint" : "text-text"
+                }`}
+              >
+                {e.name}
+              </span>
+              {!e.dir && e.size !== undefined && e.size > 0 && (
+                <span className="shrink-0 text-[11px] text-faint">{fmtSize(e.size)}</span>
+              )}
+            </button>
+          );
+        })}
+        {info?.truncated && (
+          <div className="px-4 py-2 text-[11.5px] text-faint">
+            Truncated — the directory has more entries than the panel lists.
+          </div>
+        )}
+      </div>
     </div>
   );
 }

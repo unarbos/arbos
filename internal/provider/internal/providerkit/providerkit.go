@@ -29,32 +29,41 @@ type Authorizer interface {
 	Apply(ctx context.Context, ref core.SecretRef, req *http.Request) error
 }
 
-// ImageOmittedPlaceholder stands in for an image on a wire channel that is
-// text-only (every provider's tool/function-result channel). Emitting real image
-// content there is a hard provider error (OpenAI 400s) and would permanently
-// wedge a session, since the bad tool result re-projects every later turn.
-const ImageOmittedPlaceholder = "[image omitted]"
-
-// ToolResultText renders a tool-role message as text for the tool/result wire
-// channel: the text content followed by one placeholder per image part. The
-// model still learns an image was produced, but no provider sees invalid image
-// content on a tool role.
+// ToolResultText renders the text a tool result contributes to the text-only
+// tool/function-result wire channel: the Content plus any text blocks. Image and
+// file blocks are deliberately NOT placeheld here — every provider can carry
+// them on *some* channel, so the adapters render them as real vision content
+// (Anthropic/Google in the same tool turn, OpenAI in a following user message)
+// via ToolResultVisionParts. A tool result's pixels therefore reach a
+// vision-capable model instead of being dropped.
 func ToolResultText(m core.Message) string {
+	if len(m.Parts) == 0 {
+		return m.Content
+	}
 	segs := make([]string, 0, len(m.Parts)+1)
 	if m.Content != "" {
 		segs = append(segs, m.Content)
 	}
 	for _, p := range m.Parts {
-		switch p.Type {
-		case core.BlockText:
-			if p.Text != "" {
-				segs = append(segs, p.Text)
-			}
-		case core.BlockImage:
-			segs = append(segs, ImageOmittedPlaceholder)
+		if p.Type == core.BlockText && p.Text != "" {
+			segs = append(segs, p.Text)
 		}
 	}
 	return strings.Join(segs, "\n")
+}
+
+// ToolResultVisionParts returns the image and file blocks of a tool result —
+// the parts that cannot ride the text-only tool channel and must be rendered as
+// real vision content on a channel that accepts it. Text blocks are excluded
+// (ToolResultText carries those).
+func ToolResultVisionParts(m core.Message) []core.ContentBlock {
+	var out []core.ContentBlock
+	for _, p := range m.Parts {
+		if p.Type == core.BlockImage || p.Type == core.BlockFile {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Base is the per-provider plumbing every adapter embeds: the display name, the
@@ -65,6 +74,10 @@ type Base struct {
 	Auth       Authorizer
 	SecretRef  core.SecretRef
 	Caps       ports.Capabilities
+	// ImageModel names the backing model for provider-side image generation
+	// (LLMRequest.ImageGen), where the endpoint lets the caller choose one
+	// (OpenRouter's image_generation server tool). Empty = endpoint default.
+	ImageModel string
 }
 
 // Option configures a Base.
@@ -84,6 +97,9 @@ func WithAuth(a Authorizer, ref core.SecretRef) Option {
 
 // WithCapabilities advertises provider capabilities.
 func WithCapabilities(c ports.Capabilities) Option { return func(b *Base) { b.Caps = c } }
+
+// WithImageModel names the backing model for provider-side image generation.
+func WithImageModel(m string) Option { return func(b *Base) { b.ImageModel = m } }
 
 // DefaultHTTPTimeout bounds a single provider request (connect + full body read).
 // Without it a stalled upstream TCP read wedges the session actor until the OS
@@ -205,8 +221,11 @@ func (a *ToolAccumulator) at(index int) *accCall {
 }
 
 // Add merges a fragment for the call at index: a non-empty id or name overwrites
-// (last wins, matching the providers), and an args fragment is appended.
-func (a *ToolAccumulator) Add(index int, id, name, argsFragment string) {
+// (last wins, matching the providers), and an args fragment is appended. It
+// returns the call's current snapshot — id, name, and the total argument bytes
+// accumulated — so an adapter can surface streaming progress without reaching
+// back into the accumulator. Callers that don't need it ignore the returns.
+func (a *ToolAccumulator) Add(index int, id, name, argsFragment string) (curID, curName string, argBytes int) {
 	c := a.at(index)
 	if id != "" {
 		c.id = id
@@ -217,6 +236,19 @@ func (a *ToolAccumulator) Add(index int, id, name, argsFragment string) {
 	if argsFragment != "" {
 		c.args.WriteString(argsFragment)
 	}
+	return c.id, c.name, c.args.Len()
+}
+
+// EmitToolProgress merges a streamed tool-call fragment into acc and forwards a
+// snapshot of the call's progress on out, so a frontend can render a live
+// "composing" card while a large call streams its arguments in. It returns false
+// if the downstream send was cancelled (the adapter then stops draining the
+// upstream). Adapters whose tool arguments genuinely stream in fragments
+// (OpenAI, Anthropic) route fragments through this; one whose calls arrive whole
+// (Google) has no gap to fill and uses Add directly.
+func EmitToolProgress(ctx context.Context, out chan<- core.LLMChunk, acc *ToolAccumulator, index int, id, name, argsFragment string) bool {
+	curID, curName, n := acc.Add(index, id, name, argsFragment)
+	return Send(ctx, out, core.LLMChunk{ToolProgress: &core.ToolCallProgress{ID: curID, Name: curName, Bytes: n}})
 }
 
 // Len reports how many distinct calls have been seen.

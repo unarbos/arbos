@@ -63,19 +63,34 @@ type Engine struct {
 	liveMu sync.Mutex
 	live   map[core.SessionID]*Conversation
 
-	// inFlight counts turns currently executing across ALL sessions. It is the
-	// process-global "busy" signal a graceful-restart supervisor consults to
-	// avoid swapping the binary mid-turn: processPrompt increments it on entry
-	// and decrements on return, so inFlight==0 means every actor is parked at a
-	// turn boundary. Atomic because the supervisor goroutine reads it
+	// inFlight counts session actors currently busy with a turn chain — a turn
+	// plus every follow-up prompt queued behind it. It is the process-global
+	// "busy" signal the self-restart watcher (WatchRestart) consults to avoid
+	// swapping the binary mid-work: the credit is held for the WHOLE chain, not
+	// per turn, so a queued-but-unstarted prompt (which lives only in the
+	// actor goroutine's memory) can never be dropped by an exec landing
+	// between turns. Atomic because the watcher goroutine reads it
 	// concurrently with the actor goroutines that mutate it.
 	inFlight atomic.Int64
+
+	// restartReq marks a re-exec requested by a runtime configuration change
+	// (the Settings tab's provider endpoint/key) rather than a binary swap.
+	// WatchRestart honors it at the same idle boundary.
+	restartReq atomic.Bool
 }
 
-// InFlight reports how many turns are executing right now, across every
-// session. Zero means the process is at a turn boundary on all sessions — the
-// only moment it is safe to re-exec a new binary without dropping a turn.
+// InFlight reports how many session actors are busy right now. Zero means
+// every actor is parked with an empty prompt queue — the only moment it is
+// safe to re-exec a new binary without dropping a turn or a queued follow-up.
 func (e *Engine) InFlight() int64 { return e.inFlight.Load() }
+
+// RequestRestart asks the self-restart watcher to re-exec the current binary
+// at the next idle turn boundary even though the file on disk is unchanged —
+// the path a runtime configuration change (a new provider endpoint or key
+// saved in the Settings tab) uses to apply itself: the process reboots
+// through the one assembly path instead of hot-swapping half its organs.
+// A no-op unless WatchRestart is running (the long-lived doors).
+func (e *Engine) RequestRestart() { e.restartReq.Store(true) }
 
 // Option configures optional engine dependencies without widening New's
 // signature, so existing call sites keep compiling as capabilities are added.
@@ -161,9 +176,10 @@ type Conversation struct {
 	awaits   chan awaitReg
 	observer ports.Observer // optional operational observer; nil = none
 	// model is a per-session override of the engine's configured model, set by a
-	// SetModelIntent between turns. It is owned solely by the actor goroutine and
-	// only mutated while idle (no turn running), so a running turn reads a stable
-	// value without synchronization. Empty = use the engine's configured model.
+	// SetModelIntent. It is owned solely by the actor goroutine and only mutated
+	// at turn boundaries (idle, or the deferred apply after a turn's goroutine
+	// has exited), so a running turn reads a stable value without
+	// synchronization. Empty = use the engine's configured model.
 	model string
 	// webSearch is the per-session web-search toggle, set by a SetWebSearchIntent
 	// between turns. Same ownership rules as model: actor-owned, mutated only
@@ -182,7 +198,14 @@ type Conversation struct {
 	tapsMu  sync.Mutex
 	taps    map[int]func(core.Envelope)
 	nextTap int
+	// done closes when the actor exits — the liveness signal a tapping door
+	// watches so it knows the stream it follows has ended (Events() carries
+	// the same signal by closing, but only its single owner may range it).
+	done chan struct{}
 }
+
+// Done returns a channel closed when this conversation's actor has exited.
+func (c *Conversation) Done() <-chan struct{} { return c.done }
 
 // Tap subscribes fn to every envelope this conversation emits and returns
 // the unsubscribe. fn runs on the emitting goroutine — it must be fast and
@@ -372,6 +395,7 @@ func (e *Engine) StartSession(ctx context.Context, id core.SessionID, opts ...Se
 		id:       id,
 		intents:  make(chan core.Intent, 8),
 		events:   make(chan core.Envelope, 32),
+		done:     make(chan struct{}),
 		awaits:   make(chan awaitReg), // unbuffered rendezvous
 		observer: e.observer,
 		// Session.Model is the durable authority; the actor caches it so a
@@ -427,28 +451,55 @@ func (e *Engine) Interrupt(id core.SessionID) bool {
 	return true
 }
 
+// Deliver sends an intent to a live session by id, reporting whether a live
+// session was found. It is the seam a tool uses to influence its own session
+// from inside a turn (the set_model tool): the tool runs on a dispatch
+// goroutine and must not touch actor state, so it posts an intent like any
+// other door. Same non-blocking discipline as Interrupt — a stalled actor
+// cannot wedge the caller, and the goroutine fallback keeps a momentarily
+// full buffer from dropping the intent.
+func (e *Engine) Deliver(id core.SessionID, intent core.Intent) bool {
+	e.liveMu.Lock()
+	c := e.live[id]
+	e.liveMu.Unlock()
+	if c == nil {
+		return false
+	}
+	if !c.TrySend(intent) {
+		go c.Send(intent)
+	}
+	return true
+}
+
 // runActor is the single owner of a session. It processes one intent at a time;
 // while a prompt is in flight it watches for an interrupt and cancels the turn.
 // Every intent variant is handled explicitly — no silent no-ops.
 func (e *Engine) runActor(parent context.Context, c *Conversation) {
 	defer close(c.events)
 	defer e.unregisterConv(c)
+	defer close(c.done)
 	// turnSeq is owned solely by this goroutine (the session actor), so it needs
 	// no synchronization — it is the per-session monotonic turn counter stamped
 	// on every event a turn produces.
 	var turnSeq int64
-	// queue holds prompts that arrived while a turn was running. The actor is the
-	// sole owner (no lock), and prompts run FIFO after the current turn — never
-	// silently dropped. processPrompt returns any prompts it collected mid-turn.
-	var queue []core.PromptIntent
-	for {
-		if len(queue) > 0 {
+	// drain runs one prompt and then every follow-up that queued behind it
+	// while turns were running (FIFO, never silently dropped — processPrompt
+	// returns any prompts it collected mid-turn). The process-wide busy credit
+	// is held for the WHOLE chain: queued-but-unstarted prompts exist only in
+	// this goroutine's memory, so the self-restart watcher must never observe
+	// idle while any remain — an exec then would silently drop them.
+	drain := func(first core.PromptIntent) {
+		e.inFlight.Add(1)
+		defer e.inFlight.Add(-1)
+		queue := []core.PromptIntent{first}
+		for len(queue) > 0 {
 			next := queue[0]
 			queue = queue[1:]
 			turnSeq++
 			queue = append(queue, e.processPrompt(parent, c, next.Text, next.Parts, turnSeq)...)
-			continue
 		}
+	}
+	for {
 		select {
 		case <-parent.Done():
 			return
@@ -465,11 +516,9 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 				if it.Origin != "" {
 					c.emit(parent, core.Queued{Text: it.Text, Origin: it.Origin, Parts: it.Parts})
 				}
-				turnSeq++
-				queue = append(queue, e.processPrompt(parent, c, it.Text, it.Parts, turnSeq)...)
+				drain(it)
 			case core.SteerIntent:
-				turnSeq++
-				queue = append(queue, e.processPrompt(parent, c, it.Text, it.Parts, turnSeq)...)
+				drain(core.PromptIntent{Text: it.Text, Parts: it.Parts})
 			case core.InterruptIntent:
 				// Idle: there is no in-flight turn to cancel.
 			case core.ResumeIntent:
@@ -531,12 +580,6 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 // interrupts. An InterruptIntent cancels the turn's context — the structural
 // payoff of the actor model.
 func (e *Engine) processPrompt(parent context.Context, c *Conversation, text string, parts []core.ContentBlock, turnID int64) []core.PromptIntent {
-	// Mark the process busy for the lifetime of this turn so a graceful-restart
-	// supervisor never swaps the binary mid-turn. Paired inc/dec around the
-	// whole turn (including its queued-prompt drain) keeps inFlight a faithful
-	// count of executing turns.
-	e.inFlight.Add(1)
-	defer e.inFlight.Add(-1)
 	// Attach turn correlation once, here, so every downstream append and (later)
 	// log line/span joins on the same SessionID+TurnID. cctx is not cancellable
 	// itself (only turnCtx is), so it is the right context for must-persist
@@ -568,6 +611,29 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 			}
 		}()
 		completedNormally = e.runTurn(turnCtx, c, text, parts)
+	}()
+
+	// pendingModel holds a model switch requested while this turn ran — the
+	// set_model tool runs inside a turn by construction, so its intent always
+	// arrives mid-turn. It is applied at the turn boundary: every return path
+	// below waits on done first, so by the time the deferred apply runs the
+	// turn goroutine has exited and the actor is again the sole toucher of
+	// c.model — the same no-mid-turn-mutation invariant as the idle path,
+	// honored instead of dropping the switch. Last write wins.
+	var pendingModel string
+	var havePendingModel bool
+	defer func() {
+		if !havePendingModel {
+			return
+		}
+		// WithoutCancel: the switch was accepted, so it must persist even when
+		// this return is a shutdown or interrupt tearing the context down.
+		bg := context.WithoutCancel(cctx)
+		if err := e.persistModel(bg, c.id, pendingModel); err != nil {
+			c.emit(parent, core.ErrorEvent{Category: core.ErrPersist, Err: "persist model: " + err.Error()})
+			return
+		}
+		c.model = pendingModel
 	}()
 
 	// queued collects prompts that arrive while this turn runs; the actor runs
@@ -641,7 +707,14 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 				routeResponse(c, pending, it.RequestID, it, parent)
 			case core.QuestionResponseIntent:
 				routeResponse(c, pending, it.RequestID, it, parent)
-			case core.SetModelIntent, core.SetWebSearchIntent, core.SetWebFetchIntent, core.SetImageGenIntent, core.CompactIntent:
+			case core.SetModelIntent:
+				// Defer to the turn boundary (see pendingModel above): the
+				// current turn already resolved its model, so it finishes on
+				// it; the next turn — including one queued behind this one —
+				// runs on the switch.
+				pendingModel = it.Model
+				havePendingModel = true
+			case core.SetWebSearchIntent, core.SetWebFetchIntent, core.SetImageGenIntent, core.CompactIntent:
 				// These apply only when idle (between turns). Ignoring them
 				// mid-turn keeps the actor's single-writer and no-mid-turn-mutation
 				// invariants intact; a frontend resends once the session is idle.

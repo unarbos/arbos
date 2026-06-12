@@ -18,22 +18,37 @@ import { ContextCircle } from "./ContextCircle";
 import { ModelPicker } from "./ModelPicker";
 import { QueuedMessages, type QueuedMessage } from "./QueuedMessages";
 import type { RunRef } from "./RunView";
+import { Tooltip } from "./Tooltip";
 import {
   cancelPlanNode,
   fetchChildren,
+  fetchJobTail,
   fetchModels,
   fetchReplay,
+  fetchReplayFull,
+  HttpError,
   killJob,
   startVoice,
   stopRun,
   stopVoice,
+  transcribeAudio,
   writeFile,
+  writeFileBase64,
   type ChildRun,
   type ModelOption,
 } from "@/lib/api";
+import { notifyRunComplete } from "@/lib/notify";
+import {
+  blobBase64,
+  cancelRecording,
+  recorderSupported,
+  startRecording,
+  stopRecording,
+} from "@/lib/recorder";
+import { useDocumentVisible } from "@/lib/useDocumentVisible";
 import { useSlashCommands } from "@/lib/useSlashCommands";
 import { SeamClient, type ConnectionState } from "@/lib/seam";
-import { detailsSurface, promptSurface, type Surface } from "@/lib/surface";
+import { detailsSurface, detailsUI, promptSurface, type Surface, type UICommand } from "@/lib/surface";
 import type { TermRef } from "@/lib/term";
 import type { ContentBlock, QuestionAnswer } from "@/lib/types";
 import { useAutosize } from "@/lib/useAutosize";
@@ -44,9 +59,24 @@ import {
   type TranscriptItem,
 } from "@/lib/transcript";
 
-const RECONNECT_MS = 2000;
-const REBIND_MS = 1000;
-const REBIND_MAX = 5;
+/** Socket reconnect: exponential backoff with jitter, so a restarting
+ *  backend isn't hammered and a fleet of tabs doesn't thunder in sync. */
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 15000;
+/** Re-bind while the server still holds the session for a dead connection:
+ *  it frees the moment the server notices, so retry forever (with backoff) —
+ *  never silently fall back to a fresh session under the old transcript. */
+const REBIND_BASE_MS = 1000;
+const REBIND_MAX_MS = 8000;
+/** How long a connection must stay down before the reconnecting banner
+ *  shows. Sub-grace drops (idle reaping, blips) heal invisibly. */
+const RECONNECT_BANNER_DELAY_MS = 3000;
+
+/** A retry delay with jitter: 50–100% of the capped exponential step. */
+function backoffMs(attempt: number, base: number, max: number): number {
+  const exp = Math.min(max, base * 2 ** Math.min(attempt, 10));
+  return exp / 2 + Math.random() * (exp / 2);
+}
 const COMPOSER_MAX_PX = 200;
 const RUNS_POLL_MS = 5000;
 // An edit mid-turn: the interrupt needs a beat to wind the engine down before
@@ -59,20 +89,48 @@ const ATTACH_MAX_CHARS = 2_000_000;
 /** Where attached files spool in the workspace (gitignored). */
 const ATTACH_DIR = ".arbos/attachments";
 
+/** Cap a binary attachment (PDF) so its base64 stays under the seam's
+ *  WebSocket frame limit (32 MiB; base64 inflates ~33%). */
+const ATTACH_MAX_BYTES = 24 * 1024 * 1024;
+
 /**
  * A file picked into the composer. Text files spool to the workspace on send
  * and the prompt carries a one-line path reference (the agent reads the file
  * with its own tools; the transcript renders the line as an openable chip).
  * Images ride along as base64 multimodal parts the seam carries to a vision
- * model (ADR-0022).
+ * model (ADR-0022). PDFs (kind "file") do both: they spool to disk (so the
+ * chip opens the document in a panel) AND ride along as a file part the
+ * provider parses natively (text + OCR for scanned pages).
  */
 interface Attachment {
   aid: number;
   name: string;
-  kind: "text" | "image";
+  kind: "text" | "image" | "file";
   text?: string; // kind "text": file contents
-  data?: string; // kind "image": base64 payload (no data: prefix)
-  mime?: string; // kind "image": MIME type
+  data?: string; // kind "image"/"file": base64 payload (no data: prefix)
+  mime?: string; // kind "image"/"file": MIME type
+  /** A voice memo still transcribing: the chip shows a spinner and submit
+   *  waits for the transcript to land before spooling. */
+  pending?: boolean;
+}
+
+/** Audio container formats the transcription endpoint accepts, by extension. */
+const AUDIO_FORMATS = new Set(["wav", "mp3", "flac", "m4a", "ogg", "webm", "aac"]);
+
+/** The transcription format label for an audio file, or "" if not audio. */
+function audioFormat(file: File): string {
+  const ext = file.name.toLowerCase().split(".").pop() ?? "";
+  if (AUDIO_FORMATS.has(ext)) return ext;
+  // Opus voice memos (WhatsApp .opus, Telegram .oga) are Ogg containers.
+  if (ext === "opus" || ext === "oga") return "ogg";
+  if (file.type.startsWith("audio/")) {
+    const sub = file.type.slice("audio/".length).split(";")[0];
+    if (sub === "mpeg") return "mp3";
+    if (sub === "mp4" || sub === "x-m4a") return "m4a";
+    if (sub === "opus") return "ogg";
+    if (AUDIO_FORMATS.has(sub)) return sub;
+  }
+  return "";
 }
 
 function errMsg(e: unknown): string {
@@ -96,9 +154,12 @@ function attachmentPath(name: string): string {
 async function spoolAttachments(attachments: Attachment[]): Promise<string[]> {
   return Promise.all(
     attachments
-      .filter((a) => a.kind === "text")
+      .filter((a) => a.kind === "text" || a.kind === "file")
       .map(async (a) => {
-        const saved = await writeFile(attachmentPath(a.name), a.text ?? "");
+        const saved =
+          a.kind === "file"
+            ? await writeFileBase64(attachmentPath(a.name), a.data ?? "")
+            : await writeFile(attachmentPath(a.name), a.text ?? "");
         return `Attached file "${a.name}": \`${saved.path}\``;
       }),
   );
@@ -119,14 +180,19 @@ function composeMessage(text: string, fileLines: string[]): string {
   return pieces.filter(Boolean).join("\n\n");
 }
 
-/** The image attachments as multimodal content blocks for the prompt. */
-function imageParts(attachments: Attachment[]): ContentBlock[] {
+/** The image and document attachments as multimodal content blocks for the
+ *  prompt: images as image blocks, PDFs as file blocks the provider parses. */
+function mediaParts(attachments: Attachment[]): ContentBlock[] {
   return attachments
-    .filter((a): a is Attachment & { data: string } => a.kind === "image" && !!a.data)
-    .map((a) => ({
-      type: "image",
-      image: { data: a.data, mimeType: a.mime ?? "image/png" },
-    }));
+    .filter((a): a is Attachment & { data: string } => a.kind !== "text" && !!a.data)
+    .map((a) =>
+      a.kind === "file"
+        ? {
+            type: "file",
+            file: { data: a.data, mimeType: a.mime ?? "application/pdf", name: a.name },
+          }
+        : { type: "image", image: { data: a.data, mimeType: a.mime ?? "image/png" } },
+    );
 }
 
 export interface ChatTabHandle {
@@ -138,6 +204,8 @@ export interface ChatTabHandle {
   onSession?: (id: string) => void;
   /** The agent (or a chip click) opened a surface — show it beside the chat. */
   onOpenSurface?: (surface: Surface) => void;
+  /** The agent issued a UI command (the `ui` tool) — close/focus side panels. */
+  onControlUI?: (cmd: UICommand) => void;
   /** A sub-agent run was clicked — open its transcript in a tab beside the
    *  chat, where a long-running run stays watchable. */
   onOpenRun?: (run: RunRef) => void;
@@ -202,6 +270,10 @@ export function ChatTab({
   // workspace on send (the prompt carries path references) and the chips
   // clear once it's sent.
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // Latest attachments for submit's post-await read (transcripts resolve
+  // after the closure captured state).
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
   const aidRef = useRef(1);
   // The active model, shown in the composer's picker. Seeds from the host's
   // configured default; a pick sends set_model on the live seam and re-labels.
@@ -216,6 +288,14 @@ export function ChatTab({
     "idle",
   );
 
+  // Socket open but the session is still held by a dead predecessor
+  // connection: the tab is re-binding, not usable yet. Drives the
+  // reconnecting banner and keeps the composer honest.
+  const [rebinding, setRebinding] = useState(false);
+  // The seam has been open at least once — so a later non-open state is a
+  // LOST connection (show the banner), not the initial handshake.
+  const [hadConn, setHadConn] = useState(false);
+
   const seamRef = useRef<SeamClient | null>(null);
   const sessionRef = useRef<string | null>(resumeId);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -228,16 +308,61 @@ export function ChatTab({
   // Fresh turn state for async callbacks (resubmitEdit reads it post-await).
   const turnActiveRef = useRef(chat.turnActive);
   turnActiveRef.current = chat.turnActive;
+  // Whole chat state for the reconnect reconciler (it must see pending
+  // approval/question panels, which a blind replay would wipe).
+  const chatRef = useRef(chat);
+  chatRef.current = chat;
 
   useEffect(() => {
     let retry: number | undefined;
     let forkRetry: number | undefined;
+    let connectAttempts = 0;
     let rebinds = 0;
+    // The socket dropped while a session was bound: deltas may have been
+    // missed, so the next successful re-bind reconciles from the persisted
+    // log instead of trusting the on-screen transcript.
+    let gap = false;
+    // A gap landed mid-turn: heal the transcript from the log once the turn
+    // reaches a terminal event (replaying earlier would drop a pending
+    // approval/question panel, and the in-flight prose isn't persisted yet).
+    let healAtTurnEnd = false;
     let closed = false;
+
+    /** Replace the transcript with the persisted session log — the source of
+     *  truth after a connection gap. Failure leaves the screen as-is; the
+     *  next heal (or reload) retries. */
+    const reconcile = () => {
+      const sid = sessionRef.current;
+      if (!sid) return;
+      fetchReplay(sid)
+        .then((events) => {
+          if (!closed && sessionRef.current === sid) {
+            dispatch({ type: "replay", items: replayToItems(events) });
+          }
+        })
+        .catch(() => {});
+    };
+
+    const reconcileAfterGap = () => {
+      const c = chatRef.current;
+      if (!c.turnActive) {
+        reconcile();
+        return;
+      }
+      healAtTurnEnd = true;
+      // Mid-turn with no panel parked on the user: reconcile now too, so a
+      // turn that actually FINISHED during the gap (its terminal event was
+      // missed) doesn't leave the tab stuck "working" forever.
+      if (!c.pendingApproval && !c.pendingQuestions) reconcile();
+    };
+
     const seam = new SeamClient({
       onState: (s) => {
         setConnState(s);
         if (s === "open") {
+          setHadConn(true);
+          connectAttempts = 0;
+          rebinds = 0;
           // First connect opens fresh (or resumes by id); a reconnect
           // re-binds the same session, so a dropped socket never loses the
           // thread.
@@ -247,16 +372,24 @@ export function ChatTab({
           // Any fork awaiting confirmation died with the socket; the rebind
           // below reattaches the original session, transcript intact.
           pendingEditRef.current = null;
+          if (sessionRef.current) gap = true;
           if (!closed) {
-            retry = window.setTimeout(() => seam.connect(), RECONNECT_MS);
+            retry = window.setTimeout(
+              () => seam.connect(),
+              backoffMs(connectAttempts++, RECONNECT_BASE_MS, RECONNECT_MAX_MS),
+            );
           }
         }
       },
       onSession: (id) => {
         rebinds = 0;
+        setRebinding(false);
+        const rebound = gap && id === sessionRef.current;
+        gap = false;
         sessionRef.current = id;
         setBoundSession(id);
         handleRef.current.onSession?.(id);
+        if (rebound) reconcileAfterGap();
       },
       onForked: () => {
         // The server confirmed a rewind-and-edit fork and rebound this
@@ -278,8 +411,22 @@ export function ChatTab({
         if (env.depth === 0 && env.event.kind === "tool_finished") {
           const surface = detailsSurface(env.event.data.result);
           if (surface) handleRef.current.onOpenSurface?.(surface);
+          const ui = detailsUI(env.event.data.result);
+          if (ui) handleRef.current.onControlUI?.(ui);
         }
         dispatch({ type: "envelope", env });
+        // A gap landed mid-turn: now that the turn has settled, the persisted
+        // log is whole — heal the transcript from it.
+        if (
+          healAtTurnEnd &&
+          env.depth === 0 &&
+          (env.event.kind === "turn_complete" ||
+            env.event.kind === "interrupted" ||
+            env.event.kind === "error")
+        ) {
+          healAtTurnEnd = false;
+          reconcile();
+        }
       },
       onNotice: (text, session) => {
         // A notice addressed to THIS chat always renders here, focused or
@@ -315,18 +462,16 @@ export function ChatTab({
           pendingEditRef.current = null;
         }
         // A reconnect can land while the server still drains the previous
-        // connection's hold on the session. Quietly retry the re-bind; fall
-        // back to a fresh session only if it never frees up.
+        // connection's hold on the session. It frees the moment that
+        // teardown lands, so keep re-binding with backoff — NEVER fall back
+        // to a fresh session, which would silently orphan the transcript on
+        // screen. The banner shows "reconnecting" until the bind succeeds.
         if (msg.includes("already active") && sessionRef.current) {
-          if (rebinds++ < REBIND_MAX) {
-            retry = window.setTimeout(
-              () => seam.open(sessionRef.current ?? undefined),
-              REBIND_MS,
-            );
-          } else {
-            sessionRef.current = null;
-            seam.open();
-          }
+          setRebinding(true);
+          retry = window.setTimeout(
+            () => seam.open(sessionRef.current ?? undefined),
+            backoffMs(rebinds++, REBIND_BASE_MS, REBIND_MAX_MS),
+          );
           return;
         }
         dispatch({ type: "seam-error", message: msg });
@@ -335,9 +480,15 @@ export function ChatTab({
     seamRef.current = seam;
 
     if (resumeId) {
-      // Paint history before the live connection lands.
-      fetchReplay(resumeId)
-        .then((events) => dispatch({ type: "replay", items: replayToItems(events) }))
+      // Paint history before the live connection lands, and seed the
+      // composer's controls from the session record — a resumed session
+      // keeps its model (durable, server-side), so the chip must show that
+      // state, not the host defaults.
+      fetchReplayFull(resumeId)
+        .then(({ events, session }) => {
+          dispatch({ type: "replay", items: replayToItems(events) });
+          if (session?.model) setModel(session.model);
+        })
         .catch(() => {})
         .finally(() => seam.connect());
     } else {
@@ -353,8 +504,31 @@ export function ChatTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Busy state feeds the tab spinner; a true→false transition is "the agent
+  // finished responding" — the moment the completion sound / spoken-response /
+  // notification settings hook into. The latest transcript rides a ref so the
+  // effect keys only on the transition, not on every streaming delta.
+  const wasTurnActive = useRef(false);
+  const itemsRef = useRef(chat.items);
+  itemsRef.current = chat.items;
   useEffect(() => {
     handleRef.current.onBusy?.(chat.turnActive);
+    if (wasTurnActive.current && !chat.turnActive) {
+      const items = itemsRef.current;
+      let finalText = "";
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i];
+        if (it.kind === "assistant") {
+          finalText = it.text;
+          break;
+        }
+        // An interrupted or errored turn has no reply worth speaking — the
+        // nearest assistant text behind those markers is a cut-off partial.
+        if (it.kind === "user" || it.kind === "interrupted" || it.kind === "error") break;
+      }
+      notifyRunComplete(null, finalText);
+    }
+    wasTurnActive.current = chat.turnActive;
   }, [chat.turnActive]);
 
   // The page is the prompt: clicking anywhere in this pane focuses its
@@ -394,9 +568,11 @@ export function ChatTab({
 
   // Poll this chat's scheduled runs (plan-node agent firings) so they appear
   // as openable tabs. Scoped server-side: only runs whose node THIS chat
-  // created come back, so nothing leaks across conversations.
+  // created come back, so nothing leaks across conversations. Pauses while
+  // the window is hidden; the visibility flip re-runs it immediately.
+  const docVisible = useDocumentVisible();
   useEffect(() => {
-    if (!active || !boundSession) return;
+    if (!active || !docVisible || !boundSession) return;
     let stop = false;
     const tick = () => {
       fetchChildren(boundSession)
@@ -411,18 +587,129 @@ export function ChatTab({
       stop = true;
       window.clearInterval(id);
     };
-  }, [active, boundSession]);
+  }, [active, docVisible, boundSession]);
+
+  // The background bar's jobs list is folded from the transcript, which only
+  // learns of a job's end if some LATER tool result happens to mention it —
+  // a turn that ends with the job still running would pin "1 background
+  // terminal" forever. Poll the live status of each listed job and drop the
+  // ones that exited, so the bar agrees with the cards (and reality).
+  const jobIDs = useMemo(
+    () => chat.jobs.map((j) => j.id).join(","),
+    [chat.jobs],
+  );
+  useEffect(() => {
+    if (!active || !docVisible || !jobIDs) return;
+    let stop = false;
+    const tick = () => {
+      for (const id of jobIDs.split(",")) {
+        fetchJobTail(id, 0)
+          .then((t) => {
+            if (!stop && t.status !== "running") {
+              dispatch({ type: "job-removed", id });
+            }
+          })
+          .catch((e: unknown) => {
+            // Unknown to the gateway = certainly not running.
+            if (!stop && e instanceof HttpError && e.status === 404) {
+              dispatch({ type: "job-removed", id });
+            }
+          });
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, RUNS_POLL_MS);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
+  }, [active, docVisible, jobIDs]);
 
   const connected = connState === "open";
+  // Usable = socket open AND a session bound; while re-binding the seam is
+  // open but frames addressed to the session would only error.
+  const usable = connected && !rebinding;
+  // The thread was live and now isn't. Most drops heal in well under the
+  // grace window (idle reaping by a proxy, a network blip), so the banner
+  // waits it out — flashing "connection lost" for a self-healing hiccup
+  // reads as the app being broken when nothing was lost.
+  const down = rebinding || (hadConn && !connected);
+  const [reconnecting, setReconnecting] = useState(false);
+  useEffect(() => {
+    if (!down) {
+      setReconnecting(false);
+      return;
+    }
+    const t = window.setTimeout(() => setReconnecting(true), RECONNECT_BANNER_DELAY_MS);
+    return () => window.clearTimeout(t);
+  }, [down]);
   const approval = chat.pendingApproval;
   const questions = chat.pendingQuestions;
   const questionRef = useRef<QuestionCardHandle>(null);
 
+  // The "working" heartbeat (ChatView's shimmer line): live the instant a
+  // turn starts, so a sent prompt never sits in silence. ChatView suppresses
+  // it while something is already streaming; here we also hush it while the
+  // turn is parked on the user for an approval or a question.
+  const working = chat.turnActive && !approval && !questions;
+
+  // Voice memos still transcribing when the user hits Enter: submit awaits
+  // these so a fast send never spools an empty transcript.
+  const transcribingRef = useRef(new Map<number, Promise<void>>());
+
   const onPickFiles = useCallback((files: FileList | null) => {
     if (!files) return;
     for (const file of Array.from(files)) {
-      if (file.type.startsWith("image/")) {
-        // Images go to the model as base64 multimodal parts.
+      const isPdf =
+        file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+      const audioFmt = audioFormat(file);
+      if (audioFmt) {
+        // A voice memo: transcribe it through the provider's audio endpoint
+        // and attach the transcript as text — every model can read text, so
+        // the memo works regardless of which model is driving the session.
+        if (file.size > ATTACH_MAX_BYTES) {
+          dispatch({
+            type: "seam-error",
+            message: `attach: "${file.name}" is too large (max ${Math.round(ATTACH_MAX_BYTES / 1024 / 1024)} MB)`,
+          });
+          continue;
+        }
+        const aid = aidRef.current++;
+        const name = `${file.name}.txt`;
+        setAttachments((a) => [...a, { aid, name, kind: "text", pending: true }]);
+        const job = (async () => {
+          const heard = await transcribeAudio(await blobBase64(file), audioFmt);
+          setAttachments((a) =>
+            a.map((x) =>
+              x.aid === aid
+                ? {
+                    ...x,
+                    pending: false,
+                    text: `Voice memo "${file.name}" (transcribed):\n\n${heard}`,
+                  }
+                : x,
+            ),
+          );
+        })();
+        transcribingRef.current.set(
+          aid,
+          job.catch((e: unknown) => {
+            setAttachments((a) => a.filter((x) => x.aid !== aid));
+            dispatch({ type: "seam-error", message: `attach: ${errMsg(e)}` });
+          }).finally(() => transcribingRef.current.delete(aid)),
+        );
+        continue;
+      }
+      if (file.type.startsWith("image/") || isPdf) {
+        // Images and PDFs go to the model as base64 multimodal parts; a PDF
+        // also spools to disk so its chip opens the document in a panel.
+        if (isPdf && file.size > ATTACH_MAX_BYTES) {
+          dispatch({
+            type: "seam-error",
+            message: `attach: "${file.name}" is too large (max ${Math.round(ATTACH_MAX_BYTES / 1024 / 1024)} MB)`,
+          });
+          continue;
+        }
         const reader = new FileReader();
         reader.onload = () => {
           const url = String(reader.result);
@@ -432,9 +719,9 @@ export function ChatTab({
             {
               aid: aidRef.current++,
               name: file.name,
-              kind: "image",
+              kind: isPdf ? "file" : "image",
               data,
-              mime: file.type,
+              mime: file.type || (isPdf ? "application/pdf" : "image/png"),
             },
           ]);
         };
@@ -457,7 +744,7 @@ export function ChatTab({
           .catch(() => {});
       }
     }
-  }, []);
+  }, [dispatch]);
 
   // Seed the picker with the host's configured model so the chip names the
   // model running before the user touches it.
@@ -486,36 +773,82 @@ export function ChatTab({
     return 0;
   }, [chat.items]);
 
+  // The engine applies set_model only between turns (idle-only contract); a
+  // frame sent mid-turn is dropped server-side while the chip has already
+  // flipped. The contract says the frontend resends once idle — this dirty
+  // flag plus the effect below is that resend, so a mid-turn click still
+  // means what it shows.
+  const controlsDirtyRef = useRef(false);
+  const controlsRef = useRef({ model: "" });
+  controlsRef.current = { model };
+  const markDirtyIfBusy = useCallback(() => {
+    if (turnActiveRef.current) controlsDirtyRef.current = true;
+  }, []);
+  useEffect(() => {
+    if (chat.turnActive || !controlsDirtyRef.current) return;
+    controlsDirtyRef.current = false;
+    const seam = seamRef.current;
+    const c = controlsRef.current;
+    if (!seam) return;
+    if (c.model) seam.setModel(c.model);
+  }, [chat.turnActive]);
+
   // Switch the model on the live session; only re-label once the seam accepts
   // the frame, so a dropped connection doesn't lie about what's running.
   const selectModel = useCallback((id: string) => {
-    if (seamRef.current?.setModel(id)) setModel(id);
-  }, []);
+    if (seamRef.current?.setModel(id)) {
+      setModel(id);
+      markDirtyIfBusy();
+    }
+  }, [markDirtyIfBusy]);
 
-  // Toggle dictation: first click starts host capture, the next stops it and
-  // folds the transcript into the composer. The host round-trips ("starting",
-  // "transcribing") ignore further clicks. Errors (no mic / denied permission)
-  // surface as a transcript error line.
+  // Toggle dictation: first click starts capture, the next stops it and folds
+  // the transcript into the composer. On-device host dictation (Apple Speech)
+  // is the primary path; when the host can't capture (non-macOS, helper
+  // failure) the browser records the mic itself and the gateway transcribes
+  // through the provider's audio endpoint — same button, same states, any
+  // platform. The round-trips ("starting", "transcribing") ignore further
+  // clicks. Errors (no mic / denied permission) surface as a transcript line.
+  const voiceModeRef = useRef<"host" | "browser">("host");
   const toggleVoice = useCallback(async () => {
     if (voice === "idle") {
       setVoice("starting");
       try {
         await startVoice();
+        voiceModeRef.current = "host";
         setVoice("recording");
-      } catch (e) {
-        setVoice("idle");
-        dispatch({ type: "seam-error", message: `voice: ${errMsg(e)}` });
+      } catch (hostErr) {
+        if (!recorderSupported()) {
+          setVoice("idle");
+          dispatch({ type: "seam-error", message: `voice: ${errMsg(hostErr)}` });
+          return;
+        }
+        try {
+          await startRecording();
+          voiceModeRef.current = "browser";
+          setVoice("recording");
+        } catch (e) {
+          setVoice("idle");
+          dispatch({ type: "seam-error", message: `voice: ${errMsg(e)}` });
+        }
       }
       return;
     }
     if (voice === "recording") {
       setVoice("transcribing");
       try {
-        const heard = (await stopVoice()).trim();
+        let heard: string;
+        if (voiceModeRef.current === "host") {
+          heard = (await stopVoice()).trim();
+        } else {
+          const clip = await stopRecording();
+          heard = (await transcribeAudio(clip.data, clip.format)).trim();
+        }
         if (heard) {
           setText((prev) => (prev.trim() ? `${prev.trimEnd()} ${heard}` : heard));
         }
       } catch (e) {
+        if (voiceModeRef.current === "browser") cancelRecording();
         dispatch({ type: "seam-error", message: `voice: ${errMsg(e)}` });
       } finally {
         setVoice("idle");
@@ -536,22 +869,33 @@ export function ChatTab({
   // Sends overlap only through the spool await; the guard keeps a double
   // Enter from spooling (and sending) the same attachments twice.
   const sendingRef = useRef(false);
+  const usableRef = useRef(usable);
+  usableRef.current = usable;
   const submit = useCallback(async () => {
-    if (sendingRef.current || !seamRef.current) return;
+    if (sendingRef.current || !seamRef.current || !usableRef.current) return;
     if (!text.trim() && attachments.length === 0) return;
     sendingRef.current = true;
     try {
+      // A voice memo may still be transcribing; its chip spinner is the cue.
+      // Waiting here (instead of refusing the send) keeps Enter meaning
+      // "send" — the prompt goes out the moment the transcript lands. The
+      // resolved transcripts live in state, so re-read through the ref (the
+      // closure's `attachments` predates them).
+      if (transcribingRef.current.size > 0) {
+        await Promise.all([...transcribingRef.current.values()]);
+      }
+      const atts = attachmentsRef.current.filter((a) => !a.pending);
       let fileLines: string[];
       try {
-        fileLines = await spoolAttachments(attachments);
+        fileLines = await spoolAttachments(atts);
       } catch (e) {
         dispatch({ type: "seam-error", message: `attach: ${errMsg(e)}` });
         return;
       }
       const body = composeMessage(text, fileLines);
-      const parts = imageParts(attachments);
+      const parts = mediaParts(atts);
       if (!body && parts.length === 0) return;
-      const echo = body || attachments.map((a) => a.name).join(", ") || "(attachment)";
+      const echo = body || atts.map((a) => a.name).join(", ") || "(attachment)";
       // Enter while a turn runs queues the message (Cursor's rule); the queue
       // flushes at turn end. Enter while idle starts a turn.
       if (turnActiveRef.current) {
@@ -562,7 +906,7 @@ export function ChatTab({
       }
       if (seamRef.current.prompt(body, parts)) {
         if (chat.items.length === 0) {
-          handleRef.current.onTitle?.(text.trim() || attachments[0]?.name || echo);
+          handleRef.current.onTitle?.(text.trim() || atts[0]?.name || echo);
         }
         dispatch({ type: "user", text: body, parts });
         setText("");
@@ -578,14 +922,14 @@ export function ChatTab({
   // A pending edit owns the turn-end it caused — its fork must land before
   // anything else starts a turn, or the server would report busy forever.
   useEffect(() => {
-    if (chat.turnActive || connState !== "open" || queue.length === 0) return;
+    if (chat.turnActive || !usable || queue.length === 0) return;
     if (pendingEditRef.current) return;
     const head = queue[0];
     if (seamRef.current?.prompt(head.text, head.parts)) {
       setQueue((q) => q.filter((m) => m.qid !== head.qid));
       dispatch({ type: "user", text: head.text, parts: head.parts });
     }
-  }, [chat.turnActive, connState, queue]);
+  }, [chat.turnActive, usable, queue]);
 
   /** Push: send a queued message NOW, steering the in-flight turn onto it. */
   const pushQueued = useCallback(
@@ -664,6 +1008,38 @@ export function ChatTab({
       }
     },
     [chat.items],
+  );
+
+  // The transcript hooks must be referentially stable across streaming
+  // deltas or React.memo(Item) re-renders every row per token anyway. The
+  // callbacks read through refs (handleRef / resubmitEditRef), so the object
+  // only rebuilds when state the rows genuinely render from changes.
+  const resubmitEditRef = useRef(resubmitEdit);
+  resubmitEditRef.current = resubmitEdit;
+  const onEditStart = useCallback((id: number) => setEditingId(id), []);
+  const onEditCancel = useCallback(() => setEditingId(null), []);
+  const onEditSubmit = useCallback(
+    (id: number, newText: string) => void resubmitEditRef.current(id, newText),
+    [],
+  );
+  const transcriptHooks = useMemo(
+    () => ({
+      children: chat.children,
+      onOpenChild: (session: string, label: string) =>
+        handleRef.current.onOpenRun?.({ session, label }),
+      onOpenSurface: (surface: Surface) =>
+        handleRef.current.onOpenSurface?.(surface),
+      onOpenTerminal: (term: TermRef) =>
+        handleRef.current.onOpenTerminal?.(term),
+      edit: {
+        editingId,
+        canEdit: usable,
+        onStart: onEditStart,
+        onCancel: onEditCancel,
+        onSubmit: onEditSubmit,
+      },
+    }),
+    [chat.children, editingId, usable, onEditStart, onEditCancel, onEditSubmit],
   );
 
   /** Edit: pull a queued message back into the composer. */
@@ -762,42 +1138,42 @@ export function ChatTab({
     }
   };
 
-  const placeholder = !connected
-    ? "connecting…"
+  const placeholder = reconnecting
+    ? "reconnecting…"
     : questions
       ? "Add more optional details"
       : chat.turnActive
         ? "queue a follow-up (enter) · stop (esc)"
         : "Plan, build, ask anything";
 
-  // A brand-new tab opens Cursor-style: the composer sits at the top of the
-  // empty page, then drops to the bottom the instant the first transcript
-  // item lands (the optimistic user item on Enter). Resumed tabs never start
-  // fresh — their history is already on its way.
+  // A brand-new tab opens Cursor-style: the composer floats centered in the
+  // empty page (a touch larger), then drops to the bottom the instant the
+  // first transcript item lands (the optimistic user item on Enter). Resumed
+  // tabs never start fresh — their history is already on its way.
   const fresh = !resumeId && chat.items.length === 0;
 
   return (
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
-      <ChatView
-        items={chat.items}
-        hooks={{
-          children: chat.children,
-          onOpenChild: (session, label) =>
-            handleRef.current.onOpenRun?.({ session, label }),
-          onOpenSurface: (surface) => handleRef.current.onOpenSurface?.(surface),
-          onOpenTerminal: (term) => handleRef.current.onOpenTerminal?.(term),
-          edit: {
-            editingId,
-            canEdit: connected,
-            onStart: setEditingId,
-            onCancel: () => setEditingId(null),
-            onSubmit: (id, text) => void resubmitEdit(id, text),
-          },
-        }}
-      />
+      {!fresh && (
+        <ChatView items={chat.items} working={working} hooks={transcriptHooks} />
+      )}
 
-      <div className={fresh ? "order-first shrink-0 pt-2" : "shrink-0"}>
+      <div
+        className={
+          fresh
+            ? "flex min-h-0 flex-1 items-center justify-center overflow-y-auto py-10"
+            : "shrink-0"
+        }
+      >
         <div className="mx-auto w-full max-w-4xl space-y-2 px-3.5 pb-3.5 pt-1">
+          {reconnecting && !fresh && (
+            <div className="flex items-center gap-2 rounded-md border border-warn/40 bg-warn/10 px-3 py-1.5 text-[12px] text-warn">
+              <Loader2 size={12} className="shrink-0 animate-spin" />
+              {rebinding
+                ? "Reconnecting — waiting for the session to free up…"
+                : "Connection lost — reconnecting…"}
+            </div>
+          )}
           {(chat.jobs.length > 0 || chat.scheduled.length > 0 || runs.length > 0) && (
             <BackgroundBar
               jobs={chat.jobs}
@@ -883,7 +1259,9 @@ export function ChatTab({
                     key={a.aid}
                     className="group flex items-center gap-1 rounded-md border border-line bg-card px-2 py-0.5 text-[11px] text-muted"
                   >
-                    {a.kind === "image" && a.data ? (
+                    {a.pending ? (
+                      <Loader2 size={11} className="shrink-0 animate-spin text-faint" />
+                    ) : a.kind === "image" && a.data ? (
                       <img
                         src={`data:${a.mime};base64,${a.data}`}
                         alt=""
@@ -914,7 +1292,9 @@ export function ChatTab({
               onKeyDown={onKeyDown}
               rows={1}
               placeholder={placeholder}
-              className="block w-full resize-none bg-transparent px-3 pt-2.5 pb-1 leading-relaxed text-bright outline-none placeholder:text-faint"
+              className={`block w-full resize-none bg-transparent px-3 pt-2.5 pb-1 leading-relaxed text-bright outline-none placeholder:text-faint ${
+                fresh ? "min-h-[76px] text-[15px]" : ""
+              }`}
             />
             <input
               ref={fileInputRef}
@@ -932,55 +1312,66 @@ export function ChatTab({
                 <ContextCircle used={usedTokens} total={contextLength} />
               </span>
               <span className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  title="Attach files"
-                  className="flex size-6 cursor-pointer items-center justify-center rounded-full text-faint transition-colors hover:bg-hover hover:text-text"
-                >
-                  <Paperclip size={14} />
-                </button>
-                <button
-                  type="button"
-                  onClick={toggleVoice}
-                  disabled={voice === "starting" || voice === "transcribing"}
-                  aria-pressed={voice === "recording"}
-                  title={
+                <Tooltip side="top" label="Attach files">
+                  <button
+                    type="button"
+                    aria-label="Attach files"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="flex size-6 cursor-pointer items-center justify-center rounded-full text-faint transition-colors hover:bg-hover hover:text-text"
+                  >
+                    <Paperclip size={14} />
+                  </button>
+                </Tooltip>
+                <Tooltip
+                  side="top"
+                  label={
                     voice === "recording"
                       ? "Stop dictation"
                       : "Dictate from the host mic"
                   }
-                  className={`flex size-6 cursor-pointer items-center justify-center rounded-full transition-colors disabled:cursor-default ${
-                    voice === "recording"
-                      ? "animate-pulse bg-red text-canvas"
-                      : "text-faint hover:bg-hover hover:text-text"
-                  }`}
                 >
-                  {voice === "starting" || voice === "transcribing" ? (
-                    <Loader2 size={13} className="animate-spin" />
-                  ) : (
-                    <Mic size={14} />
-                  )}
-                </button>
+                  <button
+                    type="button"
+                    aria-label={voice === "recording" ? "Stop dictation" : "Dictate"}
+                    onClick={toggleVoice}
+                    disabled={voice === "starting" || voice === "transcribing"}
+                    aria-pressed={voice === "recording"}
+                    className={`flex size-6 cursor-pointer items-center justify-center rounded-full transition-colors disabled:cursor-default ${
+                      voice === "recording"
+                        ? "animate-pulse bg-red text-canvas"
+                        : "text-faint hover:bg-hover hover:text-text"
+                    }`}
+                  >
+                    {voice === "starting" || voice === "transcribing" ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <Mic size={14} />
+                    )}
+                  </button>
+                </Tooltip>
                 {chat.turnActive ? (
-                  <button
-                    type="button"
-                    onClick={() => seamRef.current?.interrupt()}
-                    title="Stop (esc)"
-                    className="flex size-6 cursor-pointer items-center justify-center rounded-full bg-btn text-canvas transition-opacity hover:opacity-90"
-                  >
-                    <Square size={9} fill="currentColor" />
-                  </button>
+                  <Tooltip side="top" label="Stop (esc)">
+                    <button
+                      type="button"
+                      aria-label="Stop"
+                      onClick={() => seamRef.current?.interrupt()}
+                      className="flex size-6 cursor-pointer items-center justify-center rounded-full bg-btn text-canvas transition-opacity hover:opacity-90"
+                    >
+                      <Square size={9} fill="currentColor" />
+                    </button>
+                  </Tooltip>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={() => void submit()}
-                    disabled={!connected || (!text.trim() && attachments.length === 0)}
-                    title="Send (enter)"
-                    className="flex size-6 cursor-pointer items-center justify-center rounded-full bg-btn text-canvas transition-opacity disabled:cursor-default disabled:opacity-30"
-                  >
-                    <ArrowUp size={14} strokeWidth={2.5} />
-                  </button>
+                  <Tooltip side="top" label="Send (enter)">
+                    <button
+                      type="button"
+                      aria-label="Send"
+                      onClick={() => void submit()}
+                      disabled={!usable || (!text.trim() && attachments.length === 0)}
+                      className="flex size-6 cursor-pointer items-center justify-center rounded-full bg-btn text-canvas transition-opacity disabled:cursor-default disabled:opacity-30"
+                    >
+                      <ArrowUp size={14} strokeWidth={2.5} />
+                    </button>
+                  </Tooltip>
                 )}
               </span>
             </div>

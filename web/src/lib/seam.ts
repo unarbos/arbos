@@ -133,6 +133,21 @@ export class SeamClient {
     return this.send({ type: "set_model", model });
   }
 
+  /** Toggle provider-side web search for this session (set_web_search shorthand). */
+  setWebSearch(enabled: boolean): boolean {
+    return this.send({ type: "set_web_search", enabled });
+  }
+
+  /** Toggle provider-side web fetch for this session (set_web_fetch shorthand). */
+  setWebFetch(enabled: boolean): boolean {
+    return this.send({ type: "set_web_fetch", enabled });
+  }
+
+  /** Toggle provider-side image generation for this session (set_image_gen shorthand). */
+  setImageGen(enabled: boolean): boolean {
+    return this.send({ type: "set_image_gen", enabled });
+  }
+
   /**
    * Branch the bound session at throughSeq (last event kept; negative keeps
    * nothing) and rebind this connection to the branch. The server answers

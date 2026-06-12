@@ -37,6 +37,12 @@ type Options struct {
 	// so it never inherits the agent's reasoning level. Empty falls back to
 	// Model.
 	DistillModel string
+	// SubagentModel, when set, names the model delegated children run on,
+	// read per delegation. It is a hook rather than a string so the host can
+	// back it with a live settings store — a change in the Settings tab
+	// applies to the next delegate call without rebuilding the agent. Nil or
+	// returning "" falls back to Model.
+	SubagentModel func() string
 	// Approval is nil by default, which the engine treats as allow-all — matching
 	// pi's full-privileges behavior. A user opts into gating writes/shell by
 	// supplying an ApprovalPolicy here.
@@ -158,14 +164,15 @@ func (o Options) buildForRoot(root string) (engine.Config, ports.ToolRuntime, er
 	return cfg, rt, nil
 }
 
-// engineOptions returns the engine options for sessions rooted at root:
+// engineOptions returns the engine options for sessions rooted at root and
+// running model (the compaction policy budgets against that model's window):
 // compaction policy, summarizer, approval, observer, and the turn-start
 // context injectors — memory recall when a Mind is attached, the plan forest
 // when a plan store is attached, and the workspace's background-job table
 // always (jobs are part of the coding toolset, so every session that can
 // start one can see them).
-func (o Options) engineOptions(root string) []engine.Option {
-	mi := o.models().Get(o.Model)
+func (o Options) engineOptions(root, model string) []engine.Option {
+	mi := o.models().Get(model)
 	policy := CompactionPolicy{ContextWindow: mi.ContextWindow}
 	summ := Summarizer{Provider: o.Provider, Model: o.DistillerModel()}
 	opts := []engine.Option{engine.WithContextPolicy(policy, summ)}
@@ -233,7 +240,7 @@ func NewEngine(o Options) (*engine.Engine, error) {
 		// Compose delegation tools onto the coding (+ MCP/extension) toolset.
 		rt = tool.Multi(rt, o.ExtraTools)
 	}
-	return engine.New(o.Provider, rt, o.NewStore(), o.Clock, cfg, o.engineOptions(o.Cwd)...), nil
+	return engine.New(o.Provider, rt, o.NewStore(), o.Clock, cfg, o.engineOptions(o.Cwd, cfg.Model)...), nil
 }
 
 // NewAgent builds the pi coding agent as an ArbosAgent. Each delegation gets its
@@ -262,6 +269,13 @@ func NewAgent(o Options, newID func() core.SessionID) (*agent.ArbosAgent, error)
 		if err != nil {
 			return nil, err
 		}
+		// The subagent model, read per delegation so a settings change made
+		// since assembly applies to this child. Empty keeps the main model.
+		if o.SubagentModel != nil {
+			if m := o.SubagentModel(); m != "" {
+				childCfg.Model = m
+			}
+		}
 		if len(g.Tools) > 0 {
 			known := map[string]bool{}
 			for _, s := range childReg.Schemas() {
@@ -279,7 +293,9 @@ func NewAgent(o Options, newID func() core.SessionID) (*agent.ArbosAgent, error)
 		childReg = tool.Filter(childReg, g.Tools)
 		// Options are per-root: a child granted a different repo gets that
 		// repo's background-job table injected, matching where its tools run.
-		return engine.New(o.Provider, childReg, o.NewStore(), o.Clock, childCfg, o.engineOptions(root)...), nil
+		// Per-model too: the compaction policy budgets against the child's
+		// actual model, which may differ from the parent's.
+		return engine.New(o.Provider, childReg, o.NewStore(), o.Clock, childCfg, o.engineOptions(root, childCfg.Model)...), nil
 	}
 	return agent.NewArbosAgent(factory, newID), nil
 }

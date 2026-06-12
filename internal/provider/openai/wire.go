@@ -37,10 +37,19 @@ type wireContentPart struct {
 	Type     string        `json:"type"`
 	Text     string        `json:"text,omitempty"`
 	ImageURL *wireImageURL `json:"image_url,omitempty"`
+	File     *wireFile     `json:"file,omitempty"`
 }
 
 type wireImageURL struct {
 	URL string `json:"url"` // a data: URL for inline base64 images
+}
+
+// wireFile is the Chat Completions inline file input: a base64 data: URL plus
+// the original filename (the API surfaces it to the model). Used for documents
+// the model parses natively, e.g. PDFs.
+type wireFile struct {
+	Filename string `json:"filename,omitempty"`
+	FileData string `json:"file_data"` // a data: URL for inline base64 files
 }
 
 type wireToolCall struct {
@@ -54,9 +63,15 @@ type wireToolCallFn struct {
 	Arguments string `json:"arguments"`
 }
 
+// wireTool is one entry of the Chat Completions `tools` array. A user-defined
+// tool is a function: Type "function" with Function set. A provider-side server
+// tool (OpenRouter's `openrouter:web_search` etc.) carries its type directly and
+// omits Function, with optional tuning under Parameters — so Function is a
+// pointer that drops out of the JSON for server tools.
 type wireTool struct {
-	Type     string     `json:"type"`
-	Function wireToolFn `json:"function"`
+	Type       string          `json:"type"`
+	Function   *wireToolFn     `json:"function,omitempty"`
+	Parameters json.RawMessage `json:"parameters,omitempty"`
 }
 
 type wireToolFn struct {
@@ -78,9 +93,36 @@ type wireChoice struct {
 }
 
 type wireDelta struct {
-	Content   string              `json:"content"`
-	Reasoning string              `json:"reasoning"`
-	ToolCalls []wireToolCallDelta `json:"tool_calls"`
+	Content     string              `json:"content"`
+	Reasoning   string              `json:"reasoning"`
+	ToolCalls   []wireToolCallDelta `json:"tool_calls"`
+	Annotations []wireAnnotation    `json:"annotations"`
+	Images      []wireDeltaImage    `json:"images"`
+}
+
+// wireDeltaImage is one element of the message/delta `images` array: a
+// generated image OpenRouter attaches to the assistant message (the
+// image_generation server tool / image output modality). The URL is a
+// base64 data: URL.
+type wireDeltaImage struct {
+	Type     string       `json:"type"`
+	ImageURL wireImageURL `json:"image_url"`
+}
+
+// wireAnnotation is one element of the message `annotations` array. OpenRouter
+// standardizes web-search sources (across native, Exa, etc.) onto OpenAI's
+// url_citation shape; in a stream they arrive on the delta of the final
+// content chunk. Only the url_citation variant is modeled — other annotation
+// types are ignored.
+type wireAnnotation struct {
+	Type        string `json:"type"`
+	URLCitation struct {
+		URL        string `json:"url"`
+		Title      string `json:"title"`
+		Content    string `json:"content"`
+		StartIndex int    `json:"start_index"`
+		EndIndex   int    `json:"end_index"`
+	} `json:"url_citation"`
 }
 
 type wireToolCallDelta struct {

@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/unarbos/arbos/internal/core"
+	"github.com/unarbos/arbos/internal/ports"
 )
 
 // EnvProvider resolves secrets from environment variables. It is the default
@@ -23,4 +24,31 @@ func (EnvProvider) Resolve(_ context.Context, ref core.SecretRef) (core.SecretVa
 		return core.SecretValue{}, fmt.Errorf("env secret %q not set", ref.Name)
 	}
 	return core.NewSecretValue([]byte(v)), nil
+}
+
+// Chain resolves from the first provider that succeeds, in order. It is the
+// env-then-vault composition the host's own credential uses: an exported
+// OPENROUTER_API_KEY keeps working, and a key pasted into the Settings tab
+// (vault) backs it without either side knowing about the other. Nil entries
+// are skipped so a host without a vault chains cleanly.
+type Chain []ports.SecretProvider
+
+func (c Chain) Name() string { return "chain" }
+
+func (c Chain) Resolve(ctx context.Context, ref core.SecretRef) (core.SecretValue, error) {
+	var lastErr error
+	for _, p := range c {
+		if p == nil {
+			continue
+		}
+		v, err := p.Resolve(ctx, ref)
+		if err == nil {
+			return v, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("secret %q: no providers in chain", ref.Name)
+	}
+	return core.SecretValue{}, lastErr
 }

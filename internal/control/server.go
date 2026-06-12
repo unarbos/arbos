@@ -10,6 +10,9 @@
 //	  {"type":"open","session_id":"abc"}           // omit id to start fresh
 //	  {"type":"intent","intent":{kind,data}}       // encoded core.Intent
 //	  {"type":"set_model","model":"m"}             // shorthand for SetModelIntent
+//	  {"type":"set_web_search","enabled":true}     // shorthand for SetWebSearchIntent
+//	  {"type":"set_web_fetch","enabled":true}      // shorthand for SetWebFetchIntent
+//	  {"type":"set_image_gen","enabled":true}      // shorthand for SetImageGenIntent
 //	  {"type":"compact"}                           // shorthand for CompactIntent
 //	  {"type":"switch_session","session_id":"abc"} // bind another session
 //	  {"type":"fork","session_id":"child",...}     // fork from current session
@@ -29,6 +32,7 @@ import (
 	"io"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/unarbos/arbos/internal/core"
@@ -36,41 +40,35 @@ import (
 )
 
 // liveSessions enforces the single-writer-per-session invariant that engine.go
-// and sqlite/store.go assume: at most one actor may be bound to a session id at
-// a time, across every connection in the process. A second open/switch/fork onto
-// an already-active id is refused rather than spawning a second writer.
-var liveSessions = &sessionRegistry{live: make(map[core.SessionID]bool)}
+// and sqlite/store.go assume: at most one ACTOR may be bound to a session id at
+// a time, across every door in the process. A second open/switch/fork onto an
+// already-active id does not spawn a second writer — it attaches to the
+// existing actor as a follower (see bind), the same tap-and-inject seam the
+// Telegram bridge uses. It is the engine's process-wide registry so
+// out-of-band doors honor the same invariant as control connections.
+var liveSessions = engine.Sessions
 
-type sessionRegistry struct {
-	mu   sync.Mutex
-	live map[core.SessionID]bool
-}
-
-// acquire marks id active, returning false if it already is.
-func (s *sessionRegistry) acquire(id core.SessionID) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.live[id] {
-		return false
-	}
-	s.live[id] = true
-	return true
-}
-
-func (s *sessionRegistry) release(id core.SessionID) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.live, id)
-}
+// connCounter distinguishes control connections so a prompt's Queued echo can
+// be routed away from the connection that sent it (which already rendered it)
+// while still reaching every other connection on the same session.
+var connCounter atomic.Uint64
 
 type clientFrame struct {
-	Type         string          `json:"type"`
-	SessionID    core.SessionID  `json:"session_id,omitempty"`
-	Intent       json.RawMessage `json:"intent,omitempty"`
-	Model        string          `json:"model,omitempty"`
-	NewSessionID core.SessionID  `json:"new_session_id,omitempty"` // fork: id for the new branch (optional)
-	ThroughSeq   *int64          `json:"through_seq,omitempty"`    // fork: last source seq to include; nil = whole log, negative = empty branch
+	Type      string          `json:"type"`
+	SessionID core.SessionID  `json:"session_id,omitempty"`
+	Intent    json.RawMessage `json:"intent,omitempty"`
+	Model     string          `json:"model,omitempty"`
+	Enabled   bool            `json:"enabled,omitempty"` // set_web_search: target toggle state
+
+	NewSessionID core.SessionID `json:"new_session_id,omitempty"` // fork: id for the new branch (optional)
+	ThroughSeq   *int64         `json:"through_seq,omitempty"`    // fork: last source seq to include; nil = whole log, negative = empty branch
 }
+
+// seamMaxLine bounds a single client frame (one newline-delimited line). It
+// sits just above the gateway's 32 MiB WebSocket read limit so any frame the
+// transport admits also fits the scanner; the headroom covers JSON framing
+// around a max-size base64 attachment.
+const seamMaxLine = 33 << 20
 
 type serverFrame struct {
 	Type      string          `json:"type"`
@@ -90,16 +88,32 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 	}
 	enc := &lineWriter{w: w}
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// One client frame is one line. A prompt frame can carry base64 image/PDF
+	// attachments (ADR-0022); the WebSocket transport caps a frame at 32 MiB
+	// (gateway sets SetReadLimit(32<<20)), and the composer caps attachments at
+	// 24 MiB. The scanner's max-token must therefore exceed the largest frame a
+	// transport will deliver, or a legitimate ~MiB attachment dies mid-line with
+	// "token too long" and takes the connection down. Size it above the WS read
+	// limit; the buffer grows lazily, so small frames stay cheap. The transport
+	// (WS read limit, stdio EOF) is the real DoS bound, not this line cap.
+	sc.Buffer(make([]byte, 0, 64*1024), seamMaxLine)
 
 	sctx, cancel := context.WithCancel(ctx)
+	// connOrigin tags this connection's prompts so their cross-connection
+	// Queued echo (rendered "as the user speaking" by other tabs on the same
+	// session) can be suppressed on the way back to the tab that sent them.
+	connOrigin := fmt.Sprintf("web:%d", connCounter.Add(1))
 	var (
-		conv          *engine.Conversation
-		sessionCancel context.CancelFunc
-		boundID       core.SessionID
-		pump          sync.WaitGroup
-		turnDone      chan struct{}
-		turnMu        sync.Mutex
+		conv *engine.Conversation
+		// unbind releases whatever bind acquired: the owner's actor + registry
+		// slot, or the follower's tap. Set by bind, cleared by teardown.
+		unbind func()
+		// follower marks a bind that attached to an actor another connection
+		// owns; mode-dependent frames (fork) refuse rather than misbehave.
+		follower bool
+		pump     sync.WaitGroup
+		turnDone chan struct{}
+		turnMu   sync.Mutex
 	)
 
 	signalTurnStart := func() {
@@ -124,13 +138,11 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 	}
 
 	teardown := func() {
-		if sessionCancel != nil {
-			sessionCancel()
-			pump.Wait()
-			liveSessions.release(boundID)
-			sessionCancel = nil
+		if unbind != nil {
+			unbind()
+			unbind = nil
 			conv = nil
-			boundID = ""
+			follower = false
 			// The pump exited without a terminal event (the session was
 			// cancelled mid-turn); release any drain waiting on it.
 			signalTurnEnd()
@@ -140,34 +152,46 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 	defer cancel()
 	defer teardown()
 
-	bind := func(id core.SessionID) error {
-		teardown()
-		if !liveSessions.acquire(id) {
-			return fmt.Errorf("session %q is already active on another connection", id)
+	// writeEnvelope forwards one envelope to the client, suppressing the echo
+	// of this connection's own prompts (the tab rendered them when it sent
+	// them; the echo exists for the OTHER connections on the session).
+	// Reports whether the client's write side is still alive.
+	writeEnvelope := func(env core.Envelope) bool {
+		if q, ok := env.Event.(core.Queued); ok && q.Origin == connOrigin {
+			return true
 		}
+		b, err := core.EncodeEnvelope(env)
+		if err != nil {
+			_ = enc.write(serverFrame{Type: "error", Error: "encode envelope: " + err.Error()})
+			return true
+		}
+		return enc.write(serverFrame{Type: "event", Envelope: b}) == nil
+	}
+
+	// bindOwner starts the session's actor on this connection — the exclusive
+	// writer path, taken when the registry slot is free.
+	bindOwner := func(id core.SessionID) error {
 		ssctx, sscancel := context.WithCancel(sctx)
 		c, err := eng.StartSession(ssctx, id)
 		if err != nil {
 			sscancel()
-			liveSessions.release(id)
+			liveSessions.Release(id)
 			return err
 		}
 		conv = c
-		sessionCancel = sscancel
-		boundID = id
+		unbind = func() {
+			sscancel()
+			pump.Wait()
+			liveSessions.Release(id)
+		}
 		pump.Add(1)
 		go func(c *engine.Conversation) {
 			defer pump.Done()
 			dead := false // client write side gone; keep draining, stop writing
 			for env := range c.Events() {
-				if !dead {
-					b, err := core.EncodeEnvelope(env)
-					if err != nil {
-						_ = enc.write(serverFrame{Type: "error", Error: "encode envelope: " + err.Error()})
-					} else if enc.write(serverFrame{Type: "event", Envelope: b}) != nil {
-						dead = true
-						cancel() // no client left to receive; tear the connection down
-					}
+				if !dead && !writeEnvelope(env) {
+					dead = true
+					cancel() // no client left to receive; tear the connection down
 				}
 				switch env.Event.(type) {
 				case core.TurnComplete, core.ErrorEvent, core.Interrupted:
@@ -176,6 +200,91 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 			}
 		}(c)
 		return nil
+	}
+
+	// bindFollower attaches to an actor another door owns: tap its envelope
+	// stream for the outbound half and inject intents into it for the inbound
+	// half — the same seam the Telegram bridge uses when a web tab holds its
+	// session. Returns false if the actor died before the tap landed (the
+	// caller retries, likely winning ownership). When the owning door tears
+	// the actor down later, the whole connection drops: the client's
+	// reconnect re-opens the session and wins the bind or follows the next
+	// owner — reusing the client's existing healing path instead of growing a
+	// server-side promotion protocol.
+	bindFollower := func(id core.SessionID, src *engine.Conversation) bool {
+		fctx, fcancel := context.WithCancel(sctx)
+		// Buffered hand-off: the tap runs on the actor's emit path and must
+		// never block. Overflow drops the envelope — presentation only; the
+		// client reconciles from the persisted log on its next rebind.
+		ch := make(chan core.Envelope, 1024)
+		untap := src.Tap(func(env core.Envelope) {
+			select {
+			case ch <- env:
+			default:
+			}
+		})
+		select {
+		case <-src.Done():
+			untap()
+			fcancel()
+			return false
+		default:
+		}
+		conv = src
+		follower = true
+		unbind = func() {
+			fcancel()
+			untap()
+			pump.Wait()
+		}
+		pump.Add(1)
+		go func() {
+			defer pump.Done()
+			dead := false
+			for {
+				select {
+				case env := <-ch:
+					if !dead && !writeEnvelope(env) {
+						dead = true
+						cancel()
+					}
+					switch env.Event.(type) {
+					case core.TurnComplete, core.ErrorEvent, core.Interrupted:
+						signalTurnEnd()
+					}
+				case <-src.Done():
+					cancel()
+					return
+				case <-fctx.Done():
+					return
+				}
+			}
+		}()
+		return true
+	}
+
+	bind := func(id core.SessionID) error {
+		teardown()
+		// Own the session when free; follow when another connection drives
+		// it. The brief retry loop covers the races between the two (a
+		// departing owner releases the registry slot before its actor exits,
+		// and an actor can exit between the Live lookup and the tap).
+		for attempt := 0; attempt < 50; attempt++ {
+			if liveSessions.Acquire(id) {
+				return bindOwner(id)
+			}
+			if src := eng.Live(id); src != nil && bindFollower(id, src) {
+				return nil
+			}
+			// Held by an actor this engine can't see (e.g. a chat-only bridge
+			// engine's turn); wait out the gap, then report it busy.
+			select {
+			case <-time.After(20 * time.Millisecond):
+			case <-sctx.Done():
+				return sctx.Err()
+			}
+		}
+		return fmt.Errorf("session %q is already active on another connection", id)
 	}
 
 	handleFrame := func(f clientFrame) {
@@ -207,6 +316,13 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 			_ = enc.write(serverFrame{Type: "switched", SessionID: f.SessionID})
 
 		case "fork":
+			// A follower can't fork: the busy check below reads THIS
+			// connection's turn tracking, which is blind to turns the owning
+			// connection runs — a fork could silently land mid-turn.
+			if follower {
+				_ = enc.write(serverFrame{Type: "error", Error: "fork: session is driven by another connection"})
+				return
+			}
 			source := f.SessionID
 			if source == "" {
 				if conv == nil {
@@ -269,6 +385,33 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 				_ = enc.write(serverFrame{Type: "error", Error: "busy: intent buffer full, retry"})
 			}
 
+		case "set_web_search":
+			if conv == nil {
+				_ = enc.write(serverFrame{Type: "error", Error: "no session open; send an 'open' frame first"})
+				return
+			}
+			if !conv.TrySend(core.SetWebSearchIntent{Enabled: f.Enabled}) {
+				_ = enc.write(serverFrame{Type: "error", Error: "busy: intent buffer full, retry"})
+			}
+
+		case "set_web_fetch":
+			if conv == nil {
+				_ = enc.write(serverFrame{Type: "error", Error: "no session open; send an 'open' frame first"})
+				return
+			}
+			if !conv.TrySend(core.SetWebFetchIntent{Enabled: f.Enabled}) {
+				_ = enc.write(serverFrame{Type: "error", Error: "busy: intent buffer full, retry"})
+			}
+
+		case "set_image_gen":
+			if conv == nil {
+				_ = enc.write(serverFrame{Type: "error", Error: "no session open; send an 'open' frame first"})
+				return
+			}
+			if !conv.TrySend(core.SetImageGenIntent{Enabled: f.Enabled}) {
+				_ = enc.write(serverFrame{Type: "error", Error: "busy: intent buffer full, retry"})
+			}
+
 		case "compact":
 			if conv == nil {
 				_ = enc.write(serverFrame{Type: "error", Error: "no session open; send an 'open' frame first"})
@@ -288,7 +431,14 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 				_ = enc.write(serverFrame{Type: "error", Error: "decode intent: " + err.Error()})
 				return
 			}
-			if _, isPrompt := intent.(core.PromptIntent); isPrompt {
+			if p, isPrompt := intent.(core.PromptIntent); isPrompt {
+				// Stamp the connection's origin so the actor's Queued echo
+				// reaches the session's OTHER connections (which haven't seen
+				// this prompt) and writeEnvelope can suppress it here.
+				if p.Origin == "" {
+					p.Origin = connOrigin
+					intent = p
+				}
 				signalTurnStart()
 			}
 			if _, isSteer := intent.(core.SteerIntent); isSteer {

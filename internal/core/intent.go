@@ -16,6 +16,9 @@ const (
 	IntentApprovalResponse IntentKind = "approval_response"
 	IntentQuestionResponse IntentKind = "question_response"
 	IntentSetModel         IntentKind = "set_model"
+	IntentSetWebSearch     IntentKind = "set_web_search"
+	IntentSetWebFetch      IntentKind = "set_web_fetch"
+	IntentSetImageGen      IntentKind = "set_image_gen"
 	IntentCompact          IntentKind = "compact"
 )
 
@@ -32,9 +35,17 @@ type Intent interface {
 // non-text content (images) attached to the prompt; it lands on the user
 // Message's Parts so a vision-capable model sees it (ADR-0022). Text-only
 // prompts leave Parts nil and behave exactly as before.
+//
+// Origin names the door the prompt arrived through when that door is NOT the
+// session's bound frontend (e.g. "telegram" for a bridge injecting into an
+// open web tab's actor). A non-empty Origin makes the actor echo the prompt
+// as a Queued event even when idle, so the attached frontend renders text it
+// did not send itself. The frontend's own prompts leave it empty — they are
+// already rendered locally, and an echo would duplicate them.
 type PromptIntent struct {
-	Text  string         `json:"text"`
-	Parts []ContentBlock `json:"parts,omitempty"`
+	Text   string         `json:"text"`
+	Parts  []ContentBlock `json:"parts,omitempty"`
+	Origin string         `json:"origin,omitempty"`
 }
 
 // SteerIntent replaces the in-flight turn with new user text. When idle it
@@ -84,12 +95,37 @@ type QuestionResponseIntent struct {
 	Skipped   bool             `json:"skipped,omitempty"`
 }
 
-// SetModelIntent switches the model used for subsequent turns of a session. It
-// applies between turns (when the session is idle); the engine owns the
-// per-session override so no shared state is mutated mid-turn. Mirrors pi's RPC
+// SetModelIntent switches the model used for subsequent turns of a session.
+// Sent while idle it applies immediately; sent mid-turn (the set_model tool,
+// or a frontend that didn't wait) it is deferred to the end of the running
+// turn — the engine owns the per-session override and only ever mutates it at
+// a turn boundary, so no shared state is touched mid-turn. Mirrors pi's RPC
 // set_model.
 type SetModelIntent struct {
 	Model string `json:"model"`
+}
+
+// SetWebSearchIntent turns provider-side web search on or off for subsequent
+// turns of a session. Like SetModelIntent it applies between turns (when idle)
+// and the engine owns the per-session flag, so no shared state is mutated
+// mid-turn. The flag is durable: it is persisted on the Session so a resumed
+// session keeps it. See ADR-0027.
+type SetWebSearchIntent struct {
+	Enabled bool `json:"enabled"`
+}
+
+// SetWebFetchIntent turns provider-side web fetch on or off for subsequent
+// turns of a session. Same idle-only, durable contract as SetWebSearchIntent,
+// and independent of it. See ADR-0027.
+type SetWebFetchIntent struct {
+	Enabled bool `json:"enabled"`
+}
+
+// SetImageGenIntent turns provider-side image generation on or off for
+// subsequent turns of a session. Same idle-only, durable contract as
+// SetWebSearchIntent, and independent of it.
+type SetImageGenIntent struct {
+	Enabled bool `json:"enabled"`
 }
 
 // CompactIntent asks the session to compact its context now (pi's RPC compact),
@@ -103,4 +139,7 @@ func (ResumeIntent) Kind() IntentKind           { return IntentResume }
 func (ApprovalResponseIntent) Kind() IntentKind { return IntentApprovalResponse }
 func (QuestionResponseIntent) Kind() IntentKind { return IntentQuestionResponse }
 func (SetModelIntent) Kind() IntentKind         { return IntentSetModel }
+func (SetWebSearchIntent) Kind() IntentKind     { return IntentSetWebSearch }
+func (SetWebFetchIntent) Kind() IntentKind      { return IntentSetWebFetch }
+func (SetImageGenIntent) Kind() IntentKind      { return IntentSetImageGen }
 func (CompactIntent) Kind() IntentKind          { return IntentCompact }

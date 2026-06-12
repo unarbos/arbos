@@ -14,6 +14,7 @@
 package codingspec
 
 import (
+	"github.com/unarbos/arbos/internal/browser"
 	"github.com/unarbos/arbos/internal/tool"
 )
 
@@ -32,6 +33,16 @@ func Specs(root string) []tool.Spec {
 	// One checkpointer per toolset: it snapshots the workspace to a git ref
 	// before the first mutation of each turn, so undo has a restore point.
 	cp := newCheckpointer(root)
+	// One browser per workspace: a real Chromium, launched lazily on first use
+	// and torn down after idle (browser.idleTimeout), so a session that never
+	// browses pays nothing and one that goes quiet leaks no process. Headless
+	// by default, with a persistent profile and per-tab live panels (the
+	// "Browser" panels ARE the windows); ARBOS_BROWSER_HEADFUL additionally
+	// opens a real window. Policy lives in browser.ConfigFor. Shared across
+	// toolsets: the persistent profile admits one Chrome, so every session in
+	// the workspace looks through the same browser (and the same live panels)
+	// rather than racing for the profile lock.
+	br := browser.Shared(browser.ConfigFor(root))
 	return []tool.Spec{
 		lsSpec(root),
 		readSpec(root, ledger),
@@ -43,7 +54,9 @@ func Specs(root string) []tool.Spec {
 		awaitSpec(jobs),
 		jobsSpec(jobs),
 		fetchSpec(),
+		browserSpec(br),
 		showSpec(root),
+		uiSpec(),
 		changesSpec(cp),
 		undoSpec(cp),
 	}

@@ -4,6 +4,8 @@
  * how much headroom is left, with the exact count on hover.
  */
 
+import { Tooltip } from "./Tooltip";
+
 const SIZE = 15;
 const STROKE = 2.5;
 const RADIUS = (SIZE - STROKE) / 2;
@@ -30,38 +32,36 @@ export function ContextCircle({ used, total }: { used: number; total: number }) 
   const label = `Context: ${fmtTokens(used)} / ${fmtTokens(total)} (${pct}%)`;
 
   return (
-    <span
-      title={label}
-      aria-label={label}
-      className="flex shrink-0 cursor-default items-center"
-    >
-      <svg
-        width={SIZE}
-        height={SIZE}
-        viewBox={`0 0 ${SIZE} ${SIZE}`}
-        className="-rotate-90"
-      >
-        <circle
-          cx={SIZE / 2}
-          cy={SIZE / 2}
-          r={RADIUS}
-          fill="none"
-          stroke="var(--color-line)"
-          strokeWidth={STROKE}
-        />
-        <circle
-          cx={SIZE / 2}
-          cy={SIZE / 2}
-          r={RADIUS}
-          fill="none"
-          stroke={arcColor(frac)}
-          strokeWidth={STROKE}
-          strokeLinecap="round"
-          strokeDasharray={CIRCUMFERENCE}
-          strokeDashoffset={offset}
-          style={{ transition: "stroke-dashoffset 0.4s ease, stroke 0.4s ease" }}
-        />
-      </svg>
-    </span>
+    <Tooltip side="top" label={label}>
+      <span aria-label={label} className="flex shrink-0 cursor-default items-center">
+        <svg
+          width={SIZE}
+          height={SIZE}
+          viewBox={`0 0 ${SIZE} ${SIZE}`}
+          className="-rotate-90"
+        >
+          <circle
+            cx={SIZE / 2}
+            cy={SIZE / 2}
+            r={RADIUS}
+            fill="none"
+            stroke="var(--color-line)"
+            strokeWidth={STROKE}
+          />
+          <circle
+            cx={SIZE / 2}
+            cy={SIZE / 2}
+            r={RADIUS}
+            fill="none"
+            stroke={arcColor(frac)}
+            strokeWidth={STROKE}
+            strokeLinecap="round"
+            strokeDasharray={CIRCUMFERENCE}
+            strokeDashoffset={offset}
+            style={{ transition: "stroke-dashoffset 0.4s ease, stroke 0.4s ease" }}
+          />
+        </svg>
+      </span>
+    </Tooltip>
   );
 }

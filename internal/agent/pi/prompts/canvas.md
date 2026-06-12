@@ -15,7 +15,7 @@ A single self-contained HTML file — inline CSS, inline JS, no external request
 
 ## Gather first
 
-Collect the real material before writing any HTML: the diff or files touched, commands run and their results, decisions made and why, numbers worth charting (counts, durations, before/after). Pull from the actual repo state — never invent data.
+Collect the real material before writing any HTML: the diff or files touched, commands run and their results, decisions made and why, numbers worth charting (counts, durations, before/after). Pull from the actual repo state — never invent data. A section with no real material is omitted, not padded.
 
 ## Design — the canvas IS part of the arbos UI
 
@@ -49,4 +49,4 @@ Rules that keep it native:
 
 ## Deliver
 
-Write the file to `canvas/<short-slug>-<yyyy-mm-dd>.html` (create the directory if needed). Then call the `show` tool on the file (title = the page title) so it opens in a panel beside the chat. Finally reply with a one-line description and the section list — nothing more. Do not paste the HTML into the chat, and do not tell the user to open the file.
+Write the file to `canvas/<short-slug>-<yyyy-mm-dd>.html` (create the directory if needed). Then call the `show` tool on the file (title = the page title) so it opens in a panel beside the chat; if `show` is unavailable in this session, reply with the file path instead. Finally reply with a one-line description and the section list — nothing more. Do not paste the HTML into the chat, and when `show` succeeded do not tell the user to open the file.

@@ -32,8 +32,10 @@ type wireMessage struct {
 }
 
 type wireBlock struct {
-	Type string `json:"type"` // text | tool_use | tool_result
+	Type string `json:"type"` // text | image | document | tool_use | tool_result
 	Text string `json:"text,omitempty"`
+	// image | document
+	Source *wireSource `json:"source,omitempty"`
 	// tool_use
 	ID    string          `json:"id,omitempty"`
 	Name  string          `json:"name,omitempty"`
@@ -42,6 +44,14 @@ type wireBlock struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
+}
+
+// wireSource is the base64 payload of an image or document block. Anthropic
+// parses a document (PDF) natively, including OCR for scanned pages.
+type wireSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // e.g. image/png, application/pdf
+	Data      string `json:"data"`
 }
 
 type wireTool struct {
@@ -103,7 +113,7 @@ func (p *Provider) buildRequest(req core.LLMRequest) wireRequest {
 				system = append(system, m.Content)
 			}
 		case core.RoleUser:
-			w.Messages = append(w.Messages, wireMessage{Role: "user", Content: []wireBlock{{Type: "text", Text: m.Content}}})
+			w.Messages = append(w.Messages, wireMessage{Role: "user", Content: userBlocks(m)})
 		case core.RoleAssistant:
 			var blocks []wireBlock
 			if m.Content != "" {
@@ -114,18 +124,40 @@ func (p *Provider) buildRequest(req core.LLMRequest) wireRequest {
 			}
 			w.Messages = append(w.Messages, wireMessage{Role: "assistant", Content: blocks})
 		case core.RoleTool:
-			// tool_result content is text-only here; downgrade image parts to a
-			// placeholder so an image tool result is not silently lost.
 			content := m.Content
 			if len(m.Parts) > 0 {
 				content = providerkit.ToolResultText(m)
 			}
-			block := wireBlock{Type: "tool_result", ToolUseID: m.ToolCallID, Content: content}
-			// Group with the previous turn if it is already a tool-result user turn.
+			result := wireBlock{Type: "tool_result", ToolUseID: m.ToolCallID, Content: content}
+			// Image/file parts ride as real image/document blocks in the SAME
+			// user turn — Anthropic accepts them alongside tool_result — so a
+			// screenshot or a read image reaches vision instead of being dropped.
+			var media []wireBlock
+			for _, b := range providerkit.ToolResultVisionParts(m) {
+				if wb, ok := mediaBlock(b); ok {
+					media = append(media, wb)
+				}
+			}
+			// Group with the previous turn if it is already a tool-result user
+			// turn. Anthropic requires EVERY tool_result block to precede any
+			// other block in the turn (400 otherwise — and a persisted bad
+			// result would re-project the same malformed turn forever). So a
+			// grouped result inserts after the existing tool_results, and media
+			// always trails the turn.
 			if n := len(w.Messages); n > 0 && w.Messages[n-1].Role == "user" && isToolResultTurn(w.Messages[n-1]) {
-				w.Messages[n-1].Content = append(w.Messages[n-1].Content, block)
+				prev := w.Messages[n-1].Content
+				idx := 0
+				for idx < len(prev) && prev[idx].Type == "tool_result" {
+					idx++
+				}
+				merged := make([]wireBlock, 0, len(prev)+1+len(media))
+				merged = append(merged, prev[:idx]...)
+				merged = append(merged, result)
+				merged = append(merged, prev[idx:]...)
+				merged = append(merged, media...)
+				w.Messages[n-1].Content = merged
 			} else {
-				w.Messages = append(w.Messages, wireMessage{Role: "user", Content: []wireBlock{block}})
+				w.Messages = append(w.Messages, wireMessage{Role: "user", Content: append([]wireBlock{result}, media...)})
 			}
 		}
 	}
@@ -138,13 +170,65 @@ func (p *Provider) buildRequest(req core.LLMRequest) wireRequest {
 	return w
 }
 
+// userBlocks renders a user message as Anthropic content blocks: the typed text
+// first, then each multimodal part as an image or document block. A plain
+// text-only message yields a single text block, exactly as before.
+func userBlocks(m core.Message) []wireBlock {
+	blocks := make([]wireBlock, 0, len(m.Parts)+1)
+	if m.Content != "" || len(m.Parts) == 0 {
+		blocks = append(blocks, wireBlock{Type: "text", Text: m.Content})
+	}
+	for _, b := range m.Parts {
+		if b.Type == core.BlockText {
+			if b.Text != "" {
+				blocks = append(blocks, wireBlock{Type: "text", Text: b.Text})
+			}
+			continue
+		}
+		if wb, ok := mediaBlock(b); ok {
+			blocks = append(blocks, wb)
+		}
+	}
+	return blocks
+}
+
+// mediaBlock renders an image or file content block as its Anthropic wire block
+// (image / document, base64 source). The second return is false for a block
+// that is not media or whose payload is missing.
+func mediaBlock(b core.ContentBlock) (wireBlock, bool) {
+	switch b.Type {
+	case core.BlockImage:
+		if b.Image != nil {
+			return wireBlock{Type: "image", Source: &wireSource{
+				Type: "base64", MediaType: b.Image.MimeType, Data: b.Image.Data,
+			}}, true
+		}
+	case core.BlockFile:
+		if b.File != nil {
+			return wireBlock{Type: "document", Source: &wireSource{
+				Type: "base64", MediaType: b.File.MimeType, Data: b.File.Data,
+			}}, true
+		}
+	}
+	return wireBlock{}, false
+}
+
+// isToolResultTurn reports whether a user turn is a tool-result turn that a
+// following tool result may join. It holds at least one tool_result and only
+// tool_result plus promoted media (image/document) blocks — never text or
+// tool_use — so grouping survives an earlier result that carried a screenshot.
 func isToolResultTurn(m wireMessage) bool {
+	hasResult := false
 	for _, b := range m.Content {
-		if b.Type != "tool_result" {
+		switch b.Type {
+		case "tool_result":
+			hasResult = true
+		case "image", "document":
+		default:
 			return false
 		}
 	}
-	return len(m.Content) > 0
+	return hasResult
 }
 
 // thinkingBudget maps a neutral reasoning level to an Anthropic thinking budget

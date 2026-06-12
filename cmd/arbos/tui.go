@@ -52,8 +52,8 @@ type tuiRenderer struct {
 	answerLines []string
 	tail        string
 	started     bool
-	blockLines int // physical lines the block currently occupies (0 = none)
-	promptIdx  int // 0-based row offset of the → input within the block
+	blockLines  int // physical lines the block currently occupies (0 = none)
+	promptIdx   int // 0-based row offset of the → input within the block
 
 	// ephemeral is a one-line live preview of activity that never reaches the
 	// permanent transcript: the model's reasoning stream, or a delegated
@@ -73,8 +73,8 @@ type tuiRenderer struct {
 
 	dim, ok, bad, tool, note, standing lipgloss.Style
 	standingText                       lipgloss.Style
-	bright, faint, muted, cmd lipgloss.Style
-	working                   lipgloss.Style
+	bright, faint, muted, cmd          lipgloss.Style
+	working                            lipgloss.Style
 
 	sessionID string
 
@@ -171,8 +171,8 @@ func newTUIRenderer(out io.Writer, width int, meta tuiMeta) *tuiRenderer {
 		bright:       lr.NewStyle().Foreground(theme.Text),
 		faint:        lr.NewStyle().Foreground(theme.Faint),
 		muted:        lr.NewStyle().Foreground(theme.Muted),
-		working: lr.NewStyle().Bold(true).Foreground(theme.Text),
-		cmd:     lr.NewStyle().Foreground(theme.Command),
+		working:      lr.NewStyle().Bold(true).Foreground(theme.Text),
+		cmd:          lr.NewStyle().Foreground(theme.Command),
 	}
 	initTerminalChrome(out)
 	go r.tick()

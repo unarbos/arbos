@@ -9,6 +9,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/unarbos/arbos/internal/forest"
 	"github.com/unarbos/arbos/internal/piwire"
 	"github.com/unarbos/arbos/internal/theme"
 )
@@ -30,6 +31,7 @@ type cliConfig struct {
 	serve     bool
 	web       string
 	webDist   string
+	forest    string
 	db        string
 	workspace string
 }
@@ -58,6 +60,7 @@ func parseCLI(args []string) (cliConfig, []string, error) {
 	fs.BoolVar(&cfg.serve, "serve", false, "")
 	fs.StringVar(&cfg.web, "web", "", "")
 	fs.StringVar(&cfg.webDist, "web-dist", "", "")
+	fs.StringVar(&cfg.forest, "forest", "", "")
 	fs.StringVar(&cfg.db, "db", piwire.DefaultDBPath(), "")
 	fs.StringVar(&cfg.workspace, "workspace", "", "")
 
@@ -107,6 +110,12 @@ func dispatch(args []string) error {
 			return runListSessions(cfg, rest[1:])
 		case "resume":
 			return runResume(cfg, rest[1:])
+		case "export":
+			return runExport(cfg, rest[1:])
+		case "web":
+			return runWebCommand(cfg, rest[1:])
+		case "upgrade":
+			return runUpgrade(rest[1:])
 		default:
 			return fmt.Errorf("unknown command %q", rest[0])
 		}
@@ -147,19 +156,72 @@ func dispatch(args []string) error {
 	}
 
 	piCfg := piwire.LoadConfig()
+	if cfg.forest != "" && cfg.web == "" {
+		return fmt.Errorf("--forest requires --web (the forest exposes the web gateway)")
+	}
 	if cfg.web != "" {
-		return runWeb(piCfg, cfg.db, cfg.web, cfg.webDist, cfg.approve)
+		return runWeb(piCfg, cfg.db, cfg.web, cfg.webDist, cfg.forest, cfg.approve)
 	}
 	return run(piCfg, cfg.serve, cfg.db, task, session, cfg.approve, cfg.once || cfg.print)
 }
 
 func isCommand(s string) bool {
 	switch s {
-	case "ls", "resume", "help":
+	case "ls", "resume", "export", "help", "web", "upgrade":
 		return true
 	default:
 		return false
 	}
+}
+
+// runWebCommand is `arbos web [addr]` — the canonical front door. It binds
+// loopback by default and joins the default forest, so one command on any
+// machine yields a public, auth-gated URL to visit immediately. `--local`
+// keeps the node off the forest; `--forest <url>` points it at another head.
+// The bare `--web <addr>` flag stays the un-opinionated primitive (no forest
+// unless asked); this subcommand is the path with batteries included.
+func runWebCommand(cfg cliConfig, args []string) error {
+	fs := flag.NewFlagSet("web", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var local bool
+	forestURL := cfg.forest
+	fs.BoolVar(&local, "local", false, "")
+	fs.StringVar(&forestURL, "forest", forestURL, "")
+	if err := fs.Parse(normalizeLongFlags(args)); err != nil {
+		return fmt.Errorf("web: %w", err)
+	}
+
+	addr := cfg.web
+	if rest := fs.Args(); len(rest) > 0 {
+		if len(rest) > 1 {
+			return fmt.Errorf("web: unexpected argument %q", rest[1])
+		}
+		addr = rest[0]
+	}
+	if addr == "" {
+		addr = "127.0.0.1:8420"
+	}
+
+	switch {
+	case local:
+		forestURL = ""
+	case forestURL == "":
+		forestURL = forest.DefaultHead
+	}
+
+	if cfg.workspace != "" {
+		if err := os.Chdir(cfg.workspace); err != nil {
+			return fmt.Errorf("workspace: %w", err)
+		}
+	}
+	if cfg.model != "" {
+		os.Setenv("ARBOS_MODEL", cfg.model)
+	}
+	if cfg.theme != "" {
+		os.Setenv("ARBOS_THEME", cfg.theme)
+		theme.Apply(cfg.theme)
+	}
+	return runWeb(piwire.LoadConfig(), cfg.db, addr, cfg.webDist, forestURL, cfg.approve)
 }
 
 func latestSessionID(dbPath string) (string, error) {
@@ -243,7 +305,7 @@ func runResume(cfg cliConfig, args []string) error {
 	}
 	piCfg := piwire.LoadConfig()
 	if cfg.web != "" {
-		return runWeb(piCfg, cfg.db, cfg.web, cfg.webDist, cfg.approve)
+		return runWeb(piCfg, cfg.db, cfg.web, cfg.webDist, cfg.forest, cfg.approve)
 	}
 	return run(piCfg, cfg.serve, cfg.db, "", session, cfg.approve, cfg.once || cfg.print)
 }
@@ -254,12 +316,32 @@ func printCommandHelp(w io.Writer, args []string) {
 		return
 	}
 	switch args[0] {
+	case "web":
+		printSection(w, "Usage:", "  arbos web [addr] [--local | --forest <url>]")
+		printSection(w, "Serve the web UI (loopback, default 127.0.0.1:8420) and join the default forest for a public, auth-gated URL.", "")
+		fmt.Fprintln(w)
+		printSection(w, "Options:", "")
+		printHelpFlag(w, "--local", "Serve locally only; do not join a forest")
+		printHelpFlag(w, "--forest <url>", fmt.Sprintf("Join this forest head instead of the default (%s)", forest.DefaultHead))
+	case "upgrade":
+		printSection(w, "Usage:", "  arbos upgrade [--to <path>]")
+		printSection(w, "Replace the running arbos binary with a newer one; a serving instance hot-swaps it at its next idle moment. Inside an arbos source checkout this builds the checkout; elsewhere it installs the latest release.", "")
+		fmt.Fprintln(w)
+		printSection(w, "Options:", "")
+		printHelpFlag(w, "--to <path>", "Binary to replace (default: ARBOS_EXE from a serving instance, else this executable)")
 	case "ls":
 		printSection(w, "Usage:", "  arbos ls")
 		printSection(w, "List resumable chat sessions from the local store.", "")
 	case "resume":
 		printSection(w, "Usage:", "  arbos resume [session-id]")
 		printSection(w, "Resume a session. Without an id, opens the most recent chat.", "")
+	case "export":
+		printSection(w, "Usage:", "  arbos export [--all] [--messages] [session-id...]")
+		printSection(w, "Export session trajectories as JSONL on stdout.", "")
+		fmt.Fprintln(w)
+		printSection(w, "Options:", "")
+		printHelpFlag(w, "--all", "Export every session in the store (including machine-spawned runs)")
+		printHelpFlag(w, "--messages", "Render each session as one provider-facing conversation (system prompt, tools, and messages) instead of raw events")
 	default:
 		fmt.Fprintf(w, "Unknown command %q\n\n", args[0])
 		printUsage(w)
@@ -289,6 +371,7 @@ func printUsage(w io.Writer) {
 		{"--serve", "Serve the control seam over stdio (JSON lines) (default: false)"},
 		{"--web <addr>", "Serve the web gateway at this address (e.g. :8420)"},
 		{"--web-dist <path>", "Built web UI directory to serve alongside --web"},
+		{"--forest <url>", "Join a forest head and serve the gateway at an assigned public URL (e.g. http://forest.example:8080)"},
 		{"--db <path>", fmt.Sprintf("SQLite session store (default: %s)", piwire.DefaultDBPath())},
 		{"--workspace <path>", "Working directory for the agent (default: current directory)"},
 	}
@@ -298,8 +381,11 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	printSection(w, "Commands:", "")
 	commands := []helpFlag{
+		{"web [addr]", "Serve the web UI and join the default forest for a public URL (--local to stay off it)"},
+		{"upgrade", "Update the running arbos in place (source checkout or latest release); hot-swaps at idle"},
 		{"ls", "List resumable chat sessions"},
 		{"resume [id]", "Resume a session (latest when id is omitted)"},
+		{"export [id...]", "Export session trajectories as JSONL (--all, --messages)"},
 		{"help [command]", "Display help for command"},
 	}
 	for _, c := range commands {

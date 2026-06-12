@@ -33,6 +33,19 @@ type Session struct {
 	// updated by SetModelIntent, and re-read on session adoption so a resumed
 	// session keeps the model it was switched to.
 	Model string
+	// WebSearch is the durable per-session web-search toggle: updated by
+	// SetWebSearchIntent and re-read on adoption, so a resumed session keeps
+	// whether the model may search the web. Mirrors Model's lifecycle. See
+	// ADR-0027.
+	WebSearch bool
+	// WebFetch is the durable per-session web-fetch toggle — whether the model
+	// may retrieve page content server-side. Independent of WebSearch; same
+	// lifecycle. See ADR-0027.
+	WebFetch bool
+	// ImageGen is the durable per-session image-generation toggle — whether
+	// the model may generate images provider-side. Independent of the web
+	// toggles; same lifecycle.
+	ImageGen bool
 
 	// Principal: who owns/authorizes this session — the ADDRESS of the
 	// agent's voice. Single-user hosts use PrincipalLocal; a multi-user

@@ -34,8 +34,16 @@ type wireContent struct {
 
 type wirePart struct {
 	Text             string                `json:"text,omitempty"`
+	InlineData       *wireInlineData       `json:"inlineData,omitempty"`
 	FunctionCall     *wireFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *wireFunctionResponse `json:"functionResponse,omitempty"`
+}
+
+// wireInlineData is a base64 image or document part. Gemini parses a document
+// (e.g. application/pdf) natively, including OCR for scanned pages.
+type wireInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
 }
 
 type wireFunctionCall struct {
@@ -88,7 +96,7 @@ func (p *Provider) buildRequest(req core.LLMRequest) wireRequest {
 				system = append(system, m.Content)
 			}
 		case core.RoleUser:
-			w.Contents = append(w.Contents, wireContent{Role: "user", Parts: []wirePart{{Text: m.Content}}})
+			w.Contents = append(w.Contents, wireContent{Role: "user", Parts: userParts(m)})
 		case core.RoleAssistant:
 			var parts []wirePart
 			if m.Content != "" {
@@ -104,15 +112,22 @@ func (p *Provider) buildRequest(req core.LLMRequest) wireRequest {
 			if name == "" {
 				name = m.ToolCallID
 			}
-			// functionResponse content is text-only; downgrade image parts to a
-			// placeholder so an image tool result is not silently lost.
 			content := m.Content
 			if len(m.Parts) > 0 {
 				content = providerkit.ToolResultText(m)
 			}
-			w.Contents = append(w.Contents, wireContent{Role: "user", Parts: []wirePart{{
+			parts := []wirePart{{
 				FunctionResponse: &wireFunctionResponse{Name: name, Response: map[string]any{"content": content}},
-			}}})
+			}}
+			// Image/file parts ride as inlineData in the SAME user turn as the
+			// functionResponse, so a tool's visual output reaches vision instead
+			// of being dropped.
+			for _, b := range providerkit.ToolResultVisionParts(m) {
+				if p, ok := mediaPart(b); ok {
+					parts = append(parts, p)
+				}
+			}
+			w.Contents = append(w.Contents, wireContent{Role: "user", Parts: parts})
 		}
 	}
 	if len(system) > 0 {
@@ -133,6 +148,45 @@ func (p *Provider) buildRequest(req core.LLMRequest) wireRequest {
 		w.GenerationConfig = cfg
 	}
 	return w
+}
+
+// userParts renders a user message as Gemini parts: the typed text first, then
+// each multimodal part as inlineData. A plain text-only message yields a single
+// text part, exactly as before.
+func userParts(m core.Message) []wirePart {
+	parts := make([]wirePart, 0, len(m.Parts)+1)
+	if m.Content != "" || len(m.Parts) == 0 {
+		parts = append(parts, wirePart{Text: m.Content})
+	}
+	for _, b := range m.Parts {
+		if b.Type == core.BlockText {
+			if b.Text != "" {
+				parts = append(parts, wirePart{Text: b.Text})
+			}
+			continue
+		}
+		if p, ok := mediaPart(b); ok {
+			parts = append(parts, p)
+		}
+	}
+	return parts
+}
+
+// mediaPart renders an image or file content block as a Gemini inlineData part
+// (the provider parses a document natively). The second return is false for a
+// block that is not media or whose payload is missing.
+func mediaPart(b core.ContentBlock) (wirePart, bool) {
+	switch b.Type {
+	case core.BlockImage:
+		if b.Image != nil {
+			return wirePart{InlineData: &wireInlineData{MimeType: b.Image.MimeType, Data: b.Image.Data}}, true
+		}
+	case core.BlockFile:
+		if b.File != nil {
+			return wirePart{InlineData: &wireInlineData{MimeType: b.File.MimeType, Data: b.File.Data}}, true
+		}
+	}
+	return wirePart{}, false
 }
 
 func thinkingBudget(r core.ReasoningLevel) int {

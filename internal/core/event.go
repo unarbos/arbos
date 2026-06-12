@@ -30,6 +30,7 @@ const (
 	EventCompressed       EventKind = "compressed"
 	EventContext          EventKind = "context"
 	EventInterrupted      EventKind = "interrupted"
+	EventConfig           EventKind = "config"
 )
 
 // EventPayload is a sealed sum type: the kernel's event payloads are a closed
@@ -110,6 +111,45 @@ type InterruptPayload struct{ Reason string }
 
 func (InterruptPayload) Kind() EventKind { return EventInterrupted }
 
+// ConfigPayload records the turn configuration the model actually ran with:
+// the resolved model, the system prompt, and the offered toolset. These live
+// in engine config (code that evolves with the repo), so without this event a
+// historical log could only be reconstructed against *today's* prompt and
+// tools — silently wrong as training data. The engine appends one whenever the
+// effective config differs from the last logged one (in practice once per
+// session, plus on model switches and toolset changes), which keeps every
+// exported trajectory self-contained. It has no conversational projection.
+type ConfigPayload struct {
+	Model        string
+	SystemPrompt string
+	Tools        []ToolSchema
+	// WebSearch records whether provider-side web search was offered this turn.
+	// Part of "what the model saw", so a toggle change logs a fresh config event
+	// and an exported trajectory is self-contained. See ADR-0027.
+	WebSearch bool
+	// WebFetch records whether provider-side web fetch was offered this turn,
+	// for the same trajectory-fidelity reason as WebSearch.
+	WebFetch bool
+	// ImageGen records whether provider-side image generation was offered this
+	// turn, for the same trajectory-fidelity reason as WebSearch.
+	ImageGen bool
+}
+
+func (ConfigPayload) Kind() EventKind { return EventConfig }
+
+// LatestConfig returns the most recent ConfigPayload in the log, reporting
+// whether one exists. The latest entry is authoritative: a config event
+// supersedes earlier ones the same way the projection's latest-per-source rule
+// works for injected context.
+func LatestConfig(events []Event) (ConfigPayload, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if p, ok := events[i].Payload.(ConfigPayload); ok {
+			return p, true
+		}
+	}
+	return ConfigPayload{}, false
+}
+
 // Event is the spine of the kernel: sessions are an append-only sequence of
 // these. The conversation a provider sees is a projection of the log (see
 // Project), never a separately mutated structure.
@@ -186,4 +226,8 @@ func NewContextEvent(sid SessionID, segments []Segment, now time.Time) *Event {
 
 func NewInterruptEvent(sid SessionID, reason string, now time.Time) *Event {
 	return newEvent(sid, now, InterruptPayload{Reason: reason})
+}
+
+func NewConfigEvent(sid SessionID, p ConfigPayload, now time.Time) *Event {
+	return newEvent(sid, now, p)
 }

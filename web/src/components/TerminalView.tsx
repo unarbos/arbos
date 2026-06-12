@@ -8,10 +8,13 @@ import { fetchJobTail, killJob, type JobTail } from "@/lib/api";
 import type { TermRef } from "@/lib/term";
 import { useTheme } from "@/lib/theme";
 import type { Theme } from "@/lib/themes";
+import { useDocumentVisible } from "@/lib/useDocumentVisible";
 
-/** Job tabs poll the journal on one cadence whether visible or not (it's one
- * cheap localhost request), so the strip's spinner and the output are always
- * current the instant the tab shows. */
+/** Job tabs poll the journal on one cadence whether their tab is visible or
+ * not (it's one cheap localhost request), so the strip's spinner and the
+ * output are always current the instant the tab shows. The poll does pause
+ * while the WINDOW is hidden — nobody can see the spinner then — and resumes
+ * with an immediate catch-up poll on visibility. */
 const JOB_POLL_MS = 1200;
 
 const FONT_MONO =
@@ -59,7 +62,7 @@ export function TerminalView({
   return term.kind === "job" ? (
     <JobTerminal job={term.job} command={term.command} active={active} onOpenShell={onOpenShell} onBusy={onBusy} />
   ) : (
-    <ShellTerminal id={term.id} cwd={term.cwd} active={active} />
+    <ShellTerminal id={term.id} active={active} />
   );
 }
 
@@ -151,20 +154,30 @@ function JobTerminal({
   onBusyRef.current = onBusy;
 
   const running = tail?.status === "running";
+  const docVisible = useDocumentVisible();
+
+  // The journal offset survives visibility pauses (a re-run must resume where
+  // the tail left off, not re-backfill and duplicate output in the terminal)
+  // but resets when the tab is retargeted to a different job.
+  const offsetRef = useRef(-1); // -1: first poll backfills the recent window
+  const offsetJobRef = useRef(job);
+  if (offsetJobRef.current !== job) {
+    offsetJobRef.current = job;
+    offsetRef.current = -1;
+  }
 
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !docVisible) return;
     let stop = false;
-    let offset = -1; // first poll backfills the journal's recent window
     let timer = 0;
     const poll = () => {
-      fetchJobTail(job, offset)
+      fetchJobTail(job, offsetRef.current)
         .then((t) => {
           if (stop) return;
           setError("");
           setTail(t);
           if (t.data) termRef.current?.write(b64bytes(t.data));
-          offset = t.offset;
+          offsetRef.current = t.offset;
           if (t.status === "running") {
             // Behind by more than one chunk: catch up immediately.
             timer = window.setTimeout(poll, t.offset < t.size ? 0 : JOB_POLL_MS);
@@ -181,7 +194,7 @@ function JobTerminal({
       stop = true;
       window.clearTimeout(timer);
     };
-  }, [job, ready, termRef]);
+  }, [job, ready, docVisible, termRef]);
 
   useEffect(() => {
     onBusyRef.current?.(running);
@@ -249,11 +262,9 @@ function JobTerminal({
 
 function ShellTerminal({
   id,
-  cwd,
   active,
 }: {
   id: string;
-  cwd?: string;
   active: boolean;
 }) {
   const { containerRef, termRef, ready } = useXterm(active, {
@@ -305,14 +316,11 @@ function ShellTerminal({
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex h-9 shrink-0 select-none items-center gap-2 border-b border-line/70 px-3">
-        <SquareTerminal size={13} className="shrink-0 text-muted" />
-        <span className="min-w-0 truncate text-[12.5px] text-bright">Terminal</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint">
-          {cwd || ""}
-        </span>
-        {closed && <span className="shrink-0 text-[11px] text-faint">shell ended</span>}
-      </div>
+      {closed && (
+        <div className="shrink-0 border-b border-line/60 px-3 py-1 text-[11px] text-faint">
+          shell ended
+        </div>
+      )}
       <div ref={containerRef} className="min-h-0 min-w-0 flex-1 bg-canvas px-2 py-1" />
     </div>
   );

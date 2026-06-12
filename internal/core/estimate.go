@@ -13,9 +13,18 @@ const EstimatedImageChars = 4800
 func EstimateTokens(m Message) int {
 	chars := len(m.Content) + len(m.Reasoning)
 	for _, p := range m.Parts {
-		if p.Type == BlockImage {
+		switch p.Type {
+		case BlockImage:
 			chars += EstimatedImageChars
-		} else {
+		case BlockFile:
+			// A document is at least as heavy as an image; the base64 payload
+			// stands in as a monotonic size proxy until a usage event corrects it.
+			if p.File != nil {
+				chars += EstimatedImageChars + len(p.File.Data)/4
+			} else {
+				chars += EstimatedImageChars
+			}
+		default:
 			chars += len(p.Text)
 		}
 	}

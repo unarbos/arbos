@@ -1,16 +1,14 @@
-import { useEffect, useState } from "react";
-import { Activity as ActivityIcon, Loader2, Orbit, Repeat, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Loader2, Orbit, Repeat, X } from "lucide-react";
 
 import {
   cancelPlanNode,
-  fetchActivity,
   stopRun,
   type Activity,
   type ActivityRun,
   type StandingTask,
 } from "@/lib/api";
-
-const ACTIVITY_POLL_MS = 5000;
+import { subscribeActivity } from "@/lib/activity";
 
 function age(ms: number): string {
   const sec = Math.max(0, (Date.now() - ms) / 1000);
@@ -21,44 +19,32 @@ function age(ms: number): string {
 }
 
 /**
- * The whole-organism view: every standing obligation in the global plan plus
- * the agent's recent autonomous runs, across all chats. Each row links into
- * its owning conversation — scoped chats for focus, one place to see
- * everything the agent is carrying.
+ * The whole-organism view as a tab: every standing obligation in the global
+ * plan plus the agent's recent autonomous runs, across all chats. Each row
+ * links into its owning conversation. Activity rides the shared poller (one
+ * /api/activity interval per window, paused while the window is hidden), so
+ * the strip's spinner stays live even when this tab is behind another —
+ * without every consumer running its own identical poll.
  */
-export function ActivityPanel({
+export function ActivityView({
   onOpenChat,
-  onClose,
+  onBusy,
 }: {
   onOpenChat: (chat: string) => void;
-  onClose: () => void;
+  /** Any run live right now — drives the tab strip's spinner. */
+  onBusy?: (busy: boolean) => void;
 }) {
   const [activity, setActivity] = useState<Activity | null>(null);
+  const onBusyRef = useRef(onBusy);
+  onBusyRef.current = onBusy;
+
+  useEffect(() => subscribeActivity(setActivity), []);
 
   useEffect(() => {
-    let stop = false;
-    const tick = () => {
-      fetchActivity()
-        .then((a) => {
-          if (!stop) setActivity(a);
-        })
-        .catch(() => {});
-    };
-    tick();
-    const id = window.setInterval(tick, ACTIVITY_POLL_MS);
-    return () => {
-      stop = true;
-      window.clearInterval(id);
-    };
-  }, []);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    onBusyRef.current?.(
+      activity?.runs.some((r) => r.active && !r.stale) ?? false,
+    );
+  }, [activity]);
 
   const cancel = (node: number) => {
     cancelPlanNode(node)
@@ -93,55 +79,42 @@ export function ActivityPanel({
   };
 
   return (
-    <div className="fixed inset-y-0 right-0 z-30 flex w-[min(440px,92vw)] flex-col border-l border-line bg-canvas shadow-[-24px_0_48px_rgba(0,0,0,0.35)]">
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line/70 px-3.5 select-none">
-        <ActivityIcon size={14} className="shrink-0 text-muted" />
-        <span className="min-w-0 flex-1 truncate text-[12.5px] text-bright">
-          Agent activity
-        </span>
-        <button
-          type="button"
-          onClick={onClose}
-          title="Close (esc)"
-          className="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-muted transition-colors hover:bg-card hover:text-text"
-        >
-          <X size={14} />
-        </button>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto px-3.5 py-3">
-        {activity === null ? (
-          <div className="text-faint">Loading…</div>
-        ) : (
-          <>
-            <Section label="Standing obligations">
-              {activity.standing.length === 0 && (
-                <div className="text-[12px] text-faint">None</div>
-              )}
-              {activity.standing.map((t) => (
-                <StandingRow
-                  key={t.node}
-                  task={t}
-                  onOpen={t.chat ? () => onOpenChat(t.chat!) : undefined}
-                  onCancel={() => cancel(t.node)}
-                />
-              ))}
-            </Section>
-            <Section label="Recent runs">
-              {activity.runs.length === 0 && (
-                <div className="text-[12px] text-faint">None</div>
-              )}
-              {activity.runs.map((r) => (
-                <RunRow
-                  key={r.id}
-                  run={r}
-                  onOpen={() => onOpenChat(r.chat)}
-                  onStop={() => stop(r)}
-                />
-              ))}
-            </Section>
-          </>
-        )}
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-2xl px-4 py-4">
+          {activity === null ? (
+            <div className="text-faint">Loading…</div>
+          ) : (
+            <>
+              <Section label="Standing obligations">
+                {activity.standing.length === 0 && (
+                  <div className="text-[12px] text-faint">None</div>
+                )}
+                {activity.standing.map((t) => (
+                  <StandingRow
+                    key={t.node}
+                    task={t}
+                    onOpen={t.chat ? () => onOpenChat(t.chat!) : undefined}
+                    onCancel={() => cancel(t.node)}
+                  />
+                ))}
+              </Section>
+              <Section label="Recent runs">
+                {activity.runs.length === 0 && (
+                  <div className="text-[12px] text-faint">None</div>
+                )}
+                {activity.runs.map((r) => (
+                  <RunRow
+                    key={r.id}
+                    run={r}
+                    onOpen={() => onOpenChat(r.chat)}
+                    onStop={() => stop(r)}
+                  />
+                ))}
+              </Section>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -219,7 +192,9 @@ function RunRow({
         : "Scheduled run"
       : "Delegated run";
   // A stale run's task is cancelled or finished — it will never fire again, so
-  // dim it and say so rather than letting it read as a live recurrence. Pure
+  // dim it and say so rather than letting it read as a live recurrence. The
+  // label says "ended", not "cancelled": staleness only means the plan node is
+  // no longer live, and a run that completed cleanly lands here too. Pure
   // history (stale and idle) has nothing to stop; a still-live run does.
   const stoppable = run.active || !run.stale;
   return (
@@ -236,7 +211,7 @@ function RunRow({
         />
         <span className="min-w-0 flex-1 truncate text-[12.5px] text-muted">
           {label} <span className="text-faint">· {age(run.updated_at)}</span>
-          {run.stale && <span className="text-faint"> · cancelled</span>}
+          {run.stale && <span className="text-faint"> · ended</span>}
         </span>
         {run.active && !run.stale && (
           <Loader2 size={11} className="shrink-0 animate-spin text-faint" />

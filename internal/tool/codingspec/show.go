@@ -27,14 +27,15 @@ type surfaceDetails struct {
 }
 
 type surface struct {
-	Kind  string `json:"kind"`            // canvas | image | doc | code
+	Kind  string `json:"kind"`            // canvas | image | doc | pdf | code | dir
 	Path  string `json:"path"`            // workspace-relative when under root, else absolute
 	Title string `json:"title,omitempty"` // panel/tab label
 }
 
 // surfaceKind classifies a file by extension into the viewer the UI picks:
 // HTML renders in a sandboxed iframe (a canvas), markdown as a document,
-// images directly, and everything else as code.
+// images directly, PDFs in the browser's native viewer, and everything else as
+// code.
 func surfaceKind(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".html", ".htm":
@@ -43,6 +44,8 @@ func surfaceKind(path string) string {
 		return "doc"
 	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg":
 		return "image"
+	case ".pdf":
+		return "pdf"
 	default:
 		return "code"
 	}
@@ -50,7 +53,7 @@ func surfaceKind(path string) string {
 
 func showSpec(root string) tool.Spec {
 	return tool.NewRichSpec("show",
-		"Present a file to the user in a panel beside the chat: an HTML canvas, an image, a markdown document, or a code file. Use it after producing a visual artifact instead of telling the user to open the file themselves. HTML canvases are themed by the panel: style them with the arbos `--color-*` design tokens (var(--color-token, fallback)), never a hardcoded palette.",
+		"Present a file or folder to the user in a panel beside the chat: an HTML canvas, an image, a markdown document, a code file, or a browsable directory. Use it after producing a visual artifact instead of telling the user to open the file themselves. HTML canvases are themed by the panel: style them with the arbos `--color-*` design tokens (var(--color-token, fallback)), never a hardcoded palette.",
 		true,
 		func(_ context.Context, a ShowArgs) (tool.Result, error) {
 			if strings.TrimSpace(a.Path) == "" {
@@ -63,9 +66,6 @@ func showSpec(root string) tool.Spec {
 			info, err := os.Stat(abs)
 			if err != nil {
 				return tool.Result{}, fmt.Errorf("show: %w", err)
-			}
-			if info.IsDir() {
-				return tool.Result{}, fmt.Errorf("show: %s is a directory; present a file", a.Path)
 			}
 			// The panel fetches the file back through the gateway, which
 			// resolves against the same root — keep the reference
@@ -82,6 +82,9 @@ func showSpec(root string) tool.Spec {
 				title = filepath.Base(abs)
 			}
 			kind := surfaceKind(abs)
+			if info.IsDir() {
+				kind = "dir" // a browsable directory panel
+			}
 			details, err := json.Marshal(surfaceDetails{Surface: surface{
 				Kind:  kind,
 				Path:  filepath.ToSlash(shown),

@@ -77,6 +77,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     origin      TEXT    NOT NULL DEFAULT '',
     owner       TEXT    NOT NULL DEFAULT '', -- chat this session serves ('' = a chat itself)
     spawned_by  TEXT    NOT NULL DEFAULT '', -- what spawned it, e.g. 'node:12'
+    web_search  INTEGER NOT NULL DEFAULT 0, -- durable per-session web-search toggle
+    web_fetch   INTEGER NOT NULL DEFAULT 0, -- durable per-session web-fetch toggle
+    image_gen   INTEGER NOT NULL DEFAULT 0, -- durable per-session image-generation toggle
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
 );
@@ -207,6 +210,9 @@ CREATE INDEX IF NOT EXISTS idx_outbox_undelivered ON outbox(delivered_at) WHERE 
 		{"sessions", []struct{ col, stmt string }{
 			{"owner", `ALTER TABLE sessions ADD COLUMN owner TEXT NOT NULL DEFAULT ''`},
 			{"spawned_by", `ALTER TABLE sessions ADD COLUMN spawned_by TEXT NOT NULL DEFAULT ''`},
+			{"web_search", `ALTER TABLE sessions ADD COLUMN web_search INTEGER NOT NULL DEFAULT 0`},
+			{"web_fetch", `ALTER TABLE sessions ADD COLUMN web_fetch INTEGER NOT NULL DEFAULT 0`},
+			{"image_gen", `ALTER TABLE sessions ADD COLUMN image_gen INTEGER NOT NULL DEFAULT 0`},
 		}},
 		{"outbox", []struct{ col, stmt string }{
 			{"principal", `ALTER TABLE outbox ADD COLUMN principal TEXT NOT NULL DEFAULT ''`},
@@ -255,10 +261,10 @@ func (s *Store) CreateSession(ctx context.Context, sess core.Session) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, parent_id, status, model, principal, origin, owner, spawned_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (id, parent_id, status, model, principal, origin, owner, spawned_by, web_search, web_fetch, image_gen, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(sess.ID), string(sess.ParentID), string(sess.Status), sess.Model,
-		sess.Principal, sess.Origin, string(sess.Owner), sess.SpawnedBy,
+		sess.Principal, sess.Origin, string(sess.Owner), sess.SpawnedBy, boolToInt(sess.WebSearch), boolToInt(sess.WebFetch), boolToInt(sess.ImageGen),
 		sess.CreatedAt.UnixNano(), sess.UpdatedAt.UnixNano(),
 	)
 	if err != nil {
@@ -269,16 +275,17 @@ func (s *Store) CreateSession(ctx context.Context, sess core.Session) error {
 
 func (s *Store) Get(ctx context.Context, id core.SessionID) (core.Session, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, parent_id, status, model, principal, origin, owner, spawned_by, created_at, updated_at
+		`SELECT id, parent_id, status, model, principal, origin, owner, spawned_by, web_search, web_fetch, image_gen, created_at, updated_at
 		 FROM sessions WHERE id = ?`, string(id))
 	var (
-		sess               core.Session
-		idStr, parentID    string
-		status, owner      string
-		createdAt, updated int64
+		sess                          core.Session
+		idStr, parentID               string
+		status, owner                 string
+		webSearch, webFetch, imageGen int
+		createdAt, updated            int64
 	)
 	err := row.Scan(&idStr, &parentID, &status, &sess.Model,
-		&sess.Principal, &sess.Origin, &owner, &sess.SpawnedBy, &createdAt, &updated)
+		&sess.Principal, &sess.Origin, &owner, &sess.SpawnedBy, &webSearch, &webFetch, &imageGen, &createdAt, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.Session{}, ports.ErrSessionNotFound
 	}
@@ -289,6 +296,9 @@ func (s *Store) Get(ctx context.Context, id core.SessionID) (core.Session, error
 	sess.ParentID = core.SessionID(parentID)
 	sess.Status = core.SessionStatus(status)
 	sess.Owner = core.SessionID(owner)
+	sess.WebSearch = webSearch != 0
+	sess.WebFetch = webFetch != 0
+	sess.ImageGen = imageGen != 0
 	sess.CreatedAt = time.Unix(0, createdAt).UTC()
 	sess.UpdatedAt = time.Unix(0, updated).UTC()
 	return sess, nil
@@ -298,10 +308,10 @@ func (s *Store) UpdateSession(ctx context.Context, sess core.Session) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET parent_id=?, status=?, model=?, principal=?, origin=?, owner=?, spawned_by=?, updated_at=?
+		`UPDATE sessions SET parent_id=?, status=?, model=?, principal=?, origin=?, owner=?, spawned_by=?, web_search=?, web_fetch=?, image_gen=?, updated_at=?
 		 WHERE id=?`,
 		string(sess.ParentID), string(sess.Status), sess.Model,
-		sess.Principal, sess.Origin, string(sess.Owner), sess.SpawnedBy,
+		sess.Principal, sess.Origin, string(sess.Owner), sess.SpawnedBy, boolToInt(sess.WebSearch), boolToInt(sess.WebFetch), boolToInt(sess.ImageGen),
 		sess.UpdatedAt.UnixNano(), string(sess.ID),
 	)
 	if err != nil {
@@ -383,9 +393,17 @@ func (s *Store) AppendEvent(ctx context.Context, ev *core.Event) error {
 }
 
 func (s *Store) Events(ctx context.Context, id core.SessionID) ([]core.Event, error) {
+	return s.EventsFrom(ctx, id, 0)
+}
+
+// EventsFrom returns a session's events with Seq >= from, oldest first — the
+// cursor-read a live mirror (the Telegram bridge) polls with, so it never
+// re-reads a long log to see what's new. from = 0 is the full replay (seqs
+// are store-assigned starting at 0).
+func (s *Store) EventsFrom(ctx context.Context, id core.SessionID, from int64) ([]core.Event, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, seq, turn_id, kind, version, created_at, payload
-		 FROM events WHERE session_id = ? ORDER BY seq ASC`, string(id))
+		 FROM events WHERE session_id = ? AND seq >= ? ORDER BY seq ASC`, string(id), from)
 	if err != nil {
 		return nil, fmt.Errorf("events %q: %w", id, err)
 	}
@@ -484,6 +502,31 @@ func (s *Store) ListSessions(ctx context.Context, limit int) ([]SessionSummary, 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	return out, nil
+}
+
+// SessionIDs returns every session id in the store, oldest first. It exists
+// for bulk trajectory export (`arbos export --all`), which — unlike the
+// frontend picker (ListSessions) — must include machine-spawned children,
+// scheduler runs, and untitled sessions: those are rollouts too.
+func (s *Store) SessionIDs(ctx context.Context) ([]core.SessionID, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM sessions ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("session ids: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []core.SessionID
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("session ids: scan: %w", err)
+		}
+		out = append(out, core.SessionID(id))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("session ids: %w", err)
 	}
 	return out, nil
 }
@@ -671,4 +714,13 @@ func searchableText(p core.EventPayload) string {
 	default:
 		return ""
 	}
+}
+
+// boolToInt maps a Go bool to SQLite's 0/1 INTEGER convention for boolean
+// columns (the driver has no native bool type).
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

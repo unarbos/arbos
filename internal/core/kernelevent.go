@@ -10,6 +10,9 @@ type KernelEventKind string
 const (
 	KernelEventMessageDelta    KernelEventKind = "message_delta"
 	KernelEventReasoningDelta  KernelEventKind = "reasoning_delta"
+	KernelEventCitations       KernelEventKind = "citations"
+	KernelEventImages          KernelEventKind = "images"
+	KernelEventToolProgress    KernelEventKind = "tool_progress"
 	KernelEventToolStarted     KernelEventKind = "tool_started"
 	KernelEventToolFinished    KernelEventKind = "tool_finished"
 	KernelEventTurnComplete    KernelEventKind = "turn_complete"
@@ -35,6 +38,38 @@ type MessageDelta struct {
 // ReasoningDelta is an incremental chunk of assistant reasoning/thinking.
 type ReasoningDelta struct {
 	Text string `json:"text"`
+}
+
+// Citations reports the web-search sources the provider grounded the current
+// assistant message on. Unlike content, citations arrive only once the message
+// is complete (they ride on the provider's final chunk), so they cannot be
+// streamed as deltas — this event delivers them in one shot for the frontend to
+// attach to the assistant turn it has been building. Presentation only; the
+// sources are persisted on the assistant Message, not as this event. See
+// ADR-0027.
+type Citations struct {
+	Citations []Citation `json:"citations"`
+}
+
+// Images delivers provider-generated images for the current assistant message
+// (OpenRouter's image_generation server tool). Like Citations they ride the
+// provider's final chunk, so they arrive in one shot after the content deltas
+// and before turn_complete. Presentation only; the images are persisted on the
+// assistant Message's Parts, not as this event.
+type Images struct {
+	Images []ContentBlock `json:"images"`
+}
+
+// ToolProgress reports a tool call's arguments still streaming in: the call's
+// identity and how many argument bytes have arrived so far. It is emitted
+// repeatedly while a large call is composed (e.g. writing a canvas), so a
+// frontend can show live progress in the gap between the prose and the finished
+// call — the same gap the streaming deltas leave silent. Presentation only;
+// never persisted, like MessageDelta and ReasoningDelta.
+type ToolProgress struct {
+	CallID string `json:"call_id"`
+	Name   string `json:"name"`
+	Bytes  int    `json:"bytes"`
 }
 
 // ToolStarted announces a tool invocation about to run.
@@ -97,8 +132,18 @@ type ErrorEvent struct {
 // run after the current turn finishes (FIFO). This replaces the skeleton's
 // silent drop of intents-while-busy — the user always learns their input was
 // kept. See ADR-0020.
+//
+// Origin carries the PromptIntent's door marker when the prompt arrived from
+// somewhere other than the bound frontend (e.g. "telegram"): the actor also
+// echoes such prompts when idle, and a frontend renders them as the user
+// speaking through that door rather than as a queue acknowledgment.
 type Queued struct {
-	Text string `json:"text"`
+	Text   string `json:"text"`
+	Origin string `json:"origin,omitempty"`
+	// Parts carries the prompt's non-text content (images) so an echoed
+	// cross-door prompt renders complete — a photo sent from a phone must
+	// appear in the open web tab, not just its caption.
+	Parts []ContentBlock `json:"parts,omitempty"`
 }
 
 // ApprovalRequest pauses the turn to ask whether a tool call may proceed. The
@@ -137,6 +182,9 @@ type QuestionRequest struct {
 
 func (MessageDelta) Kind() KernelEventKind    { return KernelEventMessageDelta }
 func (ReasoningDelta) Kind() KernelEventKind  { return KernelEventReasoningDelta }
+func (Citations) Kind() KernelEventKind       { return KernelEventCitations }
+func (Images) Kind() KernelEventKind          { return KernelEventImages }
+func (ToolProgress) Kind() KernelEventKind    { return KernelEventToolProgress }
 func (ToolStarted) Kind() KernelEventKind     { return KernelEventToolStarted }
 func (ToolFinished) Kind() KernelEventKind    { return KernelEventToolFinished }
 func (TurnComplete) Kind() KernelEventKind    { return KernelEventTurnComplete }

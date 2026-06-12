@@ -30,7 +30,7 @@ discriminator.
 
 ```go
 type EventKind string // user_message | assistant_message | tool_result |
-                       // usage | compressed | interrupted
+                       // usage | compressed | interrupted | config
 
 type EventPayload interface { Kind() EventKind } // sealed
 
@@ -39,6 +39,9 @@ type EventPayload interface { Kind() EventKind } // sealed
     UsagePayload{ Usage Usage }                // token accounting, in the log (ADR-0011)
     CompressionPayload{ Summary string; ReplacedSeqLo, ReplacedSeqHi int64 }
     InterruptPayload{ Reason string }
+    ConfigPayload{ Model, SystemPrompt string; Tools []ToolSchema } // what the model ran with, so a
+                                               // log is a self-contained trajectory (replay/training
+                                               // never depends on the current binary's templates)
 
 const CurrentEventVersion = 1 // stamped on every written event; see ADR-0010
 

@@ -9,6 +9,7 @@
 
 import type { ReplayEvent } from "./api";
 import type {
+  Citation,
   ContentBlock,
   Envelope,
   Question,
@@ -32,6 +33,13 @@ export type TranscriptItem =
       streaming: boolean;
       stopReason?: StopReason;
       usage?: Usage;
+      /** Web-search sources the provider grounded this message on (a "Sources"
+       *  strip). Set by the citations event live, or from replay. */
+      citations?: Citation[];
+      /** Provider-generated images (image_generation server tool), rendered
+       *  inline under the prose. Set by the images event live, or from
+       *  replay's assistant parts. */
+      images?: ContentBlock[];
     }
   | { kind: "thinking"; id: number; text: string; streaming: boolean }
   | {
@@ -45,8 +53,25 @@ export type TranscriptItem =
        * it is what makes the row a clickable sub-agent tab.
        */
       childSession?: string;
+      /**
+       * Arguments still streaming in: the bytes-so-far for the live "composing"
+       * card the row shows before the finished call lands. Set by tool_progress
+       * (which may arrive before the call is whole, so `call.Args` is absent),
+       * cleared by tool_started once the real call is in hand. Live-only — a
+       * replayed transcript builds the row straight from the finished call.
+       */
+      composing?: { bytes: number };
     }
-  | { kind: "queued"; id: number; text: string }
+  | {
+      kind: "queued";
+      id: number;
+      text: string;
+      /** Door the prompt arrived through when not this frontend (e.g.
+       *  "telegram") — render it as the user speaking, not a queue ack. */
+      origin?: string;
+      /** The prompt's non-text content (a photo sent from the phone). */
+      parts?: ContentBlock[];
+    }
   | { kind: "interrupted"; id: number }
   | { kind: "error"; id: number; message: string; retryable: boolean }
   /** Outbox delivery — the agent speaking up between turns. */
@@ -290,12 +315,74 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
       });
     }
 
-    case "tool_started":
-      return push(closeThinking(state), {
+    case "citations": {
+      // Sources for the message just streamed: they ride the provider's final
+      // chunk, so they land after the content deltas (the assistant item is
+      // still the latest streaming one) and before turn_complete. Attach to
+      // the most recent assistant segment; if none has prose (a search that
+      // grounded a tool-only turn), there is nothing to annotate.
+      for (let i = state.items.length - 1; i >= 0; i--) {
+        const it = state.items[i];
+        if (it.kind === "assistant") {
+          return replaceAt(state, i, { ...it, citations: ev.data.citations });
+        }
+      }
+      return state;
+    }
+
+    case "images": {
+      // Generated images for the message just streamed: like citations they
+      // ride the provider's final chunk, so the assistant segment they belong
+      // to is the most recent one. An image-only turn (no prose) gets a fresh
+      // assistant item so the images still render.
+      for (let i = state.items.length - 1; i >= 0; i--) {
+        const it = state.items[i];
+        if (it.kind === "assistant") {
+          return replaceAt(state, i, { ...it, images: ev.data.images });
+        }
+      }
+      return push({ ...finalize(state), turnActive: true }, {
+        kind: "assistant",
+        id: state.nextId,
+        text: "",
+        streaming: false,
+        images: ev.data.images,
+      });
+    }
+
+    case "tool_progress": {
+      // A tool call's arguments streaming in (e.g. a canvas's HTML body): show
+      // a live composing row in the gap before the finished call lands. The
+      // first sighting of a call id seeds the row — finalizing any open prose,
+      // since the model has moved on from text to composing the call — and
+      // later updates just grow its byte count.
+      for (let i = state.items.length - 1; i >= 0; i--) {
+        const it = state.items[i];
+        if (it.kind === "tool" && it.call.ID === ev.data.call_id && !it.result) {
+          return replaceAt(state, i, { ...it, composing: { bytes: ev.data.bytes } });
+        }
+      }
+      return push({ ...finalize(closeThinking(state)), turnActive: true }, {
         kind: "tool",
         id: state.nextId,
-        call: ev.data.call,
+        call: { ID: ev.data.call_id, Name: ev.data.name },
+        composing: { bytes: ev.data.bytes },
       });
+    }
+
+    case "tool_started": {
+      // The finished call: adopt the composing row it grew from (so the card
+      // transitions in place, no flicker), else start a fresh row.
+      const call = ev.data.call;
+      const s = closeThinking(state);
+      for (let i = s.items.length - 1; i >= 0; i--) {
+        const it = s.items[i];
+        if (it.kind === "tool" && it.call.ID === call.ID && !it.result) {
+          return replaceAt(s, i, { ...it, call, composing: undefined });
+        }
+      }
+      return push(s, { kind: "tool", id: s.nextId, call });
+    }
 
     case "tool_finished": {
       for (let i = state.items.length - 1; i >= 0; i--) {
@@ -373,7 +460,13 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
     }
 
     case "queued":
-      return push(state, { kind: "queued", id: state.nextId, text: ev.data.text });
+      return push(state, {
+        kind: "queued",
+        id: state.nextId,
+        text: ev.data.text,
+        origin: ev.data.origin,
+        parts: ev.data.parts,
+      });
 
     case "approval_request":
       // A child's request bubbles up the relay (ADR-0018); the response
@@ -517,8 +610,16 @@ export function replayToItems(events: ReplayEvent[]): TranscriptItem[] {
         items.push({ kind: "user", id: id++, text: ev.text, parts: ev.parts, seq: ev.seq });
         break;
       case "assistant": {
-        if (ev.text) {
-          items.push({ kind: "assistant", id: id++, text: ev.text, streaming: false });
+        const images = (ev.parts ?? []).filter((p) => p.type === "image");
+        if (ev.text || images.length > 0) {
+          items.push({
+            kind: "assistant",
+            id: id++,
+            text: ev.text ?? "",
+            streaming: false,
+            citations: ev.citations,
+            images: images.length > 0 ? images : undefined,
+          });
         }
         for (const call of ev.tool_calls ?? []) {
           toolIndex.set(call.ID, items.length);

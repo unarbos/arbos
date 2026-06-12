@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Infinity as InfinityIcon, Loader2 } from "lucide-react";
 
 import { fetchModels, type ModelOption } from "@/lib/api";
+import { Tooltip } from "./Tooltip";
 
 /** Catalog shared across tabs — fetched once, then reused by every picker. */
 let catalogPromise: Promise<ModelOption[]> | null = null;
@@ -28,17 +29,28 @@ function shortLabel(id: string): string {
 const LIST_MAX = 50;
 
 /**
- * The composer's model selector, Cursor-style: a chip that shows the active
- * model and opens a typeahead over the provider's catalog. Type to filter
- * (e.g. "ki" surfaces the kimi models); Enter picks the top match, ↑/↓ move,
- * Esc closes. Selecting sends set_model on the live seam.
+ * The model selector, Cursor-style: a chip that shows the active model and
+ * opens a typeahead over the provider's catalog. Type to filter (e.g. "ki"
+ * surfaces the kimi models); Enter picks the top match, ↑/↓ move, Esc closes.
+ * The composer mounts it opening upward over the seam's set_model; the
+ * Settings tab mounts it opening downward (right-aligned, with an emptyLabel
+ * for "no override") over the host preference file.
  */
 export function ModelPicker({
   current,
   onSelect,
+  side = "up",
+  align = "left",
+  emptyLabel,
 }: {
   current: string;
   onSelect: (id: string) => void;
+  /** Where the dropdown opens relative to the chip. */
+  side?: "up" | "down";
+  /** Which chip edge the dropdown hugs (keep it on-screen near a panel edge). */
+  align?: "left" | "right";
+  /** Chip text when nothing is selected (an unset override). */
+  emptyLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<ModelOption[] | null>(null);
@@ -122,21 +134,48 @@ export function ModelPicker({
     }
   };
 
+  const chip = (
+    <button
+      type="button"
+      aria-label={current ? `Model: ${current}` : "Select model"}
+      onClick={() => setOpen((v) => !v)}
+      className="flex max-w-[220px] cursor-pointer items-center gap-1 rounded-full border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:text-text"
+    >
+      <InfinityIcon size={11} className="shrink-0" />
+      {current || emptyLabel ? (
+        <span className="truncate">
+          {current ? shortLabel(current) : emptyLabel}
+        </span>
+      ) : (
+        // Still resolving (the session's model arrives with the replay, the
+        // catalog with /api/models) — a quiet placeholder beats flashing the
+        // literal word "model" as if it were a value.
+        <span className="w-12 animate-pulse rounded-sm bg-hover text-transparent select-none">
+          &nbsp;
+        </span>
+      )}
+      <ChevronDown size={10} className="shrink-0 text-faint" />
+    </button>
+  );
+
   return (
     <div ref={rootRef} className="relative" data-keep-focus>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        title={current || "Select model"}
-        className="flex max-w-[220px] cursor-pointer items-center gap-1 rounded-full border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:text-text"
-      >
-        <InfinityIcon size={11} className="shrink-0" />
-        <span className="truncate">{shortLabel(current)}</span>
-        <ChevronDown size={10} className="shrink-0 text-faint" />
-      </button>
+      {/* The bubble would sit right under the open dropdown, so only offer it
+          while closed. */}
+      {open ? (
+        chip
+      ) : (
+        <Tooltip side="top" label={current || "Select model"}>
+          {chip}
+        </Tooltip>
+      )}
 
       {open && (
-        <div className="absolute bottom-full left-0 z-30 mb-1 flex max-h-80 w-80 flex-col overflow-hidden rounded-lg border border-line bg-card shadow-xl shadow-black/40">
+        <div
+          className={`absolute z-30 flex max-h-80 w-80 flex-col overflow-hidden rounded-lg border border-line bg-card shadow-xl shadow-black/40 ${
+            side === "up" ? "bottom-full mb-1" : "top-full mt-1"
+          } ${align === "left" ? "left-0" : "right-0"}`}
+        >
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
