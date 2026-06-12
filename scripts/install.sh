@@ -88,8 +88,9 @@ echo "Installing arbos..."
 go install "${MODULE}"
 
 BIN_DIR="$(go env GOPATH)/bin"
-export PATH="${BIN_DIR}:${PATH}"
 
+# Persist BIN_DIR before mutating our own PATH, otherwise the check below
+# always matches and the rc files never get updated.
 case ":${PATH}:" in
 *":${BIN_DIR}:"*) ;;
 *)
@@ -104,6 +105,8 @@ case ":${PATH}:" in
 	done
 	;;
 esac
+
+export PATH="${BIN_DIR}:${PATH}"
 
 if command -v arbos >/dev/null 2>&1; then
 	echo ""
