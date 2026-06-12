@@ -9,6 +9,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -23,7 +25,22 @@ type LLMInfo struct {
 	Model      string `json:"model"`
 	KeySet     bool   `json:"key_set"`
 	OpenRouter bool   `json:"openrouter"`
+	// BootID names this process instance; it changes exactly when the apply
+	// restart lands, so the panel polls it to know the reported configuration
+	// is the rebuilt one (a successful fetch alone may still be the old
+	// process, or a restart parked behind a busy agent).
+	BootID string `json:"boot_id"`
+	// RestartPending is true while a saved change waits for an idle boundary.
+	RestartPending bool `json:"restart_pending"`
 }
+
+// bootID is minted once per process. Configuration applies by re-exec, so a
+// new value on the wire is proof the new configuration is being reported.
+var bootID = func() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}()
 
 // LLMAdmin is the host's provider-configuration seam, wired by the web door.
 // Nil on the Server disables the routes.
@@ -52,7 +69,9 @@ type LLMCredits struct {
 
 // handleLLMGet returns the effective provider configuration.
 func (s *Server) handleLLMGet(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, s.LLM.Info())
+	info := s.LLM.Info()
+	info.BootID = bootID
+	writeJSON(w, info)
 }
 
 // handleLLMPut updates the endpoint and/or key. Fields are pointers so the

@@ -92,6 +92,11 @@ func (e *Engine) InFlight() int64 { return e.inFlight.Load() }
 // A no-op unless WatchRestart is running (the long-lived doors).
 func (e *Engine) RequestRestart() { e.restartReq.Store(true) }
 
+// RestartPending reports whether a requested restart is still waiting for an
+// idle boundary — the Settings panel's "saved, applying when the agent goes
+// idle" state.
+func (e *Engine) RestartPending() bool { return e.restartReq.Load() }
+
 // Option configures optional engine dependencies without widening New's
 // signature, so existing call sites keep compiling as capabilities are added.
 type Option func(*Engine)
