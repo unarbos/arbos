@@ -10,6 +10,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -61,7 +62,20 @@ type Engine struct {
 	// this map is the one shared structure and carries its own mutex.
 	liveMu sync.Mutex
 	live   map[core.SessionID]*Conversation
+
+	// inFlight counts turns currently executing across ALL sessions. It is the
+	// process-global "busy" signal a graceful-restart supervisor consults to
+	// avoid swapping the binary mid-turn: processPrompt increments it on entry
+	// and decrements on return, so inFlight==0 means every actor is parked at a
+	// turn boundary. Atomic because the supervisor goroutine reads it
+	// concurrently with the actor goroutines that mutate it.
+	inFlight atomic.Int64
 }
+
+// InFlight reports how many turns are executing right now, across every
+// session. Zero means the process is at a turn boundary on all sessions — the
+// only moment it is safe to re-exec a new binary without dropping a turn.
+func (e *Engine) InFlight() int64 { return e.inFlight.Load() }
 
 // Option configures optional engine dependencies without widening New's
 // signature, so existing call sites keep compiling as capabilities are added.
@@ -151,6 +165,42 @@ type Conversation struct {
 	// only mutated while idle (no turn running), so a running turn reads a stable
 	// value without synchronization. Empty = use the engine's configured model.
 	model string
+	// webSearch is the per-session web-search toggle, set by a SetWebSearchIntent
+	// between turns. Same ownership rules as model: actor-owned, mutated only
+	// while idle, so a running turn reads a stable value. Mirrored from the
+	// durable Session.WebSearch on adoption.
+	webSearch bool
+	// webFetch is the per-session web-fetch toggle (SetWebFetchIntent), with the
+	// same ownership and durability as webSearch. Independent of it.
+	webFetch bool
+	// imageGen is the per-session image-generation toggle (SetImageGenIntent),
+	// with the same ownership and durability as the web toggles.
+	imageGen bool
+	// taps are side-channel envelope observers attached by doors that are
+	// NOT the bound frontend (the Telegram bridge live-streaming a turn the
+	// web tab is driving). They see every envelope the events channel sees.
+	tapsMu  sync.Mutex
+	taps    map[int]func(core.Envelope)
+	nextTap int
+}
+
+// Tap subscribes fn to every envelope this conversation emits and returns
+// the unsubscribe. fn runs on the emitting goroutine — it must be fast and
+// never block (buffer internally, hand off to your own goroutine).
+func (c *Conversation) Tap(fn func(core.Envelope)) func() {
+	c.tapsMu.Lock()
+	defer c.tapsMu.Unlock()
+	if c.taps == nil {
+		c.taps = make(map[int]func(core.Envelope))
+	}
+	id := c.nextTap
+	c.nextTap++
+	c.taps[id] = fn
+	return func() {
+		c.tapsMu.Lock()
+		defer c.tapsMu.Unlock()
+		delete(c.taps, id)
+	}
 }
 
 func (c *Conversation) ID() core.SessionID           { return c.id }
@@ -243,6 +293,13 @@ func (c *Conversation) emitEnvelope(ctx context.Context, env core.Envelope) bool
 	if c.observer != nil {
 		c.observer.ObserveEvent(ctx, env.Event)
 	}
+	// Side-channel taps next, same rationale — a tapping door (the Telegram
+	// bridge) must see the envelope even if the bound frontend is slow.
+	c.tapsMu.Lock()
+	for _, fn := range c.taps {
+		fn(env)
+	}
+	c.tapsMu.Unlock()
 	select {
 	case <-ctx.Done():
 		return false
@@ -320,6 +377,10 @@ func (e *Engine) StartSession(ctx context.Context, id core.SessionID, opts ...Se
 		// Session.Model is the durable authority; the actor caches it so a
 		// resumed session keeps the model a SetModelIntent switched it to.
 		model: sess.Model,
+		// Same durable-cache pattern for the web-search/fetch/image toggles.
+		webSearch: sess.WebSearch,
+		webFetch:  sess.WebFetch,
+		imageGen:  sess.ImageGen,
 	}
 	e.registerConv(c)
 	go e.runActor(ctx, c)
@@ -397,6 +458,13 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 			}
 			switch it := intent.(type) {
 			case core.PromptIntent:
+				// A prompt injected by another door (Origin set) is invisible
+				// to the bound frontend until it echoes — emit the same
+				// Queued acknowledgment the busy path uses, so the open tab
+				// renders what the other door said before the turn streams.
+				if it.Origin != "" {
+					c.emit(parent, core.Queued{Text: it.Text, Origin: it.Origin, Parts: it.Parts})
+				}
 				turnSeq++
 				queue = append(queue, e.processPrompt(parent, c, it.Text, it.Parts, turnSeq)...)
 			case core.SteerIntent:
@@ -420,6 +488,31 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 					continue
 				}
 				c.model = it.Model
+			case core.SetWebSearchIntent:
+				// Same idle-only, persist-then-cache discipline as SetModelIntent:
+				// Session.WebSearch is the durable authority, so a resumed session
+				// keeps the toggle.
+				if err := e.persistWebSearch(parent, c.id, it.Enabled); err != nil {
+					c.emit(parent, core.ErrorEvent{Category: core.ErrPersist, Err: "persist web search: " + err.Error()})
+					continue
+				}
+				c.webSearch = it.Enabled
+			case core.SetWebFetchIntent:
+				// Same idle-only, persist-then-cache discipline as the other
+				// durable per-session toggles.
+				if err := e.persistWebFetch(parent, c.id, it.Enabled); err != nil {
+					c.emit(parent, core.ErrorEvent{Category: core.ErrPersist, Err: "persist web fetch: " + err.Error()})
+					continue
+				}
+				c.webFetch = it.Enabled
+			case core.SetImageGenIntent:
+				// Same idle-only, persist-then-cache discipline as the other
+				// durable per-session toggles.
+				if err := e.persistImageGen(parent, c.id, it.Enabled); err != nil {
+					c.emit(parent, core.ErrorEvent{Category: core.ErrPersist, Err: "persist image gen: " + err.Error()})
+					continue
+				}
+				c.imageGen = it.Enabled
 			case core.CompactIntent:
 				// Manual /compact: force a compaction pass now (when idle).
 				e.compactNow(parent, c)
@@ -438,6 +531,12 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 // interrupts. An InterruptIntent cancels the turn's context — the structural
 // payoff of the actor model.
 func (e *Engine) processPrompt(parent context.Context, c *Conversation, text string, parts []core.ContentBlock, turnID int64) []core.PromptIntent {
+	// Mark the process busy for the lifetime of this turn so a graceful-restart
+	// supervisor never swaps the binary mid-turn. Paired inc/dec around the
+	// whole turn (including its queued-prompt drain) keeps inFlight a faithful
+	// count of executing turns.
+	e.inFlight.Add(1)
+	defer e.inFlight.Add(-1)
 	// Attach turn correlation once, here, so every downstream append and (later)
 	// log line/span joins on the same SessionID+TurnID. cctx is not cancellable
 	// itself (only turnCtx is), so it is the right context for must-persist
@@ -536,13 +635,13 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 				return []core.PromptIntent{{Text: it.Text, Parts: it.Parts}}
 			case core.PromptIntent:
 				// Don't drop it: queue it and tell the user it was kept.
-				c.emit(parent, core.Queued{Text: it.Text})
+				c.emit(parent, core.Queued{Text: it.Text, Origin: it.Origin, Parts: it.Parts})
 				queued = append(queued, it)
 			case core.ApprovalResponseIntent:
 				routeResponse(c, pending, it.RequestID, it, parent)
 			case core.QuestionResponseIntent:
 				routeResponse(c, pending, it.RequestID, it, parent)
-			case core.SetModelIntent, core.CompactIntent:
+			case core.SetModelIntent, core.SetWebSearchIntent, core.SetWebFetchIntent, core.SetImageGenIntent, core.CompactIntent:
 				// These apply only when idle (between turns). Ignoring them
 				// mid-turn keeps the actor's single-writer and no-mid-turn-mutation
 				// invariants intact; a frontend resends once the session is idle.
@@ -553,6 +652,16 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 			}
 		}
 	}
+}
+
+// configEqual compares two turn configs by their canonical JSON encoding:
+// ToolSchema carries raw JSON parameters, so structural equality is encoding
+// equality. An encode failure (cannot happen for these shapes) compares
+// unequal, which merely re-logs the config — never drops it.
+func configEqual(a, b core.ConfigPayload) bool {
+	ab, aerr := core.EncodePayload(a)
+	bb, berr := core.EncodePayload(b)
+	return aerr == nil && berr == nil && bytes.Equal(ab, bb)
 }
 
 // routeResponse delivers a mid-turn response intent to its waiting turn. An
@@ -656,6 +765,24 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, 
 	// prompt-cache prefix stable (a changing tools block invalidates it).
 	tools := e.tools.Schemas()
 
+	// Resolve the model once per turn: c.model is only mutated while the
+	// session is idle, so it is stable for the turn's duration.
+	model := e.cfg.Model
+	if c.model != "" {
+		model = c.model
+	}
+
+	// Log the effective turn config (model, system prompt, toolset) when it
+	// differs from the last logged one, so the log alone reconstructs exactly
+	// what the model saw — replay and trajectory export must not depend on the
+	// current binary's prompt templates or tool registry, which evolve.
+	turnCfg := core.ConfigPayload{Model: model, SystemPrompt: e.cfg.SystemPrompt, Tools: tools, WebSearch: c.webSearch, WebFetch: c.webFetch, ImageGen: c.imageGen}
+	if prev, ok := core.LatestConfig(events); !ok || !configEqual(prev, turnCfg) {
+		if !e.append(ctx, c, core.NewConfigEvent(c.id, turnCfg, e.clock.Now())) {
+			return true
+		}
+	}
+
 	for iter := 0; iter < e.cfg.MaxIterations; iter++ {
 		if ctx.Err() != nil {
 			return false
@@ -672,16 +799,15 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, 
 			msgs = newMsgs
 		}
 
-		model := e.cfg.Model
-		if c.model != "" {
-			model = c.model
-		}
 		req := core.LLMRequest{
 			Model:          model,
 			Messages:       msgs,
 			Tools:          tools,
 			Stream:         true,
 			Reasoning:      e.cfg.Reasoning,
+			WebSearch:      c.webSearch,
+			WebFetch:       c.webFetch,
+			ImageGen:       c.imageGen,
 			CacheRetention: e.cfg.CacheRetention,
 			SessionID:      string(c.id),
 		}
@@ -714,8 +840,10 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, 
 		assistant := core.Message{
 			Role:      core.RoleAssistant,
 			Content:   sr.content,
+			Parts:     sr.images,
 			Reasoning: sr.reasoning,
 			ToolCalls: sr.toolCalls,
+			Citations: sr.citations,
 		}
 		assistantEv := core.NewMessageEvent(c.id, assistant, e.clock.Now())
 		if !e.append(ctx, c, assistantEv) {
@@ -725,6 +853,20 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, 
 		// full-log Project uses, so a live turn and a replay can't diverge.
 		if m, ok := core.ProjectEvent(*assistantEv); ok {
 			msgs = append(msgs, m)
+		}
+		// Citations can't stream as deltas (they arrive only with the final
+		// chunk), so the live frontend learns the sources via this one-shot
+		// event — it attaches them to the assistant turn it just streamed.
+		// Replay reads them off the persisted assistant Message instead.
+		if len(sr.citations) > 0 {
+			c.emit(ctx, core.Citations{Citations: sr.citations})
+		}
+		// Generated images follow the same one-shot delivery as citations:
+		// they ride the provider's final chunk, so the live frontend learns
+		// them via this event; replay reads them off the persisted assistant
+		// Message's Parts instead.
+		if len(sr.images) > 0 {
+			c.emit(ctx, core.Images{Images: sr.images})
 		}
 
 		if sr.usage != nil {
@@ -808,6 +950,42 @@ func (e *Engine) persistModel(ctx context.Context, id core.SessionID, model stri
 		return err
 	}
 	sess.Model = model
+	sess.UpdatedAt = e.clock.Now()
+	return e.store.UpdateSession(ctx, sess)
+}
+
+// persistWebSearch writes a web-search toggle to the session record, the
+// durable authority a resumed session reads at adoption (mirrors persistModel).
+func (e *Engine) persistWebSearch(ctx context.Context, id core.SessionID, enabled bool) error {
+	sess, err := e.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	sess.WebSearch = enabled
+	sess.UpdatedAt = e.clock.Now()
+	return e.store.UpdateSession(ctx, sess)
+}
+
+// persistWebFetch writes a web-fetch toggle to the session record (mirrors
+// persistWebSearch).
+func (e *Engine) persistWebFetch(ctx context.Context, id core.SessionID, enabled bool) error {
+	sess, err := e.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	sess.WebFetch = enabled
+	sess.UpdatedAt = e.clock.Now()
+	return e.store.UpdateSession(ctx, sess)
+}
+
+// persistImageGen writes an image-generation toggle to the session record
+// (mirrors persistWebSearch).
+func (e *Engine) persistImageGen(ctx context.Context, id core.SessionID, enabled bool) error {
+	sess, err := e.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	sess.ImageGen = enabled
 	sess.UpdatedAt = e.clock.Now()
 	return e.store.UpdateSession(ctx, sess)
 }
