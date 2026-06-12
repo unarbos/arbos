@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Bootstrap launcher — lets `curl … | arbos web` work before the real binary exists.
+# Install to PATH once:
+#
+#   curl -fsSL https://arbos.life/arbos -o ~/.local/bin/arbos && chmod +x ~/.local/bin/arbos
+#
+# Then:
+#
+#   curl -fsSL https://arbos.life | arbos web
+#   curl -fsSL https://arbos.life | arbos
+if [ -z "${BASH_VERSION:-}" ]; then
+	exec bash -s "$@"
+fi
+set -euo pipefail
+
+INSTALL_URL="${ARBOS_INSTALL_URL:-https://arbos.life}"
+
+if [[ ! -t 0 ]]; then
+	exec bash -s "$@"
+fi
+
+bin_dir="${HOME}/go/bin"
+if command -v go >/dev/null 2>&1; then
+	bin_dir="$(go env GOPATH)/bin"
+fi
+if [[ -x "${bin_dir}/arbos" ]]; then
+	exec "${bin_dir}/arbos" "$@"
+fi
+
+exec bash -c 'curl -fsSL "$1" | bash -s -- "${@:2}"' _ "${INSTALL_URL}" "$@"

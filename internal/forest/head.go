@@ -183,6 +183,14 @@ func (h *Head) Handler() http.Handler {
 	api.HandleFunc("POST /v1/devices/token", h.handleToken)
 	api.HandleFunc("POST /v1/nodes/heartbeat", h.handleHeartbeat)
 	api.HandleFunc("GET "+tunnelPath, h.handleTunnel)
+	api.HandleFunc("GET /install.sh", h.serveInstallScript)
+	api.HandleFunc("GET /arbos", h.serveLauncher)
+	api.HandleFunc("GET /style.css", func(w http.ResponseWriter, r *http.Request) {
+		h.serveStatic(w, r, "style.css", "text/css; charset=utf-8")
+	})
+	api.HandleFunc("GET /main.js", func(w http.ResponseWriter, r *http.Request) {
+		h.serveStatic(w, r, "main.js", "text/javascript; charset=utf-8")
+	})
 	api.HandleFunc("GET /", h.handleIndex)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -206,10 +214,11 @@ func (h *Head) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	h.mu.Lock()
-	n := len(h.leases)
-	h.mu.Unlock()
-	fmt.Fprintf(w, "arbos forest head — %d active lease(s)\n", n)
+	if wantsInstallScript(r) {
+		h.serveInstallScript(w, r)
+		return
+	}
+	h.serveLanding(w, r)
 }
 
 func (h *Head) handleRegister(w http.ResponseWriter, r *http.Request) {

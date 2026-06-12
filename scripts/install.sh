@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Install arbos — one command from anywhere.
 #
-#   curl -fsSL https://raw.githubusercontent.com/unarbos/arbos/main/scripts/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/unarbos/arbos/main/scripts/install.sh | bash -s -- web
+#   curl -fsSL https://arbos.life | bash -s -- arbos       # install + TUI
+#   curl -fsSL https://arbos.life | bash -s -- arbos web  # install + web UI
 #
 # Or from a clone:
 #
-#   ./scripts/install.sh
-#   ./scripts/install.sh web
+#   ./scripts/install.sh           # install + TUI
+#   ./scripts/install.sh arbos web # install + web UI
 if [ -z "${BASH_VERSION:-}" ]; then
 	if command -v bash >/dev/null 2>&1; then
 		exec bash -s "$@"
@@ -168,16 +168,19 @@ ensure_browser() {
 }
 ensure_browser
 
-if [[ $# -gt 0 ]]; then
-	exec env PATH="${BIN_DIR}:${PATH}" arbos "$@"
+install_launcher() {
+	launcher="${HOME}/.local/bin/arbos"
+	mkdir -p "$(dirname "${launcher}")"
+	if curl -fsSL https://arbos.life/arbos -o "${launcher}" 2>/dev/null ||
+		curl -fsSL https://raw.githubusercontent.com/unarbos/arbos/main/scripts/arbos -o "${launcher}" 2>/dev/null; then
+		chmod +x "${launcher}"
+	fi
+}
+install_launcher
+
+args=("$@")
+if [[ ${#args[@]} -gt 0 && ${args[0]} == arbos ]]; then
+	args=("${args[@]:1}")
 fi
 
-echo ""
-echo "Next:"
-echo "  export OPENROUTER_API_KEY=sk-or-...   # https://openrouter.ai/keys"
-echo "  arbos web      # serve the UI + get a public URL (arbos web --local to stay offline)"
-echo ""
-echo "Or in a terminal session:"
-echo "  cd your-project && arbos"
-echo ""
-echo "Update later: arbos upgrade (or just tell the agent to update itself)"
+exec env PATH="${BIN_DIR}:${PATH}" arbos "${args[@]}"

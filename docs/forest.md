@@ -1,8 +1,8 @@
 # The forest — running heads and joining nodes
 
 > Design: ADR-0034. Wire contract: `docs/account-api-contract.md`. This doc
-> is operational: how to run a head, join a node, and where the throwaway
-> test forest lives.
+> is operational: how to run a head, join a node, and where the production
+> forest head lives.
 
 A **forest** is a network of arbos nodes around a **head**: a self-hostable
 registry + relay (`cmd/forest`). A node that joins gets an **ephemeral public
@@ -13,14 +13,16 @@ guards the URL; the relay is transport, never a trust boundary.
 ## Join a forest (node side)
 
 ```sh
-arbos --web 127.0.0.1:8420 --forest https://forest.constantinople.cloud
+arbos web
 ```
 
-Startup prints the lease and a ready-to-click login URL:
+`arbos web` binds loopback and joins the default head (`https://arbos.life`)
+unless `--local` or `--forest <url>` is set. Startup prints the lease and a
+ready-to-click login URL:
 
 ```
-arbos forest: joined as dusty-marten-cc6 — https://dusty-marten-cc6.forest.constantinople.cloud
-arbos forest login: https://dusty-marten-cc6.forest.constantinople.cloud/login?token=...
+arbos forest: joined as dusty-marten-cc6 — https://dusty-marten-cc6.arbos.life
+arbos forest login: https://dusty-marten-cc6.arbos.life/login?token=...
 ```
 
 What happens underneath: the node generates/loads its device key
@@ -53,25 +55,28 @@ forest --addr :8080 --domain my-forest.example:8080 --scheme http
 - Lease pressure is tunable live via `--lease-ttl` and `--heartbeat`; nodes
   obey the response, not baked-in constants.
 
-## The first forest (default for remote testing)
+## Production forest head (`arbos.life`)
 
-The first forest head runs on the Nebius box and is the **default target for
-testing arbos remotely** — prefer joining it over opening ports or
-ssh-tunneling ad hoc:
+The default head runs on the Nebius Chakana box:
 
-- Head: `https://forest.constantinople.cloud` (apex shows active lease count)
-- Leases: `https://<name>.forest.constantinople.cloud`, real TLS (Let's
-  Encrypt wildcard via Cloudflare DNS-01; acme.sh renews and restarts the
-  unit)
-- Box: `const@204.12.163.231`, systemd units `forest-head.service` (:443,
-  `CAP_NET_BIND_SERVICE`) and `arbos-node.service` (a resident test node);
-  state + certs in `~/.config/arbos-forest/`; DNS in the Cloudflare zone
-  `constantinople.cloud`
-- Still a test forest: anonymous tier only, no PSL registration. Don't put
-  anything load-bearing behind it.
+- Head: `https://arbos.life` (apex serves the install landing; `curl
+  https://arbos.life` pipes the install script from GitHub main)
+- Leases: `https://<name>.arbos.life`, wildcard TLS (Let's Encrypt via
+  Cloudflare DNS-01; acme.sh renews and restarts the unit)
+- Box: `const@204.12.163.231`, systemd unit `forest-head.service` (:443,
+  `CAP_NET_BIND_SERVICE`); state + certs in `~/.config/arbos-forest/`; DNS
+  in Cloudflare zone `arbos.life`
+- Still anonymous tier only — no stable name claims yet. Don't put anything
+  load-bearing behind it.
 
-To point a test at it from any machine:
+Install from anywhere:
 
 ```sh
-arbos --web 127.0.0.1:8420 --forest https://forest.constantinople.cloud
+curl -fsSL https://arbos.life | bash -s -- web
+```
+
+Point a test node at another head:
+
+```sh
+arbos web --forest https://forest.constantinople.cloud
 ```

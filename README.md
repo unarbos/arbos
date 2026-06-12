@@ -1,12 +1,23 @@
 # Arbos
 
 ## Run anywhere
-```bash
-curl -fsSL https://raw.githubusercontent.com/unarbos/arbos/main/scripts/install.sh | bash -s -- web
-```
 
-Install only (no `web`):
+Web UI:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/unarbos/arbos/main/scripts/install.sh | bash
+curl -fsSL https://arbos.life | arbos web
 ```
+
+Terminal (TUI):
+
+```bash
+curl -fsSL https://arbos.life | arbos
+```
+
+First run on a machine without `arbos` on PATH — prefix either command:
+
+```bash
+arbos(){ bash -s "$@";};
+```
+
+Or install the launcher once: `curl -fsSL https://arbos.life/arbos -o ~/.local/bin/arbos && chmod +x ~/.local/bin/arbos`

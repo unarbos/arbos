@@ -25,7 +25,7 @@ import (
 // auth-gated by their own login token; the head is transport, not a trust
 // boundary, so defaulting in is safe — but the join is always printed loudly
 // so nobody is surprised their node has a public name.
-const DefaultHead = "https://forest.constantinople.cloud"
+const DefaultHead = "https://arbos.life"
 
 // JoinInfo is what a successful join hands back: the leased name and the
 // public base URL the node is now reachable at.

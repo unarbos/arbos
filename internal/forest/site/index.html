@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Arbos</title>
+		<meta
+			name="description"
+			content="Run an AI agent anywhere — install arbos with one command."
+		/>
+		<link rel="stylesheet" href="/style.css" />
+	</head>
+	<body>
+		<main class="page">
+			<header class="hero">
+				<p class="eyebrow">arbos.life</p>
+				<h1>Run an agent anywhere.</h1>
+				<p class="lede">
+					Install arbos on any machine, point it at your repo, and get a web UI
+					with tools, terminal, and browser — local or public.
+				</p>
+			</header>
+
+			<section class="panel">
+				<h2>Install &amp; start the web UI</h2>
+				<pre
+					class="cmd"
+					data-copy="curl -fsSL https://arbos.life | bash -s -- web"
+				><code>curl -fsSL https://arbos.life | bash -s -- web</code></pre>
+			</section>
+
+			<section class="panel">
+				<h2>Install only</h2>
+				<pre class="cmd" data-copy="curl -fsSL https://arbos.life | bash"><code>curl -fsSL https://arbos.life | bash</code></pre>
+			</section>
+
+			<section class="panel muted">
+				<h2>After install</h2>
+				<pre class="cmd" data-copy="export OPENROUTER_API_KEY=sk-or-..."><code>export OPENROUTER_API_KEY=sk-or-...</code></pre>
+				<p>
+					Then run <code>arbos web</code> for the UI, or
+					<code>cd your-project && arbos</code> in a terminal session.
+				</p>
+			</section>
+
+			<footer class="footer">
+				<a href="https://github.com/unarbos/arbos">Source on GitHub</a>
+			</footer>
+		</main>
+		<script src="/main.js" defer></script>
+	</body>
+</html>
