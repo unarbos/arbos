@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -165,6 +166,16 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 		token  string
 		public string
 	}
+
+	// Bind before anything prints a URL: when the requested port is taken
+	// (another arbos on this machine), walk forward to a free one, so the
+	// login lines below always carry the port that actually answers.
+	ln, boundAddr, err := listenWeb(addr)
+	if err != nil {
+		return fmt.Errorf("web listen: %w", err)
+	}
+	addr = boundAddr
+
 	if remoteReachable(addr) || forestURL != "" {
 		if piwire.AgentConfigDir() == "" {
 			return fmt.Errorf("gateway auth: no home directory for the signing key")
@@ -227,12 +238,11 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	// connections, which Shutdown cannot reach — to the signal context, so a
 	// SIGINT cancels in-flight control.Serve loops instead of orphaning them.
 	srv := &http.Server{
-		Addr:        addr,
 		Handler:     gw.Handler(),
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ListenAndServe() }()
+	go func() { errCh <- srv.Serve(ln) }()
 	fmt.Fprintf(os.Stderr, "arbos web listening on http://%s\n", displayAddr(addr))
 	if gw.Auth != nil {
 		gw.Auth.MintToken()
@@ -347,6 +357,9 @@ func llmAdmin(cfg piwire.Config, host *piwire.Host, vault *secret.Store) *gatewa
 				Model:      cfg.Model,
 				KeySet:     keySet(),
 				OpenRouter: credits != nil,
+				// True while a saved change waits out a busy agent; the
+				// gateway stamps BootID itself.
+				RestartPending: host.Engine.RestartPending(),
 			}
 		},
 		SetEndpoint: func(u string) error {
@@ -398,6 +411,44 @@ func slashCommands(cwd string) []gateway.CommandInfo {
 		})
 	}
 	return out
+}
+
+// maxPortProbes bounds the walk past a busy port — room for a stack of
+// instances on one box without scanning into someone else's range.
+const maxPortProbes = 20
+
+// listenWeb binds addr; when the port is taken it walks forward through the
+// next maxPortProbes ports so several arbos instances coexist on one machine
+// without flags. Returns the listener and the address actually bound, with
+// the caller's host spelling preserved (":8420" stays host-less).
+func listenWeb(addr string) (net.Listener, string, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err == nil {
+		return ln, addr, nil
+	}
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		return nil, "", err
+	}
+	host, portStr, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		return nil, "", err
+	}
+	port, atoiErr := strconv.Atoi(portStr)
+	if atoiErr != nil || port == 0 {
+		return nil, "", err
+	}
+	for next := port + 1; next <= port+maxPortProbes && next <= 65535; next++ {
+		nextAddr := net.JoinHostPort(host, strconv.Itoa(next))
+		ln, lerr := net.Listen("tcp", nextAddr)
+		if lerr == nil {
+			fmt.Fprintf(os.Stderr, "arbos: port %d is in use — using %d\n", port, next)
+			return ln, nextAddr, nil
+		}
+		if !errors.Is(lerr, syscall.EADDRINUSE) {
+			return nil, "", lerr
+		}
+	}
+	return nil, "", fmt.Errorf("ports %d-%d all in use: %w", port, port+maxPortProbes, err)
 }
 
 // displayAddr turns ":8420" into a clickable "localhost:8420".
