@@ -50,7 +50,7 @@ import { useSlashCommands } from "@/lib/useSlashCommands";
 import { SeamClient, type ConnectionState } from "@/lib/seam";
 import { detailsSurface, detailsUI, promptSurface, type Surface, type UICommand } from "@/lib/surface";
 import type { TermRef } from "@/lib/term";
-import type { ContentBlock, QuestionAnswer } from "@/lib/types";
+import type { ContentBlock, QuestionAnswer, ToolCall, ToolResult } from "@/lib/types";
 import { useAutosize } from "@/lib/useAutosize";
 import {
   chatReducer,
@@ -76,6 +76,18 @@ const RECONNECT_BANNER_DELAY_MS = 3000;
 function backoffMs(attempt: number, base: number, max: number): number {
   const exp = Math.min(max, base * 2 ** Math.min(attempt, 10));
   return exp / 2 + Math.random() * (exp / 2);
+}
+
+/** Model id from a successful set_model tool call — nil when rejected or failed. */
+function modelFromSetModelTool(call: ToolCall, result: ToolResult): string | null {
+  if (call.Name !== "set_model" || result.IsError) return null;
+  if (result.Content.startsWith("Did not switch")) return null;
+  const args =
+    typeof call.Args === "object" && call.Args !== null
+      ? (call.Args as Record<string, unknown>)
+      : {};
+  const model = typeof args.model === "string" ? args.model.trim() : "";
+  return model || null;
 }
 const COMPOSER_MAX_PX = 200;
 const RUNS_POLL_MS = 5000;
@@ -409,10 +421,22 @@ export function ChatTab({
         // resumed transcript renders chips to re-open, and a delegated
         // child's shows stay quiet until clicked.
         if (env.depth === 0 && env.event.kind === "tool_finished") {
-          const surface = detailsSurface(env.event.data.result);
+          const result = env.event.data.result;
+          const surface = detailsSurface(result);
           if (surface) handleRef.current.onOpenSurface?.(surface);
-          const ui = detailsUI(env.event.data.result);
+          const ui = detailsUI(result);
           if (ui) handleRef.current.onControlUI?.(ui);
+          // The agent's set_model tool stages a switch the engine applies at
+          // the turn boundary — mirror a manual picker change so the chip
+          // doesn't keep showing the old model.
+          for (let i = chatRef.current.items.length - 1; i >= 0; i--) {
+            const it = chatRef.current.items[i];
+            if (it.kind === "tool" && it.call.ID === result.CallID) {
+              const m = modelFromSetModelTool(it.call, result);
+              if (m) setModel(m);
+              break;
+            }
+          }
         }
         dispatch({ type: "envelope", env });
         // A gap landed mid-turn: now that the turn has settled, the persisted

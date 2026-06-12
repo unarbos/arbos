@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import { Search, Settings, SlidersHorizontal, X } from "lucide-react";
+import {
+  Cloud,
+  KeyRound,
+  Search,
+  Settings,
+  SlidersHorizontal,
+  X,
+} from "lucide-react";
 
 import {
   fetchHostSettings,
@@ -25,17 +32,32 @@ interface Section {
   rows: Row[];
 }
 
+type SettingsPage = "general" | "provider" | "secrets";
+
+const PAGES: {
+  id: SettingsPage;
+  label: string;
+  icon: React.ComponentType<{ size?: number; className?: string }>;
+}[] = [
+  { id: "general", label: "General", icon: Settings },
+  { id: "provider", label: "Provider", icon: Cloud },
+  { id: "secrets", label: "Secrets", icon: KeyRound },
+];
+
 /**
  * The settings panel as a tab — Cursor's settings layout on arbos's tokens:
- * a sidebar (identity, search, section nav) beside a scrolling column of
+ * a sidebar (identity, search, page nav) beside a scrolling column of
  * grouped setting cards, each row a title + description with its control
- * on the right. Settings persist in the localStorage-backed settings store
- * (theme keeps its own store; this panel just surfaces it).
+ * on the right. Provider and Secrets live on their own pages; a non-empty
+ * search overrides the page choice and matches across all of them.
+ * Settings persist in the localStorage-backed settings store (theme keeps
+ * its own store; this panel just surfaces it).
  */
 export function SettingsView() {
   const settings = useSettings();
   const theme = useTheme();
   const [query, setQuery] = useState("");
+  const [page, setPage] = useState<SettingsPage>("general");
   // The durable host preferences (the Go side's settings.json). null until
   // loaded — and stays null when the gateway has no settings store (e.g. no
   // config dir), which simply hides the Agent section.
@@ -133,6 +155,33 @@ export function SettingsView() {
       label: "Agent",
       rows: [
         {
+          title: "Default Model",
+          description:
+            "Model new sessions start on (applies at the next arbos start) — unset follows the launch environment",
+          control: (
+            <div className="flex items-center gap-1">
+              {host.default_model ? (
+                <button
+                  type="button"
+                  aria-label="Use launch default"
+                  title="Use launch default"
+                  onClick={() => saveHost({ ...host, default_model: "" })}
+                  className="flex size-6 cursor-pointer items-center justify-center rounded-md text-muted hover:bg-hover hover:text-bright"
+                >
+                  <X size={13} />
+                </button>
+              ) : null}
+              <ModelPicker
+                current={host.default_model ?? ""}
+                onSelect={(id) => saveHost({ ...host, default_model: id })}
+                side="down"
+                align="right"
+                emptyLabel="launch default"
+              />
+            </div>
+          ),
+        },
+        {
           title: "Subagent Model",
           description:
             "Model delegated sub-agents run on — unset follows the main model",
@@ -164,6 +213,12 @@ export function SettingsView() {
   }
 
   const q = query.trim().toLowerCase();
+  // A search spans every page — results would be invisible otherwise.
+  const searching = q !== "";
+  const showGeneral = searching || page === "general";
+  const showProvider = searching || page === "provider";
+  const showSecrets = searching || page === "secrets";
+
   const visible = sections
     .map((s) => ({
       ...s,
@@ -204,25 +259,52 @@ export function SettingsView() {
         </div>
 
         <nav className="flex flex-col gap-0.5">
-          <button
-            type="button"
-            className="flex cursor-pointer items-center gap-2 rounded-md bg-hover px-2 py-1.5 text-left text-[12.5px] text-bright"
-          >
-            <Settings size={13} className="shrink-0 text-muted" />
-            General
-          </button>
+          {PAGES.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setPage(id)}
+              className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] ${
+                page === id && !searching
+                  ? "bg-hover text-bright"
+                  : "text-muted hover:bg-hover hover:text-bright"
+              }`}
+            >
+              <Icon size={13} className="shrink-0 text-muted" />
+              {label}
+            </button>
+          ))}
         </nav>
       </aside>
 
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-2xl px-4 py-5 @[32rem]:px-8 @[32rem]:py-6">
-          {visible.length === 0 && (
+          {/* The sidebar disappears in a narrow pane; these pills are the
+              page switcher there. */}
+          <div className="mb-4 flex gap-1 @[32rem]:hidden">
+            {PAGES.map(({ id, label }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setPage(id)}
+                className={`cursor-pointer rounded-md px-2.5 py-1 text-[12px] ${
+                  page === id && !searching
+                    ? "bg-hover text-bright"
+                    : "text-muted hover:bg-hover hover:text-bright"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {showGeneral && visible.length === 0 && searching && (
             <div className="flex items-center gap-2 text-[12.5px] text-faint">
               <SlidersHorizontal size={13} />
               No settings match “{query.trim()}”
             </div>
           )}
-          {visible.map((section) => (
+          {showGeneral && visible.map((section) => (
             <div key={section.label} className="mb-6">
               <div className="mb-2 px-1 text-[12px] text-muted select-none">
                 {section.label}
@@ -245,8 +327,8 @@ export function SettingsView() {
               </div>
             </div>
           ))}
-          <ProviderSettings query={query} />
-          <SecretsSettings query={query} />
+          {showProvider && <ProviderSettings query={query} />}
+          {showSecrets && <SecretsSettings query={query} />}
         </div>
       </div>
     </div>

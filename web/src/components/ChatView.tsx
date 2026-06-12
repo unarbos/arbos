@@ -634,6 +634,9 @@ type ToolTranscriptItem = Extract<TranscriptItem, { kind: "tool" }>;
 
 /** Route each tool to its Cursor-style rendering. */
 function ToolItem({ item, hooks }: { item: ToolTranscriptItem; hooks?: TranscriptHooks }) {
+  // The turn died (stop or error) before this call's result arrived: no
+  // result is coming, so render a settled "stopped" row, never a spinner.
+  if (item.interrupted && !item.result) return <StoppedToolRow item={item} />;
   // Still streaming its arguments in: the live composing card, until the
   // finished call lands and the row becomes its real (diff/terminal/…) card.
   if (item.composing && !item.result) return <ComposingRow item={item} />;
@@ -686,6 +689,37 @@ function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** What a cut-off call was doing, for its settled "stopped" row. */
+function stoppedLabel(call: ToolCall): { verb: string; arg: string } {
+  switch (call.Name) {
+    case "bash":
+      return { verb: "Running", arg: str(args(call).command) };
+    case "write":
+    case "edit":
+      return { verb: composingVerb(call.Name), arg: basename(str(args(call).path)) };
+    default:
+      return summary(call);
+  }
+}
+
+/**
+ * A call the turn abandoned (interrupted mid-stream or mid-run): the quiet
+ * settled row that replaces its spinner — what it was doing, then "stopped".
+ */
+function StoppedToolRow({ item }: { item: ToolTranscriptItem }) {
+  const { verb, arg } = stoppedLabel(item.call);
+  return (
+    <div className="flex min-w-0 items-center gap-1.5 text-muted">
+      <X size={12} className="shrink-0 text-faint" />
+      <span className="shrink-0">{verb}</span>
+      {arg && (
+        <span className="truncate font-mono text-[11.5px] text-muted/80">{arg}</span>
+      )}
+      <span className="shrink-0 text-faint">— stopped</span>
+    </div>
+  );
 }
 
 /**

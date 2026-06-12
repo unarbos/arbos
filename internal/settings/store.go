@@ -75,6 +75,11 @@ func (s *Store) Get() Settings {
 func (s *Store) Set(v Settings) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.write(v)
+}
+
+// write persists v and updates the cache. Callers hold s.mu.
+func (s *Store) write(v Settings) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("settings encode: %w", err)
@@ -87,6 +92,17 @@ func (s *Store) Set(v Settings) error {
 	}
 	s.cur = v
 	return nil
+}
+
+// SetDefaultModel updates just the default-model preference — a
+// read-modify-write under the store lock, so the agent's set_model tool and a
+// concurrent Settings-tab save cannot clobber each other's other fields.
+func (s *Store) SetDefaultModel(model string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := s.cur
+	v.DefaultModel = model
+	return s.write(v)
 }
 
 // SubagentModel is the per-delegation read the pi agent wires as its

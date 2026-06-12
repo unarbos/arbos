@@ -7,7 +7,6 @@ package gateway
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -22,6 +21,7 @@ import (
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/engine"
 	"github.com/unarbos/arbos/internal/messenger"
+	"github.com/unarbos/arbos/internal/modelcatalog"
 	"github.com/unarbos/arbos/internal/outbox"
 	"github.com/unarbos/arbos/internal/plan"
 	"github.com/unarbos/arbos/internal/sqlite"
@@ -534,64 +534,20 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"commands": cmds})
 }
 
-// modelJSON is one selectable model from the provider's catalog — the fields
-// the composer's picker renders (id to send via set_model, a friendly name to
-// match against, the window for a hint).
-type modelJSON struct {
-	ID            string `json:"id"`
-	Name          string `json:"name,omitempty"`
-	ContextLength int    `json:"context_length,omitempty"`
-}
-
-// modelsClient bounds the catalog fetch so a slow provider can't wedge the
-// picker; the listing is a small JSON blob, so the timeout is generous.
-var modelsClient = &http.Client{Timeout: 10 * time.Second}
-
 // handleModels proxies the provider's model catalog (OpenRouter's public
-// /models list) so the composer's picker can offer every available model and
-// the user can filter by typing. The browser talks only to the gateway, so
-// this is also the seam that keeps the catalog same-origin. The current model
-// rides along so the picker shows the active selection on open.
+// /models list, via the shared modelcatalog fetch the agent's tools also use)
+// so the composer's picker can offer every available model and the user can
+// filter by typing. The browser talks only to the gateway, so this is also
+// the seam that keeps the catalog same-origin. The current model rides along
+// so the picker shows the active selection on open.
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	out := []modelJSON{}
+	out := []modelcatalog.Model{}
 	if s.ModelsURL != "" {
-		if list, err := fetchModelCatalog(r.Context(), s.ModelsURL); err == nil {
+		if list, err := modelcatalog.Fetch(r.Context(), s.ModelsURL); err == nil {
 			out = list
 		}
 	}
 	writeJSON(w, map[string]any{"models": out, "current": s.Model})
-}
-
-// fetchModelCatalog reads an OpenAI-compatible /models listing (the shape
-// OpenRouter and the OpenAI API both return: {"data":[{id,name,...}]}).
-func fetchModelCatalog(ctx context.Context, url string) ([]modelJSON, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := modelsClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("models catalog: %s", resp.Status)
-	}
-	var body struct {
-		Data []struct {
-			ID            string `json:"id"`
-			Name          string `json:"name"`
-			ContextLength int    `json:"context_length"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, err
-	}
-	out := make([]modelJSON, 0, len(body.Data))
-	for _, m := range body.Data {
-		out = append(out, modelJSON{ID: m.ID, Name: m.Name, ContextLength: m.ContextLength})
-	}
-	return out, nil
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

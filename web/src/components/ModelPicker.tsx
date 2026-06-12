@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, Infinity as InfinityIcon, Loader2 } from "lucide-react";
 
 import { fetchModels, type ModelOption } from "@/lib/api";
@@ -27,6 +28,10 @@ function shortLabel(id: string): string {
 }
 
 const LIST_MAX = 50;
+const MENU_WIDTH = 320; // matches w-80
+const MENU_MAX_HEIGHT = 320; // matches max-h-80
+const MENU_GAP = 4;
+const VIEWPORT_PAD = 8;
 
 /**
  * The model selector, Cursor-style: a chip that shows the active model and
@@ -56,7 +61,12 @@ export function ModelPicker({
   const [models, setModels] = useState<ModelOption[] | null>(null);
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
+  // The chip's viewport rect — the portaled dropdown anchors to it with
+  // fixed positioning, so no ancestor's overflow clipping can cut it off
+  // (the Settings cards are overflow-hidden, unlike the chat composer).
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -64,12 +74,25 @@ export function ModelPicker({
     loadCatalog().then(setModels);
   }, [open, models]);
 
+  useLayoutEffect(() => {
+    if (!open) return;
+    const measure = () =>
+      setAnchor(rootRef.current?.getBoundingClientRect() ?? null);
+    measure();
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t) || menuRef.current?.contains(t)) return;
+      setOpen(false);
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
@@ -170,11 +193,12 @@ export function ModelPicker({
         </Tooltip>
       )}
 
-      {open && (
+      {open && anchor && createPortal(
         <div
-          className={`absolute z-30 flex max-h-80 w-80 flex-col overflow-hidden rounded-lg border border-line bg-card shadow-xl shadow-black/40 ${
-            side === "up" ? "bottom-full mb-1" : "top-full mt-1"
-          } ${align === "left" ? "left-0" : "right-0"}`}
+          ref={menuRef}
+          data-keep-focus
+          style={menuPosition(anchor, side, align)}
+          className="fixed z-50 flex w-80 flex-col overflow-hidden rounded-lg border border-line bg-card shadow-xl shadow-black/40"
         >
           <input
             value={query}
@@ -228,8 +252,44 @@ export function ModelPicker({
               </button>
             ))}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
+}
+
+/**
+ * Fixed-position style for the portaled dropdown: hug the requested chip
+ * edge, stay inside the viewport, and cap the height to the room available
+ * on the requested side (flipping when the other side has clearly more).
+ */
+function menuPosition(
+  anchor: DOMRect,
+  side: "up" | "down",
+  align: "left" | "right",
+): React.CSSProperties {
+  const roomBelow = window.innerHeight - anchor.bottom - MENU_GAP - VIEWPORT_PAD;
+  const roomAbove = anchor.top - MENU_GAP - VIEWPORT_PAD;
+  const openUp = side === "up" ? roomAbove >= 160 || roomAbove >= roomBelow
+    : roomBelow < 160 && roomAbove > roomBelow;
+
+  const rawLeft = align === "left" ? anchor.left : anchor.right - MENU_WIDTH;
+  const left = Math.max(
+    VIEWPORT_PAD,
+    Math.min(rawLeft, window.innerWidth - MENU_WIDTH - VIEWPORT_PAD),
+  );
+
+  if (openUp) {
+    return {
+      left,
+      bottom: window.innerHeight - anchor.top + MENU_GAP,
+      maxHeight: Math.min(MENU_MAX_HEIGHT, roomAbove),
+    };
+  }
+  return {
+    left,
+    top: anchor.bottom + MENU_GAP,
+    maxHeight: Math.min(MENU_MAX_HEIGHT, roomBelow),
+  };
 }

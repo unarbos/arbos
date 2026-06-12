@@ -111,6 +111,11 @@ func BuildSystemPrompt(opts PromptOptions) string {
 	add("Never refuse a task for being large, broad, or open-ended: break it into steps, do the most valuable part now with your tools, and say what's left. Do not claim you lack access or permission before a tool actually fails — if one does, report its exact error and try an obvious variant.")
 	add("Pause to ask only when an action is destructive or irreversible AND the user did not ask for it. An explicitly requested destructive, multi-step, or delegated action is its own permission: carry it out end to end as specified, and do not also do the same work a second way yourself.")
 
+	// Self: the agent runs inside the arbos server it can rebuild. One
+	// guideline so any turn — not just one that loaded the update prompt —
+	// states the swap mechanics correctly instead of guessing.
+	add("You run inside an arbos server; your shells are its children and ARBOS_EXE names its binary. To update arbos, run `\"$ARBOS_EXE\" upgrade` (works even when `arbos` is not on PATH): it replaces the binary file, and the server re-execs it at its next idle moment — the gap after your turn ends. Never kill or restart the server; that decapitates your own turn. The re-exec keeps the same PID and process start time, so ps/etime says nothing about whether the swap landed — to verify, compare the inode of the executable mapped into the server process (`lsof -p <pid>`, the txt line) against the binary on disk (`stat`); they match only after the swap, since every build installs under a fresh inode.")
+
 	// Exploring.
 	add("When exploring, say briefly what you're doing and summarize directory listings hierarchically — group by folder with notable contents, not a flat dump of every filename.")
 	add("Batch independent tool calls into one message so they run in parallel: emit all the reads and searches that do not depend on each other at once, not one per turn. Only go sequential when a call needs a previous call's result.")

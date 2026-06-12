@@ -40,9 +40,10 @@ const openRouterImageModel = "google/gemini-2.5-flash-image"
 // where it lives, which env var holds its key, and which models to run.
 // LoadConfig is the only place the provider/model environment is read, so the
 // full env-var surface is auditable in this one file — plus the two stored
-// surfaces the Settings tab writes: the host preference file (endpoint) and
-// the secret vault (key). Secret values never enter Config — only the key's
-// name; the broker resolves it per request from env or the vault.
+// surfaces the Settings tab writes: the host preference file (endpoint,
+// default model) and the secret vault (key). Secret values never enter
+// Config — only the key's name; the broker resolves it per request from env
+// or the vault.
 type Config struct {
 	ProviderName string // "openai", "anthropic", or "google"
 	BaseURL      string
@@ -178,6 +179,13 @@ func LoadConfig() Config {
 		ImageModel:    imageModel,
 		Reasoning:     core.ReasoningLevel(os.Getenv("ARBOS_REASONING")),
 		MCPConfigJSON: os.Getenv("ARBOS_MCP_CONFIG"),
+	}
+	// Stored default model (the Settings file's default_model, written by the
+	// agent's set_model tool or the Settings tab): the durable default
+	// underneath the launch-explicit env, same precedence as the endpoint.
+	// Honored only with a real key — the fake provider keeps its fixed id.
+	if cfg.Model == "" && cfg.HasLLM {
+		cfg.Model = stored.DefaultModel
 	}
 	if cfg.Model == "" {
 		cfg.Model = "fake"

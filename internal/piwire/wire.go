@@ -21,10 +21,12 @@ import (
 	"github.com/unarbos/arbos/internal/fake"
 	"github.com/unarbos/arbos/internal/mcp"
 	"github.com/unarbos/arbos/internal/mind"
+	"github.com/unarbos/arbos/internal/modelcatalog"
 	"github.com/unarbos/arbos/internal/obs"
 	"github.com/unarbos/arbos/internal/outbox"
 	"github.com/unarbos/arbos/internal/plan"
 	"github.com/unarbos/arbos/internal/ports"
+	"github.com/unarbos/arbos/internal/setmodel"
 	"github.com/unarbos/arbos/internal/settings"
 	"github.com/unarbos/arbos/internal/sqlite"
 	"github.com/unarbos/arbos/internal/tool"
@@ -206,6 +208,37 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		mcpMgr.Close()
 		return nil, fmt.Errorf("register ask: %w", err)
 	}
+	// set_model: the agent's own model switch. Tools are composed before the
+	// engine exists, so deliver late-binds through topEngine — set right
+	// after pi.NewEngine below, strictly before any session can run a turn.
+	var topEngine *engine.Engine
+	deliver := func(id core.SessionID, in core.Intent) bool {
+		if topEngine == nil {
+			return false
+		}
+		return topEngine.Deliver(id, in)
+	}
+	var setDefault func(string) error
+	if prefs != nil {
+		setDefault = prefs.SetDefaultModel
+	}
+	// The provider's live catalog backs list_models and set_model's id check
+	// — the same listing the gateway proxies to the web picker, so the agent
+	// can name exactly the models the user sees there. Nil (no LLM, no
+	// catalog endpoint) keeps set_model blind and skips list_models.
+	var catalog setmodel.Catalog
+	if u := cfg.Config.ModelsURL(); u != "" {
+		catalog = func(ctx context.Context) ([]modelcatalog.Model, error) {
+			return modelcatalog.Fetch(ctx, u)
+		}
+	}
+	if err := setmodel.RegisterTool(topTools, deliver, setDefault, catalog); err != nil {
+		if theMind != nil {
+			theMind.Close()
+		}
+		mcpMgr.Close()
+		return nil, fmt.Errorf("register set_model: %w", err)
+	}
 
 	topOpts := piOpts
 	topOpts.NewStore = func() ports.SessionStore { return cfg.Store }
@@ -223,6 +256,7 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		mcpMgr.Close()
 		return nil, fmt.Errorf("build pi engine: %w", err)
 	}
+	topEngine = eng
 
 	cleanup := func() {
 		if theMind != nil {

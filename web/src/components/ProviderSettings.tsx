@@ -26,12 +26,15 @@ export function ProviderSettings({ query }: { query: string }) {
   const [credits, setCredits] = useState<LLMCredits | null>(null);
   const [busy, setBusy] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The endpoint the loaded info reported, to detect an actual edit.
   const loadedEndpoint = useRef("");
 
-  const load = useCallback(async () => {
-    const i = await fetchLLM();
+  // sync adopts a server picture into the form — only called on mount and
+  // once an apply has provably landed, so it never clobbers mid-edit or
+  // mid-apply input with stale pre-restart values.
+  const sync = useCallback((i: LLMInfo) => {
     setInfo(i);
     setEndpoint(i.endpoint);
     loadedEndpoint.current = i.endpoint;
@@ -40,28 +43,13 @@ export function ProviderSettings({ query }: { query: string }) {
     } else {
       setCredits(null);
     }
-    return i;
   }, []);
 
   useEffect(() => {
-    load().catch(() => setInfo(null));
-  }, [load]);
-
-  // After a save the host re-execs at its next idle moment; poll until it is
-  // back and serving the new configuration, riding out the brief gap.
-  const pollAfterRestart = useCallback(async () => {
-    setApplying(true);
-    for (let i = 0; i < 10; i++) {
-      await new Promise((r) => setTimeout(r, 1500));
-      try {
-        await load();
-        break;
-      } catch {
-        // Host mid-restart; keep polling.
-      }
-    }
-    setApplying(false);
-  }, [load]);
+    fetchLLM()
+      .then(sync)
+      .catch(() => setInfo(null));
+  }, [sync]);
 
   if (info === null) return null;
 
@@ -73,7 +61,14 @@ export function ProviderSettings({ query }: { query: string }) {
   const endpointChanged = endpoint.trim() !== loadedEndpoint.current;
   const canSave = !busy && !applying && (endpointChanged || key.trim() !== "");
 
+  // The host applies a save by re-execing at its next idle moment, so a
+  // successful fetch right after saving may still be the OLD process (or a
+  // restart parked behind a busy agent). The boot id is the proof: poll until
+  // it changes, surfacing the pending state, before adopting what the server
+  // reports — otherwise the form would snap back to the old endpoint and the
+  // save would look like it never happened.
   const save = async () => {
+    const prevBoot = info.boot_id;
     setBusy(true);
     setError(null);
     try {
@@ -81,12 +76,37 @@ export function ProviderSettings({ query }: { query: string }) {
         ...(endpointChanged ? { endpoint: endpoint.trim() } : {}),
         ...(key.trim() !== "" ? { key: key.trim() } : {}),
       });
-      setKey("");
-      void pollAfterRestart();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
       setBusy(false);
+      setError(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    setKey("");
+    setBusy(false);
+    setApplying(true);
+    setStatus("Applying — restarting arbos…");
+    try {
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          const fresh = await fetchLLM();
+          if (fresh.boot_id !== prevBoot) {
+            sync(fresh);
+            return;
+          }
+          if (fresh.restart_pending) {
+            setStatus("Saved — applying once the agent finishes its current work…");
+          }
+        } catch {
+          // Host mid-restart; keep polling.
+        }
+      }
+      setError(
+        "Saved, but the restart hasn't landed yet — it applies at the next idle moment.",
+      );
+    } finally {
+      setApplying(false);
+      setStatus(null);
     }
   };
 
@@ -141,9 +161,7 @@ export function ProviderSettings({ query }: { query: string }) {
 
           <div className="mt-0.5 flex items-center justify-between gap-2">
             <span className="text-[11.5px] text-faint">
-              {applying
-                ? "Applying — restarting arbos…"
-                : `Active model: ${info.model}`}
+              {applying && status ? status : `Active model: ${info.model}`}
             </span>
             <button
               type="button"

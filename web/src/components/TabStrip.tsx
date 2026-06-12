@@ -46,8 +46,6 @@ export type NewTabKind =
   | "terminal"
   | "files"
   | "browser"
-  | "history"
-  | "activity"
   | "messenger";
 
 /**
@@ -66,8 +64,8 @@ export interface TabDrag {
 /**
  * Cursor's tab strip, one per pane: a tab per open agent and a + menu that
  * opens any tab type in this pane. Global actions (split, theme) render
- * once, on the top-right strip, via `actions`; the settings gear renders
- * once, on the top-left strip, via `leading`.
+ * once, on the top-right strip, via `actions`; history, activity, and
+ * settings render once, on the top-left strip, via `leading`.
  */
 export function TabStrip({
   tabs,
@@ -166,8 +164,8 @@ export function TabStrip({
  * The once-per-window action cluster: the two split actions (each divides
  * the FOCUSED pane, editor-style — splits nest) and the theme picker. Lives
  * on the top-right strip. A pane closes by closing its last tab. Tab types
- * (terminal, files, browser, history, activity) open from each strip's +
- * menu instead.
+ * (terminal, files, browser, messenger) open from each strip's + menu;
+ * history and activity open from the top-left icons instead.
  */
 export function GlobalActions({ onSplit }: { onSplit: (dir: SplitDir) => void }) {
   return (
@@ -188,8 +186,6 @@ const NEW_TAB_ITEMS: { kind: NewTabKind; label: string; icon: React.ReactNode }[
   { kind: "terminal", label: "Terminal", icon: <SquareTerminal size={13} /> },
   { kind: "files", label: "Files", icon: <FolderTree size={13} /> },
   { kind: "browser", label: "Browser", icon: <Globe size={13} /> },
-  { kind: "history", label: "History", icon: <Clock size={13} /> },
-  { kind: "activity", label: "Agent activity", icon: <Activity size={13} /> },
   { kind: "messenger", label: "Messenger", icon: <Send size={13} /> },
 ];
 
@@ -258,8 +254,24 @@ function NewTabMenu({ onNew }: { onNew: (kind: NewTabKind) => void }) {
   );
 }
 
-/** The settings gear — the once-per-window leading action on the top-left
- *  strip. Opens (or focuses) the settings panel as a singleton tab. */
+/** Once-per-window leading actions on the top-left strip. Each opens (or
+ *  focuses) its singleton tab. */
+export function HistoryButton({ onOpen }: { onOpen: () => void }) {
+  return (
+    <IconButton title="History" onClick={onOpen}>
+      <Clock size={13} />
+    </IconButton>
+  );
+}
+
+export function ActivityButton({ onOpen }: { onOpen: () => void }) {
+  return (
+    <IconButton title="Agent activity" onClick={onOpen}>
+      <Activity size={13} />
+    </IconButton>
+  );
+}
+
 export function SettingsButton({ onOpen }: { onOpen: () => void }) {
   return (
     <IconButton title="Settings" onClick={onOpen}>

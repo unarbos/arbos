@@ -410,6 +410,10 @@ export async function deleteSecret(name: string): Promise<void> {
  * object travels both ways: load it, edit a field, save it back.
  */
 export interface HostSettings {
+  /** Model new sessions start on; empty follows the launch environment
+   * (ARBOS_MODEL / provider default). Also written by the agent's own
+   * set_model tool. Applies at the next arbos start. */
+  default_model?: string;
   /** Model delegated sub-agents run on; empty follows the main model. */
   subagent_model?: string;
   /** Stored LLM endpoint; edited through the provider panel (/api/llm),
@@ -446,6 +450,11 @@ export interface LLMInfo {
   model: string;
   key_set: boolean;
   openrouter: boolean;
+  /** Names the host process instance; changes exactly when the apply restart
+   * lands, so a save can be confirmed by polling for a new value. */
+  boot_id: string;
+  /** True while a saved change waits for the agent to go idle. */
+  restart_pending: boolean;
 }
 
 /** The fields a provider save sends — only what changed. The key is

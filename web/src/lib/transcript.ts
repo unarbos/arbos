@@ -61,6 +61,12 @@ export type TranscriptItem =
        * replayed transcript builds the row straight from the finished call.
        */
       composing?: { bytes: number };
+      /**
+       * The turn ended (stop or error) before this call's result arrived: the
+       * row renders as "stopped" instead of spinning forever — no result is
+       * ever coming for it.
+       */
+      interrupted?: boolean;
     }
   | {
       kind: "queued";
@@ -435,7 +441,7 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
     }
 
     case "interrupted": {
-      const s = finalize(closeThinking(state));
+      const s = settleTools(finalize(closeThinking(state)));
       return {
         ...push(s, { kind: "interrupted", id: s.nextId }),
         turnActive: false,
@@ -445,7 +451,7 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
     }
 
     case "error": {
-      const s = finalize(closeThinking(state));
+      const s = settleTools(finalize(closeThinking(state)));
       return {
         ...push(s, {
           kind: "error",
@@ -505,6 +511,23 @@ function finalize(state: ChatState): ChatState {
   if (i < 0) return state;
   const it = state.items[i] as Extract<TranscriptItem, { kind: "assistant" }>;
   return replaceAt(state, i, { ...it, streaming: false });
+}
+
+/**
+ * Settle tool rows still awaiting results once the turn dies (stop or error):
+ * the kernel will never deliver them, so a live spinner — a composing card
+ * mid-argument-stream, a running terminal card — would spin forever.
+ */
+function settleTools(state: ChatState): ChatState {
+  let items: TranscriptItem[] | null = null;
+  for (let i = 0; i < state.items.length; i++) {
+    const it = state.items[i];
+    if (it.kind === "tool" && !it.result && !it.interrupted) {
+      items ??= state.items.slice();
+      items[i] = { ...it, interrupted: true, composing: undefined };
+    }
+  }
+  return items ? { ...state, items } : state;
 }
 
 /** Settle the streaming Thinking section, if any, once other output arrives. */
@@ -648,6 +671,14 @@ export function replayToItems(events: ReplayEvent[]): TranscriptItem[] {
         break;
       }
       case "interrupted":
+        // Calls cut off by the stop never got results; settle them so the
+        // replayed rows render "stopped" instead of spinning forever.
+        for (let i = 0; i < items.length; i++) {
+          const it = items[i];
+          if (it.kind === "tool" && !it.result) {
+            items[i] = { ...it, interrupted: true };
+          }
+        }
         items.push({ kind: "interrupted", id: id++ });
         break;
       default: {

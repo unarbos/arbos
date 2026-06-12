@@ -22,7 +22,9 @@ const TerminalView = lazy(() =>
   import("./components/TerminalView").then((m) => ({ default: m.TerminalView })),
 );
 import {
+  ActivityButton,
   GlobalActions,
+  HistoryButton,
   SettingsButton,
   TabStrip,
   type NewTabKind,
@@ -735,14 +737,6 @@ export default function App() {
           focusPane(pane);
           openBrowserTab();
           break;
-        case "history":
-          focusPane(pane);
-          openHistoryTab();
-          break;
-        case "activity":
-          focusPane(pane);
-          openActivityTab();
-          break;
         case "messenger":
           newMessengerTab(pane);
           break;
@@ -758,8 +752,6 @@ export default function App() {
       newShellTab,
       openFilesTab,
       openBrowserTab,
-      openHistoryTab,
-      openActivityTab,
       newMessengerTab,
     ],
   );
@@ -835,7 +827,11 @@ export default function App() {
             drag={dragHandlers(pane)}
             leading={
               pane === leadingPane ? (
-                <SettingsButton onOpen={openSettingsTab} />
+                <>
+                  <HistoryButton onOpen={openHistoryTab} />
+                  <ActivityButton onOpen={openActivityTab} />
+                  <SettingsButton onOpen={openSettingsTab} />
+                </>
               ) : undefined
             }
             actions={
