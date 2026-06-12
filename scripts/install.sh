@@ -17,7 +17,11 @@ if [ -z "${BASH_VERSION:-}" ]; then
 fi
 set -euo pipefail
 
-MODULE=github.com/unarbos/arbos/cmd/arbos@latest
+# @main fetched directly from GitHub (proxy bypassed): the module proxy
+# caches @latest for up to ~30 minutes, which would hand fresh installs a
+# stale default forest head right after a release.
+MODULE=github.com/unarbos/arbos/cmd/arbos@main
+export GOPROXY=direct GOSUMDB=off GOFLAGS=-buildvcs=false
 GO_VERSION=1.26.4
 GO_ROOT="${HOME}/.local/go"
 
