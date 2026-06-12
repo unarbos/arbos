@@ -23,10 +23,11 @@
 /dog.png
 /dog.svg
 /ibm-canvas.html
-/canvas/austin-population.html
+/canvas/
 
 # Files attached to a chat (the composer's paperclip spools them here)
 .arbos/attachments/
+.arbos/watch/
 
 # Web UI build deps (dist/ is committed: go:embed needs it)
 web/node_modules/
