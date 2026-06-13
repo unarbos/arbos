@@ -32,6 +32,10 @@
 .arbos/agent.lock
 # Telegram bot registry — holds bot tokens, strictly per-directory, never committed
 .arbos/messenger/
+# Per-directory agent brain (sessions, mind, plans, callbacks) — never committed
+.arbos/sessions.db
+.arbos/sessions.db-wal
+.arbos/sessions.db-shm
 
 # Web UI build deps (dist/ is committed: go:embed needs it)
 web/node_modules/

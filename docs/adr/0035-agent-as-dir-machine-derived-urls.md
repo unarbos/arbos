@@ -166,7 +166,10 @@ theater against a same-user attacker.
   directory.
 - `arbos` (bare) or `arbos <prompt>` → TUI. Disambiguation: resolves to an
   existing path → web; parses as a URL → web/connect; else → TUI prompt.
-- `.arbos/` is the per-directory home (dir key, lockfile, caches).
+- `.arbos/` is the per-directory home: the dir key, lockfile, caches, and the
+  agent's **brain** (`sessions.db` — sessions, mind/atoms, plans, callbacks).
+  Two sibling directories are two separate minds; merging brains across
+  directories is a future capability, not a default.
 
 Consistent with ADR-0033/0034's no-subcommands promise: still flags plus a
 positional, no `arbos join` / `arbos serve`.
@@ -181,7 +184,9 @@ positional, no `arbos join` / `arbos serve`.
 - **Amends ADR-0033**: the durable local footprint gains a per-dir key, but it
   is **non-secret** — "the only durable secret" now reads "the only durable
   *secret* is the device key; the dir key is public." The account stays
-  per-device.
+  per-device. ADR-0033's `sessions.db` also moves *into* `.arbos/`: the brain is
+  per-directory, while the device key (machine identity) and the managed-secret
+  vault (account credentials) stay machine-level under `~/.config/arbos/`.
 - **Amends ADR-0034**: the anonymous tier gets stable derived URLs;
   "ephemeral" is redefined as resolves-while-live; the per-device cap is on
   concurrent *live* leases, not distinct names. The head change is a count in

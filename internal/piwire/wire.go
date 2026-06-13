@@ -345,11 +345,14 @@ func (r recallStore) RecentSessions(ctx context.Context, limit int) ([]recall.Se
 	return out, nil
 }
 
-// DefaultDBPath is the durable session store for production hosts (~/.config/arbos).
+// DefaultDBPath is the agent's brain — sessions, mind (atoms), plans, and
+// callbacks — scoped to one directory at <cwd>/.arbos/sessions.db. Two sibling
+// directories are two separate minds that do not know about each other: the
+// path is relative, resolved against the working directory the agent opens in
+// (after any --workspace / `arbos <dir>` chdir), so the brain always belongs to
+// the directory it runs in. Merging brains across directories is a future
+// capability, not a default.
 func DefaultDBPath() string {
-	if h, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(h, ".config", "arbos", "sessions.db")
-	}
 	return filepath.Join(".arbos", "sessions.db")
 }
 
