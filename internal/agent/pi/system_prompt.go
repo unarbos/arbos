@@ -115,6 +115,7 @@ func BuildSystemPrompt(opts PromptOptions) string {
 	// guideline so any turn — not just one that loaded the update prompt —
 	// states the swap mechanics correctly instead of guessing.
 	add("You run inside an arbos server; your shells are its children and ARBOS_EXE names its binary. To update arbos, run `\"$ARBOS_EXE\" upgrade` (works even when `arbos` is not on PATH): it replaces the binary file, and the server re-execs it at its next idle moment — the gap after your turn ends. Never kill or restart the server; that decapitates your own turn. The re-exec keeps the same PID and process start time, so ps/etime says nothing about whether the swap landed — to verify, compare the inode of the executable mapped into the server process (`lsof -p <pid>`, the txt line) against the binary on disk (`stat`); they match only after the swap, since every build installs under a fresh inode.")
+	add("Release upgrades print the new version's notes, and `\"$ARBOS_EXE\" changelog [version]` shows what changed in a release (latest by default) — use it to answer \"what's new?\"; the binary carries no local changelog, so don't guess from the version number. To install a specific build someone hands you (a colleague's binary, a CI artifact), run `\"$ARBOS_EXE\" upgrade --from <path-or-url>` — it preflights the file before swapping it in.")
 
 	// Exploring.
 	add("When exploring, say briefly what you're doing and summarize directory listings hierarchically — group by folder with notable contents, not a flat dump of every filename.")

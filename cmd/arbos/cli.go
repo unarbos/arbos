@@ -116,6 +116,8 @@ func dispatch(args []string) error {
 			return runWebCommand(cfg, rest[1:])
 		case "upgrade":
 			return runUpgrade(rest[1:])
+		case "changelog":
+			return runChangelog(rest[1:])
 		default:
 			return fmt.Errorf("unknown command %q", rest[0])
 		}
@@ -167,7 +169,7 @@ func dispatch(args []string) error {
 
 func isCommand(s string) bool {
 	switch s {
-	case "ls", "resume", "export", "help", "web", "upgrade":
+	case "ls", "resume", "export", "help", "web", "upgrade", "changelog":
 		return true
 	default:
 		return false
@@ -324,11 +326,15 @@ func printCommandHelp(w io.Writer, args []string) {
 		printHelpFlag(w, "--local", "Serve locally only; do not join a forest")
 		printHelpFlag(w, "--forest <url>", fmt.Sprintf("Join this forest head instead of the default (%s)", forest.DefaultHead))
 	case "upgrade":
-		printSection(w, "Usage:", "  arbos upgrade [--to <path>]")
-		printSection(w, "Replace the running arbos binary with a newer one; a serving instance hot-swaps it at its next idle moment. Inside an arbos source checkout this builds the checkout; elsewhere it installs the latest release.", "")
+		printSection(w, "Usage:", "  arbos upgrade [--from <path|url>] [--to <path>]")
+		printSection(w, "Replace the running arbos binary with a newer one; a serving instance hot-swaps it at its next idle moment. Inside an arbos source checkout this builds the checkout; elsewhere it downloads the latest release and prints its notes. --from installs a binary you supply instead.", "")
 		_, _ = fmt.Fprintln(w)
 		printSection(w, "Options:", "")
+		printHelpFlag(w, "--from <path|url>", "Install this binary (local file or http(s) URL; .tar.gz unpacked) instead of downloading the latest release")
 		printHelpFlag(w, "--to <path>", "Binary to replace (default: ARBOS_EXE from a serving instance, else this executable)")
+	case "changelog":
+		printSection(w, "Usage:", "  arbos changelog [version]")
+		printSection(w, "Print a release's notes (the latest by default, or a specific tag like v0.1.1). Fetched from GitHub releases — what changed, since the binary carries no local changelog.", "")
 	case "ls":
 		printSection(w, "Usage:", "  arbos ls")
 		printSection(w, "List resumable chat sessions from the local store.", "")
@@ -382,7 +388,8 @@ func printUsage(w io.Writer) {
 	printSection(w, "Commands:", "")
 	commands := []helpFlag{
 		{"web [addr]", "Serve the web UI and join the default forest for a public URL (--local to stay off it)"},
-		{"upgrade", "Update the running arbos in place (source checkout or latest release); hot-swaps at idle"},
+		{"upgrade", "Update the running arbos in place (source, latest release, or --from a supplied binary); hot-swaps at idle"},
+		{"changelog", "Show a release's notes (latest or a given version)"},
 		{"ls", "List resumable chat sessions"},
 		{"resume [id]", "Resume a session (latest when id is omitted)"},
 		{"export [id...]", "Export session trajectories as JSONL (--all, --messages)"},

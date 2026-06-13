@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -42,13 +43,17 @@ const arbosModule = "github.com/unarbos/arbos"
 //     Downloading instead of compiling matters on small nodes: a Go build
 //     wants gigabytes of RAM and can get the serving process OOM-killed.
 //
+// `--from <path|url>` overrides both: install a binary the operator supplies
+// (a colleague's build, a CI artifact) instead of detecting source/release.
+//
 // Both paths stage to <target>.new and rename: the swap is atomic, and a
 // failed build or download never touches the binary that is serving.
 func runUpgrade(args []string) error {
 	fs := flag.NewFlagSet("upgrade", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	var target string
+	var target, from string
 	fs.StringVar(&target, "to", "", "")
+	fs.StringVar(&from, "from", "", "")
 	if err := fs.Parse(normalizeLongFlags(args)); err != nil {
 		return fmt.Errorf("upgrade: %w", err)
 	}
@@ -69,6 +74,10 @@ func runUpgrade(args []string) error {
 	target, err := filepath.EvalSymlinks(target)
 	if err != nil {
 		return fmt.Errorf("upgrade: target %s: %w", target, err)
+	}
+
+	if from != "" {
+		return upgradeFromBinary(from, target)
 	}
 
 	cwd, err := os.Getwd()
@@ -166,6 +175,83 @@ func upgradeFromRelease(target string) error {
 		fmt.Printf("arbos upgrade: %s → %s\n", before, after)
 	}
 	reportSwap(target)
+	printReleaseNotes(after)
+	return nil
+}
+
+// arbosRepo is the GitHub owner/repo the release-notes API is queried under,
+// derived from the module path.
+var arbosRepo = strings.TrimPrefix(arbosModule, "github.com/")
+
+// releaseNotes fetches a release's tag and body from GitHub. version "" asks
+// for the latest release; a "vX.Y.Z" asks for that exact tag. No token is
+// needed for a public repo. The notes are what the release workflow generates
+// with --generate-notes, so this is the canonical "what changed".
+func releaseNotes(version string) (tag, body string, err error) {
+	path := "releases/latest"
+	if version != "" {
+		path = "releases/tags/" + version
+	}
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s", arbosRepo, path)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("GET %s: %s", url, resp.Status)
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+		Body    string `json:"body"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return "", "", err
+	}
+	return rel.TagName, strings.TrimSpace(rel.Body), nil
+}
+
+// printReleaseNotes shows what changed after an upgrade, best-effort: the new
+// version's GitHub release body. A network or API failure is a hint, never an
+// error — the swap already succeeded, and `arbos changelog` can retry.
+func printReleaseNotes(version string) {
+	_, body, err := releaseNotes(version)
+	if err != nil || body == "" {
+		fmt.Printf("arbos upgrade: release notes unavailable — see `arbos changelog`\n")
+		return
+	}
+	fmt.Printf("\narbos %s — what changed:\n\n%s\n", version, body)
+}
+
+// runChangelog is `arbos changelog [version]`: print a release's notes without
+// upgrading — the latest release by default, or a specific tag. This is how
+// the agent answers "what changed?": the notes live in the GitHub release, not
+// in the binary, so a built arbos has no changelog to read locally.
+func runChangelog(args []string) error {
+	version := ""
+	switch len(args) {
+	case 0:
+	case 1:
+		version = args[0]
+	default:
+		return fmt.Errorf("changelog: takes at most one version")
+	}
+	tag, body, err := releaseNotes(version)
+	if err != nil {
+		return fmt.Errorf("changelog: %w", err)
+	}
+	if tag == "" {
+		tag = version
+	}
+	if body == "" {
+		body = "(no notes published for this release)"
+	}
+	fmt.Printf("arbos %s\n\n%s\n", tag, body)
 	return nil
 }
 
@@ -203,9 +289,15 @@ func downloadRelease(target string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", asset, err)
 	}
-	// Identical bytes: nothing to swap. Skipping the rename matters under a
-	// serving arbos — a fresh inode would trigger a re-exec into the same
-	// build for nothing.
+	return installBinary(bin, target)
+}
+
+// installBinary atomically puts bin at target: identical bytes are a no-op
+// (skipping the rename matters under a serving arbos — a fresh inode would
+// trigger a re-exec into the same build for nothing); otherwise stage at
+// <target>.new, prove it runs, and rename over target. A failed preflight or
+// rename never touches the binary that is serving.
+func installBinary(bin []byte, target string) error {
 	if cur, err := os.ReadFile(target); err == nil && bytes.Equal(cur, bin) {
 		return nil
 	}
@@ -214,16 +306,58 @@ func downloadRelease(target string) error {
 		return err
 	}
 	// Preflight: a binary that cannot even print its version (truncated,
-	// wrong arch) must never be renamed over the one that is serving.
+	// wrong arch, not arbos) must never be renamed over the one serving.
 	if v := strings.TrimSpace(versionOf(staged)); v == "" {
 		_ = os.Remove(staged)
-		return fmt.Errorf("downloaded binary failed to run")
+		return fmt.Errorf("staged binary failed to run")
 	}
 	if err := os.Rename(staged, target); err != nil {
 		_ = os.Remove(staged)
 		return err
 	}
 	return nil
+}
+
+// upgradeFromBinary installs a binary the operator supplies instead of the
+// latest release — the "someone shipped me a build" path. The source is a
+// local file or an http(s) URL; a .tar.gz is unpacked (its arbos entry), and
+// anything else is taken as the raw binary. The preflight in installBinary is
+// the guard against a wrong-arch or non-arbos file being swapped in.
+func upgradeFromBinary(src, target string) error {
+	before := buildVersion()
+	fmt.Printf("arbos upgrade: installing binary from %s\n", src)
+	bin, err := readBinarySource(src)
+	if err != nil {
+		return fmt.Errorf("upgrade: read %s: %w", src, err)
+	}
+	if len(bin) >= 2 && bin[0] == 0x1f && bin[1] == 0x8b { // gzip magic
+		bin, err = extractBinary(bin, "arbos")
+		if err != nil {
+			return fmt.Errorf("upgrade: %s: %w", src, err)
+		}
+	}
+	if err := installBinary(bin, target); err != nil {
+		return fmt.Errorf("upgrade: install from %s: %w", src, err)
+	}
+	after := strings.TrimSpace(versionOf(target))
+	if after != "" && after == before {
+		fmt.Printf("arbos upgrade: already running this build (%s)\n", after)
+		return nil
+	}
+	if after != "" {
+		fmt.Printf("arbos upgrade: %s → %s\n", before, after)
+	}
+	reportSwap(target)
+	return nil
+}
+
+// readBinarySource reads --from: an http(s) URL is downloaded, anything else
+// is a local path.
+func readBinarySource(src string) ([]byte, error) {
+	if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+		return fetchBytes(&http.Client{Timeout: 5 * time.Minute}, src)
+	}
+	return os.ReadFile(src)
 }
 
 // fetchBytes GETs url fully, following GitHub's release-asset redirects.
