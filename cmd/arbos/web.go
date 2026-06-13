@@ -163,33 +163,40 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	//
 	// prints tracks the pieces of the login line that arrive at different
 	// times: the console token rotates on every consumption, and the public
-	// URL exists only once a forest join lands. Each event reprints complete
-	// URLs — forest first, because on a headless install the public link is
-	// the only one a user can click. When a join is expected, the first
-	// print waits for it (bounded by forestPrintGrace) so the loopback link
-	// is never the first thing shown.
+	// URL exists only once a forest join lands. The line is keyed to the
+	// *door* (the URL), not the token: a fresh public link prints when the
+	// join lands (and a local fallback upgrades to it), but a mere token
+	// rotation does not reprint — logging in once leaves a 30-day cookie, so
+	// the replacement token is console noise, not a new door. When a join is
+	// expected, the first print waits for it (bounded by forestPrintGrace) so
+	// the loopback link is never the first thing shown.
 	var prints struct {
 		sync.Mutex
 		token   string
 		public  string
 		login   string // local host:port for the login URL
 		waiting bool   // hold prints until the forest join lands or grace expires
+		shown   string // the door (URL, token-less) already printed; "" = none
 	}
 	prints.waiting = forestURL != ""
-	// One line, one URL: the public forest link is the door once a join
-	// lands; only a forest-less run (or a join still pending) falls back to
-	// the local link.
+	// One line, one door: the public forest link once a join lands, else the
+	// local link. We reprint only when the door changes (a local→public
+	// upgrade), never when only the single-use token rotated underneath it.
 	printLogin := func() {
 		prints.Lock()
 		defer prints.Unlock()
 		if prints.token == "" || prints.waiting {
 			return
 		}
+		door := "http://" + prints.login + "/login"
 		if prints.public != "" {
-			fmt.Fprintln(os.Stderr, loginLink(prints.public+"/login?token="+prints.token))
+			door = prints.public + "/login"
+		}
+		if door == prints.shown {
 			return
 		}
-		fmt.Fprintln(os.Stderr, loginLink("http://"+prints.login+"/login?token="+prints.token))
+		prints.shown = door
+		fmt.Fprintln(os.Stderr, loginLink(door+"?token="+prints.token))
 	}
 
 	// Bind before anything prints a URL: when the requested port is taken
