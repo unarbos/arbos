@@ -29,7 +29,15 @@ func newTUIMeta(model string, approve bool) tuiMeta {
 	}
 }
 
+// releaseVersion is stamped by the release workflow:
+// -ldflags "-X main.releaseVersion=v1.2.3". Empty for go-install and dev
+// builds, which fall back to module build info.
+var releaseVersion string
+
 func buildVersion() string {
+	if releaseVersion != "" {
+		return releaseVersion
+	}
 	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
 		v := info.Main.Version
 		if !strings.HasPrefix(v, "v") {

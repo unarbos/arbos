@@ -24,6 +24,58 @@ MODULE=github.com/unarbos/arbos/cmd/arbos@main
 export GOPROXY=direct GOSUMDB=off GOFLAGS=-buildvcs=false
 GO_VERSION=1.26.4
 GO_ROOT="${HOME}/.local/go"
+# Where the release workflow publishes prebuilt binaries (versionless asset
+# names, so "latest" is a stable URL).
+RELEASE_BASE="${ARBOS_RELEASE_BASE:-https://github.com/unarbos/arbos/releases/latest/download}"
+
+detect_platform() {
+	OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+	ARCH="$(uname -m)"
+	case "${ARCH}" in
+	x86_64 | amd64) ARCH=amd64 ;;
+	aarch64 | arm64) ARCH=arm64 ;;
+	*) return 1 ;;
+	esac
+	case "${OS}" in
+	linux | darwin) ;;
+	*) return 1 ;;
+	esac
+}
+
+sha256_of() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk '{print $1}'
+	else
+		shasum -a 256 "$1" | awk '{print $1}'
+	fi
+}
+
+# install_prebuilt downloads this platform's binary from the latest GitHub
+# release into BIN_DIR — no Go toolchain, no compile, works on a 512 MB box.
+# Returns nonzero (and installs nothing) when there is no matching release
+# asset or verification fails; the caller falls back to building from source.
+install_prebuilt() {
+	detect_platform || return 1
+	ASSET="arbos_${OS}_${ARCH}.tar.gz"
+	TMP="$(mktemp -d)"
+	trap 'rm -rf "${TMP}"' RETURN
+	curl -fsSL -o "${TMP}/checksums.txt" "${RELEASE_BASE}/checksums.txt" 2>/dev/null || return 1
+	WANT="$(awk -v a="${ASSET}" '$2 == a {print $1}' "${TMP}/checksums.txt")"
+	[[ -n "${WANT}" ]] || return 1
+	curl -fsSL -o "${TMP}/${ASSET}" "${RELEASE_BASE}/${ASSET}" || return 1
+	GOT="$(sha256_of "${TMP}/${ASSET}")"
+	if [[ "${GOT}" != "${WANT}" ]]; then
+		echo "arbos: ${ASSET} checksum mismatch (got ${GOT}, want ${WANT}) — falling back to source build" >&2
+		return 1
+	fi
+	tar -C "${TMP}" -xzf "${TMP}/${ASSET}" arbos || return 1
+	"${TMP}/arbos" --version >/dev/null 2>&1 || return 1
+	mkdir -p "${BIN_DIR}"
+	# Stage + rename so a concurrently running arbos sees an atomic swap.
+	cp "${TMP}/arbos" "${BIN_DIR}/arbos.new"
+	chmod +x "${BIN_DIR}/arbos.new"
+	mv "${BIN_DIR}/arbos.new" "${BIN_DIR}/arbos"
+}
 
 ensure_go() {
 	if command -v go >/dev/null 2>&1; then
@@ -86,21 +138,31 @@ ensure_go() {
 	echo "Installed Go ${GO_VERSION} to ${GO_ROOT}"
 }
 
-ensure_go
+# BIN_DIR matches where `go install` puts binaries (and where the launcher
+# script looks) even when Go itself never gets installed: GOPATH's default
+# is $HOME/go. Resolved without running `go` — invoking it can trigger a
+# toolchain download, which the prebuilt path exists to avoid.
+BIN_DIR="${GOPATH:-${HOME}/go}/bin"
 
 echo "Installing arbos..."
-go install "${MODULE}"
-
-BIN_DIR="$(go env GOPATH)/bin"
+if install_prebuilt; then
+	echo "Installed prebuilt $("${BIN_DIR}/arbos" --version) for ${OS}/${ARCH}"
+else
+	# No release asset for this platform (or no release yet): build @main
+	# from source, bootstrapping a Go toolchain if needed.
+	ensure_go
+	BIN_DIR="$(go env GOPATH)/bin"
+	go install "${MODULE}"
+fi
 
 # Persist BIN_DIR before mutating our own PATH, otherwise the check below
 # always matches and the rc files never get updated.
 case ":${PATH}:" in
 *":${BIN_DIR}:"*) ;;
 *)
-	LINE="export PATH=\"\$(go env GOPATH)/bin:\$PATH\""
+	LINE="export PATH=\"${BIN_DIR}:\$PATH\""
 	for rc in "${HOME}/.bashrc" "${HOME}/.zshrc"; do
-		if [[ -f "${rc}" ]] && ! grep -qF 'go env GOPATH)/bin' "${rc}" 2>/dev/null; then
+		if [[ -f "${rc}" ]] && ! grep -qE "go env GOPATH\)/bin|\\\$HOME/go/bin|${BIN_DIR}" "${rc}" 2>/dev/null; then
 			echo "" >>"${rc}"
 			echo "# arbos" >>"${rc}"
 			echo "${LINE}" >>"${rc}"

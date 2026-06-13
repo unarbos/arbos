@@ -1,0 +1,103 @@
+name: release
+
+# Publish prebuilt arbos binaries to GitHub Releases. Two ways to run it:
+#
+#   gh workflow run release                      # auto-bumps the patch version
+#   gh workflow run release -f version=v0.2.0    # explicit version
+#   git tag v0.2.0 && git push origin v0.2.0     # tag push
+#
+# Assets are named without the version (arbos_linux_amd64.tar.gz) so the
+# stable .../releases/latest/download/ URLs work for install.sh and
+# `arbos upgrade`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. v0.2.0). Empty = bump patch from the latest tag."
+        required: false
+        default: ""
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: the auto-bump reads existing tags
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/}"
+          elif [[ -n "${INPUT_VERSION}" ]]; then
+            version="${INPUT_VERSION}"
+          else
+            last="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+            last="${last:-v0.0.0}"
+            IFS=. read -r major minor patch <<<"${last#v}"
+            version="v${major}.${minor}.$((patch + 1))"
+          fi
+          if [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid version: ${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >>"$GITHUB_OUTPUT"
+          echo "Releasing ${version}"
+
+      - name: build web UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: build binaries
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist-release
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            export GOOS="${target%/*}" GOARCH="${target#*/}"
+            name="arbos_${GOOS}_${GOARCH}"
+            CGO_ENABLED=0 go build -trimpath \
+              -ldflags "-s -w -X main.releaseVersion=${VERSION}" \
+              -o "build/${name}/arbos" ./cmd/arbos
+            tar -C "build/${name}" -czf "dist-release/${name}.tar.gz" arbos
+          done
+          (cd dist-release && sha256sum *.tar.gz >checksums.txt)
+          ls -l dist-release
+
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            echo "release ${VERSION} already exists — uploading assets only"
+            gh release upload "${VERSION}" --clobber dist-release/*
+          else
+            gh release create "${VERSION}" \
+              --target "${GITHUB_SHA}" \
+              --title "${VERSION}" \
+              --generate-notes \
+              dist-release/*
+          fi
