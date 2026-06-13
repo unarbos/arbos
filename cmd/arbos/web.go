@@ -196,7 +196,10 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 			return
 		}
 		prints.shown = door
-		fmt.Fprintln(os.Stderr, loginLink(door+"?token="+prints.token))
+		// A blank line before sets the URL off from the surrounding console
+		// output (the shell prompt, any startup notices), so the one line
+		// worth clicking stands alone.
+		fmt.Fprintf(os.Stderr, "\n%s\n", loginLink(door+"?token="+prints.token))
 	}
 
 	// Bind before anything prints a URL: when the requested port is taken
