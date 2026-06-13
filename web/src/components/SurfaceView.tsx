@@ -6,7 +6,6 @@ import {
   ChevronRight,
   Columns3,
   Component,
-  Copy,
   ExternalLink,
   FileText,
   Folder,
@@ -14,7 +13,6 @@ import {
   Plus,
   RotateCw,
   Rows3,
-  Share2,
   Star,
   Terminal,
   X,
@@ -27,7 +25,6 @@ import {
   createBrowserTab,
   fetchFile,
   HttpError,
-  shareArtifact,
   writeFile,
   type FileInfo,
 } from "@/lib/api";
@@ -198,7 +195,6 @@ export function SurfaceView({
         >
           <RotateCw size={12} />
         </button>
-        <SharePanelButton path={surface.path} />
         <a
           href={rawUrl(surface.path)}
           target="_blank"
@@ -232,143 +228,6 @@ export function SurfaceView({
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-// shareTTLs are the link lifetimes the panel offers, in seconds (0 = no
-// expiry). A standing share is a standing exposure, so a bounded life is the
-// default; "no expiry" is last and opt-in.
-const shareTTLs: { label: string; seconds: number }[] = [
-  { label: "1 hour", seconds: 3600 },
-  { label: "1 day", seconds: 86400 },
-  { label: "7 days", seconds: 604800 },
-  { label: "No expiry", seconds: 0 },
-];
-
-/**
- * The panel-level Share affordance: mints a scoped, read-only link to this one
- * artifact (the tab-level doorway from the share design — same dialog a board
- * share will reuse). The link is a bearer capability; anyone with it can view
- * this file (and its sibling assets) for the chosen lifetime, nothing else.
- * On a loopback-only host the endpoint 404s and the popover says why.
- */
-function SharePanelButton({ path }: { path: string }) {
-  const [open, setOpen] = useState(false);
-  const [ttl, setTtl] = useState(86400);
-  const [url, setUrl] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [open]);
-
-  // Re-minting on a TTL change would orphan the prior link, so reset the
-  // minted URL whenever the inputs change and let the user create again.
-  useEffect(() => {
-    setUrl(null);
-    setCopied(false);
-  }, [ttl, path]);
-
-  const copy = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-    } catch {
-      setCopied(false);
-    }
-  };
-
-  const create = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const link = await shareArtifact({ kind: "file", ref: path }, ttl);
-      setUrl(link);
-      await copy(link);
-    } catch {
-      setError("Sharing needs a remotely reachable arbos (a forest join or a non-loopback bind).");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div ref={rootRef} className="relative flex shrink-0">
-      <button
-        type="button"
-        title="Share this panel"
-        onClick={() => setOpen((o) => !o)}
-        className="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted transition-colors hover:bg-hover hover:text-text"
-      >
-        <Share2 size={12} />
-      </button>
-      {open && (
-        <div className="absolute right-0 top-7 z-50 flex w-72 flex-col gap-2 rounded-lg border border-line bg-card p-3 shadow-xl shadow-black/40">
-          <div className="text-[12px] font-semibold text-bright">Share this panel</div>
-          {error ? (
-            <div className="text-[12px] text-muted">{error}</div>
-          ) : (
-            <>
-              <label className="flex items-center justify-between gap-2 text-[12px] text-muted">
-                Link expires
-                <select
-                  value={ttl}
-                  onChange={(e) => setTtl(Number(e.target.value))}
-                  className="rounded-md border border-line bg-panel px-2 py-1 text-[12px] text-text outline-none focus:border-accent"
-                >
-                  {shareTTLs.map((t) => (
-                    <option key={t.seconds} value={t.seconds}>
-                      {t.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {!url ? (
-                <button
-                  type="button"
-                  onClick={() => void create()}
-                  disabled={busy}
-                  className="flex items-center justify-center gap-1.5 rounded-md bg-btn px-2 py-1.5 text-[12px] font-semibold text-canvas transition-colors hover:bg-bright disabled:opacity-60"
-                >
-                  {busy ? <Loader2 size={12} className="animate-spin" /> : null}
-                  Create link
-                </button>
-              ) : (
-                <div className="flex items-center gap-1.5">
-                  <input
-                    readOnly
-                    value={url}
-                    onFocus={(e) => e.currentTarget.select()}
-                    className="min-w-0 flex-1 truncate rounded-md border border-line bg-panel px-2 py-1 font-mono text-[11px] text-text outline-none"
-                  />
-                  <button
-                    type="button"
-                    title="Copy"
-                    onClick={() => void copy(url)}
-                    className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-hover hover:text-text"
-                  >
-                    {copied ? <Check size={13} /> : <Copy size={13} />}
-                  </button>
-                </div>
-              )}
-              <div className="text-[11.5px] text-muted">
-                {url
-                  ? `${copied ? "Copied. " : ""}Read-only link to this artifact. Anyone with it can view until it expires.`
-                  : "Mints a read-only link to this artifact alone."}
-              </div>
-            </>
-          )}
-        </div>
-      )}
     </div>
   );
 }

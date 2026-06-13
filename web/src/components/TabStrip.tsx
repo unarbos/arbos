@@ -20,7 +20,7 @@ import {
   X,
 } from "lucide-react";
 
-import { createShareLink } from "@/lib/api";
+import { createShareLink, type ShareScope } from "@/lib/api";
 import type { SplitDir } from "@/lib/layout";
 import { ThemePicker } from "./ThemePicker";
 import { Tooltip } from "./Tooltip";
@@ -42,6 +42,10 @@ export interface TabInfo {
     | "messenger"
     | "settings"
     | "plan";
+  /** Set when this tab holds something shareable (a bound chat or a file
+   *  artifact); drives the per-tab Share affordance. Computed by App, which
+   *  owns the session id / surface path. Absent = not shareable. */
+  shareScope?: ShareScope;
 }
 
 /** What the + menu can open: a fresh chat, or one of the companion views. */
@@ -78,6 +82,7 @@ export function TabStrip({
   onActivate,
   onClose,
   onRename,
+  onShare,
   onNew,
   drag,
   leading,
@@ -89,6 +94,9 @@ export function TabStrip({
   onActivate: (key: number) => void;
   onClose: (key: number) => void;
   onRename: (key: number, title: string) => void;
+  /** Open the scoped-share dialog for a tab (only ever called for tabs whose
+   *  shareScope is set). */
+  onShare: (key: number) => void;
   onNew: (kind: NewTabKind) => void;
   drag: TabDrag;
   leading?: React.ReactNode;
@@ -140,6 +148,7 @@ export function TabStrip({
             onActivate={() => onActivate(tab.key)}
             onClose={() => onClose(tab.key)}
             onRename={(title) => onRename(tab.key, title)}
+            onShare={() => onShare(tab.key)}
             onDragStart={() => {
               setDraggingKey(tab.key);
               drag.onStart(tab.key);
@@ -426,6 +435,7 @@ function Tab({
   onActivate,
   onClose,
   onRename,
+  onShare,
   onDragStart,
   onDragOverTab,
   onDropTab,
@@ -441,6 +451,7 @@ function Tab({
   onActivate: () => void;
   onClose: () => void;
   onRename: (title: string) => void;
+  onShare: () => void;
   onDragStart: () => void;
   /** Fired while a drag hovers this tab; before = cursor on the left half. */
   onDragOverTab: (before: boolean) => void;
@@ -554,6 +565,21 @@ function Tab({
         />
       ) : (
         <span className="min-w-0 flex-1 truncate">{tab.title || "New Agent"}</span>
+      )}
+      {tab.shareScope && !editing && (
+        <button
+          type="button"
+          title="Share"
+          onClick={(e) => {
+            e.stopPropagation();
+            onShare();
+          }}
+          className={`shrink-0 cursor-pointer rounded p-0.5 text-faint transition-opacity hover:bg-hover hover:text-text ${
+            active ? "" : "opacity-0 group-hover:opacity-100"
+          }`}
+        >
+          <Share2 size={11} />
+        </button>
       )}
       {closable && !editing && (
         <button

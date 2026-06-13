@@ -41,7 +41,9 @@ import {
   fetchLLM,
   listBrowserTabs,
   type SessionSummary,
+  type ShareScope,
 } from "./lib/api";
+import { ShareDialog } from "./components/ShareDialog";
 import {
   computePlaces,
   panesOf,
@@ -118,6 +120,35 @@ function freshTab(key: number, pane: number, resume?: SessionSummary): TabState 
     titlePinned: false,
     pane,
   };
+}
+
+// Surface kinds that are a single file artifact and so shareable as ScopeFile.
+// A directory browser, a live screencast, and the prompt editor are not files
+// to hand out.
+const SHAREABLE_SURFACE_KINDS = new Set<string>([
+  "canvas",
+  "image",
+  "pdf",
+  "doc",
+  "code",
+  "sheet",
+]);
+
+/** The scoped-share target for a tab, or undefined when it holds nothing
+ *  shareable. A chat is shareable once its session is bound; a surface tab is
+ *  shareable when it holds a file artifact. Computed at render so a chat's
+ *  scope appears the moment its session id is assigned. */
+function shareScopeForTab(tab: TabState): ShareScope | undefined {
+  if (tab.kind === "surface") {
+    if (tab.surface && SHAREABLE_SURFACE_KINDS.has(tab.surface.kind)) {
+      return { kind: "file", ref: tab.surface.path };
+    }
+    return undefined;
+  }
+  if (!tab.kind || tab.kind === "chat") {
+    if (tab.sessionId) return { kind: "session", ref: tab.sessionId };
+  }
+  return undefined;
 }
 
 function surfaceTab(key: number, pane: number, surface: Surface): TabState {
@@ -838,6 +869,22 @@ export default function App() {
   });
 
   const { tabs, root, paneActive, focusedPane, focusTick } = layout;
+
+  // The scoped-share dialog target: which artifact a tab's Share icon opened.
+  const [shareTarget, setShareTarget] = useState<{ scope: ShareScope; label: string } | null>(
+    null,
+  );
+  const openShareForTab = (key: number) => {
+    const tab = tabs.find((t) => t.key === key);
+    if (!tab) return;
+    const scope = shareScopeForTab(tab);
+    if (!scope) return;
+    setShareTarget({
+      scope,
+      label: tab.title || (scope.kind === "session" ? "Chat" : scope.ref),
+    });
+  };
+
   const places = computePlaces(root);
   const paneRect = new Map(places.panes.map((p) => [p.pane, p.rect]));
   const activeKey = new Map(
@@ -866,12 +913,15 @@ export default function App() {
           }}
         >
           <TabStrip
-            tabs={tabs.filter((t) => t.pane === pane)}
+            tabs={tabs
+              .filter((t) => t.pane === pane)
+              .map((t) => ({ ...t, shareScope: shareScopeForTab(t) }))}
             activeKey={activeKey.get(pane) ?? -1}
             canClose={tabs.length > 1}
             onActivate={activateTab}
             onClose={closeTab}
             onRename={renameTab}
+            onShare={openShareForTab}
             onNew={(kind) => newTabOfKind(kind, pane)}
             drag={dragHandlers(pane)}
             leading={
@@ -1026,6 +1076,13 @@ export default function App() {
           </div>
         );
       })}
+      {shareTarget && (
+        <ShareDialog
+          scope={shareTarget.scope}
+          label={shareTarget.label}
+          onClose={() => setShareTarget(null)}
+        />
+      )}
       <Toasts />
     </div>
   );
