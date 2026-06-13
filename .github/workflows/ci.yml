@@ -9,8 +9,8 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26.x"
           cache: true
@@ -26,11 +26,37 @@ jobs:
         # tests over behavior (see docs/10-testing.md).
         run: go test -race -cover ./...
 
+  web-dist:
+    # web/dist is committed because go:embed bakes it into the binary (and
+    # `go install @main` has no Node). This job rebuilds it from web/src with
+    # the locked toolchain and fails if the committed bundle is stale — so a UI
+    # change can never ship behind an old dist. Run `make web` before committing.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: rebuild web UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: dist matches source
+        run: |
+          if ! git diff --quiet -- web/dist; then
+            echo "::error::web/dist is stale — run 'make web' and commit the result"
+            git diff --stat -- web/dist
+            exit 1
+          fi
+
   fuzz:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26.x"
           cache: true
@@ -40,11 +66,15 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26.x"
           cache: true
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+          # Compile golangci-lint with the repo's Go (above) instead of pulling
+          # a prebuilt binary: prebuilt releases lag the Go release, and a
+          # binary built with an older Go than go.mod targets refuses to run.
+          install-mode: goinstall
