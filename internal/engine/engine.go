@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/obs"
@@ -37,6 +38,28 @@ type Config struct {
 	// titles, and edits see the raw command); only the provider-facing
 	// conversation sees the expansion. nil = no rewriting.
 	ExpandUser func(string) string
+	// FallbackModels are tried, in order, after the turn's model exhausts its
+	// retries against a transient provider failure — the same-provider model
+	// chain that keeps an overnight run alive when its primary model is
+	// overloaded or down. Empty = no fallback (the turn fails after retrying
+	// the one model). The fallback applies only within a turn; the durable
+	// per-session model is unchanged, so the next turn starts on the primary
+	// again once the provider recovers.
+	FallbackModels []string
+	// Retry tunes the in-turn provider retry loop. Zero values get defaults
+	// from New.
+	Retry RetryPolicy
+}
+
+// RetryPolicy bounds the in-turn retry of a transient provider failure (a rate
+// limit, a 5xx, a dropped connection). It is deliberately small: a turn runs
+// under a deadline (a scheduler wake is bounded by wakeTurnTimeout), so the
+// retries plus the fallback chain must fit inside it — the backoff sleeps are
+// ctx-aware, so a deadline cleanly ends the loop rather than overrunning.
+type RetryPolicy struct {
+	MaxAttempts int           // attempts per model before falling back; >=1
+	BaseBackoff time.Duration // first backoff; doubles each attempt
+	MaxBackoff  time.Duration // ceiling for the exponential backoff
 }
 
 // Engine wires the ports together and spawns session actors. It is safe to
@@ -160,6 +183,15 @@ func New(provider ports.LLMProvider, tools ports.ToolRuntime, store ports.Sessio
 	}
 	if cfg.Model == "" {
 		cfg.Model = "fake"
+	}
+	if cfg.Retry.MaxAttempts <= 0 {
+		cfg.Retry.MaxAttempts = 3
+	}
+	if cfg.Retry.BaseBackoff <= 0 {
+		cfg.Retry.BaseBackoff = time.Second
+	}
+	if cfg.Retry.MaxBackoff <= 0 {
+		cfg.Retry.MaxBackoff = 30 * time.Second
 	}
 	e := &Engine{provider: provider, tools: tools, store: store, clock: clock, cfg: cfg}
 	for _, o := range opts {
@@ -889,30 +921,25 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, 
 			CacheRetention: e.cfg.CacheRetention,
 			SessionID:      string(c.id),
 		}
-		chunks, err := e.provider.Stream(ctx, req)
-		if err != nil {
-			// A cancelled turn (interrupt/steer) aborts the in-flight request;
-			// the transport surfaces that as an error, but it is not a provider
+		// streamWithRetry rides through transient provider failures (rate limit,
+		// 5xx, dropped connection, mid-stream truncation) by re-issuing the
+		// request with backoff, then falls back across cfg.FallbackModels — the
+		// in-turn resilience that keeps a long-running run alive when its model
+		// is overloaded. Re-issuing is safe: nothing is appended to the log
+		// until a complete response lands below, so a failed attempt never
+		// double-runs a tool or forks the conversation.
+		sr, outcome := e.streamWithRetry(ctx, c, req)
+		switch outcome {
+		case streamCancelled:
+			// An interrupt/steer cancelled the in-flight request; not a provider
 			// failure — report "cancelled", not a phantom ErrorEvent.
-			if ctx.Err() != nil {
-				return false
-			}
-			// Provider/transport failures are often transient (rate limit,
-			// timeout); flag retryable so a frontend can offer "try again".
-			c.emit(ctx, core.ErrorEvent{Category: core.ErrProvider, Retryable: true, Err: err.Error()})
-			return true
-		}
-
-		sr := e.streamResponse(ctx, c, chunks)
-		if ctx.Err() != nil {
 			return false
-		}
-		// A mid-stream failure (truncated/aborted response) the adapter reported
-		// must abort the turn — otherwise a partial response is mistaken for a
-		// complete one. Retryable: re-issuing the same prompt may succeed.
-		if sr.err != nil {
-			c.emit(ctx, core.ErrorEvent{Category: core.ErrProvider, Retryable: true, Err: sr.err.Error()})
+		case streamFailed:
+			// Every retry and fallback model was exhausted; streamWithRetry has
+			// already emitted the terminal ErrorEvent.
 			return true
+		case streamOK:
+			// A complete response: fall through to record it.
 		}
 
 		assistant := core.Message{

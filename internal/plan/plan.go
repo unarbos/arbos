@@ -183,6 +183,13 @@ type Store interface {
 	// reclaims a node a human or model session is legitimately holding active.
 	// Returns the number reclaimed.
 	ReclaimStaleKernelNodes(ctx context.Context, olderThan time.Time) (int, error)
+	// ReclaimStaleAgentNodes resets to pending any agent-assigned node left
+	// active past olderThan whose claiming session was spawned by the
+	// scheduler — an orphan from a host that died mid-wake. Scoped to
+	// scheduler-origin sessions so a node a live interactive chat holds active
+	// is never disturbed; olderThan must comfortably exceed the wake turn
+	// timeout so a slow-but-live wake is never reclaimed. Returns the count.
+	ReclaimStaleAgentNodes(ctx context.Context, olderThan time.Time) (int, error)
 	// OpenPlanNodes returns every node of every plan whose root is not
 	// terminal, ordered by (plan, parent, seq) — the working forest.
 	OpenPlanNodes(ctx context.Context) ([]Node, error)

@@ -248,6 +248,14 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /api/sessions/{id}/events", s.handleSessionEvents)
 		mux.HandleFunc("GET /api/sessions/{id}/children", s.handleSessionChildren)
 		mux.HandleFunc("GET /api/activity", s.handleActivity)
+		mux.HandleFunc("GET /api/plan/{id}", s.handlePlan)
+		// Saved workspace layouts (the board entity). Mutations are
+		// same-origin; a drive-by page must not save or delete the user's
+		// boards.
+		mux.HandleFunc("POST /api/boards", sameOrigin(s.handleBoardSave))
+		mux.HandleFunc("GET /api/boards", s.handleBoardsList)
+		mux.HandleFunc("GET /api/boards/{id}", s.handleBoardGet)
+		mux.HandleFunc("DELETE /api/boards/{id}", sameOrigin(s.handleBoardDelete))
 	}
 	if s.KillJob != nil {
 		mux.HandleFunc("POST /api/jobs/{id}/kill", sameOrigin(s.handleKillJob))
@@ -321,6 +329,18 @@ func (s *Server) Handler() http.Handler {
 		// Same-origin: a drive-by page must never mint itself a login link
 		// off the user's cookie.
 		mux.HandleFunc("POST /api/share", sameOrigin(s.handleShare))
+		if s.Store != nil {
+			// Scoped share links (ADR-0034): a bearer-token grant to one
+			// artifact, narrower than the full-agent invite /api/share mints.
+			// Minting is cookie-gated and same-origin (only the logged-in
+			// operator may hand out a link); redemption under /s/ rides the
+			// token itself, so it bypasses the cookie gate in wrap.
+			mux.HandleFunc("POST /api/share/link", sameOrigin(s.handleShareLink))
+			mux.HandleFunc("DELETE /api/share/link/{token}", sameOrigin(s.handleShareRevoke))
+			mux.HandleFunc("GET /s/{token}", s.handleShareView)
+			mux.HandleFunc("GET /s/{token}/raw/{path...}", s.handleShareRaw)
+			mux.HandleFunc("GET /s/{token}/events", s.handleShareEvents)
+		}
 		// GET renders (confirm/paste/error) and never consumes a token —
 		// link unfurlers GET. POST is the consuming step.
 		mux.HandleFunc("GET "+loginPath, s.Auth.handleLogin)
@@ -730,6 +750,103 @@ func planWhen(n plan.Node) string {
 	}
 }
 
+// planAttemptJSON is one execution of a node — its verdict and what it learned.
+type planAttemptJSON struct {
+	Verdict string `json:"verdict"`
+	Outcome string `json:"outcome,omitempty"`
+	Session string `json:"session,omitempty"`
+	At      int64  `json:"at"` // unix milliseconds
+}
+
+// planNodeJSON is one goal in a plan's tree, carrying the full definition the
+// detail view renders: the goal text, how it's checked, and the "code" that
+// discharges it — the shell command (Cmd), gate predicate (Cond), or notify
+// payload — plus its attempt history.
+type planNodeJSON struct {
+	Node     int64             `json:"node"`
+	Parent   int64             `json:"parent,omitempty"`
+	Seq      int               `json:"seq"`
+	Goal     string            `json:"goal"`
+	Check    string            `json:"check,omitempty"`
+	Cmd      string            `json:"cmd,omitempty"`
+	Cond     string            `json:"cond,omitempty"`
+	Notify   string            `json:"notify,omitempty"`
+	Executor string            `json:"executor"` // shell | notify | agent | ask
+	Status   string            `json:"status"`
+	When     string            `json:"when,omitempty"`
+	Outcome  string            `json:"outcome,omitempty"`
+	Assignee string            `json:"assignee,omitempty"`
+	Attempts []planAttemptJSON `json:"attempts,omitempty"`
+}
+
+// planJSON is a whole plan: the root goal as a title plus every node's
+// definition and history, the tree rebuilt client-side from parent/seq.
+type planJSON struct {
+	Plan  int64          `json:"plan"`
+	Title string         `json:"title"`
+	Chat  string         `json:"chat,omitempty"`
+	Nodes []planNodeJSON `json:"nodes"`
+}
+
+// handlePlan returns the whole plan a node belongs to: every sibling and
+// descendant goal, each node's definition (its "code" — Cmd/Cond/Notify) and
+// its attempt history. It is the read behind the plan detail view: the user
+// clicks a standing obligation and sees exactly what the agent will run.
+func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad node id", http.StatusBadRequest)
+		return
+	}
+	n, err := s.Store.PlanNode(r.Context(), plan.NodeID(id))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	nodes, err := s.Store.PlanNodesByPlan(r.Context(), n.Plan)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	attempts, err := s.Store.PlanAttemptsByPlan(r.Context(), n.Plan)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := planJSON{Plan: int64(n.Plan), Nodes: make([]planNodeJSON, 0, len(nodes))}
+	for _, nd := range nodes {
+		if nd.ID == nd.Plan {
+			out.Title = nd.Goal
+			out.Chat = nd.Origin
+		}
+		row := planNodeJSON{
+			Node:     int64(nd.ID),
+			Parent:   int64(nd.Parent),
+			Seq:      nd.Seq,
+			Goal:     nd.Goal,
+			Check:    nd.Check,
+			Cmd:      nd.Cmd,
+			Cond:     nd.Cond,
+			Notify:   nd.Notify,
+			Executor: string(nd.Executor()),
+			Status:   string(nd.Status),
+			When:     planWhen(nd),
+			Outcome:  nd.Outcome,
+			Assignee: nd.Assignee,
+		}
+		for _, a := range attempts[nd.ID] {
+			row.Attempts = append(row.Attempts, planAttemptJSON{
+				Verdict: string(a.Verdict),
+				Outcome: a.Outcome,
+				Session: a.Session,
+				At:      a.At.UnixMilli(),
+			})
+		}
+		out.Nodes = append(out.Nodes, row)
+	}
+	writeJSON(w, out)
+}
+
 // replayJSON is one transcript-shaped event for seeding a resumed tab. It
 // carries only what the UI renders — the projection/provider views stay
 // server-side.
@@ -761,14 +878,25 @@ type sessionMetaJSON struct {
 // record's durable control state (model, provider toggles) so the composer
 // reflects the session it joined rather than host defaults.
 func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
-	id := core.SessionID(r.PathValue("id"))
-	events, err := s.Store.Events(r.Context(), id)
+	payload, err := s.sessionReplay(r.Context(), core.SessionID(r.PathValue("id")))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	writeJSON(w, payload)
+}
+
+// sessionReplay builds the replay payload (visible transcript + durable
+// control state) for one session — the shape a resumed tab and a read-only
+// share view both render. Factored so the scoped share seam serves the exact
+// same projection the authed history endpoint does.
+func (s *Server) sessionReplay(ctx context.Context, id core.SessionID) (map[string]any, error) {
+	events, err := s.Store.Events(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	var meta *sessionMetaJSON
-	if sess, err := s.Store.Get(r.Context(), id); err == nil {
+	if sess, err := s.Store.Get(ctx, id); err == nil {
 		meta = &sessionMetaJSON{
 			Model:     sess.Model,
 			WebSearch: sess.WebSearch,
@@ -802,7 +930,7 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 			out = append(out, replayJSON{Type: "interrupted", Seq: ev.Seq})
 		}
 	}
-	writeJSON(w, map[string]any{"events": out, "session": meta})
+	return map[string]any{"events": out, "session": meta}, nil
 }
 
 // spaHandler serves the built SPA: real files as-is, everything else (client

@@ -19,6 +19,7 @@ import {
   X,
 } from "lucide-react";
 
+import { ErrorCard } from "./ErrorCard";
 import { CopyButton, Highlight, Markdown } from "./Markdown";
 import { PartImages } from "./PartImages";
 import { fetchJobTail, HttpError } from "@/lib/api";
@@ -45,6 +46,13 @@ export interface TranscriptHooks {
    * and resubmits. Absent in sub-agent panels, which are read-only.
    */
   edit?: TranscriptEditHooks;
+  /**
+   * Retry: re-send the most recent user prompt after a turn ended in error —
+   * the error card's Retry button. Absent in read-only panels (sub-agents).
+   */
+  onRetry?: () => void;
+  /** Whether a retry can be issued now (seam connected and no turn running). */
+  canRetry?: boolean;
 }
 
 export interface TranscriptEditHooks {
@@ -330,12 +338,13 @@ const Item = memo(function Item({
 
     case "error":
       return (
-        <div className="whitespace-pre-wrap break-words text-[12px] text-red">
-          {item.message}
-          {item.retryable && (
-            <span className="text-faint"> — send again to retry</span>
-          )}
-        </div>
+        <ErrorCard
+          message={item.message}
+          category={item.category}
+          retryable={item.retryable}
+          onRetry={hooks?.onRetry}
+          canRetry={hooks?.canRetry}
+        />
       );
 
     default: {

@@ -192,6 +192,32 @@ ensure_browser() {
 	for bin in google-chrome google-chrome-stable chromium chromium-browser headless-shell; do
 		command -v "${bin}" >/dev/null 2>&1 && return 0
 	done
+
+	# macOS: chromedp finds Chrome by its .app bundle, not via PATH, so detect
+	# the app and install with Homebrew (resolved directly — a piped,
+	# non-login shell may not have brew on PATH). NONINTERACTIVE keeps the cask
+	# install from prompting and hanging the pipe.
+	if [[ "$(uname -s)" == "Darwin" ]]; then
+		for app in "/Applications/Google Chrome.app" "${HOME}/Applications/Google Chrome.app" \
+			"/Applications/Chromium.app" "${HOME}/Applications/Chromium.app"; do
+			[[ -d "${app}" ]] && return 0
+		done
+		BREW=""
+		if command -v brew >/dev/null 2>&1; then BREW="brew"
+		elif [[ -x /opt/homebrew/bin/brew ]]; then BREW="/opt/homebrew/bin/brew"
+		elif [[ -x /usr/local/bin/brew ]]; then BREW="/usr/local/bin/brew"; fi
+		if [[ -n "${BREW}" ]]; then
+			echo "Installing Google Chrome for the agent's browser tool (best-effort)..."
+			if NONINTERACTIVE=1 "${BREW}" install --cask google-chrome >/dev/null 2>&1; then
+				echo "Installed Google Chrome."
+				return 0
+			fi
+		fi
+		echo "Note: no Chrome/Chromium found — install one to enable the agent's browser tool:"
+		echo "  brew install --cask google-chrome"
+		return 0
+	fi
+
 	if [[ "$(uname -s)" != "Linux" ]]; then
 		echo "Note: no Chrome/Chromium found — install one to enable the agent's browser tool."
 		return 0
@@ -252,4 +278,12 @@ if [[ ${#args[@]} -gt 0 && ${args[0]} == arbos ]]; then
 	args=("${args[@]:1}")
 fi
 
-exec env PATH="${BIN_DIR}:${PATH}" arbos "${args[@]}"
+# Default to the web door: a bare install (no args) should bring up the web
+# server, not drop into the interactive agent. Use the explicit `web`
+# subcommand rather than `arbos .` — the latter only maps to the web door in
+# newer builds, while `web` works on every release the installer might fetch.
+if [[ ${#args[@]} -eq 0 ]]; then
+	args=(web)
+fi
+
+exec env PATH="${BIN_DIR}:${PATH}" arbos ${args[@]+"${args[@]}"}

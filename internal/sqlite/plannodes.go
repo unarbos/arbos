@@ -187,6 +187,32 @@ func (s *Store) ReclaimStaleKernelNodes(ctx context.Context, olderThan time.Time
 	return int(rows), nil
 }
 
+// ReclaimStaleAgentNodes resets to pending any agent-assigned node still active
+// past olderThan whose claiming session was spawned by the scheduler — an
+// orphan from a host that died mid-wake, after the wake's bounded turn could
+// only have ended. It is deliberately scoped to scheduler-origin sessions (via
+// the sessions join) so a node a live interactive chat holds active is never
+// reclaimed out from under it; a human-assigned node (a parked question) is
+// likewise untouched. Recoverable, not destructive: a reclaimed node simply
+// becomes fireable again. Returns the number reclaimed.
+func (s *Store) ReclaimStaleAgentNodes(ctx context.Context, olderThan time.Time) (int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE plan_nodes SET status='pending', owner='', updated_at=?
+		  WHERE status='active' AND assignee='agent' AND owner != '' AND updated_at < ?
+		    AND owner IN (SELECT id FROM sessions WHERE origin = ?)`,
+		time.Now().UnixNano(), nanos(olderThan), core.OriginScheduler)
+	if err != nil {
+		return 0, fmt.Errorf("reclaim stale agent nodes: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("reclaim stale agent nodes: %w", err)
+	}
+	return int(rows), nil
+}
+
 // OpenPlanNodes returns every node of every plan whose root is not terminal,
 // ordered (plan, parent, seq) — the working forest the projection renders.
 func (s *Store) OpenPlanNodes(ctx context.Context) ([]plan.Node, error) {
@@ -300,6 +326,64 @@ func (s *Store) LastPlanAttempts(ctx context.Context) (map[plan.NodeID]plan.Atte
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("last plan attempts: %w", err)
+	}
+	return out, nil
+}
+
+// PlanNodesByPlan returns every node belonging to one plan (plan_id == planID),
+// ordered by (parent, seq) so the caller can rebuild the goal tree. Unlike
+// OpenPlanNodes it ignores the root's status, so a finished or cancelled plan
+// is still fully inspectable in the UI.
+func (s *Store) PlanNodesByPlan(ctx context.Context, planID plan.NodeID) ([]plan.Node, error) {
+	rows, err := s.db.QueryContext(ctx,
+		planNodeSelect+` WHERE plan_id = ? ORDER BY parent_id, seq`, int64(planID))
+	if err != nil {
+		return nil, fmt.Errorf("plan nodes by plan: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []plan.Node
+	for rows.Next() {
+		n, err := scanPlanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("plan nodes by plan: %w", err)
+	}
+	return out, nil
+}
+
+// PlanAttemptsByPlan returns every attempt for every node of one plan, grouped
+// by node id and ordered newest-first within each node — the full execution
+// history the plan detail view shows under each goal.
+func (s *Store) PlanAttemptsByPlan(ctx context.Context, planID plan.NodeID) (map[plan.NodeID][]plan.Attempt, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT a.node_id, a.session_id, a.verdict, a.outcome, a.verified_by, a.workspace, a.created_at
+		   FROM plan_attempts a
+		   JOIN plan_nodes n ON n.id = a.node_id
+		  WHERE n.plan_id = ?
+		  ORDER BY a.node_id, a.id DESC`, int64(planID))
+	if err != nil {
+		return nil, fmt.Errorf("plan attempts by plan: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[plan.NodeID][]plan.Attempt{}
+	for rows.Next() {
+		var (
+			a        plan.Attempt
+			node, at int64
+			verdict  string
+		)
+		if err := rows.Scan(&node, &a.Session, &verdict, &a.Outcome, &a.VerifiedBy, &a.Workspace, &at); err != nil {
+			return nil, fmt.Errorf("scan plan attempt: %w", err)
+		}
+		a.Node, a.Verdict, a.At = plan.NodeID(node), plan.Verdict(verdict), fromNanos(at)
+		out[a.Node] = append(out[a.Node], a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("plan attempts by plan: %w", err)
 	}
 	return out, nil
 }

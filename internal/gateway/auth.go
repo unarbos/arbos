@@ -250,14 +250,23 @@ func (a *Auth) authenticated(r *http.Request) bool {
 	return err == nil && a.verifyCookie(c.Value)
 }
 
+// sharePath prefixes the bearer-token redemption routes (/s/<token>…). They
+// carry their own credential — the token in the URL — so they pass the cookie
+// gate; the share handlers verify the grant and enforce its scope themselves.
+const sharePath = "/s/"
+
 // wrap is the gate in front of the whole route table. Loopback callers pass
-// (they own the box), /login passes (it is the way in), everything else needs
-// the cookie. API and raw paths get a bare 401 so fetch() fails loudly;
-// document navigations get redirected to the login page.
+// (they own the box), /login passes (it is the way in), share redemption and
+// the static SPA bundle pass (the token is the credential, and the compiled
+// frontend is not the secret — the data endpoints behind it stay gated), and
+// everything else needs the cookie. API and raw paths get a bare 401 so
+// fetch() fails loudly; document navigations get redirected to the login page.
 func (a *Auth) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == loginPath,
+			strings.HasPrefix(r.URL.Path, sharePath),
+			strings.HasPrefix(r.URL.Path, "/assets/"),
 			loopbackAddr(r.RemoteAddr),
 			a.authenticated(r):
 			next.ServeHTTP(w, r)

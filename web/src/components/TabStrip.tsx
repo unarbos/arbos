@@ -31,17 +31,17 @@ export interface TabInfo {
   busy: boolean;
   /** What the tab holds: an agent chat (default), an opened surface, a
    *  machine-spawned run's transcript, a terminal (job tail / shell), the
-   *  agent activity view, session history, the messenger panel, or the
-   *  settings panel. */
+   *  merged activity + history view, the messenger panel, or the settings
+   *  panel. */
   kind?:
     | "chat"
     | "surface"
     | "run"
     | "terminal"
     | "activity"
-    | "history"
     | "messenger"
-    | "settings";
+    | "settings"
+    | "plan";
 }
 
 /** What the + menu can open: a fresh chat, or one of the companion views. */
@@ -67,9 +67,9 @@ export interface TabDrag {
 
 /**
  * Cursor's tab strip, one per pane: a tab per open agent and a + menu that
- * opens any tab type in this pane. Global actions (split, theme) render
- * once, on the top-right strip, via `actions`; history, activity, and
- * settings render once, on the top-left strip, via `leading`.
+ * opens any tab type in this pane. History, activity, and the global actions
+ * (split, theme) render once, on the top-right strip, via `actions`; the
+ * settings gear renders once, on the top-left strip, via `leading`.
  */
 export function TabStrip({
   tabs,
@@ -167,9 +167,9 @@ export function TabStrip({
 /**
  * The once-per-window action cluster: the two split actions (each divides
  * the FOCUSED pane, editor-style — splits nest) and the theme picker. Lives
- * on the top-right strip. A pane closes by closing its last tab. Tab types
- * (terminal, files, browser, messenger) open from each strip's + menu;
- * history and activity open from the top-left icons instead.
+ * on the top-right strip, beside the history and activity icons. A pane
+ * closes by closing its last tab. Tab types (terminal, files, browser,
+ * messenger) open from each strip's + menu.
  */
 export function GlobalActions({ onSplit }: { onSplit: (dir: SplitDir) => void }) {
   return (
@@ -364,8 +364,8 @@ function NewTabMenu({ onNew }: { onNew: (kind: NewTabKind) => void }) {
   );
 }
 
-/** Once-per-window leading actions on the top-left strip. Each opens (or
- *  focuses) its singleton tab. */
+/** Once-per-window icons opening (or focusing) their singleton tab. History
+ *  and activity sit on the top-right strip; settings on the top-left. */
 export function HistoryButton({ onOpen }: { onOpen: () => void }) {
   return (
     <IconButton title="History" onClick={onOpen}>
@@ -526,8 +526,6 @@ function Tab({
         <SquareTerminal size={11} className="shrink-0 text-faint" />
       ) : tab.kind === "activity" ? (
         <Activity size={11} className="shrink-0 text-faint" />
-      ) : tab.kind === "history" ? (
-        <Clock size={11} className="shrink-0 text-faint" />
       ) : tab.kind === "messenger" ? (
         <Send size={11} className="shrink-0 text-faint" />
       ) : tab.kind === "settings" ? (

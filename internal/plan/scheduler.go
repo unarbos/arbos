@@ -108,6 +108,21 @@ const maxConcurrentWakes = 4
 // 30m) plus margin — so a still-running job is never mistaken for a dead one.
 const staleClaimAge = 45 * time.Minute
 
+// staleWakeAge is the DEFAULT for how long an agent node claimed by a
+// scheduler wake may sit active before it is reclaimed as an orphan from a host
+// that died mid-wake. A wake turn is bounded (piwire.wakeTurnTimeout, 15m), so
+// anything still active well past that is dead; the wide margin keeps a
+// slow-but-live wake safe. The host raises it via WithReclaimAfter when it
+// raises the wake timeout (ARBOS_WAKE_TIMEOUT), so the reclaim margin always
+// exceeds the longest a live wake can run — otherwise the reclaim would reset a
+// node out from under a running agent.
+const staleWakeAge = 60 * time.Minute
+
+// failNoteInterval coalesces the "a scheduled run is failing" notice per node:
+// a sustained provider outage that fails every firing pings the user once per
+// interval, not on every scan, so an overnight failure surfaces without spam.
+const failNoteInterval = 30 * time.Minute
+
 // closeGrace bounds how long Close waits for in-flight cmd goroutines to
 // record their results after cancellation, so shutdown is prompt even if a
 // final store write is slow.
@@ -144,6 +159,16 @@ type Scheduler struct {
 	// still gives per-arming safety; this guards the re-arm within one host.
 	inflightMu sync.Mutex
 	inflight   map[NodeID]struct{}
+	// failNote records when each node last emitted a wake-failure notice, so a
+	// sustained outage coalesces into one ping per failNoteInterval rather than
+	// one per firing. Process-local: a best-effort heads-up, not durable state.
+	// Pruned when a node's wake succeeds, so it tracks only currently-failing
+	// nodes rather than growing for the host's lifetime.
+	failMu   sync.Mutex
+	failNote map[NodeID]time.Time
+	// reclaimAfter is how long an agent node may sit active before it is
+	// reclaimed as a wake orphan; the host couples it to the wake timeout.
+	reclaimAfter time.Duration
 	// kick wakes the drain loop ahead of the next tick — a finished command
 	// may have just ungated its successor, and a four-step pipeline should
 	// flow at execution speed, not at 30-second tick quanta.
@@ -152,30 +177,52 @@ type Scheduler struct {
 	done chan struct{}
 }
 
+// SchedulerOption tunes an optional scheduler knob without widening
+// NewScheduler's signature.
+type SchedulerOption func(*Scheduler)
+
+// WithReclaimAfter overrides how long an agent-claimed node may sit active
+// before it is reclaimed as a wake orphan. The host sets it from the wake turn
+// timeout (ARBOS_WAKE_TIMEOUT) plus a margin, so the reclaim window always
+// exceeds the longest a live wake can run — a non-positive value keeps the
+// default (staleWakeAge).
+func WithReclaimAfter(d time.Duration) SchedulerOption {
+	return func(s *Scheduler) {
+		if d > 0 {
+			s.reclaimAfter = d
+		}
+	}
+}
+
 // NewScheduler starts the scan loop. Call Close to stop it. A nil logger
 // discards diagnostics; a nil runner disables the shell executor (shell nodes
 // sit [ready] for a gated turn); a nil notify disables the notify executor.
-func NewScheduler(store Store, clock ports.Clock, wake WakeFunc, run CmdRunner, notify NotifyFunc, logger *slog.Logger) *Scheduler {
+func NewScheduler(store Store, clock ports.Clock, wake WakeFunc, run CmdRunner, notify NotifyFunc, logger *slog.Logger, opts ...SchedulerOption) *Scheduler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Scheduler{
-		store:    store,
-		clock:    clock,
-		wake:     wake,
-		run:      run,
-		notify:   notify,
-		log:      logger,
-		ticker:   time.NewTicker(scanInterval),
-		baseCtx:  ctx,
-		cancel:   cancel,
-		sem:      make(chan struct{}, maxConcurrentCmds),
-		wakeSem:  make(chan struct{}, maxConcurrentWakes),
-		inflight: make(map[NodeID]struct{}),
-		kick:     make(chan struct{}, 1),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		store:        store,
+		clock:        clock,
+		wake:         wake,
+		run:          run,
+		notify:       notify,
+		log:          logger,
+		ticker:       time.NewTicker(scanInterval),
+		baseCtx:      ctx,
+		cancel:       cancel,
+		sem:          make(chan struct{}, maxConcurrentCmds),
+		wakeSem:      make(chan struct{}, maxConcurrentWakes),
+		inflight:     make(map[NodeID]struct{}),
+		failNote:     make(map[NodeID]time.Time),
+		reclaimAfter: staleWakeAge,
+		kick:         make(chan struct{}, 1),
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	go s.loop()
 	return s
@@ -267,6 +314,7 @@ func (s *Scheduler) drain(ctx context.Context) {
 // are bounded by the cmd cap rather than the wake cap — acceptable since the
 // poll, not the rare trip, is the steady-state cost.
 func (s *Scheduler) runCondition(n Node) {
+	defer s.recoverFiring("condition", n.ID)
 	defer s.wg.Done()
 	defer s.release()
 	defer s.Kick()
@@ -322,11 +370,22 @@ func (s *Scheduler) runCondition(n Node) {
 	}
 }
 
+// recoverFiring stops a panic in one fired node from killing the scan loop:
+// the firing goroutines run model turns and shell predicates, and a panic in
+// either must degrade that one firing, not decapitate the host's clock. It is
+// the scheduler-side analog of the engine's per-turn recover.
+func (s *Scheduler) recoverFiring(what string, node NodeID) {
+	if r := recover(); r != nil {
+		s.log.Error("plan scheduler: panic in firing", "what", what, "node", node, "panic", r)
+	}
+}
+
 // runWake discharges one claimed agent wake in its own goroutine — a model
 // turn the scheduler summoned. It releases the wake slot and clears the
 // node's in-flight mark on completion, then Kicks so a freed slot picks up
 // the next due wake immediately rather than at the next tick.
 func (s *Scheduler) runWake(ctx context.Context, w WakeEvent) {
+	defer s.recoverFiring("wake", w.Node.ID)
 	defer s.wg.Done()
 	defer s.releaseWake()
 	defer s.clearInflight(w.Node.ID)
@@ -334,7 +393,59 @@ func (s *Scheduler) runWake(ctx context.Context, w WakeEvent) {
 	s.log.Info("plan scheduler: firing", "node", w.Node.ID, "goal", w.Node.Goal, "reason", string(w.Reason))
 	if err := s.wake(ctx, w); err != nil {
 		s.log.Warn("plan scheduler: wake", "node", w.Node.ID, "err", err)
+		// The wake's turn exhausted its retries and fallback models (engine
+		// resilience) or hit its deadline. A recurring node re-fires next
+		// period and a deferred one is already reclaimable, so the work is not
+		// lost — but a sustained outage would otherwise fail silently all
+		// night. Surface a coalesced heads-up so the user learns the agent is
+		// stuck, without spamming on every firing.
+		s.noteWakeFailure(w.Node, err)
+		return
 	}
+	// A clean firing clears any prior failure note for this node, so the map
+	// tracks only nodes that are currently failing and a recovered-then-failing
+	// node pings again immediately rather than waiting out the interval.
+	s.clearFailNote(w.Node.ID)
+}
+
+// noteWakeFailure emits at most one wake-failure notice per node per
+// failNoteInterval, routed to the chat that owns the node (its Origin). It is
+// best-effort: no notify wired (no outbox), a shutting-down host, or a missing
+// target all silently skip — the failure is already logged.
+func (s *Scheduler) noteWakeFailure(n Node, cause error) {
+	if s.notify == nil || s.baseCtx.Err() != nil {
+		return
+	}
+	now := s.clock.Now()
+	s.failMu.Lock()
+	last, seen := s.failNote[n.ID]
+	if seen && now.Sub(last) < failNoteInterval {
+		s.failMu.Unlock()
+		return
+	}
+	s.failNote[n.ID] = now
+	s.failMu.Unlock()
+
+	target := n.Origin
+	if target == "" {
+		target = n.Owner
+	}
+	if target == "" {
+		return
+	}
+	msg := fmt.Sprintf("Heads up: a scheduled task keeps failing — node #%d (%s): %v. I'll keep retrying on its schedule.", n.ID, n.Goal, cause)
+	if e := s.notify(context.Background(), msg, target, n.ID); e != nil {
+		s.log.Warn("plan scheduler: wake-failure notify", "node", n.ID, "err", e)
+	}
+}
+
+// clearFailNote drops a node's coalescing record after a clean firing, so the
+// failNote map holds only currently-failing nodes instead of growing for the
+// host's lifetime.
+func (s *Scheduler) clearFailNote(id NodeID) {
+	s.failMu.Lock()
+	delete(s.failNote, id)
+	s.failMu.Unlock()
 }
 
 // collect claims everything fireable right now and returns it. All state
@@ -351,6 +462,16 @@ func (s *Scheduler) collect(ctx context.Context) (mech, conds []Node, wakes []Wa
 		s.log.Warn("plan scheduler: reclaim", "err", err)
 	} else if n > 0 {
 		s.log.Info("plan scheduler: reclaimed orphaned cmd nodes", "count", n)
+	}
+	// Recover agent wakes orphaned by a host that died mid-turn too: a
+	// scheduler-spawned session that never recorded its node's outcome leaves
+	// it active forever, wedging the node (and its gated successors). Scoped to
+	// scheduler-origin sessions and a margin past the wake timeout, so a live
+	// interactive session's active node is never disturbed.
+	if n, err := s.store.ReclaimStaleAgentNodes(ctx, now.Add(-s.reclaimAfter)); err != nil {
+		s.log.Warn("plan scheduler: reclaim wakes", "err", err)
+	} else if n > 0 {
+		s.log.Info("plan scheduler: reclaimed orphaned wake nodes", "count", n)
 	}
 	nodes, err := s.store.OpenPlanNodes(ctx)
 	if err != nil {
@@ -528,6 +649,7 @@ func (s *Scheduler) clearInflight(id NodeID) {
 // emits to the outbox. Both release the concurrency slot and the wait-group
 // (Close waits within closeGrace).
 func (s *Scheduler) runMechanical(n Node) {
+	defer s.recoverFiring("mechanical", n.ID)
 	defer s.wg.Done()
 	defer s.release()
 	defer s.Kick()

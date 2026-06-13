@@ -12,12 +12,20 @@ import type {
   Citation,
   ContentBlock,
   Envelope,
+  ErrorKind,
   Question,
   StopReason,
   ToolCall,
   ToolResult,
   Usage,
 } from "./types";
+
+/**
+ * What an error row attributes the failure to: the kernel's ErrorKind, plus
+ * "connection" for a seam/transport failure that never reached the kernel. The
+ * error card maps it to a title, icon, and tone.
+ */
+export type ErrorCategory = ErrorKind | "connection";
 
 export type TranscriptItem =
   /**
@@ -87,7 +95,19 @@ export type TranscriptItem =
       parts?: ContentBlock[];
     }
   | { kind: "interrupted"; id: number }
-  | { kind: "error"; id: number; message: string; retryable: boolean }
+  | {
+      kind: "error";
+      id: number;
+      /** The raw error detail (the kernel's message or a seam failure). */
+      message: string;
+      retryable: boolean;
+      /**
+       * What the error is attributed to — the kernel ErrorKind or "connection"
+       * for a seam failure — which the error card maps to a title, icon, and
+       * explanation.
+       */
+      category: ErrorCategory;
+    }
   /** Outbox delivery — the agent speaking up between turns. */
   | { kind: "notice"; id: number; text: string }
   /**
@@ -176,6 +196,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         id: state.nextId,
         message: action.message,
         retryable: true,
+        category: "connection",
       });
     case "approval-answered":
       return { ...state, pendingApproval: null };
@@ -481,8 +502,9 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
         ...push(s, {
           kind: "error",
           id: s.nextId,
-          message: `${ev.data.category}: ${ev.data.error}`,
+          message: ev.data.error,
           retryable: ev.data.retryable,
+          category: ev.data.category,
         }),
         turnActive: false,
         pendingApproval: null,

@@ -18,6 +18,7 @@ export type SurfaceKind =
   | "doc"
   | "pdf"
   | "code"
+  | "sheet"
   | "prompt"
   | "dir"
   | "screencast";
@@ -32,7 +33,9 @@ export interface Surface {
 
 // The kinds the agent's show tool can present. "prompt" (the slash-command
 // editor) is opened by the user from the / menu, never by a tool result.
-const KINDS = new Set<string>(["canvas", "image", "doc", "pdf", "code", "dir", "screencast"]);
+const KINDS = new Set<string>(["canvas", "image", "doc", "pdf", "code", "sheet", "dir", "screencast"]);
+
+const SHEET_EXT = new Set(["csv", "tsv", "tab"]);
 
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "avif"]);
 
@@ -51,7 +54,9 @@ export function fileSurface(path: string): Surface {
         ? "pdf"
         : IMAGE_EXT.has(ext)
           ? "image"
-          : "code";
+          : SHEET_EXT.has(ext)
+            ? "sheet"
+            : "code";
   return { kind, path };
 }
 

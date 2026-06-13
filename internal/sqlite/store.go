@@ -186,6 +186,38 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 
 CREATE INDEX IF NOT EXISTS idx_outbox_undelivered ON outbox(delivered_at) WHERE delivered_at = 0;
+
+-- grants: shareable capability links (internal/share, ADR-0034). One row per
+-- bearer token; the token is the secret in the /s/<token> URL and the primary
+-- key. Grants form a tree via parent so revocation cascades to delegated
+-- sub-links. expires_at is UnixNano with 0 = never; uses is a redemption
+-- budget with 0 = unlimited.
+CREATE TABLE IF NOT EXISTS grants (
+    token      TEXT PRIMARY KEY,
+    parent     TEXT    NOT NULL DEFAULT '',
+    scope_kind TEXT    NOT NULL,
+    scope_ref  TEXT    NOT NULL DEFAULT '',
+    perm       INTEGER NOT NULL DEFAULT 0,
+    expires_at INTEGER NOT NULL DEFAULT 0,
+    uses       INTEGER NOT NULL DEFAULT 0,
+    label      TEXT    NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_grants_parent ON grants(parent);
+
+-- boards: saved workspace layouts (internal/board, ADR-0034). layout is the
+-- UI's opaque serialized split-tree + tabs (round-tripped verbatim for
+-- restore); members is the JSON array of shareable referents a board share
+-- grant authorizes. Kept separate so the backend never parses frontend layout.
+CREATE TABLE IF NOT EXISTS boards (
+    id         TEXT PRIMARY KEY,
+    title      TEXT    NOT NULL DEFAULT '',
+    layout     BLOB    NOT NULL,
+    members    BLOB    NOT NULL DEFAULT '[]',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate: %w", err)

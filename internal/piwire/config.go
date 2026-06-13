@@ -51,6 +51,15 @@ type Config struct {
 	HasLLM       bool   // a key is present; false selects the deterministic fake
 	Model        string
 	DistillModel string
+	// FallbackModels are tried in order, within a turn, after Model exhausts
+	// its retries against a transient provider failure (ARBOS_FALLBACK_MODELS,
+	// comma-separated). Same provider/endpoint — model ids the configured
+	// adapter accepts. Empty = no fallback.
+	FallbackModels []string
+	// RetryAttempts overrides how many times a turn re-issues a transient
+	// provider failure per model before falling back (ARBOS_LLM_RETRIES). 0
+	// takes the engine's default.
+	RetryAttempts int
 	// Vault is the managed-secret store opened from the agent config dir, the
 	// request-time fallback when the key is not exported in the environment.
 	// Nil when no config dir exists or the vault failed to open (env-only).
@@ -169,16 +178,20 @@ func LoadConfig() Config {
 	}
 
 	cfg := Config{
-		ProviderName:  name,
-		BaseURL:       base,
-		KeyEnv:        keyEnv,
-		HasLLM:        hasKey(keyEnv),
-		Vault:         vault,
-		Model:         os.Getenv("ARBOS_MODEL"),
-		DistillModel:  os.Getenv("ARBOS_DISTILL_MODEL"),
-		ImageModel:    imageModel,
-		Reasoning:     core.ReasoningLevel(os.Getenv("ARBOS_REASONING")),
-		MCPConfigJSON: os.Getenv("ARBOS_MCP_CONFIG"),
+		ProviderName:   name,
+		BaseURL:        base,
+		KeyEnv:         keyEnv,
+		HasLLM:         hasKey(keyEnv),
+		Vault:          vault,
+		Model:          os.Getenv("ARBOS_MODEL"),
+		DistillModel:   os.Getenv("ARBOS_DISTILL_MODEL"),
+		ImageModel:     imageModel,
+		Reasoning:      core.ReasoningLevel(os.Getenv("ARBOS_REASONING")),
+		MCPConfigJSON:  os.Getenv("ARBOS_MCP_CONFIG"),
+		FallbackModels: splitModels(os.Getenv("ARBOS_FALLBACK_MODELS")),
+	}
+	if n, err := strconv.Atoi(os.Getenv("ARBOS_LLM_RETRIES")); err == nil && n > 0 {
+		cfg.RetryAttempts = n
 	}
 	// Stored default model (the Settings file's default_model, written by the
 	// agent's set_model tool or the Settings tab): the durable default
@@ -200,6 +213,22 @@ func LoadConfig() Config {
 		cfg.ServeDrainTimeout = time.Duration(sec) * time.Second
 	}
 	return cfg
+}
+
+// splitModels parses a comma-separated model list (ARBOS_FALLBACK_MODELS) into
+// a trimmed, empty-dropped slice, so a trailing comma or stray spaces never
+// produce a phantom "" model id the provider would reject.
+func splitModels(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []string
+	for _, m := range strings.Split(s, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // storedSettings reads the host preference file (the Settings tab's durable

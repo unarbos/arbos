@@ -16,12 +16,21 @@ func StreamIDFor(root string) string {
 }
 
 // Update is one screencast message: a rendered frame (base64 JPEG), a
-// navigation (the page's current URL), or both. Frames are frequent and URLs
-// change rarely; carrying them on one stream keeps the viewer protocol to a
-// single message shape.
+// navigation (the page's current URL), this tab's history availability, or any
+// combination. Frames are frequent and the rest change rarely; carrying them
+// on one stream keeps the viewer protocol to a single message shape.
 type Update struct {
-	Frame string `json:"frame,omitempty"`
-	URL   string `json:"url,omitempty"`
+	Frame string    `json:"frame,omitempty"`
+	URL   string    `json:"url,omitempty"`
+	Nav   *NavState `json:"nav,omitempty"`
+}
+
+// NavState is whether the active tab can navigate back/forward in its history,
+// so the viewer's back/forward controls grey out at the ends of history the way
+// a real browser's do.
+type NavState struct {
+	CanBack    bool `json:"canBack"`
+	CanForward bool `json:"canForward"`
 }
 
 // InputEvent is one user interaction forwarded from the screencast panel back
@@ -31,7 +40,7 @@ type Update struct {
 // you can use — most importantly, to sign into a site yourself so the agent's
 // persistent profile holds the session.
 type InputEvent struct {
-	T   string  `json:"t"`             // click | wheel | key | text | nav
+	T   string  `json:"t"`             // click | wheel | key | text | nav | back | forward | reload
 	X   float64 `json:"x,omitempty"`   // normalized [0,1]
 	Y   float64 `json:"y,omitempty"`   // normalized [0,1]
 	DY  float64 `json:"dy,omitempty"`  // wheel delta, CSS px

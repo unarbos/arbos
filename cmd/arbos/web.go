@@ -174,6 +174,9 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 		waiting bool   // hold prints until the forest join lands or grace expires
 	}
 	prints.waiting = forestURL != ""
+	// One line, one URL: the public forest link is the door once a join
+	// lands; only a forest-less run (or a join still pending) falls back to
+	// the local link.
 	printLogin := func() {
 		prints.Lock()
 		defer prints.Unlock()
@@ -181,9 +184,10 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 			return
 		}
 		if prints.public != "" {
-			fmt.Fprintf(os.Stderr, "arbos forest login: %s/login?token=%s\n", prints.public, prints.token)
+			fmt.Fprintf(os.Stderr, "%s/login?token=%s\n", prints.public, prints.token)
+			return
 		}
-		fmt.Fprintf(os.Stderr, "arbos web login: http://%s/login?token=%s\n", prints.login, prints.token)
+		fmt.Fprintf(os.Stderr, "http://%s/login?token=%s\n", prints.login, prints.token)
 	}
 
 	// Bind before anything prints a URL: when the requested port is taken
@@ -216,9 +220,22 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	// The Telegram bridge behind the Messenger tab: registered bots poll for
 	// inbound messages and bridge each chat to a kernel session. A failure to
 	// load its state is non-fatal — the web door serves without the tab.
-	if dir := piwire.AgentConfigDir(); dir != "" {
+	//
+	// The registry is keyed to *this* working directory (<cwd>/.arbos/messenger),
+	// not the shared ~/.config/arbos: Telegram allows only one getUpdates poller
+	// per bot token, so a global registry meant two arbos instances on the same
+	// machine fought over the same bots (409 Conflict, each kicking the other
+	// off). Per-directory scoping makes a bot belong to the agent in one
+	// directory and never spill into another instance.
+	if cwd != "" {
+		dir := filepath.Join(cwd, ".arbos", "messenger")
+		// One-time lift of a pre-scoping global registry into this directory.
+		// A move (not copy) is deliberate: it both preserves the owner's bots
+		// and guarantees no other instance can keep polling them through the
+		// old shared path.
+		migrateGlobalMessenger(dir)
 		msgr, err := messenger.New(messenger.Config{
-			Dir:        filepath.Join(dir, "messenger"),
+			Dir:        dir,
 			Full:       host.Engine,
 			Guest:      host.GuestEngine,
 			Store:      store,
@@ -258,7 +275,12 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ln) }()
-	fmt.Fprintf(os.Stderr, "arbos web listening on http://%s\n", displayAddr(addr))
+	// With auth on (a forest join or a remote bind) the single login line is
+	// the only thing worth printing; this bare address line is just for the
+	// frictionless loopback case, which has no login token.
+	if gw.Auth == nil {
+		fmt.Fprintf(os.Stderr, "http://%s\n", displayAddr(addr))
+	}
 	if gw.Auth != nil {
 		gw.Auth.MintToken()
 		if forestURL != "" {
@@ -288,10 +310,25 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	// client reconnects forever on its own; a head outage never takes the
 	// local door down with it.
 	if forestURL != "" {
+		// One live forest agent per (directory, machine): the URL is derived
+		// from this directory's agent key, so two arbos in the same dir would
+		// claim the same name and flap (ADR-0035). The lock gates only the
+		// join — the local door still serves (on a walked port), so a second
+		// instance is a usable local viewer, just not a second public URL.
+		release, lockErr := lockForestDir(cwd)
+		if lockErr != nil {
+			fmt.Fprintf(os.Stderr, "arbos: %v — serving locally only\n", lockErr)
+			forestURL = ""
+		} else {
+			defer release()
+		}
+	}
+	if forestURL != "" {
 		fc := &forest.Client{
-			Base:    strings.TrimRight(forestURL, "/"),
-			KeyPath: filepath.Join(piwire.AgentConfigDir(), "identity", "device.key"),
-			Handler: gw.Handler(),
+			Base:     strings.TrimRight(forestURL, "/"),
+			KeyPath:  filepath.Join(piwire.AgentConfigDir(), "identity", "device.key"),
+			AgentDir: cwd,
+			Handler:  gw.Handler(),
 			OnJoin: func(j forest.JoinInfo) {
 				prints.Lock()
 				// Reconnects re-fire OnJoin with the same URL; only the
@@ -300,7 +337,6 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 				prints.public = j.URL
 				prints.waiting = false
 				prints.Unlock()
-				fmt.Fprintf(os.Stderr, "arbos forest: joined as %s — %s\n", j.Name, j.URL)
 				if fresh {
 					printLogin()
 				}
@@ -324,6 +360,68 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 		}
 		return err
 	}
+}
+
+// lockForestDir takes an advisory lock on <dir>/.arbos/agent.lock so only one
+// arbos per directory joins the forest (ADR-0035): the derived URL is a
+// function of the directory, so a second joiner would fight for the same
+// lease. The lock is held for the process's life and released by the returned
+// closure (and by the OS on exit). flock is advisory and unix-only, which
+// matches arbos's supported platforms.
+func lockForestDir(dir string) (func(), error) {
+	if err := os.MkdirAll(filepath.Join(dir, ".arbos"), 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, ".arbos", "agent.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("another arbos already holds this directory's forest URL")
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
+}
+
+// migrateGlobalMessenger lifts a pre-scoping bot registry from the shared
+// ~/.config/arbos/messenger into this directory's newDir, once. It runs only
+// when newDir has no state.json yet and the global one exists: the global file
+// is moved (not copied) so the owner keeps their bots here and no other arbos
+// instance can keep polling the same tokens through the old shared path. Any
+// failure is silent — a fresh per-directory registry is a fine fallback.
+func migrateGlobalMessenger(newDir string) {
+	agentDir := piwire.AgentConfigDir()
+	if agentDir == "" {
+		return
+	}
+	oldState := filepath.Join(agentDir, "messenger", "state.json")
+	newState := filepath.Join(newDir, "state.json")
+	if _, err := os.Stat(newState); err == nil {
+		return // already scoped here
+	}
+	if _, err := os.Stat(oldState); err != nil {
+		return // nothing to lift
+	}
+	if err := os.MkdirAll(newDir, 0o700); err != nil {
+		return
+	}
+	// Rename is the fast path; it fails across filesystems (cwd and HOME can
+	// sit on different mounts), so fall back to copy-then-remove. Either way
+	// the global file is gone afterward, so no other instance can poll it.
+	if err := os.Rename(oldState, newState); err != nil {
+		data, readErr := os.ReadFile(oldState)
+		if readErr != nil {
+			return
+		}
+		if writeErr := os.WriteFile(newState, data, 0o600); writeErr != nil {
+			return
+		}
+		_ = os.Remove(oldState)
+	}
+	fmt.Fprintf(os.Stderr, "arbos: moved Telegram bot registry into %s (now per-directory)\n", newState)
 }
 
 // secretAdmin adapts the vault to the gateway's SecretStore seam, returning a

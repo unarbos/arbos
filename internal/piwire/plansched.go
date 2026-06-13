@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/unarbos/arbos/internal/agent"
@@ -17,7 +18,22 @@ import (
 // wakeTurnTimeout bounds one fired executor turn. A firing is one unit of
 // work (a recurrence, a deferred task), not a mission; anything bigger should
 // decompose into the plan and finish across future turns or firings.
+// ARBOS_WAKE_TIMEOUT (whole seconds) overrides it for missions whose single
+// firing legitimately needs longer — the retry/fallback chain inside a turn
+// must fit under this bound, so a host that fronts a flaky provider may want
+// more headroom.
 const wakeTurnTimeout = 15 * time.Minute
+
+// wakeTimeout resolves the per-firing turn bound from the environment, falling
+// back to wakeTurnTimeout. A non-positive or unparseable value keeps the
+// default rather than disabling the bound (an unbounded wake could wedge a
+// concurrency slot forever).
+func wakeTimeout() time.Duration {
+	if sec, err := strconv.Atoi(os.Getenv("ARBOS_WAKE_TIMEOUT")); err == nil && sec > 0 {
+		return time.Duration(sec) * time.Second
+	}
+	return wakeTurnTimeout
+}
 
 // StartPlanScheduler attaches the host's clock: the plan scheduler scanning
 // for time-armed nodes (internal/plan) with a wake that spawns a fresh
@@ -69,9 +85,18 @@ func (h *Host) StartPlanScheduler() func() {
 		func(agent.Grant) (*engine.Engine, error) { return h.Engine, nil },
 		NewSessionID,
 	)
-	sched := plan.NewScheduler(ps, sysClock{}, selfWake(self), run, notify, h.logger)
+	// Couple the orphan-reclaim window to the (possibly raised) wake timeout so
+	// it always exceeds the longest a live wake can run by a wide margin — a
+	// reclaim that fired on a still-running wake would reset its node out from
+	// under it. wakeReclaimMargin is the headroom above the timeout.
+	sched := plan.NewScheduler(ps, sysClock{}, selfWake(self), run, notify, h.logger,
+		plan.WithReclaimAfter(wakeTimeout()+wakeReclaimMargin))
 	return sched.Close
 }
+
+// wakeReclaimMargin is how far the orphan-reclaim window sits above the wake
+// turn timeout, so a slow-but-live wake is never reclaimed mid-run.
+const wakeReclaimMargin = 45 * time.Minute
 
 // cmdJobTimeout bounds one kernel-run command node. Mechanical pipeline steps
 // (builds, tests, pushes) finish in minutes; anything longer should be a
@@ -98,8 +123,9 @@ func cmdRunner(cwd string) plan.CmdRunner {
 // creation (not after), so the front-door brief anchors "since you left" on
 // human-driven sessions only, with no window or silent-failure path.
 func selfWake(self agent.Agent) plan.WakeFunc {
+	timeout := wakeTimeout()
 	return func(ctx context.Context, w plan.WakeEvent) error {
-		ctx, cancel := context.WithTimeout(ctx, wakeTurnTimeout)
+		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		// Owner ties the wake to the conversation whose node fired: its
 		// notifications route back there (sqlite.Store.Notify resolves the

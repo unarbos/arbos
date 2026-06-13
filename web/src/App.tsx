@@ -1,8 +1,7 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 
-import { ActivityView } from "./components/ActivityView";
+import { ActivityHistoryView } from "./components/ActivityHistoryView";
 import { ChatTab } from "./components/ChatTab";
-import { HistoryView } from "./components/HistoryView";
 import { RunView, type RunRef } from "./components/RunView";
 import { lazyPanel } from "./lib/lazyPanel";
 
@@ -19,6 +18,9 @@ const SettingsView = lazyPanel(() =>
 import type { SettingsPage } from "./components/SettingsView";
 const SurfaceView = lazyPanel(() =>
   import("./components/SurfaceView").then((m) => ({ default: m.SurfaceView })),
+);
+const PlanView = lazyPanel(() =>
+  import("./components/PlanView").then((m) => ({ default: m.PlanView })),
 );
 const TerminalView = lazyPanel(() =>
   import("./components/TerminalView").then((m) => ({ default: m.TerminalView })),
@@ -73,6 +75,8 @@ interface TabState extends TabInfo {
   /** kind "messenger": the connected bot this tab is the chat for
    *  (undefined until its token is entered). */
   messengerBot?: number;
+  /** kind "plan": a node in the plan this tab shows the goal tree for. */
+  planNode?: number;
   /** kind "settings": the page the panel opens on (undefined → General). */
   settingsPage?: SettingsPage;
 }
@@ -161,7 +165,7 @@ function termTab(key: number, pane: number, term: TermRef): TabState {
 function activityTab(key: number, pane: number): TabState {
   return {
     key,
-    title: "Agent activity",
+    title: "Activity",
     busy: false,
     kind: "activity",
     resumeId: null,
@@ -171,12 +175,13 @@ function activityTab(key: number, pane: number): TabState {
   };
 }
 
-function historyTab(key: number, pane: number): TabState {
+function planTab(key: number, pane: number, node: number): TabState {
   return {
     key,
-    title: "History",
+    title: `Plan #${node}`,
     busy: false,
-    kind: "history",
+    kind: "plan",
+    planNode: node,
     resumeId: null,
     sessionId: null,
     titlePinned: false,
@@ -593,17 +598,24 @@ export default function App() {
       );
   }, [openSingleton]);
 
-  /** The agent activity view as a singleton tab — one place to see every
-   *  standing obligation and recent run across all chats. */
+  /** The merged activity + history view as a singleton tab — past sessions
+   *  beside every standing obligation and live run, across all chats. Both
+   *  the history (clock) and activity buttons open this one panel. */
   const openActivityTab = useCallback(
     () => openSingleton((t) => t.kind === "activity", activityTab),
     [openSingleton],
   );
+  const openHistoryTab = openActivityTab;
 
-  /** Session history as a singleton tab — the searchable list of past
-   *  agents, picking one opens (or focuses) its chat. */
-  const openHistoryTab = useCallback(
-    () => openSingleton((t) => t.kind === "history", historyTab),
+  /** The plan detail view for a node, as a tab — clicking a standing
+   *  obligation opens (or focuses) its plan's goal tree and code. Deduped by
+   *  node so re-clicking the same task raises its tab instead of stacking. */
+  const openPlanTab = useCallback(
+    (node: number) =>
+      openSingleton(
+        (t) => t.kind === "plan" && t.planNode === node,
+        (key, pane) => planTab(key, pane, node),
+      ),
     [openSingleton],
   );
 
@@ -864,15 +876,17 @@ export default function App() {
             drag={dragHandlers(pane)}
             leading={
               pane === leadingPane ? (
-                <>
-                  <HistoryButton onOpen={openHistoryTab} />
-                  <ActivityButton onOpen={openActivityTab} />
-                  <SettingsButton onOpen={openSettingsTab} />
-                </>
+                <SettingsButton onOpen={openSettingsTab} />
               ) : undefined
             }
             actions={
-              pane === actionsPane ? <GlobalActions onSplit={splitFocused} /> : undefined
+              pane === actionsPane ? (
+                <>
+                  <HistoryButton onOpen={openHistoryTab} />
+                  <ActivityButton onOpen={openActivityTab} />
+                  <GlobalActions onSplit={splitFocused} />
+                </>
+              ) : undefined
             }
           />
         </div>
@@ -931,14 +945,23 @@ export default function App() {
                 onBusy={(busy) => patchTab(tab.key, { busy })}
               />
             ) : tab.kind === "activity" ? (
-              <ActivityView
+              <ActivityHistoryView
+                active={visible}
+                onOpenSession={openSession}
                 onOpenChat={(chat) =>
                   openSession({ id: chat, title: "", updated_at: 0 })
                 }
+                onOpenPlan={openPlanTab}
                 onBusy={(busy) => patchTab(tab.key, { busy })}
               />
-            ) : tab.kind === "history" ? (
-              <HistoryView active={visible} onOpenSession={openSession} />
+            ) : tab.kind === "plan" && tab.planNode !== undefined ? (
+              <PlanView
+                node={tab.planNode}
+                active={visible}
+                onOpenChat={(chat) =>
+                  openSession({ id: chat, title: "", updated_at: 0 })
+                }
+              />
             ) : tab.kind === "messenger" ? (
               <MessengerView
                 botId={tab.messengerBot}

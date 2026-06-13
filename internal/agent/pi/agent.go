@@ -31,6 +31,16 @@ type Options struct {
 	Models         *ModelRegistry
 	Reasoning      core.ReasoningLevel
 	CacheRetention core.CacheRetention
+	// FallbackModels are tried in order, within a turn, after Model exhausts
+	// its retries against a transient provider failure — the same-provider
+	// model chain that keeps a long-running run alive when its primary is
+	// overloaded. Threads into delegated children too (the cfg is shared), so
+	// any session rides through an outage. Empty = no fallback.
+	FallbackModels []string
+	// RetryAttempts overrides how many times a turn re-issues a transient
+	// provider failure per model before falling back; 0 takes the engine's
+	// default.
+	RetryAttempts int
 	// DistillModel, when set, runs the background distillers — the compaction
 	// Summarizer here and the Mind curator (wired by the host) — on a cheaper,
 	// faster model than the main agent. Distillation is template extraction,
@@ -156,6 +166,8 @@ func (o Options) buildForRoot(root string) (engine.Config, ports.ToolRuntime, er
 		MaxIterations:  maxIter,
 		Reasoning:      o.Reasoning,
 		CacheRetention: o.CacheRetention,
+		FallbackModels: o.FallbackModels,
+		Retry:          engine.RetryPolicy{MaxAttempts: o.RetryAttempts},
 		// Slash commands expand at projection, never in the log: every host
 		// (CLI, TUI, serve, web) gets them by construction, and the persisted
 		// transcript keeps exactly what the user typed.

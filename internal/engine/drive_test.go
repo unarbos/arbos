@@ -12,9 +12,10 @@ import (
 	"github.com/unarbos/arbos/internal/ports"
 )
 
-// errProvider fails its Stream call, which the engine reports as a RETRYABLE
-// provider ErrorEvent and ends the turn. It exists to prove Drive returns on
-// that error rather than waiting for a retry that never comes.
+// errProvider fails every Stream call. The engine retries a transient failure
+// (the in-turn resilience loop), then ends the turn with a RETRYABLE provider
+// ErrorEvent once the chain is exhausted. It exists to prove Drive returns on
+// that terminal error rather than blocking forever once the turn ends.
 type errProvider struct{}
 
 func (errProvider) Name() string                     { return "err" }
@@ -42,17 +43,19 @@ func TestDrive_ReturnsOnTurnComplete(t *testing.T) {
 	}
 }
 
-// TestDrive_ReturnsOnRetryableError is the regression guard: a retryable
-// provider error ends the turn with no TurnComplete, and the engine does not
-// auto-retry. Drive must return the error promptly, not block until ctx
-// cancels (the hang the unification briefly introduced).
+// TestDrive_ReturnsOnRetryableError is the regression guard: once a turn ends
+// on a retryable provider error (after the in-turn retry chain is exhausted),
+// Drive must return that error promptly, not block until ctx cancels (the hang
+// the unification briefly introduced). A sub-millisecond backoff keeps the
+// retries from making the test slow.
 func TestDrive_ReturnsOnRetryableError(t *testing.T) {
 	// A short timeout that is still far longer than a prompt return: if Drive
 	// hangs, the test fails by deadline; if it returns, it returns fast.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	eng := engine.New(errProvider{}, fake.Tools{}, fake.NewStore(), fake.NewClock(),
-		engine.Config{Model: "err", MaxIterations: 5})
+		engine.Config{Model: "err", MaxIterations: 5,
+			Retry: engine.RetryPolicy{MaxAttempts: 2, BaseBackoff: time.Microsecond, MaxBackoff: time.Microsecond}})
 	conv, err := eng.StartSession(ctx, "drive-err")
 	if err != nil {
 		t.Fatal(err)

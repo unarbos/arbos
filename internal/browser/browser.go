@@ -466,12 +466,14 @@ func (b *Browser) startScreencast(t *tab) {
 			if e.Frame.ParentID == "" {
 				b.setURL(t.id, e.Frame.URL)
 				Frames.Publish(t.stream, Update{URL: e.Frame.URL})
+				go b.publishNavState(t)
 			}
 		case *page.EventNavigatedWithinDocument:
 			// SPA route changes (history.pushState, hash) never fire
 			// frameNavigated, but the address still moved.
 			b.setURL(t.id, e.URL)
 			Frames.Publish(t.stream, Update{URL: e.URL})
+			go b.publishNavState(t)
 		}
 	})
 	_ = chromedp.Run(t.ctx, page.StartScreencast().
@@ -485,6 +487,29 @@ func (b *Browser) setURL(tabID, u string) {
 	b.urlMu.Lock()
 	b.lastURL[tabID] = u
 	b.urlMu.Unlock()
+}
+
+// publishNavState reads the tab's navigation history and publishes whether it
+// can go back/forward, so the viewer's controls grey out at the ends of
+// history. Run on its own goroutine off the navigation listener: the CDP
+// round-trip would deadlock chromedp's event loop if done inline (the same
+// reason the screencast ack is goroutine'd). Best-effort — a failure just
+// leaves the controls in their last state until the next navigation.
+func (b *Browser) publishNavState(t *tab) {
+	var cur int64
+	var entries []*page.NavigationEntry
+	err := chromedp.Run(t.ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		var e error
+		cur, entries, e = page.GetNavigationHistory().Do(ctx)
+		return e
+	}))
+	if err != nil {
+		return
+	}
+	Frames.Publish(t.stream, Update{Nav: &NavState{
+		CanBack:    cur > 0,
+		CanForward: cur < int64(len(entries)-1),
+	}})
 }
 
 /* ---------------------------- tab management ---------------------------- */
@@ -743,6 +768,15 @@ func (b *Browser) handleInput(t *tab, ev InputEvent) {
 				return chromedp.Navigate(u).Do(ctx)
 			}
 			return nil
+		case "back":
+			// The panel's back/forward/reload controls. NavigateBack/Forward
+			// return a harmless error at the ends of history (nothing to go
+			// to); this is best-effort, so that no-op is swallowed.
+			return chromedp.NavigateBack().Do(ctx)
+		case "forward":
+			return chromedp.NavigateForward().Do(ctx)
+		case "reload":
+			return chromedp.Reload().Do(ctx)
 		}
 		return nil
 	}))

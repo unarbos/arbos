@@ -136,6 +136,18 @@ func dispatch(args []string) error {
 		theme.Apply(cfg.theme)
 	}
 
+	// `arbos .` (or any existing directory) is the web door for that
+	// directory: it joins the default forest, and the directory's agent key
+	// derives a stable URL you return to with no login (ADR-0035). Anything
+	// that is not an existing directory stays a prompt, as before.
+	if cfg.web == "" && !cfg.serve && firstNonEmpty(cfg.query, cfg.prompt) == "" &&
+		len(rest) == 1 && isDirArg(rest[0]) {
+		if err := os.Chdir(rest[0]); err != nil {
+			return fmt.Errorf("open %s: %w", rest[0], err)
+		}
+		return runWeb(piwire.LoadConfig(), cfg.db, "127.0.0.1:8420", cfg.webDist, forest.DefaultHead, cfg.approve)
+	}
+
 	task := firstNonEmpty(cfg.query, cfg.prompt)
 	if tail := strings.TrimSpace(strings.Join(rest, " ")); tail != "" {
 		if task == "" {
@@ -165,6 +177,17 @@ func dispatch(args []string) error {
 		return runWeb(piCfg, cfg.db, cfg.web, cfg.webDist, cfg.forest, cfg.approve)
 	}
 	return run(piCfg, cfg.serve, cfg.db, task, session, cfg.approve, cfg.once || cfg.print)
+}
+
+// isDirArg reports whether a positional argument should open the web door
+// rooted there rather than be read as a prompt: "." / ".." or any path that
+// already exists as a directory.
+func isDirArg(s string) bool {
+	if s == "." || s == ".." {
+		return true
+	}
+	info, err := os.Stat(s)
+	return err == nil && info.IsDir()
 }
 
 func isCommand(s string) bool {
@@ -360,6 +383,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w)
 	printSection(w, "Arguments:", "")
 	_, _ = fmt.Fprintln(w, "  prompt                       Initial prompt for the agent")
+	_, _ = fmt.Fprintln(w, "  .|<dir>                      A directory opens the web door there with a stable forest URL")
 	_, _ = fmt.Fprintln(w)
 	printSection(w, "Options:", "")
 	flags := []helpFlag{

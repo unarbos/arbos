@@ -168,6 +168,52 @@ export async function fetchActivity(): Promise<Activity> {
   return (await res.json()) as Activity;
 }
 
+/** One execution of a plan node — its verdict and what it learned. */
+export interface PlanAttempt {
+  verdict: string;
+  outcome?: string;
+  session?: string;
+  at: number; // unix milliseconds
+}
+
+/**
+ * One goal in a plan's tree, with the full definition the detail view renders:
+ * the goal text, how it's checked, and the "code" that discharges it — the
+ * shell command (`cmd`), gate predicate (`cond`), or notify payload — plus the
+ * node's attempt history.
+ */
+export interface PlanNode {
+  node: number;
+  parent?: number;
+  seq: number;
+  goal: string;
+  check?: string;
+  cmd?: string;
+  cond?: string;
+  notify?: string;
+  executor: "shell" | "notify" | "agent" | "ask";
+  status: string;
+  when?: string;
+  outcome?: string;
+  assignee?: string;
+  attempts?: PlanAttempt[];
+}
+
+/** A whole plan: its root goal as a title plus every node's definition. */
+export interface Plan {
+  plan: number;
+  title: string;
+  chat?: string;
+  nodes: PlanNode[];
+}
+
+/** Fetch the whole plan a node belongs to (the goal tree + each node's code). */
+export async function fetchPlan(node: number): Promise<Plan> {
+  const res = await fetch(`/api/plan/${node}`);
+  if (!res.ok) throw new Error(`plan: ${res.status}`);
+  return (await res.json()) as Plan;
+}
+
 /** One live browser tab: its id, screencast stream, and last known URL. */
 export interface BrowserTab {
   id: string;
@@ -516,6 +562,41 @@ export async function createShareLink(): Promise<string> {
   if (!res.ok) throw new Error(await errorText(res, `share: ${res.status}`));
   const body = (await res.json()) as { url: string };
   return body.url;
+}
+
+/** What a scoped share link points at: one artifact in its own namespace. */
+export interface ShareScope {
+  kind: "file" | "session";
+  /** Workspace path for a file artifact; session id for a chat. */
+  ref: string;
+}
+
+/**
+ * Mint a scoped, read-only share link for a single artifact — narrower than
+ * createShareLink's full-agent invite. ttlSeconds of 0 means no expiry (capped
+ * server-side). Returns the /s/<token> URL. Fails (404) on hosts without an
+ * auth gate, where there's nothing to gate a link against.
+ */
+export async function shareArtifact(scope: ShareScope, ttlSeconds: number): Promise<string> {
+  const res = await fetch("/api/share/link", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope, ttl_seconds: ttlSeconds }),
+  });
+  if (!res.ok) throw new Error(await errorText(res, `share: ${res.status}`));
+  const body = (await res.json()) as { url: string };
+  return body.url;
+}
+
+/** Revoke a scoped link by its token (the /s/<token> tail), cascading to any
+ *  links delegated from it. Revoking an unknown token succeeds (idempotent). */
+export async function revokeShare(token: string): Promise<void> {
+  const res = await fetch(`/api/share/link/${encodeURIComponent(token)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(await errorText(res, `revoke: ${res.status}`));
+  }
 }
 
 /** Start dictation: the host machine begins capturing its own microphone. */

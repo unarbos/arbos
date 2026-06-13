@@ -65,10 +65,6 @@ func IsBroadcast(session string) bool {
 type Store interface {
 	// Notify appends one message for the user.
 	Notify(ctx context.Context, text, session string) error
-	// ClaimOutbox atomically claims every undelivered message for the named
-	// door and returns them oldest first. A claimed message belongs to that
-	// door: other doors will never see it.
-	ClaimOutbox(ctx context.Context, via string) ([]Message, error)
 }
 
 // Args are the arguments to the notify tool.
@@ -85,7 +81,7 @@ func RegisterTool(reg *tool.Registry, store Store) error {
 		return fmt.Errorf("notify schema: %w", err)
 	}
 	spec := tool.NewSpec("notify",
-		"Send the user a message that reaches them wherever they are — their open terminal, or their next arrival if no door is open. Use it when information must reach the user and your turn's reply will not (scheduled firings, finished background work, escalations). Never use it as a substitute for replying in conversation.",
+		"Send the user a durable message for when your turn's reply won't reach them on its own — a scheduled node firing, background or delegate work finishing, a mission blocked on them. It is delivered into the conversation the work belongs to (spawned sessions resolve to the chat that started them) and surfaces the next time that conversation is open; it never spills into an unrelated chat. Never use it as a substitute for replying in conversation.",
 		false,
 		func(ctx context.Context, a Args) (string, error) {
 			text := strings.TrimSpace(a.Message)
@@ -96,7 +92,7 @@ func RegisterTool(reg *tool.Registry, store Store) error {
 			if err := store.Notify(ctx, text, c.SessionID); err != nil {
 				return "", err
 			}
-			return "Queued for the user; the first open door delivers it.", nil
+			return "Queued for this conversation; it surfaces the next time its door is open.", nil
 		})
 	return reg.Register(spec, schema)
 }
@@ -105,9 +101,9 @@ func RegisterTool(reg *tool.Registry, store Store) error {
 func PromptInfo() codingspec.ToolPromptInfo {
 	return codingspec.ToolPromptInfo{
 		Name:    "notify",
-		Snippet: "Send the user a message that reaches them outside this conversation (scheduled reminders, finished background work)",
+		Snippet: "Send the user a durable message that surfaces in the conversation the work belongs to (scheduled reminders, finished background work)",
 		Guidelines: []string{
-			"Your replies reach only the conversation that prompted them. When the user must hear something outside it — a scheduled reminder firing, background work finishing, a blocked mission needing them — send it with notify.",
+			"Your replies reach only the conversation that prompted them. When the user must hear something your turn's reply won't carry — a scheduled reminder firing, background work finishing, a blocked mission needing them — send it with notify; it lands in the conversation the work belongs to, the next time that door is open.",
 			"Notify sparingly and concretely: one short message that stands alone, only when it genuinely concerns the user.",
 		},
 	}

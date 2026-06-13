@@ -455,10 +455,10 @@ export function ChatTab({
       onNotice: (text, session) => {
         // A notice addressed to THIS chat always renders here, focused or
         // not — it was claimed for this tab and exists nowhere else. Ambient
-        // ones (broadcast-class, or a stale sweep for a chat nobody has
-        // open) fan out to every connection; only the focused tab renders
-        // those (with a split two tabs are visible, exactly one is focused),
-        // so the user sees them exactly once.
+        // ones (broadcast-class, which belong to no chat) fan out to every
+        // connection; only the focused tab renders those (with a split two
+        // tabs are visible, exactly one is focused), so the user sees them
+        // exactly once.
         if (session === sessionRef.current || focusedRef.current) {
           dispatch({ type: "notice", text });
         }
@@ -1046,6 +1046,20 @@ export function ChatTab({
     (id: number, newText: string) => void resubmitEditRef.current(id, newText),
     [],
   );
+  // Retry: re-send the most recent user prompt as a fresh turn — the error
+  // card's button. Idle + connected only, so it cannot collide with a live
+  // turn; the resent message echoes as a new user row, the same as typing it.
+  const onRetry = useCallback(() => {
+    const seam = seamRef.current;
+    if (!seam || !usableRef.current || turnActiveRef.current) return;
+    const lastUser = [...itemsRef.current]
+      .reverse()
+      .find((it) => it.kind === "user");
+    if (!lastUser || lastUser.kind !== "user") return;
+    if (seam.prompt(lastUser.text, lastUser.parts)) {
+      dispatch({ type: "user", text: lastUser.text, parts: lastUser.parts });
+    }
+  }, []);
   const transcriptHooks = useMemo(
     () => ({
       children: chat.children,
@@ -1055,6 +1069,8 @@ export function ChatTab({
         handleRef.current.onOpenSurface?.(surface),
       onOpenTerminal: (term: TermRef) =>
         handleRef.current.onOpenTerminal?.(term),
+      onRetry,
+      canRetry: usable && !chat.turnActive,
       edit: {
         editingId,
         canEdit: usable,
@@ -1063,7 +1079,16 @@ export function ChatTab({
         onSubmit: onEditSubmit,
       },
     }),
-    [chat.children, editingId, usable, onEditStart, onEditCancel, onEditSubmit],
+    [
+      chat.children,
+      chat.turnActive,
+      editingId,
+      usable,
+      onRetry,
+      onEditStart,
+      onEditCancel,
+      onEditSubmit,
+    ],
   );
 
   /** Edit: pull a queued message back into the composer. */

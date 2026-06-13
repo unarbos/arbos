@@ -28,6 +28,10 @@
 # Files attached to a chat (the composer's paperclip spools them here)
 .arbos/attachments/
 .arbos/watch/
+# Per-process forest lock (machine state, not portable; the agent key is)
+.arbos/agent.lock
+# Telegram bot registry — holds bot tokens, strictly per-directory, never committed
+.arbos/messenger/
 
 # Web UI build deps (dist/ is committed: go:embed needs it)
 web/node_modules/

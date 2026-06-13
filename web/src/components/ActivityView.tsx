@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Orbit, Repeat, X } from "lucide-react";
+import { Loader2, MessageSquare, Orbit, Repeat, X } from "lucide-react";
 
 import {
   cancelPlanNode,
@@ -28,9 +28,12 @@ function age(ms: number): string {
  */
 export function ActivityView({
   onOpenChat,
+  onOpenPlan,
   onBusy,
 }: {
   onOpenChat: (chat: string) => void;
+  /** Open the plan detail view (goal tree + code) for a node. */
+  onOpenPlan?: (node: number) => void;
   /** Any run live right now — drives the tab strip's spinner. */
   onBusy?: (busy: boolean) => void;
 }) {
@@ -94,7 +97,8 @@ export function ActivityView({
                   <StandingRow
                     key={t.node}
                     task={t}
-                    onOpen={t.chat ? () => onOpenChat(t.chat!) : undefined}
+                    onOpen={onOpenPlan ? () => onOpenPlan(t.node) : undefined}
+                    onOpenChat={t.chat ? () => onOpenChat(t.chat!) : undefined}
                     onCancel={() => cancel(t.node)}
                   />
                 ))}
@@ -140,10 +144,14 @@ function Section({
 function StandingRow({
   task,
   onOpen,
+  onOpenChat,
   onCancel,
 }: {
   task: StandingTask;
+  /** Open the plan detail view (goal tree + code). */
   onOpen?: () => void;
+  /** Open the owning conversation. */
+  onOpenChat?: () => void;
   onCancel: () => void;
 }) {
   return (
@@ -153,7 +161,7 @@ function StandingRow({
         type="button"
         onClick={onOpen}
         disabled={!onOpen}
-        title={onOpen ? "Open owning chat" : undefined}
+        title={onOpen ? "View plan & code" : undefined}
         className={`min-w-0 flex-1 text-left ${onOpen ? "cursor-pointer" : "cursor-default"}`}
       >
         <div className="break-words text-[12.5px] text-text">
@@ -164,6 +172,16 @@ function StandingRow({
           <div className="truncate text-[11.5px] text-faint">{task.outcome}</div>
         )}
       </button>
+      {onOpenChat && (
+        <button
+          type="button"
+          onClick={onOpenChat}
+          title="Open owning chat"
+          className="mt-0.5 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-hover hover:text-text"
+        >
+          <MessageSquare size={11} />
+        </button>
+      )}
       <button
         type="button"
         onClick={onCancel}

@@ -11,9 +11,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -152,6 +154,43 @@ func ReadSnippet(r io.Reader) string {
 	buf := make([]byte, 512)
 	n, _ := r.Read(buf)
 	return strings.TrimSpace(string(buf[:n]))
+}
+
+// NonOKError builds the typed *ports.ProviderError for a non-200 response so
+// the engine's retry loop can classify it (ports.ProviderError.Retryable)
+// without parsing the message. It reads a diagnostic snippet and the server's
+// Retry-After hint; the caller still owns closing resp.Body. name prefixes the
+// message so a log line names the failing adapter.
+func NonOKError(name string, resp *http.Response) error {
+	return &ports.ProviderError{
+		StatusCode: resp.StatusCode,
+		RetryAfter: ParseRetryAfter(resp.Header),
+		Err:        fmt.Errorf("%s: status %d: %s", name, resp.StatusCode, ReadSnippet(resp.Body)),
+	}
+}
+
+// TransportError wraps a request-level failure (DNS, connection reset, TLS,
+// the client timeout) as a *ports.ProviderError with no status, which the
+// engine treats as retryable — a dropped connection is the canonical ephemeral
+// break a long-running run must ride through rather than abort on.
+func TransportError(name string, err error) error {
+	return &ports.ProviderError{Err: fmt.Errorf("%s: request: %w", name, err)}
+}
+
+// ParseRetryAfter reads the Retry-After header in its delta-seconds form (the
+// shape every LLM provider sends on a 429/503). An HTTP-date form or an
+// unparseable value yields 0 — the retry loop then falls back to its own
+// exponential backoff. A negative value is clamped to 0.
+func ParseRetryAfter(h http.Header) time.Duration {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // ScanSSE reads newline-delimited SSE from r, invoking onData with each payload

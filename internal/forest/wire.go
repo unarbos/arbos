@@ -49,19 +49,22 @@ type tokenResp struct {
 	ExpiresIn   int    `json:"expires_in"` // seconds
 }
 
-// heartbeatReq is POST /v1/nodes/heartbeat (bearer). For the anonymous tier
-// the heartbeat is also the lease: the head assigns a name on first beat and
-// extends it on every subsequent one.
+// heartbeatReq is POST /v1/nodes/heartbeat (bearer). The heartbeat is also the
+// lease: the first beat mints the lease, every beat extends it. AgentKey (the
+// node's per-directory public key, ADR-0035) composes with the device to
+// derive a stable name, so the same (machine, directory) reclaims its URL on
+// every run; empty names the device alone.
 type heartbeatReq struct {
-	Host string   `json:"host,omitempty"`
-	Cwd  string   `json:"cwd,omitempty"`
-	Caps []string `json:"caps,omitempty"`
+	Host     string   `json:"host,omitempty"`
+	Cwd      string   `json:"cwd,omitempty"`
+	Caps     []string `json:"caps,omitempty"`
+	AgentKey string   `json:"agent_key,omitempty"` // base64 (std) ed25519 public key
 }
 
 // heartbeatResp carries the lease. TTL and cadence are head-controlled so
 // abuse pressure is tunable server-side without shipping new node binaries.
 type heartbeatResp struct {
-	Name             string `json:"name"` // assigned, never chosen (anonymous tier)
+	Name             string `json:"name"` // derived from the agent identity (ADR-0035)
 	URL              string `json:"url"`  // public base URL for this node
 	TTLSeconds       int    `json:"ttl_seconds"`
 	HeartbeatSeconds int    `json:"heartbeat_seconds"`

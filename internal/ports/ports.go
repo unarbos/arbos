@@ -28,6 +28,58 @@ type LLMProvider interface {
 	Stream(ctx context.Context, req core.LLMRequest) (<-chan core.LLMChunk, error)
 }
 
+// ProviderError is a classifiable failure from an LLMProvider, returned by
+// Stream so the engine's retry loop can tell a transient hiccup (rate limit,
+// 5xx, a dropped connection) from a permanent one (bad request, dead key)
+// WITHOUT parsing error strings — the seam that lets long-running work survive
+// an ephemeral provider break instead of ending the turn on the first failure.
+//
+// StatusCode is the HTTP status when the failure was a response (0 for a
+// transport/network error, which is retryable by default — a connection reset
+// mid-handshake is the canonical ephemeral break). RetryAfter carries the
+// server's backoff hint when it sent one (0 = none); the retry loop honors it
+// over its own backoff. Adapters build these via providerkit so classification
+// lives in one place.
+type ProviderError struct {
+	StatusCode int
+	RetryAfter time.Duration
+	Err        error
+}
+
+func (e *ProviderError) Error() string {
+	if e == nil || e.Err == nil {
+		return "provider error"
+	}
+	return e.Err.Error()
+}
+
+func (e *ProviderError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// Retryable reports whether re-issuing the same request could plausibly
+// succeed. A transport error (no status) is retryable; among HTTP statuses
+// only the transient class is (request timeout, too-early, rate limit, and the
+// 5xx family including Anthropic's 529 overloaded). A 4xx like 400/401/403/404
+// is a permanent client error — retrying it just burns the turn's deadline.
+func (e *ProviderError) Retryable() bool {
+	if e == nil {
+		return false
+	}
+	if e.StatusCode == 0 {
+		return true
+	}
+	switch e.StatusCode {
+	case 408, 425, 429, 500, 502, 503, 504, 529:
+		return true
+	default:
+		return false
+	}
+}
+
 // Capabilities advertises what a provider supports so the engine can adapt the
 // request (vision payloads, reasoning config, tool calling) without per-provider
 // branching in the loop.

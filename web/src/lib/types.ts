@@ -68,6 +68,13 @@ export interface Usage {
 
 export type StopReason = "answered" | "max_steps" | "terminated" | "length_limit";
 
+/**
+ * Kernel ErrorEvent category (core.ErrorKind): what kind of failure ended the
+ * turn, so the error card can render an apt title and tone instead of parsing
+ * the message string.
+ */
+export type ErrorKind = "provider" | "history" | "persist" | "internal";
+
 /** One selectable answer to a Question (mirrors core.QuestionOption). */
 export interface QuestionOption {
   id: string;
@@ -103,7 +110,10 @@ export type KernelEvent =
       data: { final_response: string; stop_reason: StopReason; usage: Usage };
     }
   | { kind: "interrupted"; data?: Record<string, never> }
-  | { kind: "error"; data: { category: string; retryable: boolean; error: string } }
+  | {
+      kind: "error";
+      data: { category: ErrorKind; retryable: boolean; error: string };
+    }
   | { kind: "queued"; data: { text: string; origin?: string; parts?: ContentBlock[] } }
   | {
       kind: "approval_request";

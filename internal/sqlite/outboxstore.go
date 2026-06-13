@@ -11,9 +11,10 @@ import (
 )
 
 // This file is the storage half of the agent's voice (the "outbox"):
-// undelivered messages to the user, claimed atomically by whichever door
-// reaches them first. Delivery semantics live in internal/outbox; this is
-// dumb rows, like the atom and plan files.
+// undelivered messages to the user, claimed atomically by the door that holds
+// the originating conversation open (broadcast-class rows, which have no
+// conversation, by any door). Delivery semantics live in internal/outbox;
+// this is dumb rows, like the atom and plan files.
 
 // Notify appends one undelivered message for the user, stamped by the session
 // that spoke. Sugar for NotifyFrom with no source (never coalesced).
@@ -25,20 +26,21 @@ func (s *Store) Notify(ctx context.Context, text, session string) error {
 // cycle or a bug, and the message simply stays addressed where the walk stops.
 const ownerChainMax = 8
 
-// NotifyFrom appends one undelivered message. The message is ADDRESSED to a
-// principal and PREFERS the conversation it came from:
+// NotifyFrom appends one undelivered message, BOUND to the conversation it
+// came from:
 //
 //   - the stamping session's owner chain (chat → wake → delegate …) resolves
 //     to its root conversation, so machine-spawned work speaks into the chat
 //     that created it, however deep the nesting;
-//   - the principal rides along as the durable address — delivery may fall
-//     back to any of the principal's doors, but never to another principal.
+//   - the principal rides along as the durable address (so a future
+//     multi-user gateway never crosses principals); delivery is scoped to
+//     that conversation's own door — there is no fallback to another chat.
 //
 // A non-empty source (e.g. "node:12") makes the message COALESCING: a new
 // firing supersedes its own undelivered predecessor, so a recurring ping
-// never piles up while no door is open — the next door gets the latest
-// reading, not the backlog. The same latest-per-source rule the projection
-// applies to injected context (core.ContextPayload).
+// never piles up while its conversation is closed — the next time that door
+// opens it gets the latest reading, not the backlog. The same latest-per-
+// source rule the projection applies to injected context (core.ContextPayload).
 func (s *Store) NotifyFrom(ctx context.Context, text, session, source string) error {
 	principal := ""
 	cur := session
@@ -93,14 +95,6 @@ func (s *Store) NotifyFrom(ctx context.Context, text, session, source string) er
 	return nil
 }
 
-// ClaimOutbox atomically claims every undelivered message for one door and
-// returns them oldest first. Claim-then-deliver inside one transaction under
-// the write lock: doors racing across processes serialize on SQLite's write
-// lock, so a message is only ever returned to one caller.
-func (s *Store) ClaimOutbox(ctx context.Context, via string) ([]outbox.Message, error) {
-	return s.claimOutbox(ctx, via, "", nil)
-}
-
 // ClaimOutboxFor is the addressed claim: it takes the principal's messages —
 // never another principal's — and only those that belong to a session this
 // door holds open:
@@ -116,13 +110,6 @@ func (s *Store) ClaimOutbox(ctx context.Context, via string) ([]outbox.Message, 
 // (e.g. a throwaway `arbos -once` session that never reopens) stays self-
 // contained instead of spilling into whatever door happens to be open.
 func (s *Store) ClaimOutboxFor(ctx context.Context, via, principal string, sessions []string) ([]outbox.Message, error) {
-	if sessions == nil {
-		sessions = []string{}
-	}
-	return s.claimOutbox(ctx, via, principal, sessions)
-}
-
-func (s *Store) claimOutbox(ctx context.Context, via, principal string, sessions []string) ([]outbox.Message, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -132,21 +119,28 @@ func (s *Store) claimOutbox(ctx context.Context, via, principal string, sessions
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	query := `SELECT id, message, session_id, created_at FROM outbox
-		  WHERE delivered_at = 0`
-	var args []any
-	if sessions != nil {
-		// Address first: only this principal's mail (rows from before the
-		// principal column exist as '' and stay claimable by any door).
-		query += ` AND principal IN (?, '')`
-		args = append(args, principal)
-		scoped := append(append([]string{}, outbox.BroadcastSessions...), sessions...)
-		query += ` AND session_id IN (?` + strings.Repeat(",?", len(scoped)-1) + `)`
-		for _, sid := range scoped {
-			args = append(args, sid)
-		}
+	// Address first: only this principal's mail (rows from before the
+	// principal column exist as '' and stay claimable by any door). Then
+	// scope to the conversations this door holds open, plus the broadcast
+	// markers that belong to no conversation. scoped is never empty (the
+	// broadcast markers are always present), so the IN clause is well-formed
+	// even when this door holds no sessions.
+	scoped := append(append([]string{}, outbox.BroadcastSessions...), sessions...)
+	if len(scoped) == 0 {
+		// Defensive: the broadcast markers keep scoped non-empty in practice,
+		// so the IN-clause placeholder math below never underflows. Guard
+		// anyway — a future edit emptying BroadcastSessions must degrade to
+		// "claim nothing", not panic under the write lock.
+		return nil, nil
 	}
-	query += ` ORDER BY id`
+	query := `SELECT id, message, session_id, created_at FROM outbox
+		  WHERE delivered_at = 0 AND principal IN (?, '')
+		  AND session_id IN (?` + strings.Repeat(",?", len(scoped)-1) + `)
+		  ORDER BY id`
+	args := []any{principal}
+	for _, sid := range scoped {
+		args = append(args, sid)
+	}
 
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {

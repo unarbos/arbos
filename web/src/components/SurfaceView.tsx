@@ -1,13 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeft,
+  ArrowRight,
   Check,
   ChevronRight,
+  Columns3,
+  Component,
+  Copy,
   ExternalLink,
   FileText,
   Folder,
   Loader2,
   Plus,
   RotateCw,
+  Rows3,
+  Share2,
+  Star,
+  Terminal,
   X,
 } from "lucide-react";
 
@@ -18,9 +27,11 @@ import {
   createBrowserTab,
   fetchFile,
   HttpError,
+  shareArtifact,
   writeFile,
   type FileInfo,
 } from "@/lib/api";
+import { columnCount, delimiterFor, parseCsv, toCsv } from "@/lib/csv";
 import {
   dirSurface,
   fileSurface,
@@ -85,15 +96,19 @@ export function SurfaceView({
   const editor = surface.kind === "prompt";
   const browser = surface.kind === "dir";
   const live = surface.kind === "screencast";
+  // A sheet is an editable grid that owns its own load/save/poll, like the
+  // text editor below — it takes the whole tab, no slim header.
+  const sheet = surface.kind === "sheet";
   // Text surfaces ARE their own editor (headerless); canvas/image keep a slim
   // header since there's nothing to type into.
   const editable = surface.kind === "doc" || surface.kind === "code";
 
   const docVisible = useDocumentVisible();
   useEffect(() => {
-    // Canvas/image refresh by re-srcing on this poll; text surfaces own their
-    // own change-watching (TextSurface), and the browser owns its (DirSurface).
-    if (!active || !docVisible || editor || browser || editable || live) return;
+    // Canvas/image refresh by re-srcing on this poll; text surfaces and sheets
+    // own their own change-watching (TextSurface/SheetSurface), and the browser
+    // owns its (DirSurface).
+    if (!active || !docVisible || editor || browser || editable || live || sheet) return;
     let stop = false;
     const check = () => {
       fetchFile(surface.path, true)
@@ -117,7 +132,7 @@ export function SurfaceView({
       stop = true;
       window.clearInterval(id);
     };
-  }, [active, docVisible, editor, browser, editable, surface.path]);
+  }, [active, docVisible, editor, browser, editable, live, sheet, surface.path]);
 
   const src = `${rawUrl(surface.path)}?v=${tick}`;
 
@@ -143,6 +158,12 @@ export function SurfaceView({
   // just the file the way a normal editor opens one (it autosaves).
   if (editable) {
     return <TextSurface surface={surface} active={active} />;
+  }
+
+  // A CSV/TSV file opens as an editable grid — same headerless, autosaving,
+  // disk-watching contract as TextSurface, just cells instead of lines.
+  if (sheet) {
+    return <SheetSurface surface={surface} active={active} />;
   }
 
   // A live browser screencast: frames stream over a WebSocket, painted as they
@@ -177,6 +198,7 @@ export function SurfaceView({
         >
           <RotateCw size={12} />
         </button>
+        <SharePanelButton path={surface.path} />
         <a
           href={rawUrl(surface.path)}
           target="_blank"
@@ -210,6 +232,143 @@ export function SurfaceView({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// shareTTLs are the link lifetimes the panel offers, in seconds (0 = no
+// expiry). A standing share is a standing exposure, so a bounded life is the
+// default; "no expiry" is last and opt-in.
+const shareTTLs: { label: string; seconds: number }[] = [
+  { label: "1 hour", seconds: 3600 },
+  { label: "1 day", seconds: 86400 },
+  { label: "7 days", seconds: 604800 },
+  { label: "No expiry", seconds: 0 },
+];
+
+/**
+ * The panel-level Share affordance: mints a scoped, read-only link to this one
+ * artifact (the tab-level doorway from the share design — same dialog a board
+ * share will reuse). The link is a bearer capability; anyone with it can view
+ * this file (and its sibling assets) for the chosen lifetime, nothing else.
+ * On a loopback-only host the endpoint 404s and the popover says why.
+ */
+function SharePanelButton({ path }: { path: string }) {
+  const [open, setOpen] = useState(false);
+  const [ttl, setTtl] = useState(86400);
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  // Re-minting on a TTL change would orphan the prior link, so reset the
+  // minted URL whenever the inputs change and let the user create again.
+  useEffect(() => {
+    setUrl(null);
+    setCopied(false);
+  }, [ttl, path]);
+
+  const copy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  const create = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const link = await shareArtifact({ kind: "file", ref: path }, ttl);
+      setUrl(link);
+      await copy(link);
+    } catch {
+      setError("Sharing needs a remotely reachable arbos (a forest join or a non-loopback bind).");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div ref={rootRef} className="relative flex shrink-0">
+      <button
+        type="button"
+        title="Share this panel"
+        onClick={() => setOpen((o) => !o)}
+        className="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted transition-colors hover:bg-hover hover:text-text"
+      >
+        <Share2 size={12} />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-7 z-50 flex w-72 flex-col gap-2 rounded-lg border border-line bg-card p-3 shadow-xl shadow-black/40">
+          <div className="text-[12px] font-semibold text-bright">Share this panel</div>
+          {error ? (
+            <div className="text-[12px] text-muted">{error}</div>
+          ) : (
+            <>
+              <label className="flex items-center justify-between gap-2 text-[12px] text-muted">
+                Link expires
+                <select
+                  value={ttl}
+                  onChange={(e) => setTtl(Number(e.target.value))}
+                  className="rounded-md border border-line bg-panel px-2 py-1 text-[12px] text-text outline-none focus:border-accent"
+                >
+                  {shareTTLs.map((t) => (
+                    <option key={t.seconds} value={t.seconds}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {!url ? (
+                <button
+                  type="button"
+                  onClick={() => void create()}
+                  disabled={busy}
+                  className="flex items-center justify-center gap-1.5 rounded-md bg-btn px-2 py-1.5 text-[12px] font-semibold text-canvas transition-colors hover:bg-bright disabled:opacity-60"
+                >
+                  {busy ? <Loader2 size={12} className="animate-spin" /> : null}
+                  Create link
+                </button>
+              ) : (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    readOnly
+                    value={url}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="min-w-0 flex-1 truncate rounded-md border border-line bg-panel px-2 py-1 font-mono text-[11px] text-text outline-none"
+                  />
+                  <button
+                    type="button"
+                    title="Copy"
+                    onClick={() => void copy(url)}
+                    className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-hover hover:text-text"
+                  >
+                    {copied ? <Check size={13} /> : <Copy size={13} />}
+                  </button>
+                </div>
+              )}
+              <div className="text-[11.5px] text-muted">
+                {url
+                  ? `${copied ? "Copied. " : ""}Read-only link to this artifact. Anyone with it can view until it expires.`
+                  : "Mints a read-only link to this artifact alone."}
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -294,6 +453,9 @@ function ScreencastSurface({
 }) {
   const [frame, setFrame] = useState<string | null>(null);
   const [url, setUrl] = useState("");
+  // Whether the live tab can go back/forward — drives the controls' greying,
+  // updated from the screencast stream on every navigation.
+  const [nav, setNav] = useState({ canBack: false, canForward: false });
   // The address bar's in-progress edit; null = not editing, show the live URL.
   const [draft, setDraft] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -305,14 +467,19 @@ function ScreencastSurface({
     wsRef.current = ws;
     ws.onmessage = (e) => {
       if (stop) return;
-      let u: { frame?: string; url?: string };
+      let u: {
+        frame?: string;
+        url?: string;
+        nav?: { canBack: boolean; canForward: boolean };
+      };
       try {
-        u = JSON.parse(e.data as string) as { frame?: string; url?: string };
+        u = JSON.parse(e.data as string) as typeof u;
       } catch {
         return;
       }
       if (u.frame) setFrame(u.frame);
       if (u.url) setUrl(u.url);
+      if (u.nav) setNav(u.nav);
     };
     return () => {
       stop = true;
@@ -337,14 +504,55 @@ function ScreencastSurface({
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex h-9 shrink-0 select-none items-center gap-2 border-b border-line/70 px-3">
-        <span className="shrink-0 truncate text-[12.5px] text-bright">
-          {surfaceTitle(surface)}
-        </span>
+      <div className="flex h-9 shrink-0 select-none items-center gap-1 border-b border-line/70 px-2">
+        {/* Nav controls, Cursor-style: back/forward navigate real history
+            (greyed at the ends), reload re-fetches; star is a placeholder. */}
+        <button
+          type="button"
+          title="Go back"
+          disabled={!nav.canBack}
+          onClick={() => send({ t: "back" })}
+          className={`flex size-6 shrink-0 items-center justify-center rounded-md transition-colors ${
+            nav.canBack
+              ? "cursor-pointer text-muted hover:bg-hover hover:text-text"
+              : "cursor-default text-faint/50"
+          }`}
+        >
+          <ArrowLeft size={14} />
+        </button>
+        <button
+          type="button"
+          title="Go forward"
+          disabled={!nav.canForward}
+          onClick={() => send({ t: "forward" })}
+          className={`flex size-6 shrink-0 items-center justify-center rounded-md transition-colors ${
+            nav.canForward
+              ? "cursor-pointer text-muted hover:bg-hover hover:text-text"
+              : "cursor-default text-faint/50"
+          }`}
+        >
+          <ArrowRight size={14} />
+        </button>
+        <button
+          type="button"
+          title="Reload this page"
+          onClick={() => send({ t: "reload" })}
+          className="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted transition-colors hover:bg-hover hover:text-text"
+        >
+          <RotateCw size={13} />
+        </button>
+        <button
+          type="button"
+          title="Bookmark this page (coming soon)"
+          className="flex size-6 shrink-0 cursor-default items-center justify-center rounded-md text-faint"
+        >
+          <Star size={13} />
+        </button>
         {/* The address bar: shows where the browser is, and navigates it —
             type a URL (or a search) and press Enter. Esc abandons the edit. */}
         <input
           value={draft ?? url}
+          title="Enter a URL or search the web"
           placeholder="Enter a URL or search"
           spellCheck={false}
           onFocus={(e) => {
@@ -369,8 +577,23 @@ function ScreencastSurface({
               e.currentTarget.blur();
             }
           }}
-          className="min-w-0 flex-1 truncate rounded-md border border-line/60 bg-canvas/60 px-2 py-0.5 font-mono text-[11px] text-muted outline-none transition-colors focus:border-accent/60 focus:text-text"
+          className="ml-1 min-w-0 flex-1 truncate rounded-md border border-line/60 bg-canvas/60 px-2 py-0.5 font-mono text-[11px] text-muted outline-none transition-colors focus:border-accent/60 focus:text-text"
         />
+        {/* DevTools toggles, Cursor-style — placeholders for now. */}
+        <button
+          type="button"
+          title="Console (coming soon)"
+          className="flex size-6 shrink-0 cursor-default items-center justify-center rounded-md text-faint"
+        >
+          <Terminal size={13} />
+        </button>
+        <button
+          type="button"
+          title="Components (coming soon)"
+          className="flex size-6 shrink-0 cursor-default items-center justify-center rounded-md text-faint"
+        >
+          <Component size={13} />
+        </button>
         <button
           type="button"
           title="New browser tab"
@@ -609,47 +832,96 @@ function TextSurface({
     );
   }
 
+  // A markdown doc wears a Preview/Markdown toggle — rendered view vs its
+  // source. Preview still drops to source on double-click and the source
+  // editor returns to preview on Esc, but the toggle makes the switch explicit.
+  // The source editor autosaves like any text file; a truncated read shows its
+  // source read-only since a save would only write back the slice we hold.
+  if (surface.kind === "doc") {
+    return (
+      <div className="flex size-full flex-col">
+        {missing && <MissingNotice />}
+        <div className="flex h-9 shrink-0 select-none items-center border-b border-line/70 px-3">
+          <DocModeToggle
+            mode={editMode ? "source" : "preview"}
+            onMode={(m) => setEditMode(m === "source")}
+          />
+        </div>
+        {!editMode ? (
+          <div className="min-h-0 flex-1 overflow-auto">
+            <div
+              onDoubleClick={() => !truncated && setEditMode(true)}
+              title={truncated ? undefined : "Double-click to edit"}
+              className="mx-auto w-full max-w-4xl px-4 py-4"
+            >
+              <Markdown content={draft} />
+            </div>
+          </div>
+        ) : canEdit ? (
+          <>
+            <CodeEditor
+              value={draft}
+              onChange={setDraft}
+              highlight={false}
+              onSave={() => {
+                if (dirty) flush(draft);
+              }}
+              onExit={() => setEditMode(false)}
+            />
+            <div className="flex h-7 shrink-0 select-none items-center gap-2 border-t border-line/70 px-3 text-[11px]">
+              {saveError ? (
+                <span className="min-w-0 flex-1 truncate text-red">{saveError}</span>
+              ) : (
+                <SaveStatus saving={saving} dirty={dirty} hint="Esc to preview" />
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-auto">
+            <pre className="whitespace-pre-wrap break-words px-4 py-3 font-mono text-[12px] leading-[1.55] text-text/90">
+              {draft}
+            </pre>
+            {truncated && (
+              <div className="px-4 pb-3 text-[11.5px] text-faint">
+                Truncated — the file is larger than the panel reads, so it opens
+                read-only.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // A code file IS the editor — headerless, autosaving.
   if (canEdit) {
-    const doc = surface.kind === "doc";
     return (
       <div className="flex size-full flex-col">
         {missing && <MissingNotice />}
         <CodeEditor
           value={draft}
           onChange={setDraft}
-          highlight={!doc}
+          highlight
           onSave={() => {
             if (dirty) flush(draft);
           }}
-          // A doc drops back to its rendered view on Esc; code stays an editor.
-          onExit={doc ? () => setEditMode(false) : undefined}
         />
         <div className="flex h-7 shrink-0 select-none items-center gap-2 border-t border-line/70 px-3 text-[11px]">
           {saveError ? (
             <span className="min-w-0 flex-1 truncate text-red">{saveError}</span>
           ) : (
-            <SaveStatus saving={saving} dirty={dirty} hint={doc ? "Esc to preview" : ""} />
+            <SaveStatus saving={saving} dirty={dirty} />
           )}
         </div>
       </div>
     );
   }
 
-  // Read-only: a rendered markdown doc (double-click to edit its source), or a
-  // truncated code read we can't safely save back.
+  // Read-only: a truncated code read we can't safely save back.
   return (
     <div className="flex size-full flex-col">
       {missing && <MissingNotice />}
       <div className="min-h-0 flex-1 overflow-auto">
-      {surface.kind === "doc" ? (
-        <div
-          onDoubleClick={() => !truncated && setEditMode(true)}
-          title={truncated ? undefined : "Double-click to edit"}
-          className="mx-auto w-full max-w-4xl px-4 py-4"
-        >
-          <Markdown content={draft} />
-        </div>
-      ) : (
         <pre className="px-4 py-3 font-mono text-[12px] leading-[1.55] text-text/90">
           {draft.split("\n").map((line, i) => (
             <div key={i} className="whitespace-pre">
@@ -657,13 +929,316 @@ function TextSurface({
             </div>
           ))}
         </pre>
-      )}
-      {truncated && (
-        <div className="px-4 pb-3 text-[11.5px] text-faint">
-          Truncated — the file is larger than the panel reads, so it opens
-          read-only.
-        </div>
-      )}
+        {truncated && (
+          <div className="px-4 pb-3 text-[11.5px] text-faint">
+            Truncated — the file is larger than the panel reads, so it opens
+            read-only.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The Preview/Markdown segmented toggle a markdown doc wears: rendered view vs
+ * its source. A quiet pill that mirrors the editor's own header chrome.
+ */
+function DocModeToggle({
+  mode,
+  onMode,
+}: {
+  mode: "preview" | "source";
+  onMode: (m: "preview" | "source") => void;
+}) {
+  const seg = (m: "preview" | "source", label: string) => (
+    <button
+      type="button"
+      onClick={() => onMode(m)}
+      aria-pressed={mode === m}
+      className={`cursor-pointer rounded px-2 py-0.5 text-[11.5px] transition-colors ${
+        mode === m ? "bg-hover text-bright" : "text-muted hover:text-text"
+      }`}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="flex items-center gap-0.5 rounded-md border border-line/60 bg-panel p-0.5">
+      {seg("preview", "Preview")}
+      {seg("source", "Markdown")}
+    </div>
+  );
+}
+
+/** Spreadsheet column header for a 0-based index: 0→A, 25→Z, 26→AA. */
+function colLabel(index: number): string {
+  let n = index + 1;
+  let label = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    label = String.fromCharCode(65 + rem) + label;
+    n = Math.floor((n - 1) / 26);
+  }
+  return label;
+}
+
+/**
+ * A CSV/TSV file as an editable spreadsheet grid — the sheet surface. Same
+ * contract as TextSurface: the file *is* the panel, edits autosave a beat after
+ * you stop typing (the serialized grid written back through the gateway), and
+ * while the grid is clean it polls disk so an agent rewriting the file refreshes
+ * the cells — a dirty edit is never clobbered. The delimiter follows the
+ * extension (tab for .tsv/.tab, comma otherwise). A truncated or binary read
+ * opens read-only, since a save would only write back the slice we hold.
+ */
+function SheetSurface({
+  surface,
+  active,
+}: {
+  surface: Surface;
+  active: boolean;
+}) {
+  const delim = useMemo(() => delimiterFor(surface.path), [surface.path]);
+  const [state, setState] = useState<
+    | { phase: "loading" }
+    | { phase: "error"; message: string }
+    | { phase: "ready"; truncated: boolean; binary: boolean }
+  >({ phase: "loading" });
+  // `rows` is what's on screen; `saved` is the serialized file as last written
+  // or read (normalized through toCsv, so a clean load isn't spuriously dirty).
+  const [rows, setRows] = useState<string[][]>([]);
+  const [saved, setSaved] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [missing, setMissing] = useState(false);
+  const mtimeRef = useRef(0);
+
+  const ready = state.phase === "ready";
+  const truncated = ready && state.truncated;
+  const canEdit = ready && !truncated && !(ready && state.binary);
+  const serialized = useMemo(() => toCsv(rows, delim), [rows, delim]);
+  const dirty = ready && serialized !== saved;
+
+  // Load the file (and reload whenever the tab points at a new path).
+  useEffect(() => {
+    let stale = false;
+    fetchFile(surface.path)
+      .then((info) => {
+        if (stale) return;
+        mtimeRef.current = info.mtime;
+        const parsed = parseCsv(info.content ?? "", delim);
+        setState({
+          phase: "ready",
+          truncated: info.truncated ?? false,
+          binary: info.binary ?? false,
+        });
+        setRows(parsed);
+        setSaved(toCsv(parsed, delim));
+        setSaveError("");
+      })
+      .catch((e: unknown) => {
+        if (!stale) {
+          setState({
+            phase: "error",
+            message: e instanceof Error ? e.message : String(e),
+          });
+        }
+      });
+    return () => {
+      stale = true;
+    };
+  }, [surface.path, delim]);
+
+  // Pick up external writes while the grid is clean; a dirty edit is left alone.
+  const docVisible = useDocumentVisible();
+  useEffect(() => {
+    if (!active || !docVisible || !ready || dirty) return;
+    let stop = false;
+    const id = window.setInterval(() => {
+      fetchFile(surface.path)
+        .then((info) => {
+          if (stop) return;
+          setMissing(false);
+          if (info.mtime === mtimeRef.current) return;
+          mtimeRef.current = info.mtime;
+          const parsed = parseCsv(info.content ?? "", delim);
+          setRows(parsed);
+          setSaved(toCsv(parsed, delim));
+          setState((s) =>
+            s.phase === "ready"
+              ? { ...s, truncated: info.truncated ?? false }
+              : s,
+          );
+        })
+        .catch((e: unknown) => {
+          if (!stop && isGone(e)) setMissing(true);
+        });
+    }, STAT_POLL_MS);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, [active, docVisible, ready, dirty, surface.path, delim]);
+
+  const flush = useCallback(
+    (text: string) => {
+      setSaving(true);
+      setSaveError("");
+      writeFile(surface.path, text)
+        .then((info) => {
+          mtimeRef.current = info.mtime;
+          setSaved(text);
+        })
+        .catch((e: unknown) => {
+          setSaveError(e instanceof Error ? e.message : String(e));
+        })
+        .finally(() => setSaving(false));
+    },
+    [surface.path],
+  );
+
+  // Autosave a beat after the last edit, rescheduled on every keystroke.
+  useEffect(() => {
+    if (!canEdit || !dirty) return;
+    const id = window.setTimeout(() => flush(serialized), AUTOSAVE_MS);
+    return () => window.clearTimeout(id);
+  }, [serialized, canEdit, dirty, flush]);
+
+  // Flush a pending edit if the tab closes before the debounce fired.
+  const pending = useRef<{ path: string; text: string } | null>(null);
+  pending.current = dirty ? { path: surface.path, text: serialized } : null;
+  useEffect(
+    () => () => {
+      const p = pending.current;
+      if (p) writeFile(p.path, p.text).catch(() => {});
+    },
+    [surface.path],
+  );
+
+  const setCell = useCallback((r: number, c: number, value: string) => {
+    setRows((prev) => {
+      const next = prev.map((row) => row.slice());
+      while (next.length <= r) next.push([]);
+      const row = next[r];
+      while (row.length <= c) row.push("");
+      row[c] = value;
+      return next;
+    });
+  }, []);
+
+  const addRow = useCallback(() => {
+    setRows((prev) => {
+      const width = Math.max(columnCount(prev), 1);
+      return [...prev.map((r) => r.slice()), Array.from({ length: width }, () => "")];
+    });
+  }, []);
+
+  const addColumn = useCallback(() => {
+    setRows((prev) => (prev.length ? prev : [[]]).map((r) => [...r, ""]));
+  }, []);
+
+  if (state.phase === "loading") {
+    return (
+      <div className="flex items-center gap-2 p-4 text-faint">
+        <Loader2 size={13} className="animate-spin" /> Loading…
+      </div>
+    );
+  }
+  if (state.phase === "error") {
+    return <div className="p-4 text-[12.5px] text-red">{state.message}</div>;
+  }
+  if (state.binary) {
+    return (
+      <div className="p-4 text-faint">
+        Binary file — open it in a browser tab instead.
+      </div>
+    );
+  }
+
+  const cols = Math.max(columnCount(rows), 1);
+  const gutter =
+    "sticky left-0 z-10 select-none border border-line/60 bg-panel px-2 text-center text-[11px] text-faint";
+
+  return (
+    <div className="flex size-full flex-col">
+      {missing && <MissingNotice />}
+      <div className="min-h-0 flex-1 overflow-auto">
+        <table className="border-collapse text-[12px]">
+          <thead>
+            <tr>
+              <th className={`${gutter} top-0 z-20`} />
+              {Array.from({ length: cols }, (_, c) => (
+                <th
+                  key={c}
+                  className="sticky top-0 z-10 min-w-[7rem] select-none border border-line/60 bg-panel px-2 py-1 text-center text-[11px] font-medium text-muted"
+                >
+                  {colLabel(c)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, r) => (
+              <tr key={r}>
+                <td className={gutter}>{r + 1}</td>
+                {Array.from({ length: cols }, (_, c) => (
+                  <td
+                    key={c}
+                    className="min-w-[7rem] border border-line/60 p-0 align-top"
+                  >
+                    {canEdit ? (
+                      <input
+                        value={row[c] ?? ""}
+                        onChange={(e) => setCell(r, c, e.target.value)}
+                        spellCheck={false}
+                        className="w-full bg-transparent px-2 py-1 text-text outline-none focus:bg-hover"
+                      />
+                    ) : (
+                      <span className="block truncate px-2 py-1 text-text/90">
+                        {row[c] ?? ""}
+                      </span>
+                    )}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {truncated && (
+          <div className="px-4 py-2 text-[11.5px] text-faint">
+            Truncated — the file is larger than the panel reads, so it opens
+            read-only.
+          </div>
+        )}
+      </div>
+      <div className="flex h-7 shrink-0 select-none items-center gap-2 border-t border-line/70 px-3 text-[11px]">
+        {canEdit && (
+          <>
+            <button
+              type="button"
+              onClick={addRow}
+              title="Add a row"
+              className="flex shrink-0 cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-muted transition-colors hover:bg-hover hover:text-text"
+            >
+              <Rows3 size={12} /> Row
+            </button>
+            <button
+              type="button"
+              onClick={addColumn}
+              title="Add a column"
+              className="flex shrink-0 cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-muted transition-colors hover:bg-hover hover:text-text"
+            >
+              <Columns3 size={12} /> Column
+            </button>
+            <span className="h-3.5 w-px shrink-0 bg-line/70" />
+          </>
+        )}
+        {saveError ? (
+          <span className="min-w-0 flex-1 truncate text-red">{saveError}</span>
+        ) : (
+          <SaveStatus saving={saving} dirty={dirty} />
+        )}
       </div>
     </div>
   );

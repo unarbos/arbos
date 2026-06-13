@@ -142,6 +142,8 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		DistillModel:   cfg.Config.DistillModel,
 		Reasoning:      cfg.Config.Reasoning,
 		CacheRetention: core.CacheShort,
+		FallbackModels: cfg.Config.FallbackModels,
+		RetryAttempts:  cfg.Config.RetryAttempts,
 		ExtraRuntimes:  extraRT,
 	}
 	if prefs != nil {

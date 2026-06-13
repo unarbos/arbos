@@ -90,11 +90,11 @@ func (p *Provider) Stream(ctx context.Context, req core.LLMRequest) (<-chan core
 
 	resp, err := p.base.HTTPClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("openai: request: %w", err)
+		return nil, providerkit.TransportError("openai", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer func() { _ = resp.Body.Close() }()
-		return nil, fmt.Errorf("openai: status %d: %s", resp.StatusCode, providerkit.ReadSnippet(resp.Body))
+		return nil, providerkit.NonOKError("openai", resp)
 	}
 
 	out := make(chan core.LLMChunk, 16)

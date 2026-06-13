@@ -44,6 +44,10 @@ type Client struct {
 	Base string
 	// KeyPath is the device key seed (LoadOrCreateDeviceKey).
 	KeyPath string
+	// AgentDir is the workspace whose per-directory key (<dir>/.arbos/agent.key)
+	// composes with the device to derive a stable URL (ADR-0035). Empty leaves
+	// the name a function of the device alone.
+	AgentDir string
 	// Handler is served to tunneled requests — the same gateway handler the
 	// local listener serves, auth gate included. Serving it directly off the
 	// tunnel (no loopback hop) is deliberate: tunneled requests must never
@@ -53,10 +57,11 @@ type Client struct {
 	OnJoin func(JoinInfo)
 	Logf   func(format string, args ...any)
 
-	httpc *http.Client
-	key   ed25519.PrivateKey
-	devID string
-	token string
+	httpc    *http.Client
+	key      ed25519.PrivateKey
+	agentKey string // base64 ed25519 public key of AgentDir's agent key
+	devID    string
+	token    string
 }
 
 const (
@@ -77,6 +82,13 @@ func (c *Client) Run(ctx context.Context) error {
 		return fmt.Errorf("device key: %w", err)
 	}
 	c.key = key
+	if c.AgentDir != "" {
+		ak, err := LoadOrCreateAgentKey(c.AgentDir)
+		if err != nil {
+			return fmt.Errorf("agent key: %w", err)
+		}
+		c.agentKey = base64.StdEncoding.EncodeToString(ak.Public().(ed25519.PublicKey))
+	}
 
 	backoff := joinBackoffMin
 	for {
@@ -168,7 +180,7 @@ func (c *Client) heartbeat(ctx context.Context) (heartbeatResp, error) {
 	host, _ := os.Hostname()
 	cwd, _ := os.Getwd()
 	var resp heartbeatResp
-	err := c.post(ctx, "/v1/nodes/heartbeat", heartbeatReq{Host: host, Cwd: cwd}, &resp)
+	err := c.post(ctx, "/v1/nodes/heartbeat", heartbeatReq{Host: host, Cwd: cwd, AgentKey: c.agentKey}, &resp)
 	if err != nil {
 		return resp, fmt.Errorf("heartbeat: %w", err)
 	}
@@ -199,6 +211,9 @@ func (c *Client) beat(ctx context.Context, every time.Duration) {
 // and serves the gateway handler on it. Blocks until the session dies.
 func (c *Client) tunnel(ctx context.Context) error {
 	wsURL := strings.Replace(c.Base, "http", "ws", 1) + tunnelPath
+	if c.agentKey != "" {
+		wsURL += "?agent=" + url.QueryEscape(c.agentKey)
+	}
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + c.token}},
 	})
@@ -207,13 +222,20 @@ func (c *Client) tunnel(ctx context.Context) error {
 	}
 	conn.SetReadLimit(-1)
 	nc := websocket.NetConn(ctx, conn, websocket.MessageBinary)
-	sess, err := yamux.Server(nc, nil)
+	// Route yamux's own logging through Logf and silence it during shutdown:
+	// the default config logs to stderr, so a Ctrl-C (which cancels ctx and
+	// fails the session's blocked frame read with "context canceled") would
+	// otherwise dump a raw "[ERR] yamux: ..." line. A live session's errors
+	// still surface.
+	muxCfg := yamux.DefaultConfig()
+	muxCfg.LogOutput = nil
+	muxCfg.Logger = yamuxLogger{ctx: ctx, logf: c.Logf}
+	sess, err := yamux.Server(nc, muxCfg)
 	if err != nil {
 		_ = conn.Close(websocket.StatusInternalError, "yamux")
 		return fmt.Errorf("tunnel mux: %w", err)
 	}
 	defer func() { _ = sess.Close() }()
-	c.Logf("forest: tunnel established")
 
 	// One HTTP server per tunnel: streams are its connections. RemoteAddr on
 	// these is the yamux pseudo-address — unparseable as host:port, which the
@@ -232,6 +254,27 @@ func (c *Client) tunnel(ctx context.Context) error {
 	}
 	return err
 }
+
+// yamuxLogger adapts yamux's logger to the client's Logf and suppresses it
+// while ctx is canceled. yamux runs a read loop blocked on the next frame
+// header; on shutdown the canceled context fails that read with "context
+// canceled", which is expected teardown, not an error worth printing. Errors
+// on a still-live session pass through to Logf, prefixed as forest output.
+type yamuxLogger struct {
+	ctx  context.Context
+	logf func(format string, args ...any)
+}
+
+func (l yamuxLogger) emit(msg string) {
+	if l.logf == nil || l.ctx.Err() != nil {
+		return
+	}
+	l.logf("forest: %s", strings.TrimSpace(msg))
+}
+
+func (l yamuxLogger) Print(v ...any)                 { l.emit(fmt.Sprint(v...)) }
+func (l yamuxLogger) Printf(format string, v ...any) { l.emit(fmt.Sprintf(format, v...)) }
+func (l yamuxLogger) Println(v ...any)               { l.emit(fmt.Sprintln(v...)) }
 
 // post sends JSON (bearer-authenticated when a token is held) and decodes
 // the response.

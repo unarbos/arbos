@@ -56,7 +56,8 @@ type Head struct {
 	nonces  map[string]nonceRec  // by device id
 	tokens  map[string]tokenRec  // by opaque token
 	leases  map[string]*lease    // by name
-	byDev   map[string]*lease    // by device id
+	agents  map[string]string    // agent id -> assigned name (persisted, ADR-0035)
+	names   map[string]string    // name -> agent id (in-memory reverse index)
 }
 
 type deviceRec struct {
@@ -121,12 +122,22 @@ func NewHead(cfg HeadConfig) (*Head, error) {
 		nonces:  map[string]nonceRec{},
 		tokens:  map[string]tokenRec{},
 		leases:  map[string]*lease{},
-		byDev:   map[string]*lease{},
+		agents:  map[string]string{},
+		names:   map[string]string{},
 	}
 	if err := head.loadState(); err != nil {
 		return nil, err
 	}
 	return head, nil
+}
+
+// persistState is the head's durable state: registered devices and the
+// agent-id -> name assignments that keep a node's URL stable across restarts
+// (ADR-0035). An older head wrote a bare array of devices; loadState still
+// reads that shape so an in-place upgrade keeps existing devices.
+type persistState struct {
+	Devices []deviceRec       `json:"devices"`
+	Agents  map[string]string `json:"agents"`
 }
 
 func (h *Head) loadState() error {
@@ -140,27 +151,37 @@ func (h *Head) loadState() error {
 	if err != nil {
 		return err
 	}
-	var devs []deviceRec
-	if err := json.Unmarshal(b, &devs); err != nil {
-		return fmt.Errorf("forest state %s: %w", h.cfg.StatePath, err)
+	var st persistState
+	if err := json.Unmarshal(b, &st); err != nil {
+		// Legacy format: a top-level array of devices, no agent names.
+		var devs []deviceRec
+		if err2 := json.Unmarshal(b, &devs); err2 != nil {
+			return fmt.Errorf("forest state %s: %w", h.cfg.StatePath, err)
+		}
+		st.Devices = devs
 	}
-	for _, d := range devs {
+	for _, d := range st.Devices {
 		h.devices[d.PublicKey] = d
 		h.byID[d.DeviceID] = d
+	}
+	for id, name := range st.Agents {
+		h.agents[id] = name
+		h.names[name] = id
 	}
 	return nil
 }
 
-// saveState persists the device registry. Called with h.mu held.
+// saveState persists the device registry and agent-name assignments. Called
+// with h.mu held.
 func (h *Head) saveState() {
 	if h.cfg.StatePath == "" {
 		return
 	}
-	devs := make([]deviceRec, 0, len(h.devices))
+	st := persistState{Devices: make([]deviceRec, 0, len(h.devices)), Agents: h.agents}
 	for _, d := range h.devices {
-		devs = append(devs, d)
+		st.Devices = append(st.Devices, d)
 	}
-	b, err := json.MarshalIndent(devs, "", "  ")
+	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return
 	}
@@ -331,9 +352,11 @@ func (h *Head) authDevice(r *http.Request) string {
 	return rec.deviceID
 }
 
-// handleHeartbeat is the lease for the anonymous tier: first beat assigns a
-// name, every beat extends it. The response carries the head-controlled TTL
-// and cadence.
+// handleHeartbeat is the lease: the first beat mints it, every beat extends
+// it. The name is derived from the agent identity (device key composed with
+// the node's per-directory key, ADR-0035), so the same (machine, directory)
+// reclaims its URL on every run and one device can hold many leases (one per
+// directory). The response carries the head-controlled TTL and cadence.
 func (h *Head) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	dev := h.authDevice(r)
 	if dev == "" {
@@ -343,16 +366,32 @@ func (h *Head) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var req heartbeatReq
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
+	id, err := h.resolveAgentID(dev, req.AgentKey)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+
 	h.mu.Lock()
-	l := h.byDev[dev]
-	if l == nil {
-		name := mintName()
-		for h.leases[name] != nil {
+	name := h.agents[id]
+	if name == "" {
+		// First sight of this agent: mint a readable name and remember it, so
+		// the URL is stable across restarts and grind-proof (the name is
+		// assigned, not a function of the keys). Retry past the rare clash in
+		// the assigned set, so an agent is never stuck.
+		name = mintName()
+		for h.names[name] != "" {
 			name = mintName()
 		}
+		h.agents[id] = name
+		h.names[name] = id
+		h.saveState()
+		h.cfg.Logf("forest: assigned %s to agent %s", name, id[:12])
+	}
+	l := h.leases[name]
+	if l == nil {
 		l = &lease{name: name, deviceID: dev}
 		h.leases[name] = l
-		h.byDev[dev] = l
 		h.cfg.Logf("forest: leased %s.%s to %s", name, h.cfg.Domain, dev)
 	}
 	h.mu.Unlock()
@@ -369,6 +408,34 @@ func (h *Head) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// resolveAgentID returns the stable identity for (device, agent-key): the
+// device public key (the head's own record — the bearer token already proved
+// the caller holds the device key) composed with the node's per-directory
+// agent key, hashed. The head maps this id to a remembered name, so two
+// callers reach the same lease only when they share an identity (same machine
+// + directory), and a name assigned to one id is never handed to another. An
+// empty agent key names the device alone.
+func (h *Head) resolveAgentID(dev, agentKeyB64 string) (string, error) {
+	h.mu.Lock()
+	rec, ok := h.byID[dev]
+	h.mu.Unlock()
+	if !ok {
+		return "", fmt.Errorf("unknown device")
+	}
+	devPub, err := base64.StdEncoding.DecodeString(rec.PublicKey)
+	if err != nil {
+		return "", fmt.Errorf("device key unreadable")
+	}
+	var agentPub []byte
+	if agentKeyB64 != "" {
+		agentPub, err = base64.StdEncoding.DecodeString(agentKeyB64)
+		if err != nil || len(agentPub) != ed25519.PublicKeySize {
+			return "", fmt.Errorf("agent_key must be a base64 ed25519 key")
+		}
+	}
+	return hex.EncodeToString(agentDigest(devPub, agentPub)), nil
+}
+
 // handleTunnel upgrades to WebSocket and becomes the lease's transport: a
 // yamux session where the head opens one stream per proxied request. The
 // handler blocks for the tunnel's lifetime — the WebSocket dies with the
@@ -379,8 +446,16 @@ func (h *Head) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "unauthorized", "valid bearer token required")
 		return
 	}
+	id, err := h.resolveAgentID(dev, r.URL.Query().Get("agent"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
 	h.mu.Lock()
-	l := h.byDev[dev]
+	var l *lease
+	if name := h.agents[id]; name != "" {
+		l = h.leases[name]
+	}
 	h.mu.Unlock()
 	if l == nil {
 		writeErr(w, http.StatusConflict, "no_lease", "heartbeat before tunneling")
@@ -519,7 +594,6 @@ func (h *Head) Sweep(ctx context.Context) {
 				_ = sess.Close()
 			}
 			delete(h.leases, name)
-			delete(h.byDev, l.deviceID)
 			h.cfg.Logf("forest: lease %s expired", name)
 		}
 		h.mu.Unlock()

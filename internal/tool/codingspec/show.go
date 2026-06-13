@@ -27,15 +27,15 @@ type surfaceDetails struct {
 }
 
 type surface struct {
-	Kind  string `json:"kind"`            // canvas | image | doc | pdf | code | dir
+	Kind  string `json:"kind"`            // canvas | image | doc | pdf | code | sheet | dir
 	Path  string `json:"path"`            // workspace-relative when under root, else absolute
 	Title string `json:"title,omitempty"` // panel/tab label
 }
 
 // surfaceKind classifies a file by extension into the viewer the UI picks:
 // HTML renders in a sandboxed iframe (a canvas), markdown as a document,
-// images directly, PDFs in the browser's native viewer, and everything else as
-// code.
+// images directly, PDFs in the browser's native viewer, CSV/TSV as an editable
+// spreadsheet grid, and everything else as code.
 func surfaceKind(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".html", ".htm":
@@ -46,6 +46,8 @@ func surfaceKind(path string) string {
 		return "image"
 	case ".pdf":
 		return "pdf"
+	case ".csv", ".tsv", ".tab":
+		return "sheet"
 	default:
 		return "code"
 	}
@@ -53,7 +55,7 @@ func surfaceKind(path string) string {
 
 func showSpec(root string) tool.Spec {
 	return tool.NewRichSpec("show",
-		"Present a file or folder to the user in a panel beside the chat: an HTML canvas, an image, a markdown document, a code file, or a browsable directory. Use it after producing a visual artifact instead of telling the user to open the file themselves. HTML canvases are themed by the panel: style them with the arbos `--color-*` design tokens (var(--color-token, fallback)), never a hardcoded palette.",
+		"Present a file or folder to the user in a panel beside the chat: an HTML canvas, an image, a markdown document, a code file, a CSV/TSV spreadsheet (an editable grid), or a browsable directory. Use it after producing a visual artifact instead of telling the user to open the file themselves. HTML canvases are themed by the panel: style them with the arbos `--color-*` design tokens (var(--color-token, fallback)), never a hardcoded palette.",
 		true,
 		func(_ context.Context, a ShowArgs) (tool.Result, error) {
 			if strings.TrimSpace(a.Path) == "" {
