@@ -27,6 +27,7 @@ import (
 	"github.com/unarbos/arbos/internal/piwire"
 	"github.com/unarbos/arbos/internal/secret"
 	"github.com/unarbos/arbos/internal/settings"
+	"github.com/unarbos/arbos/internal/theme"
 	"github.com/unarbos/arbos/internal/tool/codingspec"
 	"github.com/unarbos/arbos/web"
 )
@@ -363,18 +364,37 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	}
 }
 
-// loginLink renders a login URL for the console. On a terminal it is colored
-// (cyan, underlined) and wrapped in an OSC 8 hyperlink so the URL is clickable;
-// when output is piped or NO_COLOR is set it stays a bare URL so logs and pipes
-// get clean text. The single login line is the whole of a successful startup's
-// output, so it is worth making it the obvious thing to click.
+// loginLink renders a login URL for the console using the TUI's palette: it
+// underlines the URL in theme.Accent (the color the agent uses for links and
+// filenames) and wraps it in an OSC 8 hyperlink so terminals make it clickable.
+// The accent is emitted as a single truecolor SGR pair sourced from the active
+// palette, so it tracks the dark/light theme. Piped output or NO_COLOR leaves a
+// bare URL so logs and pipes stay clean.
 func loginLink(u string) string {
 	if os.Getenv("NO_COLOR") != "" || !term.IsTerminal(os.Stderr.Fd()) {
 		return u
 	}
-	// OSC 8 hyperlink (\x1b]8;;URL\x1b\\ TEXT \x1b]8;;\x1b\\) with the visible
-	// text styled underlined cyan (\x1b[4;36m … \x1b[0m).
-	return "\x1b]8;;" + u + "\x1b\\" + "\x1b[4;36m" + u + "\x1b[0m" + "\x1b]8;;\x1b\\"
+	open, close := "\x1b[4m", "\x1b[0m" // underline; colored when the accent parses
+	if r, g, b, ok := hexRGB(string(theme.Accent)); ok {
+		open = fmt.Sprintf("\x1b[4;38;2;%d;%d;%dm", r, g, b)
+	}
+	// OSC 8 hyperlink: \x1b]8;;URL\x1b\\ <styled text> \x1b]8;;\x1b\\
+	return "\x1b]8;;" + u + "\x1b\\" + open + u + close + "\x1b]8;;\x1b\\"
+}
+
+// hexRGB parses a "#rrggbb" color into its components. It tolerates a missing
+// leading '#'; any other shape returns ok=false so the caller falls back to an
+// uncolored style.
+func hexRGB(s string) (r, g, b int, ok bool) {
+	s = strings.TrimPrefix(s, "#")
+	if len(s) != 6 {
+		return 0, 0, 0, false
+	}
+	v, err := strconv.ParseUint(s, 16, 32)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	return int(v>>16) & 0xff, int(v>>8) & 0xff, int(v) & 0xff, true
 }
 
 // lockForestDir takes an advisory lock on <dir>/.arbos/agent.lock so only one
