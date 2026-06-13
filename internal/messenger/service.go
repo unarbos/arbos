@@ -1001,10 +1001,9 @@ func (s *Service) buildPrompt(ctx context.Context, b *botRunner, cv *convo, msg 
 	}
 
 	if msg.voice != nil {
-		switch {
-		case s.cfg.Transcribe == nil:
+		if s.cfg.Transcribe == nil {
 			text = strings.TrimSpace("[voice message — no transcriber configured] " + text)
-		default:
+		} else {
 			audio, err := b.client.fetchFile(ctx, msg.voice.FileID)
 			if err != nil {
 				return core.PromptIntent{}, fmt.Errorf("voice: %w", err)
@@ -1262,6 +1261,8 @@ func turnInFlight(ev core.Event) (flight, known bool) {
 			return true, true
 		case core.RoleAssistant:
 			return len(p.Message.ToolCalls) > 0, true
+		default:
+			// System/tool messages say nothing about turn progress.
 		}
 		return false, false
 	case core.ToolResultPayload:
@@ -1304,6 +1305,8 @@ func (s *Service) mirrorEvent(ctx context.Context, bot *botRunner, cv *convo, ev
 			}
 		}
 		s.mirrorImages(ctx, bot, cv, m.Parts)
+	default:
+		// System and tool messages aren't mirrored to the phone.
 	}
 }
 

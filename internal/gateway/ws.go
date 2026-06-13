@@ -49,7 +49,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer c.Close(websocket.StatusInternalError, "gateway teardown")
+	defer func() { _ = c.Close(websocket.StatusInternalError, "gateway teardown") }()
 	// A prompt can carry base64-encoded image attachments (ADR-0022), which dwarf
 	// a text turn; 1 MiB would reject them. 32 MiB covers several inline images
 	// while still bounding a hostile client.
@@ -87,10 +87,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	err = control.Serve(ctx, s.Engine, pr, lw, s.NewSessionID, s.Drain)
 	if err != nil && ctx.Err() == nil {
-		c.Close(websocket.StatusInternalError, "seam: "+err.Error())
+		_ = c.Close(websocket.StatusInternalError, "seam: "+err.Error())
 		return
 	}
-	c.Close(websocket.StatusNormalClosure, "")
+	_ = c.Close(websocket.StatusNormalClosure, "")
 }
 
 // wsLineWriter sends each seam write as one text message. control.Serve's

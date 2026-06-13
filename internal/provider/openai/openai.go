@@ -379,6 +379,8 @@ func visionContentPart(b core.ContentBlock) (wireContentPart, bool) {
 				},
 			}, true
 		}
+	default:
+		// Non-media blocks (e.g. text) carry no vision content part.
 	}
 	return wireContentPart{}, false
 }

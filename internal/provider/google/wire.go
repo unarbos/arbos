@@ -185,6 +185,8 @@ func mediaPart(b core.ContentBlock) (wirePart, bool) {
 		if b.File != nil {
 			return wirePart{InlineData: &wireInlineData{MimeType: b.File.MimeType, Data: b.File.Data}}, true
 		}
+	default:
+		// Non-media blocks (e.g. text) carry no inline-data part.
 	}
 	return wirePart{}, false
 }

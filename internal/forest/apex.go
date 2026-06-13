@@ -113,7 +113,7 @@ func (h *Head) serveLanding(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		n := len(h.leases)
 		h.mu.Unlock()
-		fmt.Fprintf(w, "arbos forest head — %d active lease(s)\n", n)
+		_, _ = fmt.Fprintf(w, "arbos forest head — %d active lease(s)\n", n)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

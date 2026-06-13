@@ -89,7 +89,7 @@ func (s *Server) handleMessengerWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer c.Close(websocket.StatusInternalError, "messenger teardown")
+	defer func() { _ = c.Close(websocket.StatusInternalError, "messenger teardown") }()
 	ctx := r.Context()
 	go keepAlive(ctx, c)
 	// Drain inbound frames so pongs are processed and a client close is seen.

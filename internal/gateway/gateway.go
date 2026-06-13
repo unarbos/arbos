@@ -210,8 +210,8 @@ func (s *Server) DeliverOutbox(ctx context.Context) {
 				continue
 			}
 			line := append(b, '\n')
-			// Route to the owning chat's connections; broadcast-class and
-			// stale-swept messages (whose chat has no connection) go to every
+			// Route to the owning chat's connections; broadcast-class rows
+			// (which belong to no chat) have no owner, so they go to every
 			// client, which renders them once in the visible tab.
 			targets := bySession[m.Session]
 			if len(targets) == 0 {
@@ -786,6 +786,8 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 				out = append(out, replayJSON{Type: "user", Seq: ev.Seq, Text: m.Content, Parts: m.Parts})
 			case core.RoleAssistant:
 				out = append(out, replayJSON{Type: "assistant", Seq: ev.Seq, Text: m.Content, Parts: m.Parts, ToolCalls: m.ToolCalls, Citations: m.Citations})
+			default:
+				// System and tool messages aren't part of the replayed transcript.
 			}
 		case core.ToolResultPayload:
 			out = append(out, replayJSON{

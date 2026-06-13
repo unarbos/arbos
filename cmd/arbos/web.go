@@ -68,7 +68,7 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	// per-child: it is not a secret, and the re-exec passes os.Environ()
 	// through, so the value stays correct across swaps.
 	if exe, err := os.Executable(); err == nil {
-		os.Setenv("ARBOS_EXE", exe)
+		_ = os.Setenv("ARBOS_EXE", exe)
 	}
 	go host.Engine.WatchRestart(ctx, engine.RestartConfig{
 		Logf: func(f string, a ...any) { fmt.Fprintf(os.Stderr, "arbos "+f+"\n", a...) },

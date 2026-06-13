@@ -160,7 +160,7 @@ func (c *tgClient) call(ctx context.Context, method string, params any, result a
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var envelope struct {
 		OK          bool            `json:"ok"`
 		Description string          `json:"description"`
@@ -294,7 +294,7 @@ func (c *tgClient) download(ctx context.Context, filePath string) ([]byte, error
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("telegram download: %s", resp.Status)
 	}
@@ -344,7 +344,7 @@ func (c *tgClient) sendPhoto(ctx context.Context, chatID int64, img []byte) erro
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var envelope struct {
 		OK          bool   `json:"ok"`
 		Description string `json:"description"`

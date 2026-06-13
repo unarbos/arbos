@@ -31,7 +31,7 @@ type Authorizer interface {
 
 // ToolResultText renders the text a tool result contributes to the text-only
 // tool/function-result wire channel: the Content plus any text blocks. Image and
-// file blocks are deliberately NOT placeheld here — every provider can carry
+// file blocks are deliberately NOT replaced with a placeholder here — every provider can carry
 // them on *some* channel, so the adapters render them as real vision content
 // (Anthropic/Google in the same tool turn, OpenAI in a following user message)
 // via ToolResultVisionParts. A tool result's pixels therefore reach a

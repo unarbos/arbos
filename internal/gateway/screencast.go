@@ -63,7 +63,7 @@ func (s *Server) handleScreencast(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer c.Close(websocket.StatusInternalError, "screencast teardown")
+	defer func() { _ = c.Close(websocket.StatusInternalError, "screencast teardown") }()
 	ctx := r.Context()
 	// A static page emits no frames; pings keep the idle socket from being
 	// reaped by intermediaries (the input-read goroutine answers the pongs).

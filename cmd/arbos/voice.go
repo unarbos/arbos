@@ -166,7 +166,7 @@ func (v *hostVoice) Stop(ctx context.Context) (string, error) {
 	if recDir == "" {
 		return "", errors.New("no recording in progress")
 	}
-	defer os.RemoveAll(recDir)
+	defer func() { _ = os.RemoveAll(recDir) }()
 
 	if err := os.WriteFile(stop, nil, 0o644); err != nil {
 		return "", fmt.Errorf("signal voice helper: %w", err)

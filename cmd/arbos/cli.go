@@ -127,10 +127,10 @@ func dispatch(args []string) error {
 		}
 	}
 	if cfg.model != "" {
-		os.Setenv("ARBOS_MODEL", cfg.model)
+		_ = os.Setenv("ARBOS_MODEL", cfg.model)
 	}
 	if cfg.theme != "" {
-		os.Setenv("ARBOS_THEME", cfg.theme)
+		_ = os.Setenv("ARBOS_THEME", cfg.theme)
 		theme.Apply(cfg.theme)
 	}
 
@@ -215,10 +215,10 @@ func runWebCommand(cfg cliConfig, args []string) error {
 		}
 	}
 	if cfg.model != "" {
-		os.Setenv("ARBOS_MODEL", cfg.model)
+		_ = os.Setenv("ARBOS_MODEL", cfg.model)
 	}
 	if cfg.theme != "" {
-		os.Setenv("ARBOS_THEME", cfg.theme)
+		_ = os.Setenv("ARBOS_THEME", cfg.theme)
 		theme.Apply(cfg.theme)
 	}
 	return runWeb(piwire.LoadConfig(), cfg.db, addr, cfg.webDist, forestURL, cfg.approve)
@@ -297,10 +297,10 @@ func runResume(cfg cliConfig, args []string) error {
 		}
 	}
 	if cfg.model != "" {
-		os.Setenv("ARBOS_MODEL", cfg.model)
+		_ = os.Setenv("ARBOS_MODEL", cfg.model)
 	}
 	if cfg.theme != "" {
-		os.Setenv("ARBOS_THEME", cfg.theme)
+		_ = os.Setenv("ARBOS_THEME", cfg.theme)
 		theme.Apply(cfg.theme)
 	}
 	piCfg := piwire.LoadConfig()
@@ -319,14 +319,14 @@ func printCommandHelp(w io.Writer, args []string) {
 	case "web":
 		printSection(w, "Usage:", "  arbos web [addr] [--local | --forest <url>]")
 		printSection(w, "Serve the web UI (loopback, default 127.0.0.1:8420) and join the default forest for a public, auth-gated URL.", "")
-		fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
 		printSection(w, "Options:", "")
 		printHelpFlag(w, "--local", "Serve locally only; do not join a forest")
 		printHelpFlag(w, "--forest <url>", fmt.Sprintf("Join this forest head instead of the default (%s)", forest.DefaultHead))
 	case "upgrade":
 		printSection(w, "Usage:", "  arbos upgrade [--to <path>]")
 		printSection(w, "Replace the running arbos binary with a newer one; a serving instance hot-swaps it at its next idle moment. Inside an arbos source checkout this builds the checkout; elsewhere it installs the latest release.", "")
-		fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
 		printSection(w, "Options:", "")
 		printHelpFlag(w, "--to <path>", "Binary to replace (default: ARBOS_EXE from a serving instance, else this executable)")
 	case "ls":
@@ -338,23 +338,23 @@ func printCommandHelp(w io.Writer, args []string) {
 	case "export":
 		printSection(w, "Usage:", "  arbos export [--all] [--messages] [session-id...]")
 		printSection(w, "Export session trajectories as JSONL on stdout.", "")
-		fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
 		printSection(w, "Options:", "")
 		printHelpFlag(w, "--all", "Export every session in the store (including machine-spawned runs)")
 		printHelpFlag(w, "--messages", "Render each session as one provider-facing conversation (system prompt, tools, and messages) instead of raw events")
 	default:
-		fmt.Fprintf(w, "Unknown command %q\n\n", args[0])
+		_, _ = fmt.Fprintf(w, "Unknown command %q\n\n", args[0])
 		printUsage(w)
 	}
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintf(w, "Usage: %s [options] [command] [prompt...]\n\n", helpName)
-	fmt.Fprintln(w, "Start the Arbos coding agent")
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintf(w, "Usage: %s [options] [command] [prompt...]\n\n", helpName)
+	_, _ = fmt.Fprintln(w, "Start the Arbos coding agent")
+	_, _ = fmt.Fprintln(w)
 	printSection(w, "Arguments:", "")
-	fmt.Fprintln(w, "  prompt                       Initial prompt for the agent")
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "  prompt                       Initial prompt for the agent")
+	_, _ = fmt.Fprintln(w)
 	printSection(w, "Options:", "")
 	flags := []helpFlag{
 		{"-v, --version", "Output the version number"},
@@ -378,7 +378,7 @@ func printUsage(w io.Writer) {
 	for _, f := range flags {
 		printHelpFlag(w, f.name, f.desc)
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 	printSection(w, "Commands:", "")
 	commands := []helpFlag{
 		{"web [addr]", "Serve the web UI and join the default forest for a public URL (--local to stay off it)"},
@@ -391,7 +391,7 @@ func printUsage(w io.Writer) {
 	for _, c := range commands {
 		printHelpFlag(w, c.name, c.desc)
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 	printSection(w, "Environment:", "")
 	envs := []helpFlag{
 		{"OPENROUTER_API_KEY", "OpenRouter API key (default onboarding path)"},
@@ -415,22 +415,22 @@ const helpNameWidth = 30
 
 func printSection(w io.Writer, title, body string) {
 	if title != "" {
-		fmt.Fprintln(w, title)
+		_, _ = fmt.Fprintln(w, title)
 	}
 	if body != "" {
-		fmt.Fprintln(w, body)
+		_, _ = fmt.Fprintln(w, body)
 	}
 }
 
 func printHelpFlag(w io.Writer, name, desc string) {
 	lines := wrapHelp(desc, 72-helpNameWidth)
 	if len(lines) == 0 {
-		fmt.Fprintf(w, "  %-*s\n", helpNameWidth, name)
+		_, _ = fmt.Fprintf(w, "  %-*s\n", helpNameWidth, name)
 		return
 	}
-	fmt.Fprintf(w, "  %-*s %s\n", helpNameWidth, name, lines[0])
+	_, _ = fmt.Fprintf(w, "  %-*s %s\n", helpNameWidth, name, lines[0])
 	for _, ln := range lines[1:] {
-		fmt.Fprintf(w, "  %-*s %s\n", helpNameWidth, "", ln)
+		_, _ = fmt.Fprintf(w, "  %-*s %s\n", helpNameWidth, "", ln)
 	}
 }
 

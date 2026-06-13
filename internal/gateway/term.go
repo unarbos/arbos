@@ -93,7 +93,7 @@ func (h *termHost) create(cwd string) (*termSession, error) {
 		client := t.client
 		t.mu.Unlock()
 		if client != nil {
-			client.Close(websocket.StatusNormalClosure, "shell exited")
+			_ = client.Close(websocket.StatusNormalClosure, "shell exited")
 		}
 	}()
 
@@ -136,13 +136,13 @@ func (t *termSession) attach(r *http.Request, c *websocket.Conn) {
 	t.mu.Unlock()
 
 	if prev != nil {
-		prev.Close(websocket.StatusPolicyViolation, "attached elsewhere")
+		_ = prev.Close(websocket.StatusPolicyViolation, "attached elsewhere")
 	}
 	if len(scroll) > 0 {
 		_ = c.Write(ctx, websocket.MessageBinary, scroll)
 	}
 	if exited {
-		c.Close(websocket.StatusNormalClosure, "shell exited")
+		_ = c.Close(websocket.StatusNormalClosure, "shell exited")
 		return
 	}
 
@@ -231,10 +231,10 @@ func (s *Server) handleTermWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer c.Close(websocket.StatusInternalError, "gateway teardown")
+	defer func() { _ = c.Close(websocket.StatusInternalError, "gateway teardown") }()
 	// An idle shell (user reading output, long-running quiet command) must
 	// not be reaped by intermediaries; attach's read loop answers the pongs.
 	go keepAlive(r.Context(), c)
 	t.attach(r, c)
-	c.Close(websocket.StatusNormalClosure, "")
+	_ = c.Close(websocket.StatusNormalClosure, "")
 }

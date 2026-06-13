@@ -209,6 +209,8 @@ func mediaBlock(b core.ContentBlock) (wireBlock, bool) {
 				Type: "base64", MediaType: b.File.MimeType, Data: b.File.Data,
 			}}, true
 		}
+	default:
+		// Non-media blocks (e.g. text) carry no wire media block.
 	}
 	return wireBlock{}, false
 }

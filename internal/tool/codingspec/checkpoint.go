@@ -123,13 +123,13 @@ func (c *checkpointer) worktreeTree(ctx context.Context, repo string) (string, b
 		return "", false
 	}
 	idxPath := idx.Name()
-	idx.Close()
+	_ = idx.Close()
 	// Git treats an existing zero-byte GIT_INDEX_FILE as a corrupt index. Remove
 	// the temp file so git can create and initialize the throwaway index itself.
 	if err := os.Remove(idxPath); err != nil {
 		return "", false
 	}
-	defer os.Remove(idxPath)
+	defer func() { _ = os.Remove(idxPath) }()
 
 	env := append([]string{"GIT_INDEX_FILE=" + idxPath}, gitIdentity...)
 	if _, err := c.git(ctx, repo, env, "add", "-A"); err != nil {

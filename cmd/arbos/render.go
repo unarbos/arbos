@@ -97,19 +97,6 @@ type runningTool struct {
 	verb  string // gerund phrase (reading files) for live activity lines
 }
 
-// proseWidth chooses a readable line length. Wide terminals still get a measure
-// that is easy to scan; narrow terminals keep enough room for indentation.
-func proseWidth(termWidth int) int {
-	w := termWidth - len(proseIndent)
-	if w > maxProseWidth {
-		return maxProseWidth
-	}
-	if w < minProseWidth {
-		return minProseWidth
-	}
-	return w
-}
-
 type proseWrapper struct {
 	atLineStart bool
 	col         int
