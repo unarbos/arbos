@@ -571,21 +571,55 @@ export interface ShareScope {
   ref: string;
 }
 
+/** How much a share link grants within its scope. Mirrors share.Perm; the
+ *  cells the backend enforces today are read everywhere and write on a chat. */
+export type SharePerm = "read" | "write" | "admin";
+
 /**
  * Mint a scoped, read-only share link for a single artifact — narrower than
  * createShareLink's full-agent invite. ttlSeconds of 0 means no expiry (capped
  * server-side). Returns the /s/<token> URL. Fails (404) on hosts without an
  * auth gate, where there's nothing to gate a link against.
  */
-export async function shareArtifact(scope: ShareScope, ttlSeconds: number): Promise<string> {
+export async function shareArtifact(
+  scope: ShareScope,
+  ttlSeconds: number,
+  perm: SharePerm = "read",
+): Promise<string> {
   const res = await fetch("/api/share/link", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scope, ttl_seconds: ttlSeconds }),
+    body: JSON.stringify({ scope, perm, ttl_seconds: ttlSeconds }),
   });
   if (!res.ok) throw new Error(await errorText(res, `share: ${res.status}`));
   const body = (await res.json()) as { url: string };
   return body.url;
+}
+
+/** What a share token grants, for the read-only view to render the right
+ *  affordances (a composer only when write+). */
+export interface ShareInfo {
+  kind: "file" | "session";
+  perm: SharePerm;
+}
+
+export async function fetchShareInfo(token: string): Promise<ShareInfo> {
+  const res = await fetch(`/s/${encodeURIComponent(token)}/info`);
+  if (!res.ok) throw new Error(`share info: ${res.status}`);
+  return (await res.json()) as ShareInfo;
+}
+
+/** Post a message into a shared chat (write grant). Runs a real turn; the
+ *  caller refreshes the transcript to see the response. */
+export async function sendToShare(token: string, text: string): Promise<void> {
+  const res = await fetch(`/s/${encodeURIComponent(token)}/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(await errorText(res, `send: ${res.status}`));
+  }
 }
 
 /** Revoke a scoped link by its token (the /s/<token> tail), cascading to any

@@ -13,7 +13,9 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"html"
 	"io"
 	"net/http"
@@ -24,8 +26,37 @@ import (
 	"time"
 
 	"github.com/unarbos/arbos/internal/core"
+	"github.com/unarbos/arbos/internal/engine"
 	"github.com/unarbos/arbos/internal/share"
 )
+
+// parseSharePerm maps the wire permission word to a share.Perm. The empty
+// string defaults to read — the safe floor. ok is false for an unknown word.
+func parseSharePerm(s string) (share.Perm, bool) {
+	switch s {
+	case "", "read":
+		return share.PermRead, true
+	case "write":
+		return share.PermWrite, true
+	case "admin":
+		return share.PermAdmin, true
+	default:
+		return share.PermRead, false
+	}
+}
+
+// permWord is the inverse of parseSharePerm, for the info endpoint the share
+// view reads to decide whether to show a composer.
+func permWord(p share.Perm) string {
+	switch p {
+	case share.PermWrite:
+		return "write"
+	case share.PermAdmin:
+		return "admin"
+	default:
+		return "read"
+	}
+}
 
 // shareMaxTTL caps a link's life. A share link is a standing exposure; an
 // unbounded one is a forgotten open door, so even "no expiry" tops out here
@@ -42,7 +73,8 @@ func (s *Server) handleShareLink(w http.ResponseWriter, r *http.Request) {
 			Kind string `json:"kind"`
 			Ref  string `json:"ref"`
 		} `json:"scope"`
-		TTLSeconds int64 `json:"ttl_seconds"` // 0 = no expiry (capped at shareMaxTTL)
+		Perm       string `json:"perm"`        // "read" (default) | "write" | "admin"
+		TTLSeconds int64  `json:"ttl_seconds"` // 0 = no expiry (capped at shareMaxTTL)
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, jsonBodyMax)).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -55,6 +87,23 @@ func (s *Server) handleShareLink(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Scope.Ref == "" {
 		http.Error(w, "scope ref required", http.StatusBadRequest)
+		return
+	}
+	perm, ok := parseSharePerm(req.Perm)
+	if !ok {
+		http.Error(w, "unknown perm", http.StatusBadRequest)
+		return
+	}
+	// Only the cells the redemption seam actually enforces are mintable. A
+	// file artifact is read-only for now (no edit path); a chat supports read
+	// and write (talk). write/admin beyond this are staged, so refuse rather
+	// than mint a link that promises more than it delivers.
+	if kind == share.ScopeFile && perm != share.PermRead {
+		http.Error(w, "file links are read-only for now", http.StatusBadRequest)
+		return
+	}
+	if perm > share.PermWrite {
+		http.Error(w, "admin links are not available yet", http.StatusBadRequest)
 		return
 	}
 	switch kind {
@@ -88,7 +137,7 @@ func (s *Server) handleShareLink(w http.ResponseWriter, r *http.Request) {
 	g := share.Grant{
 		Token:   tok,
 		Scope:   share.Scope{Kind: kind, Ref: req.Scope.Ref},
-		Perm:    share.PermRead,
+		Perm:    perm,
 		Expires: expires,
 		Created: time.Now(),
 	}
@@ -252,6 +301,88 @@ func (s *Server) handleShareEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, payload)
+}
+
+// handleShareInfo tells the share view what it's looking at and what it may
+// do: the scope kind and the permission word. No secrets — just enough for the
+// view to decide whether to render a composer (write) on top of the transcript.
+func (s *Server) handleShareInfo(w http.ResponseWriter, r *http.Request) {
+	g, ok := s.shareGrant(r, r.PathValue("token"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"kind": string(g.Scope.Kind),
+		"perm": permWord(g.Perm),
+	})
+}
+
+// handleShareSend is the write path: a guest with a write (or higher) grant on
+// a chat posts a message into that session. It runs a real turn — the agent
+// answers with its full toolset — so a write link is a genuine "talk to my
+// agent" capability, not a comment box.
+func (s *Server) handleShareSend(w http.ResponseWriter, r *http.Request) {
+	g, ok := s.shareGrant(r, r.PathValue("token"))
+	if !ok || g.Scope.Kind != share.ScopeSession || g.Perm < share.PermWrite {
+		http.NotFound(w, r)
+		return
+	}
+	var body struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, jsonBodyMax)).Decode(&body); err != nil || strings.TrimSpace(body.Text) == "" {
+		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.deliverGuestPrompt(core.SessionID(g.Scope.Ref), body.Text); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deliverGuestPrompt submits a prompt to a session on a share viewer's behalf,
+// honoring the single-owner-per-session invariant the seam enforces. If the
+// session is already live (the owner has it open), the prompt is injected into
+// the running actor — the guest becomes another voice on the same conversation.
+// If it is idle, this acquires the registry slot, starts the actor, sends the
+// prompt, and tears the actor down once the turn ends — no leaked owner. The
+// prompt is tagged as a share origin so it is attributable.
+func (s *Server) deliverGuestPrompt(id core.SessionID, text string) error {
+	intent := core.PromptIntent{Text: text, Origin: "share"}
+	if s.Engine.Deliver(id, intent) {
+		return nil
+	}
+	if !engine.Sessions.Acquire(id) {
+		// Raced an owner between Deliver and Acquire; the actor is live now.
+		if s.Engine.Deliver(id, intent) {
+			return nil
+		}
+		return fmt.Errorf("session is busy, retry")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c, err := s.Engine.StartSession(ctx, id)
+	if err != nil {
+		cancel()
+		engine.Sessions.Release(id)
+		return err
+	}
+	c.SendCtx(ctx, intent)
+	go func() {
+		defer engine.Sessions.Release(id)
+		defer cancel()
+		// Drain to completion: cancel on the turn's terminal event (which ends
+		// the actor) but keep reading until the event channel closes, so the
+		// actor's emit path never blocks on an unread buffer.
+		for env := range c.Events() {
+			switch env.Event.(type) {
+			case core.TurnComplete, core.ErrorEvent, core.Interrupted:
+				cancel()
+			}
+		}
+	}()
+	return nil
 }
 
 // serveSharedChat boots the SPA for a chat link; the frontend detects the

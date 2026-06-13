@@ -340,6 +340,8 @@ func (s *Server) Handler() http.Handler {
 			mux.HandleFunc("GET /s/{token}", s.handleShareView)
 			mux.HandleFunc("GET /s/{token}/raw/{path...}", s.handleShareRaw)
 			mux.HandleFunc("GET /s/{token}/events", s.handleShareEvents)
+			mux.HandleFunc("GET /s/{token}/info", s.handleShareInfo)
+			mux.HandleFunc("POST /s/{token}/send", s.handleShareSend)
 		}
 		// GET renders (confirm/paste/error) and never consumes a token —
 		// link unfurlers GET. POST is the consuming step.

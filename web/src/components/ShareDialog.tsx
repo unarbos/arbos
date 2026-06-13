@@ -1,8 +1,20 @@
 import { useEffect, useState } from "react";
 import { Check, Copy, Loader2, X } from "lucide-react";
 
-import { shareArtifact, type ShareScope } from "@/lib/api";
+import { shareArtifact, type SharePerm, type ShareScope } from "@/lib/api";
 import { useClipboard } from "@/lib/useClipboard";
+
+// The permission tiers offered per scope. A chat can be read-only or
+// read+talk (the recipient can converse with the agent); a file artifact is
+// read-only for now. Admin/no-tools tiers are staged server-side, so they are
+// not offered here — the dialog never shows a permission the node won't honor.
+const PERMS: Record<ShareScope["kind"], { value: SharePerm; label: string; hint: string }[]> = {
+  session: [
+    { value: "read", label: "Read", hint: "View the conversation only" },
+    { value: "write", label: "Read + talk", hint: "View and send messages to the agent" },
+  ],
+  file: [{ value: "read", label: "Read", hint: "View this artifact only" }],
+};
 
 // The link lifetimes the dialog offers, in seconds (0 = the server's cap, the
 // "no expiry" option). A standing share is a standing exposure, so a bounded
@@ -31,10 +43,13 @@ export function ShareDialog({
   onClose: () => void;
 }) {
   const [ttl, setTtl] = useState(86400);
+  const [perm, setPerm] = useState<SharePerm>("read");
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const clip = useClipboard();
+
+  const perms = PERMS[scope.kind];
 
   // Escape closes, matching the app's other overlays.
   useEffect(() => {
@@ -45,18 +60,18 @@ export function ShareDialog({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Changing the lifetime invalidates an already-minted link (re-minting would
+  // Changing any input invalidates an already-minted link (re-minting would
   // orphan it), so clear back to the create step.
   useEffect(() => {
     setUrl(null);
     clip.reset();
-  }, [ttl, scope.kind, scope.ref]);
+  }, [ttl, perm, scope.kind, scope.ref]);
 
   const create = async () => {
     setBusy(true);
     setError(null);
     try {
-      const link = await shareArtifact(scope, ttl);
+      const link = await shareArtifact(scope, ttl, perm);
       setUrl(link);
       await clip.copy(link);
     } catch {
@@ -98,6 +113,28 @@ export function ShareDialog({
           <div className="text-[12px] text-muted">{error}</div>
         ) : (
           <>
+            {perms.length > 1 && (
+              <div className="flex flex-col gap-1">
+                <span className="text-[12px] text-muted">Permission</span>
+                <div className="flex gap-1 rounded-md border border-line bg-panel p-0.5">
+                  {perms.map((p) => (
+                    <button
+                      key={p.value}
+                      type="button"
+                      title={p.hint}
+                      onClick={() => setPerm(p.value)}
+                      className={`flex-1 rounded px-2 py-1 text-[12px] transition-colors ${
+                        perm === p.value
+                          ? "bg-btn font-semibold text-canvas"
+                          : "text-muted hover:bg-hover hover:text-text"
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <label className="flex items-center justify-between gap-2 text-[12px] text-muted">
               Link expires
               <select
@@ -146,7 +183,9 @@ export function ShareDialog({
               {clip.state === "blocked"
                 ? "Clipboard is blocked here — select the link and copy it manually."
                 : scope.kind === "session"
-                  ? "Read-only link to this conversation, including the tool output it contains."
+                  ? perm === "write"
+                    ? "Anyone with this link can read the conversation and send messages to the agent (running real turns)."
+                    : "Read-only link to this conversation, including the tool output it contains."
                   : "Read-only link to this artifact (and its sibling assets)."}
             </div>
           </>
