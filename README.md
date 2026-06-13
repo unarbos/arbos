@@ -1,8 +1,8 @@
 # Arbos
 
-# One liner
+# Install
 ```bash
-curl -fsSL https://arbos.life | bash -s -- web
+curl -fsSL https://arbos.life | bash
 ```
 
 # Usage
