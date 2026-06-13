@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/unarbos/arbos/internal/agent/pi"
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/engine"
@@ -184,10 +185,10 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 			return
 		}
 		if prints.public != "" {
-			fmt.Fprintf(os.Stderr, "%s/login?token=%s\n", prints.public, prints.token)
+			fmt.Fprintln(os.Stderr, loginLink(prints.public+"/login?token="+prints.token))
 			return
 		}
-		fmt.Fprintf(os.Stderr, "http://%s/login?token=%s\n", prints.login, prints.token)
+		fmt.Fprintln(os.Stderr, loginLink("http://"+prints.login+"/login?token="+prints.token))
 	}
 
 	// Bind before anything prints a URL: when the requested port is taken
@@ -360,6 +361,20 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 		}
 		return err
 	}
+}
+
+// loginLink renders a login URL for the console. On a terminal it is colored
+// (cyan, underlined) and wrapped in an OSC 8 hyperlink so the URL is clickable;
+// when output is piped or NO_COLOR is set it stays a bare URL so logs and pipes
+// get clean text. The single login line is the whole of a successful startup's
+// output, so it is worth making it the obvious thing to click.
+func loginLink(u string) string {
+	if os.Getenv("NO_COLOR") != "" || !term.IsTerminal(os.Stderr.Fd()) {
+		return u
+	}
+	// OSC 8 hyperlink (\x1b]8;;URL\x1b\\ TEXT \x1b]8;;\x1b\\) with the visible
+	// text styled underlined cyan (\x1b[4;36m … \x1b[0m).
+	return "\x1b]8;;" + u + "\x1b\\" + "\x1b[4;36m" + u + "\x1b[0m" + "\x1b]8;;\x1b\\"
 }
 
 // lockForestDir takes an advisory lock on <dir>/.arbos/agent.lock so only one

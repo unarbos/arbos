@@ -144,10 +144,10 @@ ensure_go() {
 # toolchain download, which the prebuilt path exists to avoid.
 BIN_DIR="${GOPATH:-${HOME}/go}/bin"
 
-echo "Installing arbos..."
-if install_prebuilt; then
-	echo "Installed prebuilt $("${BIN_DIR}/arbos" --version) for ${OS}/${ARCH}"
-else
+# A successful install is silent: the only thing printed on the happy path is
+# the binary's own output (the login URL). Progress and "installed" notices
+# would otherwise bury the one line worth reading. Errors still speak up.
+if ! install_prebuilt; then
 	# No release asset for this platform (or no release yet): build @main
 	# from source, bootstrapping a Go toolchain if needed.
 	ensure_go
@@ -174,13 +174,11 @@ esac
 
 export PATH="${BIN_DIR}:${PATH}"
 
-if command -v arbos >/dev/null 2>&1; then
-	echo ""
-	echo "Installed: $(command -v arbos)"
-else
-	echo ""
-	echo "Installed to ${BIN_DIR}/arbos — add it to PATH:"
-	echo "  export PATH=\"${BIN_DIR}:\$PATH\""
+# Only speak up when the binary is not reachable on PATH — otherwise stay quiet
+# so the login URL is the sole output (warnings go to stderr).
+if ! command -v arbos >/dev/null 2>&1; then
+	echo "arbos installed to ${BIN_DIR}/arbos — add it to PATH:" >&2
+	echo "  export PATH=\"${BIN_DIR}:\$PATH\"" >&2
 fi
 
 # A real Chromium powers the agent's browser tool (live Browser panels,
