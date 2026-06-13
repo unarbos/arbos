@@ -35,7 +35,12 @@ export function sameTerm(a: TermRef, b: TermRef): boolean {
 
 /** The job id a bash call recorded in its result's Details. */
 export function detailsJob(result: ToolResult): string | undefined {
-  const d = result.Details;
+  return jobFromDetails(result.Details);
+}
+
+/** The job id in a bash call's Details payload — the result's Details on
+ *  replay, or the live ToolDetails event's details while still running. */
+export function jobFromDetails(d: unknown): string | undefined {
   if (typeof d === "object" && d !== null && "job" in d) {
     const job = (d as { job?: unknown }).job;
     if (typeof job === "string" && job) return job;

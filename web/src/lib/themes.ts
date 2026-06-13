@@ -417,7 +417,7 @@ export const THEMES: Theme[] = [
   },
 ];
 
-export const DEFAULT_THEME_ID = "cursor-dark";
+export const DEFAULT_THEME_ID = "dark-plus";
 
 export function themeById(id: string): Theme | undefined {
   return THEMES.find((t) => t.id === id);

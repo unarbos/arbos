@@ -191,6 +191,18 @@ func (h *Head) Handler() http.Handler {
 	api.HandleFunc("GET /main.js", func(w http.ResponseWriter, r *http.Request) {
 		h.serveStatic(w, r, "main.js", "text/javascript; charset=utf-8")
 	})
+	api.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		h.serveStatic(w, r, "favicon.ico", "image/x-icon")
+	})
+	api.HandleFunc("GET /favicon-32.png", func(w http.ResponseWriter, r *http.Request) {
+		h.serveStatic(w, r, "favicon-32.png", "image/png")
+	})
+	api.HandleFunc("GET /favicon-96x96.png", func(w http.ResponseWriter, r *http.Request) {
+		h.serveStatic(w, r, "favicon-96x96.png", "image/png")
+	})
+	api.HandleFunc("GET /apple-touch-icon.png", func(w http.ResponseWriter, r *http.Request) {
+		h.serveStatic(w, r, "apple-touch-icon.png", "image/png")
+	})
 	api.HandleFunc("GET /", h.handleIndex)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

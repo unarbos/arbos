@@ -1,0 +1,158 @@
+:root {
+	--canvas: #2c262a;
+	--card: #332a2f;
+	--line: #3e373c;
+	--text: #d6d0d4;
+	--bright: #ece7ea;
+	--muted: #968f94;
+	--faint: #6e676c;
+	--accent: #85aab3;
+	--green: #87a883;
+	--font-sans:
+		ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+	--font-mono:
+		ui-monospace, "SF Mono", "Cascadia Code", "Segoe UI Mono", monospace;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	min-height: 100%;
+	background: var(--canvas);
+	color: var(--text);
+	font-family: var(--font-sans);
+	line-height: 1.55;
+}
+
+body {
+	background:
+		radial-gradient(
+			ellipse 80% 50% at 50% -10%,
+			color-mix(in srgb, var(--accent) 14%, transparent),
+			transparent
+		),
+		var(--canvas);
+}
+
+.page {
+	max-width: 42rem;
+	margin: 0 auto;
+	padding: 4rem 1.5rem 3rem;
+}
+
+.hero {
+	margin-bottom: 2.5rem;
+}
+
+.eyebrow {
+	margin: 0 0 0.75rem;
+	color: var(--accent);
+	font-size: 0.85rem;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+h1 {
+	margin: 0 0 0.75rem;
+	color: var(--bright);
+	font-size: clamp(2rem, 5vw, 2.75rem);
+	font-weight: 650;
+	letter-spacing: -0.03em;
+	line-height: 1.1;
+}
+
+.lede {
+	margin: 0;
+	max-width: 36rem;
+	color: var(--muted);
+	font-size: 1.05rem;
+}
+
+.panel {
+	margin-bottom: 1rem;
+	padding: 1.1rem 1.2rem 1.2rem;
+	border: 1px solid var(--line);
+	border-radius: 0.75rem;
+	background: color-mix(in srgb, var(--card) 88%, transparent);
+}
+
+.panel.muted p {
+	margin: 0.75rem 0 0;
+	color: var(--muted);
+	font-size: 0.95rem;
+}
+
+h2 {
+	margin: 0 0 0.75rem;
+	color: var(--bright);
+	font-size: 0.95rem;
+	font-weight: 600;
+}
+
+.cmd {
+	position: relative;
+	margin: 0;
+	padding: 0.85rem 2.75rem 0.85rem 1rem;
+	overflow-x: auto;
+	border: 1px solid var(--line);
+	border-radius: 0.55rem;
+	background: #241f23;
+	cursor: pointer;
+}
+
+.cmd code {
+	color: var(--green);
+	font-family: var(--font-mono);
+	font-size: 0.82rem;
+	white-space: pre;
+}
+
+.cmd::after {
+	content: "copy";
+	position: absolute;
+	top: 0.65rem;
+	right: 0.75rem;
+	color: var(--faint);
+	font-size: 0.72rem;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.cmd.copied::after {
+	content: "copied";
+	color: var(--accent);
+}
+
+code {
+	padding: 0.12rem 0.35rem;
+	border-radius: 0.3rem;
+	background: color-mix(in srgb, var(--line) 55%, transparent);
+	color: var(--bright);
+	font-family: var(--font-mono);
+	font-size: 0.88em;
+}
+
+.footer {
+	margin-top: 2rem;
+	color: var(--faint);
+	font-size: 0.9rem;
+}
+
+.footer a {
+	color: var(--accent);
+	text-decoration: none;
+}
+
+.footer a:hover {
+	text-decoration: underline;
+}
+
+@media (max-width: 640px) {
+	.page {
+		padding-top: 2.5rem;
+	}
+}

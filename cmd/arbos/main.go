@@ -199,15 +199,15 @@ func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, cfg p
 	// print as ambient notice lines, only ever at quiet moments (session
 	// start, turn boundaries, idle at the prompt) — never mid-stream. Scoped
 	// to this session plus broadcast-class messages, so the terminal never
-	// steals a notice belonging to a live web chat; messages stale past the
-	// grace window (their chat never reopened — e.g. an earlier, ended
-	// terminal session's reminder) deliver here rather than being lost.
+	// steals a notice belonging to another conversation; a notice for a
+	// session this terminal isn't running waits, durably, for its own door
+	// to reopen rather than surfacing here.
 	deliver := func() bool {
 		if store == nil {
 			return false
 		}
 		msgs, err := store.ClaimOutboxFor(ctx, outbox.ViaTerminal, core.PrincipalLocal,
-			[]string{string(conv.ID())}, time.Now().Add(-outbox.StaleAfter))
+			[]string{string(conv.ID())})
 		if err != nil || len(msgs) == 0 {
 			return false
 		}

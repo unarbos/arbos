@@ -26,6 +26,7 @@ import (
 	"github.com/unarbos/arbos/internal/outbox"
 	"github.com/unarbos/arbos/internal/plan"
 	"github.com/unarbos/arbos/internal/ports"
+	"github.com/unarbos/arbos/internal/recall"
 	"github.com/unarbos/arbos/internal/setmodel"
 	"github.com/unarbos/arbos/internal/settings"
 	"github.com/unarbos/arbos/internal/sqlite"
@@ -239,6 +240,45 @@ func Assemble(cfg HostConfig) (*Host, error) {
 		mcpMgr.Close()
 		return nil, fmt.Errorf("register set_model: %w", err)
 	}
+	// sessions: read the agent's other chats and autonomous runs. Wired only
+	// when the durable store backs them (SQLite, not the in-memory fake) — a
+	// fake has no cross-session history to recall. The reader spawns through
+	// the same router as delegate, so a review's big transcript lands in the
+	// sub-agent's context and only its digest returns to the calling chat.
+	if st, ok := cfg.Store.(*sqlite.Store); ok {
+		reader := func(ctx context.Context, instruction string) (string, string, error) {
+			ag, err := router.Resolve("")
+			if err != nil {
+				return "", "", err
+			}
+			c, _ := obs.From(ctx)
+			res, err := ag.Run(ctx, agent.Task{
+				Instruction: instruction,
+				Owner:       core.SessionID(c.SessionID),
+				SpawnedBy:   "review",
+				// The reader's prompt is assembled from raw transcript text,
+				// which can carry content the agent ingested from untrusted
+				// sources. Confine it to read-only tools so an injected
+				// instruction can never turn a review into a write or a shell
+				// command — the surface that matters since sessions rides the
+				// top engine the scheduler's unattended wakes reuse. An empty
+				// allowlist would mean "no restriction" (tool.Filter), i.e. the
+				// full toolset, so this list must stay non-empty.
+				Grant: agent.Grant{Tools: []string{"read", "ls", "find", "grep"}},
+			}, engine.Relay(ctx))
+			if err != nil {
+				return "", "", err
+			}
+			return res.Text, res.ChildSession, nil
+		}
+		if err := recall.RegisterTool(topTools, recallStore{st}, reader); err != nil {
+			if theMind != nil {
+				theMind.Close()
+			}
+			mcpMgr.Close()
+			return nil, fmt.Errorf("register sessions: %w", err)
+		}
+	}
 
 	topOpts := piOpts
 	topOpts.NewStore = func() ports.SessionStore { return cfg.Store }
@@ -275,6 +315,33 @@ func Assemble(cfg HostConfig) (*Host, error) {
 type sysClock struct{}
 
 func (sysClock) Now() time.Time { return time.Now() }
+
+// recallStore adapts the concrete SQLite store to recall.Store, mapping the
+// store's RecentSession rows into the tool's sqlite-free SessionInfo. Events
+// passes straight through (the signatures already match).
+type recallStore struct{ s *sqlite.Store }
+
+func (r recallStore) Events(ctx context.Context, id core.SessionID) ([]core.Event, error) {
+	return r.s.Events(ctx, id)
+}
+
+func (r recallStore) RecentSessions(ctx context.Context, limit int) ([]recall.SessionInfo, error) {
+	rows, err := r.s.RecentSessions(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]recall.SessionInfo, len(rows))
+	for i, row := range rows {
+		out[i] = recall.SessionInfo{
+			ID:        row.ID,
+			Kind:      row.Kind,
+			Title:     row.Title,
+			Status:    row.Status,
+			UpdatedAt: row.UpdatedAt,
+		}
+	}
+	return out, nil
+}
 
 // DefaultDBPath is the durable session store for production hosts (~/.config/arbos).
 func DefaultDBPath() string {

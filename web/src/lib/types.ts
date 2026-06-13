@@ -95,6 +95,7 @@ export type KernelEvent =
   | { kind: "citations"; data: { citations: Citation[] } }
   | { kind: "images"; data: { images: ContentBlock[] } }
   | { kind: "tool_progress"; data: { call_id: string; name: string; bytes: number } }
+  | { kind: "tool_details"; data: { call_id: string; details?: unknown } }
   | { kind: "tool_started"; data: { call: ToolCall } }
   | { kind: "tool_finished"; data: { result: ToolResult } }
   | {

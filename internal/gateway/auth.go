@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"html"
 	"net"
 	"net/http"
 	"os"
@@ -23,27 +24,40 @@ import (
 //
 // The credential model is deliberately minimal: a one-time login token printed
 // to the host's stderr (the Jupyter pattern) exchanges for an HMAC-signed
-// session cookie. Consuming a token mints and prints a fresh one, so the
-// operator's console always holds a current login link for the next browser.
-// Requests arriving over loopback bypass auth entirely — a local process can
-// already read the signing key off disk, so gating it buys nothing and would
-// break the localhost-out-of-the-box promise.
+// session cookie. Consuming the console token mints and prints a fresh one, so
+// the operator's console always holds a current login link for the next
+// browser. Share tokens (the UI's share button) are minted alongside, each
+// independently single-use with a TTL, so handing out an invite never kills
+// the console link — and vice versa. Requests arriving over loopback bypass
+// auth entirely — a local process can already read the signing key off disk,
+// so gating it buys nothing and would break the localhost-out-of-the-box
+// promise.
 type Auth struct {
 	// Key signs session cookies (HMAC-SHA256). Loaded once per host via
 	// LoadOrCreateAuthKey so cookies survive restarts.
 	Key []byte
-	// OnToken receives each freshly minted one-time token; the host renders
+	// OnToken receives each freshly minted console token; the host renders
 	// it as a clickable login URL on stderr.
 	OnToken func(token string)
 
 	mu    sync.Mutex
 	token string
+	// share holds outstanding share-link tokens → expiry. In-memory on
+	// purpose: a restart invalidates old invites, and the login page tells
+	// the holder so (no silent deaths).
+	share map[string]time.Time
 }
 
 const (
 	authCookie = "arbos_auth"
 	loginPath  = "/login"
 	cookieTTL  = 30 * 24 * time.Hour
+	// shareTokenTTL bounds an unused invite: long enough to send tonight and
+	// click tomorrow, short enough that a forgotten link dies on its own.
+	shareTokenTTL = 24 * time.Hour
+	// maxShareTokens caps outstanding invites; minting past it evicts the
+	// soonest-to-expire. Nobody shares with 32 people between logins.
+	maxShareTokens = 32
 )
 
 // LoadOrCreateAuthKey returns the host's cookie-signing key, generating a
@@ -67,40 +81,121 @@ func LoadOrCreateAuthKey(path string) ([]byte, error) {
 	return key, nil
 }
 
-// MintToken rotates the one-time login token and announces it via OnToken.
-// Called once at startup and again on every successful login.
-func (a *Auth) MintToken() {
+// randomToken mints a 256-bit hex token; "" only if the system's entropy
+// source fails.
+func randomToken() string {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		return
+		return ""
 	}
-	tok := hex.EncodeToString(b)
+	return hex.EncodeToString(b)
+}
+
+// MintToken rotates the console login token and announces it via OnToken.
+// Called at startup and on every consumption of the console token, so the
+// operator's console always holds a current link. Share tokens live apart
+// (MintShareToken); rotating here never invalidates an outstanding invite.
+func (a *Auth) MintToken() string {
+	tok := randomToken()
+	if tok == "" {
+		return ""
+	}
 	a.mu.Lock()
 	a.token = tok
 	a.mu.Unlock()
 	if a.OnToken != nil {
 		a.OnToken(tok)
 	}
+	return tok
 }
 
-// consumeToken redeems the current one-time token. Single-use: success clears
-// it and mints a replacement, so a leaked URL (browser history, chat preview)
-// is dead after first use while the console always shows a live link.
+// MintShareToken mints an independent single-use invite token with a TTL.
+// Independent is the point: handing out a share link must not kill the
+// console link, and two invites in a row must both work.
+func (a *Auth) MintShareToken() string {
+	tok := randomToken()
+	if tok == "" {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.share == nil {
+		a.share = make(map[string]time.Time)
+	}
+	a.pruneShareLocked()
+	for len(a.share) >= maxShareTokens {
+		oldest, oldestExp := "", time.Time{}
+		for t, exp := range a.share {
+			if oldest == "" || exp.Before(oldestExp) {
+				oldest, oldestExp = t, exp
+			}
+		}
+		delete(a.share, oldest)
+	}
+	a.share[tok] = time.Now().Add(shareTokenTTL)
+	return tok
+}
+
+// pruneShareLocked drops expired invites. Caller holds a.mu.
+func (a *Auth) pruneShareLocked() {
+	now := time.Now()
+	for t, exp := range a.share {
+		if now.After(exp) {
+			delete(a.share, t)
+		}
+	}
+}
+
+// consumeToken redeems a one-time token — console or share. Single-use:
+// success removes it, and a consumed console token mints a replacement so
+// the console always shows a live link. A leaked URL (browser history, chat
+// preview) is dead after first use.
 func (a *Auth) consumeToken(tok string) bool {
 	if tok == "" {
 		return false
 	}
 	a.mu.Lock()
-	cur := a.token
-	ok := cur != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(cur)) == 1
-	if ok {
+	console := a.token != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(a.token)) == 1
+	ok := console
+	if console {
 		a.token = ""
+	} else {
+		a.pruneShareLocked()
+		for t := range a.share {
+			if subtle.ConstantTimeCompare([]byte(tok), []byte(t)) == 1 {
+				delete(a.share, t)
+				ok = true
+				break
+			}
+		}
 	}
 	a.mu.Unlock()
-	if ok {
+	if console {
 		a.MintToken()
 	}
 	return ok
+}
+
+// peekToken reports whether tok is currently redeemable, without consuming
+// it. This is what the GET login page checks: link previewers and unfurler
+// bots GET, so a bare GET must never spend the token — only the human's
+// confirming POST does.
+func (a *Auth) peekToken(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.token != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(a.token)) == 1 {
+		return true
+	}
+	a.pruneShareLocked()
+	for t := range a.share {
+		if subtle.ConstantTimeCompare([]byte(tok), []byte(t)) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // cookiePayload is what a session cookie asserts: who, until when. The
@@ -174,42 +269,121 @@ func (a *Auth) wrap(next http.Handler) http.Handler {
 	})
 }
 
-// handleLogin redeems a one-time token for a session cookie, or shows the
-// paste-a-token page. GET on purpose: the printed URL must be clickable, and
-// the token is single-use so replay from history is inert.
+// handleLogin is the front door, in two steps. GET renders: a confirm page
+// when the URL carries a live token (clicking "Open" is what spends it — a
+// bare GET never consumes, so chat-app link previews and unfurler bots can't
+// kill an invite before the human arrives), the paste-a-token page when
+// there's no token, or a spelled-out error when the token is spent/expired.
+// POST consumes the token and sets the session cookie.
 func (a *Auth) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if a.authenticated(r) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	if a.consumeToken(r.URL.Query().Get("token")) {
-		// Secure when the browser's leg is TLS — directly, or terminated at
-		// a relay that forwards plain HTTP down the tunnel (ADR-0034).
-		secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
-		http.SetCookie(w, &http.Cookie{
-			Name:     authCookie,
-			Value:    a.signCookie(cookiePayload{Sub: "local", Exp: time.Now().Add(cookieTTL).Unix()}),
-			Path:     "/",
-			MaxAge:   int(cookieTTL / time.Second),
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-			Secure:   secure,
-		})
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+	if r.Method == http.MethodPost {
+		if a.consumeToken(r.FormValue("token")) {
+			// Secure when the browser's leg is TLS — directly, or terminated
+			// at a relay that forwards plain HTTP down the tunnel (ADR-0034).
+			secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+			http.SetCookie(w, &http.Cookie{
+				Name:     authCookie,
+				Value:    a.signCookie(cookiePayload{Sub: "local", Exp: time.Now().Add(cookieTTL).Unix()}),
+				Path:     "/",
+				MaxAge:   int(cookieTTL / time.Second),
+				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
+				Secure:   secure,
+			})
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		// The token lost a race between the confirm page render and the
+		// click (someone else used it, or it expired in between). Say so.
+		writeLoginPage(w, http.StatusUnauthorized, loginPaste, tokenSpentMsg)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusUnauthorized)
-	_, _ = w.Write([]byte(loginPage))
+	tok := r.URL.Query().Get("token")
+	switch {
+	case tok == "":
+		writeLoginPage(w, http.StatusUnauthorized, loginPaste, "")
+	case a.peekToken(tok):
+		// Live token: one click to spend it. The hidden form field carries
+		// the same secret the URL already does — no new exposure.
+		writeLoginPage(w, http.StatusOK, loginConfirm, tok)
+	default:
+		writeLoginPage(w, http.StatusUnauthorized, loginPaste, tokenSpentMsg)
+	}
 }
 
-// loginPage is the fallback when someone reaches /login without a valid
-// token: paste the token from the server console. It mirrors the SPA's
-// default theme (web/src/index.css) — same palette, type, and radii — so the
-// front door looks like the house. Pre-auth there is no user to have picked a
-// theme, so the default tokens are inlined rather than served from the
-// bundle.
-const loginPage = `<!doctype html>
+// tokenSpentMsg is the no-silent-deaths line: what happened, and both ways
+// forward (one for invitees, one for operators with console access).
+const tokenSpentMsg = "That login link was already used or has expired. " +
+	"Ask the person who shared it for a fresh one (the Share button mints them), " +
+	"or paste the current token from the arbos console or log."
+
+// handleShare mints an independent one-time invite token and returns it as a
+// shareable login URL — the UI's "share this agent" affordance. The URL is
+// built from the request's own origin, so sharing from the forest URL hands
+// out the forest URL and sharing from a LAN bind hands out that bind. Each
+// invite is single-use with a TTL and lives apart from the console token, so
+// sharing never invalidates the console link or an earlier unredeemed invite.
+func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
+	tok := s.Auth.MintShareToken()
+	if tok == "" {
+		http.Error(w, "could not mint a token", http.StatusInternalServerError)
+		return
+	}
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	writeJSON(w, map[string]any{
+		"url": scheme + "://" + r.Host + loginPath + "?token=" + tok,
+	})
+}
+
+// loginMode selects which body the login page renders: the paste-a-token
+// form (arg = error message, "" for none) or the one-click confirm form
+// (arg = the live token).
+type loginMode int
+
+const (
+	loginPaste loginMode = iota
+	loginConfirm
+)
+
+// writeLoginPage renders the front door. It mirrors the SPA's default theme
+// (web/src/index.css) — same palette, type, and radii — so the front door
+// looks like the house. Pre-auth there is no user to have picked a theme, so
+// the default tokens are inlined rather than served from the bundle.
+func writeLoginPage(w http.ResponseWriter, status int, mode loginMode, arg string) {
+	var body string
+	switch mode {
+	case loginConfirm:
+		body = `<form method="POST" action="/login">
+  <h1>arbos</h1>
+  <p>You’ve been given access to this agent. The link works once — opening it here claims it.</p>
+  <input type="hidden" name="token" value="` + html.EscapeString(arg) + `">
+  <button autofocus>Open agent</button>
+</form>`
+	default:
+		errLine := ""
+		if arg != "" {
+			errLine = `<p class="err">` + html.EscapeString(arg) + `</p>`
+		}
+		body = `<form method="POST" action="/login">
+  <h1>arbos</h1>` + errLine + `
+  <p>Paste a login token.</p>
+  <input name="token" placeholder="token" autofocus autocomplete="off">
+  <button>Log in</button>
+</form>`
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(loginPageHead + body))
+}
+
+const loginPageHead = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>arbos — login</title>
@@ -218,6 +392,7 @@ const loginPage = `<!doctype html>
     --canvas: #2c262a; --panel: #312b2f; --line: #3e373c;
     --text: #d6d0d4; --bright: #ece7ea; --muted: #968f94;
     --faint: #6e676c; --accent: #85aab3; --btn: #b0aaae;
+    --err: #c98a8a;
   }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
@@ -230,6 +405,11 @@ const loginPage = `<!doctype html>
   form { display: flex; flex-direction: column; gap: .7rem; width: min(20rem, 88vw); }
   h1 { font-size: 15px; font-weight: 600; margin: 0; color: var(--bright); }
   p { color: var(--muted); margin: 0 0 .3rem; }
+  p.err {
+    color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--err) 35%, transparent);
+    border-radius: 6px; padding: .5rem .7rem;
+  }
   input {
     background: var(--panel); border: 1px solid var(--line); color: var(--text);
     padding: .55rem .7rem; border-radius: 6px; font: inherit; outline: none;
@@ -242,12 +422,7 @@ const loginPage = `<!doctype html>
   }
   button:hover { background: var(--bright); }
 </style>
-<form method="GET" action="/login">
-  <h1>arbos</h1>
-  <p>Paste the login token from the server console.</p>
-  <input name="token" placeholder="token" autofocus autocomplete="off">
-  <button>Log in</button>
-</form>`
+`
 
 // loopbackAddr reports whether an http RemoteAddr ("host:port") is loopback.
 func loopbackAddr(remote string) bool {

@@ -808,9 +808,11 @@ func (b *Browser) Read(ctx context.Context, selector string) (PageState, error) 
 	return st, err
 }
 
-// Screenshot captures the active tab as PNG bytes: the visible viewport by
-// default, the full scrollable page when fullPage is set, or a single element
-// when selector is set.
+// Screenshot captures the active tab: the visible viewport by default, the
+// full scrollable page when fullPage is set, or a single element when selector
+// is set. Viewport and element captures are PNG; fullPage is JPEG (chromedp
+// encodes as JPEG for any quality < 100), so callers must sniff the real type
+// rather than assume PNG.
 func (b *Browser) Screenshot(ctx context.Context, selector string, fullPage bool) ([]byte, error) {
 	var buf []byte
 	var action chromedp.Action

@@ -98,30 +98,31 @@ func (s *Store) NotifyFrom(ctx context.Context, text, session, source string) er
 // the write lock: doors racing across processes serialize on SQLite's write
 // lock, so a message is only ever returned to one caller.
 func (s *Store) ClaimOutbox(ctx context.Context, via string) ([]outbox.Message, error) {
-	return s.claimOutbox(ctx, via, "", nil, time.Time{})
+	return s.claimOutbox(ctx, via, "", nil)
 }
 
 // ClaimOutboxFor is the addressed claim: it takes the principal's messages —
-// never another principal's — preferring each message's own conversation:
+// never another principal's — and only those that belong to a session this
+// door holds open:
 //
-//   - messages whose preferred session is in sessions (that chat has this
-//     door open) deliver now;
+//   - messages whose session is in sessions (that conversation has this door
+//     open) deliver now;
 //   - broadcast-class messages (no session, or the kernel's) deliver to any
-//     door;
-//   - messages older than staleBefore deliver to any of the principal's
-//     doors: within the grace window a chat's voice waits for that chat,
-//     past it being heard somewhere beats waiting for a conversation that
-//     may never reopen.
+//     door, since they have no conversation of their own to wait for.
 //
-// Pass a zero staleBefore to disable the fallback.
-func (s *Store) ClaimOutboxFor(ctx context.Context, via, principal string, sessions []string, staleBefore time.Time) ([]outbox.Message, error) {
+// There is no cross-session fallback: a notice belongs to the conversation
+// that created it and waits, durably, for that conversation to reopen. It is
+// never rerouted into an unrelated chat — so a background automation's voice
+// (e.g. a throwaway `arbos -once` session that never reopens) stays self-
+// contained instead of spilling into whatever door happens to be open.
+func (s *Store) ClaimOutboxFor(ctx context.Context, via, principal string, sessions []string) ([]outbox.Message, error) {
 	if sessions == nil {
 		sessions = []string{}
 	}
-	return s.claimOutbox(ctx, via, principal, sessions, staleBefore)
+	return s.claimOutbox(ctx, via, principal, sessions)
 }
 
-func (s *Store) claimOutbox(ctx context.Context, via, principal string, sessions []string, staleBefore time.Time) ([]outbox.Message, error) {
+func (s *Store) claimOutbox(ctx context.Context, via, principal string, sessions []string) ([]outbox.Message, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -140,12 +141,10 @@ func (s *Store) claimOutbox(ctx context.Context, via, principal string, sessions
 		query += ` AND principal IN (?, '')`
 		args = append(args, principal)
 		scoped := append(append([]string{}, outbox.BroadcastSessions...), sessions...)
-		query += ` AND (session_id IN (?` + strings.Repeat(",?", len(scoped)-1) + `)`
+		query += ` AND session_id IN (?` + strings.Repeat(",?", len(scoped)-1) + `)`
 		for _, sid := range scoped {
 			args = append(args, sid)
 		}
-		query += ` OR created_at < ?)`
-		args = append(args, nanos(staleBefore)) // zero time = 0 = matches nothing
 	}
 	query += ` ORDER BY id`
 

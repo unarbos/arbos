@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/unarbos/arbos/internal/browser"
@@ -103,7 +104,7 @@ func dispatchBrowser(ctx context.Context, b *browser.Browser, a BrowserArgs) (to
 			Content: fmt.Sprintf("Screenshot captured (%s, %s).", screenshotScope(a), FormatSize(len(png))),
 			Blocks: []core.ContentBlock{{
 				Type:  core.BlockImage,
-				Image: &core.ImageData{Data: base64.StdEncoding.EncodeToString(png), MimeType: "image/png"},
+				Image: &core.ImageData{Data: base64.StdEncoding.EncodeToString(png), MimeType: screenshotMime(png)},
 			}},
 		}, nil
 
@@ -219,6 +220,21 @@ func pageStateText(st browser.PageState) string {
 		return "(page is empty)"
 	}
 	return out
+}
+
+// screenshotMime sniffs the real image type from the capture's magic bytes.
+// chromedp returns PNG for viewport/element captures but JPEG for fullPage
+// (it encodes as JPEG whenever quality != 100), so a hardcoded "image/png"
+// would mislabel fullPage shots — and Anthropic rejects the request (400) when
+// the declared media_type doesn't match the bytes. Detecting from the content
+// keeps the label honest regardless of capture mode.
+func screenshotMime(img []byte) string {
+	switch ct := http.DetectContentType(img); ct {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return ct
+	default:
+		return "image/png"
+	}
 }
 
 // screenshotScope labels what a screenshot captured, for the result text.

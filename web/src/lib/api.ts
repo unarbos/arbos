@@ -64,6 +64,13 @@ export function fetchModels(): Promise<ModelCatalog> {
   return modelsPromise;
 }
 
+/** Drop the cached catalog so the next fetchModels hits the network. Used
+ *  after a provider change, whose re-exec gives the host a real models
+ *  endpoint where it had none before. */
+export function resetModelsCache(): void {
+  modelsPromise = null;
+}
+
 /** One slash command (a prompt template) the composer's popup offers. */
 export interface SlashCommand {
   name: string;
@@ -496,6 +503,19 @@ export async function fetchLLMCredits(): Promise<LLMCredits> {
   const res = await fetch("/api/llm/credits");
   if (!res.ok) throw new Error(await errorText(res, `credits: ${res.status}`));
   return (await res.json()) as LLMCredits;
+}
+
+/**
+ * Mint a one-time login link for sharing this agent. Each link is
+ * independent — minting another doesn't kill earlier ones — and dies on
+ * first use or after 24 hours unused. Fails (404) on hosts without an auth
+ * gate — a loopback-only bind has no login to share.
+ */
+export async function createShareLink(): Promise<string> {
+  const res = await fetch("/api/share", { method: "POST" });
+  if (!res.ok) throw new Error(await errorText(res, `share: ${res.status}`));
+  const body = (await res.json()) as { url: string };
+  return body.url;
 }
 
 /** Start dictation: the host machine begins capturing its own microphone. */

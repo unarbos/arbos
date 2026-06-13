@@ -1,24 +1,26 @@
-import { lazy, Suspense, useCallback, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 
 import { ActivityView } from "./components/ActivityView";
 import { ChatTab } from "./components/ChatTab";
 import { HistoryView } from "./components/HistoryView";
 import { RunView, type RunRef } from "./components/RunView";
+import { lazyPanel } from "./lib/lazyPanel";
 
 // Code-split the heavy companion-tab bodies out of the main bundle: xterm
 // (TerminalView), the surface viewers (SurfaceView), and the settings panel
 // load on first use instead of on every cold start. Chat is the start page,
 // so its path stays eager.
-const MessengerView = lazy(() =>
+const MessengerView = lazyPanel(() =>
   import("./components/MessengerView").then((m) => ({ default: m.MessengerView })),
 );
-const SettingsView = lazy(() =>
+const SettingsView = lazyPanel(() =>
   import("./components/SettingsView").then((m) => ({ default: m.SettingsView })),
 );
-const SurfaceView = lazy(() =>
+import type { SettingsPage } from "./components/SettingsView";
+const SurfaceView = lazyPanel(() =>
   import("./components/SurfaceView").then((m) => ({ default: m.SurfaceView })),
 );
-const TerminalView = lazy(() =>
+const TerminalView = lazyPanel(() =>
   import("./components/TerminalView").then((m) => ({ default: m.TerminalView })),
 );
 import {
@@ -34,6 +36,7 @@ import {
   closeTerminal,
   createTerminal,
   createBrowserTab,
+  fetchLLM,
   listBrowserTabs,
   type SessionSummary,
 } from "./lib/api";
@@ -70,6 +73,8 @@ interface TabState extends TabInfo {
   /** kind "messenger": the connected bot this tab is the chat for
    *  (undefined until its token is entered). */
   messengerBot?: number;
+  /** kind "settings": the page the panel opens on (undefined → General). */
+  settingsPage?: SettingsPage;
 }
 
 /**
@@ -179,7 +184,7 @@ function historyTab(key: number, pane: number): TabState {
   };
 }
 
-function settingsTab(key: number, pane: number): TabState {
+function settingsTab(key: number, pane: number, page?: SettingsPage): TabState {
   return {
     key,
     title: "Settings",
@@ -189,6 +194,7 @@ function settingsTab(key: number, pane: number): TabState {
     sessionId: null,
     titlePinned: false,
     pane,
+    settingsPage: page,
   };
 }
 
@@ -386,9 +392,14 @@ export default function App() {
    * Open (or refresh) a companion tab beside the chat that produced it —
    * the one mechanic every non-chat tab kind shares: re-use a matching open
    * tab (reference refreshed, raised to front); else the next pane over;
-   * else a fresh split to the chat's right. The keyboard stays with the
-   * chat — companions are something to look at, not type into (a shell the
-   * user asks for takes focus separately, in newShellTab).
+   * else a fresh split to the chat's right.
+   *
+   * The companion's pane becomes the focused one, so layout actions (a split,
+   * a + new tab) land on the panel the user just got, not the chat it sprang
+   * from — without it, splitting "the browser" silently split the chat
+   * instead. The composer keyboard still stays with the chat: focusTick is
+   * NOT bumped, so the chat's textarea keeps the DOM focus it already holds
+   * (a shell the user asks for takes the keyboard separately, in newShellTab).
    */
   const openAside = useCallback(
     (
@@ -406,6 +417,7 @@ export default function App() {
             ...s,
             tabs: s.tabs.map((t) => (t.key === existing.key ? refresh(t) : t)),
             paneActive: { ...s.paneActive, [existing.pane]: existing.key },
+            focusedPane: existing.pane,
           };
         }
         const panes = panesOf(s.root);
@@ -416,6 +428,7 @@ export default function App() {
             ...s,
             tabs: [...s.tabs, tab],
             paneActive: { ...s.paneActive, [beside]: tab.key },
+            focusedPane: beside,
           };
         }
         const splitId = nextId.current++;
@@ -426,6 +439,7 @@ export default function App() {
           root: splitPane(s.root, from.pane, "right", splitId, paneId),
           tabs: [...s.tabs, tab],
           paneActive: { ...s.paneActive, [paneId]: tab.key },
+          focusedPane: paneId,
         };
       });
     },
@@ -624,6 +638,29 @@ export default function App() {
     () => openSingleton((t) => t.kind === "settings", settingsTab),
     [openSingleton],
   );
+
+  /** Onboarding: the same singleton settings tab, but landed on the Provider
+   *  page — where a first run with no configured provider needs to go. */
+  const openProviderSetup = useCallback(
+    () =>
+      openSingleton(
+        (t) => t.kind === "settings",
+        (key, pane) => settingsTab(key, pane, "provider"),
+      ),
+    [openSingleton],
+  );
+
+  // First run with no provider configured can't talk to a model at all, so
+  // there's nothing to do in a chat yet — take the user straight to the
+  // Provider settings instead of a dead composer. A missing /api/llm (no
+  // config dir, so nothing to configure here) is left alone.
+  useEffect(() => {
+    fetchLLM()
+      .then((info) => {
+        if (!info.key_set) openProviderSetup();
+      })
+      .catch(() => {});
+  }, [openProviderSetup]);
 
   /** A job terminal's "shell here": continue the job's work by hand, in its
    * directory, in a live shell beside it. */
@@ -936,7 +973,7 @@ export default function App() {
                 )}
               />
             ) : tab.kind === "settings" ? (
-              <SettingsView />
+              <SettingsView initialPage={tab.settingsPage} />
             ) : (
               <ChatTab
                 active={visible}

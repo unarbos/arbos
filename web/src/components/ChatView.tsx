@@ -24,7 +24,7 @@ import { PartImages } from "./PartImages";
 import { fetchJobTail, HttpError } from "@/lib/api";
 import { argsPreview } from "@/lib/format";
 import { detailsSurface, dirSurface, fileSurface, type Surface } from "@/lib/surface";
-import { detailsJob, type TermRef } from "@/lib/term";
+import { detailsJob, jobFromDetails, type TermRef } from "@/lib/term";
 import type { ChatState, TranscriptItem } from "@/lib/transcript";
 import type { Citation, ContentBlock, ToolCall } from "@/lib/types";
 import { useAutosize } from "@/lib/useAutosize";
@@ -656,6 +656,8 @@ function ToolItem({ item, hooks }: { item: ToolTranscriptItem; hooks?: Transcrip
       return <MemoryCard item={item} />;
     case "ask":
       return <AskCard item={item} />;
+    case "fetch":
+      return <FetchRow item={item} />;
     case "ls": {
       // The listed directory opens as a browser tab — same reference the
       // Files button and show-on-a-folder use.
@@ -1111,7 +1113,7 @@ function summary(call: ToolCall): { verb: string; arg: string } {
     case "grep":
       return { verb: "Grepped", arg: str(a.pattern) };
     case "fetch":
-      return { verb: "Fetched", arg: str(a.url) };
+      return { verb: "Fetched page", arg: str(a.url) };
     case "await":
       return { verb: "Waited on job", arg: str(a.id) };
     case "jobs":
@@ -1170,6 +1172,45 @@ function SummaryRow({
   );
 }
 
+/** A fetch call the way Cursor narrates it: `Fetched page <url>` in one
+ * quiet line — the URL in the same prose face (no mono), a shade dimmer,
+ * and a live link to the page itself. */
+function FetchRow({ item }: { item: ToolTranscriptItem }) {
+  const running = !item.result;
+  const failed = item.result?.IsError ?? false;
+  const url = str(args(item.call).url);
+
+  return (
+    <div className="text-muted">
+      <div className="flex min-w-0 items-center gap-1.5">
+        {running && (
+          <Loader2 size={12} className="shrink-0 animate-spin text-faint" />
+        )}
+        {failed && <X size={12} className="shrink-0 text-red" />}
+        <span className={`shrink-0 ${running ? "shimmer" : ""}`}>
+          {running ? "Fetching page" : "Fetched page"}
+        </span>
+        {url && (
+          <a
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            title={url}
+            className="truncate text-faint hover:text-accent hover:underline"
+          >
+            {url}
+          </a>
+        )}
+      </div>
+      {failed && item.result && (
+        <div className="truncate pl-[18px] text-[11.5px] text-red/80">
+          {item.result.Content.slice(0, ERROR_PREVIEW_MAX)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const TERMINAL_TAIL_LINES = 12;
 
 const BACKGROUNDED_REPORT =
@@ -1209,7 +1250,12 @@ function TerminalCard({ item, hooks }: { item: ToolTranscriptItem; hooks?: Trans
 
   // The job behind this card: Details when the result carries it, else the
   // backgrounded-report text (older transcripts). Errors carry no Details.
-  const jobId = item.result ? (detailsJob(item.result) ?? job) : undefined;
+  // While the command is still running its result hasn't landed, so the id
+  // comes from the live tool_details event instead — that's what lets a
+  // running command open as a live terminal tab, not only a finished one.
+  const jobId = item.result
+    ? (detailsJob(item.result) ?? job)
+    : jobFromDetails(item.liveDetails);
   const expand =
     jobId && hooks?.onOpenTerminal
       ? (e: React.MouseEvent) => {

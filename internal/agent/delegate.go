@@ -32,7 +32,11 @@ func (r *Router) Register(ref BackendRef, ag Agent) {
 	r.agents[ref] = ag
 }
 
-func (r *Router) resolve(ref BackendRef) (Agent, error) {
+// Resolve returns the agent registered under ref, or the default when ref is
+// empty. It is the one dispatch point delegation routes through; exported so a
+// host can spawn a sub-agent on the same path without owning a second one (the
+// sessions tool's reader uses it).
+func (r *Router) Resolve(ref BackendRef) (Agent, error) {
 	if ref == "" {
 		ref = r.defName
 	}
@@ -77,7 +81,7 @@ func RegisterDelegate(reg *tool.Registry, r *Router) error {
 	}
 	spec := tool.NewRichSpec("delegate", "Delegate a sub-task to another agent and return its result. Issue several delegate calls at once and they run in parallel — the way to explore or edit a large codebase with multiple sub-agents working concurrently.", false,
 		func(ctx context.Context, a DelegateArgs) (tool.Result, error) {
-			ag, err := r.resolve(BackendRef(a.Backend))
+			ag, err := r.Resolve(BackendRef(a.Backend))
 			if err != nil {
 				return tool.Result{}, err
 			}

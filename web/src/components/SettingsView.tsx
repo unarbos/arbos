@@ -32,7 +32,7 @@ interface Section {
   rows: Row[];
 }
 
-type SettingsPage = "general" | "provider" | "secrets";
+export type SettingsPage = "general" | "provider" | "secrets";
 
 const PAGES: {
   id: SettingsPage;
@@ -51,13 +51,14 @@ const PAGES: {
  * on the right. Provider and Secrets live on their own pages; a non-empty
  * search overrides the page choice and matches across all of them.
  * Settings persist in the localStorage-backed settings store (theme keeps
- * its own store; this panel just surfaces it).
+ * its own store; this panel just surfaces it). initialPage selects which
+ * page opens first — the onboarding auto-open lands straight on Provider.
  */
-export function SettingsView() {
+export function SettingsView({ initialPage }: { initialPage?: SettingsPage }) {
   const settings = useSettings();
   const theme = useTheme();
   const [query, setQuery] = useState("");
-  const [page, setPage] = useState<SettingsPage>("general");
+  const [page, setPage] = useState<SettingsPage>(initialPage ?? "general");
   // The durable host preferences (the Go side's settings.json). null until
   // loaded — and stays null when the gateway has no settings store (e.g. no
   // config dir), which simply hides the Agent section.

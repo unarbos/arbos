@@ -2,8 +2,10 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Activity,
   AppWindow,
+  Check,
   Clock,
   Columns2,
+  Copy,
   FolderTree,
   Globe,
   Loader2,
@@ -13,10 +15,12 @@ import {
   Rows2,
   Send,
   Settings,
+  Share2,
   SquareTerminal,
   X,
 } from "lucide-react";
 
+import { createShareLink } from "@/lib/api";
 import type { SplitDir } from "@/lib/layout";
 import { ThemePicker } from "./ThemePicker";
 import { Tooltip } from "./Tooltip";
@@ -170,6 +174,7 @@ export function TabStrip({
 export function GlobalActions({ onSplit }: { onSplit: (dir: SplitDir) => void }) {
   return (
     <>
+      <ShareButton />
       <IconButton title="Split pane right" onClick={() => onSplit("right")}>
         <Columns2 size={13} />
       </IconButton>
@@ -178,6 +183,111 @@ export function GlobalActions({ onSplit }: { onSplit: (dir: SplitDir) => void })
       </IconButton>
       <ThemePicker />
     </>
+  );
+}
+
+/**
+ * The share affordance: mints a one-time login link for this agent and shows
+ * it in a popover, copied to the clipboard. Links are independent — minting
+ * one never kills an earlier unredeemed one or the console link — and each
+ * dies on first use or after 24 hours unused. On hosts without an auth gate
+ * (loopback-only bind) the endpoint 404s and the popover explains instead.
+ * Clipboard state is tri-valued so a blocked clipboard (plain-http origin)
+ * is said out loud rather than quietly not copying.
+ */
+function ShareButton() {
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<boolean | null>(null); // null = not attempted
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const copy = async (link: string) => {
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+    } catch {
+      setCopied(false); // clipboard blocked (e.g. plain-http origin) — say so below
+    }
+  };
+
+  const toggle = async () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    setUrl(null);
+    setError(null);
+    setCopied(null);
+    try {
+      const link = await createShareLink();
+      setUrl(link);
+      await copy(link);
+    } catch {
+      setError(
+        "Sharing needs a remotely reachable arbos (a forest join or a non-loopback bind).",
+      );
+    }
+  };
+
+  return (
+    <div ref={rootRef} className="relative flex">
+      <IconButton title="Share agent" pressed={open} onClick={() => void toggle()}>
+        <Share2 size={13} />
+      </IconButton>
+      {open && (
+        <div className="absolute right-0 top-7 z-50 flex w-72 flex-col gap-2 rounded-lg border border-line bg-card p-3 shadow-xl shadow-black/40">
+          <div className="text-[12px] font-semibold text-bright">Share this agent</div>
+          {error ? (
+            <div className="text-[12px] text-muted">{error}</div>
+          ) : !url ? (
+            <div className="flex items-center gap-2 text-[12px] text-muted">
+              <Loader2 size={12} className="animate-spin" /> Minting link…
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center gap-1.5">
+                <input
+                  readOnly
+                  value={url}
+                  onFocus={(e) => e.currentTarget.select()}
+                  className="min-w-0 flex-1 rounded-md border border-line bg-canvas px-2 py-1 text-[11.5px] text-text outline-none"
+                />
+                <IconButton
+                  title={copied ? "Copied" : "Copy link"}
+                  onClick={() => void copy(url)}
+                >
+                  {copied ? <Check size={13} /> : <Copy size={13} />}
+                </IconButton>
+              </div>
+              {copied === false && (
+                <div className="text-[11.5px] text-text">
+                  Clipboard is blocked here — select the link above and copy it
+                  manually.
+                </div>
+              )}
+              <div className="text-[11.5px] text-muted">
+                {copied ? "Copied. " : ""}Logs in one browser, then expires;
+                unused links die after 24 h. Safe to paste in chat — previews
+                can’t consume it. Share again for another.
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

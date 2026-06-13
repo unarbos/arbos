@@ -2,12 +2,26 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/ports"
 )
+
+// withToolDetails binds this call to a tool details side-channel (ToolDetails)
+// for the duration of its dispatch, so a tool that learns a presentation fact
+// mid-run — a bash command's journaled job id — can stream it to frontends
+// before its result lands. The emit rides this session's own outbound channel
+// (Depth 0), so it interleaves with the call's tool_started/tool_finished the
+// way the frontend folds it (by call id). c.emit is safe under the scheduled
+// path's concurrent dispatch.
+func (e *Engine) withToolDetails(ctx context.Context, c *Conversation, callID string) context.Context {
+	return withToolDetailsSink(ctx, func(details json.RawMessage) {
+		c.emit(ctx, core.ToolDetails{CallID: callID, Details: details})
+	})
+}
 
 // maxParallelTools caps concurrent read-only tool dispatch so a model that
 // requests a hundred fetches doesn't open a hundred sockets at once.
@@ -207,7 +221,7 @@ func (e *Engine) dispatchSequential(ctx context.Context, c *Conversation, calls 
 			e.backfillInterruptedTools(ctx, c, calls[i:])
 			return dr.interrupted()
 		}
-		res := e.tools.Dispatch(ctx, call)
+		res := e.tools.Dispatch(e.withToolDetails(ctx, c, call.ID), call)
 		if !e.recordResult(ctx, c, &dr, res) {
 			// Include i: its own result failed to persist, so backfill it too
 			// (best-effort) to avoid orphaning its tool_call.
@@ -270,7 +284,7 @@ func (e *Engine) dispatchScheduled(ctx context.Context, c *Conversation, calls [
 						results[i] = core.ToolResult{CallID: calls[i].ID, IsError: true, Content: fmt.Sprintf("panic in tool %q: %v", calls[i].Name, r)}
 					}
 				}()
-				results[i] = e.tools.Dispatch(ctx, calls[i])
+				results[i] = e.tools.Dispatch(e.withToolDetails(ctx, c, calls[i].ID), calls[i])
 			}(idx)
 		}
 		wg.Wait()

@@ -87,6 +87,8 @@ func DecodeEvent(b []byte) (KernelEvent, error) {
 		return unmarshalEvent[Images](f)
 	case KernelEventToolProgress:
 		return unmarshalEvent[ToolProgress](f)
+	case KernelEventToolDetails:
+		return unmarshalEvent[ToolDetails](f)
 	case KernelEventToolStarted:
 		return unmarshalEvent[ToolStarted](f)
 	case KernelEventToolFinished:

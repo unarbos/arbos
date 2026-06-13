@@ -486,13 +486,7 @@ func (s *Store) ListSessions(ctx context.Context, limit int) ([]SessionSummary, 
 			ID:        core.SessionID(id),
 			UpdatedAt: time.Unix(0, updated).UTC(),
 		}
-		if len(payload) > 0 {
-			if p, err := core.DecodePayload(core.EventUserMessage, payload); err == nil {
-				if mp, ok := p.(core.MessagePayload); ok {
-					sum.Title = sessionTitle(mp.Message.Content)
-				}
-			}
-		}
+		sum.Title = titleFromUserMessage(payload)
 		// A session nobody ever prompted (an opened-then-abandoned connection)
 		// has nothing to resume; keep it out of the picker.
 		if sum.Title == "" {
@@ -593,6 +587,77 @@ func (s *Store) RecentOwnedSessions(ctx context.Context, limit int) ([]OwnedSess
 	return out, nil
 }
 
+// RecentSession is one row of the unified cross-session index the agent's
+// sessions tool reads: every session that ran at least one prompt — the user's
+// other chats and the agent's own autonomous runs — labeled by its first user
+// message so the agent can recognize "that Ralph loop I just ran" without
+// loading any transcript. Kind is derived: a session with an owner is a machine
+// "run" (a scheduler wake), one without is a human "chat".
+type RecentSession struct {
+	ID        core.SessionID
+	Kind      string // "chat" or "run"
+	Title     string
+	Owner     core.SessionID
+	Origin    string
+	SpawnedBy string
+	Status    core.SessionStatus
+	UpdatedAt time.Time
+}
+
+// RecentSessions lists the most recently active sessions across every chat and
+// run, newest first, each titled by its first user prompt. Unlike ListSessions
+// (human chats only) and RecentOwnedSessions (runs only), this is the whole
+// picture the agent draws on to find another session by what it was — sessions
+// nobody ever prompted are skipped (nothing to review).
+func (s *Store) RecentSessions(ctx context.Context, limit int) ([]RecentSession, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.id, s.owner, s.origin, s.spawned_by, s.status, s.updated_at,
+		       (SELECT e.payload FROM events e
+		        WHERE e.session_id = s.id AND e.kind = 'user_message'
+		        ORDER BY e.seq ASC LIMIT 1)
+		FROM sessions s
+		ORDER BY s.updated_at DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("recent sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []RecentSession
+	for rows.Next() {
+		var (
+			rs                RecentSession
+			id, owner, status string
+			updatedRaw        int64
+			payload           []byte
+		)
+		if err := rows.Scan(&id, &owner, &rs.Origin, &rs.SpawnedBy, &status, &updatedRaw, &payload); err != nil {
+			return nil, fmt.Errorf("recent sessions: scan: %w", err)
+		}
+		rs.Title = titleFromUserMessage(payload)
+		// A session nobody ever prompted has nothing to review; skip it.
+		if rs.Title == "" {
+			continue
+		}
+		rs.ID = core.SessionID(id)
+		rs.Owner = core.SessionID(owner)
+		rs.Status = core.SessionStatus(status)
+		rs.UpdatedAt = time.Unix(0, updatedRaw).UTC()
+		rs.Kind = "chat"
+		if owner != "" {
+			rs.Kind = "run"
+		}
+		out = append(out, rs)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("recent sessions: %w", err)
+	}
+	return out, nil
+}
+
 // ScheduledChildren lists the scheduler-spawned sessions owned by one chat,
 // newest first — the runs a frontend offers as openable sub-agent tabs.
 // Scoped by the owner column, so one chat's runs never appear in another.
@@ -629,6 +694,24 @@ func (s *Store) ScheduledChildren(ctx context.Context, chat string) ([]ChildSess
 		return nil, fmt.Errorf("scheduled children: %w", err)
 	}
 	return out, nil
+}
+
+// titleFromUserMessage decodes a stored user_message payload into a one-line
+// list title, or "" when the payload is absent or not a message. Shared by the
+// session-listing queries so the three-level decode lives in one place.
+func titleFromUserMessage(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	p, err := core.DecodePayload(core.EventUserMessage, payload)
+	if err != nil {
+		return ""
+	}
+	mp, ok := p.(core.MessagePayload)
+	if !ok {
+		return ""
+	}
+	return sessionTitle(mp.Message.Content)
 }
 
 // sessionTitle reduces a prompt to one list-row line.

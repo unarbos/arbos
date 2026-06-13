@@ -191,7 +191,7 @@ func (s *Server) DeliverOutbox(ctx context.Context) {
 			}
 			bySession[sid] = append(bySession[sid], c)
 		}
-		msgs, err := s.Store.ClaimOutboxFor(ctx, viaWeb, core.PrincipalLocal, sessions, time.Now().Add(-outbox.StaleAfter))
+		msgs, err := s.Store.ClaimOutboxFor(ctx, viaWeb, core.PrincipalLocal, sessions)
 		if err != nil || len(msgs) == 0 {
 			continue
 		}
@@ -318,7 +318,13 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/", spaHandler(s.Dist))
 	}
 	if s.Auth != nil {
+		// Same-origin: a drive-by page must never mint itself a login link
+		// off the user's cookie.
+		mux.HandleFunc("POST /api/share", sameOrigin(s.handleShare))
+		// GET renders (confirm/paste/error) and never consumes a token —
+		// link unfurlers GET. POST is the consuming step.
 		mux.HandleFunc("GET "+loginPath, s.Auth.handleLogin)
+		mux.HandleFunc("POST "+loginPath, s.Auth.handleLogin)
 		return s.Auth.wrap(mux)
 	}
 	return mux
@@ -813,6 +819,15 @@ func spaHandler(dist fs.FS) http.Handler {
 			if f, err := dist.Open(p); err == nil {
 				_ = f.Close()
 				fileServer.ServeHTTP(w, r)
+				return
+			}
+			// A missing hashed bundle must 404, never fall back: after an
+			// in-place upgrade a page loaded before the swap still imports
+			// the previous build's chunks, and answering 200 with index.html
+			// makes the dynamic import choke on HTML instead of failing in a
+			// way the frontend can detect and heal (lazyPanel reloads).
+			if strings.HasPrefix(r.URL.Path, "/assets/") {
+				http.NotFound(w, r)
 				return
 			}
 		}

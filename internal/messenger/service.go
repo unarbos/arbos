@@ -126,7 +126,7 @@ type Event struct {
 // delivery door for the agent's between-turn voice.
 type KernelStore interface {
 	EventsFrom(ctx context.Context, id core.SessionID, from int64) ([]core.Event, error)
-	ClaimOutboxFor(ctx context.Context, via, principal string, sessions []string, staleBefore time.Time) ([]outbox.Message, error)
+	ClaimOutboxFor(ctx context.Context, via, principal string, sessions []string) ([]outbox.Message, error)
 }
 
 // viaTelegram is the outbox delivered_via marker for this door.
@@ -1143,10 +1143,15 @@ func (s *Service) refreshTyping(ctx context.Context, cv *convo) {
 // (scheduled firings, finished background work, escalations) reaches the
 // owner's pocket. Same claim-then-deliver contract as the web and terminal
 // doors: a claimed message is this door's alone, so nothing is ever heard
-// twice. A bridged session's notice routes to its own chat; broadcast-class
-// and stale-swept notices go to the owner — the most recently active private
-// chat on a full-permission bot. No such chat = no claim (a claim with no
-// deliverable target would silently eat the message).
+// twice. Delivery is strictly session-scoped: a bridged session's notice
+// routes to its own chat, and broadcast-class notices (which have no
+// conversation of their own) go to the owner — the most recently active
+// private chat on a full-permission bot. A notice from a session this bridge
+// holds no chat for is never claimed here; it waits, durably, for its own
+// conversation to reopen rather than spilling into an unrelated chat (e.g. a
+// throwaway `arbos -once` automation run sharing this host's store). No owner
+// = no claim (a claim with no deliverable target would silently eat the
+// message).
 func (s *Service) runOutbox(ctx context.Context) {
 	tick := time.NewTicker(outboxPoll)
 	defer tick.Stop()
@@ -1177,8 +1182,7 @@ func (s *Service) runOutbox(ctx context.Context) {
 			continue
 		}
 
-		msgs, err := s.cfg.Store.ClaimOutboxFor(ctx, viaTelegram, core.PrincipalLocal,
-			sessions, time.Now().Add(-outbox.StaleAfter))
+		msgs, err := s.cfg.Store.ClaimOutboxFor(ctx, viaTelegram, core.PrincipalLocal, sessions)
 		if err != nil || len(msgs) == 0 {
 			continue
 		}

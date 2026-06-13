@@ -1,15 +1,16 @@
-import { lazy, memo, Suspense, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, Suspense, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
+import { lazyPanel } from "../lib/lazyPanel";
 import { parsePlotSpec } from "../lib/plot";
 import { Chart } from "./Chart";
 
 // Code-split: mermaid is a heavyweight bundle, only fetched when a
 // transcript actually contains a ```mermaid fence.
-const MermaidDiagram = lazy(() => import("./Mermaid"));
+const MermaidDiagram = lazyPanel(() => import("./Mermaid"));
 
 // Same deal for katex (math typesetting) — only fetched when a message
 // actually contains $…$ / $$…$$ math.
-const Katex = lazy(() => import("./Katex"));
+const Katex = lazyPanel(() => import("./Katex"));
 
 /* ------------------------------------------------------------------ */
 /* Highlight — a tiny regex tokenizer for code blocks and diff lines.  */

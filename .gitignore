@@ -32,3 +32,12 @@
 # Web UI build deps (dist/ is committed: go:embed needs it)
 web/node_modules/
 web/tsconfig.tsbuildinfo
+
+# Node deps / build info anywhere
+node_modules/
+*.tsbuildinfo
+
+# Cloudflare Pages / Wrangler (site/): local cache + account creds + secrets
+.wrangler/
+.dev.vars
+.dev.vars.*

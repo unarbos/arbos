@@ -5,19 +5,13 @@ import { ChevronDown, Infinity as InfinityIcon, Loader2 } from "lucide-react";
 import { fetchModels, type ModelOption } from "@/lib/api";
 import { Tooltip } from "./Tooltip";
 
-/** Catalog shared across tabs — fetched once, then reused by every picker. */
-let catalogPromise: Promise<ModelOption[]> | null = null;
-
+/** The provider catalog, shared across every picker via the api-layer cache
+ *  (one fetch per page load, invalidated by resetModelsCache on a provider
+ *  change). An empty list stands in for a fetch that couldn't complete. */
 function loadCatalog(): Promise<ModelOption[]> {
-  if (!catalogPromise) {
-    catalogPromise = fetchModels()
-      .then((c) => c.models)
-      .catch(() => {
-        catalogPromise = null; // let a later open retry a failed fetch
-        return [];
-      });
-  }
-  return catalogPromise;
+  return fetchModels()
+    .then((c) => c.models)
+    .catch(() => []);
 }
 
 /** A model id shown compactly in the chip: the slug tail, e.g. `kimi-k2`. */

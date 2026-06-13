@@ -1,5 +1,5 @@
 // Package outbox is the agent's voice when no conversation is open: durable
-// messages to the user, delivered by whichever door reaches them first. It
+// messages to the user, delivered into the conversation that created them. It
 // completes the quartet:
 //
 //	STREAM  what happened          — the event log
@@ -9,11 +9,14 @@
 //
 // A turn's reply reaches only the conversation that prompted it; everything
 // else the user must hear — a scheduled reminder firing, finished background
-// work, an escalation — becomes a row here. Delivery is claim-then-deliver:
-// a door atomically claims undelivered rows before showing them, so N open
-// doors (terminal, gateways, the front-door brief) can race for the same
-// messages and the user is never told anything twice. At-most-once on
-// purpose — for speech, a rare lost line beats ever being double-pinged.
+// work, an escalation — becomes a row here, stamped with its originating
+// session. Delivery is claim-then-deliver and session-scoped: a door
+// atomically claims its own conversations' undelivered rows before showing
+// them, so the same message is never told twice and a notice never spills
+// into a chat that did not create it. The notice waits, durably, for its own
+// conversation to reopen (broadcast-class rows, which have no conversation,
+// are the sole exception and reach any door). At-most-once on purpose — for
+// speech, a rare lost line beats ever being double-pinged.
 package outbox
 
 import (
@@ -56,12 +59,6 @@ func IsBroadcast(session string) bool {
 	}
 	return false
 }
-
-// StaleAfter is how long a session-scoped message waits for its own chat to
-// reopen before any door may deliver it. Within the window, scoping is strict
-// (no cross-chat leaks); past it, being heard somewhere beats being lost —
-// the chat may belong to an ended terminal session that will never return.
-const StaleAfter = 10 * time.Minute
 
 // Store is the storage the outbox needs, satisfied by *sqlite.Store. Narrow on
 // purpose (the mind.Store / plan.Store pattern).

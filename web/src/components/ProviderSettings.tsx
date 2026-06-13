@@ -4,6 +4,7 @@ import { Check, RefreshCw } from "lucide-react";
 import {
   fetchLLM,
   fetchLLMCredits,
+  resetModelsCache,
   saveLLM,
   type LLMCredits,
   type LLMInfo,
@@ -69,6 +70,10 @@ export function ProviderSettings({ query }: { query: string }) {
   // save would look like it never happened.
   const save = async () => {
     const prevBoot = info.boot_id;
+    // Whether this save is the first time a provider gets configured — the
+    // onboarding case, where the catalog and the launch model were the
+    // keyless fakes and the whole app should come up fresh on the real one.
+    const wasUnconfigured = !info.key_set;
     setBusy(true);
     setError(null);
     try {
@@ -91,6 +96,17 @@ export function ProviderSettings({ query }: { query: string }) {
         try {
           const fresh = await fetchLLM();
           if (fresh.boot_id !== prevBoot) {
+            // The new host is up with a real models endpoint where it had
+            // none — drop the keyless catalog the page cached at load so
+            // every picker fetches the provider's models on next open.
+            resetModelsCache();
+            if (fresh.key_set && wasUnconfigured) {
+              // Onboarding: reboot the SPA so the model chip, the default
+              // model, and the composer all come up on the configured
+              // provider at once, with nothing of value to lose yet.
+              window.location.reload();
+              return;
+            }
             sync(fresh);
             return;
           }

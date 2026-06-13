@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/unarbos/arbos/internal/engine"
 	"github.com/unarbos/arbos/internal/tool"
 )
 
@@ -52,12 +53,17 @@ func bashSpec(root string, jobs *jobSupervisor, cp *checkpointer) tool.Spec {
 				return tool.Result{}, err
 			}
 			// The renderer-facing job reference (ToolResult.Details, the same
-			// channel show uses for surfaces): the web UI opens the card as a
-			// live terminal tab tailing the job's journal. The model never
-			// sees it.
+			// channel show uses for surfaces); the model never sees it.
 			details, _ := json.Marshal(struct {
 				Job string `json:"job"`
 			}{job.ID})
+			// Hand it to frontends now, before the wait — every command
+			// journals from the instant it spawns, so the terminal card can
+			// open a live tail in a side panel while the command is still
+			// running, not only once it returns. The result carries the same
+			// Details regardless, so a frontend that ignores this (the TUI) or
+			// a dispatch with no engine (tests) loses nothing.
+			engine.EmitToolDetails(ctx, details)
 
 			var timedOut atomic.Bool
 			if a.Timeout > 0 {

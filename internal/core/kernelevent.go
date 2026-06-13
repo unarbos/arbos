@@ -1,5 +1,7 @@
 package core
 
+import "encoding/json"
+
 // KernelEventKind is the serialization discriminator for a KernelEvent and the
 // sealed-interface marker. In-process frontends (the Go TUI) switch on the
 // concrete type; out-of-process frontends (web, desktop, remote arbos, the
@@ -13,6 +15,7 @@ const (
 	KernelEventCitations       KernelEventKind = "citations"
 	KernelEventImages          KernelEventKind = "images"
 	KernelEventToolProgress    KernelEventKind = "tool_progress"
+	KernelEventToolDetails     KernelEventKind = "tool_details"
 	KernelEventToolStarted     KernelEventKind = "tool_started"
 	KernelEventToolFinished    KernelEventKind = "tool_finished"
 	KernelEventTurnComplete    KernelEventKind = "turn_complete"
@@ -70,6 +73,19 @@ type ToolProgress struct {
 	CallID string `json:"call_id"`
 	Name   string `json:"name"`
 	Bytes  int    `json:"bytes"`
+}
+
+// ToolDetails carries a running tool's presentation-only Details to frontends
+// before its result lands, keyed by call id. It exists so a frontend can act
+// on a side-channel fact the tool learns mid-execution — chiefly the job id a
+// bash command is journaling to, which lets the terminal card offer "open as a
+// terminal tab" (a live tail of the journal) while the command is still
+// running, not only after it returns. Details mirrors ToolResult.Details (the
+// same channel surfaces and sub-agents ride); the model never sees it.
+// Presentation only; never persisted, like ToolProgress.
+type ToolDetails struct {
+	CallID  string          `json:"call_id"`
+	Details json.RawMessage `json:"details"`
 }
 
 // ToolStarted announces a tool invocation about to run.
@@ -185,6 +201,7 @@ func (ReasoningDelta) Kind() KernelEventKind  { return KernelEventReasoningDelta
 func (Citations) Kind() KernelEventKind       { return KernelEventCitations }
 func (Images) Kind() KernelEventKind          { return KernelEventImages }
 func (ToolProgress) Kind() KernelEventKind    { return KernelEventToolProgress }
+func (ToolDetails) Kind() KernelEventKind     { return KernelEventToolDetails }
 func (ToolStarted) Kind() KernelEventKind     { return KernelEventToolStarted }
 func (ToolFinished) Kind() KernelEventKind    { return KernelEventToolFinished }
 func (TurnComplete) Kind() KernelEventKind    { return KernelEventTurnComplete }

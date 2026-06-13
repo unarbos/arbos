@@ -62,6 +62,14 @@ export type TranscriptItem =
        */
       composing?: { bytes: number };
       /**
+       * A running tool's presentation Details, streamed by a tool_details event
+       * before the result lands — chiefly a bash command's journaled job id, so
+       * the terminal card can open a live tail in a side panel while the command
+       * is still running. Live-only; once the result arrives its Details is
+       * authoritative (and a resumed transcript reads the job id from there).
+       */
+      liveDetails?: unknown;
+      /**
        * The turn ended (stop or error) before this call's result arrived: the
        * row renders as "stopped" instead of spinning forever — no result is
        * ever coming for it.
@@ -239,6 +247,17 @@ function lastStreaming(state: ChatState): number {
   return -1;
 }
 
+/** Index of the latest still-open tool row (no result yet) for a call id, or
+ *  -1 if none. Every tool event — progress, details, started, finished —
+ *  attaches to its row by this same scan. */
+function findOpenTool(items: TranscriptItem[], callID: string): number {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it.kind === "tool" && it.call.ID === callID && !it.result) return i;
+  }
+  return -1;
+}
+
 /**
  * Route a relayed sub-agent envelope into its own per-child transcript. The
  * child's events fold through the same applyEnvelope as the parent's (depth
@@ -362,11 +381,10 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
       // first sighting of a call id seeds the row — finalizing any open prose,
       // since the model has moved on from text to composing the call — and
       // later updates just grow its byte count.
-      for (let i = state.items.length - 1; i >= 0; i--) {
-        const it = state.items[i];
-        if (it.kind === "tool" && it.call.ID === ev.data.call_id && !it.result) {
-          return replaceAt(state, i, { ...it, composing: { bytes: ev.data.bytes } });
-        }
+      const i = findOpenTool(state.items, ev.data.call_id);
+      if (i >= 0) {
+        const it = state.items[i] as Extract<TranscriptItem, { kind: "tool" }>;
+        return replaceAt(state, i, { ...it, composing: { bytes: ev.data.bytes } });
       }
       return push({ ...finalize(closeThinking(state)), turnActive: true }, {
         kind: "tool",
@@ -376,41 +394,48 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
       });
     }
 
+    case "tool_details": {
+      // A running tool handed up a presentation fact (a bash job id) before
+      // its result: attach it to the matching open row so the terminal card
+      // can offer a live tail while the command is still running. Only ever
+      // updates a result-less row — once the result lands, its Details wins.
+      const i = findOpenTool(state.items, ev.data.call_id);
+      if (i < 0) return state;
+      const it = state.items[i] as Extract<TranscriptItem, { kind: "tool" }>;
+      return replaceAt(state, i, { ...it, liveDetails: ev.data.details });
+    }
+
     case "tool_started": {
       // The finished call: adopt the composing row it grew from (so the card
       // transitions in place, no flicker), else start a fresh row.
       const call = ev.data.call;
       const s = closeThinking(state);
-      for (let i = s.items.length - 1; i >= 0; i--) {
-        const it = s.items[i];
-        if (it.kind === "tool" && it.call.ID === call.ID && !it.result) {
-          return replaceAt(s, i, { ...it, call, composing: undefined });
-        }
+      const i = findOpenTool(s.items, call.ID);
+      if (i >= 0) {
+        const it = s.items[i] as Extract<TranscriptItem, { kind: "tool" }>;
+        return replaceAt(s, i, { ...it, call, composing: undefined });
       }
       return push(s, { kind: "tool", id: s.nextId, call });
     }
 
     case "tool_finished": {
-      for (let i = state.items.length - 1; i >= 0; i--) {
-        const it = state.items[i];
-        if (it.kind === "tool" && !it.result && it.call.ID === ev.data.result.CallID) {
-          // A delegating tool's result names its true child session. The live
-          // guess paired relays to rows by arrival order, which parallel
-          // children can scramble — the result is authoritative, so re-pair.
-          let s = replaceAt(state, i, {
-            ...it,
-            result: ev.data.result,
-            childSession: detailsChildSession(ev.data.result) ?? it.childSession,
-          });
-          // An ask answered elsewhere (another frontend, the TUI) resolves
-          // here too — its panel must not linger once the result lands.
-          if (it.call.Name === "ask" && s.pendingQuestions) {
-            s = { ...s, pendingQuestions: null };
-          }
-          return trackBackground(s, it.call, ev.data.result);
-        }
+      const i = findOpenTool(state.items, ev.data.result.CallID);
+      if (i < 0) return state;
+      const it = state.items[i] as Extract<TranscriptItem, { kind: "tool" }>;
+      // A delegating tool's result names its true child session. The live
+      // guess paired relays to rows by arrival order, which parallel
+      // children can scramble — the result is authoritative, so re-pair.
+      let s = replaceAt(state, i, {
+        ...it,
+        result: ev.data.result,
+        childSession: detailsChildSession(ev.data.result) ?? it.childSession,
+      });
+      // An ask answered elsewhere (another frontend, the TUI) resolves here
+      // too — its panel must not linger once the result lands.
+      if (it.call.Name === "ask" && s.pendingQuestions) {
+        s = { ...s, pendingQuestions: null };
       }
-      return state;
+      return trackBackground(s, it.call, ev.data.result);
     }
 
     case "turn_complete": {

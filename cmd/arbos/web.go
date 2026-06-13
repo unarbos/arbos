@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/unarbos/arbos/internal/agent/pi"
 	"github.com/unarbos/arbos/internal/core"
@@ -159,12 +160,30 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	// remotely without the gate would expose file write, PTY, and secrets.
 	//
 	// prints tracks the pieces of the login line that arrive at different
-	// times: tokens rotate on every consumption, and the public URL exists
-	// only once a forest join lands. Each event reprints a complete URL.
+	// times: the console token rotates on every consumption, and the public
+	// URL exists only once a forest join lands. Each event reprints complete
+	// URLs — forest first, because on a headless install the public link is
+	// the only one a user can click. When a join is expected, the first
+	// print waits for it (bounded by forestPrintGrace) so the loopback link
+	// is never the first thing shown.
 	var prints struct {
 		sync.Mutex
-		token  string
-		public string
+		token   string
+		public  string
+		login   string // local host:port for the login URL
+		waiting bool   // hold prints until the forest join lands or grace expires
+	}
+	prints.waiting = forestURL != ""
+	printLogin := func() {
+		prints.Lock()
+		defer prints.Unlock()
+		if prints.token == "" || prints.waiting {
+			return
+		}
+		if prints.public != "" {
+			fmt.Fprintf(os.Stderr, "arbos forest login: %s/login?token=%s\n", prints.public, prints.token)
+		}
+		fmt.Fprintf(os.Stderr, "arbos web login: http://%s/login?token=%s\n", prints.login, prints.token)
 	}
 
 	// Bind before anything prints a URL: when the requested port is taken
@@ -175,6 +194,7 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 		return fmt.Errorf("web listen: %w", err)
 	}
 	addr = boundAddr
+	prints.login = loginAddr(addr)
 
 	if remoteReachable(addr) || forestURL != "" {
 		if piwire.AgentConfigDir() == "" {
@@ -185,16 +205,11 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 		if err != nil {
 			return fmt.Errorf("gateway auth key: %w", err)
 		}
-		login := loginAddr(addr)
 		gw.Auth = &gateway.Auth{Key: key, OnToken: func(tok string) {
 			prints.Lock()
 			prints.token = tok
-			public := prints.public
 			prints.Unlock()
-			fmt.Fprintf(os.Stderr, "arbos web login: http://%s/login?token=%s\n", login, tok)
-			if public != "" {
-				fmt.Fprintf(os.Stderr, "arbos forest login: %s/login?token=%s\n", public, tok)
-			}
+			printLogin()
 		}}
 	}
 
@@ -246,6 +261,26 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	fmt.Fprintf(os.Stderr, "arbos web listening on http://%s\n", displayAddr(addr))
 	if gw.Auth != nil {
 		gw.Auth.MintToken()
+		if forestURL != "" {
+			// The join usually lands within a second or two; if it drags,
+			// stop holding the login print hostage — say why and show the
+			// local link rather than nothing.
+			go func() {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(forestPrintGrace):
+				}
+				prints.Lock()
+				late := prints.waiting
+				prints.waiting = false
+				prints.Unlock()
+				if late {
+					fmt.Fprintf(os.Stderr, "arbos: forest join still pending — local login below; the public link prints when the join lands\n")
+					printLogin()
+				}
+			}()
+		}
 	}
 
 	// Join the forest: register the device, lease a name, and serve this
@@ -259,12 +294,15 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 			Handler: gw.Handler(),
 			OnJoin: func(j forest.JoinInfo) {
 				prints.Lock()
+				// Reconnects re-fire OnJoin with the same URL; only the
+				// first join (or a changed URL) reprints login lines.
+				fresh := prints.public != j.URL || prints.waiting
 				prints.public = j.URL
-				tok := prints.token
+				prints.waiting = false
 				prints.Unlock()
 				fmt.Fprintf(os.Stderr, "arbos forest: joined as %s — %s\n", j.Name, j.URL)
-				if tok != "" {
-					fmt.Fprintf(os.Stderr, "arbos forest login: %s/login?token=%s\n", j.URL, tok)
+				if fresh {
+					printLogin()
 				}
 			},
 			Logf: func(format string, args ...any) {
@@ -416,6 +454,11 @@ func slashCommands(cwd string) []gateway.CommandInfo {
 // maxPortProbes bounds the walk past a busy port — room for a stack of
 // instances on one box without scanning into someone else's range.
 const maxPortProbes = 20
+
+// forestPrintGrace is how long the first login print waits for the forest
+// join before falling back to the local link. Joins land in a second or two;
+// past this, holding the print is a silent death.
+const forestPrintGrace = 10 * time.Second
 
 // listenWeb binds addr; when the port is taken it walks forward through the
 // next maxPortProbes ports so several arbos instances coexist on one machine
