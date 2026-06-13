@@ -14,6 +14,7 @@ const PERMS: Record<ShareScope["kind"], { value: SharePerm; label: string; hint:
     { value: "write", label: "Read + talk", hint: "View and send messages to the agent" },
   ],
   file: [{ value: "read", label: "Read", hint: "View this artifact only" }],
+  all: [{ value: "admin", label: "Full access", hint: "Full control of the agent — equivalent to logging in" }],
 };
 
 // The link lifetimes the dialog offers, in seconds (0 = the server's cap, the
@@ -42,14 +43,20 @@ export function ShareDialog({
   label: string;
   onClose: () => void;
 }) {
+  const perms = PERMS[scope.kind];
   const [ttl, setTtl] = useState(86400);
-  const [perm, setPerm] = useState<SharePerm>("read");
+  const [perm, setPerm] = useState<SharePerm>(() => perms[0].value);
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const clip = useClipboard();
 
-  const perms = PERMS[scope.kind];
+  // Default the permission to the scope's first (safest) tier whenever the
+  // target changes, so reopening on a different scope never carries a stale,
+  // possibly-invalid permission (e.g. "write" onto a file).
+  useEffect(() => {
+    setPerm(PERMS[scope.kind][0].value);
+  }, [scope.kind]);
 
   // Escape closes, matching the app's other overlays.
   useEffect(() => {
@@ -83,7 +90,7 @@ export function ShareDialog({
     }
   };
 
-  const noun = scope.kind === "session" ? "chat" : "artifact";
+  const noun = scope.kind === "session" ? "chat" : scope.kind === "all" ? "agent" : "artifact";
 
   return (
     <div
@@ -182,11 +189,13 @@ export function ShareDialog({
             <div className="text-[11.5px] text-muted">
               {clip.state === "blocked"
                 ? "Clipboard is blocked here — select the link and copy it manually."
-                : scope.kind === "session"
-                  ? perm === "write"
-                    ? "Anyone with this link can read the conversation and send messages to the agent (running real turns)."
-                    : "Read-only link to this conversation, including the tool output it contains."
-                  : "Read-only link to this artifact (and its sibling assets)."}
+                : scope.kind === "all"
+                  ? "Full access to this agent — anyone with the link is logged in until it expires. Treat it like your own login."
+                  : scope.kind === "session"
+                    ? perm === "write"
+                      ? "Anyone with this link can read the conversation and send messages to the agent (running real turns)."
+                      : "Read-only link to this conversation, including the tool output it contains."
+                    : "Read-only link to this artifact (and its sibling assets)."}
             </div>
           </>
         )}

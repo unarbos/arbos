@@ -564,10 +564,11 @@ export async function createShareLink(): Promise<string> {
   return body.url;
 }
 
-/** What a scoped share link points at: one artifact in its own namespace. */
+/** What a scoped share link points at: one artifact in its own namespace, or
+ *  the whole agent ("all", no ref). */
 export interface ShareScope {
-  kind: "file" | "session";
-  /** Workspace path for a file artifact; session id for a chat. */
+  kind: "file" | "session" | "all";
+  /** Workspace path for a file artifact; session id for a chat; "" for all. */
   ref: string;
 }
 

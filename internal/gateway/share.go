@@ -81,12 +81,8 @@ func (s *Server) handleShareLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind := share.ScopeKind(req.Scope.Kind)
-	if kind != share.ScopeFile && kind != share.ScopeSession {
-		http.Error(w, "unsupported scope (v1: file or session)", http.StatusBadRequest)
-		return
-	}
-	if req.Scope.Ref == "" {
-		http.Error(w, "scope ref required", http.StatusBadRequest)
+	if kind != share.ScopeFile && kind != share.ScopeSession && kind != share.ScopeAll {
+		http.Error(w, "unsupported scope (file, session, or all)", http.StatusBadRequest)
 		return
 	}
 	perm, ok := parseSharePerm(req.Perm)
@@ -94,29 +90,36 @@ func (s *Server) handleShareLink(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown perm", http.StatusBadRequest)
 		return
 	}
-	// Only the cells the redemption seam actually enforces are mintable. A
-	// file artifact is read-only for now (no edit path); a chat supports read
-	// and write (talk). write/admin beyond this are staged, so refuse rather
-	// than mint a link that promises more than it delivers.
-	if kind == share.ScopeFile && perm != share.PermRead {
-		http.Error(w, "file links are read-only for now", http.StatusBadRequest)
-		return
-	}
-	if perm > share.PermWrite {
-		http.Error(w, "admin links are not available yet", http.StatusBadRequest)
-		return
-	}
+	// Only the cells the redemption seam actually enforces are mintable, so a
+	// link never promises more than it delivers: a file artifact is read-only
+	// (no edit path yet); a chat is read or write (talk); the full agent is
+	// admin only — a full-agent link is login-equivalent, and a read-only
+	// whole-app view is not yet built. The referent must exist.
 	switch kind {
 	case share.ScopeFile:
+		if perm != share.PermRead {
+			http.Error(w, "file links are read-only for now", http.StatusBadRequest)
+			return
+		}
 		if _, info, err := s.resolveFile(req.Scope.Ref); err != nil || info.IsDir() {
 			http.Error(w, "no such file", http.StatusNotFound)
 			return
 		}
 	case share.ScopeSession:
+		if perm > share.PermWrite {
+			http.Error(w, "admin chat links are not available yet", http.StatusBadRequest)
+			return
+		}
 		if _, err := s.Store.Get(r.Context(), core.SessionID(req.Scope.Ref)); err != nil {
 			http.Error(w, "no such session", http.StatusNotFound)
 			return
 		}
+	case share.ScopeAll:
+		if perm != share.PermAdmin {
+			http.Error(w, "a full-agent link must be full access", http.StatusBadRequest)
+			return
+		}
+		req.Scope.Ref = "" // a node-wide grant has no referent
 	}
 	tok := randomToken()
 	if tok == "" {
@@ -184,9 +187,47 @@ func (s *Server) handleShareView(w http.ResponseWriter, r *http.Request) {
 		s.serveSharedFile(w, r, g)
 	case share.ScopeSession:
 		s.serveSharedChat(w, r)
+	case share.ScopeAll:
+		s.serveSharedAgent(w, r, g)
 	default:
 		shareGone(w)
 	}
+}
+
+// serveSharedAgent redeems a full-agent link: it is login-equivalent (the
+// holder asked for full access and the operator granted it), so redeeming it
+// sets the session cookie and drops the visitor into the live app — folding
+// the share system and login into one credential (ADR-0034). The cookie's life
+// is the grant's remaining life, capped at the normal session TTL, so a
+// short-lived link yields a short session. (Revoking the grant can't retract a
+// cookie already minted from it — the same irreversibility a secrets read has;
+// short TTLs are the mitigation until per-session revocation exists.)
+func (s *Server) serveSharedAgent(w http.ResponseWriter, r *http.Request, g share.Grant) {
+	ttl := cookieTTL
+	if !g.Expires.IsZero() {
+		if d := time.Until(g.Expires); d < ttl {
+			ttl = d
+		}
+	}
+	if ttl <= 0 {
+		shareGone(w)
+		return
+	}
+	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+	tok := g.Token
+	if len(tok) > 8 {
+		tok = tok[:8]
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     authCookie,
+		Value:    s.Auth.signCookie(cookiePayload{Sub: "share:" + tok, Exp: time.Now().Add(ttl).Unix()}),
+		Path:     "/",
+		MaxAge:   int(ttl / time.Second),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
+	})
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // sandboxArtifact forces a served artifact into an opaque origin, the same

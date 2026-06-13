@@ -1,7 +1,8 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 
-import { ActivityHistoryView } from "./components/ActivityHistoryView";
+import { ActivityView } from "./components/ActivityView";
 import { ChatTab } from "./components/ChatTab";
+import { HistoryView } from "./components/HistoryView";
 import { RunView, type RunRef } from "./components/RunView";
 import { lazyPanel } from "./lib/lazyPanel";
 
@@ -196,7 +197,7 @@ function termTab(key: number, pane: number, term: TermRef): TabState {
 function activityTab(key: number, pane: number): TabState {
   return {
     key,
-    title: "Activity",
+    title: "Agent activity",
     busy: false,
     kind: "activity",
     resumeId: null,
@@ -213,6 +214,19 @@ function planTab(key: number, pane: number, node: number): TabState {
     busy: false,
     kind: "plan",
     planNode: node,
+    resumeId: null,
+    sessionId: null,
+    titlePinned: false,
+    pane,
+  };
+}
+
+function historyTab(key: number, pane: number): TabState {
+  return {
+    key,
+    title: "History",
+    busy: false,
+    kind: "history",
     resumeId: null,
     sessionId: null,
     titlePinned: false,
@@ -629,14 +643,19 @@ export default function App() {
       );
   }, [openSingleton]);
 
-  /** The merged activity + history view as a singleton tab — past sessions
-   *  beside every standing obligation and live run, across all chats. Both
-   *  the history (clock) and activity buttons open this one panel. */
+  /** The agent activity view as a singleton tab — one place to see every
+   *  standing obligation and recent run across all chats. */
   const openActivityTab = useCallback(
     () => openSingleton((t) => t.kind === "activity", activityTab),
     [openSingleton],
   );
-  const openHistoryTab = openActivityTab;
+
+  /** Session history as a singleton tab — the searchable list of past
+   *  agents, picking one opens (or focuses) its chat. */
+  const openHistoryTab = useCallback(
+    () => openSingleton((t) => t.kind === "history", historyTab),
+    [openSingleton],
+  );
 
   /** The plan detail view for a node, as a tab — clicking a standing
    *  obligation opens (or focuses) its plan's goal tree and code. Deduped by
@@ -884,6 +903,8 @@ export default function App() {
       label: tab.title || (scope.kind === "session" ? "Chat" : scope.ref),
     });
   };
+  const openShareAgent = () =>
+    setShareTarget({ scope: { kind: "all", ref: "" }, label: "Full access to this agent" });
 
   const places = computePlaces(root);
   const paneRect = new Map(places.panes.map((p) => [p.pane, p.rect]));
@@ -926,16 +947,16 @@ export default function App() {
             drag={dragHandlers(pane)}
             leading={
               pane === leadingPane ? (
-                <SettingsButton onOpen={openSettingsTab} />
+                <>
+                  <HistoryButton onOpen={openHistoryTab} />
+                  <ActivityButton onOpen={openActivityTab} />
+                  <SettingsButton onOpen={openSettingsTab} />
+                </>
               ) : undefined
             }
             actions={
               pane === actionsPane ? (
-                <>
-                  <HistoryButton onOpen={openHistoryTab} />
-                  <ActivityButton onOpen={openActivityTab} />
-                  <GlobalActions onSplit={splitFocused} />
-                </>
+                <GlobalActions onSplit={splitFocused} onShareAgent={openShareAgent} />
               ) : undefined
             }
           />
@@ -995,9 +1016,7 @@ export default function App() {
                 onBusy={(busy) => patchTab(tab.key, { busy })}
               />
             ) : tab.kind === "activity" ? (
-              <ActivityHistoryView
-                active={visible}
-                onOpenSession={openSession}
+              <ActivityView
                 onOpenChat={(chat) =>
                   openSession({ id: chat, title: "", updated_at: 0 })
                 }
@@ -1012,6 +1031,8 @@ export default function App() {
                   openSession({ id: chat, title: "", updated_at: 0 })
                 }
               />
+            ) : tab.kind === "history" ? (
+              <HistoryView active={visible} onOpenSession={openSession} />
             ) : tab.kind === "messenger" ? (
               <MessengerView
                 botId={tab.messengerBot}
