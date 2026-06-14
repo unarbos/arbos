@@ -78,8 +78,8 @@ func (s *Server) handleShareLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind := share.ScopeKind(req.Scope.Kind)
-	if kind != share.ScopeFile && kind != share.ScopeSession && kind != share.ScopeAll {
-		http.Error(w, "unsupported scope (file, session, or all)", http.StatusBadRequest)
+	if kind != share.ScopeFile && kind != share.ScopeSession && kind != share.ScopeAll && kind != share.ScopeTrajectory {
+		http.Error(w, "unsupported scope (file, session, trajectory, or all)", http.StatusBadRequest)
 		return
 	}
 	perm, ok := parseSharePerm(req.Perm)
@@ -111,12 +111,31 @@ func (s *Server) handleShareLink(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "no such session", http.StatusNotFound)
 			return
 		}
+	case share.ScopeTrajectory:
+		// A trajectory is a read-only reproduction — there is nothing to write
+		// back to a snapshot — so it only mints at PermRead. The referent must
+		// be a real session.
+		if perm != share.PermRead {
+			http.Error(w, "trajectory links are read-only", http.StatusBadRequest)
+			return
+		}
+		if _, err := s.Store.Get(r.Context(), core.SessionID(req.Scope.Ref)); err != nil {
+			http.Error(w, "no such session", http.StatusNotFound)
+			return
+		}
 	case share.ScopeAll:
 		if perm != share.PermAdmin {
 			http.Error(w, "a full-agent link must be full access", http.StatusBadRequest)
 			return
 		}
 		req.Scope.Ref = "" // a node-wide grant has no referent
+	default:
+		// The kind guard above already rejects anything unmintable (e.g.
+		// ScopeBoard, a later phase); the explicit default makes a future
+		// ScopeKind force a mint decision here rather than fall through and
+		// silently mint a grant the redemption seam can't honor.
+		http.Error(w, "unsupported scope", http.StatusBadRequest)
+		return
 	}
 	tok := randomToken()
 	if tok == "" {
@@ -182,6 +201,10 @@ func (s *Server) handleShareView(w http.ResponseWriter, r *http.Request) {
 	switch g.Scope.Kind {
 	case share.ScopeFile:
 		s.serveSharedFile(w, r, g)
+	case share.ScopeTrajectory:
+		// Served standalone like a file artifact: a self-contained snapshot
+		// page, sandboxed, with no scoped cookie and no entry into the SPA.
+		s.serveTrajectory(w, r, g)
 	case share.ScopeSession, share.ScopeAll:
 		// Both redeem the same way: set a scoped session cookie and drop the
 		// holder into the real app. The scope guard then enforces what that

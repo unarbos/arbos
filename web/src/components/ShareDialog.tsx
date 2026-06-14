@@ -14,6 +14,7 @@ const PERMS: Record<ShareScope["kind"], { value: SharePerm; label: string; hint:
     { value: "write", label: "Read + talk", hint: "View and send messages to the agent" },
   ],
   file: [{ value: "read", label: "Read", hint: "View this artifact only" }],
+  trajectory: [{ value: "read", label: "Read", hint: "View the full debug log only" }],
   all: [{ value: "admin", label: "Full access", hint: "Full control of the agent — equivalent to logging in" }],
 };
 
@@ -43,7 +44,16 @@ export function ShareDialog({
   label: string;
   onClose: () => void;
 }) {
-  const perms = PERMS[scope.kind];
+  // A chat can be shared two ways: as the live conversation (the real read /
+  // read+talk link) or as a static trajectory snapshot — the full debug log
+  // (every tool call, output, context, and the token totals) rendered at a
+  // link, for "send me the trajectory so I can debug it". The choice only
+  // exists for a chat; every other scope shares exactly one way.
+  const isChat = scope.kind === "session";
+  const [mode, setMode] = useState<"conversation" | "trajectory">("conversation");
+  const effScope: ShareScope =
+    isChat && mode === "trajectory" ? { kind: "trajectory", ref: scope.ref } : scope;
+  const perms = PERMS[effScope.kind];
   const [ttl, setTtl] = useState(86400);
   const [perm, setPerm] = useState<SharePerm>(() => perms[0].value);
   const [url, setUrl] = useState<string | null>(null);
@@ -61,10 +71,11 @@ export function ShareDialog({
 
   // Default the permission to the scope's first (safest) tier whenever the
   // target changes, so reopening on a different scope never carries a stale,
-  // possibly-invalid permission (e.g. "write" onto a file).
+  // possibly-invalid permission (e.g. "write" onto a file). Switching a chat
+  // between conversation and trajectory counts as a target change.
   useEffect(() => {
-    setPerm(PERMS[scope.kind][0].value);
-  }, [scope.kind]);
+    setPerm(PERMS[effScope.kind][0].value);
+  }, [effScope.kind]);
 
   // Escape closes, matching the app's other overlays.
   useEffect(() => {
@@ -80,13 +91,13 @@ export function ShareDialog({
   useEffect(() => {
     setUrl(null);
     clip.reset();
-  }, [ttl, perm, scope.kind, scope.ref]);
+  }, [ttl, perm, mode, scope.kind, scope.ref]);
 
   const create = async () => {
     setBusy(true);
     setError(null);
     try {
-      const link = await shareArtifact(scope, ttl, perm);
+      const link = await shareArtifact(effScope, ttl, perm);
       setUrl(link);
       copyLink(link);
     } catch {
@@ -98,7 +109,14 @@ export function ShareDialog({
     }
   };
 
-  const noun = scope.kind === "session" ? "chat" : scope.kind === "all" ? "agent" : "artifact";
+  const noun =
+    effScope.kind === "trajectory"
+      ? "trajectory"
+      : scope.kind === "session"
+        ? "chat"
+        : scope.kind === "all"
+          ? "agent"
+          : "artifact";
 
   return (
     <div
@@ -128,10 +146,42 @@ export function ShareDialog({
           <div className="text-[12px] text-muted">{error}</div>
         ) : (
           <>
-            <div className="flex flex-col gap-1">
-              <span className="text-[12px] text-muted">Permission</span>
-              <div className="flex gap-1 rounded-md border border-line bg-panel p-0.5">
-                {perms.map((p) => (
+            {isChat ? (
+              <div className="flex flex-col gap-1">
+                <span className="text-[12px] text-muted">Share</span>
+                <div className="flex gap-1 rounded-md border border-line bg-panel p-0.5">
+                  {(
+                    [
+                      { value: "conversation", label: "Conversation" },
+                      { value: "trajectory", label: "Trajectory" },
+                    ] as const
+                  ).map((m) => (
+                    <button
+                      key={m.value}
+                      type="button"
+                      title={
+                        m.value === "trajectory"
+                          ? "A static snapshot of the full debug log — every message, tool call, output, and the token totals"
+                          : "The live conversation behind the real chat UI"
+                      }
+                      onClick={() => setMode(m.value)}
+                      className={`flex-1 rounded px-2 py-1 text-[12px] transition-colors ${
+                        mode === m.value
+                          ? "bg-btn font-semibold text-canvas"
+                          : "text-muted hover:bg-hover hover:text-text"
+                      }`}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {perms.length > 1 ? (
+              <div className="flex flex-col gap-1">
+                <span className="text-[12px] text-muted">Permission</span>
+                <div className="flex gap-1 rounded-md border border-line bg-panel p-0.5">
+                  {perms.map((p) => (
                     <button
                       key={p.value}
                       type="button"
@@ -148,6 +198,7 @@ export function ShareDialog({
                   ))}
                 </div>
               </div>
+            ) : null}
             <label className="flex items-center justify-between gap-2 text-[12px] text-muted">
               Link expires
               <select
@@ -203,13 +254,15 @@ export function ShareDialog({
             <div className="text-[11.5px] text-muted">
               {clip.state === "blocked"
                 ? "Clipboard is blocked here — select the link and copy it manually."
-                : scope.kind === "all"
-                  ? "Full access to this agent — anyone with the link is logged in until it expires. Treat it like your own login."
-                  : scope.kind === "session"
-                    ? perm === "write"
-                      ? "Anyone with this link can read the conversation and send messages to the agent (running real turns)."
-                      : "Read-only link to this conversation, including the tool output it contains."
-                    : "Read-only link to this artifact (and its sibling assets)."}
+                : effScope.kind === "trajectory"
+                  ? "A static, read-only snapshot of the full session: every message, tool call, output, the injected context, the turn config, and the token totals — for debugging. Secret-looking strings are best-effort redacted before sharing."
+                  : scope.kind === "all"
+                    ? "Full access to this agent — anyone with the link is logged in until it expires. Treat it like your own login."
+                    : scope.kind === "session"
+                      ? perm === "write"
+                        ? "Anyone with this link can read the conversation and send messages to the agent (running real turns)."
+                        : "Read-only link to this conversation, including the tool output it contains."
+                      : "Read-only link to this artifact (and its sibling assets)."}
             </div>
           </>
         )}

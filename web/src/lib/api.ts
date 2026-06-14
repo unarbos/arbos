@@ -557,8 +557,9 @@ export async function fetchLLMCredits(): Promise<LLMCredits> {
 /** What a scoped share link points at: one artifact in its own namespace, or
  *  the whole agent ("all", no ref). */
 export interface ShareScope {
-  kind: "file" | "session" | "all";
-  /** Workspace path for a file artifact; session id for a chat; "" for all. */
+  kind: "file" | "session" | "trajectory" | "all";
+  /** Workspace path for a file artifact; session id for a chat or its
+   *  trajectory snapshot; "" for all. */
   ref: string;
 }
 

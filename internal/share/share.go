@@ -29,6 +29,14 @@ const (
 	ScopeSession ScopeKind = "session" // Ref = session id
 	ScopeBoard   ScopeKind = "board"   // Ref = board id
 	ScopeAll     ScopeKind = "all"     // Ref = "" — the whole node (login's scope)
+	// ScopeTrajectory shares a session's full debug trajectory (Ref = session
+	// id): a static, self-contained snapshot of the event log — every message,
+	// tool call and result, injected context, the turn config, and the token
+	// totals — rendered as a standalone page for a bug report. Unlike
+	// ScopeSession (the live chat behind the real UI), a trajectory link is a
+	// read-only reproduction served straight from the log, so it survives a
+	// node that has since crashed or moved on.
+	ScopeTrajectory ScopeKind = "trajectory" // Ref = session id
 )
 
 // Scope is what a grant shares.

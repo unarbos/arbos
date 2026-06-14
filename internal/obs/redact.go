@@ -86,3 +86,12 @@ func redactAttr(a slog.Attr) slog.Attr {
 func redactString(s string) string {
 	return secretPattern.ReplaceAllString(s, redactedMark)
 }
+
+// RedactString scrubs secret-looking substrings from s — the same best-effort
+// pass the logging handler applies (see secretPattern). Exported for the share
+// boundary: a trajectory link is the one path that ships log content outside
+// the box, so it is scrubbed before leaving, while the local `arbos export`
+// stays full-fidelity (your own data, your own machine).
+func RedactString(s string) string {
+	return redactString(s)
+}
