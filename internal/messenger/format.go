@@ -60,7 +60,7 @@ func mdToHTML(src string) string {
 				out.WriteByte('\n')
 			}
 			if lang := strings.TrimSpace(trimmed[3:]); lang != "" {
-				out.WriteString(`<pre><code class="language-` + escapeHTML(lang) + `">`)
+				out.WriteString(`<pre><code class="language-` + escapeAttr(lang) + `">`)
 				fenceClose = "</code></pre>"
 			} else {
 				out.WriteString("<pre>")
@@ -83,7 +83,9 @@ func mdToHTML(src string) string {
 		if strings.HasPrefix(trimmed, ">") {
 			content := strings.TrimPrefix(strings.TrimPrefix(trimmed, ">"), " ")
 			openQuoteLine()
-			out.WriteString(inlineHTML(content))
+			// A blockquote may carry bold/italic etc. but not a code span or a
+			// link, so those are rendered without their tags inside it.
+			out.WriteString(inlineHTML(content, false, false))
 			continue
 		}
 		closeQuote()
@@ -108,61 +110,75 @@ func blockLineHTML(trimmed, raw string) string {
 		return ""
 	}
 	if h := mdHeadingLevel(trimmed); h > 0 {
-		return "<b>" + inlineHTML(strings.TrimSpace(trimmed[h:])) + "</b>"
+		// A heading is a <b> wrapper, so its content can't carry a code span.
+		return "<b>" + inlineHTML(strings.TrimSpace(trimmed[h:]), false, true) + "</b>"
 	}
 	indent := raw[:len(raw)-len(strings.TrimLeft(raw, " \t"))]
 	if marker, rest, ok := mdListMarker(trimmed); ok {
-		return indent + marker + " " + inlineHTML(rest)
+		return indent + marker + " " + inlineHTML(rest, true, true)
 	}
-	return indent + inlineHTML(trimmed)
+	return indent + inlineHTML(trimmed, true, true)
 }
 
 // inlineHTML styles inline spans within one line, escaping all other text. A
 // span is only emitted when its closing delimiter is found on the same line,
 // so the output is always balanced even mid-stream.
-func inlineHTML(s string) string {
+//
+// allowCode and allowLink encode Telegram's entity-nesting rules: <code>/<pre>
+// may not sit inside any other entity, and <a>/<blockquote> may not contain a
+// link. When a span would violate that, its content is rendered without the
+// offending tag rather than emitted as HTML Telegram would reject. bold,
+// italic, strikethrough, and spoiler may nest freely, so they always recurse.
+func inlineHTML(s string, allowCode, allowLink bool) string {
 	var b strings.Builder
 	for i := 0; i < len(s); {
 		switch {
 		case s[i] == '`':
 			if end := strings.IndexByte(s[i+1:], '`'); end >= 0 {
-				b.WriteString("<code>" + escapeHTML(s[i+1:i+1+end]) + "</code>")
+				code := escapeHTML(s[i+1 : i+1+end])
+				if allowCode {
+					b.WriteString("<code>" + code + "</code>")
+				} else {
+					b.WriteString(code) // code can't nest in another entity
+				}
 				i += end + 2
 				continue
 			}
 		case strings.HasPrefix(s[i:], "**"):
 			if end := strings.Index(s[i+2:], "**"); end >= 0 {
-				b.WriteString("<b>" + inlineHTML(s[i+2:i+2+end]) + "</b>")
+				b.WriteString("<b>" + inlineHTML(s[i+2:i+2+end], false, allowLink) + "</b>")
 				i += end + 4
 				continue
 			}
 		case strings.HasPrefix(s[i:], "~~"):
 			if end := strings.Index(s[i+2:], "~~"); end >= 0 {
-				b.WriteString("<s>" + inlineHTML(s[i+2:i+2+end]) + "</s>")
+				b.WriteString("<s>" + inlineHTML(s[i+2:i+2+end], false, allowLink) + "</s>")
 				i += end + 4
 				continue
 			}
 		case strings.HasPrefix(s[i:], "||"):
 			if end := strings.Index(s[i+2:], "||"); end >= 0 {
-				b.WriteString("<tg-spoiler>" + inlineHTML(s[i+2:i+2+end]) + "</tg-spoiler>")
+				b.WriteString("<tg-spoiler>" + inlineHTML(s[i+2:i+2+end], false, allowLink) + "</tg-spoiler>")
 				i += end + 4
 				continue
 			}
 		case s[i] == '*':
 			if end := strings.IndexByte(s[i+1:], '*'); end >= 0 {
-				b.WriteString("<i>" + inlineHTML(s[i+1:i+1+end]) + "</i>")
+				b.WriteString("<i>" + inlineHTML(s[i+1:i+1+end], false, allowLink) + "</i>")
 				i += end + 2
 				continue
 			}
 		case s[i] == '[':
 			if text, url, n, ok := parseLink(s[i:]); ok {
-				if safeURL(url) {
-					b.WriteString(`<a href="` + escapeURL(url) + `">` + inlineHTML(text) + "</a>")
+				if allowLink && safeURL(url) {
+					// A link can't contain a link or a code span.
+					b.WriteString(`<a href="` + escapeURL(url) + `">` + inlineHTML(text, false, false) + "</a>")
 				} else {
-					// An unsupported scheme (e.g. javascript:) makes Telegram
-					// reject the whole message with a non-parse error the plain
-					// fallback can't catch — keep the link literal instead, so
-					// Telegram auto-links any bare URL and nothing is dropped.
+					// An unsupported scheme (e.g. javascript:), or a link where
+					// one isn't allowed (inside a link or a blockquote), would
+					// make Telegram reject the message with an error the plain
+					// fallback can't catch — keep it literal so Telegram still
+					// auto-links any bare URL and nothing is dropped.
 					b.WriteString(escapeHTML(s[i : i+n]))
 				}
 				i += n
@@ -199,15 +215,15 @@ func safeURL(url string) bool {
 // parseLink matches a leading "[text](url)" and reports the bytes it spans. A
 // missing "]", "(", or ")" means it isn't a link — the "[" is then literal.
 func parseLink(s string) (text, url string, n int, ok bool) {
-	close := strings.IndexByte(s, ']')
-	if close < 0 || close+1 >= len(s) || s[close+1] != '(' {
+	closeIdx := strings.IndexByte(s, ']')
+	if closeIdx < 0 || closeIdx+1 >= len(s) || s[closeIdx+1] != '(' {
 		return "", "", 0, false
 	}
-	end := strings.IndexByte(s[close+2:], ')')
+	end := strings.IndexByte(s[closeIdx+2:], ')')
 	if end < 0 {
 		return "", "", 0, false
 	}
-	return s[1:close], s[close+2 : close+2+end], close + 2 + end + 1, true
+	return s[1:closeIdx], s[closeIdx+2 : closeIdx+2+end], closeIdx + 2 + end + 1, true
 }
 
 // mdHeadingLevel returns the ATX heading level (1-6) if line is a heading, else 0.
@@ -249,10 +265,16 @@ func escapeHTML(s string) string {
 // escapeURL escapes a URL for an href attribute (the three reserved characters
 // plus the quote that closes the attribute).
 func escapeURL(s string) string {
-	return urlEscaper.Replace(s)
+	return attrEscaper.Replace(s)
+}
+
+// escapeAttr escapes an attribute value (e.g. a code fence's language): the
+// reserved characters plus the quote that would otherwise close the attribute.
+func escapeAttr(s string) string {
+	return attrEscaper.Replace(s)
 }
 
 var (
 	htmlEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
-	urlEscaper  = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
+	attrEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
 )

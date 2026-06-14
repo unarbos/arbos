@@ -86,7 +86,7 @@ func (s *Service) presentAsk(ctx context.Context, b *botRunner, chatID int64, q 
 	// keep the plain-text path: those need accumulate-then-confirm state a
 	// single tap can't express, so the typed reply stays their answer.
 	if kb, ok := askKeyboard(q); ok {
-		if _, err := b.client.sendMessageMarkup(ctx, chatID, renderAsk(q), kb, parseHTML); err == nil {
+		if _, err := b.client.sendMessageMarkup(ctx, chatID, renderAsk(q), kb, parseHTML, ""); err == nil {
 			return
 		}
 		// Fall through to the form without buttons if the keyboard send was rejected.

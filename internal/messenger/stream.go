@@ -127,7 +127,7 @@ func (p *presenter) sendImages(parts []core.ContentBlock) {
 
 // note sends one standalone line (a marker like "(interrupted)").
 func (p *presenter) note(text string) {
-	if _, err := p.client.sendMessageID(p.ctx, p.chatID, text, parseNone); err != nil {
+	if _, err := p.client.sendMessageID(p.ctx, p.chatID, text, parseNone, ""); err != nil {
 		p.logf("messenger: note: %v", err)
 	}
 }
@@ -176,12 +176,28 @@ func (p *presenter) append(text string) {
 	p.dropTickerLocked()
 	p.buf.WriteString(text)
 	if p.buf.Len() >= streamCap {
-		// Continue in a fresh Telegram message (same assistant message split
-		// across Telegram's length cap).
-		p.flushLocked(true)
+		p.drainOverflowLocked()
 		return
 	}
 	p.scheduleLocked()
+}
+
+// drainOverflowLocked seals a buffer that has grown past streamCap. It splits
+// the SOURCE (so each piece converts and self-balances) into cap-sized chunks,
+// finalizing every full chunk as its own Telegram message and keeping only the
+// sub-cap remainder live. This bounds each message under Telegram's length cap
+// even when a single delta arrives larger than the cap.
+func (p *presenter) drainOverflowLocked() {
+	chunks := splitMessage(p.buf.String(), streamCap)
+	p.buf.Reset()
+	for i, chunk := range chunks {
+		p.buf.WriteString(chunk)
+		if i == len(chunks)-1 && len(chunk) < streamCap {
+			p.scheduleLocked() // remainder stays live to keep growing
+			return
+		}
+		p.flushLocked(true) // full chunk: seal it as its own message
+	}
 }
 
 // tick puts one line on the activity ticker (newest last, capped).
@@ -215,9 +231,9 @@ func (p *presenter) flushTickerLocked() {
 	// The ticker is plain (a "⚙ name · arg" activity line, ephemeral) — no
 	// formatting to parse, so no parse mode.
 	if p.tickerID == 0 {
-		p.tickerID, err = p.client.sendMessageID(p.ctx, p.chatID, text, parseNone)
+		p.tickerID, err = p.client.sendMessageID(p.ctx, p.chatID, text, parseNone, "")
 	} else {
-		err = p.client.editMessageText(p.ctx, p.chatID, p.tickerID, text, parseNone)
+		err = p.client.editMessageText(p.ctx, p.chatID, p.tickerID, text, parseNone, "")
 	}
 	if err != nil {
 		p.logf("messenger: ticker: %v", err)
@@ -270,8 +286,11 @@ func (p *presenter) flushLocked(final bool) {
 	// The buffer holds the model's raw Markdown; Telegram shows it as rich text
 	// via HTML. mdToHTML balances every snapshot, so even a partial buffer
 	// (an open **, a half-typed code fence) renders valid entities. p.sent
-	// caches the rendered HTML so an unchanged snapshot skips the edit.
-	text := mdToHTML(p.buf.String())
+	// caches the rendered HTML so an unchanged snapshot skips the edit. The
+	// raw source rides along as the plain fallback, so a rejected snapshot
+	// degrades to readable Markdown rather than literal HTML tags.
+	src := p.buf.String()
+	text := mdToHTML(src)
 	if strings.TrimSpace(text) == "" || text == p.sent {
 		if final {
 			p.resetSegmentLocked()
@@ -281,12 +300,17 @@ func (p *presenter) flushLocked(final bool) {
 	p.lastEdit = time.Now()
 	var err error
 	if p.msgID == 0 {
-		p.msgID, err = p.client.sendMessageID(p.ctx, p.chatID, text, parseHTML)
+		p.msgID, err = p.client.sendMessageID(p.ctx, p.chatID, text, parseHTML, src)
 	} else {
-		err = p.client.editMessageText(p.ctx, p.chatID, p.msgID, text, parseHTML)
+		err = p.client.editMessageText(p.ctx, p.chatID, p.msgID, text, parseHTML, src)
 	}
 	if err != nil {
 		p.logf("messenger: stream: %v", err)
+		// Don't carry a buffer Telegram refused into the next turn: on a
+		// terminal flush, reset so one bad segment can't wedge the stream.
+		if final {
+			p.resetSegmentLocked()
+		}
 		return
 	}
 	p.sent = text
