@@ -189,27 +189,21 @@ CREATE INDEX IF NOT EXISTS idx_outbox_undelivered ON outbox(delivered_at) WHERE 
 
 -- grants: shareable capability links (internal/share, ADR-0034). One row per
 -- bearer token; the token is the secret in the /s/<token> URL and the primary
--- key. Grants form a tree via parent so revocation cascades to delegated
--- sub-links. expires_at is UnixNano with 0 = never; uses is a redemption
--- budget with 0 = unlimited.
+-- key. expires_at is UnixNano with 0 = never. (Columns from a prototyped
+-- delegation/use-budget feature — parent, uses, label — may linger on older
+-- databases; no statement references them.)
 CREATE TABLE IF NOT EXISTS grants (
     token      TEXT PRIMARY KEY,
-    parent     TEXT    NOT NULL DEFAULT '',
     scope_kind TEXT    NOT NULL,
     scope_ref  TEXT    NOT NULL DEFAULT '',
     perm       INTEGER NOT NULL DEFAULT 0,
     expires_at INTEGER NOT NULL DEFAULT 0,
-    uses       INTEGER NOT NULL DEFAULT 0,
-    label      TEXT    NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_grants_parent ON grants(parent);
-
--- boards: saved workspace layouts (internal/board, ADR-0034). layout is the
--- UI's opaque serialized split-tree + tabs (round-tripped verbatim for
--- restore); members is the JSON array of shareable referents a board share
--- grant authorizes. Kept separate so the backend never parses frontend layout.
+-- boards: VESTIGIAL. A persisted-layout entity was prototyped then cut (the
+-- "board" share is just a full-agent share). The table is left in place rather
+-- than dropped (forward-only migrations, ADR-0005); nothing reads or writes it.
 CREATE TABLE IF NOT EXISTS boards (
     id         TEXT PRIMARY KEY,
     title      TEXT    NOT NULL DEFAULT '',

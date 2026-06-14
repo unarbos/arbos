@@ -26,10 +26,10 @@ func (s *Store) PutGrant(ctx context.Context, g share.Grant) error {
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO grants
-		   (token, parent, scope_kind, scope_ref, perm, expires_at, uses, label, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		g.Token, g.Parent, string(g.Scope.Kind), g.Scope.Ref, int(g.Perm),
-		expires, g.Uses, g.Label, g.Created.UnixNano(),
+		   (token, scope_kind, scope_ref, perm, expires_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		g.Token, string(g.Scope.Kind), g.Scope.Ref, int(g.Perm),
+		expires, g.Created.UnixNano(),
 	)
 	if err != nil {
 		return fmt.Errorf("put grant: %w", err)
@@ -40,7 +40,7 @@ func (s *Store) PutGrant(ctx context.Context, g share.Grant) error {
 // Grant resolves a token to its grant, or ErrNoGrant when absent.
 func (s *Store) Grant(ctx context.Context, token string) (share.Grant, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT token, parent, scope_kind, scope_ref, perm, expires_at, uses, label, created_at
+		`SELECT token, scope_kind, scope_ref, perm, expires_at, created_at
 		 FROM grants WHERE token = ?`, token)
 	var (
 		g                  share.Grant
@@ -48,8 +48,7 @@ func (s *Store) Grant(ctx context.Context, token string) (share.Grant, error) {
 		perm               int
 		expiresAt, created int64
 	)
-	err := row.Scan(&g.Token, &g.Parent, &kind, &g.Scope.Ref, &perm,
-		&expiresAt, &g.Uses, &g.Label, &created)
+	err := row.Scan(&g.Token, &kind, &g.Scope.Ref, &perm, &expiresAt, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return share.Grant{}, ErrNoGrant
 	}
@@ -65,22 +64,12 @@ func (s *Store) Grant(ctx context.Context, token string) (share.Grant, error) {
 	return g, nil
 }
 
-// RevokeGrant deletes a grant and every grant descended from it, so a revoke
-// never leaks through the grant tree (a delegated PermAdmin link's children
-// die with it). Revoking an absent token is a no-op success.
+// RevokeGrant deletes a grant by token. Revoking an absent token is a no-op
+// success.
 func (s *Store) RevokeGrant(ctx context.Context, token string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	// UNION (not UNION ALL) dedupes the frontier, so a malformed parent cycle
-	// (a future PermAdmin delegation bug) terminates instead of spinning.
-	_, err := s.db.ExecContext(ctx, `
-WITH RECURSIVE subtree(token) AS (
-    SELECT token FROM grants WHERE token = ?
-    UNION
-    SELECT g.token FROM grants g JOIN subtree st ON g.parent = st.token
-)
-DELETE FROM grants WHERE token IN (SELECT token FROM subtree)`, token)
-	if err != nil {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM grants WHERE token = ?`, token); err != nil {
 		return fmt.Errorf("revoke grant: %w", err)
 	}
 	return nil

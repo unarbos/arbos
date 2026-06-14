@@ -551,19 +551,6 @@ export async function fetchLLMCredits(): Promise<LLMCredits> {
   return (await res.json()) as LLMCredits;
 }
 
-/**
- * Mint a one-time login link for sharing this agent. Each link is
- * independent — minting another doesn't kill earlier ones — and dies on
- * first use or after 24 hours unused. Fails (404) on hosts without an auth
- * gate — a loopback-only bind has no login to share.
- */
-export async function createShareLink(): Promise<string> {
-  const res = await fetch("/api/share", { method: "POST" });
-  if (!res.ok) throw new Error(await errorText(res, `share: ${res.status}`));
-  const body = (await res.json()) as { url: string };
-  return body.url;
-}
-
 /** What a scoped share link points at: one artifact in its own namespace, or
  *  the whole agent ("all", no ref). */
 export interface ShareScope {

@@ -26,10 +26,10 @@ import (
 // to the host's stderr (the Jupyter pattern) exchanges for an HMAC-signed
 // session cookie. Consuming the console token mints and prints a fresh one, so
 // the operator's console always holds a current login link for the next
-// browser. Share tokens (the UI's share button) are minted alongside, each
-// independently single-use with a TTL, so handing out an invite never kills
-// the console link — and vice versa. Requests arriving over loopback bypass
-// auth entirely — a local process can already read the signing key off disk,
+// browser. Sharing is a separate, scoped mechanism (internal/share: grant
+// links under /s/<token>), not a second login token here. Requests arriving
+// over loopback bypass auth entirely — a local process can already read the
+// signing key off disk,
 // so gating it buys nothing and would break the localhost-out-of-the-box
 // promise.
 type Auth struct {
@@ -42,22 +42,12 @@ type Auth struct {
 
 	mu    sync.Mutex
 	token string
-	// share holds outstanding share-link tokens → expiry. In-memory on
-	// purpose: a restart invalidates old invites, and the login page tells
-	// the holder so (no silent deaths).
-	share map[string]time.Time
 }
 
 const (
 	authCookie = "arbos_auth"
 	loginPath  = "/login"
 	cookieTTL  = 30 * 24 * time.Hour
-	// shareTokenTTL bounds an unused invite: long enough to send tonight and
-	// click tomorrow, short enough that a forgotten link dies on its own.
-	shareTokenTTL = 24 * time.Hour
-	// maxShareTokens caps outstanding invites; minting past it evicts the
-	// soonest-to-expire. Nobody shares with 32 people between logins.
-	maxShareTokens = 32
 )
 
 // LoadOrCreateAuthKey returns the host's cookie-signing key, generating a
@@ -93,8 +83,7 @@ func randomToken() string {
 
 // MintToken rotates the console login token and announces it via OnToken.
 // Called at startup and on every consumption of the console token, so the
-// operator's console always holds a current link. Share tokens live apart
-// (MintShareToken); rotating here never invalidates an outstanding invite.
+// operator's console always holds a current link.
 func (a *Auth) MintToken() string {
 	tok := randomToken()
 	if tok == "" {
@@ -109,74 +98,26 @@ func (a *Auth) MintToken() string {
 	return tok
 }
 
-// MintShareToken mints an independent single-use invite token with a TTL.
-// Independent is the point: handing out a share link must not kill the
-// console link, and two invites in a row must both work.
-func (a *Auth) MintShareToken() string {
-	tok := randomToken()
-	if tok == "" {
-		return ""
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.share == nil {
-		a.share = make(map[string]time.Time)
-	}
-	a.pruneShareLocked()
-	for len(a.share) >= maxShareTokens {
-		oldest, oldestExp := "", time.Time{}
-		for t, exp := range a.share {
-			if oldest == "" || exp.Before(oldestExp) {
-				oldest, oldestExp = t, exp
-			}
-		}
-		delete(a.share, oldest)
-	}
-	a.share[tok] = time.Now().Add(shareTokenTTL)
-	return tok
-}
-
-// pruneShareLocked drops expired invites. Caller holds a.mu.
-func (a *Auth) pruneShareLocked() {
-	now := time.Now()
-	for t, exp := range a.share {
-		if now.After(exp) {
-			delete(a.share, t)
-		}
-	}
-}
-
-// consumeToken redeems a one-time token — console or share. Single-use:
-// success removes it, and a consumed console token mints a replacement so
-// the console always shows a live link. A leaked URL (browser history, chat
-// preview) is dead after first use.
+// consumeToken redeems the one-time console login token. Single-use: success
+// clears it and mints a replacement so the console always shows a live link,
+// and a leaked URL (browser history, chat preview) is dead after first use.
 func (a *Auth) consumeToken(tok string) bool {
 	if tok == "" {
 		return false
 	}
 	a.mu.Lock()
-	console := a.token != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(a.token)) == 1
-	ok := console
-	if console {
+	ok := a.token != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(a.token)) == 1
+	if ok {
 		a.token = ""
-	} else {
-		a.pruneShareLocked()
-		for t := range a.share {
-			if subtle.ConstantTimeCompare([]byte(tok), []byte(t)) == 1 {
-				delete(a.share, t)
-				ok = true
-				break
-			}
-		}
 	}
 	a.mu.Unlock()
-	if console {
+	if ok {
 		a.MintToken()
 	}
 	return ok
 }
 
-// peekToken reports whether tok is currently redeemable, without consuming
+// peekToken reports whether tok is the live console token, without consuming
 // it. This is what the GET login page checks: link previewers and unfurler
 // bots GET, so a bare GET must never spend the token — only the human's
 // confirming POST does.
@@ -186,16 +127,7 @@ func (a *Auth) peekToken(tok string) bool {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.token != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(a.token)) == 1 {
-		return true
-	}
-	a.pruneShareLocked()
-	for t := range a.share {
-		if subtle.ConstantTimeCompare([]byte(tok), []byte(t)) == 1 {
-			return true
-		}
-	}
-	return false
+	return a.token != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(a.token)) == 1
 }
 
 // cookiePayload is what a session cookie asserts: who, until when. The
@@ -249,6 +181,30 @@ func (a *Auth) authenticated(r *http.Request) bool {
 	c, err := r.Cookie(authCookie)
 	return err == nil && a.verifyCookie(c.Value)
 }
+
+// principal returns the subject of a valid session cookie ("" + false when
+// absent or invalid). It is how the scope guard tells a full-access session
+// ("local") from a scoped share session ("share:<token>").
+func (a *Auth) principal(r *http.Request) (string, bool) {
+	c, err := r.Cookie(authCookie)
+	if err != nil || !a.verifyCookie(c.Value) {
+		return "", false
+	}
+	enc, _, _ := strings.Cut(c.Value, ".")
+	body, err := base64.RawURLEncoding.DecodeString(enc)
+	if err != nil {
+		return "", false
+	}
+	var p cookiePayload
+	if json.Unmarshal(body, &p) != nil {
+		return "", false
+	}
+	return p.Sub, true
+}
+
+// sharePrincipal is the cookie subject prefix for a scoped share session; the
+// rest is the grant token, which the scope guard resolves to the live grant.
+const sharePrincipal = "share:"
 
 // sharePath prefixes the bearer-token redemption routes (/s/<token>…). They
 // carry their own credential — the token in the URL — so they pass the cookie
@@ -327,29 +283,7 @@ func (a *Auth) handleLogin(w http.ResponseWriter, r *http.Request) {
 // tokenSpentMsg is the no-silent-deaths line: what happened, and both ways
 // forward (one for invitees, one for operators with console access).
 const tokenSpentMsg = "That login link was already used or has expired. " +
-	"Ask the person who shared it for a fresh one (the Share button mints them), " +
-	"or paste the current token from the arbos console or log."
-
-// handleShare mints an independent one-time invite token and returns it as a
-// shareable login URL — the UI's "share this agent" affordance. The URL is
-// built from the request's own origin, so sharing from the forest URL hands
-// out the forest URL and sharing from a LAN bind hands out that bind. Each
-// invite is single-use with a TTL and lives apart from the console token, so
-// sharing never invalidates the console link or an earlier unredeemed invite.
-func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
-	tok := s.Auth.MintShareToken()
-	if tok == "" {
-		http.Error(w, "could not mint a token", http.StatusInternalServerError)
-		return
-	}
-	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "https"
-	}
-	writeJSON(w, map[string]any{
-		"url": scheme + "://" + r.Host + loginPath + "?token=" + tok,
-	})
-}
+	"Paste the current token from the arbos console or log."
 
 // loginMode selects which body the login page renders: the paste-a-token
 // form (arg = error message, "" for none) or the one-click confirm form

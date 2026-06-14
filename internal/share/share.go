@@ -44,20 +44,10 @@ type Grant struct {
 	// Token is the opaque bearer secret — the /s/<token> URL tail and the
 	// row's primary key. Holding it is the capability.
 	Token string
-	// Parent is the token of the grant that minted this one ("" = root).
-	// Grants form a tree so revocation can cascade to delegated sub-links —
-	// the column exists from day one even though cascade enforcement and
-	// delegation (PermAdmin minting) are later phases.
-	Parent string
-	Scope  Scope
-	Perm   Perm
+	Scope Scope
+	Perm  Perm
 	// Expires is when the grant dies; the zero time means never.
 	Expires time.Time
-	// Uses is the remaining redemption budget; 0 means unlimited. Single-use
-	// links (the login invite's shape) set 1. Reserved for the use-budget
-	// phase; v1 leaves it 0.
-	Uses    int64
-	Label   string
 	Created time.Time
 }
 

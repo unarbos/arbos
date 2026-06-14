@@ -249,13 +249,6 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /api/sessions/{id}/children", s.handleSessionChildren)
 		mux.HandleFunc("GET /api/activity", s.handleActivity)
 		mux.HandleFunc("GET /api/plan/{id}", s.handlePlan)
-		// Saved workspace layouts (the board entity). Mutations are
-		// same-origin; a drive-by page must not save or delete the user's
-		// boards.
-		mux.HandleFunc("POST /api/boards", sameOrigin(s.handleBoardSave))
-		mux.HandleFunc("GET /api/boards", s.handleBoardsList)
-		mux.HandleFunc("GET /api/boards/{id}", s.handleBoardGet)
-		mux.HandleFunc("DELETE /api/boards/{id}", sameOrigin(s.handleBoardDelete))
 	}
 	if s.KillJob != nil {
 		mux.HandleFunc("POST /api/jobs/{id}/kill", sameOrigin(s.handleKillJob))
@@ -326,9 +319,6 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/", spaHandler(s.Dist))
 	}
 	if s.Auth != nil {
-		// Same-origin: a drive-by page must never mint itself a login link
-		// off the user's cookie.
-		mux.HandleFunc("POST /api/share", sameOrigin(s.handleShare))
 		if s.Store != nil {
 			// Scoped share links (ADR-0034): a bearer-token grant to one
 			// artifact, narrower than the full-agent invite /api/share mints.
