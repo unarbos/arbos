@@ -101,7 +101,10 @@ export type KernelEvent =
   | { kind: "reasoning_delta"; data: { text: string } }
   | { kind: "citations"; data: { citations: Citation[] } }
   | { kind: "images"; data: { images: ContentBlock[] } }
-  | { kind: "tool_progress"; data: { call_id: string; name: string; bytes: number } }
+  | {
+      kind: "tool_progress";
+      data: { call_id: string; name: string; bytes: number; args_delta?: string };
+    }
   | { kind: "tool_details"; data: { call_id: string; details?: unknown } }
   | { kind: "tool_started"; data: { call: ToolCall } }
   | { kind: "tool_finished"; data: { result: ToolResult } }

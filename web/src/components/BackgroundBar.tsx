@@ -112,49 +112,19 @@ export function BackgroundBar({
           {scheduled.map((t) => {
             // A scheduled node fires agent runs that carry its node id; the
             // latest one is the work — the run whose transcript holds the code
-            // the firing wrote. Make the row open it so the plan is a door to
-            // its output, not just a clock with a cancel button.
+            // the firing wrote. Surface it from the expanded row so the plan is
+            // a door to its output, not just a clock with a cancel button.
             const latestRun = runs
               .filter((r) => r.node === t.id)
               .sort((a, b) => b.updated_at - a.updated_at)[0];
             return (
-              <div
+              <ScheduledRow
                 key={t.id}
-                className="group flex min-w-0 items-center gap-2 text-[12px] text-muted"
-              >
-                {latestRun ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenRun(latestRun)}
-                    title={`Open run for #${t.id}`}
-                    className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded text-left transition-colors hover:text-text"
-                  >
-                    <Clock size={12} className="shrink-0 text-faint" />
-                    <span className="min-w-0 flex-1 truncate">
-                      {t.goal} <span className="text-faint">· {t.when}</span>
-                    </span>
-                    {latestRun.active && (
-                      <Loader2 size={11} className="shrink-0 animate-spin text-faint" />
-                    )}
-                    <ChevronRight size={12} className="shrink-0 text-faint" />
-                  </button>
-                ) : (
-                  <>
-                    <Clock size={12} className="shrink-0 text-faint" />
-                    <span className="min-w-0 flex-1 truncate">
-                      {t.goal} <span className="text-faint">· {t.when}</span>
-                    </span>
-                  </>
-                )}
-                <button
-                  type="button"
-                  onClick={() => onCancelTask(t.id)}
-                  title={`Cancel #${t.id}`}
-                  className="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-hover hover:text-red"
-                >
-                  <X size={11} />
-                </button>
-              </div>
+                task={t}
+                latestRun={latestRun}
+                onOpenRun={onOpenRun}
+                onCancelTask={onCancelTask}
+              />
             );
           })}
           {runs.slice(0, RUNS_SHOWN).map((r) => (
@@ -187,6 +157,79 @@ export function BackgroundBar({
               </button>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One scheduled plan node. Click the row to expand it: the truncated goal
+ * unfolds into its full text and trigger, and (once it has fired) a door to
+ * the latest agent run it spawned.
+ */
+function ScheduledRow({
+  task,
+  latestRun,
+  onOpenRun,
+  onCancelTask,
+}: {
+  task: ScheduledTask;
+  latestRun: ChildRun | undefined;
+  onOpenRun: (r: ChildRun) => void;
+  onCancelTask: (id: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="group min-w-0 text-[12px] text-muted">
+      <div className="flex min-w-0 items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          title={open ? "Collapse" : "Expand"}
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded text-left transition-colors hover:text-text"
+        >
+          <ChevronRight
+            size={12}
+            className={`shrink-0 text-faint transition-transform ${open ? "rotate-90" : ""}`}
+          />
+          <Clock size={12} className="shrink-0 text-faint" />
+          <span className="min-w-0 flex-1 truncate">
+            {task.goal} <span className="text-faint">· {task.when}</span>
+          </span>
+          {latestRun?.active && (
+            <Loader2 size={11} className="shrink-0 animate-spin text-faint" />
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => onCancelTask(task.id)}
+          title={`Cancel #${task.id}`}
+          className="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-hover hover:text-red"
+        >
+          <X size={11} />
+        </button>
+      </div>
+      {open && (
+        <div className="mb-1 ml-[26px] mt-1 space-y-1 rounded border border-line/60 bg-card px-2 py-1.5">
+          <div className="break-words text-text/85">{task.goal}</div>
+          <div className="text-faint">Runs {task.when}</div>
+          {latestRun && (
+            <button
+              type="button"
+              onClick={() => onOpenRun(latestRun)}
+              className="flex cursor-pointer items-center gap-1 rounded text-accent transition-colors hover:text-text"
+            >
+              <Orbit size={11} className="shrink-0" />
+              <span>Open latest run</span>
+              {latestRun.active && (
+                <Loader2 size={11} className="shrink-0 animate-spin text-faint" />
+              )}
+              <ChevronRight size={11} className="shrink-0" />
+            </button>
+          )}
         </div>
       )}
     </div>

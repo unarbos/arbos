@@ -73,6 +73,10 @@ type ToolProgress struct {
 	CallID string `json:"call_id"`
 	Name   string `json:"name"`
 	Bytes  int    `json:"bytes"`
+	// ArgsDelta is the argument-JSON fragment that just arrived (not the
+	// cumulative buffer). A frontend accumulates these to render the call's
+	// content streaming in — chiefly a write/edit's file body appearing live.
+	ArgsDelta string `json:"args_delta,omitempty"`
 }
 
 // ToolDetails carries a running tool's presentation-only Details to frontends

@@ -287,7 +287,7 @@ func (a *ToolAccumulator) Add(index int, id, name, argsFragment string) (curID, 
 // (Google) has no gap to fill and uses Add directly.
 func EmitToolProgress(ctx context.Context, out chan<- core.LLMChunk, acc *ToolAccumulator, index int, id, name, argsFragment string) bool {
 	curID, curName, n := acc.Add(index, id, name, argsFragment)
-	return Send(ctx, out, core.LLMChunk{ToolProgress: &core.ToolCallProgress{ID: curID, Name: curName, Bytes: n}})
+	return Send(ctx, out, core.LLMChunk{ToolProgress: &core.ToolCallProgress{ID: curID, Name: curName, Bytes: n, ArgsDelta: argsFragment}})
 }
 
 // Len reports how many distinct calls have been seen.

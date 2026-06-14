@@ -49,7 +49,15 @@ export function ShareDialog({
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Bumped on every copy so the check icon re-mounts and replays its pop,
+  // even when the button was already in the "copied" state.
+  const [pulse, setPulse] = useState(0);
   const clip = useClipboard();
+
+  const copyLink = (link: string) => {
+    setPulse((n) => n + 1);
+    void clip.copy(link);
+  };
 
   // Default the permission to the scope's first (safest) tier whenever the
   // target changes, so reopening on a different scope never carries a stale,
@@ -80,7 +88,7 @@ export function ShareDialog({
     try {
       const link = await shareArtifact(scope, ttl, perm);
       setUrl(link);
-      await clip.copy(link);
+      copyLink(link);
     } catch {
       setError(
         "Sharing needs a remotely reachable arbos (a forest join or a non-loopback bind).",
@@ -175,11 +183,19 @@ export function ShareDialog({
                 />
                 <button
                   type="button"
-                  title={clip.state === "ok" ? "Copied" : "Copy link"}
-                  onClick={() => void clip.copy(url)}
-                  className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-hover hover:text-text"
+                  title={clip.state === "ok" ? "Copied — click to copy again" : "Copy link"}
+                  onClick={() => copyLink(url)}
+                  className={`flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md transition-[background-color,color,transform] active:scale-90 ${
+                    clip.state === "ok"
+                      ? "bg-green/15 text-green hover:bg-green/25"
+                      : "text-muted hover:bg-hover hover:text-text"
+                  }`}
                 >
-                  {clip.state === "ok" ? <Check size={14} /> : <Copy size={14} />}
+                  {clip.state === "ok" ? (
+                    <Check key={pulse} size={14} className="copy-pop" />
+                  ) : (
+                    <Copy size={14} />
+                  )}
                 </button>
               </div>
             )}

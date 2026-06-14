@@ -229,9 +229,10 @@ func (e *Engine) streamResponse(ctx context.Context, c *Conversation, chunks <-c
 			// live progress event (never logged) so the frontend can show a
 			// composing card in the gap before the finished call lands.
 			if !c.emit(ctx, core.ToolProgress{
-				CallID: ch.ToolProgress.ID,
-				Name:   ch.ToolProgress.Name,
-				Bytes:  ch.ToolProgress.Bytes,
+				CallID:    ch.ToolProgress.ID,
+				Name:      ch.ToolProgress.Name,
+				Bytes:     ch.ToolProgress.Bytes,
+				ArgsDelta: ch.ToolProgress.ArgsDelta,
 			}) {
 				drainChunks(chunks)
 				break

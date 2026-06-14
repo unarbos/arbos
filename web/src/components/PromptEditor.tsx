@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Loader2 } from "lucide-react";
 
-import { fetchFile, writeFile, HttpError } from "@/lib/api";
+import { fetchCommands, fetchFile, writeFile, HttpError } from "@/lib/api";
 import { type Surface } from "@/lib/surface";
 import { useDocumentVisible } from "@/lib/useDocumentVisible";
 
@@ -33,8 +33,10 @@ type LoadState =
  * (.arbos/prompts/name.md), opened from the / menu's edit pencil or create
  * row. Plain text in, ⌘S/Save out — the engine reloads templates from disk
  * on every slash message, so a saved prompt runs as /name immediately, no
- * restart. A command not yet on disk opens seeded with a frontmatter
- * skeleton and saves into existence on first ⌘S.
+ * restart. A command not yet on disk opens seeded — a built-in opens on its
+ * full shipped definition (editable in place; the first ⌘S writes a
+ * project-scope override), a brand-new command on a frontmatter skeleton —
+ * and saves into existence on first ⌘S.
  */
 export function PromptEditor({
   surface,
@@ -68,10 +70,26 @@ export function PromptEditor({
       .catch((e: unknown) => {
         if (stale) return;
         if (e instanceof HttpError && e.status === 404) {
-          // The create flow: the command has no file yet — seed a skeleton.
-          setContent(NEW_PROMPT_SEED);
-          setSaved(null);
-          setState({ phase: "ready" });
+          // No file on disk yet. A built-in command ships its full definition
+          // (so editing opens the real template in place, not a blank slate);
+          // a brand-new command falls back to the frontmatter skeleton. Either
+          // way it stays "new" — the first save writes the file into existence.
+          fetchCommands()
+            .then((cmds) => {
+              if (stale) return;
+              const seed =
+                cmds.find((c) => c.name.toLowerCase() === name.toLowerCase())
+                  ?.content ?? NEW_PROMPT_SEED;
+              setContent(seed);
+              setSaved(null);
+              setState({ phase: "ready" });
+            })
+            .catch(() => {
+              if (stale) return;
+              setContent(NEW_PROMPT_SEED);
+              setSaved(null);
+              setState({ phase: "ready" });
+            });
           return;
         }
         setState({
@@ -82,7 +100,7 @@ export function PromptEditor({
     return () => {
       stale = true;
     };
-  }, [surface.path]);
+  }, [surface.path, name]);
 
   // Pick up external edits (the agent rewriting an open prompt) while the
   // panel is clean; a dirty editor never clobbers the user's typing.

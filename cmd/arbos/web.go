@@ -584,12 +584,19 @@ func slashCommands(cwd string) []gateway.CommandInfo {
 		if rel, err := filepath.Rel(cwd, t.Path); err == nil && !strings.HasPrefix(rel, "..") {
 			path = rel
 		}
-		out = append(out, gateway.CommandInfo{
+		ci := gateway.CommandInfo{
 			Name:         t.Name,
 			Description:  t.Description,
 			ArgumentHint: t.ArgumentHint,
 			Path:         path,
-		})
+		}
+		// A built-in has no source file (empty Path): ship its raw definition
+		// so the editor opens the full template for in-place editing, saved as
+		// a project-scope override rather than rewritten from a blank skeleton.
+		if t.Path == "" {
+			ci.Content = t.Raw
+		}
+		out = append(out, ci)
 	}
 	return out
 }

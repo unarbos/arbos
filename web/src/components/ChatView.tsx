@@ -40,6 +40,8 @@ export interface TranscriptHooks {
   onOpenSurface?: (surface: Surface) => void;
   /** Open a terminal tab (a bash card's live job tail, or a shell). */
   onOpenTerminal?: (term: TermRef) => void;
+  /** Open a plan's goal tree and code in a panel beside the chat. */
+  onOpenPlan?: (node: number) => void;
   /**
    * Rewind-and-edit (Cursor's edit-a-previous-turn): clicking a past user
    * message opens it for editing; submitting forks the session at that point
@@ -472,6 +474,63 @@ function AttachmentChips({
  * resubmits the edited text (Cursor's edit-a-previous-turn). Works mid-turn
  * too: the fork cancels the in-flight turn, like Cursor's checkpoint restore.
  */
+/**
+ * A prompt's text, clamped so a wall of text can't dominate the viewport. The
+ * user card is sticky — it pins to the top while its turn streams beneath it —
+ * so a very long prompt would otherwise paper over the agent's work below.
+ * Past the height cap we clamp with a fade and a "Show more" toggle; short
+ * prompts render untouched (no measuring artifact, no toggle).
+ */
+function CollapsiblePromptBody({ body }: { body: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  // Re-measure on text change (an inline edit can grow or shrink the prompt).
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    setOverflows(el.scrollHeight > PROMPT_COLLAPSED_MAX_PX + 8);
+  }, [body]);
+
+  const clamped = overflows && !expanded;
+  return (
+    <div className="space-y-1">
+      <div className="relative">
+        <div
+          ref={ref}
+          className="overflow-hidden whitespace-pre-wrap break-words"
+          style={clamped ? { maxHeight: PROMPT_COLLAPSED_MAX_PX } : undefined}
+        >
+          {body}
+        </div>
+        {clamped && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-card to-transparent" />
+        )}
+      </div>
+      {overflows && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpanded((v) => !v);
+          }}
+          className="flex cursor-pointer items-center gap-1 text-[12px] text-muted transition-colors hover:text-text"
+        >
+          {expanded ? "Show less" : "Show more"}
+          <ChevronDown
+            size={12}
+            className={`text-faint transition-transform ${expanded ? "rotate-180" : ""}`}
+          />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Height cap for a collapsed prompt card, in px (~10 lines of prose). */
+const PROMPT_COLLAPSED_MAX_PX = 220;
+
 function UserItem({
   item,
   edit,
@@ -501,9 +560,7 @@ function UserItem({
           className="group relative -mx-3 space-y-1.5 rounded-md border border-line/70 bg-card px-3 py-2 text-bright"
         >
           <AttachmentChips files={files} onOpenSurface={onOpenSurface} />
-          {body && (
-            <div className="whitespace-pre-wrap break-words">{body}</div>
-          )}
+          {body && <CollapsiblePromptBody body={body} />}
           <UserAttachments parts={item.parts} />
           {edit?.canEdit && (
             <button
@@ -646,9 +703,15 @@ function ToolItem({ item, hooks }: { item: ToolTranscriptItem; hooks?: Transcrip
   // The turn died (stop or error) before this call's result arrived: no
   // result is coming, so render a settled "stopped" row, never a spinner.
   if (item.interrupted && !item.result) return <StoppedToolRow item={item} />;
-  // Still streaming its arguments in: the live composing card, until the
-  // finished call lands and the row becomes its real (diff/terminal/…) card.
-  if (item.composing && !item.result) return <ComposingRow item={item} />;
+  // Still streaming its arguments in: a write/edit grows its diff card live
+  // (the file body appearing line by line, Cursor-style); everything else
+  // shows the lightweight composing row until the finished call lands.
+  if (item.composing && !item.result) {
+    if (item.call.Name === "write" || item.call.Name === "edit") {
+      return <DiffCard item={item} hooks={hooks} />;
+    }
+    return <ComposingRow item={item} />;
+  }
   switch (item.call.Name) {
     case "bash":
       return <TerminalCard item={item} hooks={hooks} />;
@@ -656,7 +719,7 @@ function ToolItem({ item, hooks }: { item: ToolTranscriptItem; hooks?: Transcrip
     case "write":
       return <DiffCard item={item} hooks={hooks} />;
     case "plan":
-      return <PlanItem item={item} />;
+      return <PlanItem item={item} hooks={hooks} />;
     case "delegate":
       return <DelegateChip item={item} hooks={hooks} />;
     case "show":
@@ -1294,6 +1357,10 @@ function TerminalCard({ item, hooks }: { item: ToolTranscriptItem; hooks?: Trans
     null,
   );
   const live = !!job && !stopped && !done;
+  // The header waves while the task is active — both the synchronous tool
+  // call and a backgrounded job that outlives it (the result has landed but
+  // the process is still running), matching every other live step.
+  const active = running || live;
   useEffect(() => {
     if (!job || !live) return;
     let stop = false;
@@ -1329,10 +1396,18 @@ function TerminalCard({ item, hooks }: { item: ToolTranscriptItem; hooks?: Trans
       >
         <SquareTerminal size={13} className="shrink-0 text-muted" />
         <span className="min-w-0 flex-1 truncate">
-          {description && <span className="text-muted">{description} </span>}
-          <span className="font-mono text-[11.5px] text-faint">{command}</span>
+          {description && (
+            <span className={`text-muted${active ? " shimmer" : ""}`}>
+              {description}{" "}
+            </span>
+          )}
+          <span
+            className={`font-mono text-[11.5px] text-faint${active ? " shimmer" : ""}`}
+          >
+            {command}
+          </span>
         </span>
-        {running && (
+        {active && (
           <Loader2 size={12} className="shrink-0 animate-spin text-faint" />
         )}
         {failed && <X size={12} className="shrink-0 text-red" />}
@@ -1412,6 +1487,14 @@ function planWhen(n: PlanNodeArg): string {
   return "";
 }
 
+/** The action a node performs, revealed when its row is expanded. */
+function planAction(n: PlanNodeArg): { text: string; mono: boolean } | null {
+  if (n.do?.shell) return { text: n.do.shell, mono: true };
+  if (n.do?.notify) return { text: n.do.notify, mono: false };
+  if (n.do?.ask) return { text: "Asks you before continuing.", mono: false };
+  return null;
+}
+
 function PlanNodeIcon({ node }: { node: PlanNodeArg }) {
   if (node.do?.notify) return <Bell size={12} className="text-muted" />;
   if (node.do?.shell) return <SquareTerminal size={12} className="text-muted" />;
@@ -1430,7 +1513,15 @@ const PLAN_STATUS_ICON: Record<string, ReactNode> = {
   pending: <Circle size={11} className="text-faint" />,
 };
 
-function PlanItem({ item }: { item: ToolTranscriptItem }) {
+/** The first node id the plan tool's ack assigned ("Added #5, #6." → 5), so a
+ * card can open the plan panel rooted at one of its own nodes. */
+function planFirstNode(item: ToolTranscriptItem): number | undefined {
+  const first = item.result?.Content.split("\n", 1)[0] ?? "";
+  const m = first.match(/#(\d+)/);
+  return m ? Number(m[1]) : undefined;
+}
+
+function PlanItem({ item, hooks }: { item: ToolTranscriptItem; hooks?: TranscriptHooks }) {
   const running = !item.result;
   const failed = item.result?.IsError ?? false;
   const a = args(item.call);
@@ -1445,32 +1536,17 @@ function PlanItem({ item }: { item: ToolTranscriptItem }) {
   }
 
   if (a.op === "add" && Array.isArray(a.nodes) && a.nodes.length > 0) {
-    const nodes = a.nodes as PlanNodeArg[];
+    const node = planFirstNode(item);
+    const onOpen =
+      node !== undefined && hooks?.onOpenPlan
+        ? () => hooks.onOpenPlan?.(node)
+        : undefined;
     return (
-      <div className="overflow-hidden rounded-lg border border-line/80">
-        <div className="flex items-center gap-2 px-3 py-1.5 text-muted">
-          <ListTodo size={13} className="shrink-0" />
-          <span>Updated plan</span>
-          {running && (
-            <Loader2 size={12} className="ml-auto shrink-0 animate-spin text-faint" />
-          )}
-        </div>
-        <div className="space-y-1 border-t border-line/60 px-3 py-2">
-          {nodes.map((n, i) => (
-            <div key={i} className="flex min-w-0 items-start gap-2">
-              <span className="mt-1 shrink-0">
-                <PlanNodeIcon node={n} />
-              </span>
-              <span className="min-w-0 flex-1 break-words text-text/90">
-                {n.goal}
-                {planWhen(n) && (
-                  <span className="text-faint"> · {planWhen(n)}</span>
-                )}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
+      <PlanAddCard
+        nodes={a.nodes as PlanNodeArg[]}
+        running={running}
+        onOpen={onOpen}
+      />
     );
   }
 
@@ -1502,6 +1578,99 @@ function PlanItem({ item }: { item: ToolTranscriptItem }) {
   );
 }
 
+/** The "Updated plan" to-do card: each step expands to reveal its action, and
+ * the header opens the plan's goal tree and code in a panel — the same
+ * click-to-panel as terminals and sub-agents. */
+function PlanAddCard({
+  nodes,
+  running,
+  onOpen,
+}: {
+  nodes: PlanNodeArg[];
+  running: boolean;
+  onOpen?: () => void;
+}) {
+  const [open, setOpen] = useState<Set<number>>(new Set());
+  const toggle = (i: number) =>
+    setOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-line/80">
+      <button
+        type="button"
+        onClick={onOpen}
+        disabled={!onOpen}
+        title={onOpen ? "Open plan panel" : undefined}
+        className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-muted ${
+          onOpen ? "cursor-pointer hover:text-text" : "cursor-default"
+        }`}
+      >
+        <ListTodo size={13} className="shrink-0" />
+        <span>Updated plan</span>
+        {running && (
+          <Loader2 size={12} className="ml-auto shrink-0 animate-spin text-faint" />
+        )}
+        {onOpen && (
+          <Maximize2
+            size={11}
+            className={`shrink-0 text-faint ${running ? "" : "ml-auto"}`}
+          />
+        )}
+      </button>
+      <div className="space-y-0.5 border-t border-line/60 px-3 py-2">
+        {nodes.map((n, i) => {
+          const detail = planAction(n);
+          const isOpen = open.has(i);
+          return (
+            <div key={i} className="min-w-0">
+              <button
+                type="button"
+                onClick={detail ? () => toggle(i) : undefined}
+                aria-expanded={detail ? isOpen : undefined}
+                className={`flex w-full min-w-0 items-start gap-2 rounded text-left ${
+                  detail ? "cursor-pointer hover:text-text" : "cursor-default"
+                }`}
+              >
+                <span className="mt-1 shrink-0">
+                  <PlanNodeIcon node={n} />
+                </span>
+                <span className="min-w-0 flex-1 break-words text-text/90">
+                  {n.goal}
+                  {planWhen(n) && <span className="text-faint"> · {planWhen(n)}</span>}
+                </span>
+                {detail && (
+                  <ChevronDown
+                    size={12}
+                    className={`mt-1 shrink-0 text-faint transition-transform ${
+                      isOpen ? "" : "-rotate-90"
+                    }`}
+                  />
+                )}
+              </button>
+              {detail && isOpen && (
+                <div className="mb-1 ml-[22px] mt-1 break-words rounded border border-line/60 bg-card px-2 py-1 text-faint">
+                  {detail.mono ? (
+                    <code className="whitespace-pre-wrap font-mono text-[11.5px]">
+                      {detail.text}
+                    </code>
+                  ) : (
+                    detail.text
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 type DiffLine = { kind: "add" | "del" | "ctx" | "gap"; text: string };
 
 const DIFF_MAX_LINES = 40;
@@ -1521,7 +1690,74 @@ function parseEditDiff(diff: string): DiffLine[] {
   });
 }
 
+const JSON_ESCAPES: Record<string, string> = {
+  n: "\n",
+  t: "\t",
+  r: "\r",
+  b: "\b",
+  f: "\f",
+  '"': '"',
+  "\\": "\\",
+  "/": "/",
+};
+
+/**
+ * Decode the value of a top-level string field out of JSON that is still
+ * streaming in — e.g. `{"path":"x.go","content":"package main\nfunc ma` yields
+ * the `content` written so far. Tolerant by design: a dangling backslash or a
+ * half-arrived `\u` escape at the very tail just stops decoding there, so the
+ * preview never throws on a fragment cut mid-escape. Returns "" until the field
+ * (and its opening quote) have appeared.
+ */
+function partialJsonString(src: string, key: string): string {
+  const k = src.indexOf(`"${key}"`);
+  if (k < 0) return "";
+  let i = k + key.length + 2;
+  while (i < src.length && src[i] !== ":") i++;
+  i++;
+  while (i < src.length && (src[i] === " " || src[i] === "\n" || src[i] === "\t" || src[i] === "\r"))
+    i++;
+  if (src[i] !== '"') return "";
+  i++;
+  let out = "";
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '"') break;
+    if (c !== "\\") {
+      out += c;
+      i++;
+      continue;
+    }
+    const n = src[i + 1];
+    if (n === undefined) break; // dangling backslash at the stream's tail
+    if (n === "u") {
+      const hex = src.slice(i + 2, i + 6);
+      if (hex.length < 4) break; // half-arrived unicode escape
+      out += String.fromCharCode(parseInt(hex, 16));
+      i += 6;
+      continue;
+    }
+    out += JSON_ESCAPES[n] ?? n;
+    i += 2;
+  }
+  return out;
+}
+
+/** The file path of a write/edit, from the finished call's Args or — while it's
+ *  still composing — the partial argument JSON. */
+function diffPath(item: ToolTranscriptItem): string {
+  return str(args(item.call).path) || partialJsonString(item.composing?.args ?? "", "path");
+}
+
 function diffLines(item: ToolTranscriptItem): DiffLine[] {
+  // Still composing: the finished call's Args aren't in hand yet, so read the
+  // body straight from the streamed argument JSON. This is what makes a write
+  // (its `content`) or an edit (its `new_string`) appear line by line, live.
+  if (item.composing && !item.result) {
+    const key = item.call.Name === "edit" ? "new_string" : "content";
+    const body = partialJsonString(item.composing.args, key);
+    return body ? body.split("\n").map((text) => ({ kind: "add" as const, text })) : [];
+  }
   if (item.call.Name === "write") {
     // A write is all additions; preview the head of the new content.
     return str(args(item.call).content)
@@ -1551,11 +1787,18 @@ function DiffCard({ item, hooks }: { item: ToolTranscriptItem; hooks?: Transcrip
   const [open, setOpen] = useState(true);
   const running = !item.result;
   const failed = item.result?.IsError ?? false;
-  const path = str(args(item.call).path);
+  const path = diffPath(item);
   const name = basename(path);
   const lines = diffLines(item);
   const adds = lines.filter((l) => l.kind === "add").length;
   const dels = lines.filter((l) => l.kind === "del").length;
+  // While composing, the body grows top-down — follow its tail so the newest
+  // lines stay in view, the way an editor scrolls as code is typed in.
+  const streaming = running && lines.length > 0;
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (streaming && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+  }, [streaming, lines.length]);
 
   const openFile =
     path && hooks?.onOpenSurface
@@ -1564,6 +1807,12 @@ function DiffCard({ item, hooks }: { item: ToolTranscriptItem; hooks?: Transcrip
           hooks.onOpenSurface?.(fileSurface(path));
         }
       : undefined;
+
+  // Settled: head of the diff. Streaming: tail, so the freshest lines show.
+  const shown = streaming
+    ? lines.slice(Math.max(0, lines.length - DIFF_MAX_LINES))
+    : lines.slice(0, DIFF_MAX_LINES);
+  const lastShown = shown.length - 1;
 
   return (
     <div className="overflow-hidden rounded-md border border-line/80">
@@ -1577,10 +1826,10 @@ function DiffCard({ item, hooks }: { item: ToolTranscriptItem; hooks?: Transcrip
           onClick={openFile}
           title={openFile ? `Open ${path}` : undefined}
           className={`min-w-0 truncate text-[12px] text-text ${
-            openFile ? "hover:text-accent hover:underline" : ""
-          }`}
+            streaming ? "shimmer" : ""
+          } ${openFile ? "hover:text-accent hover:underline" : ""}`}
         >
-          {name}
+          {name || composingVerb(item.call.Name)}
         </span>
         {!running && !failed && (
           <span className="shrink-0 font-mono text-[11px]">
@@ -1594,9 +1843,15 @@ function DiffCard({ item, hooks }: { item: ToolTranscriptItem; hooks?: Transcrip
         )}
         {failed && <X size={12} className="shrink-0 text-red" />}
       </button>
-      {open && !running && !failed && lines.length > 0 && (
-        <div className="max-h-56 overflow-y-auto py-1 font-mono text-[11.5px] leading-[1.5]">
-          {lines.slice(0, DIFF_MAX_LINES).map((l, i) =>
+      {open && !failed && shown.length > 0 && (
+        <div
+          ref={bodyRef}
+          className="max-h-56 overflow-y-auto py-1 font-mono text-[11.5px] leading-[1.5]"
+        >
+          {streaming && lines.length > shown.length && (
+            <div className="px-3 text-faint select-none">⋯</div>
+          )}
+          {shown.map((l, i) =>
             l.kind === "gap" ? (
               <div key={i} className="px-3 text-faint select-none">
                 ⋯
@@ -1609,10 +1864,13 @@ function DiffCard({ item, hooks }: { item: ToolTranscriptItem; hooks?: Transcrip
                 }`}
               >
                 {l.text ? <Highlight text={l.text} /> : " "}
+                {streaming && i === lastShown && (
+                  <span className="ml-px inline-block h-[1em] w-[0.5em] translate-y-[0.15em] bg-muted/70 animate-pulse" />
+                )}
               </div>
             ),
           )}
-          {lines.length > DIFF_MAX_LINES && (
+          {!streaming && lines.length > DIFF_MAX_LINES && (
             <div className="px-3 text-faint select-none">⋯</div>
           )}
         </div>

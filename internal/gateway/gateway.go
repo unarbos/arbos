@@ -542,6 +542,10 @@ type CommandInfo struct {
 	Description  string `json:"description,omitempty"`
 	ArgumentHint string `json:"argument_hint,omitempty"`
 	Path         string `json:"path,omitempty"`
+	// Content is the full template text, sent only for built-ins (which have
+	// no file on disk) so the editor can open the shipped definition for
+	// in-place editing; the first save writes a project-scope override at Path.
+	Content string `json:"content,omitempty"`
 }
 
 // handleCommands lists the slash commands for the composer's popup. The list

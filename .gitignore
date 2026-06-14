@@ -19,6 +19,7 @@
 
 # Throwaway experiments / demo scratch
 /scratch/
+/ralph-primes/
 /edit_demo.txt
 /dog.png
 /dog.svg
@@ -30,6 +31,10 @@
 .arbos/watch/
 # Per-process forest lock (machine state, not portable; the agent key is)
 .arbos/agent.lock
+# Per-directory agent identity key (a secret) — never committed
+.arbos/agent.key
+# Project prompt overrides written at runtime — local, not portable
+.arbos/prompts/
 # Telegram bot registry — holds bot tokens, strictly per-directory, never committed
 .arbos/messenger/
 # Per-directory agent brain (sessions, mind, plans, callbacks) — never committed

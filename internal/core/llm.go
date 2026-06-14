@@ -79,6 +79,11 @@ type ToolCallProgress struct {
 	ID    string
 	Name  string
 	Bytes int
+	// ArgsDelta is the raw argument-JSON fragment that just arrived (not the
+	// cumulative buffer), so a frontend can accumulate it and render the call's
+	// content streaming in — e.g. the file body of a write appearing line by
+	// line. Empty on the block-start ping that only announces the call.
+	ArgsDelta string
 }
 
 // LLMChunk is one streamed unit from a provider. A provider emits a sequence of

@@ -62,13 +62,15 @@ export type TranscriptItem =
        */
       childSession?: string;
       /**
-       * Arguments still streaming in: the bytes-so-far for the live "composing"
-       * card the row shows before the finished call lands. Set by tool_progress
-       * (which may arrive before the call is whole, so `call.Args` is absent),
-       * cleared by tool_started once the real call is in hand. Live-only — a
-       * replayed transcript builds the row straight from the finished call.
+       * Arguments still streaming in: the bytes-so-far plus the raw argument
+       * JSON accumulated so far, for the live "composing" card the row shows
+       * before the finished call lands. Set by tool_progress (which may arrive
+       * before the call is whole, so `call.Args` is absent), cleared by
+       * tool_started once the real call is in hand. The partial `args` is what
+       * lets a write/edit stream its file body in live. Live-only — a replayed
+       * transcript builds the row straight from the finished call.
        */
-      composing?: { bytes: number };
+      composing?: { bytes: number; args: string };
       /**
        * A running tool's presentation Details, streamed by a tool_details event
        * before the result lands — chiefly a bash command's journaled job id, so
@@ -405,13 +407,14 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
       const i = findOpenTool(state.items, ev.data.call_id);
       if (i >= 0) {
         const it = state.items[i] as Extract<TranscriptItem, { kind: "tool" }>;
-        return replaceAt(state, i, { ...it, composing: { bytes: ev.data.bytes } });
+        const args = (it.composing?.args ?? "") + (ev.data.args_delta ?? "");
+        return replaceAt(state, i, { ...it, composing: { bytes: ev.data.bytes, args } });
       }
       return push({ ...finalize(closeThinking(state)), turnActive: true }, {
         kind: "tool",
         id: state.nextId,
         call: { ID: ev.data.call_id, Name: ev.data.name },
-        composing: { bytes: ev.data.bytes },
+        composing: { bytes: ev.data.bytes, args: ev.data.args_delta ?? "" },
       });
     }
 

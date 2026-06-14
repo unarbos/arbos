@@ -78,6 +78,9 @@ export interface SlashCommand {
   argument_hint?: string;
   /** The template's source file, for the popup's edit affordance. */
   path?: string;
+  /** The full template text, sent only for built-ins (no file on disk) so the
+   * editor can open the shipped definition for in-place editing. */
+  content?: string;
 }
 
 /** The slash commands available to this host (expansion stays server-side). */

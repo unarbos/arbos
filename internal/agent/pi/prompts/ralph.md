@@ -5,6 +5,8 @@ argument-hint: <goal>
 
 Start a Ralph loop for this goal. A Ralph loop is relentless, explorative iteration toward one goal: each pass does a little real work, checks it, writes down what it learned, refreshes a live view of progress, and repeats — forever, until the goal demonstrably holds. You design the loop ONCE, plant it in the plan forest, and end the turn. The scheduler owns the cadence from then on; it survives restarts, interrupts, and session ends. Never build it on ad-hoc files, and never hold this turn open to run it yourself.
 
+**Order is non-negotiable: think (Phase 0–1), then plant the forest (Phase 2), then — and only then — touch any artifact (Phase 3–4).** Do not write or run a single script, file, or command before `plan op:add` has created the root and the driver. If you catch yourself building or running anything while the forest does not yet exist, stop and plant it first. The forest is the deliverable; scripts, state files, and the canvas are things the *planted* loop operates on, not work you do ahead of it. A turn that ran the heartbeat but never called `plan op:add` has failed, no matter how much real work it did.
+
 <goal>
 $ARGUMENTS
 </goal>
@@ -34,9 +36,9 @@ Be explorative on purpose. Each pass should try a *real* variation — not the s
 
 Restate the user's words as a falsifiable definition of done: what must be observably true when the loop may stop, and the command or criterion that proves it. If the goal is ambiguous in a way that materially changes the work, add a `do:{ask}` node for that question — do not stall the whole loop on it.
 
-## Phase 2 — Build the plan forest
+## Phase 2 — Build the plan forest (do this before writing or running anything)
 
-With `plan op:add parent:0`, create the mission root (the goal, with its definition-of-done as `check`), then arm the loop as ONE recurring agent node under it — the Ralph driver:
+This is the first action that changes the world. Nothing in Phase 0–1 created a file or ran a command — it was all thought. Now, before you write a single script, render a canvas, or run a verifier, plant the forest. With `plan op:add parent:0`, create the mission root (the goal, with its definition-of-done as `check`), then arm the loop as ONE recurring agent node under it — the Ralph driver:
 
 - `when:{every:"<cadence>"}`, goal: "Ralph driver: run one iteration of the heartbeat — do the smallest worthwhile change, check it, write state, refresh the canvas, record the outcome. Keep a change only if it beats the best; explore a new variation each pass and never repeat a recorded dead end. Add discovered work as sibling nodes. When the root's check holds, mark it done, cancel this driver, and notify."
 - Route the heavy or fixed steps out of the firing: a long or mechanical "do work"/"check" step becomes a `do:{shell}` node so it costs no model turn and wakes you only on failure. The firing is for judgment — choosing the change and reading the result.
@@ -50,9 +52,9 @@ The loop maintains one self-contained HTML canvas of its own progress — `canva
 
 Make the refresh mechanical so it costs no model turn: write a tiny render step that reads the state file (the leaderboard/results log) and emits the HTML, and run it as a `do:{shell}` node in the heartbeat. Call the `show` tool once, on the first iteration, to open the canvas in a panel beside the chat; the panel re-fetches the file live, so every later rewrite updates the view on its own.
 
-## Phase 4 — Run the first iteration now
+## Phase 4 — Run the first iteration now (only after the forest is planted)
 
-Do not wait for the first firing: execute one full heartbeat in this turn — do the first real change, check it, write the first state, render and `show` the canvas, record the outcome on the driver. Then confirm from the tool's echoed forest that the loop is sound: root with its check, the driver armed with its cadence and next-fire time, mechanical nodes in place. End the turn — the scheduler continues from there.
+The forest from Phase 2 now exists; the scripts it references may not yet — that is fine, you write them here as part of this first pass. Do not wait for the first firing: execute one full heartbeat in this turn — do the first real change, check it, write the first state, render and `show` the canvas, record the outcome on the driver. Then confirm from the tool's echoed forest that the loop is sound: root with its check, the driver armed with its cadence and next-fire time, mechanical nodes in place. End the turn — the scheduler continues from there.
 
 If the plan tool is unavailable in this session, say so in one line and run the loop in-turn instead — iterate the heartbeat here until done or blocked. Never degrade to ad-hoc state files or a promise that future invocations will happen.
 

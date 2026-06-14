@@ -1024,13 +1024,7 @@ export default function App() {
                 onBusy={(busy) => patchTab(tab.key, { busy })}
               />
             ) : tab.kind === "plan" && tab.planNode !== undefined ? (
-              <PlanView
-                node={tab.planNode}
-                active={visible}
-                onOpenChat={(chat) =>
-                  openSession({ id: chat, title: "", updated_at: 0 })
-                }
-              />
+              <PlanView node={tab.planNode} active={visible} />
             ) : tab.kind === "history" ? (
               <HistoryView active={visible} onOpenSession={openSession} />
             ) : tab.kind === "messenger" ? (
@@ -1062,6 +1056,7 @@ export default function App() {
                       onControlUI: (cmd) => controlUI(tab.key, cmd),
                       onOpenRun: (run) => openRun(tab.key, run),
                       onOpenTerminal: (term) => openTerminal(tab.key, term),
+                      onOpenPlan: (node) => openPlanTab(node),
                     }}
                   />
                 )}
@@ -1090,6 +1085,7 @@ export default function App() {
                   onControlUI: (cmd) => controlUI(tab.key, cmd),
                   onOpenRun: (run) => openRun(tab.key, run),
                   onOpenTerminal: (term) => openTerminal(tab.key, term),
+                  onOpenPlan: (node) => openPlanTab(node),
                 }}
               />
             )}

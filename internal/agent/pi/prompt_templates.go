@@ -40,7 +40,11 @@ var builtinTemplates = sync.OnceValue(func() []PromptTemplate {
 		// Path stays empty: there is no file to open, and the popup's edit
 		// affordance then falls through to its create flow, which writes a
 		// project-scope override — exactly how a built-in gets customized.
-		out = append(out, parseTemplate(e.Name(), string(raw), ""))
+		// Raw carries the shipped definition so that create flow can open the
+		// full template for in-place editing rather than a blank skeleton.
+		t := parseTemplate(e.Name(), string(raw), "")
+		t.Raw = string(raw)
+		out = append(out, t)
 	}
 	return out
 })
@@ -51,6 +55,11 @@ type PromptTemplate struct {
 	Description  string
 	ArgumentHint string
 	Content      string
+	// Raw is the unparsed template file (frontmatter + body). Built-ins carry
+	// it so the editor can open the full shipped definition for in-place
+	// editing even though there is no file on disk; on-disk templates leave
+	// it empty (the editor reads them back from their Path).
+	Raw string
 	// Path is the source file the template was loaded from (absolute), so a
 	// frontend can offer to open it for editing.
 	Path string
