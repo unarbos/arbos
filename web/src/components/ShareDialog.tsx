@@ -120,11 +120,10 @@ export function ShareDialog({
           <div className="text-[12px] text-muted">{error}</div>
         ) : (
           <>
-            {perms.length > 1 && (
-              <div className="flex flex-col gap-1">
-                <span className="text-[12px] text-muted">Permission</span>
-                <div className="flex gap-1 rounded-md border border-line bg-panel p-0.5">
-                  {perms.map((p) => (
+            <div className="flex flex-col gap-1">
+              <span className="text-[12px] text-muted">Permission</span>
+              <div className="flex gap-1 rounded-md border border-line bg-panel p-0.5">
+                {perms.map((p) => (
                     <button
                       key={p.value}
                       type="button"
@@ -141,7 +140,6 @@ export function ShareDialog({
                   ))}
                 </div>
               </div>
-            )}
             <label className="flex items-center justify-between gap-2 text-[12px] text-muted">
               Link expires
               <select
