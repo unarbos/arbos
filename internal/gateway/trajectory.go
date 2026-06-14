@@ -52,17 +52,18 @@ func (s *Server) serveTrajectory(w http.ResponseWriter, r *http.Request, g share
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 
+	// No default: trajectoryFormat is the only producer of trajFormat and can
+	// return only these three, so exhaustive guards the closed set at compile
+	// time — adding a default here would defeat that check.
 	switch trajectoryFormat(r) {
 	case fmtHTML:
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		sandboxArtifact(w)
 		_, _ = io.WriteString(w, obs.RedactString(renderTrajectory(sess, events, r.URL.Path)))
 	case fmtMessages:
-		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
-		writeRedactedNDJSON(w, func(enc *json.Encoder) { _ = trajectory.WriteMessages(enc, id, events, sess.Model) })
+		writeRedactedNDJSON(w, func(enc *json.Encoder) error { return trajectory.WriteMessages(enc, id, events, sess.Model) })
 	case fmtJSONL:
-		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
-		writeRedactedNDJSON(w, func(enc *json.Encoder) { _ = trajectory.WriteEvents(enc, id, events) })
+		writeRedactedNDJSON(w, func(enc *json.Encoder) error { return trajectory.WriteEvents(enc, id, events) })
 	}
 }
 
@@ -70,10 +71,19 @@ func (s *Server) serveTrajectory(w http.ResponseWriter, r *http.Request, g share
 // redactor over it, then writes the result — the scrub only the share path
 // applies. Buffering (rather than streaming straight to the response) is the
 // price of redacting before the bytes leave; trajectories are bounded, and this
-// is the share boundary, not a hot loop.
-func writeRedactedNDJSON(w io.Writer, gen func(*json.Encoder)) {
+// is the share boundary, not a hot loop. Redacting the serialized text is safe
+// for JSON: no secretPattern branch can match a `"` (every token class excludes
+// it), so a hit stays inside one string value, and the [REDACTED] mark has no
+// JSON-special characters — structure is preserved. A generation error is
+// refused rather than written: buffering lets us check before any byte ships,
+// so a failed encode returns 500 instead of a truncated body under 200.
+func writeRedactedNDJSON(w http.ResponseWriter, gen func(*json.Encoder) error) {
 	var buf bytes.Buffer
-	gen(trajectory.NewEncoder(&buf))
+	if err := gen(trajectory.NewEncoder(&buf)); err != nil {
+		http.Error(w, "trajectory unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
 	_, _ = io.WriteString(w, obs.RedactString(buf.String()))
 }
 

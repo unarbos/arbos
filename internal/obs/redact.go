@@ -15,9 +15,17 @@ const redactedMark = "[REDACTED]"
 // guarantee — the primary control is that secrets stay SecretRefs until the
 // broker boundary. Covers: bearer tokens, OpenAI keys, Slack tokens, AWS access
 // key ids, GitHub tokens, Google API keys, and JWTs.
+//
+// The two high-frequency shapes are anchored to avoid eating ordinary prose and
+// code, which matters most on the trajectory share path (RedactString) where
+// over-redaction would silently corrupt the very debug/training payload the
+// link exists to deliver: `sk-` must start at a word boundary (so "disk-",
+// "task-", "risk-" are not mistaken for an OpenAI key), and a bearer token must
+// be credential-length (so "bearer of the message" is left alone). Real keys
+// satisfy both, so precision here costs no real-secret coverage.
 var secretPattern = regexp.MustCompile(`(?i)(` +
-	`bearer\s+[a-z0-9._\-]+` +
-	`|sk-[a-z0-9._\-]{8,}` +
+	`bearer\s+[a-z0-9._\-]{8,}` +
+	`|\bsk-[a-z0-9._\-]{8,}` +
 	`|xox[baprs]-[a-z0-9\-]+` +
 	`|AKIA[0-9A-Z]{16}` +
 	`|gh[opsru]_[A-Za-z0-9]{30,}` +
