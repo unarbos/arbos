@@ -58,9 +58,10 @@ import {
 import { dirSurface, surfaceTitle, type Surface, type UICommand } from "./lib/surface";
 import { sameTerm, termTitle, type TermRef } from "./lib/term";
 import { errMsg, toastError } from "./lib/toast";
+import { loadWorkspace, saveWorkspace } from "./lib/workspace";
 import { Toasts } from "./components/Toasts";
 
-interface TabState extends TabInfo {
+export interface TabState extends TabInfo {
   /** Session to resume (from history); null opens fresh. */
   resumeId: string | null;
   /** Bound session id once the seam assigns/confirms one. */
@@ -89,7 +90,7 @@ interface TabState extends TabInfo {
  * in one place (see normalize): every pane in the tree has at least one tab,
  * and focus points at a pane that exists.
  */
-interface Layout {
+export interface Layout {
   root: LayoutNode;
   tabs: TabState[];
   /** Preferred active tab per pane; falls back to the pane's last tab. */
@@ -288,15 +289,33 @@ const pct = (f: number) => `${f * 100}%`;
  * splits, merges, and cross-pane tab drags.
  */
 export default function App() {
-  const nextKey = useRef(2); // tab keys (tab 1 exists)
-  const nextId = useRef(2); // pane / split ids (pane 1 exists)
-  const [layout, setLayout] = useState<Layout>({
-    root: { kind: "pane", id: 1 },
-    tabs: [freshTab(1, 1)],
-    paneActive: { 1: 1 },
-    focusedPane: 1,
-    focusTick: 0,
-  });
+  // Rehydrate the window from the last session so a refresh keeps every tab
+  // and split; a clean start (or unreadable storage) falls back to one chat.
+  // Lazy state init reads storage exactly once — App is a hot render path.
+  const [restored] = useState(loadWorkspace);
+  const nextKey = useRef(restored?.nextKey ?? 2); // tab keys (tab 1 exists)
+  const nextId = useRef(restored?.nextId ?? 2); // pane / split ids (pane 1 exists)
+  const [layout, setLayout] = useState<Layout>(() =>
+    // normalize repairs any drift in the restored blob (an orphaned pane, a
+    // focus on a pane that's gone) before it ever reaches the renderer.
+    restored
+      ? normalize(restored.layout)
+      : {
+          root: { kind: "pane", id: 1 },
+          tabs: [freshTab(1, 1)],
+          paneActive: { 1: 1 },
+          focusedPane: 1,
+          focusTick: 0,
+        },
+  );
+
+  // Mirror the window to storage so the next reload restores it. Debounced:
+  // a divider drag fires setRatio per pointer-move and activation bumps
+  // focusTick — without this, every frame would re-serialize the whole tree.
+  useEffect(() => {
+    const t = setTimeout(() => saveWorkspace(layout), 250);
+    return () => clearTimeout(t);
+  }, [layout]);
   const rootRef = useRef<HTMLDivElement>(null);
   // Key of the tab being dragged; the strip paints a drop line at the hovered
   // insertion point and the actual move (across panes too) commits on drop.

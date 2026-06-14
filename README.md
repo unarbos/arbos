@@ -1,6 +1,6 @@
 # Arbos
 
-<!-- mock change (test) -->
+Arbos is a coding harness, with memory, and a website. 
 
 # Install
 ```bash
