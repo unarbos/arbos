@@ -26,6 +26,12 @@ type Message struct {
 	Reasoning  string         // assistant reasoning/thinking trace text, when provided
 	ToolCalls  []ToolCall     // set on assistant messages that request tools
 	ToolCallID string         // set on RoleTool messages, links back to a ToolCall
+	// Origin names the door a user message arrived through (a web connection's
+	// "web:<n>", a Telegram chat's id). It lets every other door recognize and
+	// suppress the echo of a message it sent itself, without matching content.
+	// Empty for assistant/tool/system messages and for the local terminal. It
+	// is presentation provenance, not part of the provider projection.
+	Origin string `json:",omitempty"`
 	// Citations are web-search sources the provider grounded this message on
 	// (an assistant turn). They are additive: a turn with no web search leaves
 	// them nil and serializes exactly as before. Unlike a tool call, a citation

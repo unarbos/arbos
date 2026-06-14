@@ -29,26 +29,18 @@ import (
 	"github.com/unarbos/arbos/internal/outbox"
 )
 
-// turnTimeout bounds one bridge-run turn (mirrors the plan scheduler's wake
-// timeout); on expiry the turn is interrupted, not abandoned.
+// turnTimeout bounds how long a pending phone question stays answerable: an ask
+// older than this is stale (its turn is long over) and a later reply is
+// conversation again, not its answer.
 const turnTimeout = 15 * time.Minute
 
 // convoQueueDepth bounds messages waiting on a chat's worker while a turn
 // runs; beyond it the bridge tells the sender it is overloaded.
 const convoQueueDepth = 16
 
-// tailInterval is how often the mirror tail polls bridged sessions for new
-// events (cheap — an indexed seq-range read per chat). One second keeps the
-// phone close behind the log; turn completions also kick the tail directly.
-const tailInterval = time.Second
-
-// typingRefresh is how often the tail re-sends the typing indicator while a
-// turn is in flight (Telegram clears it after ~5s).
-const typingRefresh = 3 * time.Second
-
-// originTelegram marks bridge-injected prompts so (a) an attached web tab
-// echoes them visibly and (b) the tail recognizes its own injections.
-const originTelegram = "telegram"
+// actorAttachRetryMax caps the backoff while a door waits out a cross-engine
+// conflict (the other engine's actor winding down through its grace window).
+const actorAttachRetryMax = 10 * time.Second
 
 // toollessSystemPrompt frames the chat-only engine that serves bots whose
 // tools toggle is off.
@@ -101,12 +93,6 @@ type Convo struct {
 	Kind      string `json:"kind"` // private | group | supergroup
 	SessionID string `json:"session_id"`
 	LastAt    int64  `json:"last_at,omitempty"`
-	// NextSeq is the mirror tail's cursor into the session's event log: the
-	// seq of the next event not yet delivered to Telegram. Persisted so a
-	// restart never re-blasts history.
-	NextSeq int64 `json:"next_seq,omitempty"`
-	// Busy is wire-only: a bridge-run turn is in flight.
-	Busy bool `json:"busy,omitempty"`
 }
 
 // Event is one frame on the panel's stream. State carries a full snapshot
@@ -140,13 +126,15 @@ type Config struct {
 	// Dir is where the bot registry and conversation index persist
 	// (state.json, mode 0600 — it holds bot tokens).
 	Dir string
-	// Full is the host's own engine; tools-on turns run here, and an open
-	// web tab's actor (always on this engine) receives injected prompts.
+	// Full is the host's own engine; tools-on bots attach their chat's door
+	// here, sharing the one session actor with an open web tab on the same
+	// session.
 	Full *engine.Engine
 	// Guest builds the chat-only engine for tools-off bots, once, on first
 	// need (piwire.Host.GuestEngine with the bridge's prompt).
 	Guest func(systemPrompt string) *engine.Engine
-	// Store is the durable event log the mirror tail reads. Required.
+	// Store is the durable event log: the outbox claim door reads it, and
+	// firstPrompt checks it for the bridge preface. Required.
 	Store KernelStore
 	// Transcribe converts an inbound voice memo (base64 + container format)
 	// to text; nil leaves voice messages as a placeholder.
@@ -168,14 +156,11 @@ type Command struct {
 	Description string
 }
 
-// Service owns the bot runners, the chat workers, the mirror tail, and the
-// panel fan-out.
+// Service owns the bot runners, the per-chat door workers, the outbox door,
+// and the panel fan-out.
 type Service struct {
 	cfg Config
 	ctx context.Context // service lifetime, set by Start
-	// kick nudges the mirror tail ahead of its tick — a completed
-	// bridge-run turn delivers its reply immediately, not a poll later.
-	kick chan struct{}
 
 	mu       sync.Mutex
 	bots     map[int64]*botRunner
@@ -196,34 +181,33 @@ type botRunner struct {
 type convo struct {
 	c     Convo
 	queue chan inbound
-	// pending holds prompt texts this bridge injected itself, so the tail
-	// can tell its own injections (already on the phone) from prompts that
-	// arrived through other doors (mirror those). Guarded by Service.mu.
-	pending []string
-	// prime marks a conversation loaded from a pre-tail state file: its
-	// first tail pass fast-forwards past existing history instead of
-	// re-delivering the whole conversation to Telegram.
-	prime bool
-	// inFlight is the tail's read on whether a turn is mid-run (the last
-	// log event was a prompt or tool activity, not a final reply) — it
-	// drives the Telegram typing indicator for turns the bridge didn't run
-	// itself (the web tab's). inFlightAt bounds a stuck flag; lastTyping
-	// throttles the refresh. All guarded by Service.mu.
-	inFlight   bool
-	inFlightAt time.Time
-	lastTyping time.Time
-	// streamed records text segments already live-streamed to the phone
-	// (send-early-edit-often), so the tail skips them when the same text
-	// lands in the log. Guarded by Service.mu.
-	streamed []string
-	// ask is the QuestionRequest a suspended turn is waiting on, presented
-	// on the phone and awaiting the owner's next reply (see ask.go).
-	// Guarded by Service.mu.
+	// origin tags prompts this Telegram door sends into the shared actor, so
+	// the presenter recognizes their Queued echo (already on the phone) and
+	// skips it, while messages from other doors (a web tab) cross over. It is
+	// this door's identity in the one-session-many-doors model.
+	origin string
+	// conv is the live session actor this door is attached to (set by
+	// runConvo). Inbound messages and control intents Send to it. A callback
+	// tap (ask answer) from the poll goroutine reads it too. Guarded by
+	// Service.mu.
+	conv *engine.Conversation
+	// ask is the QuestionRequest a suspended turn is waiting on, presented on
+	// the phone and awaiting the owner's next reply (see ask.go). Guarded by
+	// Service.mu.
 	ask *pendingAsk
-	// stream is the live pipeline currently consuming a tapped web-tab
-	// actor for this chat, if any; follow-up prompts reuse it rather than
-	// stacking a second tap (see stream.go). Guarded by Service.mu.
-	stream *turnStream
+	// cancel stops this chat's door worker; SetTools relaunches the worker
+	// through it so a tools toggle re-attaches on the engine it now selects.
+	// done closes when the worker has fully exited, so a relaunch never races
+	// a duplicate. Both guarded by Service.mu.
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// originFor is a Telegram door's stable identity: which bot, which chat. The
+// presenter skips a Queued echo carrying it (the phone sent that message), and
+// web doors render it as "via telegram".
+func originFor(botID, chatID int64) string {
+	return fmt.Sprintf("telegram:%d:%d", botID, chatID)
 }
 
 // inbound is one Telegram message, reduced to what a turn needs.
@@ -243,7 +227,6 @@ func New(cfg Config) (*Service, error) {
 	}
 	s := &Service{
 		cfg:    cfg,
-		kick:   make(chan struct{}, 1),
 		bots:   map[int64]*botRunner{},
 		convos: map[string]*convo{},
 		subs:   map[chan Event]bool{},
@@ -254,8 +237,8 @@ func New(cfg Config) (*Service, error) {
 	return s, nil
 }
 
-// Start launches a poller per registered bot, a worker per known chat, and
-// the mirror tail. Blocks nothing; everything lives until ctx is cancelled.
+// Start launches a poller per registered bot, a door worker per known chat,
+// and the outbox door. Blocks nothing; everything lives until ctx is cancelled.
 func (s *Service) Start(ctx context.Context) {
 	s.mu.Lock()
 	s.ctx = ctx
@@ -263,7 +246,6 @@ func (s *Service) Start(ctx context.Context) {
 		s.startBotLocked(b)
 	}
 	s.mu.Unlock()
-	go s.runTail(ctx)
 	go s.runOutbox(ctx)
 }
 
@@ -299,19 +281,46 @@ func (s *Service) AddBot(ctx context.Context, token string, tools bool) (BotView
 	return cfg.view(), nil
 }
 
-// SetTools flips a bot's permission switch; it applies from the next
-// bridge-run turn (the engine is chosen per turn).
+// SetTools flips a bot's permission switch. Because a door attaches to its
+// engine once (tools-on → the full host engine, off → the chat-only guest
+// engine), the switch only takes effect when the door re-attaches — so this
+// relaunches the bot's chat workers, dropping a downgraded bot off the full
+// toolset rather than leaving it there until restart. Each relaunched worker's
+// retry loop rides out the grace window while the previous engine's actor winds
+// down.
 func (s *Service) SetTools(id int64, tools bool) (BotView, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	b := s.bots[id]
 	if b == nil {
+		s.mu.Unlock()
 		return BotView{}, fmt.Errorf("no bot %d", id)
 	}
 	b.cfg.Tools = tools
 	s.saveLocked()
 	s.broadcastStateLocked()
-	return b.cfg.view(), nil
+	parent := b.ctx
+	view := b.cfg.view()
+	workers := make([]*convo, 0)
+	for _, cv := range s.convos {
+		if cv.c.BotID == id {
+			workers = append(workers, cv)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, cv := range workers {
+		s.mu.Lock()
+		cancel, done := cv.cancel, cv.done
+		s.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		if done != nil {
+			<-done // wait for a clean exit so the relaunch never doubles up
+		}
+		s.launchConvo(parent, b, cv)
+	}
+	return view, nil
 }
 
 // RemoveBot stops the bot's poller and chat workers and drops it and its
@@ -419,13 +428,10 @@ func (s *Service) load() error {
 		s.bots[cfg.ID] = &botRunner{cfg: cfg, client: newTGClient(cfg.Token)}
 	}
 	for _, c := range st.Convos {
-		c.Busy = false
 		s.convos[c.ID] = &convo{
-			c:     c,
-			queue: make(chan inbound, convoQueueDepth),
-			// A conversation that has never been tailed (pre-tail state
-			// file) fast-forwards past its existing history.
-			prime: c.NextSeq == 0,
+			c:      c,
+			queue:  make(chan inbound, convoQueueDepth),
+			origin: originFor(c.BotID, c.ChatID),
 		}
 	}
 	return nil
@@ -467,11 +473,27 @@ func (s *Service) startBotLocked(b *botRunner) {
 	b.ctx, b.cancel = context.WithCancel(s.ctx)
 	for _, cv := range s.convos {
 		if cv.c.BotID == b.cfg.ID {
-			go s.runConvo(b.ctx, b, cv)
+			s.launchConvo(b.ctx, b, cv)
 		}
 	}
 	go s.runBot(b.ctx, b)
 	go s.publishCommands(b.ctx, b)
+}
+
+// launchConvo starts (or restarts) a chat's door worker under its own
+// cancellable context, recording the canceller and a done signal so SetTools
+// can stop the worker and wait for a clean exit before relaunching it.
+func (s *Service) launchConvo(parent context.Context, b *botRunner, cv *convo) {
+	cctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	s.mu.Lock()
+	cv.cancel = cancel
+	cv.done = done
+	s.mu.Unlock()
+	go func() {
+		defer close(done)
+		s.runConvo(cctx, b, cv)
+	}()
 }
 
 // publishCommands puts the bridge's built-ins and the host's slash commands
@@ -642,12 +664,13 @@ func (s *Service) inbound(ctx context.Context, b *botRunner, m tgMessage) {
 				Title: m.Chat.title(), Kind: m.Chat.Type,
 				SessionID: fmt.Sprintf("tg-%d-%d", b.cfg.ID, m.Chat.ID),
 			},
-			queue: make(chan inbound, convoQueueDepth),
+			queue:  make(chan inbound, convoQueueDepth),
+			origin: originFor(b.cfg.ID, m.Chat.ID),
 		}
 		s.convos[key] = cv
 		s.saveLocked()
 		s.broadcastStateLocked()
-		go s.runConvo(b.ctx, b, cv)
+		s.launchConvo(b.ctx, b, cv)
 	}
 	s.mu.Unlock()
 
@@ -660,21 +683,75 @@ func (s *Service) inbound(ctx context.Context, b *botRunner, m tgMessage) {
 
 // --- inbound turns --------------------------------------------------------------
 
-// runConvo is a chat's single worker: it serializes turns so two Telegram
-// messages can never race one kernel session. handleInbound returns the
-// messages that arrived mid-turn and were neither answers nor control
-// commands — they run next, in arrival order, before anything newer.
+// runConvo is a chat's standing door onto its session. It attaches to the
+// shared session actor — keeping it warm so a turn from ANY door (this phone, a
+// web tab) mirrors here live — renders the session's one stream to the phone
+// through a presenter, and feeds inbound Telegram messages in as intents. The
+// actor serializes turns across every door; this worker just serializes its own
+// chat's sends. There is no mirror tail and no dedup: the stream is the single
+// source, and the presenter skips this door's own echoes by origin.
 func (s *Service) runConvo(ctx context.Context, b *botRunner, cv *convo) {
+	sessID := core.SessionID(cv.c.SessionID)
+	conv, release := s.attachConvo(ctx, b, cv, sessID)
+	if conv == nil {
+		return // ctx ended before we could attach
+	}
+
+	sub, cancelSub := conv.Subscribe()
+	pres := newPresenter(ctx, b.client, cv.c.ChatID, cv.origin, s.logf)
+	var present sync.WaitGroup
+	present.Add(1)
+	go func() {
+		defer present.Done()
+		for env := range sub {
+			s.observeAsk(ctx, b, cv, conv, sessID, env)
+			pres.feed(env)
+		}
+		pres.close()
+	}()
+	// Order matters: cancelSub closes the stream so the presenter goroutine
+	// ends, present.Wait then blocks until it has, and release frees the hub
+	// ref last — so a SetTools relaunch sees a fully torn-down worker.
+	defer release()
+	defer present.Wait()
+	defer cancelSub()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case msg := <-cv.queue:
-			backlog := []inbound{msg}
-			for len(backlog) > 0 && ctx.Err() == nil {
-				next := backlog[0]
-				backlog = append(backlog[1:], s.handleInbound(ctx, b, cv, next)...)
-			}
+			s.handleInbound(ctx, b, cv, conv, msg)
+		}
+	}
+}
+
+// attachConvo attaches this chat's door to its session, retrying through a
+// transient cross-engine conflict instead of killing the worker — a
+// full-engine web tab holding the session while a tools-off bot attaches, or
+// the grace window after a tools toggle, both clear on their own. Returns nil
+// if ctx ends first.
+func (s *Service) attachConvo(ctx context.Context, b *botRunner, cv *convo, sessID core.SessionID) (*engine.Conversation, func()) {
+	for attempt := 0; ; attempt++ {
+		conv, release, err := s.engineFor(s.botTools(b)).Attach(sessID,
+			engine.WithOrigin(cv.origin),
+			engine.WithPrincipal(core.PrincipalLocal),
+		)
+		if err == nil {
+			s.mu.Lock()
+			cv.conv = conv
+			s.mu.Unlock()
+			return conv, release
+		}
+		s.logf("messenger: @%s attach %s: %v (retrying)", b.cfg.Username, sessID, err)
+		wait := time.Duration(attempt+1) * 2 * time.Second
+		if wait > actorAttachRetryMax {
+			wait = actorAttachRetryMax
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		case <-time.After(wait):
 		}
 	}
 }
@@ -700,88 +777,38 @@ func (s *Service) botTools(b *botRunner) bool {
 	return b.cfg.Tools
 }
 
-// handleInbound turns one Telegram message into a kernel prompt and sees the
-// turn run: on the bridge's own ephemeral actor when the session is free, or
-// injected into the door that holds it (an open web tab) otherwise. While the
-// turn runs, its deltas live-stream back to the phone (send-early-edit-often);
-// anything the streamer didn't deliver, the mirror tail still will. It
-// returns the messages that arrived while its own turn ran and were plain
-// conversation — the caller runs them next, in order.
-func (s *Service) handleInbound(ctx context.Context, b *botRunner, cv *convo, msg inbound) []inbound {
-	// The control surface first: /stop, /steer, and a pending question's
-	// answer act on the in-flight turn instead of becoming prompts.
-	if s.routeControl(ctx, b, cv, &msg) {
-		return nil
+// handleInbound feeds one Telegram message into the shared session. Control
+// messages (/stop, /steer, a pending question's answer) act on the running
+// turn; anything else becomes a prompt the actor runs. The presenter mirrors
+// the turn — and any web-tab turn — back to the phone, so there is no separate
+// delivery path and nothing to dedup.
+func (s *Service) handleInbound(ctx context.Context, b *botRunner, cv *convo, conv *engine.Conversation, msg inbound) {
+	if s.routeTurn(ctx, b, cv, conv, &msg) {
+		return
 	}
 	intent, err := s.buildPrompt(ctx, b, cv, msg)
 	if err != nil {
 		s.logf("messenger: @%s prompt: %v", b.cfg.Username, err)
 		_ = b.client.sendMessage(ctx, cv.c.ChatID, "(could not read that message: "+err.Error()+")")
-		return nil
+		return
 	}
-
-	// Remember our own injection so the tail doesn't mirror it back to the
-	// phone that just sent it.
 	s.mu.Lock()
-	cv.pending = append(cv.pending, intent.Text)
 	cv.c.LastAt = msg.at.UnixMilli()
 	s.mu.Unlock()
 	s.broadcastConvo(cv)
-
-	sessID := core.SessionID(cv.c.SessionID)
-	if engine.Sessions.Acquire(sessID) {
-		ts := s.startStream(ctx, b, cv, sessID, nil)
-		backlog := s.runOwnTurn(ctx, b, cv, sessID, intent, ts.push)
-		// The reply is in the log; deliver it now, not a poll later — but
-		// only after the consumer has sealed the streamer and recorded what
-		// it delivered, or the tail re-sends the final reply it cannot yet
-		// recognize as already streamed.
-		ts.finish()
-		s.kickTail()
-		return backlog
-	}
-
-	// Another door holds the session: an open web tab's actor, always on
-	// the host's own engine. A tools-off bot stops here — injecting would
-	// run its turn with the full toolset (shell, files), the exact
-	// escalation its toggle exists to prevent. Tools-on bots hand the
-	// prompt to that actor (Origin makes the tab echo it) and stream the
-	// turn back through a tap (see injectTurn).
-	if s.botTools(b) {
-		if conv := s.cfg.Full.Live(sessID); conv != nil && s.injectTurn(ctx, b, cv, sessID, conv, intent) {
-			return nil
-		}
-	}
-	// The prompt never landed: drop its pending entry, or a later identical
-	// web-tab message would be silently swallowed instead of mirrored.
-	s.consumePending(cv, intent.Text)
-	_ = b.client.sendMessage(ctx, cv.c.ChatID, "(arbos is busy in this conversation — try again in a moment)")
-	return nil
+	// SendCtx (not Send) so a worker relaunch — SetTools cancelling this ctx —
+	// can't wedge on a momentarily full intent buffer.
+	conv.SendCtx(ctx, intent)
 }
 
-// routeControl is the handleInbound half of the control surface: it acts on
-// whatever live actor currently holds this session (an open web tab's, or
-// none). The bridge's own turns never reach here mid-flight — runOwnTurn
-// drains the queue itself and routes through the same routeTurn. Tools-off
-// bots get no actor handle: steering or answering a full-engine turn is the
-// same escalation as injecting prompts into it.
-func (s *Service) routeControl(ctx context.Context, b *botRunner, cv *convo, msg *inbound) bool {
-	var conv *engine.Conversation
-	if s.botTools(b) {
-		conv = s.cfg.Full.Live(core.SessionID(cv.c.SessionID))
-	}
-	return s.routeTurn(ctx, b, cv, conv, msg)
-}
-
-// routeTurn intercepts the messages that act on an in-flight turn rather than
-// becoming prompts: /stop interrupts it, /steer replaces it (the engine
-// cancels the current turn silently and runs the new text), and a reply while
-// a question is pending answers the question — so a turn suspended on the ask
-// tool can always be unblocked, redirected, or killed from the phone. These
-// built-ins shadow any prompt templates of the same names. conv is the live
-// actor to act on; nil means nothing is running (then /steer degrades to a
-// plain prompt by rewriting the message). Returns true when the message was
-// consumed; false leaves it to the normal prompt path.
+// routeTurn intercepts the messages that act on the running turn rather than
+// becoming prompts: /stop interrupts it, /steer replaces it (the engine cancels
+// the current turn silently and runs the new text), and a reply while a
+// question is pending answers it — so a turn suspended on the ask tool can
+// always be unblocked, redirected, or killed from the phone. These built-ins
+// shadow any prompt templates of the same names. conv is the session's actor.
+// Returns true when the message was consumed; false leaves it to the prompt
+// path. A /stop or /steer with nothing running is harmless (the actor is idle).
 func (s *Service) routeTurn(ctx context.Context, b *botRunner, cv *convo, conv *engine.Conversation, msg *inbound) bool {
 	head, rest, _ := strings.Cut(strings.TrimSpace(msg.text), " ")
 	rest = strings.TrimSpace(rest)
@@ -792,12 +819,7 @@ func (s *Service) routeTurn(ctx context.Context, b *botRunner, cv *convo, conv *
 	switch strings.ToLower(head) {
 	case "/stop":
 		s.clearAsk(cv)
-		if conv == nil {
-			_ = b.client.sendMessage(ctx, cv.c.ChatID, "(nothing is running)")
-			return true
-		}
-		// Urgent: never let a full intent buffer drop the interrupt
-		// (mirrors Engine.Interrupt's delivery).
+		// Urgent: never let a full intent buffer drop the interrupt.
 		if !conv.TrySend(core.InterruptIntent{}) {
 			go conv.Send(core.InterruptIntent{})
 		}
@@ -807,12 +829,7 @@ func (s *Service) routeTurn(ctx context.Context, b *botRunner, cv *convo, conv *
 			_ = b.client.sendMessage(ctx, cv.c.ChatID, "(usage: /steer <new instruction>)")
 			return true
 		}
-		if conv == nil {
-			msg.text = rest // nothing to steer; run it as the next prompt
-			return false
-		}
 		s.clearAsk(cv)
-		s.notePending(cv, rest)
 		conv.Send(core.SteerIntent{Text: rest})
 		return true
 	}
@@ -831,155 +848,6 @@ func (s *Service) routeTurn(ctx context.Context, b *botRunner, cv *convo, conv *
 		return true
 	}
 	return false
-}
-
-// notePending records a prompt text this bridge injected itself, so the
-// mirror tail won't echo it back to the phone that sent it.
-func (s *Service) notePending(cv *convo, text string) {
-	s.mu.Lock()
-	cv.pending = append(cv.pending, text)
-	cv.c.LastAt = time.Now().UnixMilli()
-	s.mu.Unlock()
-}
-
-// recordStreamed notes a segment the streamer already delivered to the phone.
-func (s *Service) recordStreamed(cv *convo, text string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cv.streamed = append(cv.streamed, text)
-	if len(cv.streamed) > 32 {
-		cv.streamed = cv.streamed[len(cv.streamed)-32:]
-	}
-}
-
-// consumeStreamed reports whether text was already live-streamed to the
-// phone, consuming the record.
-func (s *Service) consumeStreamed(cv *convo, text string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, t := range cv.streamed {
-		if t == text {
-			cv.streamed = append(cv.streamed[:i], cv.streamed[i+1:]...)
-			return true
-		}
-	}
-	return false
-}
-
-// runOwnTurn runs one turn on a bridge-owned ephemeral actor: acquire was
-// already won; start the actor, prompt, drive to the terminal event, tear the
-// actor down, release. push live-streams the turn's envelopes to the phone;
-// whatever the stream didn't carry, the tail still mirrors. While the turn
-// runs the queue stays live: a pending question's answer, /steer, and /stop
-// act on the turn immediately; plain messages are returned as backlog for
-// the caller to run next, in arrival order.
-func (s *Service) runOwnTurn(ctx context.Context, b *botRunner, cv *convo, sessID core.SessionID, intent core.PromptIntent, push func(core.Envelope)) []inbound {
-	defer engine.Sessions.Release(sessID)
-	// A question that outlived its turn must not capture the next message.
-	defer s.clearAsk(cv)
-	tools := s.botTools(b)
-
-	actorCtx, stopActor := context.WithCancel(ctx)
-	defer stopActor()
-	eng := s.engineFor(tools)
-	conv, err := eng.StartSession(actorCtx, sessID,
-		engine.WithOrigin(fmt.Sprintf("telegram:@%s/%d", b.cfg.Username, cv.c.ChatID)),
-		engine.WithPrincipal(core.PrincipalLocal),
-	)
-	if err != nil {
-		s.logf("messenger: start session %s: %v", sessID, err)
-		s.consumePending(cv, intent.Text) // never landed; don't let it eat a mirror
-		_ = b.client.sendMessage(ctx, cv.c.ChatID, "(arbos could not open this conversation — check the host logs)")
-		return nil
-	}
-
-	s.setBusy(cv, true)
-	defer s.setBusy(cv, false)
-
-	turnCtx, cancel := context.WithTimeout(ctx, turnTimeout)
-	defer cancel()
-
-	// Telegram's typing indicator decays after ~5s; refresh it while the
-	// turn runs so the sender sees the agent is alive.
-	typingDone := make(chan struct{})
-	go func() {
-		t := time.NewTicker(4 * time.Second)
-		defer t.Stop()
-		b.client.sendTyping(turnCtx, cv.c.ChatID)
-		for {
-			select {
-			case <-typingDone:
-				return
-			case <-t.C:
-				b.client.sendTyping(turnCtx, cv.c.ChatID)
-			}
-		}
-	}()
-	defer close(typingDone)
-
-	conv.Send(intent)
-
-	// The bridge is no longer deaf mid-turn: approvals still auto-follow the
-	// tools toggle, but a question (the ask tool) goes to the phone and waits
-	// for the owner's reply — observeAsk presents it and remembers the
-	// request; the queue drain below routes the answer back.
-	emit := func(env core.Envelope) {
-		push(env)
-		s.observeAsk(ctx, b, cv, conv, sessID, env)
-		if env.SessionID != sessID {
-			return
-		}
-		if e, ok := env.Event.(core.ApprovalRequest); ok {
-			conv.Send(core.ApprovalResponseIntent{
-				RequestID: e.RequestID,
-				Approved:  tools,
-				Reason:    "telegram bridge auto-response",
-			})
-		}
-	}
-
-	// Drive the turn in the background and keep servicing the chat's queue:
-	// an answer to a suspended question, /steer, or /stop must reach the
-	// actor NOW — the old blocking drive left the phone locked out of its
-	// own turn until timeout. Plain messages backlog for after the turn.
-	var tc core.TurnComplete
-	driveDone := make(chan struct{})
-	go func() {
-		defer close(driveDone)
-		tc, err = engine.Drive(turnCtx, conv, emit)
-	}()
-	var backlog []inbound
-	for waiting := true; waiting; {
-		select {
-		case <-driveDone:
-			waiting = false
-		case <-turnCtx.Done():
-			eng.Interrupt(sessID) // stop the still-running turn, not just our wait
-			<-driveDone
-			waiting = false
-		case msg := <-cv.queue:
-			if !s.routeTurn(ctx, b, cv, conv, &msg) {
-				backlog = append(backlog, msg)
-			}
-		}
-	}
-
-	// handleInbound kicks the tail once the stream has settled.
-	switch {
-	case err == nil:
-		if tc.FinalResponse == "" {
-			// Nothing for the tail to mirror; don't leave the phone silent.
-			_ = b.client.sendMessage(ctx, cv.c.ChatID, "(done — the turn produced no text reply)")
-		}
-	case turnCtx.Err() != nil:
-		_ = b.client.sendMessage(ctx, cv.c.ChatID, "(the turn timed out and was stopped)")
-	case errors.Is(err, context.Canceled):
-		_ = b.client.sendMessage(ctx, cv.c.ChatID, "(the turn was interrupted)")
-	default:
-		s.logf("messenger: turn %s: %v", sessID, err)
-		_ = b.client.sendMessage(ctx, cv.c.ChatID, fmt.Sprintf("(turn failed: %v)", err))
-	}
-	return backlog
 }
 
 // buildPrompt reduces one Telegram message to a PromptIntent: text plus any
@@ -1047,96 +915,20 @@ func (s *Service) buildPrompt(ctx context.Context, b *botRunner, cv *convo, msg 
 				b.cfg.Username, msg.from.name()) + text
 		}
 	}
-	return core.PromptIntent{Text: text, Parts: parts, Origin: originTelegram}, nil
+	// Origin is this door's identity: the presenter skips its own echo, web
+	// doors render it as "via telegram".
+	return core.PromptIntent{Text: text, Parts: parts, Origin: cv.origin}, nil
 }
 
 // firstPrompt reports whether this conversation's session has never seen a
-// prompt — the one turn that carries the bridge preface.
+// prompt — the one turn that carries the bridge preface. It reads the log
+// directly: an empty log means a fresh session.
 func (s *Service) firstPrompt(cv *convo) bool {
-	s.mu.Lock()
-	next := cv.c.NextSeq
-	prime := cv.prime
-	s.mu.Unlock()
-	if next > 0 || prime {
-		return false
-	}
 	evs, err := s.cfg.Store.EventsFrom(context.Background(), core.SessionID(cv.c.SessionID), 0)
 	return err == nil && len(evs) == 0
 }
 
-func (s *Service) setBusy(cv *convo, busy bool) {
-	s.mu.Lock()
-	cv.c.Busy = busy
-	s.mu.Unlock()
-	s.broadcastConvo(cv)
-}
-
-// --- the mirror tail -------------------------------------------------------------
-
-// runTail is the outbound half of the duplex: a poll over every bridged
-// session's event log, mirroring whatever is new — from whichever door caused
-// it — to the Telegram thread. This is the only path agent output takes to
-// the phone, so bridge-run turns and web-run turns deliver identically. It
-// also keeps the phone's typing indicator honest while a turn is mid-run.
-func (s *Service) runTail(ctx context.Context) {
-	tick := time.NewTicker(tailInterval)
-	defer tick.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
-		case <-s.kick:
-		}
-		s.mu.Lock()
-		convos := make([]*convo, 0, len(s.convos))
-		for _, cv := range s.convos {
-			convos = append(convos, cv)
-		}
-		s.mu.Unlock()
-		dirty := false
-		for _, cv := range convos {
-			if s.tailConvo(ctx, cv) {
-				dirty = true
-			}
-			s.refreshTyping(ctx, cv)
-		}
-		if dirty {
-			s.mu.Lock()
-			s.saveLocked()
-			s.mu.Unlock()
-		}
-	}
-}
-
-// kickTail nudges the tail to run now (a turn just finished; deliver its
-// reply immediately instead of a poll later).
-func (s *Service) kickTail() {
-	select {
-	case s.kick <- struct{}{}:
-	default:
-	}
-}
-
-// refreshTyping keeps the Telegram typing indicator alive while a turn is in
-// flight on this conversation — including turns the bridge didn't run (an
-// open web tab's), which it can only see through the log.
-func (s *Service) refreshTyping(ctx context.Context, cv *convo) {
-	s.mu.Lock()
-	bot := s.bots[cv.c.BotID]
-	due := cv.inFlight && time.Since(cv.lastTyping) >= typingRefresh
-	if cv.inFlight && time.Since(cv.inFlightAt) > turnTimeout {
-		cv.inFlight = false // a stuck flag must not type forever
-		due = false
-	}
-	if due {
-		cv.lastTyping = time.Now()
-	}
-	s.mu.Unlock()
-	if due && bot != nil {
-		bot.client.sendTyping(ctx, cv.c.ChatID)
-	}
-}
+// --- the outbox door -------------------------------------------------------------
 
 // runOutbox makes the phone an outbox door — the agent's voice between turns
 // (scheduled firings, finished background work, escalations) reaches the
@@ -1203,140 +995,3 @@ func (s *Service) runOutbox(ctx context.Context) {
 	}
 }
 
-// tailConvo mirrors one conversation's new events to Telegram, returning
-// whether the high-water mark moved.
-func (s *Service) tailConvo(ctx context.Context, cv *convo) bool {
-	s.mu.Lock()
-	next := cv.c.NextSeq
-	prime := cv.prime
-	bot := s.bots[cv.c.BotID]
-	s.mu.Unlock()
-	if bot == nil {
-		return false
-	}
-
-	events, err := s.cfg.Store.EventsFrom(ctx, core.SessionID(cv.c.SessionID), next)
-	if err != nil {
-		s.logf("messenger: tail %s: %v", cv.c.SessionID, err)
-		return false
-	}
-	if len(events) == 0 {
-		return false
-	}
-
-	if prime {
-		// First tail over a pre-existing log: fast-forward, never re-deliver
-		// history the phone already lived through.
-		s.mu.Lock()
-		cv.c.NextSeq = events[len(events)-1].Seq + 1
-		cv.prime = false
-		s.mu.Unlock()
-		return true
-	}
-
-	for _, ev := range events {
-		s.mirrorEvent(ctx, bot, cv, ev)
-		s.mu.Lock()
-		cv.c.NextSeq = ev.Seq + 1
-		cv.c.LastAt = time.Now().UnixMilli()
-		if flight, known := turnInFlight(ev); known {
-			cv.inFlight = flight
-			cv.inFlightAt = time.Now()
-		}
-		s.mu.Unlock()
-	}
-	s.broadcastConvo(cv)
-	return true
-}
-
-// turnInFlight reads one log event as turn progress: a prompt or tool
-// activity means a reply is still coming (keep the phone's typing indicator
-// alive); a plain assistant message or an interrupt means the turn settled.
-// Events that say nothing about progress (config, usage) return known=false.
-func turnInFlight(ev core.Event) (flight, known bool) {
-	switch p := ev.Payload.(type) {
-	case core.MessagePayload:
-		switch p.Message.Role {
-		case core.RoleUser:
-			return true, true
-		case core.RoleAssistant:
-			return len(p.Message.ToolCalls) > 0, true
-		default:
-			// System/tool messages say nothing about turn progress.
-		}
-		return false, false
-	case core.ToolResultPayload:
-		return true, true
-	case core.InterruptPayload:
-		return false, true
-	default:
-		return false, false
-	}
-}
-
-// mirrorEvent delivers one log event to the Telegram thread: assistant text
-// and images as the agent speaking; user messages from other doors prefixed
-// as the owner's own words crossing over; interrupts as a marker. Tool
-// chatter stays out — the phone gets the conversation, not the machinery.
-func (s *Service) mirrorEvent(ctx context.Context, bot *botRunner, cv *convo, ev core.Event) {
-	p, ok := ev.Payload.(core.MessagePayload)
-	if !ok {
-		if _, interrupted := ev.Payload.(core.InterruptPayload); interrupted {
-			_ = bot.client.sendMessage(ctx, cv.c.ChatID, "(interrupted)")
-		}
-		return
-	}
-	m := p.Message
-	switch m.Role {
-	case core.RoleUser:
-		if s.consumePending(cv, m.Content) {
-			return // our own injection — the phone already has it
-		}
-		if m.Content != "" {
-			if err := bot.client.sendMessage(ctx, cv.c.ChatID, "[from web] "+m.Content); err != nil {
-				s.logf("messenger: @%s mirror: %v", bot.cfg.Username, err)
-			}
-		}
-		s.mirrorImages(ctx, bot, cv, m.Parts)
-	case core.RoleAssistant:
-		if m.Content != "" && !s.consumeStreamed(cv, m.Content) {
-			if err := bot.client.sendMessage(ctx, cv.c.ChatID, m.Content); err != nil {
-				s.logf("messenger: @%s send: %v", bot.cfg.Username, err)
-			}
-		}
-		s.mirrorImages(ctx, bot, cv, m.Parts)
-	default:
-		// System and tool messages aren't mirrored to the phone.
-	}
-}
-
-// mirrorImages sends a message's image parts as photos (attachments from the
-// web composer, provider-generated images).
-func (s *Service) mirrorImages(ctx context.Context, bot *botRunner, cv *convo, parts []core.ContentBlock) {
-	for _, part := range parts {
-		if part.Type != core.BlockImage || part.Image == nil {
-			continue
-		}
-		img, err := base64.StdEncoding.DecodeString(part.Image.Data)
-		if err != nil || len(img) == 0 || len(img) > mediaCap {
-			continue
-		}
-		if err := bot.client.sendPhoto(ctx, cv.c.ChatID, img); err != nil {
-			s.logf("messenger: @%s photo: %v", bot.cfg.Username, err)
-		}
-	}
-}
-
-// consumePending reports whether text matches a prompt this bridge injected
-// itself, consuming the entry.
-func (s *Service) consumePending(cv *convo, text string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, t := range cv.pending {
-		if t == text {
-			cv.pending = append(cv.pending[:i], cv.pending[i+1:]...)
-			return true
-		}
-	}
-	return false
-}

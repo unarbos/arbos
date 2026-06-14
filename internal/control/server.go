@@ -39,15 +39,6 @@ import (
 	"github.com/unarbos/arbos/internal/engine"
 )
 
-// liveSessions enforces the single-writer-per-session invariant that engine.go
-// and sqlite/store.go assume: at most one ACTOR may be bound to a session id at
-// a time, across every door in the process. A second open/switch/fork onto an
-// already-active id does not spawn a second writer — it attaches to the
-// existing actor as a follower (see bind), the same tap-and-inject seam the
-// Telegram bridge uses. It is the engine's process-wide registry so
-// out-of-band doors honor the same invariant as control connections.
-var liveSessions = engine.Sessions
-
 // connCounter distinguishes control connections so a prompt's Queued echo can
 // be routed away from the connection that sent it (which already rendered it)
 // while still reaching every other connection on the same session.
@@ -104,51 +95,38 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 	// session) can be suppressed on the way back to the tab that sent them.
 	connOrigin := fmt.Sprintf("web:%d", connCounter.Add(1))
 	var (
-		conv *engine.Conversation
-		// unbind releases whatever bind acquired: the owner's actor + registry
-		// slot, or the follower's tap. Set by bind, cleared by teardown.
-		unbind func()
-		// follower marks a bind that attached to an actor another connection
-		// owns; mode-dependent frames (fork) refuse rather than misbehave.
-		follower bool
-		pump     sync.WaitGroup
-		turnDone chan struct{}
-		turnMu   sync.Mutex
+		conv      *engine.Conversation
+		release   func() // detach this door from the session's ref-counted hub
+		cancelSub func() // end this connection's subscription to the stream
+		pump      sync.WaitGroup
+		// turnActive tracks whether a turn is in flight on the bound session,
+		// derived from the stream so it reflects a turn ANY door started — fork
+		// refuses while it is true. Guarded by turnMu.
+		turnMu     sync.Mutex
+		turnActive bool
 	)
-
-	signalTurnStart := func() {
+	setTurn := func(active bool) {
 		turnMu.Lock()
-		if turnDone != nil {
-			// A new turn started before the previous one's terminal event
-			// arrived; release any waiter on the old channel so it can't
-			// block on a turn that will never signal again.
-			close(turnDone)
-		}
-		turnDone = make(chan struct{})
+		turnActive = active
 		turnMu.Unlock()
 	}
 
-	signalTurnEnd := func() {
-		turnMu.Lock()
-		if turnDone != nil {
-			close(turnDone)
-			turnDone = nil
-		}
-		turnMu.Unlock()
-	}
-
+	// teardown detaches this door: end the subscription, wait for the pump to
+	// drain, then release the hub ref. It never cancels the actor — other doors
+	// (or a quick reconnect inside the hub's grace window) keep it warm.
 	teardown := func() {
-		if unbind != nil {
-			unbind()
-			unbind = nil
-			conv = nil
-			follower = false
-			// The pump exited without a terminal event (the session was
-			// cancelled mid-turn); release any drain waiting on it.
-			signalTurnEnd()
+		if cancelSub != nil {
+			cancelSub()
+			cancelSub = nil
 		}
+		pump.Wait()
+		if release != nil {
+			release()
+			release = nil
+		}
+		conv = nil
+		setTurn(false)
 	}
-	defer pump.Wait()
 	defer cancel()
 	defer teardown()
 
@@ -168,123 +146,45 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 		return enc.write(serverFrame{Type: "event", Envelope: b}) == nil
 	}
 
-	// bindOwner starts the session's actor on this connection — the exclusive
-	// writer path, taken when the registry slot is free.
-	bindOwner := func(id core.SessionID) error {
-		ssctx, sscancel := context.WithCancel(sctx)
-		c, err := eng.StartSession(ssctx, id)
+	// bind attaches this connection to a session as one of N equal doors. It
+	// joins the session's shared, ref-counted actor (so the actor outlives any
+	// single door) and subscribes to the identical envelope stream every other
+	// door sees — a web tab, a sibling browser window, a Telegram chat. There
+	// is no owner/follower split and nothing to rebind when a turn ends: the
+	// actor stays warm while any door is attached, and intents from every door
+	// serialize through its one inbox.
+	bind := func(id core.SessionID) error {
+		teardown()
+		c, rel, err := eng.Attach(id)
 		if err != nil {
-			sscancel()
-			liveSessions.Release(id)
 			return err
 		}
+		sub, cancelS := c.Subscribe()
 		conv = c
-		unbind = func() {
-			sscancel()
-			pump.Wait()
-			liveSessions.Release(id)
-		}
+		release = rel
+		cancelSub = cancelS
 		pump.Add(1)
-		go func(c *engine.Conversation) {
+		go func(self core.SessionID) {
 			defer pump.Done()
 			dead := false // client write side gone; keep draining, stop writing
-			for env := range c.Events() {
+			for env := range sub {
+				// Track the shared session's turn state from the stream so fork
+				// can refuse mid-turn no matter which door started the turn.
+				if env.SessionID == self && env.Depth == 0 {
+					switch env.Event.(type) {
+					case core.TurnComplete, core.Interrupted, core.ErrorEvent:
+						setTurn(false)
+					case core.Queued, core.MessageDelta, core.ToolStarted:
+						setTurn(true)
+					}
+				}
 				if !dead && !writeEnvelope(env) {
 					dead = true
 					cancel() // no client left to receive; tear the connection down
 				}
-				switch env.Event.(type) {
-				case core.TurnComplete, core.ErrorEvent, core.Interrupted:
-					signalTurnEnd()
-				}
 			}
-		}(c)
+		}(id)
 		return nil
-	}
-
-	// bindFollower attaches to an actor another door owns: tap its envelope
-	// stream for the outbound half and inject intents into it for the inbound
-	// half — the same seam the Telegram bridge uses when a web tab holds its
-	// session. Returns false if the actor died before the tap landed (the
-	// caller retries, likely winning ownership). When the owning door tears
-	// the actor down later, the whole connection drops: the client's
-	// reconnect re-opens the session and wins the bind or follows the next
-	// owner — reusing the client's existing healing path instead of growing a
-	// server-side promotion protocol.
-	bindFollower := func(id core.SessionID, src *engine.Conversation) bool {
-		fctx, fcancel := context.WithCancel(sctx)
-		// Buffered hand-off: the tap runs on the actor's emit path and must
-		// never block. Overflow drops the envelope — presentation only; the
-		// client reconciles from the persisted log on its next rebind.
-		ch := make(chan core.Envelope, 1024)
-		untap := src.Tap(func(env core.Envelope) {
-			select {
-			case ch <- env:
-			default:
-			}
-		})
-		select {
-		case <-src.Done():
-			untap()
-			fcancel()
-			return false
-		default:
-		}
-		conv = src
-		follower = true
-		unbind = func() {
-			fcancel()
-			untap()
-			pump.Wait()
-		}
-		pump.Add(1)
-		go func() {
-			defer pump.Done()
-			dead := false
-			for {
-				select {
-				case env := <-ch:
-					if !dead && !writeEnvelope(env) {
-						dead = true
-						cancel()
-					}
-					switch env.Event.(type) {
-					case core.TurnComplete, core.ErrorEvent, core.Interrupted:
-						signalTurnEnd()
-					}
-				case <-src.Done():
-					cancel()
-					return
-				case <-fctx.Done():
-					return
-				}
-			}
-		}()
-		return true
-	}
-
-	bind := func(id core.SessionID) error {
-		teardown()
-		// Own the session when free; follow when another connection drives
-		// it. The brief retry loop covers the races between the two (a
-		// departing owner releases the registry slot before its actor exits,
-		// and an actor can exit between the Live lookup and the tap).
-		for attempt := 0; attempt < 50; attempt++ {
-			if liveSessions.Acquire(id) {
-				return bindOwner(id)
-			}
-			if src := eng.Live(id); src != nil && bindFollower(id, src) {
-				return nil
-			}
-			// Held by an actor this engine can't see (e.g. a chat-only bridge
-			// engine's turn); wait out the gap, then report it busy.
-			select {
-			case <-time.After(20 * time.Millisecond):
-			case <-sctx.Done():
-				return sctx.Err()
-			}
-		}
-		return fmt.Errorf("session %q is already active on another connection", id)
 	}
 
 	handleFrame := func(f clientFrame) {
@@ -316,13 +216,6 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 			_ = enc.write(serverFrame{Type: "switched", SessionID: f.SessionID})
 
 		case "fork":
-			// A follower can't fork: the busy check below reads THIS
-			// connection's turn tracking, which is blind to turns the owning
-			// connection runs — a fork could silently land mid-turn.
-			if follower {
-				_ = enc.write(serverFrame{Type: "error", Error: "fork: session is driven by another connection"})
-				return
-			}
 			source := f.SessionID
 			if source == "" {
 				if conv == nil {
@@ -331,10 +224,11 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 				}
 				source = conv.ID()
 			}
-			// Refuse to fork under an in-flight turn: the source log is being
-			// written, and the rebind below would silently cancel the turn.
+			// Refuse to fork under an in-flight turn (tracked from the stream,
+			// so it catches a turn any door started): the source log is being
+			// written, and forking would branch a partial transcript.
 			turnMu.Lock()
-			busy := turnDone != nil
+			busy := turnActive
 			turnMu.Unlock()
 			if busy {
 				_ = enc.write(serverFrame{Type: "error", Error: "fork: busy: a turn is in flight, interrupt it first"})
@@ -433,16 +327,19 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 			}
 			if p, isPrompt := intent.(core.PromptIntent); isPrompt {
 				// Stamp the connection's origin so the actor's Queued echo
-				// reaches the session's OTHER connections (which haven't seen
-				// this prompt) and writeEnvelope can suppress it here.
+				// reaches the session's OTHER doors (which haven't seen this
+				// prompt) while writeEnvelope suppresses it here.
 				if p.Origin == "" {
 					p.Origin = connOrigin
 					intent = p
 				}
-				signalTurnStart()
 			}
-			if _, isSteer := intent.(core.SteerIntent); isSteer {
-				signalTurnStart()
+			switch intent.(type) {
+			case core.PromptIntent, core.SteerIntent:
+				// Mark the turn in flight synchronously, so a disconnect right
+				// after the prompt still drains it; the stream confirms this and
+				// the pump flips it false at the terminal event.
+				setTurn(true)
 			}
 			switch intent.(type) {
 			case core.InterruptIntent, core.SteerIntent:
@@ -461,17 +358,25 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 		}
 	}
 
-	waitDrain := func() {
-		turnMu.Lock()
-		ch := turnDone
-		turnMu.Unlock()
-		if ch == nil {
-			return
-		}
-		select {
-		case <-ch:
-		case <-time.After(drain):
-		case <-sctx.Done():
+	// waitIdle holds Serve open on a client disconnect until the in-flight turn
+	// reaches its terminal event (bounded by drain), so a client that pipes a
+	// prompt and closes stdin — the CLI's one-shot path — still streams the
+	// answer before teardown ends the subscription. The pump keeps forwarding
+	// envelopes meanwhile; turnActive flips false when the terminal lands.
+	waitIdle := func() {
+		deadline := time.Now().Add(drain)
+		for {
+			turnMu.Lock()
+			active := turnActive
+			turnMu.Unlock()
+			if !active || time.Now().After(deadline) {
+				return
+			}
+			select {
+			case <-time.After(20 * time.Millisecond):
+			case <-sctx.Done():
+				return
+			}
 		}
 	}
 
@@ -494,7 +399,7 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 			return ctx.Err()
 		case b, ok := <-lines:
 			if !ok {
-				waitDrain()
+				waitIdle()
 				if err := sc.Err(); err != nil {
 					return err
 				}

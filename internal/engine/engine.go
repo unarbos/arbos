@@ -206,7 +206,6 @@ func New(provider ports.LLMProvider, tools ports.ToolRuntime, store ports.Sessio
 type Conversation struct {
 	id      core.SessionID
 	intents chan core.Intent
-	events  chan core.Envelope
 	// awaits is an UNBUFFERED rendezvous: the turn goroutine registers a waiter
 	// here and the actor receives it before the turn proceeds, so a response
 	// intent can never arrive before its waiter is registered.
@@ -229,42 +228,92 @@ type Conversation struct {
 	// imageGen is the per-session image-generation toggle (SetImageGenIntent),
 	// with the same ownership and durability as the web toggles.
 	imageGen bool
-	// taps are side-channel envelope observers attached by doors that are
-	// NOT the bound frontend (the Telegram bridge live-streaming a turn the
-	// web tab is driving). They see every envelope the events channel sees.
-	tapsMu  sync.Mutex
-	taps    map[int]func(core.Envelope)
-	nextTap int
-	// done closes when the actor exits — the liveness signal a tapping door
-	// watches so it knows the stream it follows has ended (Events() carries
-	// the same signal by closing, but only its single owner may range it).
+	// subs is the envelope fan-out. Every door — a web tab, a Telegram chat,
+	// a shared link — and every internal consumer (Drive) is an equal
+	// subscriber; there is no privileged "owner" channel. The live stream is
+	// best-effort: a subscriber whose buffer overflows drops envelopes and
+	// reconciles from the persisted log, which is the canonical record. This
+	// is what makes one session with N doors behave like a shared chat —
+	// everyone sees the identical stream.
+	subsMu  sync.Mutex
+	subs    map[int]chan core.Envelope
+	nextSub int
+	closed  bool // actor exited: existing subs closed, late subscribers get a closed channel
+	// events is a subscription created eagerly at session start. It exists for
+	// the sequential "send a prompt, then range the stream to its terminal"
+	// consumers (Drive, the CLI/TUI one-shot loops, tests): because it is
+	// created before the actor can emit, a consumer that subscribes after
+	// Send never misses the turn's opening — or its terminal. Live doors that
+	// attach before prompting use Subscribe() directly, one stream each.
+	events <-chan core.Envelope
+	// done closes when the actor exits — the liveness signal a door watches
+	// so it knows the stream it follows has ended.
 	done chan struct{}
 }
 
 // Done returns a channel closed when this conversation's actor has exited.
 func (c *Conversation) Done() <-chan struct{} { return c.done }
 
-// Tap subscribes fn to every envelope this conversation emits and returns
-// the unsubscribe. fn runs on the emitting goroutine — it must be fast and
-// never block (buffer internally, hand off to your own goroutine).
-func (c *Conversation) Tap(fn func(core.Envelope)) func() {
-	c.tapsMu.Lock()
-	defer c.tapsMu.Unlock()
-	if c.taps == nil {
-		c.taps = make(map[int]func(core.Envelope))
+// subBuffer sizes each subscriber's buffer. The live stream is presentation,
+// not the record (the log is), so a generous buffer absorbs normal bursts and
+// the rare overflow is recovered by reconciling from the log — never by
+// stalling the turn on a slow door.
+const subBuffer = 256
+
+// Subscribe is the one way to read a conversation's stream: every door and
+// every internal consumer attaches the same way and sees the identical
+// envelope sequence. The returned channel is closed when the caller's cancel
+// runs or when the actor exits. Sends are non-blocking — a door that can't
+// keep up drops envelopes and reconciles from the persisted log.
+func (c *Conversation) Subscribe() (<-chan core.Envelope, func()) {
+	ch := make(chan core.Envelope, subBuffer)
+	c.subsMu.Lock()
+	if c.closed {
+		c.subsMu.Unlock()
+		close(ch) // the actor is already gone; hand back an ended stream
+		return ch, func() {}
 	}
-	id := c.nextTap
-	c.nextTap++
-	c.taps[id] = fn
-	return func() {
-		c.tapsMu.Lock()
-		defer c.tapsMu.Unlock()
-		delete(c.taps, id)
+	if c.subs == nil {
+		c.subs = make(map[int]chan core.Envelope)
+	}
+	id := c.nextSub
+	c.nextSub++
+	c.subs[id] = ch
+	c.subsMu.Unlock()
+	var once sync.Once
+	return ch, func() {
+		once.Do(func() {
+			c.subsMu.Lock()
+			if sub, ok := c.subs[id]; ok {
+				delete(c.subs, id)
+				close(sub)
+			}
+			c.subsMu.Unlock()
+		})
 	}
 }
 
-func (c *Conversation) ID() core.SessionID           { return c.id }
-func (c *Conversation) Send(i core.Intent)           { c.intents <- i }
+// closeSubs ends every subscriber's stream when the actor exits and blocks any
+// late subscriber from attaching to a dead conversation.
+func (c *Conversation) closeSubs() {
+	c.subsMu.Lock()
+	c.closed = true
+	for id, ch := range c.subs {
+		delete(c.subs, id)
+		close(ch)
+	}
+	c.subsMu.Unlock()
+}
+
+func (c *Conversation) ID() core.SessionID { return c.id }
+func (c *Conversation) Send(i core.Intent) { c.intents <- i }
+
+// Events is the eager session-start stream — the same channel on every call,
+// closed when the actor exits. Use it for a sequential consumer that sends a
+// prompt and ranges to the turn's terminal (Drive, the CLI, tests); it is safe
+// to subscribe after Send because the channel predates the actor's first emit.
+// A live door that attaches before prompting should Subscribe() for its own
+// independent stream.
 func (c *Conversation) Events() <-chan core.Envelope { return c.events }
 
 // SendCtx is Send that gives up when ctx is cancelled instead of blocking
@@ -353,18 +402,62 @@ func (c *Conversation) emitEnvelope(ctx context.Context, env core.Envelope) bool
 	if c.observer != nil {
 		c.observer.ObserveEvent(ctx, env.Event)
 	}
-	// Side-channel taps next, same rationale — a tapping door (the Telegram
-	// bridge) must see the envelope even if the bound frontend is slow.
-	c.tapsMu.Lock()
-	for _, fn := range c.taps {
-		fn(env)
+	// Fan out without blocking, so a slow door never stalls the turn. A delta
+	// that overflows a subscriber's buffer is dropped — presentation only, and
+	// a web door recovers it by reconciling from the log. A terminal event is
+	// control-flow, not presentation: Drive and the CLI range the stream to a
+	// terminal and have no log to fall back on, so a terminal that finds a full
+	// buffer evicts a buffered delta to make room rather than being lost.
+	terminal := isTerminalEvent(env.Event)
+	c.subsMu.Lock()
+	for _, ch := range c.subs {
+		sendOrEvict(ch, env, terminal)
 	}
-	c.tapsMu.Unlock()
+	c.subsMu.Unlock()
+	// The fan-out never blocks, so emission only "fails" when the turn itself
+	// was cancelled — callers read that to stop draining.
 	select {
 	case <-ctx.Done():
 		return false
-	case c.events <- env:
+	default:
 		return true
+	}
+}
+
+// isTerminalEvent reports whether e ends a turn — the events Drive and the CLI
+// range the stream waiting for, which must therefore never be dropped.
+func isTerminalEvent(e core.KernelEvent) bool {
+	switch e.(type) {
+	case core.TurnComplete, core.Interrupted, core.ErrorEvent:
+		return true
+	default:
+		return false
+	}
+}
+
+// sendOrEvict delivers env to ch without blocking. A non-terminal that doesn't
+// fit is dropped. A terminal that doesn't fit evicts buffered deltas (droppable
+// presentation) until it lands — emitEnvelope is the only sender and holds the
+// lock, so one eviction frees a slot the send then takes.
+func sendOrEvict(ch chan core.Envelope, env core.Envelope, terminal bool) {
+	select {
+	case ch <- env:
+		return
+	default:
+	}
+	if !terminal {
+		return
+	}
+	for i := 0; i <= cap(ch); i++ {
+		select {
+		case <-ch: // discard one buffered delta to make room
+		default:
+		}
+		select {
+		case ch <- env:
+			return
+		default:
+		}
 	}
 }
 
@@ -431,7 +524,6 @@ func (e *Engine) StartSession(ctx context.Context, id core.SessionID, opts ...Se
 	c := &Conversation{
 		id:       id,
 		intents:  make(chan core.Intent, 8),
-		events:   make(chan core.Envelope, 32),
 		done:     make(chan struct{}),
 		awaits:   make(chan awaitReg), // unbuffered rendezvous
 		observer: e.observer,
@@ -443,6 +535,9 @@ func (e *Engine) StartSession(ctx context.Context, id core.SessionID, opts ...Se
 		webFetch:  sess.WebFetch,
 		imageGen:  sess.ImageGen,
 	}
+	// Create the eager stream before the actor can emit, so a send-then-range
+	// consumer (Events()) never misses the turn's opening or terminal.
+	c.events, _ = c.Subscribe()
 	e.registerConv(c)
 	go e.runActor(ctx, c)
 	return c, nil
@@ -512,7 +607,7 @@ func (e *Engine) Deliver(id core.SessionID, intent core.Intent) bool {
 // while a prompt is in flight it watches for an interrupt and cancels the turn.
 // Every intent variant is handled explicitly — no silent no-ops.
 func (e *Engine) runActor(parent context.Context, c *Conversation) {
-	defer close(c.events)
+	defer c.closeSubs()
 	defer e.unregisterConv(c)
 	defer close(c.done)
 	// turnSeq is owned solely by this goroutine (the session actor), so it needs
@@ -533,7 +628,7 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 			next := queue[0]
 			queue = queue[1:]
 			turnSeq++
-			queue = append(queue, e.processPrompt(parent, c, next.Text, next.Parts, turnSeq)...)
+			queue = append(queue, e.processPrompt(parent, c, next.Text, next.Parts, next.Origin, turnSeq)...)
 		}
 	}
 	for {
@@ -616,7 +711,7 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 // processPrompt runs a turn in a child context and races it against incoming
 // interrupts. An InterruptIntent cancels the turn's context — the structural
 // payoff of the actor model.
-func (e *Engine) processPrompt(parent context.Context, c *Conversation, text string, parts []core.ContentBlock, turnID int64) []core.PromptIntent {
+func (e *Engine) processPrompt(parent context.Context, c *Conversation, text string, parts []core.ContentBlock, origin string, turnID int64) []core.PromptIntent {
 	// Attach turn correlation once, here, so every downstream append and (later)
 	// log line/span joins on the same SessionID+TurnID. cctx is not cancellable
 	// itself (only turnCtx is), so it is the right context for must-persist
@@ -647,7 +742,7 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 				completedNormally = true // a panic is a terminal outcome, not an interrupt
 			}
 		}()
-		completedNormally = e.runTurn(turnCtx, c, text, parts)
+		completedNormally = e.runTurn(turnCtx, c, text, parts, origin)
 	}()
 
 	// pendingModel holds a model switch requested while this turn ran — the
@@ -814,7 +909,7 @@ func (e *Engine) project(events []core.Event) []core.Message {
 // surfaced error, or persist failure) and false when it returned because the
 // context was cancelled (an interrupt). processPrompt uses this to tell a real
 // interrupt from one that merely raced a completing turn (H1).
-func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, userParts []core.ContentBlock) bool {
+func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, userParts []core.ContentBlock, origin string) bool {
 	// Attach the live-relay sink so a delegating tool can stream a child agent's
 	// events into this session's outbound stream, incrementing Depth by one for
 	// nested rendering and preserving the originating child SessionID. The depth
@@ -839,7 +934,7 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, 
 		return qr, true
 	})
 
-	if !e.append(ctx, c, core.NewMessageEvent(c.id, core.Message{Role: core.RoleUser, Content: userText, Parts: userParts}, e.clock.Now())) {
+	if !e.append(ctx, c, core.NewMessageEvent(c.id, core.Message{Role: core.RoleUser, Content: userText, Parts: userParts, Origin: origin}, e.clock.Now())) {
 		return true
 	}
 
