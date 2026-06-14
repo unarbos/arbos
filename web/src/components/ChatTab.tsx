@@ -224,6 +224,8 @@ export interface ChatTabHandle {
   /** A terminal card (or background-bar job) was expanded — open it as a
    *  terminal tab tailing the job's live journal. */
   onOpenTerminal?: (term: TermRef) => void;
+  /** A plan card was clicked — open its goal tree and code in a panel. */
+  onOpenPlan?: (node: number) => void;
 }
 
 /**
@@ -244,6 +246,7 @@ export function ChatTab({
   focusTick,
   resumeId,
   handle,
+  readOnly,
 }: {
   active: boolean;
   focused: boolean;
@@ -251,6 +254,9 @@ export function ChatTab({
   focusTick: number;
   resumeId: string | null;
   handle: ChatTabHandle;
+  /** Read-only view (a read-scoped share): render the transcript, but no
+   *  composer or interactive cards — the viewer can watch, not drive. */
+  readOnly?: boolean;
 }) {
   const [chat, dispatch] = useReducer(chatReducer, initialChatState);
   const [connState, setConnState] = useState<ConnectionState>("idle");
@@ -1069,6 +1075,7 @@ export function ChatTab({
         handleRef.current.onOpenSurface?.(surface),
       onOpenTerminal: (term: TermRef) =>
         handleRef.current.onOpenTerminal?.(term),
+      onOpenPlan: (node: number) => handleRef.current.onOpenPlan?.(node),
       onRetry,
       canRetry: usable && !chat.turnActive,
       edit: {
@@ -1200,6 +1207,16 @@ export function ChatTab({
   // first transcript item lands (the optimistic user item on Enter). Resumed
   // tabs never start fresh — their history is already on its way.
   const fresh = !resumeId && chat.items.length === 0;
+
+  // A read-only share renders just the transcript — no composer, no
+  // interactive cards (queue/approval/questions), nothing to drive with.
+  if (readOnly) {
+    return (
+      <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
+        <ChatView items={chat.items} working={working} hooks={transcriptHooks} />
+      </div>
+    );
+  }
 
   return (
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">

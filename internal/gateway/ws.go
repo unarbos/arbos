@@ -58,6 +58,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	go keepAlive(ctx, c)
 
+	// A session-scoped share principal drives the seam through a frame-filter:
+	// it is forced onto the one granted session and may send only
+	// conversational intents (and only with write permission), so the real
+	// ChatTab can run unchanged while a guest can neither reach another
+	// session nor restructure this one. Full logins (and ScopeAll shares) have
+	// no scoped grant here and pass through untouched.
+	scoped, isScoped := shareFromContext(ctx)
+
 	// Browser -> seam: messages become newline-terminated lines on a pipe the
 	// seam's scanner reads. Closing the pipe on read failure is what lets
 	// control.Serve observe EOF and run its drain-then-exit path.
@@ -71,6 +79,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 			if typ != websocket.MessageText {
 				continue
+			}
+			if isScoped {
+				line, keep := filterShareFrame(data, scoped.Scope.Ref, scoped.Perm)
+				if !keep {
+					continue
+				}
+				data = line
 			}
 			if len(data) == 0 || data[len(data)-1] != '\n' {
 				data = append(data, '\n')

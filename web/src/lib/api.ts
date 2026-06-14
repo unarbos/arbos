@@ -584,30 +584,20 @@ export async function shareArtifact(
   return body.url;
 }
 
-/** What a share token grants, for the read-only view to render the right
- *  affordances (a composer only when write+). */
-export interface ShareInfo {
-  kind: "file" | "session";
-  perm: SharePerm;
+/** The current principal's capabilities. A full login (or a full-agent share)
+ *  is "local" — the whole workspace; a session-scoped share is "share", which
+ *  the SPA renders as just that one chat, read-only or writable. */
+export interface Me {
+  kind: "local" | "share";
+  scope?: string;
+  session?: string;
+  perm?: SharePerm;
 }
 
-export async function fetchShareInfo(token: string): Promise<ShareInfo> {
-  const res = await fetch(`/s/${encodeURIComponent(token)}/info`);
-  if (!res.ok) throw new Error(`share info: ${res.status}`);
-  return (await res.json()) as ShareInfo;
-}
-
-/** Post a message into a shared chat (write grant). Runs a real turn; the
- *  caller refreshes the transcript to see the response. */
-export async function sendToShare(token: string, text: string): Promise<void> {
-  const res = await fetch(`/s/${encodeURIComponent(token)}/send`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-  if (!res.ok && res.status !== 204) {
-    throw new Error(await errorText(res, `send: ${res.status}`));
-  }
+export async function fetchMe(): Promise<Me> {
+  const res = await fetch("/api/me");
+  if (!res.ok) throw new Error(`me: ${res.status}`);
+  return (await res.json()) as Me;
 }
 
 /** Revoke a scoped link by its token (the /s/<token> tail), cascading to any

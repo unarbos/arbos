@@ -319,25 +319,28 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/", spaHandler(s.Dist))
 	}
 	if s.Auth != nil {
+		// Capabilities probe: the SPA reads this to enter share mode (a
+		// scoped session principal renders just the granted chat).
+		mux.HandleFunc("GET /api/me", s.handleMe)
 		if s.Store != nil {
-			// Scoped share links (ADR-0034): a bearer-token grant to one
-			// artifact, narrower than the full-agent invite /api/share mints.
-			// Minting is cookie-gated and same-origin (only the logged-in
-			// operator may hand out a link); redemption under /s/ rides the
-			// token itself, so it bypasses the cookie gate in wrap.
+			// Scoped share links (ADR-0034). Minting/revoking are cookie-gated
+			// and same-origin (only the logged-in operator hands out a link).
+			// Redeeming /s/<token> rides the token (it bypasses the cookie gate
+			// in wrap): a file artifact is served standalone; a session or
+			// full-agent grant sets a scoped session cookie and drops the
+			// holder into the real app, where scopeGuard enforces the scope.
 			mux.HandleFunc("POST /api/share/link", sameOrigin(s.handleShareLink))
 			mux.HandleFunc("DELETE /api/share/link/{token}", sameOrigin(s.handleShareRevoke))
 			mux.HandleFunc("GET /s/{token}", s.handleShareView)
 			mux.HandleFunc("GET /s/{token}/raw/{path...}", s.handleShareRaw)
-			mux.HandleFunc("GET /s/{token}/events", s.handleShareEvents)
-			mux.HandleFunc("GET /s/{token}/info", s.handleShareInfo)
-			mux.HandleFunc("POST /s/{token}/send", s.handleShareSend)
 		}
 		// GET renders (confirm/paste/error) and never consumes a token —
 		// link unfurlers GET. POST is the consuming step.
 		mux.HandleFunc("GET "+loginPath, s.Auth.handleLogin)
 		mux.HandleFunc("POST "+loginPath, s.Auth.handleLogin)
-		return s.Auth.wrap(mux)
+		// scopeGuard runs outermost: a scoped share-session cookie is held to
+		// a deny-by-default allowlist; every other principal passes through.
+		return s.scopeGuard(s.Auth.wrap(mux))
 	}
 	return mux
 }

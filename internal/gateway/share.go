@@ -13,9 +13,7 @@
 package gateway
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"html"
 	"io"
 	"net/http"
@@ -26,7 +24,6 @@ import (
 	"time"
 
 	"github.com/unarbos/arbos/internal/core"
-	"github.com/unarbos/arbos/internal/engine"
 	"github.com/unarbos/arbos/internal/share"
 )
 
@@ -185,49 +182,15 @@ func (s *Server) handleShareView(w http.ResponseWriter, r *http.Request) {
 	switch g.Scope.Kind {
 	case share.ScopeFile:
 		s.serveSharedFile(w, r, g)
-	case share.ScopeSession:
-		s.serveSharedChat(w, r)
-	case share.ScopeAll:
-		s.serveSharedAgent(w, r, g)
+	case share.ScopeSession, share.ScopeAll:
+		// Both redeem the same way: set a scoped session cookie and drop the
+		// holder into the real app. The scope guard then enforces what that
+		// cookie may reach — the whole workspace for ScopeAll, just the
+		// granted chat for ScopeSession. One redemption shape, no parallel API.
+		s.setShareCookie(w, r, g)
 	default:
 		shareGone(w)
 	}
-}
-
-// serveSharedAgent redeems a full-agent link: it is login-equivalent (the
-// holder asked for full access and the operator granted it), so redeeming it
-// sets the session cookie and drops the visitor into the live app — folding
-// the share system and login into one credential (ADR-0034). The cookie's life
-// is the grant's remaining life, capped at the normal session TTL, so a
-// short-lived link yields a short session. (Revoking the grant can't retract a
-// cookie already minted from it — the same irreversibility a secrets read has;
-// short TTLs are the mitigation until per-session revocation exists.)
-func (s *Server) serveSharedAgent(w http.ResponseWriter, r *http.Request, g share.Grant) {
-	ttl := cookieTTL
-	if !g.Expires.IsZero() {
-		if d := time.Until(g.Expires); d < ttl {
-			ttl = d
-		}
-	}
-	if ttl <= 0 {
-		shareGone(w)
-		return
-	}
-	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
-	tok := g.Token
-	if len(tok) > 8 {
-		tok = tok[:8]
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     authCookie,
-		Value:    s.Auth.signCookie(cookiePayload{Sub: "share:" + tok, Exp: time.Now().Add(ttl).Unix()}),
-		Path:     "/",
-		MaxAge:   int(ttl / time.Second),
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   secure,
-	})
-	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // sandboxArtifact forces a served artifact into an opaque origin, the same
@@ -325,123 +288,6 @@ func withinShareDir(canvasRef, req string) bool {
 		return clean == path.Clean(canvasRef)
 	}
 	return clean == dir || strings.HasPrefix(clean, dir+"/")
-}
-
-// handleShareEvents is the read-only chat feed: the same replay projection the
-// authed history endpoint serves, scoped to the one granted session.
-func (s *Server) handleShareEvents(w http.ResponseWriter, r *http.Request) {
-	g, ok := s.shareGrant(r, r.PathValue("token"))
-	if !ok || g.Scope.Kind != share.ScopeSession {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	payload, err := s.sessionReplay(r.Context(), core.SessionID(g.Scope.Ref))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, payload)
-}
-
-// handleShareInfo tells the share view what it's looking at and what it may
-// do: the scope kind and the permission word. No secrets — just enough for the
-// view to decide whether to render a composer (write) on top of the transcript.
-func (s *Server) handleShareInfo(w http.ResponseWriter, r *http.Request) {
-	g, ok := s.shareGrant(r, r.PathValue("token"))
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	writeJSON(w, map[string]any{
-		"kind": string(g.Scope.Kind),
-		"perm": permWord(g.Perm),
-	})
-}
-
-// handleShareSend is the write path: a guest with a write (or higher) grant on
-// a chat posts a message into that session. It runs a real turn — the agent
-// answers with its full toolset — so a write link is a genuine "talk to my
-// agent" capability, not a comment box.
-func (s *Server) handleShareSend(w http.ResponseWriter, r *http.Request) {
-	g, ok := s.shareGrant(r, r.PathValue("token"))
-	if !ok || g.Scope.Kind != share.ScopeSession || g.Perm < share.PermWrite {
-		http.NotFound(w, r)
-		return
-	}
-	var body struct {
-		Text string `json:"text"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, jsonBodyMax)).Decode(&body); err != nil || strings.TrimSpace(body.Text) == "" {
-		http.Error(w, "text is required", http.StatusBadRequest)
-		return
-	}
-	if err := s.deliverGuestPrompt(core.SessionID(g.Scope.Ref), body.Text); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// deliverGuestPrompt submits a prompt to a session on a share viewer's behalf,
-// honoring the single-owner-per-session invariant the seam enforces. If the
-// session is already live (the owner has it open), the prompt is injected into
-// the running actor — the guest becomes another voice on the same conversation.
-// If it is idle, this acquires the registry slot, starts the actor, sends the
-// prompt, and tears the actor down once the turn ends — no leaked owner. The
-// prompt is tagged as a share origin so it is attributable.
-func (s *Server) deliverGuestPrompt(id core.SessionID, text string) error {
-	intent := core.PromptIntent{Text: text, Origin: "share"}
-	if s.Engine.Deliver(id, intent) {
-		return nil
-	}
-	if !engine.Sessions.Acquire(id) {
-		// Raced an owner between Deliver and Acquire; the actor is live now.
-		if s.Engine.Deliver(id, intent) {
-			return nil
-		}
-		return fmt.Errorf("session is busy, retry")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	c, err := s.Engine.StartSession(ctx, id)
-	if err != nil {
-		cancel()
-		engine.Sessions.Release(id)
-		return err
-	}
-	c.SendCtx(ctx, intent)
-	go func() {
-		defer engine.Sessions.Release(id)
-		defer cancel()
-		// Drain to completion: cancel on the turn's terminal event (which ends
-		// the actor) but keep reading until the event channel closes, so the
-		// actor's emit path never blocks on an unread buffer.
-		for env := range c.Events() {
-			switch env.Event.(type) {
-			case core.TurnComplete, core.ErrorEvent, core.Interrupted:
-				cancel()
-			}
-		}
-	}()
-	return nil
-}
-
-// serveSharedChat boots the SPA for a chat link; the frontend detects the
-// /s/<token> path and renders a read-only transcript off /s/<token>/events.
-func (s *Server) serveSharedChat(w http.ResponseWriter, r *http.Request) {
-	if s.Dist == nil {
-		shareGone(w)
-		return
-	}
-	f, err := s.Dist.Open("index.html")
-	if err != nil {
-		shareGone(w)
-		return
-	}
-	defer func() { _ = f.Close() }()
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = io.Copy(w, f)
 }
 
 // shareScheme reports the public scheme for building a link URL: https when
