@@ -101,7 +101,7 @@ func (p *presenter) feed(env core.Envelope) {
 // text prefixed as the owner's own words crossing over, plus any image parts.
 func (p *presenter) sendForeign(text string, parts []core.ContentBlock) {
 	if strings.TrimSpace(text) != "" {
-		if err := p.client.sendMessage(p.ctx, p.chatID, "[from web] "+text); err != nil {
+		if err := p.client.sendMarkdown(p.ctx, p.chatID, "[from web] "+text); err != nil {
 			p.logf("messenger: cross-door: %v", err)
 		}
 	}
@@ -127,7 +127,7 @@ func (p *presenter) sendImages(parts []core.ContentBlock) {
 
 // note sends one standalone line (a marker like "(interrupted)").
 func (p *presenter) note(text string) {
-	if _, err := p.client.sendMessageID(p.ctx, p.chatID, text); err != nil {
+	if _, err := p.client.sendMessageID(p.ctx, p.chatID, text, parseNone); err != nil {
 		p.logf("messenger: note: %v", err)
 	}
 }
@@ -212,10 +212,12 @@ func (p *presenter) flushTickerLocked() {
 	}
 	p.lastEdit = time.Now()
 	var err error
+	// The ticker is plain (a "⚙ name · arg" activity line, ephemeral) — no
+	// formatting to parse, so no parse mode.
 	if p.tickerID == 0 {
-		p.tickerID, err = p.client.sendMessageID(p.ctx, p.chatID, text)
+		p.tickerID, err = p.client.sendMessageID(p.ctx, p.chatID, text, parseNone)
 	} else {
-		err = p.client.editMessageText(p.ctx, p.chatID, p.tickerID, text)
+		err = p.client.editMessageText(p.ctx, p.chatID, p.tickerID, text, parseNone)
 	}
 	if err != nil {
 		p.logf("messenger: ticker: %v", err)
@@ -265,7 +267,11 @@ func (p *presenter) scheduleLocked() {
 // later flushes edit it in place. final=true seals the current message and
 // starts the next segment fresh.
 func (p *presenter) flushLocked(final bool) {
-	text := p.buf.String()
+	// The buffer holds the model's raw Markdown; Telegram shows it as rich text
+	// via HTML. mdToHTML balances every snapshot, so even a partial buffer
+	// (an open **, a half-typed code fence) renders valid entities. p.sent
+	// caches the rendered HTML so an unchanged snapshot skips the edit.
+	text := mdToHTML(p.buf.String())
 	if strings.TrimSpace(text) == "" || text == p.sent {
 		if final {
 			p.resetSegmentLocked()
@@ -275,9 +281,9 @@ func (p *presenter) flushLocked(final bool) {
 	p.lastEdit = time.Now()
 	var err error
 	if p.msgID == 0 {
-		p.msgID, err = p.client.sendMessageID(p.ctx, p.chatID, text)
+		p.msgID, err = p.client.sendMessageID(p.ctx, p.chatID, text, parseHTML)
 	} else {
-		err = p.client.editMessageText(p.ctx, p.chatID, p.msgID, text)
+		err = p.client.editMessageText(p.ctx, p.chatID, p.msgID, text, parseHTML)
 	}
 	if err != nil {
 		p.logf("messenger: stream: %v", err)

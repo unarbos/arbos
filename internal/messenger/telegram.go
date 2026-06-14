@@ -197,12 +197,70 @@ func (c *tgClient) getUpdates(ctx context.Context, offset int64) ([]tgUpdate, er
 	return ups, err
 }
 
-// sendMessage delivers text to a chat as plain text (no parse mode: the
-// model's markdown must never make Telegram reject the whole message), split
-// into chunks under Telegram's length cap.
-func (c *tgClient) sendMessage(ctx context.Context, chatID int64, text string) error {
+// parseMode selects Telegram's rich-text rendering for a message. The empty
+// string sends plain text (no markup parsing). The bridge uses "HTML" for
+// model prose (see format.go); a parse failure never blocks delivery — the
+// send/edit helpers retry the same text plain.
+const (
+	parseNone = ""
+	parseHTML = "HTML"
+)
+
+// applyFormat adds parse_mode and suppresses the link preview for a formatted
+// message. Mid-conversation link cards are noise; the rich text is the point.
+func applyFormat(params map[string]any, parseMode string) {
+	if parseMode == parseNone {
+		return
+	}
+	params["parse_mode"] = parseMode
+	params["link_preview_options"] = map[string]any{"is_disabled": true}
+}
+
+// isParseEntityError reports whether Telegram rejected a message because it
+// could not parse its formatting entities — the one failure the bridge
+// recovers from by resending the text plain.
+func isParseEntityError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "can't parse entities")
+}
+
+// callFormatted runs a send/edit with parse_mode set, then — if Telegram
+// rejects the formatting entities — retries the identical request as plain
+// text. Formatting must never cost delivery, so the one recoverable failure is
+// swallowed by resending without markup. Other errors pass through unchanged.
+func (c *tgClient) callFormatted(ctx context.Context, method string, params map[string]any, parseMode string, result any) error {
+	applyFormat(params, parseMode)
+	err := c.call(ctx, method, params, result)
+	if parseMode != parseNone && isParseEntityError(err) {
+		delete(params, "parse_mode")
+		delete(params, "link_preview_options")
+		err = c.call(ctx, method, params, result)
+	}
+	return err
+}
+
+// sendMessage delivers text to a chat, split into chunks under Telegram's
+// length cap. With parseMode set the text is formatted; a formatting rejection
+// falls back to plain so a stray entity never drops the whole message.
+//
+// The split is by bytes, so callers passing already-rendered HTML must keep
+// the text short enough to not be chunked (a cut would sever a tag); for
+// arbitrary-length Markdown use sendMarkdown, which splits the source.
+func (c *tgClient) sendMessage(ctx context.Context, chatID int64, text, parseMode string) error {
 	for _, chunk := range splitMessage(text, sendLimit) {
-		if _, err := c.sendMessageID(ctx, chatID, chunk); err != nil {
+		if _, err := c.sendMessageID(ctx, chatID, chunk, parseMode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sendMarkdown delivers arbitrary-length Markdown as Telegram HTML. The split
+// happens on the SOURCE before conversion, so a chunk boundary never cuts an
+// HTML tag — each chunk is converted and self-balanced on its own (see
+// format.go). Use this, not sendMessage, for text whose length isn't bounded.
+func (c *tgClient) sendMarkdown(ctx context.Context, chatID int64, src string) error {
+	for _, chunk := range splitMessage(src, sendLimit) {
+		if _, err := c.sendMessageID(ctx, chatID, mdToHTML(chunk), parseHTML); err != nil {
 			return err
 		}
 	}
@@ -210,24 +268,23 @@ func (c *tgClient) sendMessage(ctx context.Context, chatID int64, text string) e
 }
 
 // sendMessageID sends one message (no chunking) and returns its id — the
-// handle live-streaming edits against.
-func (c *tgClient) sendMessageID(ctx context.Context, chatID int64, text string) (int64, error) {
+// handle live-streaming edits against. On a formatting rejection it resends
+// the same text plain, so formatting never costs delivery.
+func (c *tgClient) sendMessageID(ctx context.Context, chatID int64, text, parseMode string) (int64, error) {
 	var m struct {
 		MessageID int64 `json:"message_id"`
 	}
-	err := c.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text}, &m)
+	err := c.callFormatted(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text}, parseMode, &m)
 	return m.MessageID, err
 }
 
 // sendMessageMarkup sends one message carrying an inline keyboard and returns
 // its id, so a later edit can strip the buttons once the question is answered.
-func (c *tgClient) sendMessageMarkup(ctx context.Context, chatID int64, text string, kb inlineKeyboard) (int64, error) {
+func (c *tgClient) sendMessageMarkup(ctx context.Context, chatID int64, text string, kb inlineKeyboard, parseMode string) (int64, error) {
 	var m struct {
 		MessageID int64 `json:"message_id"`
 	}
-	err := c.call(ctx, "sendMessage", map[string]any{
-		"chat_id": chatID, "text": text, "reply_markup": kb,
-	}, &m)
+	err := c.callFormatted(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text, "reply_markup": kb}, parseMode, &m)
 	return m.MessageID, err
 }
 
@@ -249,11 +306,10 @@ func (c *tgClient) clearReplyMarkup(ctx context.Context, chatID, messageID int64
 }
 
 // editMessageText replaces a sent message's text — how a reply "streams" on
-// Telegram: send early, grow in place.
-func (c *tgClient) editMessageText(ctx context.Context, chatID, messageID int64, text string) error {
-	return c.call(ctx, "editMessageText", map[string]any{
-		"chat_id": chatID, "message_id": messageID, "text": text,
-	}, nil)
+// Telegram: send early, grow in place. On a formatting rejection it retries
+// the same text plain, so a mid-stream entity glitch never stalls the edit.
+func (c *tgClient) editMessageText(ctx context.Context, chatID, messageID int64, text, parseMode string) error {
+	return c.callFormatted(ctx, "editMessageText", map[string]any{"chat_id": chatID, "message_id": messageID, "text": text}, parseMode, nil)
 }
 
 // deleteMessage removes a sent message — how the ephemeral activity ticker

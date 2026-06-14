@@ -48,7 +48,7 @@ const toollessSystemPrompt = `You are arbos, a personal AI agent, chatting over 
 
 Tools are switched off for this connector: no file access, no shell, no web. Do not pretend otherwise — if asked to do something that needs them, say tools are disabled here and offer what you can do in conversation instead.
 
-Replies are delivered as plain-text Telegram messages: keep them concise and skip heavy markdown.`
+Replies are delivered as Telegram messages: keep them concise. Markdown renders natively — **bold**, *italic*, ` + "`code`" + `, fenced code blocks, lists, [links](url), > blockquotes, and ||spoilers|| all show as rich text — so use it where it helps, but don't overdo it.`
 
 // BotConfig is one registered bot, as persisted (the token never crosses the
 // wire back out — see BotView).
@@ -651,7 +651,7 @@ func (s *Service) inbound(ctx context.Context, b *botRunner, m tgMessage) {
 		s.logf("messenger: @%s bound to %s", b.cfg.Username, in.from.name())
 	} else if b.cfg.BoundUser != in.from.ID {
 		s.mu.Unlock()
-		_ = b.client.sendMessage(ctx, m.Chat.ID, "This arbos is private.")
+		_ = b.client.sendMessage(ctx, m.Chat.ID, "This arbos is private.", parseNone)
 		return
 	}
 
@@ -677,7 +677,7 @@ func (s *Service) inbound(ctx context.Context, b *botRunner, m tgMessage) {
 	select {
 	case cv.queue <- in:
 	default:
-		_ = b.client.sendMessage(ctx, m.Chat.ID, "(arbos is overloaded — message dropped, try again shortly)")
+		_ = b.client.sendMessage(ctx, m.Chat.ID, "(arbos is overloaded — message dropped, try again shortly)", parseNone)
 	}
 }
 
@@ -789,7 +789,7 @@ func (s *Service) handleInbound(ctx context.Context, b *botRunner, cv *convo, co
 	intent, err := s.buildPrompt(ctx, b, cv, msg)
 	if err != nil {
 		s.logf("messenger: @%s prompt: %v", b.cfg.Username, err)
-		_ = b.client.sendMessage(ctx, cv.c.ChatID, "(could not read that message: "+err.Error()+")")
+		_ = b.client.sendMessage(ctx, cv.c.ChatID, "(could not read that message: "+err.Error()+")", parseNone)
 		return
 	}
 	s.mu.Lock()
@@ -817,6 +817,13 @@ func (s *Service) routeTurn(ctx context.Context, b *botRunner, cv *convo, conv *
 		head = cmd
 	}
 	switch strings.ToLower(head) {
+	case "/start", "/help":
+		// Telegram sends /start automatically when a chat is first opened (and
+		// /help is the conventional how-do-I-use-this). Neither is a kernel
+		// prompt: answer with a fixed greeting instead of spending a turn
+		// having the agent puzzle over an unknown command.
+		_ = b.client.sendMessage(ctx, cv.c.ChatID, s.welcomeText(b), parseHTML)
+		return true
 	case "/stop":
 		s.clearAsk(cv)
 		// Urgent: never let a full intent buffer drop the interrupt.
@@ -826,7 +833,7 @@ func (s *Service) routeTurn(ctx context.Context, b *botRunner, cv *convo, conv *
 		return true
 	case "/steer":
 		if rest == "" {
-			_ = b.client.sendMessage(ctx, cv.c.ChatID, "(usage: /steer <new instruction>)")
+			_ = b.client.sendMessage(ctx, cv.c.ChatID, "(usage: /steer <new instruction>)", parseNone)
 			return true
 		}
 		s.clearAsk(cv)
@@ -848,6 +855,25 @@ func (s *Service) routeTurn(ctx context.Context, b *botRunner, cv *convo, conv *
 		return true
 	}
 	return false
+}
+
+// welcomeText is the fixed reply to /start and /help: a short orientation to
+// what this connector is and how to drive it. It reflects the bot's one
+// permission switch, since a tools-off bot can't actually do most of what a
+// full chat can.
+func (s *Service) welcomeText(b *botRunner) string {
+	var sb strings.Builder
+	sb.WriteString("👋 I'm <b>arbos</b>, your personal AI agent. Send me a message and I'll get to work — this chat stays in sync with the arbos web app, so you can pick it up from either side.\n\n")
+	if !s.botTools(b) {
+		sb.WriteString("This connector is chat-only: no files, shell, or web — just conversation.\n\n")
+	} else {
+		sb.WriteString("I can answer questions, work with your files, run commands, and search the web.\n\n")
+	}
+	sb.WriteString("<b>Handy commands:</b>\n")
+	sb.WriteString("• <code>/stop</code> — stop what I'm doing\n")
+	sb.WriteString("• <code>/steer &lt;note&gt;</code> — redirect the current task\n")
+	sb.WriteString("Type / to see everything else.")
+	return sb.String()
 }
 
 // buildPrompt reduces one Telegram message to a PromptIntent: text plus any
@@ -911,7 +937,7 @@ func (s *Service) buildPrompt(ctx context.Context, b *botRunner, cv *convo, msg 
 			text = msg.from.name() + ": " + text
 		}
 		if s.firstPrompt(cv) {
-			text = fmt.Sprintf("[Telegram bridge: this conversation reaches you via your Telegram bot @%s, from %s. Replies mirror to their phone as plain-text Telegram messages — keep them concise and skip heavy markdown.]\n\n",
+			text = fmt.Sprintf("[Telegram bridge: this conversation reaches you via your Telegram bot @%s, from %s. Replies mirror to their phone as Telegram messages — keep them concise. Markdown renders natively (bold, italic, code, fenced blocks, lists, links, blockquotes, spoilers), so use it where it helps.]\n\n",
 				b.cfg.Username, msg.from.name()) + text
 		}
 	}
@@ -988,7 +1014,7 @@ func (s *Service) runOutbox(ctx context.Context) {
 			if bot == nil {
 				continue
 			}
-			if err := bot.client.sendMessage(ctx, target.c.ChatID, "🔔 "+m.Text); err != nil {
+			if err := bot.client.sendMarkdown(ctx, target.c.ChatID, "🔔 "+m.Text); err != nil {
 				s.logf("messenger: @%s notify: %v", bot.cfg.Username, err)
 			}
 		}

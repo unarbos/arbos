@@ -86,12 +86,12 @@ func (s *Service) presentAsk(ctx context.Context, b *botRunner, chatID int64, q 
 	// keep the plain-text path: those need accumulate-then-confirm state a
 	// single tap can't express, so the typed reply stays their answer.
 	if kb, ok := askKeyboard(q); ok {
-		if _, err := b.client.sendMessageMarkup(ctx, chatID, renderAsk(q), kb); err == nil {
+		if _, err := b.client.sendMessageMarkup(ctx, chatID, renderAsk(q), kb, parseHTML); err == nil {
 			return
 		}
-		// Fall through to plain text if the keyboard send was rejected.
+		// Fall through to the form without buttons if the keyboard send was rejected.
 	}
-	if err := b.client.sendMessage(ctx, chatID, renderAsk(q)); err != nil {
+	if err := b.client.sendMessage(ctx, chatID, renderAsk(q), parseHTML); err != nil {
 		s.logf("messenger: @%s ask: %v", b.cfg.Username, err)
 	}
 }
@@ -201,25 +201,26 @@ func (s *Service) onCallback(ctx context.Context, b *botRunner, cb tgCallbackQue
 	_ = b.client.clearReplyMarkup(ctx, chatID, cb.Message.MessageID)
 }
 
-// renderAsk formats a question form as one plain-text message the phone can
-// answer by number.
+// renderAsk formats a question form as one HTML message the phone can answer
+// by number. Dynamic fields (title, prompts, option labels) are escaped so a
+// "<" in the model's wording can't break the message's formatting.
 func renderAsk(q core.QuestionRequest) string {
 	var sb strings.Builder
 	title := strings.TrimSpace(q.Title)
 	if title == "" {
 		title = "arbos needs your input"
 	}
-	sb.WriteString("❓ " + title + "\n")
+	sb.WriteString("❓ <b>" + escapeHTML(title) + "</b>\n")
 	multi := len(q.Questions) > 1
 	for qi, question := range q.Questions {
 		sb.WriteString("\n")
 		if multi {
-			fmt.Fprintf(&sb, "Q%d: %s\n", qi+1, question.Prompt)
+			fmt.Fprintf(&sb, "<b>Q%d:</b> %s\n", qi+1, escapeHTML(question.Prompt))
 		} else {
-			sb.WriteString(question.Prompt + "\n")
+			sb.WriteString(escapeHTML(question.Prompt) + "\n")
 		}
 		for oi, opt := range question.Options {
-			fmt.Fprintf(&sb, "  %d. %s\n", oi+1, opt.Label)
+			fmt.Fprintf(&sb, "  %d. %s\n", oi+1, escapeHTML(opt.Label))
 		}
 		if question.AllowMultiple {
 			sb.WriteString("  (several allowed, e.g. \"1,3\")\n")
@@ -231,7 +232,7 @@ func renderAsk(q core.QuestionRequest) string {
 	} else {
 		sb.WriteString("Reply with an option number or your own words.")
 	}
-	sb.WriteString("\n/skip to skip · /steer <text> to redirect · /stop to stop the turn")
+	sb.WriteString("\n<code>/skip</code> to skip · <code>/steer &lt;text&gt;</code> to redirect · <code>/stop</code> to stop the turn")
 	return sb.String()
 }
 
