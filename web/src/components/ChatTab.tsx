@@ -776,6 +776,20 @@ export function ChatTab({
     }
   }, [dispatch]);
 
+  // Paste an image (or file) straight from the clipboard — a screenshot or a
+  // copied image rides the same path as the picker. A plain-text paste carries
+  // no files, so it falls through to the textarea's default handling.
+  const onPaste = useCallback(
+    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const files = e.clipboardData?.files;
+      if (files && files.length > 0) {
+        e.preventDefault();
+        onPickFiles(files);
+      }
+    },
+    [onPickFiles],
+  );
+
   // Seed the picker with the host's configured model so the chip names the
   // model running before the user touches it.
   useEffect(() => {
@@ -1356,6 +1370,7 @@ export function ChatTab({
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={onKeyDown}
+              onPaste={onPaste}
               rows={1}
               placeholder={placeholder}
               className={`block w-full resize-none bg-transparent px-3 pt-2.5 pb-1 leading-relaxed text-bright outline-none placeholder:text-faint ${
