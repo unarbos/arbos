@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -44,6 +45,11 @@ type tuiRenderer struct {
 	input      strings.Builder
 	promptKind promptKind
 	approval   string // approval prompt label, when promptKind == promptApproval
+
+	// pending holds image/file attachments staged for the next prompt or steer
+	// (drag-dropped/typed paths, or a clipboard paste). Drained into
+	// Intent.Parts on send. Guarded by mu like the rest of the input state.
+	pending []core.ContentBlock
 
 	// answerRaw accumulates the turn's raw answer tokens — the source of truth
 	// for the final full render. answerLines + tail hold the same text wrapped
@@ -506,6 +512,96 @@ func (r *tuiRenderer) inputString() string {
 	return r.input.String()
 }
 
+// addPending stages an attachment and repaints so the indicator line appears.
+// A full repaint (not redrawPromptLine) is needed because the indicator changes
+// the block's line count.
+func (r *tuiRenderer) addPending(b core.ContentBlock) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pending = append(r.pending, b)
+	r.clearBlock()
+	r.renderBlock()
+}
+
+// clearPending drops all staged attachments and repaints.
+func (r *tuiRenderer) clearPending() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.pending) == 0 {
+		return
+	}
+	r.pending = nil
+	r.clearBlock()
+	r.renderBlock()
+}
+
+// takePending returns the staged attachments and clears them, for inclusion in
+// the outgoing intent. Returns nil when nothing is staged so text-only prompts
+// serialize identically (no Parts).
+func (r *tuiRenderer) takePending() []core.ContentBlock {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.pending) == 0 {
+		return nil
+	}
+	out := make([]core.ContentBlock, len(r.pending))
+	copy(out, r.pending)
+	r.pending = nil
+	return out
+}
+
+func (r *tuiRenderer) hasPending() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.pending) > 0
+}
+
+// attachFromClipboard reads an image off the OS clipboard and stages it, or
+// shows a one-line hint when no image/tool is available. Never blocks the input
+// loop for long: the shell-out is bounded by a short timeout.
+func (r *tuiRenderer) attachFromClipboard() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	data, mime, err := clipboardImage(ctx)
+	if err != nil {
+		r.notice([]string{clipboardHint(err)})
+		return
+	}
+	r.addPending(imageBlock(data, mime))
+}
+
+// handlePaste routes a bracketed-paste payload: image paths in it are staged,
+// and any remaining text is appended to the input buffer (so a multi-line or
+// path-bearing paste behaves like typing it).
+func (r *tuiRenderer) handlePaste(payload string) {
+	text, blocks := extractImageAttachments(strings.TrimRight(payload, "\r\n"))
+	for _, b := range blocks {
+		r.addPending(b)
+	}
+	if text != "" {
+		r.setInput(r.inputString() + text)
+	}
+}
+
+// attachMarker is the transcript echo for a message whose only content is
+// attachments (no typed text), so the user sees that an image was sent.
+func attachMarker(parts []core.ContentBlock) string {
+	n := 0
+	for _, p := range parts {
+		if p.Type == core.BlockImage {
+			n++
+		}
+	}
+	switch {
+	case n == 0:
+		return ""
+	case n == 1:
+		return "📎 image"
+	default:
+		return fmt.Sprintf("📎 %d images", n)
+	}
+}
+
 // submitLine commits the typed line into the permanent transcript. Mid-turn
 // (a steer), the cut-off turn's partial answer is rendered above it first so
 // nothing the model already said is lost from scrollback.
@@ -667,6 +763,15 @@ func (r *tuiRenderer) blockContent() (lines []string, promptIdx int) {
 	band := r.bandLines(r.promptText(), theme.Panel)
 	promptIdx = pre + bandBodyOffset
 	lines = append(lines, band...)
+	// Attachment indicator sits below the prompt row so it never shifts
+	// promptIdx (computed above from pre, before the band was appended).
+	if n := len(r.pending); n > 0 {
+		noun := "image"
+		if n > 1 {
+			noun = "images"
+		}
+		lines = append(lines, indentTranscript(r.dim.Render(fmt.Sprintf("📎 %d %s attached  (ctrl+r to clear)", n, noun))))
+	}
 	lines = append(lines, "")
 	lines = append(lines, r.footerLines()...)
 	return lines, promptIdx
@@ -918,11 +1023,17 @@ func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRendere
 	if err != nil {
 		return err
 	}
+	// Bracketed paste: terminals that support it wrap pasted text in
+	// ESC[200~…ESC[201~ so the reader captures a multi-line/path paste as one
+	// unit instead of letting embedded newlines submit it early. Harmless on
+	// terminals that ignore the mode.
+	_, _ = fmt.Fprint(r.out, "\x1b[?2004h")
 	defer func() {
 		r.mu.Lock()
 		r.clearBlock()
 		sid := r.sessionID
 		r.mu.Unlock()
+		_, _ = fmt.Fprint(r.out, "\x1b[?2004l")
 		_ = term.Restore(os.Stdin.Fd(), oldState)
 		_, _ = fmt.Fprint(os.Stderr, "\x1b[0m\n")
 		printSessionResume(os.Stderr, sid)
@@ -941,17 +1052,30 @@ func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRendere
 	var pendingAsk *askForm
 
 	sendPrompt := func(text string, echo bool) {
+		parts := r.takePending()
 		if echo {
-			r.printQuery(text)
+			if text != "" {
+				r.printQuery(text)
+			} else if m := attachMarker(parts); m != "" {
+				r.printQuery(m)
+			}
 		}
-		conv.Send(core.PromptIntent{Text: text})
+		conv.Send(core.PromptIntent{Text: text, Parts: parts})
 		turnActive = true
 		r.turnStart()
 		r.steeringPrompt()
 	}
 	steer := func(text string) {
+		parts := r.takePending()
 		r.steerCut()
-		conv.Send(core.SteerIntent{Text: text})
+		// A steer with typed text was already echoed by submitLine; only an
+		// attachment-only steer needs its own marker.
+		if text == "" {
+			if m := attachMarker(parts); m != "" {
+				r.printQuery(m)
+			}
+		}
+		conv.Send(core.SteerIntent{Text: text, Parts: parts})
 		turnActive = true
 		r.turnStart()
 		r.steeringPrompt()
@@ -982,6 +1106,12 @@ func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRendere
 				}
 			case rawClear:
 				r.setInput("")
+			case rawClearAttach:
+				r.clearPending()
+			case rawClipImage:
+				r.attachFromClipboard()
+			case rawPaste:
+				r.handlePaste(ev.data)
 			case rawCtrlC:
 				if turnActive {
 					conv.Send(core.InterruptIntent{})
@@ -1028,14 +1158,30 @@ func runTUISession(ctx context.Context, conv *engine.Conversation, r *tuiRendere
 				}
 				switch line {
 				case "":
-					// submitLine already re-rendered the block.
+					// An attachment staged via clipboard paste (ctrl+v) with no
+					// typed text still sends — providers accept an image-only
+					// user message. Otherwise submitLine already re-rendered.
+					if r.hasPending() {
+						if turnActive {
+							steer("")
+						} else {
+							sendPrompt("", true)
+						}
+					}
 				case "exit", "quit", "q":
 					return nil
 				default:
+					// Lift any dropped/typed image paths out of the line; the
+					// rest stays as prose. submitLine already echoed the raw
+					// line, so send with echo=false.
+					text, blocks := extractImageAttachments(line)
+					for _, b := range blocks {
+						r.addPending(b)
+					}
 					if turnActive {
-						steer(line)
+						steer(text)
 					} else {
-						sendPrompt(line, false)
+						sendPrompt(text, false)
 					}
 				}
 			}
@@ -1105,11 +1251,15 @@ const (
 	rawClear
 	rawCtrlC
 	rawCtrlD
+	rawClearAttach // ctrl+r: drop staged attachments
+	rawClipImage   // ctrl+v: paste an image from the clipboard
+	rawPaste       // bracketed-paste payload (carried in data)
 )
 
 type rawEvent struct {
 	kind rawEventKind
 	r    rune
+	data string // paste payload, when kind == rawPaste
 }
 
 type rawInput struct {
@@ -1135,12 +1285,21 @@ func startRawInput(ctx context.Context, in io.Reader) rawInput {
 				ev.kind = rawCtrlC
 			case 0x04:
 				ev.kind = rawCtrlD
+			case 0x12:
+				ev.kind = rawClearAttach
 			case 0x15:
 				ev.kind = rawClear
+			case 0x16:
+				ev.kind = rawClipImage
 			case 0x7f, '\b':
 				ev.kind = rawBackspace
 			case 0x1b:
-				discardEscape(br)
+				// A bracketed paste (ESC[200~ … ESC[201~) is captured as one
+				// event; any other escape sequence is discarded as before.
+				if payload, ok := readBracketedPaste(br); ok {
+					ev = rawEvent{kind: rawPaste, data: payload}
+					break
+				}
 				continue
 			default:
 				if r < 0x20 {
@@ -1158,23 +1317,55 @@ func startRawInput(ctx context.Context, in io.Reader) rawInput {
 	return out
 }
 
-func discardEscape(br *bufio.Reader) {
+// readBracketedPaste handles the bytes following an ESC. If they begin a
+// bracketed paste (CSI 200~), it reads the raw payload up to the CSI 201~
+// terminator and returns it. Otherwise it consumes-and-discards the escape
+// sequence (the old discardEscape behavior) and returns ("", false). It reads a
+// complete CSI/SS3 sequence byte-by-byte — never peeking past the final byte —
+// so a short sequence (e.g. an arrow key ESC[A) does not block waiting for more.
+func readBracketedPaste(br *bufio.Reader) (string, bool) {
 	next, err := br.Peek(1)
 	if err != nil || len(next) == 0 {
-		return
+		return "", false
 	}
 	if next[0] != '[' && next[0] != 'O' {
-		_, _, _ = br.ReadRune()
-		return
+		_, _ = br.ReadByte()
+		return "", false
 	}
-	_, _, _ = br.ReadRune()
+	intro, _ := br.ReadByte() // '[' (CSI) or 'O' (SS3)
+	var params []byte
 	for {
-		r, _, err := br.ReadRune()
+		c, err := br.ReadByte()
 		if err != nil {
-			return
+			return "", false
 		}
-		if r >= '@' && r <= '~' {
-			return
+		if c >= '@' && c <= '~' { // final byte ends the sequence
+			if intro == '[' && c == '~' && string(params) == "200" {
+				return readPasteBody(br)
+			}
+			return "", false
+		}
+		params = append(params, c)
+	}
+}
+
+// readPasteBody reads raw bytes (not runes — the body may contain control bytes,
+// CRs and newlines that must not be filtered or treated as Enter) until the
+// CSI 201~ terminator, which is stripped. Bounded so a missing terminator can't
+// drive an unbounded read.
+func readPasteBody(br *bufio.Reader) (string, bool) {
+	const maxPaste = 8 << 20 // 8 MiB
+	term := []byte{0x1b, '[', '2', '0', '1', '~'}
+	var buf []byte
+	for len(buf) < maxPaste {
+		c, err := br.ReadByte()
+		if err != nil {
+			return string(buf), len(buf) > 0
+		}
+		buf = append(buf, c)
+		if bytes.HasSuffix(buf, term) {
+			return string(buf[:len(buf)-len(term)]), true
 		}
 	}
+	return string(buf), true
 }
