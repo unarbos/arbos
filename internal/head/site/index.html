@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>arbos — account</title>
+    <meta name="description" content="Your arbos account: balance, API keys, and inference routed through arbos.life." />
+    <style>
+      /* Cursor Dark — the same tokens the SPA and the login page inline
+         (web/src/index.css, internal/gateway/auth.go), so the account page
+         looks like the rest of the house. */
+      :root {
+        --canvas: #2c262a;
+        --bar: #262024;
+        --card: #332a2f;
+        --panel: #312b2f;
+        --line: #3e373c;
+        --text: #d6d0d4;
+        --bright: #ece7ea;
+        --muted: #968f94;
+        --faint: #6e676c;
+        --accent: #85aab3;
+        --green: #87a883;
+        --red: #c97f77;
+        --btn: #b0aaae;
+        --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+        --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; min-height: 100%; }
+      body {
+        background:
+          radial-gradient(ellipse 80% 50% at 50% -10%, color-mix(in srgb, var(--accent) 13%, transparent), transparent),
+          var(--canvas);
+        color: var(--text);
+        font-family: var(--font-sans);
+        font-size: 13px;
+        line-height: 1.6;
+        color-scheme: dark;
+        -webkit-font-smoothing: antialiased;
+      }
+      ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+
+      .page { max-width: 40rem; margin: 0 auto; padding: 3.5rem 1.5rem 4rem; }
+
+      .hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 2rem; }
+      .eyebrow { margin: 0 0 0.5rem; color: var(--accent); font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; }
+      h1 { margin: 0 0 0.4rem; color: var(--bright); font-size: clamp(1.6rem, 4vw, 2.1rem); font-weight: 650; letter-spacing: -0.03em; line-height: 1.1; }
+      .lede { margin: 0; max-width: 30rem; color: var(--muted); font-size: 1rem; }
+
+      .panel {
+        margin-bottom: 1rem; padding: 1.1rem 1.2rem 1.2rem;
+        border: 1px solid var(--line); border-radius: 0.75rem;
+        background: color-mix(in srgb, var(--card) 88%, transparent);
+      }
+      .panel h2 { margin: 0 0 0.9rem; color: var(--bright); font-size: 0.95rem; font-weight: 600; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+
+      .balance { display: flex; align-items: baseline; gap: 0.5rem; }
+      .balance .amount { color: var(--bright); font-size: 2.4rem; font-weight: 650; letter-spacing: -0.04em; line-height: 1; }
+      .balance .unit { color: var(--muted); font-size: 1rem; }
+      .meta-row { margin-top: 0.85rem; display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; color: var(--faint); font-size: 0.82rem; }
+      .meta-row b { color: var(--muted); font-weight: 500; }
+      .mono { font-family: var(--font-mono); }
+
+      button, .btn {
+        background: var(--btn); border: 0; color: var(--canvas); font-weight: 600;
+        padding: 0.55rem 0.9rem; border-radius: 6px; font: inherit; font-weight: 600;
+        cursor: pointer; transition: background 0.12s ease;
+      }
+      button:hover, .btn:hover { background: var(--bright); }
+      button.ghost {
+        background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 500;
+      }
+      button.ghost:hover { background: color-mix(in srgb, var(--bright) 8%, transparent); color: var(--bright); }
+      button.danger { background: transparent; color: var(--red); border: 1px solid color-mix(in srgb, var(--red) 35%, transparent); font-weight: 500; padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+      button.danger:hover { background: color-mix(in srgb, var(--red) 14%, transparent); }
+      button[disabled] { opacity: 0.5; cursor: default; }
+      .row { display: flex; gap: 0.6rem; align-items: center; }
+      input {
+        background: var(--panel); border: 1px solid var(--line); color: var(--text);
+        padding: 0.55rem 0.7rem; border-radius: 6px; font: inherit; outline: none; flex: 1; min-width: 0;
+      }
+      input::placeholder { color: var(--faint); }
+      input:focus { border-color: var(--accent); }
+
+      .lede-sub { margin: 0 0 0.9rem; color: var(--muted); }
+
+      /* The one-time key reveal: a deliberate, can't-miss moment. */
+      .reveal {
+        margin-top: 0.9rem; padding: 0.85rem 1rem; border-radius: 0.6rem;
+        border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+        background: color-mix(in srgb, var(--accent) 10%, transparent);
+      }
+      .reveal .label { color: var(--accent); font-size: 0.74rem; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 0.35rem; }
+      .reveal .hint { color: var(--muted); font-size: 0.82rem; margin-top: 0.5rem; }
+
+      .copyable {
+        position: relative; margin: 0; padding: 0.7rem 3rem 0.7rem 0.85rem; overflow-x: auto;
+        border: 1px solid var(--line); border-radius: 0.55rem; background: #241f23; cursor: pointer;
+      }
+      .copyable code { color: var(--green); font-family: var(--font-mono); font-size: 0.8rem; white-space: pre; }
+      .copyable::after { content: "copy"; position: absolute; top: 0.55rem; right: 0.7rem; color: var(--faint); font-size: 0.68rem; letter-spacing: 0.04em; text-transform: uppercase; }
+      .copyable.copied::after { content: "copied"; color: var(--accent); }
+
+      .keylist { display: flex; flex-direction: column; gap: 0.5rem; }
+      .keyrow { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.6rem 0.75rem; border: 1px solid var(--line); border-radius: 0.55rem; background: color-mix(in srgb, var(--panel) 70%, transparent); }
+      .keyrow .id { color: var(--bright); font-family: var(--font-mono); font-size: 0.82rem; }
+      .keyrow .sub { color: var(--faint); font-size: 0.76rem; margin-top: 0.1rem; }
+      .keyrow.revoked .id { color: var(--faint); text-decoration: line-through; }
+      .empty { color: var(--faint); font-size: 0.88rem; }
+      .field-label { color: var(--faint); font-size: 0.74rem; letter-spacing: 0.05em; text-transform: uppercase; margin: 0.7rem 0 0.25rem; }
+
+      .toast {
+        position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%) translateY(1rem);
+        background: var(--card); border: 1px solid var(--line); color: var(--bright);
+        padding: 0.55rem 0.9rem; border-radius: 0.55rem; font-size: 0.85rem;
+        opacity: 0; pointer-events: none; transition: opacity 0.2s ease, transform 0.2s ease;
+      }
+      .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+      .toast.err { border-color: color-mix(in srgb, var(--red) 45%, transparent); color: var(--red); }
+
+      .footer { margin-top: 2rem; color: var(--faint); font-size: 0.85rem; }
+      .hidden { display: none !important; }
+      .soon { color: var(--faint); font-size: 0.82rem; }
+
+      @media (max-width: 560px) {
+        .page { padding-top: 2.25rem; }
+        .hero { flex-direction: column; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">arbos.life</p>
+          <h1>Your agent account</h1>
+          <p class="lede">A prepaid balance and an API key. Point arbos at the gateway and your calls route through here.</p>
+        </div>
+        <button id="signout" class="ghost hidden" onclick="signOut()">Sign out</button>
+      </header>
+
+      <!-- Signed out -->
+      <section id="landing" class="panel hidden">
+        <h2>Get started</h2>
+        <p class="lede-sub">No email, no signup forms. Create an account and get a key in one click.</p>
+        <div class="row">
+          <button id="create-btn" onclick="createAccount()">Create account &amp; get API key</button>
+        </div>
+        <div class="row" style="margin-top: 1rem;">
+          <input id="existing-key" placeholder="sk-arbos-…  (already have a key? paste it)" autocomplete="off" spellcheck="false" />
+          <button class="ghost" onclick="useExistingKey()">Use key</button>
+        </div>
+      </section>
+
+      <!-- Signed in -->
+      <section id="balance-panel" class="panel hidden">
+        <h2>Balance</h2>
+        <div class="balance"><span class="amount" id="balance-amount">—</span><span class="unit">USD</span></div>
+        <div class="meta-row">
+          <span><b>Account</b> <span class="mono" id="account-id">—</span></span>
+        </div>
+      </section>
+
+      <section id="fund-panel" class="panel hidden">
+        <h2>Add funds</h2>
+        <div id="fund-body"></div>
+      </section>
+
+      <section id="connect-panel" class="panel hidden">
+        <h2>Connect arbos</h2>
+        <p class="lede-sub">Paste this where you run arbos. The same OpenAI-compatible endpoint, your arbos key instead of OpenRouter.</p>
+        <pre class="copyable" id="connect-snippet"><code id="connect-code"></code></pre>
+      </section>
+
+      <section id="keys-panel" class="panel hidden">
+        <h2>API keys <button class="ghost" style="padding:0.3rem 0.6rem; font-size:0.8rem;" onclick="newKey()">New key</button></h2>
+        <div id="key-reveal"></div>
+        <div class="keylist" id="keylist"></div>
+      </section>
+
+      <footer class="footer">
+        <a href="https://github.com/unarbos/arbos">Source on GitHub</a>
+      </footer>
+    </main>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+      const API = window.location.origin;
+      const KEY_STORE = "arbos_key";
+      let apiKey = localStorage.getItem(KEY_STORE) || "";
+
+      const $ = (id) => document.getElementById(id);
+      function show(id, on) { $(id).classList.toggle("hidden", !on); }
+      function toast(msg, isErr) {
+        const t = $("toast");
+        t.textContent = msg;
+        t.classList.toggle("err", !!isErr);
+        t.classList.add("show");
+        clearTimeout(t._t);
+        t._t = setTimeout(() => t.classList.remove("show"), 2200);
+      }
+      function authHeaders() { return { Authorization: "Bearer " + apiKey }; }
+      function fmtUSD(micro) { return (micro / 1_000_000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }); }
+      function fmtDate(unix) { return unix ? new Date(unix * 1000).toLocaleDateString() : "—"; }
+
+      function render() {
+        const signedIn = !!apiKey;
+        ["balance-panel", "fund-panel", "connect-panel", "keys-panel", "signout"].forEach((id) => show(id, signedIn));
+        show("landing", !signedIn);
+        if (signedIn) refresh();
+      }
+
+      async function refresh() {
+        try {
+          const r = await fetch(API + "/v1/balance", { headers: authHeaders() });
+          if (r.status === 401) { return logout("That key is not valid here."); }
+          const b = await r.json();
+          $("balance-amount").textContent = fmtUSD(b.balance_micro);
+          $("account-id").textContent = b.account_id;
+        } catch (e) { toast("Could not reach the gateway.", true); }
+        $("connect-code").textContent =
+          "export ARBOS_OPENAI_BASE_URL=" + API + "/v1\n" +
+          "export ARBOS_OPENAI_API_KEY=" + apiKey + "\n" +
+          "export ARBOS_MODEL=openai/gpt-4o-mini";
+        refreshKeys();
+        loadFunding();
+      }
+
+      async function loadFunding() {
+        const el = $("fund-body");
+        try {
+          const r = await fetch(API + "/v1/fund/info", { headers: authHeaders() });
+          if (r.status === 503) {
+            el.innerHTML = '<p class="lede-sub soon">Crypto funding is not enabled on this head yet. A head operator can credit your account by id.</p>';
+            return;
+          }
+          const f = await r.json();
+          el.innerHTML =
+            '<p class="lede-sub">Send native ETH to the treasury on chain ' + esc(String(f.chain_id)) +
+            ', with the transaction <b>data</b> set to the tag below (it binds the deposit to your account), then paste the transaction hash.</p>' +
+            '<div class="field-label">Treasury address</div><pre class="copyable" data-copy="' + esc(f.treasury) + '"><code>' + esc(f.treasury) + '</code></pre>' +
+            '<div class="field-label">Deposit data (your account tag)</div><pre class="copyable" data-copy="' + esc(f.deposit_data) + '"><code>' + esc(f.deposit_data) + '</code></pre>' +
+            '<div class="row" style="margin-top:0.8rem;"><input id="txhash" placeholder="0x… deposit transaction hash" autocomplete="off" spellcheck="false" /><button onclick="submitDeposit()">Credit deposit</button></div>';
+          wireCopy();
+        } catch (e) {
+          el.innerHTML = '<p class="lede-sub soon">Could not load funding info.</p>';
+        }
+      }
+
+      async function submitDeposit() {
+        const tx = $("txhash").value.trim();
+        if (!tx) return;
+        try {
+          const r = await fetch(API + "/v1/fund/evm", { method: "POST", headers: authHeaders(), body: JSON.stringify({ tx_hash: tx }) });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d.error?.message || "could not credit deposit");
+          toast("Credited $" + (d.credited_micro / 1_000_000).toFixed(4));
+          refresh();
+        } catch (e) {
+          toast(e.message || "Deposit failed.", true);
+        }
+      }
+
+      async function refreshKeys() {
+        const list = $("keylist");
+        try {
+          const r = await fetch(API + "/v1/keys", { headers: authHeaders() });
+          const data = await r.json();
+          const keys = data.keys || [];
+          if (!keys.length) { list.innerHTML = '<div class="empty">No keys yet.</div>'; return; }
+          list.innerHTML = "";
+          for (const k of keys) {
+            const row = document.createElement("div");
+            row.className = "keyrow" + (k.revoked ? " revoked" : "");
+            const left = document.createElement("div");
+            left.innerHTML = '<div class="id">' + esc(k.prefix) + '…</div><div class="sub">' +
+              esc(k.name || "unnamed") + " · created " + fmtDate(k.created) + (k.revoked ? " · revoked" : "") + "</div>";
+            row.appendChild(left);
+            if (!k.revoked) {
+              const btn = document.createElement("button");
+              btn.className = "danger";
+              btn.textContent = "Revoke";
+              btn.onclick = () => revokeKey(k.id);
+              row.appendChild(btn);
+            }
+            list.appendChild(row);
+          }
+        } catch (e) { list.innerHTML = '<div class="empty">Could not load keys.</div>'; }
+      }
+
+      function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+      async function createAccount() {
+        const btn = $("create-btn");
+        btn.disabled = true; btn.textContent = "Creating…";
+        try {
+          const r = await fetch(API + "/v1/signup", { method: "POST", body: JSON.stringify({ name: "dashboard" }) });
+          const d = await r.json();
+          if (!r.ok || !d.api_key) throw new Error(d.error?.message || "signup failed");
+          setKey(d.api_key);
+          render();
+          revealKey(d.api_key, "Account created. This is your API key — copy it now, it is shown only once.");
+        } catch (e) { toast(e.message || "Could not create account.", true); }
+        btn.disabled = false; btn.textContent = "Create account & get API key";
+      }
+
+      async function useExistingKey() {
+        const v = $("existing-key").value.trim();
+        if (!v) return;
+        apiKey = v;
+        const r = await fetch(API + "/v1/balance", { headers: authHeaders() }).catch(() => null);
+        if (!r || r.status === 401) { apiKey = ""; return toast("That key is not valid here.", true); }
+        setKey(v); render();
+      }
+
+      async function newKey() {
+        try {
+          const r = await fetch(API + "/v1/keys", { method: "POST", headers: authHeaders(), body: JSON.stringify({ name: "key" }) });
+          const d = await r.json();
+          if (!r.ok || !d.api_key) throw new Error(d.error?.message || "could not mint key");
+          revealKey(d.api_key, "New key minted — copy it now, it is shown only once.");
+          refreshKeys();
+        } catch (e) { toast(e.message || "Could not mint key.", true); }
+      }
+
+      async function revokeKey(id) {
+        try {
+          const r = await fetch(API + "/v1/keys/" + encodeURIComponent(id) + "/revoke", { method: "POST", headers: authHeaders() });
+          if (!r.ok) throw new Error("revoke failed");
+          toast("Key revoked.");
+          refreshKeys();
+        } catch (e) { toast("Could not revoke key.", true); }
+      }
+
+      function revealKey(secret, msg) {
+        const el = $("key-reveal");
+        el.innerHTML =
+          '<div class="reveal"><div class="label">API key</div>' +
+          '<pre class="copyable" data-copy="' + esc(secret) + '"><code>' + esc(secret) + "</code></pre>" +
+          '<div class="hint">' + esc(msg) + "</div></div>";
+        wireCopy();
+      }
+
+      function setKey(k) { apiKey = k; localStorage.setItem(KEY_STORE, k); }
+      function logout(msg) { localStorage.removeItem(KEY_STORE); apiKey = ""; if (msg) toast(msg, true); render(); }
+      function signOut() { logout(); }
+
+      // Click-to-copy for any .copyable (the connect snippet uses its own text;
+      // a data-copy attribute overrides it for the key reveal).
+      function wireCopy() {
+        document.querySelectorAll(".copyable").forEach((el) => {
+          if (el._wired) return;
+          el._wired = true;
+          el.addEventListener("click", () => {
+            const text = el.getAttribute("data-copy") || el.textContent;
+            navigator.clipboard.writeText(text).then(() => {
+              el.classList.add("copied");
+              setTimeout(() => el.classList.remove("copied"), 1400);
+            });
+          });
+        });
+      }
+
+      const obs = new MutationObserver(wireCopy);
+      obs.observe(document.body, { childList: true, subtree: true });
+      render();
+    </script>
+  </body>
+</html>

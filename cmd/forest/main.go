@@ -67,7 +67,17 @@ func main() {
 	defer stop()
 	go head.Sweep(ctx)
 
-	srv := &http.Server{Addr: *addr, Handler: head.Handler()}
+	// Compose the account head (accounts, API keys, the metered inference
+	// gateway, the dashboard) onto the same listener when configured. Forest
+	// routes — install one-liner, device APIs, lease subdomains — are untouched.
+	handler, acct := mountAccount(head.Handler(), *domain, filepath.Dir(*state), func(f string, a ...any) {
+		fmt.Fprintf(os.Stderr, f+"\n", a...)
+	})
+	if acct != nil {
+		defer func() { _ = acct.Close() }()
+	}
+
+	srv := &http.Server{Addr: *addr, Handler: handler}
 	errCh := make(chan error, 1)
 	go func() {
 		if *tlsCert != "" {
