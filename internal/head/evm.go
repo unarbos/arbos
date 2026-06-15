@@ -50,7 +50,9 @@ func newEVMFunder(rpcURL, usdc string, chainID, ethUSDMicro, minConf int64) *evm
 		chainID: chainID,
 		ethUSD:  ethUSDMicro,
 		minConf: minConf,
-		client:  &http.Client{Timeout: 20 * time.Second},
+		// Short, bounded JSON-RPC calls (not streams), so a client timeout is
+		// safe here; the pooled transport keeps the RPC connection warm.
+		client: &http.Client{Timeout: 20 * time.Second, Transport: pooledTransport()},
 	}
 }
 

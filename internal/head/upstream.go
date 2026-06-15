@@ -3,9 +3,47 @@ package head
 import (
 	"bytes"
 	"context"
+	"net"
 	"net/http"
 	"strings"
+	"time"
+
+	"golang.org/x/net/http2"
 )
+
+// pooledTransport builds the shared HTTP transport for upstream calls. The
+// gateway sends every request to a single host (OpenRouter, behind Cloudflare),
+// which speaks HTTP/2 — so one persistent connection already multiplexes all
+// concurrent completions and the TLS handshake is amortized, not per-request.
+// The explicit transport pins that intent and adds two things the defaults lack:
+// a generous per-host idle pool (a no-op under h2, but it keeps a future
+// HTTP/1.1 upstream — Chutes, a direct provider — from churning TLS), and h2
+// health pings so a dead idle connection (Cloudflare reaps them) is detected and
+// replaced instead of carrying the next request into a sporadic failure.
+//
+// No client-level timeout is set by callers on the streaming path: a long stream
+// must not be cut mid-flight; the request context bounds the call. The dial and
+// TLS-handshake timeouts here only bound connection setup, never an open stream.
+func pooledTransport() *http.Transport {
+	t := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          256,
+		MaxIdleConnsPerHost:   256,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	// ConfigureTransports wires HTTP/2 onto t and hands back the h2 transport so
+	// we can set keepalive pings; on error we simply fall back to t's built-in
+	// h2 (without pings), which is still correct.
+	if h2t, err := http2.ConfigureTransports(t); err == nil && h2t != nil {
+		h2t.ReadIdleTimeout = 30 * time.Second
+		h2t.PingTimeout = 15 * time.Second
+	}
+	return t
+}
 
 // Upstream is one inference provider the gateway can forward to. Today there is
 // exactly one (OpenRouter); Chutes and direct-provider upstreams satisfy the
@@ -48,7 +86,7 @@ func newOpenRouter(baseURL, apiKey string) *openRouter {
 		apiKey:  apiKey,
 		// No client-side timeout: a long stream must not be cut mid-flight.
 		// The request context (the client connection) bounds the call.
-		client: &http.Client{},
+		client: &http.Client{Transport: pooledTransport()},
 	}
 }
 
