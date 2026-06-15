@@ -28,15 +28,35 @@ type Config struct {
 	// forwarder from OpenRouterKey/OpenRouterBase; a test injects a fake here to
 	// exercise the metering path without a live endpoint.
 	Upstream Upstream
+	// Mock enables a local demo mode: a simulated funding endpoint
+	// (POST /v1/fund/mock) that credits without a chain or wallet. Never set
+	// this in production — it is a free faucet by design.
+	Mock bool
 	// EVM funding (optional). When EVMRPCURL and EVMTreasury are both set,
 	// POST /v1/fund/evm credits an account for confirmed native-coin deposits to
 	// the treasury, verified against the JSON-RPC endpoint. EVMETHUSDMicro is the
 	// micro-USD value of 1 ETH used to convert a deposit to credits.
 	EVMRPCURL      string
-	EVMTreasury    string
+	EVMUSDCAddr    string // USDC token contract ("" disables USDC deposits)
 	EVMChainID     int64
 	EVMETHUSDMicro int64
 	EVMMinConf     int64
+}
+
+// APIPrefixes are the apex path prefixes the account head owns. It lives beside
+// Handler (the routes below) so a composing host — cmd/forest, which mounts the
+// head onto the forest relay's listener — routes by the same list the routes
+// are registered under, and the two can't drift. Disjoint from everything the
+// forest head serves (/v1/devices, /v1/nodes, /v1/tunnel, install, assets).
+var APIPrefixes = []string{
+	"/v1/chat/completions",
+	"/v1/models",
+	"/v1/signup",
+	"/v1/balance",
+	"/v1/keys",
+	"/v1/fund/",
+	"/v1/admin/",
+	"/healthz",
 }
 
 // Head is the account backend's HTTP surface: the inference gateway, agent
@@ -46,6 +66,7 @@ type Head struct {
 	store       *Store
 	upstream    Upstream
 	evm         *evmFunder // nil unless EVM funding is configured
+	mock        bool       // local demo mode: simulated funding
 	marginBps   int
 	promoMicro  int64
 	adminToken  string
@@ -60,13 +81,14 @@ func New(cfg Config) *Head {
 		up = newOpenRouter(cfg.OpenRouterBase, cfg.OpenRouterKey)
 	}
 	var evm *evmFunder
-	if cfg.EVMRPCURL != "" && cfg.EVMTreasury != "" {
-		evm = newEVMFunder(cfg.EVMRPCURL, cfg.EVMTreasury, cfg.EVMChainID, cfg.EVMETHUSDMicro, cfg.EVMMinConf)
+	if cfg.EVMRPCURL != "" {
+		evm = newEVMFunder(cfg.EVMRPCURL, cfg.EVMUSDCAddr, cfg.EVMChainID, cfg.EVMETHUSDMicro, cfg.EVMMinConf)
 	}
 	return &Head{
 		store:       cfg.Store,
 		upstream:    up,
 		evm:         evm,
+		mock:        cfg.Mock,
 		marginBps:   cfg.MarginBps,
 		promoMicro:  cfg.PromoMicro,
 		adminToken:  cfg.AdminToken,
@@ -94,8 +116,15 @@ func (h *Head) Handler() http.Handler {
 	// Crypto funding: credit an account for a confirmed on-chain deposit.
 	// Registered only when an EVM endpoint + treasury are configured.
 	if h.evm != nil {
-		mux.HandleFunc("GET /v1/fund/info", h.handleFundInfo)
 		mux.HandleFunc("POST /v1/fund/evm", h.handleFundEVM)
+	}
+	// Funding info is served whenever any funding rail (crypto or mock) is on.
+	if h.evm != nil || h.mock {
+		mux.HandleFunc("GET /v1/fund/info", h.handleFundInfo)
+	}
+	// Local demo: simulated funding, no chain/wallet. Gated on mock mode.
+	if h.mock {
+		mux.HandleFunc("POST /v1/fund/mock", h.handleFundMock)
 	}
 	// Out-of-band funding stand-in (admin-gated): manual credits and the path
 	// other rails (TAO, card) will mirror.
@@ -124,6 +153,13 @@ func (h *Head) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// The dashboard holds the API key in JS-reachable storage, so lock the
+	// origin down: same-origin only, inline script/style (the page is fully
+	// self-contained), no framing — defense-in-depth against any future XSS.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	_, _ = w.Write(b)
 }
 

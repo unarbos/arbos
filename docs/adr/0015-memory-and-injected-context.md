@@ -39,6 +39,18 @@ first-class, logged, fenced concept:
   prefix-cache friendly; explicit fence → injected text is visibly distinct from
   system instructions (injection mitigation by construction, not ad-hoc string
   scrubbing).
+
+  > **Superseded (2026-06-15) — placement, not fencing.** The block now renders
+  > as a trailing **suffix** (after the conversation), not a prefix. "Stable
+  > position" is not "stable bytes": the latest-per-source content (memory
+  > recall, the plan forest, the jobs table) changes across turns, and a
+  > volatile block placed ahead of the conversation invalidates the prompt cache
+  > for all history behind it. Rendering it last keeps the longest byte-stable
+  > prefix (system + append-only conversation) cacheable and confines per-turn
+  > variation to the end. `core.Project` orders it last; the engine composes the
+  > live request the same way (`ProjectConversation` + `ProjectContext`) so a
+  > replay and a live turn stay byte-consistent. The fencing and
+  > latest-per-source rules below are unchanged.
 - **Retrieval/write-back is a port.** `ports.MemoryProvider`
   (`Retrieve`/`Observe`) is the one seam backing both the built-in store and
   external backends; the engine never branches on which. It is optional — nil

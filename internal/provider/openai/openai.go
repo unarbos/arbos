@@ -130,6 +130,9 @@ func (p *Provider) consume(ctx context.Context, resp *http.Response, out chan<- 
 				CompletionTokens: evt.Usage.CompletionTokens,
 				TotalTokens:      evt.Usage.TotalTokens,
 			}
+			if evt.Usage.PromptTokensDetails != nil {
+				usage.CachedPromptTokens = evt.Usage.PromptTokensDetails.CachedTokens
+			}
 		}
 		for _, choice := range evt.Choices {
 			if choice.FinishReason != "" {
@@ -181,7 +184,8 @@ func (p *Provider) consume(ctx context.Context, resp *http.Response, out chan<- 
 
 	// acc.Calls() is nil when no tool calls streamed, so assign directly (same
 	// shape as the anthropic/google adapters).
-	providerkit.Send(ctx, out, core.LLMChunk{Done: true, Usage: usage, ToolCalls: acc.Calls(), Citations: citations, Images: images, FinishReason: finishReason})
+	calls := acc.Calls()
+	providerkit.Send(ctx, out, core.LLMChunk{Done: true, Usage: usage, ToolCalls: calls, Citations: citations, Images: images, FinishReason: finishReason})
 }
 
 // reasoningEffort maps the neutral reasoning level to the Chat Completions
@@ -285,7 +289,64 @@ func (p *Provider) buildRequest(req core.LLMRequest) wireRequest {
 		}
 		w.Tools = append(w.Tools, t)
 	}
+	applyCacheBreakpoints(w.Messages, req.CacheRetention)
 	return w
+}
+
+// applyCacheBreakpoints marks the prompt-cache breakpoints on the message array
+// when caching is not disabled. Two breakpoints are placed:
+//
+//   - the leading system message — caches the tools + system prefix (in
+//     Anthropic's cache ordering tools precede system, so a breakpoint on system
+//     covers both), which is frozen for the session; and
+//   - the last non-system message — the end of the conversation prefix, before
+//     the trailing injected-context suffix (which the engine appends as system
+//     messages and which changes every turn). This rolling breakpoint advances
+//     as the tool loop grows the conversation, so each iteration's cache write
+//     is read back by the next, and the next turn reads the whole history.
+//
+// Both are well within OpenRouter's per-request breakpoint cap. cache_control is
+// ignored by endpoints that auto-cache or do not support it, so this is safe on
+// any OpenAI-compatible server.
+func applyCacheBreakpoints(msgs []wireMessage, retention core.CacheRetention) {
+	if retention == core.CacheNone || len(msgs) == 0 {
+		return
+	}
+	cc := &wireCacheControl{Type: "ephemeral"}
+	if retention == core.CacheLong {
+		cc.TTL = "1h"
+	}
+	if msgs[0].Role == "system" {
+		markCacheBreakpoint(&msgs[0], cc)
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "system" {
+			continue // skip the trailing injected-context suffix
+		}
+		markCacheBreakpoint(&msgs[i], cc)
+		break
+	}
+}
+
+// markCacheBreakpoint attaches the cache_control marker to a message's last
+// content part, promoting a plain-string content to the one-element text-part
+// array form the marker requires. A message with no content (e.g. an
+// assistant turn that is only tool_calls) is left untouched — there is no part
+// to mark, and the adjacent breakpoint still bounds the cached prefix.
+func markCacheBreakpoint(m *wireMessage, cc *wireCacheControl) {
+	switch c := m.Content.(type) {
+	case string:
+		if c == "" {
+			return
+		}
+		m.Content = []wireContentPart{{Type: "text", Text: c, CacheControl: cc}}
+	case []wireContentPart:
+		if len(c) == 0 {
+			return
+		}
+		c[len(c)-1].CacheControl = cc
+		m.Content = c
+	}
 }
 
 // webSearchToolType / webFetchToolType are OpenRouter's identifiers for the

@@ -48,8 +48,9 @@ func bearer(r *http.Request) (string, bool) {
 	if h == "" {
 		return "", false
 	}
-	if tok, ok := strings.CutPrefix(h, "Bearer "); ok {
-		return strings.TrimSpace(tok), true
+	// The "Bearer" scheme is case-insensitive (RFC 7235); accept any casing.
+	if len(h) >= 7 && strings.EqualFold(h[:7], "Bearer ") {
+		return strings.TrimSpace(h[7:]), true
 	}
 	if strings.HasPrefix(h, keyPrefix) {
 		return h, true

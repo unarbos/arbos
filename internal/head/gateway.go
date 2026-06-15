@@ -5,8 +5,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
-	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -94,6 +94,7 @@ func (h *Head) settle(princ *Principal, u usageResult) {
 		_ = h.store.Debit(ctx, princ.AccountID, costMicro, reasonInference, ref, map[string]any{
 			"model": u.model, "upstream": h.upstream.Name(),
 			"prompt_tokens": u.promptTokens, "completion_tokens": u.completionTokens,
+			"cached_tokens": u.cachedTokens,
 		})
 	}
 	h.store.RecordUsage(ctx, princ.AccountID, princ.KeyID, u.model, h.upstream.Name(),
@@ -114,6 +115,7 @@ type usageResult struct {
 	id               string
 	model            string
 	promptTokens     int
+	cachedTokens     int // prompt tokens served from the upstream prompt cache (read hit)
 	completionTokens int
 	costMicro        int64 // upstream cost before margin
 }
@@ -125,6 +127,11 @@ func prepareBody(raw []byte) (body []byte, stream bool, err error) {
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, false, err
+	}
+	// `null` and whitespace unmarshal without error but leave m nil; assigning
+	// into a nil map would panic, so reject anything that isn't a JSON object.
+	if m == nil {
+		return nil, false, errors.New("body must be a JSON object")
 	}
 	stream, _ = m["stream"].(bool)
 	// Ask the upstream to include cost + tokens in the response.
@@ -197,9 +204,12 @@ func mergeUsage(u *usageResult, payload []byte) {
 		ID    string `json:"id"`
 		Model string `json:"model"`
 		Usage *struct {
-			PromptTokens     int     `json:"prompt_tokens"`
-			CompletionTokens int     `json:"completion_tokens"`
-			Cost             float64 `json:"cost"`
+			PromptTokens        int     `json:"prompt_tokens"`
+			CompletionTokens    int     `json:"completion_tokens"`
+			Cost                float64 `json:"cost"`
+			PromptTokensDetails *struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal(payload, &p) != nil {
@@ -214,7 +224,10 @@ func mergeUsage(u *usageResult, payload []byte) {
 	if p.Usage != nil {
 		u.promptTokens = p.Usage.PromptTokens
 		u.completionTokens = p.Usage.CompletionTokens
-		u.costMicro = int64(math.Round(p.Usage.Cost * microPerUSD))
+		u.costMicro = MicroFromUSD(p.Usage.Cost)
+		if p.Usage.PromptTokensDetails != nil {
+			u.cachedTokens = p.Usage.PromptTokensDetails.CachedTokens
+		}
 	}
 }
 

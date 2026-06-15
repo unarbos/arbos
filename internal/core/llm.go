@@ -127,4 +127,10 @@ type Usage struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	// CachedPromptTokens is how many of the prompt tokens were served from the
+	// provider's prompt cache (a read hit), when the provider reports it; zero
+	// otherwise. It is the signal for cache effectiveness: a healthy long
+	// session keeps this a large fraction of PromptTokens. Additive field —
+	// older logs simply omit it (ADR-0010).
+	CachedPromptTokens int
 }

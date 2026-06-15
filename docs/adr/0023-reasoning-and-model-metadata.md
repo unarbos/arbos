@@ -33,6 +33,18 @@ in the pi layer.
   These headers are ignored by endpoints that do not use them, so the change is
   safe on a generic server. Body-level `cache_control` markers (Anthropic) and
   exact effort ladders belong to native adapters added later.
+
+  > **Amended (2026-06-15) — `cache_control` in the OpenAI-compatible adapter.**
+  > The default production path runs Claude *through* the OpenAI-compatible
+  > adapter via OpenRouter, where Anthropic models do not auto-cache and require
+  > explicit `cache_control` breakpoints. So that adapter now emits breakpoints
+  > (gated on `CacheRetention != none`): one on the leading system message
+  > (tools + system), one rolling on the last conversation message before the
+  > trailing injected-context suffix. `CacheLong` maps to `ttl: "1h"`,
+  > `CacheShort` to the default. Breakpoints are ignored by endpoints that
+  > auto-cache or do not support them, so this stays safe on a generic server.
+  > Cache effectiveness is now observable: `core.Usage` gains
+  > `CachedPromptTokens`, parsed from `prompt_tokens_details.cached_tokens`.
 - A model-metadata registry (`internal/agent/pi`, NOT core) holds `ModelInfo`
   (context window, max tokens, reasoning/vision/caching support, reasoning-level
   map) with a conservative fallback for unknown ids. The compaction trigger reads

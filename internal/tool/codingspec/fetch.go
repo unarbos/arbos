@@ -1,8 +1,11 @@
 package codingspec
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"regexp"
@@ -18,7 +21,16 @@ const (
 )
 
 var (
-	htmlTagRe = regexp.MustCompile(`(?s)<[^>]*>`)
+	// scriptStyleRe drops the content of tags that hold code, not prose — the
+	// usual source of the "stripped HTML" mush (inline JS, CSS, JSON state).
+	scriptStyleRe = regexp.MustCompile(`(?is)<(script|style|noscript|template)\b[^>]*>.*?</\s*(script|style|noscript|template)\s*>`)
+	// blockBreakRe turns block-level boundaries into newlines so the extracted
+	// text keeps the page's paragraph/list/row structure instead of collapsing
+	// to one line.
+	blockBreakRe = regexp.MustCompile(`(?i)</?(p|div|section|article|header|footer|nav|li|tr|h[1-6]|br|hr|table|ul|ol|dl|blockquote|pre)\b[^>]*>`)
+	htmlTagRe    = regexp.MustCompile(`(?s)<[^>]*>`)
+	inlineWSRe   = regexp.MustCompile(`[ \t\f\v]+`)
+	blankLinesRe = regexp.MustCompile(`\n{3,}`)
 	// errNoVault is what auth requests hit when no host wired a vault (CLI
 	// one-shots, tests). Named so the message stays in one place.
 	errNoVault = fmt.Errorf("no managed-secret vault is available in this arbos")
@@ -30,7 +42,8 @@ type FetchArgs struct {
 	Method  string        `json:"method,omitempty" desc:"HTTP method (GET or POST). Default GET."`
 	Body    string        `json:"body,omitempty" desc:"Request body for POST."`
 	Headers []fetchHeader `json:"headers,omitempty" desc:"Optional request headers."`
-	Auth    string        `json:"auth,omitempty" desc:"Name of a managed secret to attach as credentials (Authorization: Bearer). The destination host must be on that secret's allowlist; HTTPS only. You never see the value."`
+	Auth    string        `json:"auth,omitempty" desc:"Name of a managed secret to attach as credentials. The secret's own scheme is applied (Authorization: Bearer by default, or a custom header). The destination host must be on that secret's allowlist; HTTPS only. You never see the value."`
+	Raw     bool          `json:"raw,omitempty" desc:"Return the response body verbatim, skipping HTML-to-text extraction and JSON pretty-printing. Use when you need the raw markup or an embedded data blob (e.g. a page's hydration state)."`
 }
 
 type fetchHeader struct {
@@ -40,7 +53,7 @@ type fetchHeader struct {
 
 func fetchSpec() tool.Spec {
 	return tool.NewSpec("fetch",
-		"Fetch a URL and return the response body as text. Responses are truncated to 256KB. HTML tags are stripped for text/html responses. To call an API that needs credentials, pass the managed secret's name as `auth` — the value is attached at the boundary (host-allowlisted, HTTPS only) and never enters your context.",
+		"Fetch a URL and return the response body. Responses are truncated to 256KB. HTML is reduced to readable text (scripts and styles dropped, structure kept); JSON is pretty-printed. Pass `raw` to skip both. To call an API that needs credentials, pass the managed secret's name as `auth` — its configured scheme is applied at the boundary (host-allowlisted, HTTPS only) and never enters your context.",
 		true,
 		func(ctx context.Context, a FetchArgs) (string, error) {
 			if strings.TrimSpace(a.URL) == "" {
@@ -97,12 +110,8 @@ func fetchSpec() tool.Spec {
 				data = data[:defaultFetchMaxBody]
 			}
 
-			text := string(data)
 			ct := resp.Header.Get("Content-Type")
-			if strings.Contains(strings.ToLower(ct), "text/html") {
-				text = strings.TrimSpace(htmlTagRe.ReplaceAllString(text, " "))
-				text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
-			}
+			text := renderBody(data, ct, a.Raw)
 
 			var b strings.Builder
 			fmt.Fprintf(&b, "HTTP %d %s\nContent-Type: %s\n\n", resp.StatusCode, resp.Status, ct)
@@ -112,4 +121,43 @@ func fetchSpec() tool.Spec {
 			}
 			return b.String(), nil
 		})
+}
+
+// renderBody turns a response body into the text the agent reads. Raw returns
+// it verbatim; otherwise JSON is indented and HTML is reduced to readable text.
+// Anything else (and JSON that does not parse — e.g. a truncated body) passes
+// through unchanged.
+func renderBody(data []byte, contentType string, raw bool) string {
+	if raw {
+		return string(data)
+	}
+	lc := strings.ToLower(contentType)
+	switch {
+	case strings.Contains(lc, "json"):
+		var buf bytes.Buffer
+		if json.Indent(&buf, data, "", "  ") == nil {
+			return buf.String()
+		}
+		return string(data)
+	case strings.Contains(lc, "html"):
+		return htmlToText(string(data))
+	default:
+		return string(data)
+	}
+}
+
+// htmlToText extracts readable text from HTML: it drops code-bearing tags
+// (script/style/...), turns block boundaries into newlines, removes the
+// remaining tags, decodes entities, and squeezes whitespace — so prose and
+// structure survive while the markup and inline code do not.
+func htmlToText(s string) string {
+	s = scriptStyleRe.ReplaceAllString(s, " ")
+	s = blockBreakRe.ReplaceAllString(s, "\n")
+	s = htmlTagRe.ReplaceAllString(s, "")
+	s = html.UnescapeString(s)
+	lines := strings.Split(s, "\n")
+	for i, ln := range lines {
+		lines[i] = strings.TrimSpace(inlineWSRe.ReplaceAllString(ln, " "))
+	}
+	return strings.TrimSpace(blankLinesRe.ReplaceAllString(strings.Join(lines, "\n"), "\n\n"))
 }

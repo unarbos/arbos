@@ -142,6 +142,76 @@ func TestGatewayUnauthorized(t *testing.T) {
 	}
 }
 
+// priceWithMargin marks the upstream cost up by the configured basis points;
+// zero is a pure pass-through.
+func TestPriceWithMargin(t *testing.T) {
+	cases := []struct {
+		bps      int
+		upstream int64
+		want     int64
+	}{
+		{0, 1_000_000, 1_000_000},    // pass-through
+		{1000, 1_000_000, 1_100_000}, // +10%
+		{250, 1_000_000, 1_025_000},  // +2.5%
+		{10000, 2_000, 4_000},        // +100%
+	}
+	for _, c := range cases {
+		h := New(Config{Store: testStore(t), Upstream: fakeUpstream{}, MarginBps: c.bps})
+		if got := h.priceWithMargin(c.upstream); got != c.want {
+			t.Errorf("priceWithMargin(bps=%d, %d) = %d, want %d", c.bps, c.upstream, got, c.want)
+		}
+	}
+}
+
+// The margin is actually applied on the metered debit, end to end.
+func TestGatewayAppliesMargin(t *testing.T) {
+	s := testStore(t)
+	acct, key := fundedKey(t, s, 1_000_000)
+	resp := `{"id":"g","model":"m","choices":[{"message":{"content":"hi"}}],"usage":{"cost":0.0001}}` // 100 micro upstream
+	h := New(Config{Store: s, Upstream: fakeUpstream{body: resp}, MarginBps: 5000})                   // +50% -> 150
+	rec := httptest.NewRecorder()
+	h.handleChatCompletions(rec, chatReq(key, `{"model":"m","messages":[]}`))
+	if got := balance(t, s, acct); got != 1_000_000-150 {
+		t.Fatalf("balance = %d, want %d (debited 150 with 50%% margin)", got, 1_000_000-150)
+	}
+}
+
+// handleAdminCredit funds an account behind the admin token and rejects a wrong
+// or missing token.
+func TestAdminCredit(t *testing.T) {
+	s := testStore(t)
+	acct := newAccount(t, s)
+	h := New(Config{Store: s, Upstream: fakeUpstream{}, AdminToken: "secret"})
+
+	credit := func(token, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/v1/admin/credit", strings.NewReader(body))
+		if token != "" {
+			r.Header.Set("X-Admin-Token", token)
+		}
+		h.handleAdminCredit(rec, r)
+		return rec
+	}
+
+	if rec := credit("", `{"account_id":"`+acct+`","usd":5}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no token: status = %d, want 401", rec.Code)
+	}
+	if rec := credit("wrong", `{"account_id":"`+acct+`","usd":5}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong token: status = %d, want 401", rec.Code)
+	}
+	if rec := credit("secret", `{"account_id":"`+acct+`","usd":5,"ref":"r1"}`); rec.Code != 200 {
+		t.Fatalf("good token: status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := balance(t, s, acct); got != 5_000_000 {
+		t.Fatalf("balance = %d, want 5000000", got)
+	}
+	// Idempotent on ref.
+	credit("secret", `{"account_id":"`+acct+`","usd":5,"ref":"r1"}`)
+	if got := balance(t, s, acct); got != 5_000_000 {
+		t.Fatalf("balance = %d after replay, want 5000000 (idempotent)", got)
+	}
+}
+
 // prepareBody turns on usage accounting and detects streaming without dropping
 // the caller's fields.
 func TestPrepareBody(t *testing.T) {
@@ -160,5 +230,12 @@ func TestPrepareBody(t *testing.T) {
 	}
 	if _, _, err := prepareBody([]byte(`not json`)); err == nil {
 		t.Fatal("expected error for non-object body")
+	}
+	// `null` is valid JSON but unmarshals to a nil map; it must be rejected,
+	// not panic on the usage assignment.
+	for _, bad := range []string{`null`, ` `, `123`, `"x"`, `[]`} {
+		if _, _, err := prepareBody([]byte(bad)); err == nil {
+			t.Errorf("prepareBody(%q) = nil error, want rejection", bad)
+		}
 	}
 }

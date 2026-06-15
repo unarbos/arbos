@@ -52,6 +52,27 @@ type Entry struct {
 	// environment. Off by default: a brokered HTTP secret never needs to sit in
 	// a child's environment, and not putting it there is strictly safer.
 	Env bool `json:"env,omitempty"`
+	// Header is the HTTP header the brokered value is injected into. Empty (the
+	// default) means "Authorization: Bearer <value>" — the common case. Set it
+	// (e.g. "X-API-Key", or "Authorization" with an empty Prefix) for APIs whose
+	// scheme is not Bearer.
+	Header string `json:"header,omitempty"`
+	// Prefix is placed before the value in Header (e.g. "Bearer ", "Token ").
+	// Empty injects the raw value — for x-api-key-style headers or keys that
+	// already carry their own scheme (e.g. a "prefix.secret" credential).
+	// Ignored when Header is empty.
+	Prefix string `json:"prefix,omitempty"`
+}
+
+// injector builds the Injector this entry's scheme describes. An entry with no
+// Header keeps the default Authorization/Bearer scheme, so existing secrets and
+// the common case need no configuration; otherwise the value is injected into
+// Header behind Prefix.
+func (e Entry) injector() Injector {
+	if e.Header == "" {
+		return BearerInjector
+	}
+	return SchemeInjector(e.Header, e.Prefix)
 }
 
 // Store is the encrypted managed-secret vault. Metadata and ciphertext persist
@@ -272,9 +293,10 @@ func (s *Store) EnvValues() []string {
 
 // Bindings builds a broker binding per entry that named at least one host, so
 // the HTTP boundary can attach these secrets to their allowed destinations and
-// refuse every other host. inject is how the value is applied (e.g. a Bearer or
-// header injector); the caller picks it per its transport.
-func (s *Store) Bindings(inject Injector) []Binding {
+// refuse every other host. Each binding carries the entry's own injection
+// scheme (see Entry.injector), so different secrets can speak different auth
+// dialects through the same broker.
+func (s *Store) Bindings() []Binding {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var out []Binding
@@ -285,7 +307,7 @@ func (s *Store) Bindings(inject Injector) []Binding {
 		out = append(out, Binding{
 			Ref:    core.SecretRef{Name: name},
 			Hosts:  append([]string(nil), e.Hosts...),
-			Inject: inject,
+			Inject: e.injector(),
 		})
 	}
 	return out

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/unarbos/arbos/internal/browser"
@@ -17,7 +18,7 @@ import (
 // stateful handle to a real browser, dispatched by Action, rather than a family
 // of tools that would each re-explain the same browser.
 type BrowserArgs struct {
-	Action     string `json:"action" desc:"What to do: navigate, screenshot, read, click, type, viewport, eval, tabs, new_tab, switch_tab, or close_tab."`
+	Action     string `json:"action" desc:"What to do: navigate, screenshot, read, click, type, viewport, eval, network, tabs, new_tab, switch_tab, or close_tab."`
 	Tab        string `json:"tab,omitempty" desc:"Tab id (from tabs) for switch_tab / close_tab."`
 	URL        string `json:"url,omitempty" desc:"URL to open (action=navigate)."`
 	Selector   string `json:"selector,omitempty" desc:"CSS selector to target (screenshot of one element, read, click, type)."`
@@ -42,6 +43,7 @@ const browserDescription = "Drive a real browser (Chromium) to render and act on
 	"type (text into a selector, optionally submit), " +
 	"viewport (resize for responsive checks), " +
 	"eval (run a JavaScript expression), " +
+	"network (list the API/XHR/fetch calls the page has made — use this to discover a site's own endpoints instead of guessing, then call them directly with fetch), " +
 	"tabs (list open tabs), new_tab (open + switch to a fresh tab), switch_tab (tab=id), close_tab (tab=id). " +
 	"Tabs keep their pages between calls within a session."
 
@@ -149,6 +151,13 @@ func dispatchBrowser(ctx context.Context, b *browser.Browser, a BrowserArgs) (to
 		}
 		return tool.Result{Content: res}, nil
 
+	case "network", "requests":
+		calls, running := b.Network()
+		if !running {
+			return tool.Result{Content: "No tabs open (the browser is not running; navigate opens one)."}, nil
+		}
+		return tool.Result{Content: formatNetwork(calls)}, nil
+
 	case "tabs":
 		tabs := b.Tabs()
 		if len(tabs) == 0 {
@@ -195,7 +204,7 @@ func dispatchBrowser(ctx context.Context, b *browser.Browser, a BrowserArgs) (to
 		return tool.Result{Content: fmt.Sprintf("Closed tab %s.", a.Tab)}, nil
 
 	case "":
-		return tool.Result{}, fmt.Errorf("browser: action is required (navigate, screenshot, read, click, type, viewport, eval, tabs, new_tab, switch_tab, close_tab)")
+		return tool.Result{}, fmt.Errorf("browser: action is required (navigate, screenshot, read, click, type, viewport, eval, network, tabs, new_tab, switch_tab, close_tab)")
 	default:
 		return tool.Result{}, fmt.Errorf("browser: unknown action %q", a.Action)
 	}
@@ -220,6 +229,62 @@ func pageStateText(st browser.PageState) string {
 		return "(page is empty)"
 	}
 	return out
+}
+
+// formatNetwork renders captured API traffic for the model: one line per
+// distinct method+URL (repeats collapsed with a count), oldest first, so a
+// site's own endpoints are obvious at a glance and ready to call with fetch.
+func formatNetwork(calls []browser.NetCall) string {
+	if len(calls) == 0 {
+		return "No API (XHR/fetch) requests captured on this page yet. The log resets on each navigation, so navigate (or interact and wait for the page to load its data), then check again."
+	}
+	type row struct {
+		browser.NetCall
+		count int
+	}
+	seen := map[string]int{}
+	var rows []row
+	for _, c := range calls {
+		key := c.Method + " " + c.URL
+		if i, ok := seen[key]; ok {
+			// Collapse polling/repeats but keep the latest status and MIME.
+			rows[i].count++
+			rows[i].Status = c.Status
+			rows[i].MIME = c.MIME
+			continue
+		}
+		seen[key] = len(rows)
+		rows = append(rows, row{NetCall: c, count: 1})
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%d API request(s) (XHR/fetch), oldest first:\n\n", len(rows))
+	for _, r := range rows {
+		method := r.Method
+		if method == "" {
+			method = "?"
+		}
+		status := "—"
+		if r.Status > 0 {
+			status = strconv.FormatInt(r.Status, 10)
+		}
+		fmt.Fprintf(&sb, "  %-4s %-3s %s", method, status, r.URL)
+		if mime := shortMIME(r.MIME); mime != "" {
+			fmt.Fprintf(&sb, "  [%s]", mime)
+		}
+		if r.count > 1 {
+			fmt.Fprintf(&sb, "  (×%d)", r.count)
+		}
+		sb.WriteByte('\n')
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// shortMIME drops the "; charset=…" parameters so the type reads at a glance.
+func shortMIME(m string) string {
+	if i := strings.IndexByte(m, ';'); i >= 0 {
+		m = m[:i]
+	}
+	return strings.TrimSpace(m)
 }
 
 // screenshotMime sniffs the real image type from the capture's magic bytes.

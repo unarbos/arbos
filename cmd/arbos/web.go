@@ -50,8 +50,43 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if stopSched := host.StartPlanScheduler(); stopSched != nil {
-		defer stopSched()
+	// One owner per directory. arbos keeps its event log, bot registry, plan
+	// scheduler, and outbox under <cwd>/.arbos; a second instance in the same
+	// directory would run a second copy of every singleton against that shared
+	// state — most visibly, two Telegram bridges polling each bot's token at
+	// once (Telegram allows a single getUpdates poller per token, so the rest
+	// get 409 Conflict and inbound updates split between the pollers) and a
+	// scheduler/outbox that fires and delivers twice. That is the "doubled and
+	// missing messages" a stray second instance produces. The first instance
+	// in a directory takes the lock and owns these singletons; a later one
+	// still serves as a local viewer on a walked port (ADR-0035) but runs none
+	// of them, and never claims the public forest URL.
+	cwd, _ := os.Getwd()
+	primary := true
+	if cwd != "" {
+		release, lockErr := lockDir(cwd)
+		if lockErr != nil {
+			primary = false
+			forestURL = "" // a viewer never claims the directory's public URL
+			fmt.Fprintf(os.Stderr, "arbos: another arbos is already running in this directory — this instance is a local viewer only (no Telegram bridge, scheduler, or public URL)\n")
+		} else {
+			defer release()
+		}
+	}
+
+	if primary {
+		// Retire runs a previous instance left active when it died: a delegated
+		// child or scheduler wake that never reached its end-of-turn defer would
+		// otherwise spin forever in the activity feed. Holding the directory lock
+		// means that instance is gone, so any still-active run is an orphan.
+		if n, err := host.ReclaimOrphanedRuns(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "arbos: reclaim orphaned runs: %v\n", err)
+		} else if n > 0 {
+			fmt.Fprintf(os.Stderr, "arbos: retired %d orphaned run(s) from a previous session\n", n)
+		}
+		if stopSched := host.StartPlanScheduler(); stopSched != nil {
+			defer stopSched()
+		}
 	}
 
 	// Graceful self-restart: arbos is safe to rebuild in place while it runs.
@@ -94,14 +129,14 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 		codingspec.SetSecretApplier(func(ctx context.Context, name string, req *http.Request) error {
 			// Bindings are rebuilt per call so a secret added in the
 			// Settings tab mid-session is attachable immediately.
-			br := secret.NewBroker(vault, vault.Bindings(secret.BearerInjector)...)
+			br := secret.NewBroker(vault, vault.Bindings()...)
 			return br.Apply(ctx, core.SecretRef{Name: name}, req)
 		})
 	}
 
 	// Jobs are keyed by workspace root (= this process's cwd, same as the
-	// toolset); the ✕ on a running job in the UI lands here.
-	cwd, _ := os.Getwd()
+	// toolset); the ✕ on a running job in the UI lands here. cwd was resolved
+	// above when taking the directory lock.
 	gw := &gateway.Server{
 		Engine:       host.Engine,
 		Store:        store,
@@ -239,7 +274,7 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	// machine fought over the same bots (409 Conflict, each kicking the other
 	// off). Per-directory scoping makes a bot belong to the agent in one
 	// directory and never spill into another instance.
-	if cwd != "" {
+	if primary && cwd != "" {
 		dir := filepath.Join(cwd, ".arbos", "messenger")
 		// One-time lift of a pre-scoping global registry into this directory.
 		// A move (not copy) is deliberate: it both preserves the owner's bots
@@ -275,8 +310,11 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	}
 
 	// The browser door on the outbox: scheduled firings and finished
-	// background work reach open tabs as ambient notices.
-	go gw.DeliverOutbox(ctx)
+	// background work reach open tabs as ambient notices. Primary-only: a
+	// second instance must not claim and re-deliver the same outbox messages.
+	if primary {
+		go gw.DeliverOutbox(ctx)
+	}
 
 	// BaseContext ties every request — including hijacked WebSocket seam
 	// connections, which Shutdown cannot reach — to the signal context, so a
@@ -321,20 +359,11 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	// same handler (gate and all) back through the outbound tunnel. The
 	// client reconnects forever on its own; a head outage never takes the
 	// local door down with it.
-	if forestURL != "" {
-		// One live forest agent per (directory, machine): the URL is derived
-		// from this directory's agent key, so two arbos in the same dir would
-		// claim the same name and flap (ADR-0035). The lock gates only the
-		// join — the local door still serves (on a walked port), so a second
-		// instance is a usable local viewer, just not a second public URL.
-		release, lockErr := lockForestDir(cwd)
-		if lockErr != nil {
-			fmt.Fprintf(os.Stderr, "arbos: %v — serving locally only\n", lockErr)
-			forestURL = ""
-		} else {
-			defer release()
-		}
-	}
+	// Only the directory's primary instance joins the forest: the public URL
+	// is derived from this directory's agent key, so a second joiner would
+	// fight for the same lease and flap (ADR-0035). forestURL was already
+	// cleared above for a non-primary (viewer) instance, so this just serves
+	// the join for the holder of the directory lock.
 	if forestURL != "" {
 		fc := &forest.Client{
 			Base:     strings.TrimRight(forestURL, "/"),
@@ -407,13 +436,14 @@ func hexRGB(s string) (r, g, b int, ok bool) {
 	return int(v>>16) & 0xff, int(v>>8) & 0xff, int(v) & 0xff, true
 }
 
-// lockForestDir takes an advisory lock on <dir>/.arbos/agent.lock so only one
-// arbos per directory joins the forest (ADR-0035): the derived URL is a
-// function of the directory, so a second joiner would fight for the same
-// lease. The lock is held for the process's life and released by the returned
-// closure (and by the OS on exit). flock is advisory and unix-only, which
-// matches arbos's supported platforms.
-func lockForestDir(dir string) (func(), error) {
+// lockDir takes an advisory lock on <dir>/.arbos/agent.lock so only one arbos
+// per directory owns that directory's singletons — the Telegram bridge, the
+// plan scheduler, the outbox, and the forest join (ADR-0035) — all of which
+// act on the one shared <dir>/.arbos state and would conflict if run twice.
+// The lock is held for the process's life and released by the returned closure
+// (and by the OS on exit). flock is advisory and unix-only, which matches
+// arbos's supported platforms.
+func lockDir(dir string) (func(), error) {
 	if err := os.MkdirAll(filepath.Join(dir, ".arbos"), 0o700); err != nil {
 		return nil, err
 	}

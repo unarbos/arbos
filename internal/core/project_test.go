@@ -80,7 +80,9 @@ func TestProjectFoldsCompressedSpan(t *testing.T) {
 
 // TestProjectRendersLatestContextPerSourceFenced checks the memory/injected
 // context block: only the latest segment per source is rendered, fenced, as a
-// stable prefix — older injections stay in the log but are superseded.
+// trailing suffix AFTER the conversation — older injections stay in the log but
+// are superseded. The suffix placement keeps the volatile block out of the
+// cacheable conversation prefix.
 func TestProjectRendersLatestContextPerSourceFenced(t *testing.T) {
 	events := []core.Event{
 		ev(0, core.ContextPayload{Segments: []core.Segment{{Source: "memory", Content: "old mem"}}}),
@@ -95,7 +97,10 @@ func TestProjectRendersLatestContextPerSourceFenced(t *testing.T) {
 	if msgs[0].Role != core.RoleSystem || msgs[0].Content != "sys" {
 		t.Fatalf("msg 0 should be the system prompt, got %+v", msgs[0])
 	}
-	block := msgs[1]
+	if msgs[1].Role != core.RoleUser || msgs[1].Content != "hi" {
+		t.Fatalf("conversation should precede the context suffix, got %+v", msgs[1])
+	}
+	block := msgs[2]
 	if block.Role != core.RoleSystem {
 		t.Fatalf("context block should be a system message, got role %q", block.Role)
 	}
@@ -108,8 +113,12 @@ func TestProjectRendersLatestContextPerSourceFenced(t *testing.T) {
 	if !strings.Contains(block.Content, "<<memory>>") {
 		t.Fatalf("context block should be fenced with provenance, got %q", block.Content)
 	}
-	if msgs[2].Role != core.RoleUser {
-		t.Fatalf("conversation should follow the context block, got %+v", msgs[2])
+
+	// ProjectContext renders only the suffix block, byte-identical to Project's
+	// trailing message — the engine composes it after the conversation prefix.
+	ctxOnly := core.ProjectContext(events)
+	if len(ctxOnly) != 1 || ctxOnly[0].Content != block.Content {
+		t.Fatalf("ProjectContext should yield just the context block, got %+v", ctxOnly)
 	}
 }
 

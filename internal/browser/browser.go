@@ -92,14 +92,15 @@ func ConfigFor(root string) Config {
 	}
 }
 
-// tab is one live Chrome tab: its chromedp context, its screencast stream, and
-// its input unsubscriber.
+// tab is one live Chrome tab: its chromedp context, its screencast stream, its
+// input unsubscriber, and the log of API traffic it has made.
 type tab struct {
 	id     string
 	stream string
 	ctx    context.Context
 	cancel context.CancelFunc
 	unsub  func()
+	net    *netLog
 }
 
 // TabInfo is one tab's identity as reported to the tool and the UI.
@@ -251,8 +252,9 @@ func (b *Browser) newTabLocked() (*tab, error) {
 		tcancel()
 		return nil, fmt.Errorf("new tab: %w", err)
 	}
-	t := &tab{id: id, ctx: tctx, cancel: tcancel}
+	t := &tab{id: id, ctx: tctx, cancel: tcancel, net: newNetLog()}
 	b.applyStealth(tctx)
+	b.startNetworkCapture(t)
 	if b.cfg.StreamID != "" {
 		t.stream = b.cfg.StreamID + "/" + id
 		b.startScreencast(t)

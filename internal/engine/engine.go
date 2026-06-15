@@ -882,13 +882,21 @@ func routeResponse(c *Conversation, pending map[core.RequestID]chan core.Intent,
 	delete(pending, id)
 }
 
-// project folds the log into the provider-facing conversation: core.Project,
-// then the ExpandUser hook over user messages. Expansion lives here — at the
+// project folds the log into the provider-facing conversation prefix: the
+// system prompt and the conversation (core.ProjectConversation), then the
+// ExpandUser hook over user messages. It deliberately omits the injected-context
+// block: the engine composes that as a trailing suffix at request time
+// (projectContext), so the volatile memory/plan/jobs context never sits inside
+// the byte-stable, cacheable conversation prefix. Expansion lives here — at the
 // read side, not the write side — so the persisted log keeps exactly what the
 // user typed and every other consumer (replay, titles, edit-by-text) sees the
 // raw message.
 func (e *Engine) project(events []core.Event) []core.Message {
-	msgs := core.Project(events, e.cfg.SystemPrompt)
+	msgs := make([]core.Message, 0, len(events)+1)
+	if e.cfg.SystemPrompt != "" {
+		msgs = append(msgs, core.Message{Role: core.RoleSystem, Content: e.cfg.SystemPrompt})
+	}
+	msgs = append(msgs, core.ProjectConversation(events)...)
 	if f := e.cfg.ExpandUser; f != nil {
 		for i := range msgs {
 			if msgs[i].Role == core.RoleUser {
@@ -897,6 +905,16 @@ func (e *Engine) project(events []core.Event) []core.Message {
 		}
 	}
 	return msgs
+}
+
+// projectContext renders the injected-context block (latest segment per source,
+// fenced) that the turn appends as the trailing suffix of every request, after
+// the conversation prefix it caches. It is computed once per turn — context
+// events are not created mid-turn, and compression never folds them — and
+// re-appended at the end each iteration so it stays the last block even as the
+// tool loop grows the conversation. Returns nil when nothing was injected.
+func (e *Engine) projectContext(events []core.Event) []core.Message {
+	return core.ProjectContext(events)
 }
 
 // runTurn is the agentic loop. The event log is the source of truth: any append
@@ -960,6 +978,13 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, 
 	}
 	msgs := e.project(events)
 
+	// contextMsgs is the injected-context suffix (memory/plan/jobs). It is fixed
+	// for the turn's duration — context events are only created at turn start —
+	// so it is computed once and re-appended after the (growing) conversation on
+	// every request, keeping it the trailing block and out of the cacheable
+	// conversation prefix.
+	contextMsgs := e.projectContext(events)
+
 	// turnUsage aggregates token accounting across every LLM call in this turn,
 	// so TurnComplete can report the turn's cost without the frontend re-reading
 	// the per-response usage events from the log.
@@ -1004,9 +1029,20 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, 
 			msgs = newMsgs
 		}
 
+		// Compose the request messages as conversation prefix + context suffix.
+		// msgs grows with each iteration's assistant/tool messages (the cacheable
+		// tail); the context block is re-appended last so it never lands mid-array
+		// ahead of newer turns, which would shift the bytes a prior turn cached.
+		reqMsgs := msgs
+		if len(contextMsgs) > 0 {
+			reqMsgs = make([]core.Message, 0, len(msgs)+len(contextMsgs))
+			reqMsgs = append(reqMsgs, msgs...)
+			reqMsgs = append(reqMsgs, contextMsgs...)
+		}
+
 		req := core.LLMRequest{
 			Model:          model,
-			Messages:       msgs,
+			Messages:       reqMsgs,
 			Tools:          tools,
 			Stream:         true,
 			Reasoning:      e.cfg.Reasoning,
@@ -1073,6 +1109,7 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, 
 			turnUsage.PromptTokens += sr.usage.PromptTokens
 			turnUsage.CompletionTokens += sr.usage.CompletionTokens
 			turnUsage.TotalTokens += sr.usage.TotalTokens
+			turnUsage.CachedPromptTokens += sr.usage.CachedPromptTokens
 			if !e.append(ctx, c, core.NewUsageEvent(c.id, *sr.usage, e.clock.Now())) {
 				return true
 			}

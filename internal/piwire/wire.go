@@ -18,7 +18,6 @@ import (
 	"github.com/unarbos/arbos/internal/engine"
 	"github.com/unarbos/arbos/internal/extension"
 	"github.com/unarbos/arbos/internal/extension/builtin"
-	"github.com/unarbos/arbos/internal/fake"
 	"github.com/unarbos/arbos/internal/mcp"
 	"github.com/unarbos/arbos/internal/mind"
 	"github.com/unarbos/arbos/internal/modelcatalog"
@@ -35,7 +34,9 @@ import (
 
 // HostConfig wires a pi session host. Config carries the resolved environment
 // (provider, model; see LoadConfig); Store and Observer are required for
-// production; delegated children always get an ephemeral in-memory store.
+// production. Delegated children share that same durable Store — their
+// transcripts persist and replay like any session; only memory (Mind) stays
+// the self's.
 type HostConfig struct {
 	Config   Config
 	Store    ports.SessionStore
@@ -89,6 +90,22 @@ func (h *Host) GuestEngine(systemPrompt string) *engine.Engine {
 		engine.WithContextPolicy(policy, summ))
 }
 
+// ReclaimOrphanedRuns retires machine-spawned sessions (delegated children and
+// scheduler wakes) that a crash left flagged active, so they stop showing as
+// perpetually-live runs in the activity feed. It is a startup pass the caller
+// runs while holding the directory lock — the previous owner is gone, so any
+// still-active run is an orphan (see sqlite.Store.ReclaimOrphanedRuns). A no-op
+// when the store does not track sessions this way (the in-memory fake).
+func (h *Host) ReclaimOrphanedRuns(ctx context.Context) (int, error) {
+	r, ok := h.store.(interface {
+		ReclaimOrphanedRuns(context.Context) (int, error)
+	})
+	if !ok {
+		return 0, nil
+	}
+	return r.ReclaimOrphanedRuns(ctx)
+}
+
 // Assemble builds the top-level pi engine with delegation tools, memory, MCP, and
 // built-in extensions registered on the returned router.
 func Assemble(cfg HostConfig) (*Host, error) {
@@ -132,8 +149,11 @@ func Assemble(cfg HostConfig) (*Host, error) {
 	}
 
 	piOpts := pi.Options{
-		Provider:       cfg.Config.NewProvider(),
-		NewStore:       func() ports.SessionStore { return fake.NewStore() },
+		Provider: cfg.Config.NewProvider(),
+		// The top-level chat and every delegated child share the one durable
+		// store, so a sub-agent's transcript replays like any other session
+		// (see Options.Store).
+		Store:          cfg.Store,
 		Clock:          sysClock{},
 		Cwd:            cwd,
 		AgentDir:       agentDir,
@@ -173,11 +193,14 @@ func Assemble(cfg HostConfig) (*Host, error) {
 	// Long-term memory, when the durable store backs atoms (SQLite, not the
 	// in-memory fake) and a real LLM can curate. It is the SELF's: recall,
 	// curation, and the remember tool are wired only on the top engine (which
-	// the scheduler's wakes reuse), not on delegated children — a child's
-	// recall can't anchor (its events live in an ephemeral store) and a child
-	// writing global atoms would be a memory-poisoning surface. Children pass
-	// findings up via results; the self decides what to remember. Created here
-	// (before pi.Register) only so it can be Closed on an early return.
+	// the scheduler's wakes reuse), not on delegated children. A child now
+	// persists its events to the same store, so recall could anchor — but
+	// memory writes deliberately stay at the self: a child is the agent's
+	// exposure to untrusted input (arbitrary repos, web pages), and atoms are
+	// one global, unscoped set, so letting a child curate or remember would be
+	// a memory-poisoning surface. Children pass findings up via results; the
+	// self decides what to remember. Created here (before pi.Register) only so
+	// it can be Closed on an early return.
 	var theMind *mind.Mind
 	if as, ok := cfg.Store.(mind.Store); ok && cfg.Config.HasLLM {
 		// The curator runs on the same distill model as the compaction
@@ -283,7 +306,6 @@ func Assemble(cfg HostConfig) (*Host, error) {
 	}
 
 	topOpts := piOpts
-	topOpts.NewStore = func() ports.SessionStore { return cfg.Store }
 	topOpts.Observer = cfg.Observer
 	topOpts.ExtraTools = topTools
 	// Memory is the self's: recall, curation, and the remember tool wire on the

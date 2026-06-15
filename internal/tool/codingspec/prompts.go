@@ -46,8 +46,9 @@ func PromptInfos() []ToolPromptInfo {
 		}},
 		{Name: "await", Snippet: "Wait on a background job: returns its new output when it exits, a regex matches, or the timeout elapses"},
 		{Name: "jobs", Snippet: "List background jobs (id, status, runtime, command, log path)"},
-		{Name: "fetch", Snippet: "Fetch a URL and return the response body as text", Guidelines: []string{
+		{Name: "fetch", Snippet: "Fetch a URL: HTML comes back as readable text, JSON pretty-printed; pass raw for the verbatim body", Guidelines: []string{
 			"Use fetch for HTTP/HTTPS requests instead of curl in bash when possible.",
+			"To call an API needing credentials, pass the managed secret's name as auth — its scheme is applied at the boundary and the value never enters your context.",
 		}},
 		{Name: "show", Snippet: "Present a file to the user in a panel beside the chat (HTML canvas, image, markdown document, or code file)", Guidelines: []string{
 			"After producing a visual artifact (an HTML canvas, a chart image, a report), call show on the file so it opens beside the chat — never tell the user to open it themselves.",

@@ -223,6 +223,10 @@ function SecretForm({
           .map((h) => h.trim())
           .filter(Boolean),
         env: draft.env,
+        // prefix is sent untrimmed on purpose: a scheme like "Bearer " needs
+        // its trailing space, since the value is appended directly after it.
+        header: draft.header.trim(),
+        prefix: draft.prefix,
       });
       await onSaved();
     } catch (e) {
@@ -278,6 +282,30 @@ function SecretForm({
           className="w-full rounded-md border border-line bg-panel px-2 py-1 font-mono text-[12px] text-bright outline-none placeholder:text-faint"
         />
       </Field>
+
+      <div className="flex gap-2.5">
+        <Field label="Auth header">
+          <input
+            value={draft.header}
+            onChange={(e) => onChange({ ...draft, header: e.target.value })}
+            placeholder="Authorization"
+            className="w-full rounded-md border border-line bg-panel px-2 py-1 font-mono text-[12px] text-bright outline-none placeholder:text-faint"
+          />
+        </Field>
+        <Field label="Value prefix">
+          <input
+            value={draft.prefix}
+            onChange={(e) => onChange({ ...draft, prefix: e.target.value })}
+            placeholder="Bearer "
+            className="w-full rounded-md border border-line bg-panel px-2 py-1 font-mono text-[12px] text-bright outline-none placeholder:text-faint"
+          />
+        </Field>
+      </div>
+      <p className="-mt-0.5 text-[11px] leading-relaxed text-faint">
+        Leave both blank for <code className="font-mono">Authorization: Bearer</code>.
+        For an API-key header, set the header (e.g. <code className="font-mono">X-API-Key</code>)
+        and clear the prefix to send the raw value.
+      </p>
 
       <label className="flex cursor-pointer items-start gap-2 text-[12px] text-muted">
         <input
@@ -359,6 +387,8 @@ interface Draft {
   value: string;
   hosts: string;
   env: boolean;
+  header: string;
+  prefix: string;
 }
 
 function blankDraft(): Draft {
@@ -366,7 +396,16 @@ function blankDraft(): Draft {
   // (fetch's auth) without ever reading it, so shell exposure — which makes
   // the value readable and transcript-visible — is the deliberate opt-in for
   // CLI tools that need $NAME, not the starting point.
-  return { original: null, name: "", label: "", value: "", hosts: "", env: false };
+  return {
+    original: null,
+    name: "",
+    label: "",
+    value: "",
+    hosts: "",
+    env: false,
+    header: "",
+    prefix: "",
+  };
 }
 
 function fromMeta(s: SecretMeta): Draft {
@@ -377,5 +416,7 @@ function fromMeta(s: SecretMeta): Draft {
     value: "",
     hosts: (s.hosts ?? []).join(", "),
     env: s.env ?? false,
+    header: s.header ?? "",
+    prefix: s.prefix ?? "",
   };
 }

@@ -38,6 +38,20 @@ type wireContentPart struct {
 	Text     string        `json:"text,omitempty"`
 	ImageURL *wireImageURL `json:"image_url,omitempty"`
 	File     *wireFile     `json:"file,omitempty"`
+	// CacheControl marks this content part as a prompt-cache breakpoint. On
+	// OpenRouter it is required for Anthropic models (which do not auto-cache)
+	// and ignored by endpoints that auto-cache or do not support it, so it is
+	// safe on a generic OpenAI-compatible server. It drops out of the JSON when
+	// nil.
+	CacheControl *wireCacheControl `json:"cache_control,omitempty"`
+}
+
+// wireCacheControl is the prompt-cache breakpoint marker carried on a content
+// part. Type is always "ephemeral"; TTL is optional ("1h" extends the default
+// 5-minute retention) and omitted otherwise.
+type wireCacheControl struct {
+	Type string `json:"type"`
+	TTL  string `json:"ttl,omitempty"`
 }
 
 type wireImageURL struct {
@@ -138,4 +152,13 @@ type wireUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// PromptTokensDetails carries the breakdown of the prompt tokens; its
+	// CachedTokens field is how many were served from the prompt cache (a read
+	// hit). OpenAI and OpenRouter both report it here. Absent on endpoints that
+	// do not, leaving CachedTokens zero.
+	PromptTokensDetails *wirePromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+type wirePromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }

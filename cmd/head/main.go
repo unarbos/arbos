@@ -37,11 +37,12 @@ func main() {
 	orBase := flag.String("openrouter-base", "", "OpenRouter base URL (default https://openrouter.ai/api/v1)")
 	marginBps := flag.Int("margin-bps", 0, "markup over upstream cost in basis points (100 = 1%); 0 = pass-through")
 	promoUSD := flag.Float64("promo-usd", 0, "signup allowance credited to a new account, in USD")
+	mock := flag.Bool("mock", false, "local demo mode: mock inference + simulated funding (no key, no chain, no wallet)")
 	flag.Parse()
 
 	orKey := os.Getenv("OPENROUTER_API_KEY")
-	if orKey == "" {
-		fmt.Fprintln(os.Stderr, "head: OPENROUTER_API_KEY is required (try: doppler run -- head ...)")
+	if orKey == "" && !*mock {
+		fmt.Fprintln(os.Stderr, "head: OPENROUTER_API_KEY is required (try: doppler run -- head ..., or --mock for a local demo)")
 		os.Exit(2)
 	}
 	adminToken := os.Getenv("ARBOS_HEAD_ADMIN_TOKEN") // empty disables the funding endpoint
@@ -53,21 +54,27 @@ func main() {
 	}
 	defer func() { _ = store.Close() }()
 
-	h := head.New(head.Config{
+	cfg := head.Config{
 		Store:          store,
 		OpenRouterKey:  orKey,
 		OpenRouterBase: *orBase,
 		MarginBps:      *marginBps,
 		PromoMicro:     head.MicroFromUSD(*promoUSD),
 		AdminToken:     adminToken,
-		// Crypto funding: set ARBOS_EVM_RPC + ARBOS_TREASURY_ADDR to enable
-		// POST /v1/fund/evm. ARBOS_ETH_USD is dollars per ETH (default 3000).
+		// Crypto funding: set ARBOS_EVM_RPC to enable per-account deposit
+		// addresses + POST /v1/fund/evm. ARBOS_ETH_USD is dollars per ETH.
 		EVMRPCURL:      os.Getenv("ARBOS_EVM_RPC"),
-		EVMTreasury:    os.Getenv("ARBOS_TREASURY_ADDR"),
+		EVMUSDCAddr:    os.Getenv("ARBOS_USDC_ADDR"),
 		EVMChainID:     envInt("ARBOS_EVM_CHAIN_ID", 0),
 		EVMETHUSDMicro: head.MicroFromUSD(envFloat("ARBOS_ETH_USD", 3000)),
 		EVMMinConf:     envInt("ARBOS_EVM_MIN_CONF", 1),
-	})
+	}
+	if *mock {
+		cfg.Upstream = mockUpstream{} // canned replies, no key/network
+		cfg.Mock = true               // enables POST /v1/fund/mock (simulated payment)
+		fmt.Fprintln(os.Stderr, "head: MOCK MODE — inference and funding are simulated; do not expose publicly")
+	}
+	h := head.New(cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

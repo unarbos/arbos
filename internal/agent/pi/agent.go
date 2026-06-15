@@ -19,11 +19,16 @@ import (
 	"github.com/unarbos/arbos/internal/tool/codingspec"
 )
 
-// Options configures the pi coding agent assembly. Provider, NewStore, Clock,
+// Options configures the pi coding agent assembly. Provider, Store, Clock,
 // Cwd, and Model are required; the rest take sensible defaults.
 type Options struct {
-	Provider       ports.LLMProvider
-	NewStore       func() ports.SessionStore
+	Provider ports.LLMProvider
+	// Store is the session store every engine this assembly builds writes to —
+	// the top-level chat and each delegated child alike. It is one shared store,
+	// not a per-session factory: children are kept distinct by their Owner /
+	// SpawnedBy columns, so a sub-agent's transcript persists and replays like
+	// any other session rather than vanishing into a throwaway store.
+	Store          ports.SessionStore
 	Clock          ports.Clock
 	Cwd            string
 	AgentDir       string // user-scope config dir for skills/prompts; "" disables user scope
@@ -62,13 +67,14 @@ type Options struct {
 	// Mind, when set, is the agent's long-term memory, and it is the SELF's:
 	// recall (read) is injected at turn start, curation distills the turn at
 	// end, and the remember tool (write) is offered. Set only on the top
-	// engine (which the scheduler's wakes reuse) — not on delegated children:
-	// recall anchors on the session's own event log, which a child running on
-	// an ephemeral store does not have in the durable atom store, and a child
-	// writing global atoms is a memory-poisoning surface. Children contribute
-	// findings by returning results up to the self, which decides what to
-	// remember. Atoms remain one global set; only the read/write *operations*
-	// live at the self.
+	// engine (which the scheduler's wakes reuse) — not on delegated children.
+	// A child persists its own event log like any session, so recall could
+	// anchor on it; the operations are withheld anyway because a child is the
+	// agent's exposure to untrusted input and atoms are one global, unscoped
+	// set — letting a child write would be a memory-poisoning surface.
+	// Children contribute findings by returning results up to the self, which
+	// decides what to remember. Atoms remain one global set; only the
+	// read/write *operations* live at the self.
 	Mind *mind.Mind
 	// Plan, when set, is the agent's durable intent (internal/plan): the plan
 	// tool joins the toolset and the forest is injected at each turn start.
@@ -191,8 +197,8 @@ func (o Options) engineOptions(root, model string) []engine.Option {
 	if o.Mind != nil {
 		// Recall at turn start, curate at turn end — the self's memory loop.
 		// o.Mind is set only on the self (top engine + the wakes that reuse
-		// it), so this never wires for a child, whose recall could not anchor
-		// (its events live in an ephemeral store).
+		// it), so this never wires for a child: memory's read/write operations
+		// stay at the self even though a child's event log now persists too.
 		opts = append(opts, engine.WithContextInjector(o.Mind.Recall), engine.WithTurnEnd(o.Mind.Curate))
 	}
 	if o.Plan != nil {
@@ -252,7 +258,7 @@ func NewEngine(o Options) (*engine.Engine, error) {
 		// Compose delegation tools onto the coding (+ MCP/extension) toolset.
 		rt = tool.Multi(rt, o.ExtraTools)
 	}
-	return engine.New(o.Provider, rt, o.NewStore(), o.Clock, cfg, o.engineOptions(o.Cwd, cfg.Model)...), nil
+	return engine.New(o.Provider, rt, o.Store, o.Clock, cfg, o.engineOptions(o.Cwd, cfg.Model)...), nil
 }
 
 // NewAgent builds the pi coding agent as an ArbosAgent. Each delegation gets its
@@ -307,7 +313,7 @@ func NewAgent(o Options, newID func() core.SessionID) (*agent.ArbosAgent, error)
 		// repo's background-job table injected, matching where its tools run.
 		// Per-model too: the compaction policy budgets against the child's
 		// actual model, which may differ from the parent's.
-		return engine.New(o.Provider, childReg, o.NewStore(), o.Clock, childCfg, o.engineOptions(root, childCfg.Model)...), nil
+		return engine.New(o.Provider, childReg, o.Store, o.Clock, childCfg, o.engineOptions(root, childCfg.Model)...), nil
 	}
 	return agent.NewArbosAgent(factory, newID), nil
 }

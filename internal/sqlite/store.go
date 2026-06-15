@@ -613,6 +613,33 @@ func (s *Store) RecentOwnedSessions(ctx context.Context, limit int) ([]OwnedSess
 	return out, nil
 }
 
+// ReclaimOrphanedRuns marks every machine-spawned session (owner set) still
+// flagged active as ended, returning the count. A delegated child or scheduler
+// wake runs exactly one turn and is normally ended in a defer; a hard kill or
+// crash skips that defer and strands the row at status='active', which the
+// activity feed and a run tab then read as a perpetually-live run. The caller
+// runs this once at startup while holding the directory lock, so the previous
+// owner is gone and no such run can still be in flight — any lingering active
+// run is an orphan to retire. updated_at is deliberately left untouched so a
+// reclaimed run keeps its place in history instead of jumping to the top of the
+// activity feed. Interactive chats (owner='') are never touched: they stay
+// active to remain resumable.
+func (s *Store) ReclaimOrphanedRuns(ctx context.Context) (int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET status=? WHERE owner <> '' AND status=?`,
+		core.SessionEnded, core.SessionActive)
+	if err != nil {
+		return 0, fmt.Errorf("reclaim orphaned runs: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("reclaim orphaned runs: %w", err)
+	}
+	return int(rows), nil
+}
+
 // RecentSession is one row of the unified cross-session index the agent's
 // sessions tool reads: every session that ran at least one prompt — the user's
 // other chats and the agent's own autonomous runs — labeled by its first user

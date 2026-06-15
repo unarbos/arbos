@@ -415,6 +415,10 @@ export interface SecretMeta {
   hosts?: string[];
   /** Whether the secret is injected into tool subprocess environments. */
   env?: boolean;
+  /** Header the brokered value is injected into. Empty = Authorization/Bearer. */
+  header?: string;
+  /** Value prefix inside that header (e.g. "Bearer "). Empty = raw value. */
+  prefix?: string;
 }
 
 /** The fields a save sends: metadata plus an optional value (omit to keep). */
@@ -424,6 +428,8 @@ export interface SecretUpsert {
   value?: string;
   hosts?: string[];
   env?: boolean;
+  header?: string;
+  prefix?: string;
 }
 
 /** List the managed secrets' metadata (no values) for the Settings panel. */
@@ -447,6 +453,8 @@ export async function saveSecret(s: SecretUpsert): Promise<void> {
       value: s.value ?? "",
       hosts: s.hosts ?? [],
       env: s.env ?? false,
+      header: s.header ?? "",
+      prefix: s.prefix ?? "",
     }),
   });
   if (!res.ok) throw new Error(await errorText(res, `save secret: ${res.status}`));

@@ -12,20 +12,6 @@ import (
 	"github.com/unarbos/arbos/internal/head"
 )
 
-// accountPrefixes are the apex paths the account head owns. They are disjoint
-// from everything the forest head serves (its /v1/devices, /v1/nodes, /v1/tunnel,
-// /install.sh, /arbos, assets), so the split is unambiguous.
-var accountPrefixes = []string{
-	"/v1/chat/completions",
-	"/v1/models",
-	"/v1/signup",
-	"/v1/balance",
-	"/v1/keys",
-	"/v1/fund/",
-	"/v1/admin/",
-	"/healthz",
-}
-
 // mountAccount composes the account head (internal/head) onto the forest
 // handler when an OpenRouter key is configured. The key comes from
 // OPENROUTER_API_KEY, else <stateDir>/openrouter.key; the admin token (for the
@@ -56,26 +42,27 @@ func mountAccount(forestH http.Handler, domain, stateDir string, logf func(strin
 	if adminToken == "" {
 		adminToken = readTrimmed(filepath.Join(stateDir, "admin.token"))
 	}
-	// Crypto funding (optional): enabled when an EVM RPC + treasury address are
-	// present, from env or files beside the state (evm-rpc, treasury-addr,
-	// evm-chain-id, eth-usd). Without them the account head simply omits
-	// POST /v1/fund/evm.
+	// Crypto funding (optional): enabled when an EVM RPC is present, from env or
+	// files beside the state (evm-rpc, usdc-addr, evm-chain-id, eth-usd). Each
+	// account gets its own deposit address; without an RPC the account head
+	// simply omits the funding routes.
 	evmRPC := firstNonEmpty(os.Getenv("ARBOS_EVM_RPC"), readTrimmed(filepath.Join(stateDir, "evm-rpc")))
-	treasury := firstNonEmpty(os.Getenv("ARBOS_TREASURY_ADDR"), readTrimmed(filepath.Join(stateDir, "treasury-addr")))
+	usdc := firstNonEmpty(os.Getenv("ARBOS_USDC_ADDR"), readTrimmed(filepath.Join(stateDir, "usdc-addr")))
 	ethUSD := parseFloat(firstNonEmpty(os.Getenv("ARBOS_ETH_USD"), readTrimmed(filepath.Join(stateDir, "eth-usd"))), 3000)
 	chainID := parseInt(firstNonEmpty(os.Getenv("ARBOS_EVM_CHAIN_ID"), readTrimmed(filepath.Join(stateDir, "evm-chain-id"))), 0)
-	if evmRPC != "" && treasury != "" {
-		logf("forest: crypto funding live — treasury %s on chain %d (rpc %s)", treasury, chainID, evmRPC)
+	minConf := parseInt(firstNonEmpty(os.Getenv("ARBOS_EVM_MIN_CONF"), readTrimmed(filepath.Join(stateDir, "evm-min-conf"))), 3)
+	if evmRPC != "" {
+		logf("forest: crypto funding live — per-account deposit addresses on chain %d (rpc %s)", chainID, evmRPC)
 	}
 	acctH := head.New(head.Config{
 		Store:          store,
 		OpenRouterKey:  orKey,
 		AdminToken:     adminToken,
 		EVMRPCURL:      evmRPC,
-		EVMTreasury:    treasury,
+		EVMUSDCAddr:    usdc,
 		EVMChainID:     chainID,
 		EVMETHUSDMicro: head.MicroFromUSD(ethUSD),
-		EVMMinConf:     3,
+		EVMMinConf:     minConf,
 	}).Handler()
 
 	apex := apexHost(domain)
@@ -83,7 +70,7 @@ func mountAccount(forestH http.Handler, domain, stateDir string, logf func(strin
 	combined := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if apexHost(r.Host) == apex {
 			p := r.URL.Path
-			if hasAnyPrefix(p, accountPrefixes) || (p == "/" && browserWantsHTML(r)) {
+			if hasAnyPrefix(p, head.APIPrefixes) || (p == "/" && browserWantsHTML(r)) {
 				acctH.ServeHTTP(w, r)
 				return
 			}

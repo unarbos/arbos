@@ -13,10 +13,19 @@ import "strings"
 // The projected conversation has three regions, in order:
 //
 //  1. the base system prompt (stable);
-//  2. an injected-context block (memory/jobs/skills/retrieval) — the latest
-//     segment per source, fenced (stable prefix → prefix-cache friendly);
-//  3. the conversation, with compressed spans folded away and their summaries
-//     rendered in place at the span start.
+//  2. the conversation, with compressed spans folded away and their summaries
+//     rendered in place at the span start (append-only → stable prefix);
+//  3. an injected-context block (memory/jobs/skills/retrieval) — the latest
+//     segment per source, fenced.
+//
+// The injected-context block is the trailing suffix, NOT a prefix: its content
+// changes across turns (memory recall, the plan forest, the jobs table), and a
+// volatile block placed ahead of the conversation would invalidate the prompt
+// cache for all history behind it. Rendering it last keeps the longest possible
+// byte-stable prefix (system + append-only conversation) cacheable, and pushes
+// the only per-turn variation to the end (the cache-aware layout). The engine's
+// live request composes the same way (ProjectConversation + ProjectContext), so
+// a replay via Project and a live turn stay byte-consistent.
 //
 // Unknown/future payloads are ignored rather than rejected: a newer log read by
 // an older binary (or vice versa, post-upcasting) must still project cleanly.
@@ -26,9 +35,18 @@ func Project(events []Event, systemPrompt string) []Message {
 		msgs = append(msgs, Message{Role: RoleSystem, Content: systemPrompt})
 	}
 
-	msgs = appendContextBlock(msgs, events)
 	msgs = appendConversation(msgs, events)
+	msgs = appendContextBlock(msgs, events)
 	return msgs
+}
+
+// ProjectContext renders only the injected-context block — the latest segment
+// per source, fenced — and nothing else. The engine composes it as the trailing
+// suffix of a live request (after the conversation prefix it caches), so the
+// volatile memory/plan/jobs context never sits inside the cacheable prefix. It
+// returns nil when no context has been injected.
+func ProjectContext(events []Event) []Message {
+	return appendContextBlock(nil, events)
 }
 
 // ProjectConversation renders only the conversation region of Project — no

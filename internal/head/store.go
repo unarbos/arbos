@@ -19,6 +19,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"sync"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
@@ -55,6 +57,11 @@ type Store struct {
 // schema. WAL keeps reads concurrent with the single writer; foreign keys are
 // enforced so a stray account_id can't orphan a key or a ledger row.
 func Open(path string) (*Store, error) {
+	// Create the parent dir so the documented default (~/.config/arbos-head/…)
+	// works on a fresh self-host; modernc sqlite won't make missing dirs.
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0o700)
+	}
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -115,6 +122,16 @@ CREATE INDEX IF NOT EXISTS idx_ledger_account ON ledger_entries(account_id, ts);
 CREATE TABLE IF NOT EXISTS account_balances (
     account_id    TEXT PRIMARY KEY REFERENCES accounts(id),
     balance_micro INTEGER NOT NULL DEFAULT 0
+);
+
+-- Per-account EVM deposit address: a deposit is attributed by which account
+-- owns the destination address, so no memo/tag is needed. privkey is the
+-- 32-byte secp256k1 key that later sweeps funds to a cold treasury.
+CREATE TABLE IF NOT EXISTS deposit_addresses (
+    account_id TEXT PRIMARY KEY REFERENCES accounts(id),
+    address    TEXT    NOT NULL UNIQUE,  -- lowercased 0x EVM address
+    privkey    BLOB    NOT NULL,
+    created    INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS usage_records (

@@ -6,9 +6,10 @@
     <title>arbos — account</title>
     <meta name="description" content="Your arbos account: balance, API keys, and inference routed through arbos.life." />
     <style>
-      /* Cursor Dark — the same tokens the SPA and the login page inline
-         (web/src/index.css, internal/gateway/auth.go), so the account page
-         looks like the rest of the house. */
+      /* Cursor Dark tokens — the same palette the SPA inlines (web/src/index.css),
+         and this page mirrors the SPA's Settings layout: a sidebar beside a
+         column of section-labeled cards whose rows are title+description left,
+         control right. */
       :root {
         --canvas: #2c262a;
         --bar: #262024;
@@ -22,169 +23,226 @@
         --accent: #85aab3;
         --green: #87a883;
         --red: #c97f77;
-        --btn: #b0aaae;
+        --hover: color-mix(in srgb, var(--bright) 8%, transparent);
+        --card-50: color-mix(in srgb, var(--card) 50%, transparent);
+        --line-30: color-mix(in srgb, var(--line) 30%, transparent);
+        --line-50: color-mix(in srgb, var(--line) 50%, transparent);
         --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
         --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
       }
       * { box-sizing: border-box; }
-      html, body { margin: 0; min-height: 100%; }
+      html, body, #shell { height: 100dvh; }
       body {
-        background:
-          radial-gradient(ellipse 80% 50% at 50% -10%, color-mix(in srgb, var(--accent) 13%, transparent), transparent),
-          var(--canvas);
-        color: var(--text);
-        font-family: var(--font-sans);
-        font-size: 13px;
-        line-height: 1.6;
-        color-scheme: dark;
-        -webkit-font-smoothing: antialiased;
+        margin: 0; background: var(--canvas); color: var(--text);
+        font-family: var(--font-sans); font-size: 13px; line-height: 1.5;
+        color-scheme: dark; -webkit-font-smoothing: antialiased;
       }
       ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
-      a { color: var(--accent); text-decoration: none; }
-      a:hover { text-decoration: underline; }
 
-      .page { max-width: 40rem; margin: 0 auto; padding: 3.5rem 1.5rem 4rem; }
-
-      .hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 2rem; }
-      .eyebrow { margin: 0 0 0.5rem; color: var(--accent); font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; }
-      h1 { margin: 0 0 0.4rem; color: var(--bright); font-size: clamp(1.6rem, 4vw, 2.1rem); font-weight: 650; letter-spacing: -0.03em; line-height: 1.1; }
-      .lede { margin: 0; max-width: 30rem; color: var(--muted); font-size: 1rem; }
-
-      .panel {
-        margin-bottom: 1rem; padding: 1.1rem 1.2rem 1.2rem;
-        border: 1px solid var(--line); border-radius: 0.75rem;
-        background: color-mix(in srgb, var(--card) 88%, transparent);
+      /* ---- shell: sidebar + scrolling content (Cursor settings layout) ---- */
+      #shell { display: flex; min-height: 0; }
+      .sidebar {
+        width: 14rem; flex-shrink: 0; display: flex; flex-direction: column; gap: 0.75rem;
+        border-right: 1px solid var(--line-50); padding: 1rem 0.75rem;
       }
-      .panel h2 { margin: 0 0 0.9rem; color: var(--bright); font-size: 0.95rem; font-weight: 600; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
-
-      .balance { display: flex; align-items: baseline; gap: 0.5rem; }
-      .balance .amount { color: var(--bright); font-size: 2.4rem; font-weight: 650; letter-spacing: -0.04em; line-height: 1; }
-      .balance .unit { color: var(--muted); font-size: 1rem; }
-      .meta-row { margin-top: 0.85rem; display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; color: var(--faint); font-size: 0.82rem; }
-      .meta-row b { color: var(--muted); font-weight: 500; }
-      .mono { font-family: var(--font-mono); }
-
-      button, .btn {
-        background: var(--btn); border: 0; color: var(--canvas); font-weight: 600;
-        padding: 0.55rem 0.9rem; border-radius: 6px; font: inherit; font-weight: 600;
-        cursor: pointer; transition: background 0.12s ease;
+      .identity { display: flex; align-items: center; gap: 0.6rem; padding: 0 0.25rem; }
+      .avatar {
+        width: 1.75rem; height: 1.75rem; flex-shrink: 0; border-radius: 999px;
+        background: var(--card); color: var(--bright); font-weight: 500; font-size: 12px;
+        display: flex; align-items: center; justify-content: center;
       }
-      button:hover, .btn:hover { background: var(--bright); }
-      button.ghost {
-        background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 500;
+      .identity .who { min-width: 0; }
+      .identity .name { display: block; color: var(--bright); font-size: 12.5px; }
+      .identity .sub { display: block; color: var(--faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .nav { display: flex; flex-direction: column; gap: 2px; }
+      .nav button {
+        display: flex; align-items: center; gap: 0.5rem; width: 100%; text-align: left;
+        background: transparent; border: 0; cursor: pointer; color: var(--muted);
+        font: inherit; font-size: 12.5px; padding: 0.4rem 0.5rem; border-radius: 6px;
       }
-      button.ghost:hover { background: color-mix(in srgb, var(--bright) 8%, transparent); color: var(--bright); }
-      button.danger { background: transparent; color: var(--red); border: 1px solid color-mix(in srgb, var(--red) 35%, transparent); font-weight: 500; padding: 0.3rem 0.6rem; font-size: 0.8rem; }
-      button.danger:hover { background: color-mix(in srgb, var(--red) 14%, transparent); }
-      button[disabled] { opacity: 0.5; cursor: default; }
-      .row { display: flex; gap: 0.6rem; align-items: center; }
+      .nav button:hover { background: var(--hover); color: var(--bright); }
+      .nav button.active { background: var(--hover); color: var(--bright); }
+      .nav svg { width: 14px; height: 14px; flex-shrink: 0; stroke: currentColor; fill: none; stroke-width: 1.6; opacity: 0.85; }
+      .nav-spacer { flex: 1; }
+
+      .content { flex: 1; min-width: 0; overflow-y: auto; }
+      .content-inner { max-width: 40rem; margin: 0 auto; padding: 1.6rem 2rem 3rem; }
+
+      .section { margin-bottom: 1.5rem; }
+      .section-label { color: var(--muted); font-size: 12px; margin: 0 0 0.5rem 0.25rem; user-select: none; }
+      .card { border-radius: 0.75rem; background: var(--card-50); overflow: hidden; }
+      .card .desc { border-bottom: 1px solid var(--line-30); padding: 0.7rem 1rem; color: var(--faint); font-size: 11.5px; line-height: 1.55; }
+      .row { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; padding: 0.75rem 1rem; }
+      .row + .row, .stack + .row, .row + .stack, .stack + .stack { border-top: 1px solid var(--line-30); }
+      .rtitle { color: var(--bright); font-size: 13px; }
+      .rdesc { color: var(--muted); font-size: 12px; margin-top: 2px; }
+      .rcontrol { flex-shrink: 0; }
+      .stack { padding: 0.85rem 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
+      .flabel { color: var(--faint); font-size: 11px; }
+      .flabel .ok { color: var(--green); }
+
+      .amount { display: flex; align-items: baseline; gap: 0.4rem; }
+      .amount .num { color: var(--bright); font-size: 1.9rem; font-weight: 600; letter-spacing: -0.03em; line-height: 1; }
+      .amount .unit { color: var(--muted); font-size: 0.9rem; }
+      .mono { font-family: var(--font-mono); font-size: 12px; }
+
       input {
-        background: var(--panel); border: 1px solid var(--line); color: var(--text);
-        padding: 0.55rem 0.7rem; border-radius: 6px; font: inherit; outline: none; flex: 1; min-width: 0;
+        width: 100%; background: var(--panel); border: 1px solid var(--line); color: var(--bright);
+        border-radius: 6px; padding: 0.35rem 0.5rem; font: inherit; font-size: 12px; outline: none;
       }
+      input.mono { font-family: var(--font-mono); }
       input::placeholder { color: var(--faint); }
       input:focus { border-color: var(--accent); }
+      .field-row { display: flex; gap: 0.5rem; align-items: center; }
 
-      .lede-sub { margin: 0 0 0.9rem; color: var(--muted); }
+      button.btn { cursor: pointer; font: inherit; font-size: 12px; border-radius: 6px; border: 0; padding: 0.35rem 0.7rem; display: inline-flex; align-items: center; gap: 0.35rem; }
+      button.green { background: color-mix(in srgb, var(--green) 90%, transparent); color: #fff; }
+      button.green:hover { background: var(--green); }
+      button.green:disabled { opacity: 0.4; cursor: default; }
+      button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+      button.ghost:hover { background: var(--hover); color: var(--bright); }
+      button.danger { background: transparent; color: var(--red); border: 1px solid color-mix(in srgb, var(--red) 35%, transparent); padding: 0.25rem 0.55rem; }
+      button.danger:hover { background: color-mix(in srgb, var(--red) 14%, transparent); }
+      button.link { background: transparent; border: 0; color: var(--muted); cursor: pointer; font: inherit; font-size: 12px; }
+      button.link:hover { color: var(--bright); }
 
-      /* The one-time key reveal: a deliberate, can't-miss moment. */
-      .reveal {
-        margin-top: 0.9rem; padding: 0.85rem 1rem; border-radius: 0.6rem;
-        border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
-        background: color-mix(in srgb, var(--accent) 10%, transparent);
-      }
-      .reveal .label { color: var(--accent); font-size: 0.74rem; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 0.35rem; }
-      .reveal .hint { color: var(--muted); font-size: 0.82rem; margin-top: 0.5rem; }
-
-      .copyable {
-        position: relative; margin: 0; padding: 0.7rem 3rem 0.7rem 0.85rem; overflow-x: auto;
-        border: 1px solid var(--line); border-radius: 0.55rem; background: #241f23; cursor: pointer;
-      }
-      .copyable code { color: var(--green); font-family: var(--font-mono); font-size: 0.8rem; white-space: pre; }
-      .copyable::after { content: "copy"; position: absolute; top: 0.55rem; right: 0.7rem; color: var(--faint); font-size: 0.68rem; letter-spacing: 0.04em; text-transform: uppercase; }
+      .copyable { position: relative; margin: 0; padding: 0.6rem 3rem 0.6rem 0.75rem; overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; }
+      .copyable code { color: var(--green); font-family: var(--font-mono); font-size: 11.5px; white-space: pre; }
+      .copyable::after { content: "copy"; position: absolute; top: 0.5rem; right: 0.6rem; color: var(--faint); font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; }
       .copyable.copied::after { content: "copied"; color: var(--accent); }
 
-      .keylist { display: flex; flex-direction: column; gap: 0.5rem; }
-      .keyrow { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.6rem 0.75rem; border: 1px solid var(--line); border-radius: 0.55rem; background: color-mix(in srgb, var(--panel) 70%, transparent); }
-      .keyrow .id { color: var(--bright); font-family: var(--font-mono); font-size: 0.82rem; }
-      .keyrow .sub { color: var(--faint); font-size: 0.76rem; margin-top: 0.1rem; }
-      .keyrow.revoked .id { color: var(--faint); text-decoration: line-through; }
-      .empty { color: var(--faint); font-size: 0.88rem; }
-      .field-label { color: var(--faint); font-size: 0.74rem; letter-spacing: 0.05em; text-transform: uppercase; margin: 0.7rem 0 0.25rem; }
+      .reveal { padding: 0.85rem 1rem; border-top: 1px solid var(--line-30); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+      .reveal .rl { color: var(--accent); font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 0.35rem; }
+      .reveal .hint { color: var(--muted); font-size: 11.5px; margin-top: 0.5rem; }
 
-      .toast {
-        position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%) translateY(1rem);
-        background: var(--card); border: 1px solid var(--line); color: var(--bright);
-        padding: 0.55rem 0.9rem; border-radius: 0.55rem; font-size: 0.85rem;
-        opacity: 0; pointer-events: none; transition: opacity 0.2s ease, transform 0.2s ease;
-      }
+      .keyrow .id { color: var(--bright); font-family: var(--font-mono); font-size: 12px; }
+      .keyrow.revoked .id { color: var(--faint); text-decoration: line-through; }
+      .keyrow .sub { color: var(--faint); font-size: 11px; margin-top: 2px; }
+      .empty { color: var(--faint); font-size: 12px; padding: 0.4rem 0; }
+      .soon { color: var(--faint); font-size: 12px; }
+
+      /* ---- signed-out: a single centered card (Cursor onboarding feel) ---- */
+      #landing { display: none; place-items: center; min-height: 100dvh; padding: 1.5rem; }
+      #landing .box { width: min(26rem, 92vw); }
+      #landing h1 { color: var(--bright); font-size: 1.4rem; font-weight: 650; letter-spacing: -0.02em; margin: 0 0 0.3rem; }
+      #landing .lede { color: var(--muted); font-size: 0.95rem; margin: 0 0 1.1rem; }
+
+      .toast { position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%) translateY(1rem); background: var(--card); border: 1px solid var(--line); color: var(--bright); padding: 0.5rem 0.85rem; border-radius: 6px; font-size: 12.5px; opacity: 0; pointer-events: none; transition: opacity 0.2s, transform 0.2s; }
       .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
       .toast.err { border-color: color-mix(in srgb, var(--red) 45%, transparent); color: var(--red); }
-
-      .footer { margin-top: 2rem; color: var(--faint); font-size: 0.85rem; }
       .hidden { display: none !important; }
-      .soon { color: var(--faint); font-size: 0.82rem; }
 
-      @media (max-width: 560px) {
-        .page { padding-top: 2.25rem; }
-        .hero { flex-direction: column; }
+      @media (max-width: 640px) {
+        .sidebar { display: none; }
+        .content-inner { padding: 1.25rem 1rem 3rem; }
       }
     </style>
   </head>
   <body>
-    <main class="page">
-      <header class="hero">
-        <div>
-          <p class="eyebrow">arbos.life</p>
-          <h1>Your agent account</h1>
-          <p class="lede">A prepaid balance and an API key. Point arbos at the gateway and your calls route through here.</p>
+    <!-- Signed out: one focused card -->
+    <main id="landing">
+      <div class="box">
+        <h1>arbos account</h1>
+        <p class="lede">A prepaid balance and an API key — no email, no signup forms.</p>
+        <div class="card">
+          <div class="stack">
+            <button class="btn green" id="create-btn" onclick="createAccount()" style="justify-content:center; padding:0.5rem;">Create account &amp; get API key</button>
+          </div>
+          <div class="stack">
+            <span class="flabel">Already have a key?</span>
+            <div class="field-row">
+              <input id="existing-key" class="mono" placeholder="sk-arbos-…" autocomplete="off" spellcheck="false" />
+              <button class="btn ghost" onclick="useExistingKey()">Use key</button>
+            </div>
+          </div>
         </div>
-        <button id="signout" class="ghost hidden" onclick="signOut()">Sign out</button>
-      </header>
-
-      <!-- Signed out -->
-      <section id="landing" class="panel hidden">
-        <h2>Get started</h2>
-        <p class="lede-sub">No email, no signup forms. Create an account and get a key in one click.</p>
-        <div class="row">
-          <button id="create-btn" onclick="createAccount()">Create account &amp; get API key</button>
-        </div>
-        <div class="row" style="margin-top: 1rem;">
-          <input id="existing-key" placeholder="sk-arbos-…  (already have a key? paste it)" autocomplete="off" spellcheck="false" />
-          <button class="ghost" onclick="useExistingKey()">Use key</button>
-        </div>
-      </section>
-
-      <!-- Signed in -->
-      <section id="balance-panel" class="panel hidden">
-        <h2>Balance</h2>
-        <div class="balance"><span class="amount" id="balance-amount">—</span><span class="unit">USD</span></div>
-        <div class="meta-row">
-          <span><b>Account</b> <span class="mono" id="account-id">—</span></span>
-        </div>
-      </section>
-
-      <section id="fund-panel" class="panel hidden">
-        <h2>Add funds</h2>
-        <div id="fund-body"></div>
-      </section>
-
-      <section id="connect-panel" class="panel hidden">
-        <h2>Connect arbos</h2>
-        <p class="lede-sub">Paste this where you run arbos. The same OpenAI-compatible endpoint, your arbos key instead of OpenRouter.</p>
-        <pre class="copyable" id="connect-snippet"><code id="connect-code"></code></pre>
-      </section>
-
-      <section id="keys-panel" class="panel hidden">
-        <h2>API keys <button class="ghost" style="padding:0.3rem 0.6rem; font-size:0.8rem;" onclick="newKey()">New key</button></h2>
-        <div id="key-reveal"></div>
-        <div class="keylist" id="keylist"></div>
-      </section>
-
-      <footer class="footer">
-        <a href="https://github.com/unarbos/arbos">Source on GitHub</a>
-      </footer>
+      </div>
     </main>
+
+    <!-- Signed in: settings-style shell -->
+    <div id="shell" class="hidden">
+      <aside class="sidebar">
+        <div class="identity">
+          <span class="avatar">A</span>
+          <span class="who">
+            <span class="name">arbos account</span>
+          </span>
+        </div>
+        <nav class="nav" id="nav">
+          <button data-page="account" class="active" onclick="go('account')">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20a8 8 0 0 1 16 0"/></svg> Account
+          </button>
+          <button data-page="keys" onclick="go('keys')">
+            <svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9 2 2-2 2 2 2-3 3-2-2"/></svg> API keys
+          </button>
+          <button data-page="funding" onclick="go('funding')">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M9 9h4a2 2 0 0 1 0 4H9m0 0h5"/></svg> Add funds
+          </button>
+        </nav>
+        <div class="nav-spacer"></div>
+        <nav class="nav">
+          <button onclick="signOut()">
+            <svg viewBox="0 0 24 24"><path d="M14 4h5v16h-5"/><path d="M3 12h12m0 0l-4-4m4 4l-4 4"/></svg> Sign out
+          </button>
+        </nav>
+      </aside>
+
+      <div class="content">
+        <div class="content-inner">
+          <!-- Account -->
+          <div id="page-account">
+            <div class="section">
+              <div class="section-label">Balance</div>
+              <div class="card">
+                <div class="row">
+                  <div>
+                    <div class="rtitle">Available credits</div>
+                    <div class="rdesc">Prepaid USD spent down as your agents run inference</div>
+                  </div>
+                  <div class="rcontrol amount"><span class="num" id="bal-num">—</span><span class="unit">USD</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="section">
+              <div class="section-label">Connect arbos</div>
+              <div class="card">
+                <p class="desc">Point arbos at the gateway with your key instead of OpenRouter. Same OpenAI-compatible endpoint.</p>
+                <div class="stack">
+                  <pre class="copyable" id="connect-snippet"><code id="connect-code"></code></pre>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- API keys -->
+          <div id="page-keys" class="hidden">
+            <div class="section">
+              <div class="section-label">API keys</div>
+              <div class="card">
+                <p class="desc">Keys authenticate arbos to the gateway. The full secret is shown once at creation; only its hash is stored.</p>
+                <div class="row">
+                  <div><div class="rtitle">Create a new key</div><div class="rdesc">Scoped to this account</div></div>
+                  <div class="rcontrol"><button class="btn green" onclick="newKey()">New key</button></div>
+                </div>
+                <div id="key-reveal"></div>
+                <div id="keylist"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Add funds -->
+          <div id="page-funding" class="hidden">
+            <div class="section">
+              <div class="section-label">Add funds</div>
+              <div class="card" id="fund-card">
+                <p class="desc" id="fund-desc">Loading funding options…</p>
+                <div id="fund-body"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <div class="toast" id="toast"></div>
 
@@ -192,125 +250,188 @@
       const API = window.location.origin;
       const KEY_STORE = "arbos_key";
       let apiKey = localStorage.getItem(KEY_STORE) || "";
+      let page = "account";
 
       const $ = (id) => document.getElementById(id);
-      function show(id, on) { $(id).classList.toggle("hidden", !on); }
-      function toast(msg, isErr) {
-        const t = $("toast");
-        t.textContent = msg;
-        t.classList.toggle("err", !!isErr);
-        t.classList.add("show");
-        clearTimeout(t._t);
-        t._t = setTimeout(() => t.classList.remove("show"), 2200);
-      }
+      const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
       function authHeaders() { return { Authorization: "Bearer " + apiKey }; }
       function fmtUSD(micro) { return (micro / 1_000_000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }); }
       function fmtDate(unix) { return unix ? new Date(unix * 1000).toLocaleDateString() : "—"; }
+      function toast(msg, err) {
+        const t = $("toast"); t.textContent = msg; t.classList.toggle("err", !!err); t.classList.add("show");
+        clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove("show"), 2400);
+      }
 
       function render() {
-        const signedIn = !!apiKey;
-        ["balance-panel", "fund-panel", "connect-panel", "keys-panel", "signout"].forEach((id) => show(id, signedIn));
-        show("landing", !signedIn);
-        if (signedIn) refresh();
+        const inApp = !!apiKey;
+        $("shell").classList.toggle("hidden", !inApp);
+        $("landing").style.display = inApp ? "none" : "grid";
+        if (inApp) { go(page); refresh(); }
+      }
+
+      function go(p) {
+        page = p;
+        for (const b of document.querySelectorAll("#nav button[data-page]")) b.classList.toggle("active", b.dataset.page === p);
+        for (const id of ["account", "keys", "funding"]) $("page-" + id).classList.toggle("hidden", id !== p);
+        if (p === "funding") loadFunding();
       }
 
       async function refresh() {
         try {
           const r = await fetch(API + "/v1/balance", { headers: authHeaders() });
-          if (r.status === 401) { return logout("That key is not valid here."); }
+          if (r.status === 401) return logout("That key is not valid here.");
           const b = await r.json();
-          $("balance-amount").textContent = fmtUSD(b.balance_micro);
-          $("account-id").textContent = b.account_id;
+          $("bal-num").textContent = fmtUSD(b.balance_micro);
         } catch (e) { toast("Could not reach the gateway.", true); }
         $("connect-code").textContent =
           "export ARBOS_OPENAI_BASE_URL=" + API + "/v1\n" +
           "export ARBOS_OPENAI_API_KEY=" + apiKey + "\n" +
           "export ARBOS_MODEL=openai/gpt-4o-mini";
         refreshKeys();
-        loadFunding();
-      }
-
-      async function loadFunding() {
-        const el = $("fund-body");
-        try {
-          const r = await fetch(API + "/v1/fund/info", { headers: authHeaders() });
-          if (r.status === 503) {
-            el.innerHTML = '<p class="lede-sub soon">Crypto funding is not enabled on this head yet. A head operator can credit your account by id.</p>';
-            return;
-          }
-          const f = await r.json();
-          el.innerHTML =
-            '<p class="lede-sub">Send native ETH to the treasury on chain ' + esc(String(f.chain_id)) +
-            ', with the transaction <b>data</b> set to the tag below (it binds the deposit to your account), then paste the transaction hash.</p>' +
-            '<div class="field-label">Treasury address</div><pre class="copyable" data-copy="' + esc(f.treasury) + '"><code>' + esc(f.treasury) + '</code></pre>' +
-            '<div class="field-label">Deposit data (your account tag)</div><pre class="copyable" data-copy="' + esc(f.deposit_data) + '"><code>' + esc(f.deposit_data) + '</code></pre>' +
-            '<div class="row" style="margin-top:0.8rem;"><input id="txhash" placeholder="0x… deposit transaction hash" autocomplete="off" spellcheck="false" /><button onclick="submitDeposit()">Credit deposit</button></div>';
-          wireCopy();
-        } catch (e) {
-          el.innerHTML = '<p class="lede-sub soon">Could not load funding info.</p>';
-        }
-      }
-
-      async function submitDeposit() {
-        const tx = $("txhash").value.trim();
-        if (!tx) return;
-        try {
-          const r = await fetch(API + "/v1/fund/evm", { method: "POST", headers: authHeaders(), body: JSON.stringify({ tx_hash: tx }) });
-          const d = await r.json();
-          if (!r.ok) throw new Error(d.error?.message || "could not credit deposit");
-          toast("Credited $" + (d.credited_micro / 1_000_000).toFixed(4));
-          refresh();
-        } catch (e) {
-          toast(e.message || "Deposit failed.", true);
-        }
       }
 
       async function refreshKeys() {
         const list = $("keylist");
         try {
           const r = await fetch(API + "/v1/keys", { headers: authHeaders() });
-          const data = await r.json();
-          const keys = data.keys || [];
-          if (!keys.length) { list.innerHTML = '<div class="empty">No keys yet.</div>'; return; }
+          const keys = (await r.json()).keys || [];
+          if (!keys.length) { list.innerHTML = '<div class="row"><span class="empty">No keys yet.</span></div>'; return; }
           list.innerHTML = "";
           for (const k of keys) {
             const row = document.createElement("div");
-            row.className = "keyrow" + (k.revoked ? " revoked" : "");
+            row.className = "row keyrow" + (k.revoked ? " revoked" : "");
             const left = document.createElement("div");
             left.innerHTML = '<div class="id">' + esc(k.prefix) + '…</div><div class="sub">' +
-              esc(k.name || "unnamed") + " · created " + fmtDate(k.created) + (k.revoked ? " · revoked" : "") + "</div>";
+              esc(k.name || "unnamed") + " · " + fmtDate(k.created) + (k.revoked ? " · revoked" : "") + "</div>";
             row.appendChild(left);
             if (!k.revoked) {
               const btn = document.createElement("button");
-              btn.className = "danger";
-              btn.textContent = "Revoke";
+              btn.className = "btn danger"; btn.textContent = "Revoke";
               btn.onclick = () => revokeKey(k.id);
-              row.appendChild(btn);
+              const wrap = document.createElement("div"); wrap.className = "rcontrol"; wrap.appendChild(btn);
+              row.appendChild(wrap);
             }
             list.appendChild(row);
           }
-        } catch (e) { list.innerHTML = '<div class="empty">Could not load keys.</div>'; }
+        } catch (e) { list.innerHTML = '<div class="row"><span class="empty">Could not load keys.</span></div>'; }
       }
 
-      function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+      let fundInfo = null;
+
+      async function loadFunding() {
+        const body = $("fund-body"), desc = $("fund-desc");
+        try {
+          const r = await fetch(API + "/v1/fund/info", { headers: authHeaders() });
+          if (r.status === 503) {
+            desc.textContent = "Crypto funding is not enabled on this head yet — a head operator can credit your account by id.";
+            body.innerHTML = ""; return;
+          }
+          fundInfo = await r.json();
+          const f = fundInfo;
+          desc.textContent = f.mock
+            ? "Demo mode — payments are simulated, no wallet needed. Enter an amount and click to credit instantly."
+            : "Pay with USDC from your wallet, or send USDC/ETH to your deposit address below — either way it credits this account automatically.";
+          const payRow = (f.usdc || f.mock)
+            ? '<div class="stack"><span class="flabel">Amount (USD)</span>' +
+              '<div class="field-row"><input id="usd" type="number" min="1" step="1" value="10" /><button class="btn green" id="pay-btn" onclick="payUSDC()">' + (f.mock ? "Add credits (demo)" : "Pay with USDC") + '</button></div>' +
+              '<div id="pay-status" class="soon"></div></div>'
+            : '';
+          // Your own deposit address — send funds here directly (agents) and the
+          // deposit attributes to this account; no memo or account id needed.
+          const addrRow = f.address
+            ? '<div class="stack"><span class="flabel">Your deposit address' + (f.chain_id ? ' (chain ' + esc(String(f.chain_id)) + ')' : '') + '</span>' +
+              '<pre class="copyable" data-copy="' + esc(f.address) + '"><code>' + esc(f.address) + '</code></pre>' +
+              (f.usdc ? '<div class="rdesc" style="margin:0.35rem 0 0">USDC token <span class="mono">' + esc(f.usdc) + '</span></div>' : '') + '</div>'
+            : '';
+          // After sending directly, submit the tx hash to credit immediately
+          // (or wait for the auto-credit).
+          const agentRow = (f.address && !f.mock)
+            ? '<div class="stack"><span class="flabel">Already sent? Credit a transaction</span>' +
+              '<div class="field-row"><input id="txhash" class="mono" placeholder="0x… transaction hash" autocomplete="off" spellcheck="false" /><button class="btn ghost" onclick="submitDeposit()">Submit hash</button></div></div>'
+            : '';
+          body.innerHTML = payRow + addrRow + agentRow;
+          wireCopy();
+        } catch (e) { desc.textContent = "Could not load funding info."; body.innerHTML = ""; }
+      }
+
+      // payUSDC runs the OpenRouter-style checkout: connect MetaMask, send a USDC
+      // transfer to the treasury on Base, then poll the head to credit the
+      // account from the confirmed transaction — no hashes or account ids to
+      // copy by hand.
+      async function payUSDC() {
+        const f = fundInfo, st = $("pay-status"), btn = $("pay-btn");
+        if (!f) return;
+        const usd = parseFloat($("usd").value);
+        if (!(usd > 0)) { toast("Enter an amount.", true); return; }
+        // Demo mode: simulate the payment server-side, no wallet.
+        if (f.mock) {
+          btn.disabled = true; st.textContent = "Simulating payment…";
+          try {
+            const r = await fetch(API + "/v1/fund/mock", { method: "POST", headers: authHeaders(), body: JSON.stringify({ usd }) });
+            const d = await r.json();
+            if (!r.ok) throw new Error((d.error && d.error.message) || "failed");
+            st.textContent = ""; toast("Credited $" + (d.credited_micro / 1_000_000).toFixed(2)); refresh();
+          } catch (e) { st.textContent = ""; toast(e.message || "Failed.", true); }
+          btn.disabled = false; return;
+        }
+        if (!f.usdc) return;
+        if (!window.ethereum) { toast("No Ethereum wallet found — install MetaMask.", true); return; }
+        btn.disabled = true;
+        try {
+          st.textContent = "Connecting wallet…";
+          const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+          const from = accounts[0];
+          const want = "0x" + Number(f.chain_id).toString(16);
+          const have = await window.ethereum.request({ method: "eth_chainId" });
+          if (have !== want) {
+            try {
+              await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: want }] });
+            } catch (e) {
+              if (e.code === 4902) {
+                await window.ethereum.request({ method: "wallet_addEthereumChain", params: [{ chainId: want, chainName: "Base", rpcUrls: ["https://mainnet.base.org"], nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, blockExplorerUrls: ["https://basescan.org"] }] });
+              } else throw e;
+            }
+          }
+          const units = BigInt(Math.round(usd * 1e6)); // USDC has 6 decimals
+          // Recipient is your own per-account deposit address — the credit
+          // attributes by destination, so no memo/tag is needed.
+          const toArg = f.address.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+          const amtArg = units.toString(16).padStart(64, "0");
+          const data = "0xa9059cbb" + toArg + amtArg;
+          st.textContent = "Confirm the payment in your wallet…";
+          const txHash = await window.ethereum.request({ method: "eth_sendTransaction", params: [{ from, to: f.usdc, data }] });
+          st.textContent = "Payment sent — confirming on-chain…";
+          for (let i = 0; i < 40; i++) {
+            await new Promise((r) => setTimeout(r, 3000));
+            const rr = await fetch(API + "/v1/fund/evm", { method: "POST", headers: authHeaders(), body: JSON.stringify({ tx_hash: txHash }) });
+            const d = await rr.json();
+            if (rr.ok) { st.textContent = ""; toast("Credited $" + (d.credited_micro / 1_000_000).toFixed(2)); refresh(); btn.disabled = false; return; }
+            const msg = (d.error && d.error.message) || "";
+            if (!/confirmation|not found|pending/i.test(msg)) throw new Error(msg || "credit failed");
+            st.textContent = "Confirming on-chain… (" + ((i + 1) * 3) + "s)";
+          }
+          st.textContent = "Sent — your balance will update once it confirms. Tx " + txHash.slice(0, 12) + "…";
+        } catch (e) {
+          st.textContent = "";
+          toast(e.code === 4001 ? "Rejected in wallet." : (e.message || "Payment failed."), true);
+        }
+        btn.disabled = false;
+      }
 
       async function createAccount() {
-        const btn = $("create-btn");
-        btn.disabled = true; btn.textContent = "Creating…";
+        const btn = $("create-btn"); btn.disabled = true; btn.textContent = "Creating…";
         try {
           const r = await fetch(API + "/v1/signup", { method: "POST", body: JSON.stringify({ name: "dashboard" }) });
           const d = await r.json();
           if (!r.ok || !d.api_key) throw new Error(d.error?.message || "signup failed");
-          setKey(d.api_key);
-          render();
-          revealKey(d.api_key, "Account created. This is your API key — copy it now, it is shown only once.");
+          setKey(d.api_key); render(); go("keys");
+          revealKey(d.api_key, "Account created. Copy your API key now — it is shown only once.");
         } catch (e) { toast(e.message || "Could not create account.", true); }
         btn.disabled = false; btn.textContent = "Create account & get API key";
       }
 
       async function useExistingKey() {
-        const v = $("existing-key").value.trim();
-        if (!v) return;
+        const v = $("existing-key").value.trim(); if (!v) return;
         apiKey = v;
         const r = await fetch(API + "/v1/balance", { headers: authHeaders() }).catch(() => null);
         if (!r || r.status === 401) { apiKey = ""; return toast("That key is not valid here.", true); }
@@ -322,8 +443,7 @@
           const r = await fetch(API + "/v1/keys", { method: "POST", headers: authHeaders(), body: JSON.stringify({ name: "key" }) });
           const d = await r.json();
           if (!r.ok || !d.api_key) throw new Error(d.error?.message || "could not mint key");
-          revealKey(d.api_key, "New key minted — copy it now, it is shown only once.");
-          refreshKeys();
+          revealKey(d.api_key, "New key minted. Copy it now — it is shown only once."); refreshKeys();
         } catch (e) { toast(e.message || "Could not mint key.", true); }
       }
 
@@ -331,42 +451,43 @@
         try {
           const r = await fetch(API + "/v1/keys/" + encodeURIComponent(id) + "/revoke", { method: "POST", headers: authHeaders() });
           if (!r.ok) throw new Error("revoke failed");
-          toast("Key revoked.");
-          refreshKeys();
+          toast("Key revoked."); refreshKeys();
         } catch (e) { toast("Could not revoke key.", true); }
       }
 
+      async function submitDeposit() {
+        const tx = $("txhash").value.trim(); if (!tx) return;
+        try {
+          const r = await fetch(API + "/v1/fund/evm", { method: "POST", headers: authHeaders(), body: JSON.stringify({ tx_hash: tx }) });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d.error?.message || "could not credit deposit");
+          toast("Credited $" + (d.credited_micro / 1_000_000).toFixed(4)); refresh();
+        } catch (e) { toast(e.message || "Deposit failed.", true); }
+      }
+
       function revealKey(secret, msg) {
-        const el = $("key-reveal");
-        el.innerHTML =
-          '<div class="reveal"><div class="label">API key</div>' +
-          '<pre class="copyable" data-copy="' + esc(secret) + '"><code>' + esc(secret) + "</code></pre>" +
+        $("key-reveal").innerHTML =
+          '<div class="reveal"><div class="rl">New API key</div>' +
+          '<pre class="copyable" data-copy="' + esc(secret) + '"><code>' + esc(secret) + '</code></pre>' +
           '<div class="hint">' + esc(msg) + "</div></div>";
         wireCopy();
       }
 
       function setKey(k) { apiKey = k; localStorage.setItem(KEY_STORE, k); }
-      function logout(msg) { localStorage.removeItem(KEY_STORE); apiKey = ""; if (msg) toast(msg, true); render(); }
+      function logout(msg) { localStorage.removeItem(KEY_STORE); apiKey = ""; page = "account"; if (msg) toast(msg, true); render(); }
       function signOut() { logout(); }
 
-      // Click-to-copy for any .copyable (the connect snippet uses its own text;
-      // a data-copy attribute overrides it for the key reveal).
       function wireCopy() {
-        document.querySelectorAll(".copyable").forEach((el) => {
-          if (el._wired) return;
-          el._wired = true;
+        for (const el of document.querySelectorAll(".copyable")) {
+          if (el._wired) continue; el._wired = true;
           el.addEventListener("click", () => {
-            const text = el.getAttribute("data-copy") || el.textContent;
-            navigator.clipboard.writeText(text).then(() => {
-              el.classList.add("copied");
-              setTimeout(() => el.classList.remove("copied"), 1400);
+            navigator.clipboard.writeText(el.getAttribute("data-copy") || el.textContent).then(() => {
+              el.classList.add("copied"); setTimeout(() => el.classList.remove("copied"), 1400);
             });
           });
-        });
+        }
       }
-
-      const obs = new MutationObserver(wireCopy);
-      obs.observe(document.body, { childList: true, subtree: true });
+      new MutationObserver(wireCopy).observe(document.body, { childList: true, subtree: true });
       render();
     </script>
   </body>

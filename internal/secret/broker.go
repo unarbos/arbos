@@ -32,6 +32,17 @@ func HeaderInjector(header string) Injector {
 	}
 }
 
+// SchemeInjector sets header to prefix+value — the general form HeaderInjector
+// (empty prefix) and BearerInjector (Authorization, "Bearer ") specialize. It
+// lets a stored secret carry its own auth dialect (e.g. "Token <value>" or a
+// "prefix.secret" key sent raw) without the storage layer hand-rolling the
+// header write.
+func SchemeInjector(header, prefix string) Injector {
+	return func(req *http.Request, value []byte) {
+		req.Header.Set(header, prefix+string(value))
+	}
+}
+
 // Binding ties a secret to the hosts it may be sent to and how it is applied.
 // Hosts are matched exactly (case-insensitive) against the request hostname.
 type Binding struct {
