@@ -304,12 +304,14 @@ const Item = memo(function Item({
       // a same-door prompt queued behind a busy turn keeps the queue
       // acknowledgment. Seam connections tag prompts "web:<n>" — the counter
       // is meaningless to a person, so label the door, not the connection.
-      if (item.origin) {
+      if (item.origin || item.author) {
         return (
           <div className="flex justify-end py-1">
             <div className="max-w-[85%] rounded-md border border-line/70 bg-card px-3 py-2">
               <div className="mb-0.5 text-[10.5px] uppercase tracking-wider text-faint select-none">
-                via {item.origin.startsWith("web:") ? "another window" : item.origin}
+                {item.author
+                  ? item.author
+                  : `via ${item.origin?.startsWith("web:") ? "another window" : item.origin}`}
               </div>
               <div className="whitespace-pre-wrap break-words text-bright">{item.text}</div>
               <PartImages
@@ -559,6 +561,11 @@ function UserItem({
           // indented from the prose.
           className="group relative -mx-3 space-y-1.5 rounded-md border border-line/70 bg-card px-3 py-2 text-bright"
         >
+          {item.author && (
+            <div className="text-[10.5px] uppercase tracking-wider text-faint select-none">
+              {item.author}
+            </div>
+          )}
           <AttachmentChips files={files} onOpenSurface={onOpenSurface} />
           {body && <CollapsiblePromptBody body={body} />}
           <UserAttachments parts={item.parts} />

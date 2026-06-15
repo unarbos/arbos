@@ -853,6 +853,7 @@ type replayJSON struct {
 	Type      string              `json:"type"` // user | assistant | tool_result | interrupted
 	Seq       int64               `json:"seq"`  // source event seq, the fork point for rewind/edit
 	Text      string              `json:"text,omitempty"`
+	Author    string              `json:"author,omitempty"` // display name of a multi-party guest who sent a user message
 	Parts     []core.ContentBlock `json:"parts,omitempty"` // user-attached or assistant-generated images, for re-render
 	ToolCalls []core.ToolCall     `json:"tool_calls,omitempty"`
 	Citations []core.Citation     `json:"citations,omitempty"` // assistant web-search sources, for re-render
@@ -910,7 +911,7 @@ func (s *Server) sessionReplay(ctx context.Context, id core.SessionID) (map[stri
 			m := p.Message
 			switch m.Role {
 			case core.RoleUser:
-				out = append(out, replayJSON{Type: "user", Seq: ev.Seq, Text: m.Content, Parts: m.Parts})
+				out = append(out, replayJSON{Type: "user", Seq: ev.Seq, Text: m.Content, Parts: m.Parts, Author: m.Author})
 			case core.RoleAssistant:
 				out = append(out, replayJSON{Type: "assistant", Seq: ev.Seq, Text: m.Content, Parts: m.Parts, ToolCalls: m.ToolCalls, Citations: m.Citations})
 			default:

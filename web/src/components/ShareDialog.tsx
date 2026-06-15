@@ -260,7 +260,7 @@ export function ShareDialog({
                     ? "Full access to this agent — anyone with the link is logged in until it expires. Treat it like your own login."
                     : scope.kind === "session"
                       ? perm === "write"
-                        ? "Anyone with this link can read the conversation and send messages to the agent (running real turns)."
+                        ? "Invite people to this chat: anyone with the link picks a display name on opening, then can read the conversation and send messages (running real turns) — everyone sees who said what."
                         : "Read-only link to this conversation, including the tool output it contains."
                       : "Read-only link to this artifact (and its sibling assets)."}
             </div>

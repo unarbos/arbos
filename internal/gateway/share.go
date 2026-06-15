@@ -205,15 +205,64 @@ func (s *Server) handleShareView(w http.ResponseWriter, r *http.Request) {
 		// Served standalone like a file artifact: a self-contained snapshot
 		// page, sandboxed, with no scoped cookie and no entry into the SPA.
 		s.serveTrajectory(w, r, g)
-	case share.ScopeSession, share.ScopeAll:
-		// Both redeem the same way: set a scoped session cookie and drop the
-		// holder into the real app. The scope guard then enforces what that
-		// cookie may reach — the whole workspace for ScopeAll, just the
-		// granted chat for ScopeSession. One redemption shape, no parallel API.
-		s.setShareCookie(w, r, g)
+	case share.ScopeSession:
+		// A chat invite: the guest picks a self-asserted display name once, then
+		// lands in the SPA. The name rides in the signed scoped cookie (the
+		// trusted source for the author stamped onto their messages). A GET form
+		// posting back to the same /s/<token> keeps redemption a plain
+		// navigation — the path token is the credential, so no CSRF token needed
+		// (same rationale as the /login confirm page).
+		q := r.URL.Query()
+		if !q.Has("name") {
+			s.writeNameForm(w, g.Token)
+			return
+		}
+		name := sanitizeGuestName(q.Get("name"))
+		if name == "" {
+			name = "Guest"
+		}
+		s.setShareCookie(w, r, g, name)
+	case share.ScopeAll:
+		// Login-equivalent (a second device for the operator, not a guest): set a
+		// scoped session cookie with no display name and drop the holder into the
+		// real app. The scope guard enforces what that cookie may reach.
+		s.setShareCookie(w, r, g, "")
 	default:
 		shareGone(w)
 	}
+}
+
+// sanitizeGuestName normalizes a self-asserted display name: trims, strips
+// control chars and newlines (so the cookie JSON stays clean and the "Name:
+// <text>" projection line can't be split), and caps length. Returns "" for an
+// empty/whitespace name, which the caller maps to "Guest".
+func sanitizeGuestName(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+	s = strings.TrimSpace(s)
+	if rs := []rune(s); len(rs) > 32 {
+		s = strings.TrimSpace(string(rs[:32]))
+	}
+	return s
+}
+
+// writeNameForm renders the one-field name-entry page a chat-invite guest sees
+// before redemption. It reuses the login page chrome and posts (via GET) back to
+// the same /s/<token> with the chosen name.
+func (s *Server) writeNameForm(w http.ResponseWriter, token string) {
+	body := `<form method="GET" action="/s/` + html.EscapeString(token) + `">
+  <h1>arbos</h1>
+  <p>You’ve been invited to a chat. Pick a name the others will see.</p>
+  <input name="name" placeholder="your name" autofocus autocomplete="off" maxlength="32">
+  <button>Join chat</button>
+</form>`
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(loginPageHead + body))
 }
 
 // sandboxArtifact forces a served artifact into an opaque origin, the same

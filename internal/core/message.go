@@ -32,6 +32,13 @@ type Message struct {
 	// Empty for assistant/tool/system messages and for the local terminal. It
 	// is presentation provenance, not part of the provider projection.
 	Origin string `json:",omitempty"`
+	// Author is the self-asserted display name of the human who sent a user
+	// message, stamped server-side from a shared-session guest's cookie. It lets
+	// every door and the model attribute messages by name in a multi-party chat.
+	// Additive like Origin: empty for the local operator, assistant/tool/system
+	// messages, and single-party sessions, so it serializes identically to before
+	// and is not part of the provider projection by default. See ADR-0022 pattern.
+	Author string `json:",omitempty"`
 	// Citations are web-search sources the provider grounded this message on
 	// (an assistant turn). They are additive: a turn with no web search leaves
 	// them nil and serializes exactly as before. Unlike a tool call, a citation

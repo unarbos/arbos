@@ -33,7 +33,7 @@ export type TranscriptItem =
    * on items seeded from a replay. Rewind-and-edit forks at it directly;
    * optimistic live items carry none and fall back to text-verified matching.
    */
-  | { kind: "user"; id: number; text: string; parts?: ContentBlock[]; seq?: number }
+  | { kind: "user"; id: number; text: string; parts?: ContentBlock[]; seq?: number; author?: string }
   | {
       kind: "assistant";
       id: number;
@@ -93,6 +93,8 @@ export type TranscriptItem =
       /** Door the prompt arrived through when not this frontend (e.g.
        *  "telegram") — render it as the user speaking, not a queue ack. */
       origin?: string;
+      /** Display name of the multi-party guest who sent it, when known. */
+      author?: string;
       /** The prompt's non-text content (a photo sent from the phone). */
       parts?: ContentBlock[];
     }
@@ -521,6 +523,7 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
         id: state.nextId,
         text: ev.data.text,
         origin: ev.data.origin,
+        author: ev.data.author,
         parts: ev.data.parts,
       });
 
@@ -680,7 +683,7 @@ export function replayToItems(events: ReplayEvent[]): TranscriptItem[] {
   for (const ev of events) {
     switch (ev.type) {
       case "user":
-        items.push({ kind: "user", id: id++, text: ev.text, parts: ev.parts, seq: ev.seq });
+        items.push({ kind: "user", id: id++, text: ev.text, parts: ev.parts, seq: ev.seq, author: ev.author });
         break;
       case "assistant": {
         const images = (ev.parts ?? []).filter((p) => p.type === "image");

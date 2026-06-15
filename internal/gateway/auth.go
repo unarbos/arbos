@@ -136,6 +136,11 @@ func (a *Auth) peekToken(tok string) bool {
 type cookiePayload struct {
 	Sub string `json:"sub"`
 	Exp int64  `json:"exp"` // unix seconds
+	// Name is the self-asserted display name a shared-session guest chose when
+	// redeeming the invite. Additive: a full "local" login leaves it empty and
+	// the cookie serializes as before. It is the trusted source for the author
+	// stamped onto a guest's messages (a guest cannot assert it from a frame).
+	Name string `json:"name,omitempty"`
 }
 
 // signCookie mints a session cookie value: base64url(payload) + "." +
@@ -182,24 +187,46 @@ func (a *Auth) authenticated(r *http.Request) bool {
 	return err == nil && a.verifyCookie(c.Value)
 }
 
-// principal returns the subject of a valid session cookie ("" + false when
-// absent or invalid). It is how the scope guard tells a full-access session
-// ("local") from a scoped share session ("share:<token>").
-func (a *Auth) principal(r *http.Request) (string, bool) {
+// decodeCookie verifies and decodes the request's session cookie into its
+// payload (false when absent/invalid/expired). The single parse shared by
+// principal and principalName.
+func (a *Auth) decodeCookie(r *http.Request) (cookiePayload, bool) {
 	c, err := r.Cookie(authCookie)
 	if err != nil || !a.verifyCookie(c.Value) {
-		return "", false
+		return cookiePayload{}, false
 	}
 	enc, _, _ := strings.Cut(c.Value, ".")
 	body, err := base64.RawURLEncoding.DecodeString(enc)
 	if err != nil {
-		return "", false
+		return cookiePayload{}, false
 	}
 	var p cookiePayload
 	if json.Unmarshal(body, &p) != nil {
+		return cookiePayload{}, false
+	}
+	return p, true
+}
+
+// principal returns the subject of a valid session cookie ("" + false when
+// absent or invalid). It is how the scope guard tells a full-access session
+// ("local") from a scoped share session ("share:<token>").
+func (a *Auth) principal(r *http.Request) (string, bool) {
+	p, ok := a.decodeCookie(r)
+	if !ok {
 		return "", false
 	}
 	return p.Sub, true
+}
+
+// principalName returns the self-asserted display name carried by a valid
+// scoped-share cookie ("" when absent, invalid, or a full login). This is the
+// server-trusted author for a guest's messages.
+func (a *Auth) principalName(r *http.Request) string {
+	p, ok := a.decodeCookie(r)
+	if !ok {
+		return ""
+	}
+	return p.Name
 }
 
 // sharePrincipal is the cookie subject prefix for a scoped share session; the

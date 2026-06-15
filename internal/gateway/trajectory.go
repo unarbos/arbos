@@ -224,7 +224,13 @@ func metaItem(b *strings.Builder, k, v string) {
 
 func renderUserMessage(b *strings.Builder, ev core.Event, m core.Message) {
 	b.WriteString(`<section class="ev user">`)
-	rowHead(b, ev, "user", m.Origin)
+	// A named multi-party guest shows by name; otherwise fall back to the door
+	// marker (e.g. "telegram") the snapshot has always shown.
+	tag := m.Author
+	if tag == "" {
+		tag = m.Origin
+	}
+	rowHead(b, ev, "user", tag)
 	b.WriteString(`<pre class="text">` + esc(m.Content) + `</pre>`)
 	renderBlocks(b, m.Parts)
 	b.WriteString(`</section>`)

@@ -628,7 +628,7 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 			next := queue[0]
 			queue = queue[1:]
 			turnSeq++
-			queue = append(queue, e.processPrompt(parent, c, next.Text, next.Parts, next.Origin, turnSeq)...)
+			queue = append(queue, e.processPrompt(parent, c, next.Text, next.Parts, next.Origin, next.Author, turnSeq)...)
 		}
 	}
 	for {
@@ -646,11 +646,11 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 				// Queued acknowledgment the busy path uses, so the open tab
 				// renders what the other door said before the turn streams.
 				if it.Origin != "" {
-					c.emit(parent, core.Queued{Text: it.Text, Origin: it.Origin, Parts: it.Parts})
+					c.emit(parent, core.Queued{Text: it.Text, Origin: it.Origin, Parts: it.Parts, Author: it.Author})
 				}
 				drain(it)
 			case core.SteerIntent:
-				drain(core.PromptIntent{Text: it.Text, Parts: it.Parts})
+				drain(core.PromptIntent{Text: it.Text, Parts: it.Parts, Author: it.Author})
 			case core.InterruptIntent:
 				// Idle: there is no in-flight turn to cancel.
 			case core.ResumeIntent:
@@ -711,7 +711,7 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 // processPrompt runs a turn in a child context and races it against incoming
 // interrupts. An InterruptIntent cancels the turn's context — the structural
 // payoff of the actor model.
-func (e *Engine) processPrompt(parent context.Context, c *Conversation, text string, parts []core.ContentBlock, origin string, turnID int64) []core.PromptIntent {
+func (e *Engine) processPrompt(parent context.Context, c *Conversation, text string, parts []core.ContentBlock, origin, author string, turnID int64) []core.PromptIntent {
 	// Attach turn correlation once, here, so every downstream append and (later)
 	// log line/span joins on the same SessionID+TurnID. cctx is not cancellable
 	// itself (only turnCtx is), so it is the right context for must-persist
@@ -742,7 +742,7 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 				completedNormally = true // a panic is a terminal outcome, not an interrupt
 			}
 		}()
-		completedNormally = e.runTurn(turnCtx, c, text, parts, origin)
+		completedNormally = e.runTurn(turnCtx, c, text, parts, origin, author)
 	}()
 
 	// pendingModel holds a model switch requested while this turn ran — the
@@ -827,13 +827,13 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 				// H1: if the turn finished on its own, honor the completion and
 				// still run the steer text as the next turn (user intent).
 				if completedNormally {
-					return append(queued, core.PromptIntent{Text: it.Text, Parts: it.Parts})
+					return append(queued, core.PromptIntent{Text: it.Text, Parts: it.Parts, Author: it.Author})
 				}
 				// Silent cut: discard intra-turn queued prompts, no Interrupted.
-				return []core.PromptIntent{{Text: it.Text, Parts: it.Parts}}
+				return []core.PromptIntent{{Text: it.Text, Parts: it.Parts, Author: it.Author}}
 			case core.PromptIntent:
 				// Don't drop it: queue it and tell the user it was kept.
-				c.emit(parent, core.Queued{Text: it.Text, Origin: it.Origin, Parts: it.Parts})
+				c.emit(parent, core.Queued{Text: it.Text, Origin: it.Origin, Parts: it.Parts, Author: it.Author})
 				queued = append(queued, it)
 			case core.ApprovalResponseIntent:
 				routeResponse(c, pending, it.RequestID, it, parent)
@@ -904,6 +904,17 @@ func (e *Engine) project(events []core.Event) []core.Message {
 			}
 		}
 	}
+	// Multi-party attribution: prefix each user message with its sender's
+	// self-asserted display name so the model can tell participants apart. Like
+	// ExpandUser this is a read-side rewrite (the persisted log keeps the raw
+	// text), applied after expansion so a guest's slash command still expands.
+	// Only when Author is set — single-party sessions project byte-identically,
+	// keeping the cacheable prefix stable.
+	for i := range msgs {
+		if msgs[i].Role == core.RoleUser && msgs[i].Author != "" {
+			msgs[i].Content = msgs[i].Author + ": " + msgs[i].Content
+		}
+	}
 	return msgs
 }
 
@@ -927,7 +938,7 @@ func (e *Engine) projectContext(events []core.Event) []core.Message {
 // surfaced error, or persist failure) and false when it returned because the
 // context was cancelled (an interrupt). processPrompt uses this to tell a real
 // interrupt from one that merely raced a completing turn (H1).
-func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, userParts []core.ContentBlock, origin string) bool {
+func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, userParts []core.ContentBlock, origin, author string) bool {
 	// Attach the live-relay sink so a delegating tool can stream a child agent's
 	// events into this session's outbound stream, incrementing Depth by one for
 	// nested rendering and preserving the originating child SessionID. The depth
@@ -952,7 +963,7 @@ func (e *Engine) runTurn(ctx context.Context, c *Conversation, userText string, 
 		return qr, true
 	})
 
-	if !e.append(ctx, c, core.NewMessageEvent(c.id, core.Message{Role: core.RoleUser, Content: userText, Parts: userParts, Origin: origin}, e.clock.Now())) {
+	if !e.append(ctx, c, core.NewMessageEvent(c.id, core.Message{Role: core.RoleUser, Content: userText, Parts: userParts, Origin: origin, Author: author}, e.clock.Now())) {
 		return true
 	}
 

@@ -164,6 +164,10 @@ type Queued struct {
 	// cross-door prompt renders complete — a photo sent from a phone must
 	// appear in the open web tab, not just its caption.
 	Parts []ContentBlock `json:"parts,omitempty"`
+	// Author is the self-asserted display name of the human who sent the prompt,
+	// so other doors render the cross-door echo labeled by name in a multi-party
+	// chat. Empty for the local operator and single-party sessions.
+	Author string `json:"author,omitempty"`
 }
 
 // ApprovalRequest pauses the turn to ask whether a tool call may proceed. The

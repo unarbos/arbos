@@ -9,7 +9,7 @@ export interface SessionSummary {
 }
 
 export type ReplayEvent =
-  | { type: "user"; seq: number; text: string; parts?: ContentBlock[] }
+  | { type: "user"; seq: number; text: string; parts?: ContentBlock[]; author?: string }
   | {
       type: "assistant";
       seq: number;

@@ -117,7 +117,7 @@ export type KernelEvent =
       kind: "error";
       data: { category: ErrorKind; retryable: boolean; error: string };
     }
-  | { kind: "queued"; data: { text: string; origin?: string; parts?: ContentBlock[] } }
+  | { kind: "queued"; data: { text: string; origin?: string; author?: string; parts?: ContentBlock[] } }
   | {
       kind: "approval_request";
       data: { request_id: string; call: ToolCall; reason?: string };

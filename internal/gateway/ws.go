@@ -65,6 +65,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// session nor restructure this one. Full logins (and ScopeAll shares) have
 	// no scoped grant here and pass through untouched.
 	scoped, isScoped := shareFromContext(ctx)
+	// The guest's self-asserted display name, resolved once from the trusted
+	// scoped cookie (never the client frame) and stamped onto every prompt/steer
+	// the frame-filter forwards, so a guest cannot impersonate another name.
+	guestName := ""
+	if isScoped {
+		guestName = s.Auth.principalName(r)
+	}
 
 	// Browser -> seam: messages become newline-terminated lines on a pipe the
 	// seam's scanner reads. Closing the pipe on read failure is what lets
@@ -81,7 +88,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if isScoped {
-				line, keep := filterShareFrame(data, scoped.Scope.Ref, scoped.Perm)
+				line, keep := filterShareFrame(data, scoped.Scope.Ref, scoped.Perm, guestName)
 				if !keep {
 					continue
 				}

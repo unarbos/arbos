@@ -123,7 +123,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // holder into the real app. The cookie's life is the grant's remaining life
 // (capped at the session TTL); the full token rides in the subject so the
 // guard can resolve scope and perm on every request.
-func (s *Server) setShareCookie(w http.ResponseWriter, r *http.Request, g share.Grant) {
+func (s *Server) setShareCookie(w http.ResponseWriter, r *http.Request, g share.Grant, name string) {
 	ttl := cookieTTL
 	if !g.Expires.IsZero() {
 		if d := time.Until(g.Expires); d < ttl {
@@ -137,7 +137,7 @@ func (s *Server) setShareCookie(w http.ResponseWriter, r *http.Request, g share.
 	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
 	http.SetCookie(w, &http.Cookie{
 		Name:     authCookie,
-		Value:    s.Auth.signCookie(cookiePayload{Sub: sharePrincipal + g.Token, Exp: time.Now().Add(ttl).Unix()}),
+		Value:    s.Auth.signCookie(cookiePayload{Sub: sharePrincipal + g.Token, Exp: time.Now().Add(ttl).Unix(), Name: name}),
 		Path:     "/",
 		MaxAge:   int(ttl / time.Second),
 		HttpOnly: true,
@@ -153,7 +153,7 @@ func (s *Server) setShareCookie(w http.ResponseWriter, r *http.Request, g share.
 // only with write permission; everything else (switch, fork, set_model, other
 // sessions) is dropped, so a guest can neither drive another session nor
 // restructure this one.
-func filterShareFrame(line []byte, ref string, perm share.Perm) ([]byte, bool) {
+func filterShareFrame(line []byte, ref string, perm share.Perm, name string) ([]byte, bool) {
 	var f struct {
 		Type      string          `json:"type"`
 		SessionID string          `json:"session_id,omitempty"`
@@ -180,7 +180,16 @@ func filterShareFrame(line []byte, ref string, perm share.Perm) ([]byte, bool) {
 		// Only conversational intents — never session-structural ones
 		// (set_model, fork, compact) which would let a guest reshape the chat.
 		switch kind.Kind {
-		case "prompt", "steer", "interrupt", "approval_response", "question_response":
+		case "prompt", "steer":
+			// Stamp the guest's trusted display name onto the intent, overwriting
+			// anything the client put there — this is the only place a guest's
+			// frames pass, so it is where spoofing is foreclosed. Returns the
+			// rewritten frame; on any encode hiccup fall back to the original.
+			if out, ok := stampAuthor(line, f.Intent, name); ok {
+				return out, true
+			}
+			return line, true
+		case "interrupt", "approval_response", "question_response":
 			return line, true
 		default:
 			return nil, false
@@ -189,4 +198,60 @@ func filterShareFrame(line []byte, ref string, perm share.Perm) ([]byte, bool) {
 		// switch_session, fork, set_model, set_web_*, compact: not for a guest.
 		return nil, false
 	}
+}
+
+// stampAuthor rewrites intent.data.author on a prompt/steer frame to the
+// server-resolved name. The frame is {type:"intent", intent:{kind, data:{…}}}
+// and data unmarshals into the PromptIntent/SteerIntent struct, so setting
+// data.author makes the field flow through DecodeIntent unchanged. An empty
+// name (a full login, not a guest) is a no-op.
+func stampAuthor(line, intentRaw json.RawMessage, name string) ([]byte, bool) {
+	if name == "" {
+		return nil, false
+	}
+	var intent struct {
+		Kind string          `json:"kind"`
+		Data json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(intentRaw, &intent) != nil {
+		return nil, false
+	}
+	data := map[string]json.RawMessage{}
+	if len(intent.Data) > 0 {
+		if json.Unmarshal(intent.Data, &data) != nil {
+			return nil, false
+		}
+	}
+	nameJSON, err := json.Marshal(name)
+	if err != nil {
+		return nil, false
+	}
+	data["author"] = nameJSON
+	newData, err := json.Marshal(data)
+	if err != nil {
+		return nil, false
+	}
+	newIntent, err := json.Marshal(map[string]json.RawMessage{
+		"kind": mustJSON(intent.Kind),
+		"data": newData,
+	})
+	if err != nil {
+		return nil, false
+	}
+	// Preserve the rest of the frame; only the intent field changes.
+	var frame map[string]json.RawMessage
+	if json.Unmarshal(line, &frame) != nil {
+		return nil, false
+	}
+	frame["intent"] = newIntent
+	out, err := json.Marshal(frame)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+func mustJSON(s string) json.RawMessage {
+	b, _ := json.Marshal(s)
+	return b
 }

@@ -46,6 +46,12 @@ type PromptIntent struct {
 	Text   string         `json:"text"`
 	Parts  []ContentBlock `json:"parts,omitempty"`
 	Origin string         `json:"origin,omitempty"`
+	// Author is the self-asserted display name of the human who sent this
+	// prompt, set server-side from a shared-session guest's signed cookie (never
+	// trusted from the client frame). It lands on the user Message's Author so
+	// other doors and the model can tell participants apart in a multi-party
+	// chat. Empty for the local operator and single-party sessions.
+	Author string `json:"author,omitempty"`
 }
 
 // SteerIntent replaces the in-flight turn with new user text. When idle it
@@ -55,6 +61,9 @@ type PromptIntent struct {
 type SteerIntent struct {
 	Text  string         `json:"text"`
 	Parts []ContentBlock `json:"parts,omitempty"`
+	// Author mirrors PromptIntent.Author: the self-asserted display name of the
+	// human who sent this steer, stamped server-side.
+	Author string `json:"author,omitempty"`
 }
 
 // InterruptIntent cancels the in-flight turn, if any.
