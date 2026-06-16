@@ -1462,7 +1462,7 @@ export function ChatTab({
                 e.target.value = "";
               }}
             />
-            <div className="flex items-center justify-between px-2 pb-2">
+            <div className="flex items-center justify-between px-2 pt-1 pb-2">
               <span className="flex items-center gap-2 select-none">
                 <ModelPicker current={model} onSelect={selectModel} />
                 <ContextCircle used={usedTokens} total={contextLength} />
