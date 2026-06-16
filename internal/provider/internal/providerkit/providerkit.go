@@ -302,7 +302,15 @@ func (a *ToolAccumulator) Calls() []core.ToolCall {
 	for _, idx := range idxs {
 		c := a.byIndex[idx]
 		args := c.args.String()
-		if args == "" {
+		// A model occasionally streams malformed JSON arguments — an unescaped
+		// quote or a missing comma in a large free-text field (writing a report,
+		// recording a quoted claim). Stored raw, that invalid json.RawMessage
+		// fails json.Marshal when the assistant message is persisted, which
+		// aborts the whole turn ("couldn't save the conversation") and loses the
+		// work. Coerce empty or invalid args to {} so the call still persists;
+		// the tool then reports a normal argument error and the model can retry,
+		// rather than the kernel crashing on the model's bad JSON.
+		if args == "" || !json.Valid([]byte(args)) {
 			args = "{}"
 		}
 		out = append(out, core.ToolCall{ID: c.id, Name: c.name, Args: json.RawMessage(args)})
