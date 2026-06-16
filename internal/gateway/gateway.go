@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -153,6 +154,93 @@ type noticeFrame struct {
 	Text      string `json:"text"`
 	Session   string `json:"session,omitempty"`
 	CreatedAt int64  `json:"created_at"` // unix milliseconds
+}
+
+// rosterFrame and typingFrame are the gateway's ephemeral People-panel presence
+// signals — pushed on the same NDJSON stream as notices, never persisted, never
+// seen by the model. Like noticeFrame, an older client ignores unknown types.
+type rosterFrame struct {
+	Type    string   `json:"type"` // always "roster"
+	Session string   `json:"session"`
+	Users   []string `json:"users"` // deduped display names currently online
+}
+
+type typingFrame struct {
+	Type    string `json:"type"` // always "typing"
+	Session string `json:"session"`
+	User    string `json:"user"` // the typer's display name
+}
+
+// sessionPeers returns the live connections bound to sid — the same grouping
+// DeliverOutbox uses for session-scoped delivery. Empty sid yields none.
+func (s *Server) sessionPeers(sid string) []*wsLineWriter {
+	if sid == "" {
+		return nil
+	}
+	var out []*wsLineWriter
+	for _, c := range s.clientList() {
+		if c.boundSession() == sid {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// rosterFor is the deduped, sorted set of NAMED participants present on a
+// session. Unnamed connections (a host that never set a display name) are
+// omitted — the roster shows real people, not a placeholder.
+func (s *Server) rosterFor(sid string) []string {
+	seen := map[string]bool{}
+	var names []string
+	for _, c := range s.sessionPeers(sid) {
+		n := c.displayName()
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// broadcastRoster pushes the current online roster to every connection on a
+// session. Ephemeral and gateway-only; it never touches the kernel log.
+func (s *Server) broadcastRoster(sid string) {
+	peers := s.sessionPeers(sid)
+	if len(peers) == 0 {
+		return
+	}
+	b, err := json.Marshal(rosterFrame{Type: "roster", Session: sid, Users: s.rosterFor(sid)})
+	if err != nil {
+		return
+	}
+	line := append(b, '\n')
+	for _, c := range peers {
+		_, _ = c.Write(line)
+	}
+}
+
+// broadcastTyping relays a typing ping to the OTHER connections on the sender's
+// session (suppressing the sender by pointer). There is no server-side typing
+// state — the recipient clears each typer after a short idle window.
+func (s *Server) broadcastTyping(sender *wsLineWriter) {
+	sid := sender.boundSession()
+	name := sender.displayName()
+	if sid == "" || name == "" {
+		return
+	}
+	b, err := json.Marshal(typingFrame{Type: "typing", Session: sid, User: name})
+	if err != nil {
+		return
+	}
+	line := append(b, '\n')
+	for _, c := range s.sessionPeers(sid) {
+		if c == sender {
+			continue
+		}
+		_, _ = c.Write(line)
+	}
 }
 
 // DeliverOutbox is the browser door on the outbox (the agent's voice between
@@ -854,7 +942,7 @@ type replayJSON struct {
 	Seq       int64               `json:"seq"`  // source event seq, the fork point for rewind/edit
 	Text      string              `json:"text,omitempty"`
 	Author    string              `json:"author,omitempty"` // display name of a multi-party guest who sent a user message
-	Parts     []core.ContentBlock `json:"parts,omitempty"` // user-attached or assistant-generated images, for re-render
+	Parts     []core.ContentBlock `json:"parts,omitempty"`  // user-attached or assistant-generated images, for re-render
 	ToolCalls []core.ToolCall     `json:"tool_calls,omitempty"`
 	Citations []core.Citation     `json:"citations,omitempty"` // assistant web-search sources, for re-render
 	CallID    string              `json:"call_id,omitempty"`

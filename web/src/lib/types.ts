@@ -159,6 +159,11 @@ export type Intent =
 export type ClientFrame =
   | { type: "open"; session_id?: string }
   | { type: "intent"; intent: Intent }
+  // Gateway-local ephemeral People-panel signals — never reach control.Serve or
+  // the kernel. "hello" announces the host's display name (a guest's is
+  // server-stamped); "typing" is a debounced typing ping.
+  | { type: "hello"; name: string }
+  | { type: "typing" }
   | { type: "set_model"; model: string }
   | { type: "set_web_search"; enabled: boolean }
   | { type: "set_web_fetch"; enabled: boolean }
@@ -183,4 +188,8 @@ export type ServerFrame =
   // Gateway-level outbox delivery: the agent's voice between turns
   // (scheduled firings, finished background work). Not part of control.Serve.
   /** session names the owning chat; "" / absent = ambient broadcast. */
-  | { type: "notice"; text: string; session?: string; created_at: number };
+  | { type: "notice"; text: string; session?: string; created_at: number }
+  // Ephemeral People-panel presence: roster is the deduped online names for a
+  // session; typing is a single typer's name (the client clears it on a timer).
+  | { type: "roster"; session: string; users: string[] }
+  | { type: "typing"; session: string; user: string };

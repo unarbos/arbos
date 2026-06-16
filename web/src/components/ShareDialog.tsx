@@ -3,7 +3,7 @@ import { Check, Copy, Loader2, X } from "lucide-react";
 
 import { shareArtifact, type SharePerm, type ShareScope } from "@/lib/api";
 import { useClipboard } from "@/lib/useClipboard";
-import { hostName, setHostName } from "@/lib/identity";
+import { hostName, markSharedSession, setHostName } from "@/lib/identity";
 
 // The permission tiers offered per scope. A chat can be read-only or
 // read+talk (the recipient can converse with the agent); a file artifact is
@@ -105,6 +105,8 @@ export function ShareDialog({
       const link = await shareArtifact(effScope, ttl, perm);
       setUrl(link);
       copyLink(link);
+      // A live chat link means collaborators may join — open the People panel.
+      if (effScope.kind === "session") markSharedSession(scope.ref);
     } catch {
       setError(
         "Sharing needs a remotely reachable arbos (a forest join or a non-loopback bind).",

@@ -39,7 +39,12 @@ import {
   type ModelOption,
 } from "@/lib/api";
 import { notifyRunComplete } from "@/lib/notify";
-import { hostName, onHostNameChange } from "@/lib/identity";
+import {
+  hostName,
+  isSharedSession,
+  onHostNameChange,
+  onSharedChange,
+} from "@/lib/identity";
 import {
   blobBase64,
   cancelRecording,
@@ -252,6 +257,7 @@ export function ChatTab({
   resumeId,
   handle,
   readOnly,
+  sharedTab,
 }: {
   active: boolean;
   focused: boolean;
@@ -262,6 +268,9 @@ export function ChatTab({
   /** Read-only view (a read-scoped share): render the transcript, but no
    *  composer or interactive cards — the viewer can watch, not drive. */
   readOnly?: boolean;
+  /** This tab is a shared session (a guest arrived via a share link): open the
+   *  People panel by default. The host's tab opens it once it shares. */
+  sharedTab?: boolean;
 }) {
   const [chat, dispatch] = useReducer(chatReducer, initialChatState);
   const [connState, setConnState] = useState<ConnectionState>("idle");
@@ -273,14 +282,43 @@ export function ChatTab({
   // The host's display name for this chat (set in the Share dialog). Kept in
   // state so setting it relabels the host's own messages live.
   const [selfName, setSelfName] = useState(() => hostName(resumeId));
+  // Mirror selfName into a ref so the long-lived seam handlers (built once) read
+  // the current value rather than the value captured at construction.
+  const selfNameRef = useRef(selfName);
+  selfNameRef.current = selfName;
   // People panel: human-to-human side chat for collaborators on this board,
   // separate from the agent transcript and never seen by the model.
   const [people, setPeople] = useState<PeopleMessage[]>([]);
   const peopleIdRef = useRef(1);
-  const [peopleOpen, setPeopleOpen] = useState(false);
-  const peopleOpenRef = useRef(false);
+  // The People panel opens only on a shared tab — a guest who arrived via a
+  // share link (sharedTab), or once the host shares this session. A solo,
+  // unshared tab keeps it collapsed. Collapsing it leaves a rail with badges.
+  const [peopleOpen, setPeopleOpen] = useState(
+    () => !!sharedTab || isSharedSession(resumeId),
+  );
+  const peopleOpenRef = useRef(peopleOpen);
   peopleOpenRef.current = peopleOpen;
   const [peopleUnread, setPeopleUnread] = useState(0);
+  // Ephemeral presence: who's online (roster) and who's currently typing. Both
+  // arrive as gateway frames, never persisted. Each typer auto-clears after a
+  // short idle window via a per-name timer.
+  const [roster, setRoster] = useState<string[]>([]);
+  const [typing, setTyping] = useState<string[]>([]);
+  const typingTimers = useRef<Map<string, number>>(new Map());
+  const lastTypingPing = useRef(0); // throttle outbound typing pings
+  const noteTyping = useCallback((name: string) => {
+    setTyping((t) => (t.includes(name) ? t : [...t, name]));
+    const timers = typingTimers.current;
+    const prev = timers.get(name);
+    if (prev) window.clearTimeout(prev);
+    timers.set(
+      name,
+      window.setTimeout(() => {
+        timers.delete(name);
+        setTyping((t) => t.filter((n) => n !== name));
+      }, 3000),
+    );
+  }, []);
   // Messages composed while a turn runs wait here (Cursor's queue): each can
   // be edited back into the composer, deleted, or pushed (sent now as a
   // steer). The head auto-sends when the turn completes.
@@ -423,8 +461,17 @@ export function ChatTab({
         setRebinding(false);
         const rebound = gap && id === sessionRef.current;
         gap = false;
+        // Switching to a different session: drop the previous room's presence.
+        if (sessionRef.current && sessionRef.current !== id) {
+          setRoster([]);
+          setTyping([]);
+        }
         sessionRef.current = id;
         setBoundSession(id);
+        // Announce our display name so the roster names us (host name is
+        // client-side; a guest's announce is ignored server-side). Re-fires on
+        // every rebind, so a reconnect re-registers us automatically.
+        seam.announceName(hostName(id));
         handleRef.current.onSession?.(id);
         if (rebound) reconcileAfterGap();
       },
@@ -499,6 +546,15 @@ export function ChatTab({
         // exactly once.
         if (session === sessionRef.current || focusedRef.current) {
           dispatch({ type: "notice", text });
+        }
+      },
+      onRoster: (session, users) => {
+        if (session === sessionRef.current) setRoster(users);
+      },
+      onTyping: (session, user) => {
+        // The gateway already suppresses the sender; skip self defensively too.
+        if (session === sessionRef.current && user !== selfNameRef.current) {
+          noteTyping(user);
         }
       },
       onError: (msg) => {
@@ -1165,11 +1221,32 @@ export function ChatTab({
   );
 
   // Keep selfName synced to the bound session and to live changes from the
-  // Share dialog, so the host's own messages (past included) relabel at once.
+  // Share dialog, so the host's own messages (past included) relabel at once —
+  // and re-announce the new name so the roster updates for everyone.
   useEffect(() => {
     setSelfName(hostName(boundSession));
     if (!boundSession) return;
-    return onHostNameChange(boundSession, setSelfName);
+    return onHostNameChange(boundSession, (name) => {
+      setSelfName(name);
+      seamRef.current?.announceName(name);
+    });
+  }, [boundSession]);
+
+  // Drop any pending typing-clear timers when the tab unmounts.
+  useEffect(() => {
+    const timers = typingTimers.current;
+    return () => {
+      for (const id of timers.values()) window.clearTimeout(id);
+      timers.clear();
+    };
+  }, []);
+
+  // Open the People panel the moment this session is shared (the host mints a
+  // link). Also covers a session bound after mount that was shared earlier.
+  useEffect(() => {
+    if (!boundSession) return;
+    if (isSharedSession(boundSession)) setPeopleOpen(true);
+    return onSharedChange(boundSession, () => setPeopleOpen(true));
   }, [boundSession]);
 
   /** Edit: pull a queued message back into the composer. */
@@ -1282,35 +1359,52 @@ export function ChatTab({
   // tabs never start fresh — their history is already on its way.
   const fresh = !resumeId && chat.items.length === 0;
 
-  // The People panel (human-to-human side chat) docks as a right-edge drawer,
-  // toggled by a small button. Present in both the read-only and normal views:
-  // a read-only guest can still read it (canPost gates only the composer).
-  const peoplePanel = peopleOpen ? (
-    <div className="absolute inset-y-0 right-0 z-20 w-72 max-w-[85%] shadow-xl shadow-black/30">
+  // Throttled typing ping: at most one per ~1.5s while actively typing; the
+  // recipient clears each typer after a 3s idle window, so gaps are covered.
+  const emitTyping = useCallback(() => {
+    const now = Date.now();
+    if (now - lastTypingPing.current < 1500) return;
+    lastTypingPing.current = now;
+    seamRef.current?.typingPing();
+  }, []);
+
+  // The People panel docks as a right column when shared. Collapsing it leaves a
+  // thin rail that still surfaces unread + typing activity.
+  const someoneTyping = typing.some((n) => n !== selfName);
+  const peopleColumn = peopleOpen ? (
+    <div className="flex min-h-0 w-72 shrink-0 flex-col">
       <PeopleChat
         messages={people}
         selfName={selfName}
         canPost={!readOnly}
+        roster={roster}
+        typing={typing}
         onSend={sendPeople}
+        onTyping={emitTyping}
         onClose={() => setPeopleOpen(false)}
       />
     </div>
-  ) : null;
-  const peopleToggle = (
+  ) : (
     <button
       type="button"
       onClick={() => {
-        setPeopleOpen((v) => !v);
+        setPeopleOpen(true);
         setPeopleUnread(0);
       }}
-      title="People on this board"
-      className="absolute right-2 top-2 z-30 flex items-center gap-1 rounded-md border border-line bg-card/90 px-2 py-1 text-[11.5px] text-muted backdrop-blur transition-colors hover:text-text"
+      title={someoneTyping ? "Someone is typing…" : "People on this board"}
+      className="flex w-9 shrink-0 flex-col items-center gap-1 border-l border-line bg-panel pt-2.5 text-muted transition-colors hover:text-text"
     >
-      <Users size={13} />
-      {peopleUnread > 0 && !peopleOpen && (
-        <span className="rounded-full bg-accent px-1.5 text-[10px] font-semibold text-canvas">
+      <Users size={15} />
+      {peopleUnread > 0 && (
+        <span className="rounded-full bg-accent px-1 text-[10px] font-semibold text-canvas">
           {peopleUnread}
         </span>
+      )}
+      {someoneTyping && peopleUnread === 0 && (
+        <span
+          aria-label="typing"
+          className="size-1.5 animate-pulse rounded-full bg-accent"
+        />
       )}
     </button>
   );
@@ -1319,16 +1413,18 @@ export function ChatTab({
   // interactive cards (queue/approval/questions), nothing to drive with.
   if (readOnly) {
     return (
-      <div ref={rootRef} className="relative flex min-h-0 flex-1 flex-col">
-        <ChatView items={chat.items} working={working} hooks={transcriptHooks} />
-        {peoplePanel}
-        {peopleToggle}
+      <div ref={rootRef} className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 flex-1 flex-col">
+          <ChatView items={chat.items} working={working} hooks={transcriptHooks} />
+        </div>
+        {peopleColumn}
       </div>
     );
   }
 
   return (
-    <div ref={rootRef} className="relative flex min-h-0 flex-1 flex-col">
+    <div ref={rootRef} className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1 flex-col">
       {!fresh && (
         <ChatView items={chat.items} working={working} hooks={transcriptHooks} />
       )}
@@ -1554,8 +1650,8 @@ export function ChatTab({
           </div>
         </div>
       </div>
-      {peoplePanel}
-      {peopleToggle}
+      </div>
+      {peopleColumn}
     </div>
   );
 }

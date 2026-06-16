@@ -28,6 +28,10 @@ export interface SeamHandlers {
   /** Outbox delivery (gateway broadcast): an ambient message between turns. */
   /** Outbox delivery; session is the owning chat ("" = ambient broadcast). */
   onNotice?: (text: string, session: string) => void;
+  /** Ephemeral People-panel presence: the current online roster for a session. */
+  onRoster?: (session: string, users: string[]) => void;
+  /** A participant is typing in the People panel (cleared client-side on idle). */
+  onTyping?: (session: string, user: string) => void;
 }
 
 function wsUrl(): string {
@@ -91,6 +95,12 @@ export class SeamClient {
         case "notice":
           this.handlers.onNotice?.(frame.text, frame.session ?? "");
           break;
+        case "roster":
+          this.handlers.onRoster?.(frame.session, frame.users);
+          break;
+        case "typing":
+          this.handlers.onTyping?.(frame.session, frame.user);
+          break;
       }
     };
   }
@@ -142,6 +152,19 @@ export class SeamClient {
     const data: Extract<Intent, { kind: "chat_note" }>["data"] = { text };
     if (author) data.author = author;
     return this.intent({ kind: "chat_note", data });
+  }
+
+  /** Announce this connection's display name for the presence roster. The host
+   *  asserts its localStorage name; a guest's name is server-stamped, so the
+   *  gateway ignores this for scoped guests (anti-spoof). */
+  announceName(name: string): boolean {
+    return this.send({ type: "hello", name });
+  }
+
+  /** Ephemeral typing ping for the People panel. The caller debounces it; the
+   *  server relays it to other participants, who clear it on an idle timer. */
+  typingPing(): boolean {
+    return this.send({ type: "typing" });
   }
 
   /** Switch the model for this session (server's set_model shorthand). */

@@ -12,7 +12,23 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/unarbos/arbos/internal/control"
+	"github.com/unarbos/arbos/internal/share"
 )
+
+// localFrameType detects the two gateway-local ephemeral client frames
+// (presence/typing) by a cheap prefix check, so ordinary prompt/intent frames
+// fall straight through to the seam without an extra unmarshal. The web client
+// always serializes these with "type" first.
+func localFrameType(data []byte) (string, bool) {
+	switch {
+	case bytes.HasPrefix(data, []byte(`{"type":"hello"`)):
+		return "hello", true
+	case bytes.HasPrefix(data, []byte(`{"type":"typing"`)):
+		return "typing", true
+	default:
+		return "", false
+	}
+}
 
 // wsPingInterval keeps browser-facing sockets warm. The seam is silent
 // between turns, and every hop in between (forest relay, TLS terminator,
@@ -73,6 +89,20 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		guestName = s.Auth.principalName(r)
 	}
 
+	lw := &wsLineWriter{ctx: ctx, c: c, srv: s}
+	// A scoped guest's name is server-authoritative (from the cookie); set it now
+	// so the roster names them the moment they bind. The host announces its own
+	// name over the wire (a "hello" frame), since it lives client-side.
+	if guestName != "" {
+		lw.setName(guestName)
+	}
+	s.register(lw) // join the outbox + presence fan-out for the connection's life
+	defer func() {
+		sid := lw.boundSession()
+		s.unregister(lw)
+		s.broadcastRoster(sid) // the room learns this connection left
+	}()
+
 	// Browser -> seam: messages become newline-terminated lines on a pipe the
 	// seam's scanner reads. Closing the pipe on read failure is what lets
 	// control.Serve observe EOF and run its drain-then-exit path.
@@ -85,6 +115,32 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if typ != websocket.MessageText {
+				continue
+			}
+			// Gateway-local ephemeral frames (presence/typing) are handled here
+			// and NEVER piped to control.Serve or the engine — they're transport
+			// state, not kernel events.
+			if t, ok := localFrameType(data); ok {
+				switch t {
+				case "hello":
+					// The host announces its display name; a scoped guest's name
+					// is server-authoritative, so its announce is ignored
+					// (anti-spoof, mirroring stampAuthor).
+					if !isScoped {
+						var f struct {
+							Name string `json:"name"`
+						}
+						if json.Unmarshal(data, &f) == nil && lw.setName(sanitizeGuestName(f.Name)) {
+							s.broadcastRoster(lw.boundSession())
+						}
+					}
+				case "typing":
+					// Only write-capable connections emit typing — a read-only
+					// guest can't post, so it can't be "typing" either.
+					if !isScoped || scoped.Perm >= share.PermWrite {
+						s.broadcastTyping(lw)
+					}
+				}
 				continue
 			}
 			if isScoped {
@@ -102,10 +158,6 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
-
-	lw := &wsLineWriter{ctx: ctx, c: c}
-	s.register(lw) // join the outbox fan-out for the connection's lifetime
-	defer s.unregister(lw)
 
 	err = control.Serve(ctx, s.Engine, pr, lw, s.NewSessionID, s.Drain)
 	if err != nil && ctx.Err() == nil {
@@ -127,10 +179,35 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 type wsLineWriter struct {
 	ctx context.Context
 	c   *websocket.Conn
+	srv *Server // back-ref so a session bind can refresh the presence roster
 	mu  sync.Mutex
 
 	sessMu  sync.Mutex
 	session string
+
+	// name is the connection's display name for the People-panel roster: a
+	// guest's server-stamped cookie name, or the host's client-announced name.
+	// Ephemeral, gateway-only — never on the kernel log.
+	nameMu sync.Mutex
+	name   string
+}
+
+func (w *wsLineWriter) displayName() string {
+	w.nameMu.Lock()
+	defer w.nameMu.Unlock()
+	return w.name
+}
+
+// setName records the connection's display name, reporting whether it changed
+// (so the caller only re-broadcasts the roster on a real change).
+func (w *wsLineWriter) setName(n string) bool {
+	w.nameMu.Lock()
+	defer w.nameMu.Unlock()
+	if w.name == n {
+		return false
+	}
+	w.name = n
+	return true
 }
 
 // boundFrame is the slice of a server frame that names a session binding.
@@ -152,8 +229,19 @@ func (w *wsLineWriter) sniffSession(p []byte) {
 	switch f.Type {
 	case "opened", "switched", "forked":
 		w.sessMu.Lock()
+		old := w.session
 		w.session = f.SessionID
 		w.sessMu.Unlock()
+		// A new binding changes who is present on both the old and new session.
+		// Broadcast asynchronously: this runs inside the hot Write path, and
+		// broadcastRoster writes to peers (locking their mu) — doing it inline
+		// would re-enter this connection's own Write and reorder frames.
+		if w.srv != nil && f.SessionID != old {
+			go w.srv.broadcastRoster(f.SessionID)
+			if old != "" {
+				go w.srv.broadcastRoster(old)
+			}
+		}
 	}
 }
 

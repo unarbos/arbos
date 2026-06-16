@@ -60,3 +60,41 @@ export function onHostNameChange(
   window.addEventListener(EVENT, handler);
   return () => window.removeEventListener(EVENT, handler);
 }
+
+// Whether a chat has been shared (a session link minted). Drives whether the
+// People panel opens by default — a solo, unshared tab keeps it closed; sharing
+// (or arriving via a share link) opens it.
+const SHARED_PREFIX = "arbos:shared:";
+const SHARED_EVENT = "arbos:shared";
+
+export function isSharedSession(sessionId: string | null | undefined): boolean {
+  if (!sessionId) return false;
+  try {
+    return localStorage.getItem(SHARED_PREFIX + sessionId) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function markSharedSession(sessionId: string): void {
+  try {
+    localStorage.setItem(SHARED_PREFIX + sessionId, "1");
+  } catch {
+    // localStorage unavailable — the panel just won't auto-open until reload.
+  }
+  try {
+    window.dispatchEvent(new CustomEvent(SHARED_EVENT, { detail: { sessionId } }));
+  } catch {
+    // No window (SSR/tests).
+  }
+}
+
+/** Subscribe to "this session was shared" for one session id. */
+export function onSharedChange(sessionId: string, fn: () => void): () => void {
+  const handler = (e: Event) => {
+    const detail = (e as CustomEvent<{ sessionId: string }>).detail;
+    if (detail && detail.sessionId === sessionId) fn();
+  };
+  window.addEventListener(SHARED_EVENT, handler);
+  return () => window.removeEventListener(SHARED_EVENT, handler);
+}

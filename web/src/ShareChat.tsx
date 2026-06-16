@@ -26,6 +26,7 @@ export function ShareChat({ session, perm }: { session: string; perm: SharePerm 
         focusTick={0}
         resumeId={session}
         readOnly={!canWrite}
+        sharedTab
         handle={{}}
       />
     </div>
