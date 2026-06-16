@@ -113,7 +113,7 @@ export function ChatView({
     <div
       ref={scrollRef}
       onScroll={onScroll}
-      className="min-h-0 flex-1 overflow-y-auto"
+      className="min-h-0 min-w-0 flex-1 overflow-y-auto"
     >
       <TranscriptList items={items} working={working} hooks={hooks} />
     </div>
@@ -255,7 +255,7 @@ const Item = memo(function Item({
 
     case "assistant":
       return (
-        <div className="group/msg break-words py-1">
+        <div className="group/msg min-w-0 break-words py-1">
           <Markdown content={item.text} streaming={item.streaming} />
           {item.images && item.images.length > 0 && (
             <PartImages
@@ -570,7 +570,7 @@ function UserItem({
           // negative margin cancels the px), so a prompt and the answer beneath
           // it line up on the same left edge instead of the card text sitting
           // indented from the prose.
-          className="group relative -mx-3 space-y-1.5 rounded-md border border-line/70 bg-card px-3 py-2 text-bright"
+          className="group relative -mx-3 min-w-0 space-y-1.5 rounded-md border border-line/70 bg-card px-3 py-2 text-bright"
         >
           {author && (
             <div className="text-[10.5px] uppercase tracking-wider text-faint select-none">

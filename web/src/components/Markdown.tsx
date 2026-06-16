@@ -472,14 +472,14 @@ function CodeBlock({
   caret?: ReactNode;
 }) {
   return (
-    <div className="overflow-hidden rounded-md border border-line/80">
+    <div className="min-w-0 overflow-hidden rounded-md border border-line/80">
       <div className="flex items-center justify-between bg-card px-3 py-1">
         <span className="text-[11px] text-faint select-none">
           {lang || "text"}
         </span>
         <CopyButton text={content} />
       </div>
-      <pre className="overflow-x-auto px-3 py-2 font-mono text-[11.5px] leading-relaxed text-text/90">
+      <pre className="min-w-0 max-w-full overflow-x-auto px-3 py-2 font-mono text-[11.5px] leading-relaxed text-text/90">
         <code>
           {/* While the fence is still streaming (caret present) the text is
               plain — re-tokenizing a growing block per delta is O(n²) churn.
@@ -780,7 +780,7 @@ function InlineContent({ text }: { text: string }) {
             return (
               <code
                 key={i}
-                className="rounded-[4px] bg-hover px-[5px] py-px font-mono text-[0.85em] text-bright"
+                className="rounded-[4px] bg-hover px-[5px] py-px font-mono text-[0.85em] text-bright break-all"
               >
                 {node.content}
               </code>
@@ -834,7 +834,7 @@ function InlineContent({ text }: { text: string }) {
                 href={href}
                 target="_blank"
                 rel="noreferrer"
-                className="text-accent decoration-accent/40 underline-offset-2 hover:underline"
+                className="break-all text-accent decoration-accent/40 underline-offset-2 hover:underline"
               >
                 {node.text}
               </a>

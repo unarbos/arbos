@@ -1298,15 +1298,15 @@ export function ChatTab({
   // interactive cards (queue/approval/questions), nothing to drive with.
   if (readOnly) {
     return (
-      <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
+      <div ref={rootRef} className="flex min-h-0 min-w-0 flex-1 flex-col">
         <ChatView items={chat.items} working={working} hooks={transcriptHooks} />
       </div>
     );
   }
 
   return (
-    <div ref={rootRef} className="flex min-h-0 flex-1">
-      <div className="relative flex min-h-0 flex-1 flex-col">
+    <div ref={rootRef} className="flex min-h-0 min-w-0 flex-1">
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       {!fresh && (
         <ChatView items={chat.items} working={working} hooks={transcriptHooks} />
       )}
