@@ -6,7 +6,6 @@ import {
   Mic,
   Paperclip,
   Square,
-  Users,
   X,
 } from "lucide-react";
 
@@ -291,30 +290,11 @@ export function ChatTab({
   const selfNameRef = useRef(selfName);
   selfNameRef.current = selfName;
   // People side chat: a human-to-human board for collaborators, separate from
-  // the agent transcript and never seen by the model. It lives in its own tab
-  // (the "people" surface) which owns the message list + sends; the chat tab
-  // only watches its own seam to keep the rail's unread badge current.
-  // Notes that arrived since the People tab was last opened from this rail.
-  const [peopleUnread, setPeopleUnread] = useState(0);
-  // Ephemeral presence the rail reflects: who's currently typing in the People
-  // tab. Arrives as gateway frames, never persisted; each typer auto-clears
-  // after a short idle window via a per-name timer. (The full roster + message
-  // list live in the People surface, which runs its own scoped seam.)
-  const [typing, setTyping] = useState<string[]>([]);
-  const typingTimers = useRef<Map<string, number>>(new Map());
-  const noteTyping = useCallback((name: string) => {
-    setTyping((t) => (t.includes(name) ? t : [...t, name]));
-    const timers = typingTimers.current;
-    const prev = timers.get(name);
-    if (prev) window.clearTimeout(prev);
-    timers.set(
-      name,
-      window.setTimeout(() => {
-        timers.delete(name);
-        setTyping((t) => t.filter((n) => n !== name));
-      }, 3000),
-    );
-  }, []);
+  // the agent transcript and never seen by the model. It lives entirely in its
+  // own panel (the "people" surface) — a normal tab opened from the top row,
+  // splittable like any other — which owns the roster, message list, presence,
+  // and sends on its own scoped seam. The chat tab holds no People UI of its
+  // own.
   // Messages composed while a turn runs wait here (Cursor's queue): each can
   // be edited back into the composer, deleted, or pushed (sent now as a
   // steer). The head auto-sends when the turn completes.
@@ -454,10 +434,6 @@ export function ChatTab({
         setRebinding(false);
         const rebound = gap && id === sessionRef.current;
         gap = false;
-        // Switching to a different session: drop the previous room's presence.
-        if (sessionRef.current && sessionRef.current !== id) {
-          setTyping([]);
-        }
         sessionRef.current = id;
         setBoundSession(id);
         // Announce our display name so the roster names us (host name is
@@ -480,14 +456,11 @@ export function ChatTab({
         }
       },
       onEnvelope: (env) => {
-        // A human-to-human side-chat line belongs to the People tab, not the
-        // agent transcript. The surface holds the messages; here we only bump
-        // the rail's unread badge when that tab isn't open. Own lines are
-        // suppressed server-side (the connOrigin echo filter), so a live
-        // chat_note here is always from someone else. depth>0 (a delegated
-        // child) never surfaces here.
+        // A human-to-human side-chat line belongs to the People panel, not the
+        // agent transcript: the People surface owns the message list on its own
+        // scoped seam, so the chat tab simply ignores chat_notes here. depth>0
+        // (a delegated child) never surfaces here.
         if (env.depth === 0 && env.event.kind === "chat_note") {
-          setPeopleUnread((n) => n + 1);
           return;
         }
         // The agent presenting a file (the show tool) opens its panel the
@@ -535,12 +508,6 @@ export function ChatTab({
         // exactly once.
         if (session === sessionRef.current || focusedRef.current) {
           dispatch({ type: "notice", text });
-        }
-      },
-      onTyping: (session, user) => {
-        // The gateway already suppresses the sender; skip self defensively too.
-        if (session === sessionRef.current && user !== selfNameRef.current) {
-          noteTyping(user);
         }
       },
       onError: (msg) => {
@@ -1201,23 +1168,14 @@ export function ChatTab({
     });
   }, [boundSession]);
 
-  // Drop any pending typing-clear timers when the tab unmounts.
-  useEffect(() => {
-    const timers = typingTimers.current;
-    return () => {
-      for (const id of timers.values()) window.clearTimeout(id);
-      timers.clear();
-    };
-  }, []);
-
   // Open the People tab the moment this session is shared (the host mints a
   // link) or when a guest arrives via a share link. Also covers a session bound
   // after mount that was shared earlier. openPeople asks the host to open (or
-  // focus) the People surface tab — the chat keeps only the rail that opens it.
+  // focus) the People surface tab — the same panel the top-row People button
+  // opens.
   const openPeople = useCallback(() => {
     const sid = sessionRef.current;
     if (!sid) return;
-    setPeopleUnread(0);
     handleRef.current.onOpenSurface?.(peopleSurface(sid));
   }, []);
   useEffect(() => {
@@ -1336,45 +1294,12 @@ export function ChatTab({
   // tabs never start fresh — their history is already on its way.
   const fresh = !resumeId && chat.items.length === 0;
 
-  // The People panel is its own tab now (a "people" surface, reused beside the
-  // chat like any canvas or doc, and openable alongside other panels). The chat
-  // keeps only a thin rail that surfaces unread + typing activity and opens that
-  // tab; the surface owns its own scoped seam for presence and side-chat lines.
-  const someoneTyping = typing.some((n) => n !== selfName);
-  // The People rail docks as a slim full-height column on desktop. On phones
-  // it would steal width from a single-column layout, so it hides below `sm`;
-  // People still opens full-screen as its own tab (and auto-opens when shared).
-  const peopleColumn = (
-    <button
-      type="button"
-      onClick={openPeople}
-      title={someoneTyping ? "Someone is typing…" : "People on this board"}
-      className="hidden w-9 shrink-0 flex-col items-center gap-1 border-l border-line bg-panel pt-2.5 text-muted transition-colors hover:text-text sm:flex"
-    >
-      <Users size={15} />
-      {peopleUnread > 0 && (
-        <span className="rounded-full bg-accent px-1 text-[10px] font-semibold text-canvas">
-          {peopleUnread}
-        </span>
-      )}
-      {someoneTyping && peopleUnread === 0 && (
-        <span
-          aria-label="typing"
-          className="size-1.5 animate-pulse rounded-full bg-accent"
-        />
-      )}
-    </button>
-  );
-
   // A read-only share renders just the transcript — no composer, no
   // interactive cards (queue/approval/questions), nothing to drive with.
   if (readOnly) {
     return (
-      <div ref={rootRef} className="flex min-h-0 flex-1">
-        <div className="flex min-h-0 flex-1 flex-col">
-          <ChatView items={chat.items} working={working} hooks={transcriptHooks} />
-        </div>
-        {peopleColumn}
+      <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
+        <ChatView items={chat.items} working={working} hooks={transcriptHooks} />
       </div>
     );
   }
@@ -1610,7 +1535,6 @@ export function ChatTab({
         </div>
       </div>
       </div>
-      {peopleColumn}
     </div>
   );
 }

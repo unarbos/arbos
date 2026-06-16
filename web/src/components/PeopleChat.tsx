@@ -52,8 +52,8 @@ export function PeopleChat({
   // The roster and the typing line both show OTHER people only — never
   // yourself (you know you're here). Matches the "see others, not yourself"
   // message convention and avoids a confusing self/"Host" entry.
-  const otherPeople = roster.filter((n) => n !== selfName);
-  const line = typingLine(typing.filter((n) => n !== selfName));
+  const otherPeople = (roster ?? []).filter((n) => n !== selfName);
+  const line = typingLine((typing ?? []).filter((n) => n !== selfName));
 
   return (
     <div className="flex h-full w-full flex-col bg-panel">

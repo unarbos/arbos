@@ -15,6 +15,7 @@ import {
   Settings,
   Share2,
   SquareTerminal,
+  Users,
   X,
 } from "lucide-react";
 
@@ -38,6 +39,7 @@ export interface TabInfo {
     | "terminal"
     | "activity"
     | "history"
+    | "people"
     | "messenger"
     | "settings"
     | "plan";
@@ -45,6 +47,10 @@ export interface TabInfo {
    *  artifact); drives the per-tab Share affordance. Computed by App, which
    *  owns the session id / surface path. Absent = not shareable. */
   shareScope?: ShareScope;
+  /** Pin a tab open: `false` suppresses its close button even when the strip
+   *  is otherwise closable. Defaults to closable. The share view pins its one
+   *  chat so a guest can't close the conversation out from under themselves. */
+  closable?: boolean;
 }
 
 /** What the + menu can open: a fresh chat, or one of the companion views. */
@@ -96,7 +102,10 @@ export function TabStrip({
   /** Open the scoped-share dialog for a tab (only ever called for tabs whose
    *  shareScope is set). */
   onShare: (key: number) => void;
-  onNew: (kind: NewTabKind) => void;
+  /** The + menu's pick. Omit to drop the + entirely — the share view offers
+   *  no way to open new tabs, so a guest can't spawn chats, terminals, or
+   *  files beside the one shared conversation. */
+  onNew?: (kind: NewTabKind) => void;
   drag: TabDrag;
   leading?: React.ReactNode;
   actions?: React.ReactNode;
@@ -139,7 +148,7 @@ export function TabStrip({
             key={tab.key}
             tab={tab}
             active={tab.key === activeKey}
-            closable={canClose}
+            closable={canClose && tab.closable !== false}
             dragging={tab.key === draggingKey}
             indicator={
               indicator?.key === tab.key ? (indicator.before ? "before" : "after") : null
@@ -163,9 +172,11 @@ export function TabStrip({
             }}
           />
         ))}
-        <div className="flex items-center px-1.5">
-          <NewTabMenu onNew={onNew} />
-        </div>
+        {onNew && (
+          <div className="flex items-center px-1.5">
+            <NewTabMenu onNew={onNew} />
+          </div>
+        )}
       </div>
       {actions && <div className="flex items-center gap-0.5 px-2">{actions}</div>}
     </div>
@@ -300,6 +311,14 @@ export function ActivityButton({ onOpen }: { onOpen: () => void }) {
   return (
     <IconButton title="Agent activity" onClick={onOpen}>
       <Activity size={13} />
+    </IconButton>
+  );
+}
+
+export function PeopleButton({ onOpen }: { onOpen: () => void }) {
+  return (
+    <IconButton title="People" onClick={onOpen}>
+      <Users size={13} />
     </IconButton>
   );
 }
@@ -454,6 +473,8 @@ function Tab({
         <Activity size={11} className="shrink-0 text-faint" />
       ) : tab.kind === "history" ? (
         <Clock size={11} className="shrink-0 text-faint" />
+      ) : tab.kind === "people" ? (
+        <Users size={11} className="shrink-0 text-faint" />
       ) : tab.kind === "messenger" ? (
         <Send size={11} className="shrink-0 text-faint" />
       ) : tab.kind === "settings" ? (

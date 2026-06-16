@@ -30,22 +30,29 @@ function age(ms: number): string {
 export function HistoryView({
   active,
   onOpenSession,
+  sessions: provided,
 }: {
   /** Visible in its pane — list polling pauses while hidden. */
   active: boolean;
   onOpenSession: (s: SessionSummary) => void;
+  /** A fixed list to render instead of fetching the host's sessions. The
+   *  share view passes just the one shared chat — a guest's history is exactly
+   *  what they were granted, never a window onto the host's other agents. */
+  sessions?: SessionSummary[];
 }) {
-  const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
+  const [fetched, setFetched] = useState<SessionSummary[] | null>(null);
   const [query, setQuery] = useState("");
   const docVisible = useDocumentVisible();
 
   useEffect(() => {
-    if (!active || !docVisible) return;
+    // A provided list is authoritative — never poll the host-wide endpoint
+    // (it's 403 for a share guest anyway).
+    if (provided || !active || !docVisible) return;
     let stop = false;
     const load = () => {
       fetchSessions()
         .then((s) => {
-          if (!stop) setSessions(s);
+          if (!stop) setFetched(s);
         })
         .catch(() => {});
     };
@@ -55,7 +62,9 @@ export function HistoryView({
       stop = true;
       window.clearInterval(id);
     };
-  }, [active, docVisible]);
+  }, [active, docVisible, provided]);
+
+  const sessions = provided ?? fetched;
 
   const q = query.trim().toLowerCase();
   const visible = (sessions ?? []).filter(

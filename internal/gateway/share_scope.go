@@ -79,9 +79,10 @@ func (s *Server) scopeGuard(next http.Handler) http.Handler {
 // sessionScopeAllows is the deny-by-default allowlist for a chat share. It
 // permits exactly what the real ChatTab needs to render and (when write) drive
 // the one granted session — the SPA shell, the capabilities probe, the seam
-// (scoped by the frame-filter), the composer's read-only catalogs, and that
-// session's own replay — and refuses everything else (other sessions, the
-// session list, secrets, settings, terminals, jobs, files, the host mic).
+// (scoped by the frame-filter), the composer's read-only catalogs, that
+// session's own replay, and its activity feed (scoped server-side to this
+// chat) — and refuses everything else (other sessions, the session list,
+// secrets, settings, terminals, jobs, files, the host mic).
 func sessionScopeAllows(r *http.Request, ref string, perm share.Perm) bool {
 	p := path.Clean(r.URL.Path)
 	get := r.Method == http.MethodGet
@@ -93,6 +94,13 @@ func sessionScopeAllows(r *http.Request, ref string, perm share.Perm) bool {
 	case p == "/api/ws": // the seam — frame-filtered to ref in handleWS
 		return true
 	case p == "/api/models" || p == "/api/commands":
+		return get
+	case p == "/api/activity":
+		// The activity feed, scoped server-side to this one chat (handleActivity
+		// filters standing obligations and runs to the granted session), so the
+		// guest sees what this conversation is carrying — never the host's
+		// other chats. Read-only: the cancel/stop mutation routes are not
+		// listed here, so a guest can observe but not reshape the work.
 		return get
 	case p == "/api/sessions/"+ref+"/events" || p == "/api/sessions/"+ref+"/children":
 		return get
