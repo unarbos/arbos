@@ -1,4 +1,13 @@
-import { memo, Suspense, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  createContext,
+  memo,
+  Suspense,
+  useContext,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Check, Copy } from "lucide-react";
 import { lazyPanel } from "../lib/lazyPanel";
 import { parsePlotSpec } from "../lib/plot";
@@ -68,6 +77,62 @@ export function Highlight({ text }: { text: string }) {
   return <>{nodes}</>;
 }
 
+/* ------------------------------------------------------------------ */
+/* Reference-style citations. A cited report (the /blog command) writes  */
+/* claims with bare `[n]` markers pointing at a numbered Sources list at  */
+/* the end. We scan the whole document for that list, build n → source    */
+/* text, and render each `[n]` as a superscript anchor: hover shows the   */
+/* source line as a tooltip, click jumps to the anchored Sources entry.   */
+/* ------------------------------------------------------------------ */
+
+/** Stable anchor id for source n, shared by the marker and the list item. */
+function citeId(n: string): string {
+  return `cite-src-${n}`;
+}
+
+/** A numbered ordered-list item, e.g. "3. Title — Publisher, https://…". */
+const SOURCE_ITEM_RE = /^\s*(\d+)[.)]\s+(.*\S)/;
+/** A "## Sources" / "# References" style heading that opens the list. */
+const SOURCES_HEADING_RE = /^#{1,6}\s+(sources|references|citations|notes)\b/i;
+
+/**
+ * Map of source number → its plain-text line, harvested from the document's
+ * Sources/References section (the numbered list after that heading). Empty
+ * when the document has no such section, in which case `[n]` stays plain text.
+ */
+export type Citations = Map<string, string>;
+
+function buildCitations(content: string): Citations {
+  const map: Citations = new Map();
+  const lines = content.split("\n");
+  let inSources = false;
+  for (const line of lines) {
+    if (SOURCES_HEADING_RE.test(line)) {
+      inSources = true;
+      continue;
+    }
+    // A later heading ends the section.
+    if (inSources && /^#{1,6}\s+/.test(line)) {
+      inSources = false;
+      continue;
+    }
+    if (!inSources) continue;
+    const m = line.match(SOURCE_ITEM_RE);
+    if (m && !map.has(m[1])) {
+      // Strip inline markdown emphasis/link syntax for the tooltip text.
+      const text = m[2]
+        .replace(/\*\*([^*]+)\*\*/g, "$1")
+        .replace(/\*([^*]+)\*/g, "$1")
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)")
+        .trim();
+      map.set(m[1], text);
+    }
+  }
+  return map;
+}
+
+const CitationsContext = createContext<Citations | null>(null);
+
 /**
  * Lightweight markdown renderer for model output. Handles code blocks, inline
  * code, bold, italic, headers, links, lists, and horizontal rules — not a
@@ -75,14 +140,24 @@ export function Highlight({ text }: { text: string }) {
  *
  * `streaming` renders a blinking caret hugging the final character of the
  * last block instead of wrapping onto a new line after a block element.
+ *
+ * `cite` turns bare `[n]` markers into clickable superscript citations linked
+ * to a Sources/References list in the same document (used by the doc panel for
+ * /blog reports). Off by default so ordinary chat text with `[1]` stays plain.
  */
 export function Markdown({
   content,
   streaming,
+  cite,
 }: {
   content: string;
   streaming?: boolean;
+  cite?: boolean;
 }) {
+  const citations = useMemo(
+    () => (cite ? buildCitations(content) : null),
+    [cite, content],
+  );
   // Streaming appends only grow the tail, so re-parsing the whole message per
   // delta is O(n²) over its length. Cache the parse and re-parse only from the
   // last COMMITTED boundary: a blank line at fence depth 0 (see safeBoundary).
@@ -144,16 +219,18 @@ export function Markdown({
   const caret = streaming ? <StreamingCaret /> : null;
 
   return (
-    <div className="space-y-2.5">
-      {blocks.map((block, i) => (
-        <Block
-          key={i}
-          block={block}
-          caret={caret && i === blocks.length - 1 ? caret : null}
-        />
-      ))}
-      {blocks.length === 0 && caret}
-    </div>
+    <CitationsContext.Provider value={citations}>
+      <div className="space-y-2.5">
+        {blocks.map((block, i) => (
+          <Block
+            key={i}
+            block={block}
+            caret={caret && i === blocks.length - 1 ? caret : null}
+          />
+        ))}
+        {blocks.length === 0 && caret}
+      </div>
+    </CitationsContext.Provider>
   );
 }
 
@@ -524,22 +601,8 @@ const Block = memo(function Block({ block, caret }: { block: BlockNode; caret?: 
         </>
       );
 
-    case "list": {
-      const Tag = block.ordered ? "ol" : "ul";
-      const last = block.items.length - 1;
-      return (
-        <Tag
-          className={`space-y-0.5 ${block.ordered ? "list-decimal" : "list-disc"} pl-5 m-0`}
-        >
-          {block.items.map((item, i) => (
-            <li key={i}>
-              <InlineContent text={item} />
-              {i === last ? caret : null}
-            </li>
-          ))}
-        </Tag>
-      );
-    }
+    case "list":
+      return <ListBlock block={block} caret={caret} />;
 
     case "table":
       return (
@@ -586,6 +649,40 @@ const Block = memo(function Block({ block, caret }: { block: BlockNode; caret?: 
   }
 });
 
+/**
+ * A list block. In a cited document an ordered-list item whose text matches a
+ * known Sources entry gets that source's anchor id, so clicking a `[n]` marker
+ * scrolls here. Matching is by text (the item's leading `n.` was stripped at
+ * parse time), so the anchor lands on the right entry regardless of order.
+ */
+function ListBlock({ block, caret }: { block: BlockNode & { type: "list" }; caret?: ReactNode }) {
+  const citations = useContext(CitationsContext);
+  const byText = useMemo(() => {
+    if (!citations || !block.ordered) return null;
+    const m = new Map<string, string>();
+    for (const [n, text] of citations) m.set(text, n);
+    return m;
+  }, [citations, block.ordered]);
+
+  const Tag = block.ordered ? "ol" : "ul";
+  const last = block.items.length - 1;
+  return (
+    <Tag
+      className={`space-y-0.5 ${block.ordered ? "list-decimal" : "list-disc"} pl-5 m-0`}
+    >
+      {block.items.map((item, i) => {
+        const n = byText?.get(item.trim());
+        return (
+          <li key={i} id={n ? citeId(n) : undefined} className={n ? "scroll-mt-4 target:bg-accent/10" : undefined}>
+            <InlineContent text={item} />
+            {i === last ? caret : null}
+          </li>
+        );
+      })}
+    </Tag>
+  );
+}
+
 type InlineNode =
   | { type: "text"; content: string }
   | { type: "code"; content: string }
@@ -594,6 +691,7 @@ type InlineNode =
   | { type: "italic"; content: string }
   | { type: "image"; alt: string; src: string }
   | { type: "link"; text: string; href: string }
+  | { type: "footnote"; n: string }
   | { type: "br" };
 
 function parseInline(text: string): InlineNode[] {
@@ -604,8 +702,11 @@ function parseInline(text: string): InlineNode[] {
   // span newlines; inline math ($…$ / \(…\)) must stay on one line, must not
   // hug whitespace, and the closing $ can't be followed by a digit — so
   // "$5 and $10" reads as money, not math.
+  // …|link|footnote|bold|… — the footnote rule (`[n]`, digits only, not
+  // followed by `(`) sits after the inline-link rule so a real `[text](url)`
+  // still wins; a bare `[3]` falls through to it.
   const pattern =
-    /(``[^`]+``|`[^`]+`)|(\$\$([\s\S]+?)\$\$)|(\\\[([\s\S]+?)\\\])|(\$([^\s$](?:[^$\n]*?[^\s$])?)\$(?!\d))|(\\\(([^\n]+?)\\\))|(!\[([^\]]*)\]\(([^)]+)\))|(\[([^\]]+)\]\(([^)]+)\))|(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(\bhttps?:\/\/[^\s<>)\]]+)|(\n)/g;
+    /(``[^`]+``|`[^`]+`)|(\$\$([\s\S]+?)\$\$)|(\\\[([\s\S]+?)\\\])|(\$([^\s$](?:[^$\n]*?[^\s$])?)\$(?!\d))|(\\\(([^\n]+?)\\\))|(!\[([^\]]*)\]\(([^)]+)\))|(\[([^\]]+)\]\(([^)]+)\))|(\[(\d{1,4})\](?!\())|(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(\bhttps?:\/\/[^\s<>)\]]+)|(\n)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -635,12 +736,14 @@ function parseInline(text: string): InlineNode[] {
     } else if (match[13]) {
       nodes.push({ type: "link", text: match[14], href: match[15] });
     } else if (match[16]) {
-      nodes.push({ type: "bold", content: match[17] });
+      nodes.push({ type: "footnote", n: match[17] });
     } else if (match[18]) {
-      nodes.push({ type: "italic", content: match[19] });
+      nodes.push({ type: "bold", content: match[19] });
     } else if (match[20]) {
-      nodes.push({ type: "link", text: match[20], href: match[20] });
-    } else if (match[21]) {
+      nodes.push({ type: "italic", content: match[21] });
+    } else if (match[22]) {
+      nodes.push({ type: "link", text: match[22], href: match[22] });
+    } else if (match[23]) {
       nodes.push({ type: "br" });
     }
 
@@ -665,6 +768,7 @@ function parseInline(text: string): InlineNode[] {
 
 function InlineContent({ text }: { text: string }) {
   const nodes = useMemo(() => parseInline(text), [text]);
+  const citations = useContext(CitationsContext);
 
   return (
     <>
@@ -733,6 +837,23 @@ function InlineContent({ text }: { text: string }) {
                 className="text-accent decoration-accent/40 underline-offset-2 hover:underline"
               >
                 {node.text}
+              </a>
+            );
+          }
+          case "footnote": {
+            // A bare `[n]` reference marker. Without a Sources section to
+            // resolve it against (cite off, or no matching entry), leave it
+            // as literal text so ordinary `[1]` in prose is untouched.
+            const src = citations?.get(node.n);
+            if (!src) return <span key={i}>[{node.n}]</span>;
+            return (
+              <a
+                key={i}
+                href={`#${citeId(node.n)}`}
+                title={src}
+                className="cite-ref cursor-pointer align-super text-[0.72em] font-medium text-accent no-underline hover:underline"
+              >
+                [{node.n}]
               </a>
             );
           }

@@ -295,7 +295,21 @@ func (s *Server) serveSharedFile(w http.ResponseWriter, r *http.Request, g share
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	sandboxArtifact(w)
-	if ext := strings.ToLower(path.Ext(g.Scope.Ref)); ext != ".html" && ext != ".htm" {
+	ext := strings.ToLower(path.Ext(g.Scope.Ref))
+	// A markdown document renders to a self-contained reading page (the /blog
+	// report's home) with clickable [n] citations, rather than shipping raw
+	// source — a file share is standalone and sandboxed, so the render runs
+	// here in Go (see sharedoc.go) instead of mounting the SPA's renderer.
+	if isMarkdownExt(ext) {
+		if b, err := os.ReadFile(abs); err == nil {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = io.WriteString(w, renderSharedDoc(path.Base(g.Scope.Ref), string(b)))
+			return
+		}
+		shareGone(w)
+		return
+	}
+	if ext != ".html" && ext != ".htm" {
 		http.ServeFile(w, r, abs)
 		return
 	}

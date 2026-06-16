@@ -713,7 +713,7 @@ function TextSurface({
               title={truncated ? undefined : "Double-click to edit"}
               className="mx-auto w-full max-w-4xl px-4 py-4"
             >
-              <Markdown content={draft} />
+              <Markdown content={draft} cite />
             </div>
           </div>
         ) : canEdit ? (
