@@ -592,10 +592,10 @@ func attachMarker(parts []core.ContentBlock) string {
 			n++
 		}
 	}
-	switch {
-	case n == 0:
+	switch n {
+	case 0:
 		return ""
-	case n == 1:
+	case 1:
 		return "📎 image"
 	default:
 		return fmt.Sprintf("📎 %d images", n)

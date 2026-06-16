@@ -21,7 +21,8 @@ export type SurfaceKind =
   | "sheet"
   | "prompt"
   | "dir"
-  | "screencast";
+  | "screencast"
+  | "people";
 
 export interface Surface {
   kind: SurfaceKind;
@@ -63,6 +64,16 @@ export function fileSurface(path: string): Surface {
 /** The browser surface for a directory. "." is the workspace root. */
 export function dirSurface(path: string, title?: string): Surface {
   return { kind: "dir", path, title };
+}
+
+/**
+ * The People surface for a session: the human-to-human side chat for the
+ * collaborators on a board, opened as its own tab beside the conversation
+ * (not file-backed — its path is the session id, and it runs its own scoped
+ * seam for presence + side-chat lines).
+ */
+export function peopleSurface(sessionId: string): Surface {
+  return { kind: "people", path: sessionId, title: "People" };
 }
 
 /** A directory reference's child path ("." is the workspace root itself). */
@@ -163,6 +174,7 @@ export function rawUrl(path: string): string {
 export function surfaceTitle(s: Surface): string {
   if (s.title) return s.title;
   if (s.kind === "dir" && (s.path === "." || s.path === "")) return "Files";
+  if (s.kind === "people") return "People";
   return s.path.split("/").pop() || s.path;
 }
 

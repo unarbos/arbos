@@ -55,19 +55,23 @@ import {
 import { useDocumentVisible } from "@/lib/useDocumentVisible";
 import { useSlashCommands } from "@/lib/useSlashCommands";
 import { SeamClient, type ConnectionState } from "@/lib/seam";
-import { detailsSurface, detailsUI, promptSurface, type Surface, type UICommand } from "@/lib/surface";
+import {
+  detailsSurface,
+  detailsUI,
+  peopleSurface,
+  promptSurface,
+  type Surface,
+  type UICommand,
+} from "@/lib/surface";
 import type { TermRef } from "@/lib/term";
 import type { ContentBlock, QuestionAnswer, ToolCall, ToolResult } from "@/lib/types";
 import { useAutosize } from "@/lib/useAutosize";
 import {
   chatReducer,
   initialChatState,
-  peopleFromReplay,
   replayToItems,
-  type PeopleMessage,
   type TranscriptItem,
 } from "@/lib/transcript";
-import { PeopleChat } from "./PeopleChat";
 
 /** Socket reconnect: exponential backoff with jitter, so a restarting
  *  backend isn't hammered and a fleet of tabs doesn't thunder in sync. */
@@ -286,26 +290,18 @@ export function ChatTab({
   // the current value rather than the value captured at construction.
   const selfNameRef = useRef(selfName);
   selfNameRef.current = selfName;
-  // People panel: human-to-human side chat for collaborators on this board,
-  // separate from the agent transcript and never seen by the model.
-  const [people, setPeople] = useState<PeopleMessage[]>([]);
-  const peopleIdRef = useRef(1);
-  // The People panel opens only on a shared tab — a guest who arrived via a
-  // share link (sharedTab), or once the host shares this session. A solo,
-  // unshared tab keeps it collapsed. Collapsing it leaves a rail with badges.
-  const [peopleOpen, setPeopleOpen] = useState(
-    () => !!sharedTab || isSharedSession(resumeId),
-  );
-  const peopleOpenRef = useRef(peopleOpen);
-  peopleOpenRef.current = peopleOpen;
+  // People side chat: a human-to-human board for collaborators, separate from
+  // the agent transcript and never seen by the model. It lives in its own tab
+  // (the "people" surface) which owns the message list + sends; the chat tab
+  // only watches its own seam to keep the rail's unread badge current.
+  // Notes that arrived since the People tab was last opened from this rail.
   const [peopleUnread, setPeopleUnread] = useState(0);
-  // Ephemeral presence: who's online (roster) and who's currently typing. Both
-  // arrive as gateway frames, never persisted. Each typer auto-clears after a
-  // short idle window via a per-name timer.
-  const [roster, setRoster] = useState<string[]>([]);
+  // Ephemeral presence the rail reflects: who's currently typing in the People
+  // tab. Arrives as gateway frames, never persisted; each typer auto-clears
+  // after a short idle window via a per-name timer. (The full roster + message
+  // list live in the People surface, which runs its own scoped seam.)
   const [typing, setTyping] = useState<string[]>([]);
   const typingTimers = useRef<Map<string, number>>(new Map());
-  const lastTypingPing = useRef(0); // throttle outbound typing pings
   const noteTyping = useCallback((name: string) => {
     setTyping((t) => (t.includes(name) ? t : [...t, name]));
     const timers = typingTimers.current;
@@ -410,9 +406,6 @@ export function ChatTab({
         .then((events) => {
           if (!closed && sessionRef.current === sid) {
             dispatch({ type: "replay", items: replayToItems(events) });
-            const ppl = peopleFromReplay(events);
-            peopleIdRef.current = ppl.length + 1;
-            setPeople(ppl);
           }
         })
         .catch(() => {});
@@ -463,7 +456,6 @@ export function ChatTab({
         gap = false;
         // Switching to a different session: drop the previous room's presence.
         if (sessionRef.current && sessionRef.current !== id) {
-          setRoster([]);
           setTyping([]);
         }
         sessionRef.current = id;
@@ -488,17 +480,14 @@ export function ChatTab({
         }
       },
       onEnvelope: (env) => {
-        // A human-to-human side-chat line: route it to the People panel, never
-        // the agent transcript. Own lines are suppressed server-side (by the
-        // connOrigin echo filter), so a live chat_note here is always from
-        // someone else. depth>0 (a delegated child) never surfaces here.
+        // A human-to-human side-chat line belongs to the People tab, not the
+        // agent transcript. The surface holds the messages; here we only bump
+        // the rail's unread badge when that tab isn't open. Own lines are
+        // suppressed server-side (the connOrigin echo filter), so a live
+        // chat_note here is always from someone else. depth>0 (a delegated
+        // child) never surfaces here.
         if (env.depth === 0 && env.event.kind === "chat_note") {
-          const d = env.event.data;
-          setPeople((p) => [
-            ...p,
-            { id: peopleIdRef.current++, text: d.text, author: d.author ?? "" },
-          ]);
-          if (!peopleOpenRef.current) setPeopleUnread((n) => n + 1);
+          setPeopleUnread((n) => n + 1);
           return;
         }
         // The agent presenting a file (the show tool) opens its panel the
@@ -547,9 +536,6 @@ export function ChatTab({
         if (session === sessionRef.current || focusedRef.current) {
           dispatch({ type: "notice", text });
         }
-      },
-      onRoster: (session, users) => {
-        if (session === sessionRef.current) setRoster(users);
       },
       onTyping: (session, user) => {
         // The gateway already suppresses the sender; skip self defensively too.
@@ -605,9 +591,6 @@ export function ChatTab({
       fetchReplayFull(resumeId)
         .then(({ events, session }) => {
           dispatch({ type: "replay", items: replayToItems(events) });
-          const ppl = peopleFromReplay(events);
-          peopleIdRef.current = ppl.length + 1;
-          setPeople(ppl);
           if (session?.model) setModel(session.model);
         })
         .catch(() => {})
@@ -1052,20 +1035,6 @@ export function ChatTab({
     }
   }, [text, attachments, chat.items.length]);
 
-  // Post a human-to-human side-chat line: the server logs+broadcasts it without
-  // starting a turn. The broadcast back to us is suppressed server-side, so we
-  // append optimistically with our own name (which renders unlabeled — you see
-  // others' names, not your own).
-  const sendPeople = useCallback(
-    (text: string) => {
-      const name = hostName(sessionRef.current);
-      if (seamRef.current?.chatNote(text, name)) {
-        setPeople((p) => [...p, { id: peopleIdRef.current++, text, author: name }]);
-      }
-    },
-    [],
-  );
-
   // Flush the queue head when the turn ends: sending dispatches a user item
   // and re-arms turnActive, so exactly one queued message runs per turn.
   // A pending edit owns the turn-end it caused — its fork must land before
@@ -1241,13 +1210,21 @@ export function ChatTab({
     };
   }, []);
 
-  // Open the People panel the moment this session is shared (the host mints a
-  // link). Also covers a session bound after mount that was shared earlier.
+  // Open the People tab the moment this session is shared (the host mints a
+  // link) or when a guest arrives via a share link. Also covers a session bound
+  // after mount that was shared earlier. openPeople asks the host to open (or
+  // focus) the People surface tab — the chat keeps only the rail that opens it.
+  const openPeople = useCallback(() => {
+    const sid = sessionRef.current;
+    if (!sid) return;
+    setPeopleUnread(0);
+    handleRef.current.onOpenSurface?.(peopleSurface(sid));
+  }, []);
   useEffect(() => {
     if (!boundSession) return;
-    if (isSharedSession(boundSession)) setPeopleOpen(true);
-    return onSharedChange(boundSession, () => setPeopleOpen(true));
-  }, [boundSession]);
+    if (sharedTab || isSharedSession(boundSession)) openPeople();
+    return onSharedChange(boundSession, openPeople);
+  }, [boundSession, sharedTab, openPeople]);
 
   /** Edit: pull a queued message back into the composer. */
   const editQueued = useCallback(
@@ -1359,38 +1336,15 @@ export function ChatTab({
   // tabs never start fresh — their history is already on its way.
   const fresh = !resumeId && chat.items.length === 0;
 
-  // Throttled typing ping: at most one per ~1.5s while actively typing; the
-  // recipient clears each typer after a 3s idle window, so gaps are covered.
-  const emitTyping = useCallback(() => {
-    const now = Date.now();
-    if (now - lastTypingPing.current < 1500) return;
-    lastTypingPing.current = now;
-    seamRef.current?.typingPing();
-  }, []);
-
-  // The People panel docks as a right column when shared. Collapsing it leaves a
-  // thin rail that still surfaces unread + typing activity.
+  // The People panel is its own tab now (a "people" surface, reused beside the
+  // chat like any canvas or doc, and openable alongside other panels). The chat
+  // keeps only a thin rail that surfaces unread + typing activity and opens that
+  // tab; the surface owns its own scoped seam for presence and side-chat lines.
   const someoneTyping = typing.some((n) => n !== selfName);
-  const peopleColumn = peopleOpen ? (
-    <div className="flex min-h-0 w-72 shrink-0 flex-col">
-      <PeopleChat
-        messages={people}
-        selfName={selfName}
-        canPost={!readOnly}
-        roster={roster}
-        typing={typing}
-        onSend={sendPeople}
-        onTyping={emitTyping}
-        onClose={() => setPeopleOpen(false)}
-      />
-    </div>
-  ) : (
+  const peopleColumn = (
     <button
       type="button"
-      onClick={() => {
-        setPeopleOpen(true);
-        setPeopleUnread(0);
-      }}
+      onClick={openPeople}
       title={someoneTyping ? "Someone is typing…" : "People on this board"}
       className="flex w-9 shrink-0 flex-col items-center gap-1 border-l border-line bg-panel pt-2.5 text-muted transition-colors hover:text-text"
     >

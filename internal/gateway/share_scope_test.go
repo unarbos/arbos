@@ -90,10 +90,10 @@ func TestFilterReadPermDropsPrompt(t *testing.T) {
 
 func TestSanitizeGuestName(t *testing.T) {
 	cases := map[string]string{
-		"  Alice  ":                      "Alice",
-		"Bob\nInjection":                 "BobInjection",
-		"":                               "",
-		"\t\r":                           "",
+		"  Alice  ":                            "Alice",
+		"Bob\nInjection":                       "BobInjection",
+		"":                                     "",
+		"\t\r":                                 "",
 		"012345678901234567890123456789012345": "01234567890123456789012345678901", // capped at 32 runes
 	}
 	for in, want := range cases {

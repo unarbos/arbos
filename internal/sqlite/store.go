@@ -622,7 +622,7 @@ func (s *Store) RecentOwnedSessions(ctx context.Context, limit int) ([]OwnedSess
 // owner is gone and no such run can still be in flight — any lingering active
 // run is an orphan to retire. updated_at is deliberately left untouched so a
 // reclaimed run keeps its place in history instead of jumping to the top of the
-// activity feed. Interactive chats (owner='') are never touched: they stay
+// activity feed. Interactive chats (empty owner) are never touched: they stay
 // active to remain resumable.
 func (s *Store) ReclaimOrphanedRuns(ctx context.Context) (int, error) {
 	s.writeMu.Lock()

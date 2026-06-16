@@ -23,6 +23,9 @@ const SurfaceView = lazyPanel(() =>
 const PlanView = lazyPanel(() =>
   import("./components/PlanView").then((m) => ({ default: m.PlanView })),
 );
+const PeopleSurface = lazyPanel(() =>
+  import("./components/PeopleSurface").then((m) => ({ default: m.PeopleSurface })),
+);
 const TerminalView = lazyPanel(() =>
   import("./components/TerminalView").then((m) => ({ default: m.TerminalView })),
 );
@@ -1008,7 +1011,9 @@ export default function App() {
             <Suspense
               fallback={<div className="px-4 py-4 text-faint">Loading…</div>}
             >
-            {tab.kind === "surface" && tab.surface ? (
+            {tab.kind === "surface" && tab.surface?.kind === "people" ? (
+              <PeopleSurface surface={tab.surface} active={visible} />
+            ) : tab.kind === "surface" && tab.surface ? (
               <SurfaceView
                 surface={tab.surface}
                 active={visible}

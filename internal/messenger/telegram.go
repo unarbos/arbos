@@ -444,12 +444,6 @@ func (c *tgClient) setMyCommands(ctx context.Context, cmds []tgBotCommand) error
 	return c.call(ctx, "setMyCommands", map[string]any{"commands": cmds}, nil)
 }
 
-// sendTyping shows the "typing…" indicator; Telegram clears it after ~5s, so
-// the caller refreshes it while a turn runs. Best-effort by design.
-func (c *tgClient) sendTyping(ctx context.Context, chatID int64) {
-	_ = c.call(ctx, "sendChatAction", map[string]any{"chat_id": chatID, "action": "typing"}, nil)
-}
-
 // splitMessage breaks text into chunks of at most limit bytes, preferring
 // line breaks so chunks read naturally and never splitting mid-rune.
 func splitMessage(text string, limit int) []string {

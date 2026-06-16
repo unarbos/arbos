@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
 
 import type { PeopleMessage } from "@/lib/transcript";
 
@@ -14,8 +13,8 @@ function typingLine(names: string[]): string {
 /**
  * The People panel: a human-to-human side chat for collaborators on this board.
  * It is NOT the agent conversation — messages here go to the other people on
- * the session, never to the model. Presentational: the parent (ChatTab) owns
- * the message state, presence, and the seam sends. Following the chat
+ * the session, never to the model. Presentational: the parent (PeopleSurface)
+ * owns the message state, presence, and the seam sends. Following the chat
  * convention, you see other participants' names but never your own.
  */
 export function PeopleChat({
@@ -26,7 +25,6 @@ export function PeopleChat({
   typing,
   onSend,
   onTyping,
-  onClose,
 }: {
   messages: PeopleMessage[];
   selfName: string;
@@ -35,7 +33,6 @@ export function PeopleChat({
   typing: string[];
   onSend: (text: string) => void;
   onTyping: () => void;
-  onClose: () => void;
 }) {
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
@@ -59,19 +56,7 @@ export function PeopleChat({
   const line = typingLine(typing.filter((n) => n !== selfName));
 
   return (
-    <div className="flex h-full w-full flex-col border-l border-line bg-panel">
-      <div className="flex shrink-0 items-center justify-between border-b border-line px-3 py-2">
-        <span className="text-[12px] font-semibold text-bright">People</span>
-        <button
-          type="button"
-          onClick={onClose}
-          title="Collapse people chat"
-          className="flex size-6 items-center justify-center rounded-md text-muted hover:bg-hover hover:text-text"
-        >
-          <X size={13} />
-        </button>
-      </div>
-
+    <div className="flex h-full w-full flex-col bg-panel">
       {/* Online roster: the OTHER people currently on this board (not you). */}
       <div className="shrink-0 border-b border-line px-3 py-2">
         <div className="mb-1 text-[10.5px] uppercase tracking-wider text-faint select-none">
