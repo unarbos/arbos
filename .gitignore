@@ -25,6 +25,8 @@
 /dog.svg
 /ibm-canvas.html
 /canvas/
+# /blog reports are generated artifacts (the /blog command writes them here)
+/blog/
 
 # Files attached to a chat (the composer's paperclip spools them here)
 .arbos/attachments/
