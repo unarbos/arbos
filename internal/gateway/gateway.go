@@ -25,6 +25,7 @@ import (
 	"github.com/unarbos/arbos/internal/modelcatalog"
 	"github.com/unarbos/arbos/internal/outbox"
 	"github.com/unarbos/arbos/internal/plan"
+	"github.com/unarbos/arbos/internal/share"
 	"github.com/unarbos/arbos/internal/sqlite"
 )
 
@@ -211,7 +212,14 @@ func (s *Server) broadcastRoster(sid string) {
 	if len(peers) == 0 {
 		return
 	}
-	b, err := json.Marshal(rosterFrame{Type: "roster", Session: sid, Users: s.rosterFor(sid)})
+	// rosterFor returns a nil slice for an empty roster (no named participants),
+	// which would marshal to JSON null and crash a client that filters the
+	// list. Send an empty array instead.
+	users := s.rosterFor(sid)
+	if users == nil {
+		users = []string{}
+	}
+	b, err := json.Marshal(rosterFrame{Type: "roster", Session: sid, Users: users})
 	if err != nil {
 		return
 	}
@@ -761,6 +769,14 @@ type activityRunJSON struct {
 // agent is carrying overall — closing the gap where the agent (whose
 // projection is global) knows more than any one conversation shows.
 func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
+	// A session-scoped share guest may read this feed, but only for the one
+	// chat they were granted: scope filters every standing obligation and run
+	// to that session, so a guest never learns what the host's other chats are
+	// carrying. A full login leaves scope empty and sees everything.
+	var scope string
+	if g, ok := shareFromContext(r.Context()); ok && g.Scope.Kind == share.ScopeSession {
+		scope = g.Scope.Ref
+	}
 	nodes, err := s.Store.OpenPlanNodes(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -781,6 +797,12 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		live[int64(n.ID)] = true
+		// A scoped guest sees only obligations owned by their chat. live still
+		// records every node id, so a run's staleness is judged against the
+		// whole plan even when its owning obligation is filtered out below.
+		if scope != "" && n.Origin != scope {
+			continue
+		}
 		row := standingJSON{
 			Node:   int64(n.ID),
 			Goal:   n.Goal,
@@ -801,6 +823,9 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	runs := make([]activityRunJSON, 0, len(owned))
 	for _, o := range owned {
+		if scope != "" && string(o.Owner) != scope {
+			continue
+		}
 		kind := "delegate"
 		if o.Origin == core.OriginScheduler {
 			kind = "scheduled"

@@ -104,7 +104,9 @@ export function PeopleSurface({
         }
       },
       onRoster: (sess, users) => {
-        if (sess === sessionId) setRoster(users);
+        // An empty room arrives as JSON null (a Go nil slice), so default it —
+        // setRoster(null) would crash the roster .filter on the next render.
+        if (sess === sessionId) setRoster(users ?? []);
       },
       onTyping: (sess, user) => {
         if (sess === sessionId) noteTyping(user);

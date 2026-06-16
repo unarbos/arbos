@@ -33,6 +33,7 @@ import {
   ActivityButton,
   GlobalActions,
   HistoryButton,
+  PeopleButton,
   SettingsButton,
   TabStrip,
   type NewTabKind,
@@ -58,7 +59,7 @@ import {
   type LayoutNode,
   type SplitDir,
 } from "./lib/layout";
-import { dirSurface, surfaceTitle, type Surface, type UICommand } from "./lib/surface";
+import { dirSurface, peopleSurface, surfaceTitle, type Surface, type UICommand } from "./lib/surface";
 import { sameTerm, termTitle, type TermRef } from "./lib/term";
 import { errMsg, toastError } from "./lib/toast";
 import { loadWorkspace, saveWorkspace } from "./lib/workspace";
@@ -673,6 +674,21 @@ export default function App() {
     [openSingleton],
   );
 
+  /** The People board for the focused chat, as a normal panel — opened (or
+   *  focused) from the top-row button just like the agent opens it: a "people"
+   *  surface beside its chat, deduped by session, splittable like any other
+   *  tab. People is per-conversation, so it targets the focused pane's active
+   *  chat (falling back to any bound chat); with no chat bound yet, there is
+   *  nothing to open. */
+  const openPeopleTab = useCallback(() => {
+    const activeTabKey = activeKeyIn(layout.tabs, layout.focusedPane, layout.paneActive[layout.focusedPane]);
+    const chat =
+      layout.tabs.find(
+        (t) => t.key === activeTabKey && (!t.kind || t.kind === "chat") && t.sessionId,
+      ) ?? layout.tabs.find((t) => (!t.kind || t.kind === "chat") && t.sessionId);
+    if (chat?.sessionId) openSurface(chat.key, peopleSurface(chat.sessionId));
+  }, [layout, openSurface]);
+
   /** Session history as a singleton tab — the searchable list of past
    *  agents, picking one opens (or focuses) its chat. */
   const openHistoryTab = useCallback(
@@ -978,7 +994,13 @@ export default function App() {
           <TabStrip
             tabs={tabs
               .filter((t) => t.pane === pane)
-              .map((t) => ({ ...t, shareScope: shareScopeForTab(t) }))}
+              .map((t) => ({
+                ...t,
+                // A People surface gets the People icon in the strip, matching
+                // its top-row button — every other surface keeps its own icon.
+                kind: t.kind === "surface" && t.surface?.kind === "people" ? "people" : t.kind,
+                shareScope: shareScopeForTab(t),
+              }))}
             activeKey={activeKey.get(pane) ?? -1}
             canClose={tabs.length > 1}
             onActivate={activateTab}
@@ -992,6 +1014,7 @@ export default function App() {
                 <>
                   <HistoryButton onOpen={openHistoryTab} />
                   <ActivityButton onOpen={openActivityTab} />
+                  <PeopleButton onOpen={openPeopleTab} />
                   <SettingsButton onOpen={openSettingsTab} />
                 </>
               ) : undefined

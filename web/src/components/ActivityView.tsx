@@ -30,12 +30,17 @@ export function ActivityView({
   onOpenChat,
   onOpenPlan,
   onBusy,
+  readOnly,
 }: {
   onOpenChat: (chat: string) => void;
   /** Open the plan detail view (goal tree + code) for a node. */
   onOpenPlan?: (node: number) => void;
   /** Any run live right now — drives the tab strip's spinner. */
   onBusy?: (busy: boolean) => void;
+  /** Observe-only (a share guest): the cancel/stop controls are hidden — the
+   *  mutation routes are 403 for a guest anyway, so the affordances don't even
+   *  appear. */
+  readOnly?: boolean;
 }) {
   const [activity, setActivity] = useState<Activity | null>(null);
   const onBusyRef = useRef(onBusy);
@@ -99,7 +104,7 @@ export function ActivityView({
                     task={t}
                     onOpen={onOpenPlan ? () => onOpenPlan(t.node) : undefined}
                     onOpenChat={t.chat ? () => onOpenChat(t.chat!) : undefined}
-                    onCancel={() => cancel(t.node)}
+                    onCancel={readOnly ? undefined : () => cancel(t.node)}
                   />
                 ))}
               </Section>
@@ -112,7 +117,7 @@ export function ActivityView({
                     key={r.id}
                     run={r}
                     onOpen={() => onOpenChat(r.chat)}
-                    onStop={() => stop(r)}
+                    onStop={readOnly ? undefined : () => stop(r)}
                   />
                 ))}
               </Section>
@@ -152,7 +157,8 @@ function StandingRow({
   onOpen?: () => void;
   /** Open the owning conversation. */
   onOpenChat?: () => void;
-  onCancel: () => void;
+  /** Cancel the obligation; omitted in observe-only (share) mode. */
+  onCancel?: () => void;
 }) {
   return (
     <div className="group flex min-w-0 items-start gap-2 rounded-md border border-line/60 px-2.5 py-1.5">
@@ -182,14 +188,16 @@ function StandingRow({
           <MessageSquare size={11} />
         </button>
       )}
-      <button
-        type="button"
-        onClick={onCancel}
-        title={`Cancel #${task.node}`}
-        className="mt-0.5 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-hover hover:text-red"
-      >
-        <X size={11} />
-      </button>
+      {onCancel && (
+        <button
+          type="button"
+          onClick={onCancel}
+          title={`Cancel #${task.node}`}
+          className="mt-0.5 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-hover hover:text-red"
+        >
+          <X size={11} />
+        </button>
+      )}
     </div>
   );
 }
@@ -201,7 +209,8 @@ function RunRow({
 }: {
   run: ActivityRun;
   onOpen: () => void;
-  onStop: () => void;
+  /** Stop the run / cancel its schedule; omitted in observe-only (share) mode. */
+  onStop?: () => void;
 }) {
   const label =
     run.kind === "scheduled"
@@ -235,7 +244,7 @@ function RunRow({
           <Loader2 size={11} className="shrink-0 animate-spin text-faint" />
         )}
       </button>
-      {stoppable && (
+      {stoppable && onStop && (
         <button
           type="button"
           onClick={onStop}
