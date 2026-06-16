@@ -63,7 +63,10 @@ export function ShareChat({ session, perm }: { session: string; perm: SharePerm 
   const canWrite = perm === "write" || perm === "admin";
 
   // The chat is always open. At most one companion is docked beside it.
-  const [companion, setCompanion] = useState<CompanionKind | null>(null);
+  // People opens docked by default the moment a guest joins (right after they
+  // enter their name and this view mounts), so a shared link lands them able
+  // to watch the agent AND talk to the other participants without a click.
+  const [companion, setCompanion] = useState<CompanionKind | null>("people");
   // Which pane holds the keyboard / is shown full-bleed on a phone.
   const [active, setActive] = useState<PanelKind>("chat");
   const [chatTitle, setChatTitle] = useState(PANEL_TITLE.chat);
