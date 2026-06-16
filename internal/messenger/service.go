@@ -318,7 +318,9 @@ func (s *Service) SetTools(id int64, tools bool) (BotView, error) {
 		if done != nil {
 			<-done // wait for a clean exit so the relaunch never doubles up
 		}
-		s.launchConvo(parent, b, cv)
+		s.mu.Lock()
+		s.launchConvoLocked(parent, b, cv)
+		s.mu.Unlock()
 	}
 	return view, nil
 }
@@ -473,23 +475,25 @@ func (s *Service) startBotLocked(b *botRunner) {
 	b.ctx, b.cancel = context.WithCancel(s.ctx)
 	for _, cv := range s.convos {
 		if cv.c.BotID == b.cfg.ID {
-			s.launchConvo(b.ctx, b, cv)
+			s.launchConvoLocked(b.ctx, b, cv)
 		}
 	}
 	go s.runBot(b.ctx, b)
 	go s.publishCommands(b.ctx, b)
 }
 
-// launchConvo starts (or restarts) a chat's door worker under its own
+// launchConvoLocked starts (or restarts) a chat's door worker under its own
 // cancellable context, recording the canceller and a done signal so SetTools
-// can stop the worker and wait for a clean exit before relaunching it.
-func (s *Service) launchConvo(parent context.Context, b *botRunner, cv *convo) {
+// can stop the worker and wait for a clean exit before relaunching it. The
+// caller MUST hold s.mu: it is called from startBotLocked and inbound, both of
+// which already hold the lock — taking it again here self-deadlocked the actor
+// on startup whenever a bot had a saved conversation. SetTools, which calls it
+// without the lock, wraps it in s.mu itself.
+func (s *Service) launchConvoLocked(parent context.Context, b *botRunner, cv *convo) {
 	cctx, cancel := context.WithCancel(parent)
 	done := make(chan struct{})
-	s.mu.Lock()
 	cv.cancel = cancel
 	cv.done = done
-	s.mu.Unlock()
 	go func() {
 		defer close(done)
 		s.runConvo(cctx, b, cv)
@@ -670,7 +674,7 @@ func (s *Service) inbound(ctx context.Context, b *botRunner, m tgMessage) {
 		s.convos[key] = cv
 		s.saveLocked()
 		s.broadcastStateLocked()
-		s.launchConvo(b.ctx, b, cv)
+		s.launchConvoLocked(b.ctx, b, cv)
 	}
 	s.mu.Unlock()
 
@@ -1020,4 +1024,3 @@ func (s *Service) runOutbox(ctx context.Context) {
 		}
 	}
 }
-
