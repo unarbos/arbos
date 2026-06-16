@@ -55,6 +55,10 @@ export interface TranscriptHooks {
   onRetry?: () => void;
   /** Whether a retry can be issued now (seam connected and no turn running). */
   canRetry?: boolean;
+  /** Your own display name in this chat (the host's chosen name, or a guest's
+   *  name from /api/me). Used to suppress the label on your OWN messages — you
+   *  see other participants' names, never your own. */
+  selfName?: string;
 }
 
 export interface TranscriptEditHooks {
@@ -245,6 +249,7 @@ const Item = memo(function Item({
           item={item}
           edit={hooks?.edit}
           onOpenSurface={hooks?.onOpenSurface}
+          selfName={hooks?.selfName}
         />
       );
 
@@ -537,13 +542,19 @@ function UserItem({
   item,
   edit,
   onOpenSurface,
+  selfName,
 }: {
   item: Extract<TranscriptItem, { kind: "user" }>;
   edit?: TranscriptEditHooks;
   onOpenSurface?: (surface: Surface) => void;
+  selfName?: string;
 }) {
   const editing = edit?.editingId === item.id;
   const { body, files } = splitAttachments(item.text);
+  // Show a name only for OTHER participants — never your own (chat convention).
+  // Your own messages either carry no author (live, optimistic) or carry your
+  // own name after replay; both match selfName and stay unlabeled.
+  const author = item.author && item.author !== selfName ? item.author : "";
   return (
     <div className="sticky top-0 z-10 -mx-3.5 bg-canvas px-3.5 pt-1 pb-1">
       {editing && edit ? (
@@ -561,9 +572,9 @@ function UserItem({
           // indented from the prose.
           className="group relative -mx-3 space-y-1.5 rounded-md border border-line/70 bg-card px-3 py-2 text-bright"
         >
-          {item.author && (
+          {author && (
             <div className="text-[10.5px] uppercase tracking-wider text-faint select-none">
-              {item.author}
+              {author}
             </div>
           )}
           <AttachmentChips files={files} onOpenSurface={onOpenSurface} />

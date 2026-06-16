@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import { ShareChat } from "./ShareChat";
 import { fetchMe, type Me } from "./lib/api";
+import { setHostName } from "./lib/identity";
 import { initTheme } from "./lib/theme";
 import "./index.css";
 
@@ -20,6 +21,13 @@ function Root() {
       .then(setMe)
       .catch(() => setMe({ kind: "local" }));
   }, []);
+  // A guest learns their own name from /api/me; store it the same way the host's
+  // name is stored so the shared chat labels the guest's own messages live.
+  useEffect(() => {
+    if (me?.kind === "share" && me.session && me.name) {
+      setHostName(me.session, me.name);
+    }
+  }, [me]);
   if (!me) return null; // a blink while /api/me resolves
   if (me.kind === "share" && me.session) {
     return <ShareChat session={me.session} perm={me.perm ?? "read"} />;

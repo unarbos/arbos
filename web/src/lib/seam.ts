@@ -118,14 +118,30 @@ export class SeamClient {
     return this.send({ type: "intent", intent });
   }
 
-  prompt(text: string, parts?: ContentBlock[]): boolean {
-    const data = parts && parts.length > 0 ? { text, parts } : { text };
+  prompt(text: string, parts?: ContentBlock[], author?: string): boolean {
+    const data: Extract<Intent, { kind: "prompt" }>["data"] = { text };
+    if (parts && parts.length > 0) data.parts = parts;
+    // The host's self-asserted name for a shared chat. Trusted because the host
+    // is a full principal (not a scoped guest, whose name the server overwrites
+    // in filterShareFrame); it labels the host's messages for the guests.
+    if (author) data.author = author;
     return this.intent({ kind: "prompt", data });
   }
 
-  steer(text: string, parts?: ContentBlock[]): boolean {
-    const data = parts && parts.length > 0 ? { text, parts } : { text };
+  steer(text: string, parts?: ContentBlock[], author?: string): boolean {
+    const data: Extract<Intent, { kind: "steer" }>["data"] = { text };
+    if (parts && parts.length > 0) data.parts = parts;
+    if (author) data.author = author;
     return this.intent({ kind: "steer", data });
+  }
+
+  /** Post a human-to-human side-chat line. NOT a prompt: the server logs and
+   *  broadcasts it to the other doors without starting an agent turn. Author is
+   *  self-asserted by the host and overwritten server-side for a share guest. */
+  chatNote(text: string, author?: string): boolean {
+    const data: Extract<Intent, { kind: "chat_note" }>["data"] = { text };
+    if (author) data.author = author;
+    return this.intent({ kind: "chat_note", data });
   }
 
   /** Switch the model for this session (server's set_model shorthand). */

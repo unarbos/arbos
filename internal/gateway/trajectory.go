@@ -167,6 +167,10 @@ func renderTrajectory(sess core.Session, events []core.Event, selfPath string) s
 			totalCompletion += u.CompletionTokens
 			totalTokens += u.TotalTokens
 			continue
+		case core.EventChatNote:
+			// Human-to-human side chat is private coordination, not part of the
+			// agent's auditable trajectory — skip it (matches WriteEvents).
+			continue
 		}
 		renderUnknown(body, ev)
 	}

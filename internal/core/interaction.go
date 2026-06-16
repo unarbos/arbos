@@ -57,6 +57,8 @@ func DecodeIntent(b []byte) (Intent, error) {
 		return unmarshalInto[SetImageGenIntent](f)
 	case IntentCompact:
 		return unmarshalInto[CompactIntent](f)
+	case IntentChatNote:
+		return unmarshalInto[ChatNoteIntent](f)
 	}
 	return nil, fmt.Errorf("decode intent: unknown kind %q", f.Kind)
 }
@@ -105,6 +107,8 @@ func DecodeEvent(b []byte) (KernelEvent, error) {
 		return unmarshalEvent[ApprovalRequest](f)
 	case KernelEventQuestionRequest:
 		return unmarshalEvent[QuestionRequest](f)
+	case KernelEventChatNote:
+		return unmarshalEvent[ChatNote](f)
 	}
 	return nil, fmt.Errorf("decode event: unknown kind %q", f.Kind)
 }

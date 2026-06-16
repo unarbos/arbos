@@ -27,7 +27,8 @@ export type ReplayEvent =
       is_error?: boolean;
       details?: unknown;
     }
-  | { type: "interrupted"; seq: number };
+  | { type: "interrupted"; seq: number }
+  | { type: "chat_note"; seq: number; text: string; author?: string };
 
 /** One selectable model from the provider's catalog (OpenRouter's listing). */
 export interface ModelOption {
@@ -604,6 +605,9 @@ export interface Me {
   scope?: string;
   session?: string;
   perm?: SharePerm;
+  /** A share guest's self-asserted display name, so the SPA can label the
+   *  guest's own messages live (the server stamps it on the wire regardless). */
+  name?: string;
 }
 
 export async function fetchMe(): Promise<Me> {

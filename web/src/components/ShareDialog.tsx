@@ -3,6 +3,7 @@ import { Check, Copy, Loader2, X } from "lucide-react";
 
 import { shareArtifact, type SharePerm, type ShareScope } from "@/lib/api";
 import { useClipboard } from "@/lib/useClipboard";
+import { hostName, setHostName } from "@/lib/identity";
 
 // The permission tiers offered per scope. A chat can be read-only or
 // read+talk (the recipient can converse with the agent); a file artifact is
@@ -57,6 +58,10 @@ export function ShareDialog({
   const [ttl, setTtl] = useState(86400);
   const [perm, setPerm] = useState<SharePerm>(() => perms[0].value);
   const [url, setUrl] = useState<string | null>(null);
+  // The host's own display name for this chat, so guests see a name instead of
+  // "another window". Persisted per-session (localStorage) and applied to the
+  // host's outgoing messages by ChatTab.
+  const [myName, setMyName] = useState(() => hostName(scope.ref));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Bumped on every copy so the check icon re-mounts and replays its pop,
@@ -198,6 +203,21 @@ export function ShareDialog({
                   ))}
                 </div>
               </div>
+            ) : null}
+            {isChat && mode === "conversation" && perm === "write" ? (
+              <label className="flex flex-col gap-1 text-[12px] text-muted">
+                Your name
+                <input
+                  value={myName}
+                  onChange={(e) => {
+                    setMyName(e.target.value);
+                    setHostName(scope.ref, e.target.value);
+                  }}
+                  placeholder="how guests see you (e.g. your name)"
+                  maxLength={32}
+                  className="rounded-md border border-line bg-panel px-2 py-1 text-[12px] text-text outline-none placeholder:text-faint focus:border-accent"
+                />
+              </label>
             ) : null}
             <label className="flex items-center justify-between gap-2 text-[12px] text-muted">
               Link expires

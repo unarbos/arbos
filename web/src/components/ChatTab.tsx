@@ -6,6 +6,7 @@ import {
   Mic,
   Paperclip,
   Square,
+  Users,
   X,
 } from "lucide-react";
 
@@ -38,6 +39,7 @@ import {
   type ModelOption,
 } from "@/lib/api";
 import { notifyRunComplete } from "@/lib/notify";
+import { hostName, onHostNameChange } from "@/lib/identity";
 import {
   blobBase64,
   cancelRecording,
@@ -55,9 +57,12 @@ import { useAutosize } from "@/lib/useAutosize";
 import {
   chatReducer,
   initialChatState,
+  peopleFromReplay,
   replayToItems,
+  type PeopleMessage,
   type TranscriptItem,
 } from "@/lib/transcript";
+import { PeopleChat } from "./PeopleChat";
 
 /** Socket reconnect: exponential backoff with jitter, so a restarting
  *  backend isn't hammered and a fleet of tabs doesn't thunder in sync. */
@@ -265,6 +270,17 @@ export function ChatTab({
   // background bar's rows; clicking one opens it in a run tab beside us.
   const [runs, setRuns] = useState<ChildRun[]>([]);
   const [boundSession, setBoundSession] = useState<string | null>(resumeId);
+  // The host's display name for this chat (set in the Share dialog). Kept in
+  // state so setting it relabels the host's own messages live.
+  const [selfName, setSelfName] = useState(() => hostName(resumeId));
+  // People panel: human-to-human side chat for collaborators on this board,
+  // separate from the agent transcript and never seen by the model.
+  const [people, setPeople] = useState<PeopleMessage[]>([]);
+  const peopleIdRef = useRef(1);
+  const [peopleOpen, setPeopleOpen] = useState(false);
+  const peopleOpenRef = useRef(false);
+  peopleOpenRef.current = peopleOpen;
+  const [peopleUnread, setPeopleUnread] = useState(0);
   // Messages composed while a turn runs wait here (Cursor's queue): each can
   // be edited back into the composer, deleted, or pushed (sent now as a
   // steer). The head auto-sends when the turn completes.
@@ -356,6 +372,9 @@ export function ChatTab({
         .then((events) => {
           if (!closed && sessionRef.current === sid) {
             dispatch({ type: "replay", items: replayToItems(events) });
+            const ppl = peopleFromReplay(events);
+            peopleIdRef.current = ppl.length + 1;
+            setPeople(ppl);
           }
         })
         .catch(() => {});
@@ -417,11 +436,24 @@ export function ChatTab({
         if (!edit) return;
         pendingEditRef.current = null;
         dispatch({ type: "replay", items: edit.keep });
-        if (seam.prompt(edit.text, edit.parts)) {
+        if (seam.prompt(edit.text, edit.parts, hostName(sessionRef.current))) {
           dispatch({ type: "user", text: edit.text, parts: edit.parts });
         }
       },
       onEnvelope: (env) => {
+        // A human-to-human side-chat line: route it to the People panel, never
+        // the agent transcript. Own lines are suppressed server-side (by the
+        // connOrigin echo filter), so a live chat_note here is always from
+        // someone else. depth>0 (a delegated child) never surfaces here.
+        if (env.depth === 0 && env.event.kind === "chat_note") {
+          const d = env.event.data;
+          setPeople((p) => [
+            ...p,
+            { id: peopleIdRef.current++, text: d.text, author: d.author ?? "" },
+          ]);
+          if (!peopleOpenRef.current) setPeopleUnread((n) => n + 1);
+          return;
+        }
         // The agent presenting a file (the show tool) opens its panel the
         // moment the result streams in — live only, top-level only: a
         // resumed transcript renders chips to re-open, and a delegated
@@ -517,6 +549,9 @@ export function ChatTab({
       fetchReplayFull(resumeId)
         .then(({ events, session }) => {
           dispatch({ type: "replay", items: replayToItems(events) });
+          const ppl = peopleFromReplay(events);
+          peopleIdRef.current = ppl.length + 1;
+          setPeople(ppl);
           if (session?.model) setModel(session.model);
         })
         .catch(() => {})
@@ -948,7 +983,7 @@ export function ChatTab({
         setAttachments([]);
         return;
       }
-      if (seamRef.current.prompt(body, parts)) {
+      if (seamRef.current.prompt(body, parts, hostName(sessionRef.current))) {
         if (chat.items.length === 0) {
           handleRef.current.onTitle?.(text.trim() || atts[0]?.name || echo);
         }
@@ -961,6 +996,20 @@ export function ChatTab({
     }
   }, [text, attachments, chat.items.length]);
 
+  // Post a human-to-human side-chat line: the server logs+broadcasts it without
+  // starting a turn. The broadcast back to us is suppressed server-side, so we
+  // append optimistically with our own name (which renders unlabeled — you see
+  // others' names, not your own).
+  const sendPeople = useCallback(
+    (text: string) => {
+      const name = hostName(sessionRef.current);
+      if (seamRef.current?.chatNote(text, name)) {
+        setPeople((p) => [...p, { id: peopleIdRef.current++, text, author: name }]);
+      }
+    },
+    [],
+  );
+
   // Flush the queue head when the turn ends: sending dispatches a user item
   // and re-arms turnActive, so exactly one queued message runs per turn.
   // A pending edit owns the turn-end it caused — its fork must land before
@@ -969,7 +1018,7 @@ export function ChatTab({
     if (chat.turnActive || !usable || queue.length === 0) return;
     if (pendingEditRef.current) return;
     const head = queue[0];
-    if (seamRef.current?.prompt(head.text, head.parts)) {
+    if (seamRef.current?.prompt(head.text, head.parts, hostName(sessionRef.current))) {
       setQueue((q) => q.filter((m) => m.qid !== head.qid));
       dispatch({ type: "user", text: head.text, parts: head.parts });
     }
@@ -980,9 +1029,10 @@ export function ChatTab({
     (qid: number) => {
       const msg = queue.find((m) => m.qid === qid);
       if (!msg || !seamRef.current) return;
+      const name = hostName(sessionRef.current);
       const ok = chat.turnActive
-        ? seamRef.current.steer(msg.text, msg.parts)
-        : seamRef.current.prompt(msg.text, msg.parts);
+        ? seamRef.current.steer(msg.text, msg.parts, name)
+        : seamRef.current.prompt(msg.text, msg.parts, name);
       if (ok) {
         setQueue((q) => q.filter((m) => m.qid !== qid));
         dispatch({ type: "user", text: msg.text, parts: msg.parts });
@@ -1092,6 +1142,7 @@ export function ChatTab({
       onOpenPlan: (node: number) => handleRef.current.onOpenPlan?.(node),
       onRetry,
       canRetry: usable && !chat.turnActive,
+      selfName,
       edit: {
         editingId,
         canEdit: usable,
@@ -1106,11 +1157,20 @@ export function ChatTab({
       editingId,
       usable,
       onRetry,
+      selfName,
       onEditStart,
       onEditCancel,
       onEditSubmit,
     ],
   );
+
+  // Keep selfName synced to the bound session and to live changes from the
+  // Share dialog, so the host's own messages (past included) relabel at once.
+  useEffect(() => {
+    setSelfName(hostName(boundSession));
+    if (!boundSession) return;
+    return onHostNameChange(boundSession, setSelfName);
+  }, [boundSession]);
 
   /** Edit: pull a queued message back into the composer. */
   const editQueued = useCallback(
@@ -1222,18 +1282,53 @@ export function ChatTab({
   // tabs never start fresh — their history is already on its way.
   const fresh = !resumeId && chat.items.length === 0;
 
+  // The People panel (human-to-human side chat) docks as a right-edge drawer,
+  // toggled by a small button. Present in both the read-only and normal views:
+  // a read-only guest can still read it (canPost gates only the composer).
+  const peoplePanel = peopleOpen ? (
+    <div className="absolute inset-y-0 right-0 z-20 w-72 max-w-[85%] shadow-xl shadow-black/30">
+      <PeopleChat
+        messages={people}
+        selfName={selfName}
+        canPost={!readOnly}
+        onSend={sendPeople}
+        onClose={() => setPeopleOpen(false)}
+      />
+    </div>
+  ) : null;
+  const peopleToggle = (
+    <button
+      type="button"
+      onClick={() => {
+        setPeopleOpen((v) => !v);
+        setPeopleUnread(0);
+      }}
+      title="People on this board"
+      className="absolute right-2 top-2 z-30 flex items-center gap-1 rounded-md border border-line bg-card/90 px-2 py-1 text-[11.5px] text-muted backdrop-blur transition-colors hover:text-text"
+    >
+      <Users size={13} />
+      {peopleUnread > 0 && !peopleOpen && (
+        <span className="rounded-full bg-accent px-1.5 text-[10px] font-semibold text-canvas">
+          {peopleUnread}
+        </span>
+      )}
+    </button>
+  );
+
   // A read-only share renders just the transcript — no composer, no
   // interactive cards (queue/approval/questions), nothing to drive with.
   if (readOnly) {
     return (
-      <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
+      <div ref={rootRef} className="relative flex min-h-0 flex-1 flex-col">
         <ChatView items={chat.items} working={working} hooks={transcriptHooks} />
+        {peoplePanel}
+        {peopleToggle}
       </div>
     );
   }
 
   return (
-    <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
+    <div ref={rootRef} className="relative flex min-h-0 flex-1 flex-col">
       {!fresh && (
         <ChatView items={chat.items} working={working} hooks={transcriptHooks} />
       )}
@@ -1459,6 +1554,8 @@ export function ChatTab({
           </div>
         </div>
       </div>
+      {peoplePanel}
+      {peopleToggle}
     </div>
   );
 }

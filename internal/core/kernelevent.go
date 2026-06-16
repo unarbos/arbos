@@ -24,6 +24,7 @@ const (
 	KernelEventQueued          KernelEventKind = "queued"
 	KernelEventApprovalRequest KernelEventKind = "approval_request"
 	KernelEventQuestionRequest KernelEventKind = "question_request"
+	KernelEventChatNote        KernelEventKind = "chat_note"
 )
 
 // KernelEvent is something a session emits as it works. Frontends render these;
@@ -170,6 +171,20 @@ type Queued struct {
 	Author string `json:"author,omitempty"`
 }
 
+// ChatNote is the live presentation of a human-to-human side-chat line (the
+// durable record is ChatNotePayload on the log). It is deliberately its OWN
+// kernel-event type, NOT a Queued — the control pump flips turn state on Queued,
+// so reusing it would make every door think a turn is in flight. Origin is the
+// per-connection door marker used for echo + self-suppression; Author is the
+// sender's display name (server-stamped for guests). TS orders the side chat.
+type ChatNote struct {
+	Text   string         `json:"text"`
+	Author string         `json:"author,omitempty"`
+	Origin string         `json:"origin,omitempty"`
+	Parts  []ContentBlock `json:"parts,omitempty"`
+	TS     int64          `json:"ts"`
+}
+
 // ApprovalRequest pauses the turn to ask whether a tool call may proceed. The
 // turn blocks until a matching ApprovalResponseIntent (same RequestID) arrives
 // — the suspend-and-await control-flow rule (ADR-0018). Emitted, e.g., before a
@@ -216,5 +231,6 @@ func (TurnComplete) Kind() KernelEventKind    { return KernelEventTurnComplete }
 func (Interrupted) Kind() KernelEventKind     { return KernelEventInterrupted }
 func (ErrorEvent) Kind() KernelEventKind      { return KernelEventError }
 func (Queued) Kind() KernelEventKind          { return KernelEventQueued }
+func (ChatNote) Kind() KernelEventKind        { return KernelEventChatNote }
 func (ApprovalRequest) Kind() KernelEventKind { return KernelEventApprovalRequest }
 func (QuestionRequest) Kind() KernelEventKind { return KernelEventQuestionRequest }

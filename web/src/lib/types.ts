@@ -125,6 +125,10 @@ export type KernelEvent =
   | {
       kind: "question_request";
       data: { request_id: string; title?: string; questions: Question[] };
+    }
+  | {
+      kind: "chat_note";
+      data: { text: string; author?: string; origin?: string; ts: number };
     };
 
 export interface Envelope {
@@ -134,8 +138,8 @@ export interface Envelope {
 }
 
 export type Intent =
-  | { kind: "prompt"; data: { text: string; parts?: ContentBlock[] } }
-  | { kind: "steer"; data: { text: string; parts?: ContentBlock[] } }
+  | { kind: "prompt"; data: { text: string; parts?: ContentBlock[]; author?: string } }
+  | { kind: "steer"; data: { text: string; parts?: ContentBlock[]; author?: string } }
   | { kind: "interrupt"; data: Record<string, never> }
   | {
       kind: "approval_response";
@@ -149,7 +153,8 @@ export type Intent =
         details?: string;
         skipped?: boolean;
       };
-    };
+    }
+  | { kind: "chat_note"; data: { text: string; author?: string } };
 
 export type ClientFrame =
   | { type: "open"; session_id?: string }

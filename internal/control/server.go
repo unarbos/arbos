@@ -138,6 +138,11 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 		if q, ok := env.Event.(core.Queued); ok && q.Origin == connOrigin {
 			return true
 		}
+		// Same echo suppression for a side-chat line: the sending tab already
+		// rendered it optimistically; the broadcast is for the OTHER doors.
+		if n, ok := env.Event.(core.ChatNote); ok && n.Origin == connOrigin {
+			return true
+		}
 		b, err := core.EncodeEnvelope(env)
 		if err != nil {
 			_ = enc.write(serverFrame{Type: "error", Error: "encode envelope: " + err.Error()})
@@ -332,6 +337,16 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 				if p.Origin == "" {
 					p.Origin = connOrigin
 					intent = p
+				}
+			}
+			if n, isNote := intent.(core.ChatNoteIntent); isNote {
+				// Same origin stamp as a prompt so the ChatNote broadcast reaches
+				// the OTHER doors while writeEnvelope suppresses it here.
+				// Deliberately absent from the setTurn switch below — a side-chat
+				// note is not a turn and must not flip turn state on any door.
+				if n.Origin == "" {
+					n.Origin = connOrigin
+					intent = n
 				}
 			}
 			switch intent.(type) {

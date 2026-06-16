@@ -701,11 +701,29 @@ func (e *Engine) runActor(parent context.Context, c *Conversation) {
 				// A response arriving while idle has no pending waiter — the turn
 				// that asked already ended or was interrupted. Drop it benignly;
 				// a late/duplicate frame is not an internal error.
+			case core.ChatNoteIntent:
+				// Human-to-human side chat: log + broadcast, never a turn.
+				e.appendChatNote(parent, c, it)
 			default:
 				c.emit(parent, core.ErrorEvent{Category: core.ErrInternal, Err: "unhandled intent type"})
 			}
 		}
 	}
+}
+
+// appendChatNote logs a human-to-human side-chat line and broadcasts it live to
+// every door WITHOUT starting or touching an agent turn. The event is excluded
+// from ProjectEvent, so it never reaches the model or compaction; it persists
+// only so the side chat replays on reload. Called from both the idle and the
+// mid-turn intent loops — in the mid-turn loop it must NOT cancel or queue, so
+// the active turn runs on untouched.
+func (e *Engine) appendChatNote(parent context.Context, c *Conversation, it core.ChatNoteIntent) {
+	now := e.clock.Now()
+	m := core.Message{Role: core.RoleUser, Content: it.Text, Parts: it.Parts, Author: it.Author}
+	if !e.append(parent, c, core.NewChatNoteEvent(c.id, m, now)) {
+		return
+	}
+	c.emit(parent, core.ChatNote{Text: it.Text, Author: it.Author, Origin: it.Origin, Parts: it.Parts, TS: now.UnixMilli()})
 }
 
 // processPrompt runs a turn in a child context and races it against incoming
@@ -850,6 +868,13 @@ func (e *Engine) processPrompt(parent context.Context, c *Conversation, text str
 				// These apply only when idle (between turns). Ignoring them
 				// mid-turn keeps the actor's single-writer and no-mid-turn-mutation
 				// invariants intact; a frontend resends once the session is idle.
+			case core.ChatNoteIntent:
+				// A human-to-human side-chat line posted WHILE the agent works
+				// (the headline use case). Log + broadcast it without cancelling,
+				// queuing, or otherwise touching the active turn — and crucially
+				// without falling through to the default below, which would emit a
+				// turn-terminal ErrorEvent and abort the turn.
+				e.appendChatNote(parent, c, it)
 			default:
 				// Any other intent mid-turn is a protocol error, surfaced not
 				// swallowed.

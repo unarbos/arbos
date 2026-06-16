@@ -45,6 +45,12 @@ type MessagesLine struct {
 // line, in log order. This is the lossless shape — the default a machine reads.
 func WriteEvents(enc *json.Encoder, id core.SessionID, events []core.Event) error {
 	for i := range events {
+		// Human-to-human side chat is private coordination, not part of the
+		// agent's auditable trajectory — and WriteEvents dumps raw payloads, so
+		// without this skip the chat text would leak into every export/share.
+		if events[i].Payload.Kind() == core.EventChatNote {
+			continue
+		}
 		payload, err := core.EncodePayload(events[i].Payload)
 		if err != nil {
 			return fmt.Errorf("trajectory %s: encode seq %d: %w", id, events[i].Seq, err)

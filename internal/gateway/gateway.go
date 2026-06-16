@@ -928,6 +928,13 @@ func (s *Server) sessionReplay(ctx context.Context, id core.SessionID) (map[stri
 			})
 		case core.InterruptPayload:
 			out = append(out, replayJSON{Type: "interrupted", Seq: ev.Seq})
+		case core.ChatNotePayload:
+			// Human-to-human side chat: replayed into the people panel, never
+			// merged into the agent transcript. (This is a Go type switch, NOT
+			// exhaustive-linted — a missing case fails silently as "no chat
+			// history on reload", so it is covered by a test.)
+			m := p.Message
+			out = append(out, replayJSON{Type: "chat_note", Seq: ev.Seq, Text: m.Content, Parts: m.Parts, Author: m.Author})
 		}
 	}
 	return map[string]any{"events": out, "session": meta}, nil

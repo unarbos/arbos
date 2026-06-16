@@ -31,6 +31,7 @@ const (
 	EventContext          EventKind = "context"
 	EventInterrupted      EventKind = "interrupted"
 	EventConfig           EventKind = "config"
+	EventChatNote         EventKind = "chat_note"
 )
 
 // EventPayload is a sealed sum type: the kernel's event payloads are a closed
@@ -137,6 +138,17 @@ type ConfigPayload struct {
 
 func (ConfigPayload) Kind() EventKind { return EventConfig }
 
+// ChatNotePayload is a human-to-human side-chat line — collaborators on the
+// same session talking to EACH OTHER, not prompting the agent. It is logged
+// (so it replays and interleaves by Seq like any event) but is deliberately
+// EXCLUDED from ProjectEvent, so it never enters the model context or
+// compaction. It reuses Message for the Author/attachment apparatus; Role is
+// RoleUser for shape only, and Kind() is its own EventChatNote regardless of
+// role, so Validate's user/assistant message check does not apply to it.
+type ChatNotePayload struct{ Message Message }
+
+func (ChatNotePayload) Kind() EventKind { return EventChatNote }
+
 // LatestConfig returns the most recent ConfigPayload in the log, reporting
 // whether one exists. The latest entry is authoritative: a config event
 // supersedes earlier ones the same way the projection's latest-per-source rule
@@ -230,4 +242,8 @@ func NewInterruptEvent(sid SessionID, reason string, now time.Time) *Event {
 
 func NewConfigEvent(sid SessionID, p ConfigPayload, now time.Time) *Event {
 	return newEvent(sid, now, p)
+}
+
+func NewChatNoteEvent(sid SessionID, m Message, now time.Time) *Event {
+	return newEvent(sid, now, ChatNotePayload{Message: m})
 }

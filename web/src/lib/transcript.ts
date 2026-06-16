@@ -551,6 +551,11 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
         },
       };
 
+    case "chat_note":
+      // Human-to-human side chat is handled by the People panel (ChatTab routes
+      // it before dispatch), never the agent transcript — ignore it here.
+      return state;
+
     default: {
       const never: never = ev;
       void never;
@@ -675,6 +680,26 @@ function trackBackground(
  * mirror of applyEnvelope. Tool calls come from assistant messages; results
  * attach to them by call id.
  */
+/** One human-to-human side-chat line for the People panel (separate from the
+ *  agent transcript). */
+export interface PeopleMessage {
+  id: number;
+  text: string;
+  author: string;
+}
+
+/** Extract the side-chat lines from a session replay, in log order. */
+export function peopleFromReplay(events: ReplayEvent[]): PeopleMessage[] {
+  const out: PeopleMessage[] = [];
+  let id = 1;
+  for (const ev of events) {
+    if (ev.type === "chat_note") {
+      out.push({ id: id++, text: ev.text, author: ev.author ?? "" });
+    }
+  }
+  return out;
+}
+
 export function replayToItems(events: ReplayEvent[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   const toolIndex = new Map<string, number>();
@@ -733,6 +758,10 @@ export function replayToItems(events: ReplayEvent[]): TranscriptItem[] {
           }
         }
         items.push({ kind: "interrupted", id: id++ });
+        break;
+      case "chat_note":
+        // Human-to-human side chat is rendered in the People panel, never in
+        // the agent transcript — peopleFromReplay extracts these rows instead.
         break;
       default: {
         const never: never = ev;

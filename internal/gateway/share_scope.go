@@ -113,6 +113,9 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 				"scope":   string(g.Scope.Kind),
 				"session": g.Scope.Ref,
 				"perm":    permWord(g.Perm),
+				// The guest's self-asserted name, so their own browser can label
+				// their messages live (the server already stamps it on the wire).
+				"name": s.Auth.principalName(r),
 			}
 		}
 	}
@@ -180,11 +183,14 @@ func filterShareFrame(line []byte, ref string, perm share.Perm, name string) ([]
 		// Only conversational intents — never session-structural ones
 		// (set_model, fork, compact) which would let a guest reshape the chat.
 		switch kind.Kind {
-		case "prompt", "steer":
+		case "prompt", "steer", "chat_note":
 			// Stamp the guest's trusted display name onto the intent, overwriting
 			// anything the client put there — this is the only place a guest's
 			// frames pass, so it is where spoofing is foreclosed. Returns the
 			// rewritten frame; on any encode hiccup fall back to the original.
+			// A read-only guest never reaches here: the perm < PermWrite check
+			// above already dropped their frame, so chat_note posting is
+			// write-only with no extra code.
 			if out, ok := stampAuthor(line, f.Intent, name); ok {
 				return out, true
 			}

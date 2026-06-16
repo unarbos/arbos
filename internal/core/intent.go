@@ -20,6 +20,7 @@ const (
 	IntentSetWebFetch      IntentKind = "set_web_fetch"
 	IntentSetImageGen      IntentKind = "set_image_gen"
 	IntentCompact          IntentKind = "compact"
+	IntentChatNote         IntentKind = "chat_note"
 )
 
 // Intent is something an outside actor (CLI, TUI, gateway, socket) asks a
@@ -64,6 +65,21 @@ type SteerIntent struct {
 	// Author mirrors PromptIntent.Author: the self-asserted display name of the
 	// human who sent this steer, stamped server-side.
 	Author string `json:"author,omitempty"`
+}
+
+// ChatNoteIntent is a human-to-human side-chat line: collaborators sharing a
+// session talking to EACH OTHER, NOT prompting the agent. The actor appends it
+// to the log and broadcasts it to every door but NEVER starts a turn, and it is
+// excluded from the model projection — so it reaches people, not the model.
+// Origin and Author mirror PromptIntent so the existing cross-door echo
+// suppression and server-side name stamping (filterShareFrame) apply verbatim;
+// for a share guest Author is overwritten server-side and never trusted from
+// the client frame.
+type ChatNoteIntent struct {
+	Text   string         `json:"text"`
+	Parts  []ContentBlock `json:"parts,omitempty"`
+	Origin string         `json:"origin,omitempty"`
+	Author string         `json:"author,omitempty"`
 }
 
 // InterruptIntent cancels the in-flight turn, if any.
@@ -152,3 +168,4 @@ func (SetWebSearchIntent) Kind() IntentKind     { return IntentSetWebSearch }
 func (SetWebFetchIntent) Kind() IntentKind      { return IntentSetWebFetch }
 func (SetImageGenIntent) Kind() IntentKind      { return IntentSetImageGen }
 func (CompactIntent) Kind() IntentKind          { return IntentCompact }
+func (ChatNoteIntent) Kind() IntentKind         { return IntentChatNote }
