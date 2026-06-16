@@ -62,6 +62,7 @@ import { dirSurface, surfaceTitle, type Surface, type UICommand } from "./lib/su
 import { sameTerm, termTitle, type TermRef } from "./lib/term";
 import { errMsg, toastError } from "./lib/toast";
 import { loadWorkspace, saveWorkspace } from "./lib/workspace";
+import { useMediaQuery } from "./lib/useMediaQuery";
 import { Toasts } from "./components/Toasts";
 
 export interface TabState extends TabInfo {
@@ -928,7 +929,24 @@ export default function App() {
   const openShareAgent = () =>
     setShareTarget({ scope: { kind: "all", ref: "" }, label: "Full access to this agent" });
 
-  const places = computePlaces(root);
+  // Phones have no room for side-by-side panes: below `sm` we render only the
+  // focused pane, full-bleed, so a split made on desktop never strands the
+  // user in a half-width column on mobile. The split tree is untouched —
+  // widen the window and the other panes reappear exactly where they were.
+  const narrow = useMediaQuery("(max-width: 639px)");
+  const allPlaces = computePlaces(root);
+  const places =
+    narrow && allPlaces.panes.length > 1
+      ? {
+          panes: [
+            {
+              pane: focusedPane,
+              rect: { x: 0, y: 0, w: 1, h: 1 },
+            },
+          ],
+          dividers: [],
+        }
+      : allPlaces;
   const paneRect = new Map(places.panes.map((p) => [p.pane, p.rect]));
   const activeKey = new Map(
     places.panes.map((p) => [p.pane, activeKeyIn(tabs, p.pane, paneActive[p.pane])]),
@@ -947,7 +965,9 @@ export default function App() {
       {places.panes.map(({ pane, rect }) => (
         <div
           key={`strip-${pane}`}
-          className="absolute"
+          // Top-edge strips carry the status-bar / notch inset so their
+          // controls clear it; the strip's own background paints under it.
+          className={`absolute${rect.y < 0.001 ? " safe-pt" : ""}`}
           style={{
             left: pct(rect.x),
             top: pct(rect.y),

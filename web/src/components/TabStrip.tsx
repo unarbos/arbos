@@ -192,10 +192,20 @@ export function GlobalActions({
       <IconButton title="Share agent" onClick={onShareAgent}>
         <Share2 size={13} />
       </IconButton>
-      <IconButton title="Split pane right" onClick={() => onSplit("right")}>
+      {/* Splitting a pane is a desktop affordance: a phone has no room for two
+          panes side by side, so the split controls hide below `sm`. */}
+      <IconButton
+        title="Split pane right"
+        onClick={() => onSplit("right")}
+        className="hidden sm:flex"
+      >
         <Columns2 size={13} />
       </IconButton>
-      <IconButton title="Split pane down" onClick={() => onSplit("down")}>
+      <IconButton
+        title="Split pane down"
+        onClick={() => onSplit("down")}
+        className="hidden sm:flex"
+      >
         <Rows2 size={13} />
       </IconButton>
       <ThemePicker />
@@ -306,11 +316,13 @@ function IconButton({
   title,
   onClick,
   pressed,
+  className,
   children,
 }: {
   title: string;
   onClick: () => void;
   pressed?: boolean;
+  className?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -319,9 +331,9 @@ function IconButton({
         type="button"
         aria-label={title}
         onClick={onClick}
-        className={`flex size-6 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-hover ${
+        className={`tap flex size-6 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-hover ${
           pressed ? "bg-hover text-text" : "text-muted hover:text-text"
-        }`}
+        } ${className ?? ""}`}
       >
         {children}
       </button>

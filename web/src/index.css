@@ -61,6 +61,52 @@ body,
   -webkit-text-size-adjust: 100%;
 }
 
+/* The app shell paints to the very edges (theme-color + black-translucent
+   status bar), so the SAFE-AREA insets are applied INSIDE, on the elements
+   that hold interactive content — see .safe-* helpers below. The root itself
+   stays full-bleed so backgrounds reach under the notch and home bar. */
+body {
+  /* iOS rubber-band scroll must not drag the whole app; panes own their own
+     overflow. */
+  overscroll-behavior: none;
+}
+
+/* Safe-area helpers: pad by the device inset, but never less than 0. Used by
+   the tab strip (top) and the composer (bottom) so controls clear the notch,
+   the status bar, and the home indicator on phones. The max() keeps desktop
+   (inset = 0) exactly as before. */
+.safe-pt {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.safe-pb {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.safe-pl {
+  padding-left: env(safe-area-inset-left, 0px);
+}
+.safe-pr {
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* On touch devices, give buttons a comfortable minimum hit area without
+   bloating the dense desktop layout. Applied to the composer + strip controls
+   via the .tap class. */
+@media (pointer: coarse) {
+  .tap {
+    min-width: 2.25rem;
+    min-height: 2.25rem;
+  }
+
+  /* The composer field must be >=16px on touch so iOS Safari doesn't zoom the
+     viewport on focus (its trigger is a sub-16px focused input). Set here, not
+     via a Tailwind size utility, so it always wins over the inherited 13px and
+     never depends on a responsive utility being emitted. The denser desktop
+     size stays the default off touch. */
+  .composer-input {
+    font-size: 16px;
+  }
+}
+
 ::selection {
   background: color-mix(in srgb, var(--color-accent) 28%, transparent);
 }

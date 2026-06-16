@@ -51,7 +51,10 @@ export function ShareChat({ session, perm }: { session: string; perm: SharePerm 
           />
         </div>
         {people && (
-          <div className="flex min-h-0 w-72 shrink-0 flex-col border-l border-line">
+          // Phone: the People panel takes the whole screen (absolute overlay)
+          // instead of a cramped side column; from `sm` up it docks as a
+          // 288px column beside the chat.
+          <div className="absolute inset-0 z-20 flex min-h-0 flex-col border-l border-line bg-canvas sm:static sm:inset-auto sm:z-auto sm:w-72 sm:shrink-0">
             <div className="flex shrink-0 items-center justify-between border-b border-line px-3 py-2">
               <span className="text-[12px] font-semibold text-bright">People</span>
               <button

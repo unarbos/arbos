@@ -1341,12 +1341,15 @@ export function ChatTab({
   // keeps only a thin rail that surfaces unread + typing activity and opens that
   // tab; the surface owns its own scoped seam for presence and side-chat lines.
   const someoneTyping = typing.some((n) => n !== selfName);
+  // The People rail docks as a slim full-height column on desktop. On phones
+  // it would steal width from a single-column layout, so it hides below `sm`;
+  // People still opens full-screen as its own tab (and auto-opens when shared).
   const peopleColumn = (
     <button
       type="button"
       onClick={openPeople}
       title={someoneTyping ? "Someone is typing…" : "People on this board"}
-      className="flex w-9 shrink-0 flex-col items-center gap-1 border-l border-line bg-panel pt-2.5 text-muted transition-colors hover:text-text"
+      className="hidden w-9 shrink-0 flex-col items-center gap-1 border-l border-line bg-panel pt-2.5 text-muted transition-colors hover:text-text sm:flex"
     >
       <Users size={15} />
       {peopleUnread > 0 && (
@@ -1390,7 +1393,7 @@ export function ChatTab({
             : "shrink-0"
         }
       >
-        <div className="mx-auto w-full max-w-4xl space-y-2 px-3.5 pb-3.5 pt-1">
+        <div className="safe-pb mx-auto w-full max-w-4xl space-y-2 px-3.5 pb-3.5 pt-1">
           {reconnecting && !fresh && (
             <div className="flex items-center gap-2 rounded-md border border-warn/40 bg-warn/10 px-3 py-1.5 text-[12px] text-warn">
               <Loader2 size={12} className="shrink-0 animate-spin" />
@@ -1518,7 +1521,9 @@ export function ChatTab({
               onPaste={onPaste}
               rows={1}
               placeholder={placeholder}
-              className={`block w-full resize-none bg-transparent px-3 pt-2.5 pb-1 leading-relaxed text-bright outline-none placeholder:text-faint ${
+              // composer-input forces >=16px on touch (index.css) so iOS Safari
+              // doesn't zoom on focus; the denser desktop size is kept off touch.
+              className={`composer-input block w-full resize-none bg-transparent px-3 pt-2.5 pb-1 leading-relaxed text-bright outline-none placeholder:text-faint ${
                 fresh ? "min-h-[76px] text-[15px]" : ""
               }`}
             />
@@ -1543,7 +1548,7 @@ export function ChatTab({
                     type="button"
                     aria-label="Attach files"
                     onClick={() => fileInputRef.current?.click()}
-                    className="flex size-6 cursor-pointer items-center justify-center rounded-full text-faint transition-colors hover:bg-hover hover:text-text"
+                    className="tap flex size-6 cursor-pointer items-center justify-center rounded-full text-faint transition-colors hover:bg-hover hover:text-text"
                   >
                     <Paperclip size={14} />
                   </button>
@@ -1562,7 +1567,7 @@ export function ChatTab({
                     onClick={toggleVoice}
                     disabled={voice === "starting" || voice === "transcribing"}
                     aria-pressed={voice === "recording"}
-                    className={`flex size-6 cursor-pointer items-center justify-center rounded-full transition-colors disabled:cursor-default ${
+                    className={`tap flex size-6 cursor-pointer items-center justify-center rounded-full transition-colors disabled:cursor-default ${
                       voice === "recording"
                         ? "animate-pulse bg-red text-canvas"
                         : "text-faint hover:bg-hover hover:text-text"
@@ -1581,7 +1586,7 @@ export function ChatTab({
                       type="button"
                       aria-label="Stop"
                       onClick={() => seamRef.current?.interrupt()}
-                      className="flex size-6 cursor-pointer items-center justify-center rounded-full bg-btn text-canvas transition-opacity hover:opacity-90"
+                      className="tap flex size-6 cursor-pointer items-center justify-center rounded-full bg-btn text-canvas transition-opacity hover:opacity-90"
                     >
                       <Square size={9} fill="currentColor" />
                     </button>
@@ -1593,7 +1598,7 @@ export function ChatTab({
                       aria-label="Send"
                       onClick={() => void submit()}
                       disabled={!usable || (!text.trim() && attachments.length === 0)}
-                      className="flex size-6 cursor-pointer items-center justify-center rounded-full bg-btn text-canvas transition-opacity disabled:cursor-default disabled:opacity-30"
+                      className="tap flex size-6 cursor-pointer items-center justify-center rounded-full bg-btn text-canvas transition-opacity disabled:cursor-default disabled:opacity-30"
                     >
                       <ArrowUp size={14} strokeWidth={2.5} />
                     </button>
