@@ -635,7 +635,10 @@ export function ChatTab({
   }, [active, focusTick]);
 
   // Autosize the composer to its content, capped so it never eats the page.
-  useAutosize(taRef, text, COMPOSER_MAX_PX);
+  // `active` is the remeasure key: a hidden tab measures scrollHeight as 0, so
+  // re-running on show keeps the empty composer from collapsing and letting the
+  // placeholder overlap the model picker after a tab switch.
+  useAutosize(taRef, text, COMPOSER_MAX_PX, active);
 
   // Poll this chat's scheduled runs (plan-node agent firings) so they appear
   // as openable tabs. Scoped server-side: only runs whose node THIS chat
