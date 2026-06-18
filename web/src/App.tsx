@@ -60,6 +60,7 @@ import {
   type SplitDir,
 } from "./lib/layout";
 import { dirSurface, peopleSurface, surfaceTitle, type Surface, type UICommand } from "./lib/surface";
+import { getSettings } from "./lib/settings";
 import { sameTerm, termTitle, type TermRef } from "./lib/term";
 import { errMsg, toastError } from "./lib/toast";
 import { loadWorkspace, saveWorkspace } from "./lib/workspace";
@@ -372,18 +373,50 @@ export default function App() {
     });
   }, []);
 
-  const activateTab = useCallback((key: number) => {
-    setLayout((s) => {
-      const tab = s.tabs.find((t) => t.key === key);
-      if (!tab) return s;
-      return {
-        ...s,
-        paneActive: { ...s.paneActive, [tab.pane]: key },
-        focusedPane: tab.pane,
-        focusTick: s.focusTick + 1,
-      };
-    });
+  /**
+   * A People surface and its chat are two halves of one conversation, docked
+   * in adjacent panes. Find the tab linked to `tab`: for a People surface, the
+   * chat bound to its session (surface.path); for a chat, the People surface
+   * keyed to its sessionId. Returns undefined when there is no live partner or
+   * when the partner shares the same pane (raising it there would just hide the
+   * tab the user clicked).
+   */
+  const linkedTab = useCallback((tabs: TabState[], tab: TabState): TabState | undefined => {
+    if (!getSettings().linkPeopleChat) return undefined;
+    let partner: TabState | undefined;
+    if (tab.kind === "surface" && tab.surface?.kind === "people") {
+      const sid = tab.surface.path;
+      partner = tabs.find((t) => (!t.kind || t.kind === "chat") && t.sessionId === sid);
+    } else if ((!tab.kind || tab.kind === "chat") && tab.sessionId) {
+      const sid = tab.sessionId;
+      partner = tabs.find(
+        (t) => t.kind === "surface" && t.surface?.kind === "people" && t.surface.path === sid,
+      );
+    }
+    return partner && partner.pane !== tab.pane ? partner : undefined;
   }, []);
+
+  const activateTab = useCallback(
+    (key: number) => {
+      setLayout((s) => {
+        const tab = s.tabs.find((t) => t.key === key);
+        if (!tab) return s;
+        const paneActive = { ...s.paneActive, [tab.pane]: key };
+        // Switch a People tab and its chat together (and vice versa): raising one
+        // raises its partner in the adjacent pane, so the chat is always shown
+        // alongside its agentic half. Focus still lands on the clicked tab.
+        const partner = linkedTab(s.tabs, tab);
+        if (partner) paneActive[partner.pane] = partner.key;
+        return {
+          ...s,
+          paneActive,
+          focusedPane: tab.pane,
+          focusTick: s.focusTick + 1,
+        };
+      });
+    },
+    [linkedTab],
+  );
 
   const renameTab = useCallback(
     (key: number, title: string) => {

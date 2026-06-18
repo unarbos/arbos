@@ -16,12 +16,17 @@ export interface Settings {
   completionSound: boolean;
   /** Read the agent's final reply aloud when it finishes responding. */
   speakResponses: boolean;
+  /** Switch a People tab and its chat together: raising one raises its
+   *  partner in the adjacent pane, so the chat stays alongside its agentic
+   *  half. */
+  linkPeopleChat: boolean;
 }
 
 const DEFAULTS: Settings = {
   systemNotifications: false,
   completionSound: false,
   speakResponses: false,
+  linkPeopleChat: true,
 };
 
 function load(): Settings {

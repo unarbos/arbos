@@ -171,6 +171,10 @@ func renderTrajectory(sess core.Session, events []core.Event, selfPath string) s
 			// Human-to-human side chat is private coordination, not part of the
 			// agent's auditable trajectory — skip it (matches WriteEvents).
 			continue
+		case core.EventBranchAnchor:
+			// Anchor/merge bookkeeping with no conversational content — skip it
+			// (matches the projection in core.project.go).
+			continue
 		}
 		renderUnknown(body, ev)
 	}

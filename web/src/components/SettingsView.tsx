@@ -110,6 +110,17 @@ export function SettingsView({ initialPage }: { initialPage?: SettingsPage }) {
             </select>
           ),
         },
+        {
+          title: "Link People and chat tabs",
+          description:
+            "Switch a People tab and its conversation together, so the chat stays alongside its agentic half",
+          control: (
+            <Toggle
+              on={settings.linkPeopleChat}
+              onChange={(on) => setSetting("linkPeopleChat", on)}
+            />
+          ),
+        },
       ],
     },
     {
