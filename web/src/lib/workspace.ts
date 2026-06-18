@@ -80,6 +80,24 @@ function rehydrateTab(tab: TabState): TabState {
   };
 }
 
+/**
+ * Collapse duplicate People tabs to one. People is per-board, never a panel you
+ * accumulate, but its surface is keyed by the chat's bound session id — and that
+ * id changes on an edit-fork rebind, so opening People after a fork misses the
+ * live dedup and leaves a second tab. Those all persist; without this, a refresh
+ * restores every one (three "People" tabs side by side). Keep the first People
+ * tab, drop the rest; normalize() then prunes any pane the dropped tabs vacated.
+ */
+function dedupePeople(tabs: TabState[]): TabState[] {
+  let seen = false;
+  return tabs.filter((t) => {
+    if (t.kind !== "surface" || t.surface?.kind !== "people") return true;
+    if (seen) return false;
+    seen = true;
+    return true;
+  });
+}
+
 /** Read the persisted window, or null when there's nothing usable to restore. */
 export function loadWorkspace(): Restored | null {
   let raw: string | null;
@@ -108,7 +126,7 @@ export function loadWorkspace(): Restored | null {
     }
     const layout: Layout = {
       root: snap.root,
-      tabs: snap.tabs.map(rehydrateTab),
+      tabs: dedupePeople(snap.tabs.map(rehydrateTab)),
       paneActive: snap.paneActive,
       focusedPane: snap.focusedPane,
       focusTick: 0,
