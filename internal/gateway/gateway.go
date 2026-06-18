@@ -978,13 +978,14 @@ type replayJSON struct {
 	// branch_anchor: a discussion-branch anchor on THIS session (the parent).
 	// The UI renders a "discussed" marker on the message at AnchorSeq and a chip
 	// that reopens the child session.
-	Branch       string `json:"branch,omitempty"`        // child session the anchor opened
-	AnchorSeq    *int64 `json:"anchor_seq,omitempty"`    // parent event the highlight lives in (pointer: seq 0 is valid)
-	AnchorStart  int    `json:"anchor_start"`            // rune offset into the rendered event text (0 is valid, never omit)
-	AnchorEnd    int    `json:"anchor_end"`              // rune offset, exclusive (0 is valid, never omit)
-	Quote        string `json:"quote,omitempty"`         // the highlighted text
-	BranchStatus string `json:"branch_status,omitempty"` // open | accepted | discarded
-	Summary      string `json:"summary,omitempty"`       // curated conclusion (accepted)
+	Branch       string `json:"branch,omitempty"`         // child session the anchor opened
+	AnchorSeq    *int64 `json:"anchor_seq,omitempty"`     // parent event the highlight lives in (pointer: seq 0 is valid)
+	AnchorStart  int    `json:"anchor_start"`             // rune offset into the rendered event text (0 is valid, never omit)
+	AnchorEnd    int    `json:"anchor_end"`               // rune offset, exclusive (0 is valid, never omit)
+	Quote        string `json:"quote,omitempty"`          // the highlighted text
+	AnchorMsg    string `json:"anchor_message,omitempty"` // full text of the containing message (the branch's scope)
+	BranchStatus string `json:"branch_status,omitempty"`  // open | accepted | discarded
+	Summary      string `json:"summary,omitempty"`        // curated conclusion (accepted)
 }
 
 // sessionMetaJSON is the durable per-session state a resumed tab seeds its
@@ -1065,6 +1066,7 @@ func (s *Server) sessionReplay(ctx context.Context, id core.SessionID) (map[stri
 				AnchorStart:  p.Start,
 				AnchorEnd:    p.End,
 				Quote:        p.Quote,
+				AnchorMsg:    p.Message,
 				BranchStatus: string(p.Status),
 				Summary:      p.Summary,
 			})

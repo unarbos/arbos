@@ -12,6 +12,7 @@ package sessiontree
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/unarbos/arbos/internal/core"
@@ -73,23 +74,42 @@ func Fork(ctx context.Context, store ports.SessionStore, source, newID core.Sess
 // stream. Like every injected segment it is fenced and superseded per source.
 const SourceBranchAnchor = "branch_anchor"
 
-// Branch opens an anchored sub-discussion about a highlighted span of source.
-// It is Fork(throughSeq = anchor.Seq) — the child sees the parent's history up
-// to and including the event the highlight lives in, but nothing after, so the
-// side-thread is a genuine "step aside at this point" — followed by two records:
+// Branch opens an anchored sub-discussion scoped to a highlighted FRAGMENT and
+// its containing message — NOT a fork of the whole conversation. The child is a
+// fresh session (no parent turns copied in), seeded with a single ContextPayload
+// segment that quotes the message the highlight came from and calls out the
+// highlighted span within it. So the agent discusses the fragment with its own
+// message as the surrounding context, and sees nothing else from the thread —
+// no earlier turns, no later turns. It writes two records:
 //
 //   - on the PARENT: a BranchAnchorPayload (Status open) marking where the
 //     highlight is and which child it opened, so the parent UI can render the
 //     anchor and later resolve it on accept;
-//   - on the CHILD: a ContextPayload segment (SourceBranchAnchor) framing the
-//     side-discussion around the quoted fragment, injected (not a visible
+//   - on the CHILD: a ContextPayload segment (SourceBranchAnchor) carrying the
+//     containing message + the highlighted fragment, injected (not a visible
 //     message) so it reaches the model as fenced context.
 //
-// anchor.Branch must equal newID and anchor.Seq must be a valid source seq; the
-// caller (engine) sets these. Failures after the fork leave the child session
-// in place (the caller decides whether to retry or abandon it).
+// anchor.Branch must equal newID; anchor.Quote is the highlighted text and
+// anchor.Message the full containing message (the caller, which has the rendered
+// transcript, supplies both). anchor.Seq locates the anchor on the parent for
+// the marker. Failures after CreateSession leave the child in place (the caller
+// decides whether to retry or abandon it).
 func Branch(ctx context.Context, store ports.SessionStore, source, newID core.SessionID, anchor core.BranchAnchorPayload, now time.Time) error {
-	if err := Fork(ctx, store, source, newID, anchor.Seq, now); err != nil {
+	src, err := store.Get(ctx, source)
+	if err != nil {
+		return err
+	}
+	if err := store.CreateSession(ctx, core.Session{
+		ID:        newID,
+		ParentID:  source,
+		Status:    core.SessionActive,
+		Model:     src.Model,
+		WebSearch: src.WebSearch,
+		WebFetch:  src.WebFetch,
+		ImageGen:  src.ImageGen,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
 		return err
 	}
 	anchor.Branch = newID
@@ -99,9 +119,28 @@ func Branch(ctx context.Context, store ports.SessionStore, source, newID core.Se
 	if err := store.AppendEvent(ctx, pa); err != nil {
 		return err
 	}
-	seed := "You are in a focused side-discussion the user opened about this highlighted fragment of the conversation:\n\n\u201c" + anchor.Quote + "\u201d\n\nDiscuss it in depth. When the user accepts, only a short curated conclusion is carried back to the main thread."
-	seg := core.NewContextEvent(newID, []core.Segment{{Source: SourceBranchAnchor, Content: seed}}, now)
+	seg := core.NewContextEvent(newID, []core.Segment{{Source: SourceBranchAnchor, Content: branchSeed(anchor)}}, now)
 	return store.AppendEvent(ctx, seg)
+}
+
+// branchSeed renders the child's framing context: the containing message as the
+// scope, the highlighted fragment called out within it, and the merge-back
+// contract. When the containing message is unavailable (Message empty) it falls
+// back to the fragment alone.
+func branchSeed(a core.BranchAnchorPayload) string {
+	var b strings.Builder
+	b.WriteString("The user opened a focused side-discussion about a highlighted fragment of an earlier message. ")
+	b.WriteString("Discuss ONLY this fragment; the surrounding conversation is intentionally not included.\n\n")
+	b.WriteString("Highlighted fragment:\n\u201c")
+	b.WriteString(a.Quote)
+	b.WriteString("\u201d\n")
+	if msg := strings.TrimSpace(a.Message); msg != "" && msg != strings.TrimSpace(a.Quote) {
+		b.WriteString("\nIt appeared in this message (for context only):\n\u201c")
+		b.WriteString(msg)
+		b.WriteString("\u201d\n")
+	}
+	b.WriteString("\nWhen the user accepts, only a short curated conclusion is carried back to the main thread.")
+	return b.String()
 }
 
 // Accept resolves an open branch: it appends the curated summary to the PARENT

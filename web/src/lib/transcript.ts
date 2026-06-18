@@ -710,6 +710,8 @@ export interface BranchAnchor {
   child: string;
   seq: number;
   quote: string;
+  /** Full text of the containing message (the branch's scope). */
+  message?: string;
   status: "open" | "accepted" | "discarded";
   summary?: string;
 }
@@ -725,6 +727,7 @@ export function anchorsFromReplay(events: ReplayEvent[]): BranchAnchor[] {
       child: ev.branch,
       seq: ev.anchor_seq,
       quote: ev.quote,
+      message: ev.anchor_message,
       status: ev.branch_status,
       summary: ev.summary,
     });

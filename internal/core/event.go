@@ -174,14 +174,18 @@ const (
 //
 // Offsets address the rendered text of the event at Seq; Quote is the
 // denormalized highlighted text and the display source of truth, since the
-// append-only log freezes the referenced event. Summary is the curated
-// conclusion captured on accept (empty while open or discarded).
+// append-only log freezes the referenced event. Message is the full text of the
+// containing message, so a branch is scoped to the highlighted fragment WITHIN
+// its own message (no other conversation turns) — the child discusses the
+// fragment with its immediate message as context, not the whole thread. Summary
+// is the curated conclusion captured on accept (empty while open or discarded).
 type BranchAnchorPayload struct {
 	Branch  SessionID    // the child session this anchor opened
 	Seq     int64        // the parent event the highlight lives in
 	Start   int          // rune offset into the rendered event text (best-effort)
 	End     int          // rune offset, exclusive
 	Quote   string       // the highlighted text, denormalized for display
+	Message string       // full text of the containing message (the branch's context)
 	Status  BranchStatus // open | accepted | discarded
 	Summary string       // curated conclusion merged back on accept
 }

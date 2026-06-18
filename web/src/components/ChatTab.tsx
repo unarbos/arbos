@@ -1156,14 +1156,15 @@ export function ChatTab({
    *  the parent up to the anchored event and seeds the child; this connection
    *  stays bound to the parent (onBranched opens the child in a sibling tab). */
   const onBranch = useCallback(
-    (seq: number, start: number, end: number, quote: string) => {
+    (seq: number, start: number, end: number, quote: string, message: string) => {
       const seam = seamRef.current;
       if (!seam) return;
       pendingBranchRef.current = { quote };
-      // The child id is allocated server-side; we let the server name it and
-      // learn it from the branched frame.
+      // The child id is allocated client-side (the server learns it from the
+      // branch frame). message is the full containing message — the branch is
+      // scoped to the fragment within it, not the whole thread.
       const childId = `branch-${sessionRef.current ?? "s"}-${Date.now().toString(36)}`;
-      if (!seam.branch(childId, seq, start, end, quote)) {
+      if (!seam.branch(childId, seq, start, end, quote, message)) {
         pendingBranchRef.current = null;
       }
     },

@@ -191,6 +191,7 @@ export type ClientFrame =
       anchor_start?: number;
       anchor_end?: number;
       anchor_quote?: string;
+      anchor_message?: string;
     }
   /** Merge a branch's curated conclusion back into the bound (parent) session. */
   | { type: "accept_branch"; new_session_id: string; summary: string }

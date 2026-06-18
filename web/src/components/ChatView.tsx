@@ -77,8 +77,16 @@ export interface TranscriptHooks {
    * span of a message. seq is the highlighted event's position in the log,
    * start/end are rune offsets into the item's rendered text, quote is the
    * selected text. Absent in read-only panels (sub-agents) and when no seq is
-   * known (a live, not-yet-replayed item). */
-  onBranch?: (seq: number, start: number, end: number, quote: string) => void;
+   * known (a live, not-yet-replayed item). message is the full text of the
+   * containing message, so the branch is scoped to the fragment WITHIN its own
+   * message — not the whole thread. */
+  onBranch?: (
+    seq: number,
+    start: number,
+    end: number,
+    quote: string,
+    message: string,
+  ) => void;
   /** Resolved branch anchors on THIS session, keyed by the parent event seq —
    *  used to render a "discussed" marker on a previously-branched message. */
   anchors?: BranchAnchorView[];
@@ -608,7 +616,13 @@ function BranchableText({
   seq?: number;
   text: string;
   anchors?: BranchAnchorView[];
-  onBranch?: (seq: number, start: number, end: number, quote: string) => void;
+  onBranch?: (
+    seq: number,
+    start: number,
+    end: number,
+    quote: string,
+    message: string,
+  ) => void;
   onOpenBranch?: (child: string, quote: string) => void;
   onResolveBranch?: (anchor: BranchAnchorView) => void;
   children: ReactNode;
@@ -657,10 +671,11 @@ function BranchableText({
     if (!sel || seq === undefined) return;
     // Best-effort rune offsets of the quote within the block text; the Quote
     // itself is the display source of truth (the kernel freezes it on the log).
+    // The full block text is the containing message — the branch's scope.
     const idx = text.indexOf(sel.quote);
     const start = idx >= 0 ? idx : 0;
     const end = idx >= 0 ? idx + sel.quote.length : sel.quote.length;
-    onBranch?.(seq, start, end, sel.quote);
+    onBranch?.(seq, start, end, sel.quote, text);
     window.getSelection()?.removeAllRanges();
     clear();
   };
@@ -745,7 +760,13 @@ function UserItem({
   onOpenSurface?: (surface: Surface) => void;
   selfName?: string;
   anchors?: BranchAnchorView[];
-  onBranch?: (seq: number, start: number, end: number, quote: string) => void;
+  onBranch?: (
+    seq: number,
+    start: number,
+    end: number,
+    quote: string,
+    message: string,
+  ) => void;
   onOpenBranch?: (child: string, quote: string) => void;
   onResolveBranch?: (anchor: BranchAnchorView) => void;
 }) {

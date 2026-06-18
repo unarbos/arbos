@@ -221,6 +221,7 @@ export class SeamClient {
     start: number,
     end: number,
     quote: string,
+    message: string,
   ): boolean {
     return this.send({
       type: "branch",
@@ -229,6 +230,7 @@ export class SeamClient {
       anchor_start: start,
       anchor_end: end,
       anchor_quote: quote,
+      anchor_message: message,
     });
   }
 

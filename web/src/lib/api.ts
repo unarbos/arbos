@@ -37,6 +37,7 @@ export type ReplayEvent =
       anchor_start?: number;
       anchor_end?: number;
       quote: string;
+      anchor_message?: string;
       branch_status: "open" | "accepted" | "discarded";
       summary?: string;
     };

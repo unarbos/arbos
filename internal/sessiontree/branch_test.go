@@ -38,7 +38,13 @@ func TestBranchForksAtAnchorAndSeeds(t *testing.T) {
 	now := time.Unix(0, 0)
 
 	const child core.SessionID = "child-1"
-	anchor := core.BranchAnchorPayload{Seq: 1, Start: 4, End: 8, Quote: "plan has three regions"}
+	anchor := core.BranchAnchorPayload{
+		Seq:     1,
+		Start:   4,
+		End:     8,
+		Quote:   "three regions",
+		Message: "the plan has three regions, the second being the conversation",
+	}
 	if err := Branch(ctx, store, pid, child, anchor, now); err != nil {
 		t.Fatalf("Branch: %v", err)
 	}
@@ -52,30 +58,37 @@ func TestBranchForksAtAnchorAndSeeds(t *testing.T) {
 		t.Errorf("child ParentID = %q, want %q", cs.ParentID, pid)
 	}
 
-	// Child sees parent history up to and including the anchored event (seq 1),
-	// not the later seq-2 user turn, plus the seeded anchor context segment.
+	// Option 2 scoping: the child is a FRESH session — NO parent conversation
+	// turns are copied in. Its only seeded content is one branch-anchor context
+	// segment carrying the fragment + its containing message.
 	cev, _ := store.Events(ctx, child)
 	var msgs, anchorSegs int
+	var seed string
 	for _, e := range cev {
 		switch p := e.Payload.(type) {
 		case core.MessagePayload:
 			msgs++
-			if p.Message.Content == "and after that?" {
-				t.Error("child contains the post-anchor parent turn — branch should fork at the anchor")
-			}
 		case core.ContextPayload:
 			for _, s := range p.Segments {
 				if s.Source == SourceBranchAnchor {
 					anchorSegs++
+					seed = s.Content
 				}
 			}
 		}
 	}
-	if msgs != 2 {
-		t.Errorf("child has %d message events, want 2 (seq 0,1)", msgs)
+	if msgs != 0 {
+		t.Errorf("child has %d message events, want 0 (option 2: no parent turns copied)", msgs)
 	}
 	if anchorSegs != 1 {
 		t.Errorf("child has %d branch-anchor segments, want 1", anchorSegs)
+	}
+	// The seed carries both the fragment and its containing message.
+	if !contains(seed, anchor.Quote) {
+		t.Errorf("seed missing the highlighted fragment: %q", seed)
+	}
+	if !contains(seed, anchor.Message) {
+		t.Errorf("seed missing the containing message: %q", seed)
 	}
 
 	// Parent has an open anchor pointing at the child.

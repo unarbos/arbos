@@ -60,10 +60,11 @@ type clientFrame struct {
 	ThroughSeq   *int64         `json:"through_seq,omitempty"`    // fork: last source seq to include; nil = whole log, negative = empty branch
 
 	// branch: anchor of a sub-discussion onto the current (parent) session.
-	AnchorSeq   int64  `json:"anchor_seq,omitempty"`   // parent event the highlight lives in
-	AnchorStart int    `json:"anchor_start,omitempty"` // rune offset into the rendered event text
-	AnchorEnd   int    `json:"anchor_end,omitempty"`   // rune offset, exclusive
-	AnchorQuote string `json:"anchor_quote,omitempty"` // the highlighted text
+	AnchorSeq     int64  `json:"anchor_seq,omitempty"`     // parent event the highlight lives in
+	AnchorStart   int    `json:"anchor_start,omitempty"`   // rune offset into the rendered event text
+	AnchorEnd     int    `json:"anchor_end,omitempty"`     // rune offset, exclusive
+	AnchorQuote   string `json:"anchor_quote,omitempty"`   // the highlighted text
+	AnchorMessage string `json:"anchor_message,omitempty"` // full text of the containing message (the branch's scope)
 	// accept_branch: the curated (possibly user-edited) conclusion to merge back.
 	Summary string `json:"summary,omitempty"`
 }
@@ -308,10 +309,11 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 				childID = newSessionID()
 			}
 			anchor := core.BranchAnchorPayload{
-				Seq:   f.AnchorSeq,
-				Start: f.AnchorStart,
-				End:   f.AnchorEnd,
-				Quote: f.AnchorQuote,
+				Seq:     f.AnchorSeq,
+				Start:   f.AnchorStart,
+				End:     f.AnchorEnd,
+				Quote:   f.AnchorQuote,
+				Message: f.AnchorMessage,
 			}
 			if err := eng.BranchSession(sctx, parent, childID, anchor); err != nil {
 				_ = enc.write(serverFrame{Type: "error", Error: "branch: " + err.Error()})

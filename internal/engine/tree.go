@@ -16,11 +16,13 @@ func (e *Engine) ForkSession(ctx context.Context, source, newID core.SessionID, 
 	return sessiontree.Fork(ctx, e.store, source, newID, throughSeq, e.clock.Now())
 }
 
-// BranchSession opens an anchored sub-discussion: it forks source up to the
-// anchored event, records the anchor on the parent, and seeds the child with
-// the side-discussion framing. The child is a live session the caller binds on
-// a separate door (a sibling tab), so the parent stays open beside it. Like
-// ForkSession it is a control-plane store operation over an idle source.
+// BranchSession opens an anchored sub-discussion scoped to the highlighted
+// fragment and its containing message (anchor.Quote / anchor.Message): it
+// creates a FRESH child (no parent turns copied), records the anchor on the
+// parent, and seeds the child with that fragment as its context. The child is a
+// live session the caller binds on a separate door (a sibling tab), so the
+// parent stays open beside it. A control-plane store operation over an idle
+// source.
 func (e *Engine) BranchSession(ctx context.Context, source, newID core.SessionID, anchor core.BranchAnchorPayload) error {
 	return sessiontree.Branch(ctx, e.store, source, newID, anchor, e.clock.Now())
 }
