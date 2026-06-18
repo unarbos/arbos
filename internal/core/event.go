@@ -32,6 +32,7 @@ const (
 	EventInterrupted      EventKind = "interrupted"
 	EventConfig           EventKind = "config"
 	EventChatNote         EventKind = "chat_note"
+	EventBranchAnchor     EventKind = "branch_anchor"
 )
 
 // EventPayload is a sealed sum type: the kernel's event payloads are a closed
@@ -149,6 +150,63 @@ type ChatNotePayload struct{ Message Message }
 
 func (ChatNotePayload) Kind() EventKind { return EventChatNote }
 
+// BranchStatus tracks where an anchored sub-discussion stands relative to its
+// parent. A branch is opened from a highlighted span, discussed in its own
+// child session, then either accepted (its conclusion merged back into the
+// parent as a fenced context segment) or discarded.
+type BranchStatus string
+
+const (
+	BranchOpen      BranchStatus = "open"
+	BranchAccepted  BranchStatus = "accepted"
+	BranchDiscarded BranchStatus = "discarded"
+)
+
+// BranchAnchorPayload records a discussion branch anchored to a highlighted
+// span of THIS (the parent) session. It is logged so the anchor and its merge
+// outcome replay with the conversation, but it has NO conversational projection
+// (ProjectEvent returns false) — the model never sees the anchor bookkeeping;
+// only the accepted summary reaches it, injected separately as a ContextPayload
+// segment (Source = BranchSegmentSource(Branch)). The latest payload per Branch
+// is authoritative (open -> accepted/discarded), mirroring the latest-per-source
+// and latest-config supersession rules, so re-accepting a branch is just another
+// appended payload.
+//
+// Offsets address the rendered text of the event at Seq; Quote is the
+// denormalized highlighted text and the display source of truth, since the
+// append-only log freezes the referenced event. Summary is the curated
+// conclusion captured on accept (empty while open or discarded).
+type BranchAnchorPayload struct {
+	Branch  SessionID    // the child session this anchor opened
+	Seq     int64        // the parent event the highlight lives in
+	Start   int          // rune offset into the rendered event text (best-effort)
+	End     int          // rune offset, exclusive
+	Quote   string       // the highlighted text, denormalized for display
+	Status  BranchStatus // open | accepted | discarded
+	Summary string       // curated conclusion merged back on accept
+}
+
+func (BranchAnchorPayload) Kind() EventKind { return EventBranchAnchor }
+
+// BranchSegmentSource is the Segment.Source under which an accepted branch's
+// curated summary is injected into the parent context. It is unique per branch
+// so distinct branches accumulate (each its own fenced block) while re-accepting
+// the SAME branch supersedes its prior summary (latest-per-source). The fence
+// the projection renders is <<branch:CHILD>> … <</branch:CHILD>>.
+func BranchSegmentSource(branch SessionID) string { return "branch:" + string(branch) }
+
+// LatestBranchAnchor returns the most recent BranchAnchorPayload for branch in
+// the log, reporting whether one exists. The latest payload is authoritative,
+// so a branch's current status (open/accepted/discarded) is read from it.
+func LatestBranchAnchor(events []Event, branch SessionID) (BranchAnchorPayload, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if p, ok := events[i].Payload.(BranchAnchorPayload); ok && p.Branch == branch {
+			return p, true
+		}
+	}
+	return BranchAnchorPayload{}, false
+}
+
 // LatestConfig returns the most recent ConfigPayload in the log, reporting
 // whether one exists. The latest entry is authoritative: a config event
 // supersedes earlier ones the same way the projection's latest-per-source rule
@@ -246,4 +304,8 @@ func NewConfigEvent(sid SessionID, p ConfigPayload, now time.Time) *Event {
 
 func NewChatNoteEvent(sid SessionID, m Message, now time.Time) *Event {
 	return newEvent(sid, now, ChatNotePayload{Message: m})
+}
+
+func NewBranchAnchorEvent(sid SessionID, p BranchAnchorPayload, now time.Time) *Event {
+	return newEvent(sid, now, p)
 }

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   ArrowUp,
+  Check,
   FileText,
+  GitBranch,
   Loader2,
   Mic,
   Paperclip,
@@ -66,9 +68,11 @@ import type { TermRef } from "@/lib/term";
 import type { ContentBlock, QuestionAnswer, ToolCall, ToolResult } from "@/lib/types";
 import { useAutosize } from "@/lib/useAutosize";
 import {
+  anchorsFromReplay,
   chatReducer,
   initialChatState,
   replayToItems,
+  type BranchAnchor,
   type TranscriptItem,
 } from "@/lib/transcript";
 
@@ -239,6 +243,10 @@ export interface ChatTabHandle {
   onOpenTerminal?: (term: TermRef) => void;
   /** A plan card was clicked — open its goal tree and code in a panel. */
   onOpenPlan?: (node: number) => void;
+  /** A discussion branch was opened (or reopened) — open the child session in
+   *  a sibling tab beside the parent so the two threads run side by side. The
+   *  label is the highlighted quote, truncated. */
+  onOpenBranch?: (child: string, label: string) => void;
 }
 
 /**
@@ -314,6 +322,17 @@ export function ChatTab({
     parts: ContentBlock[];
     retries: number;
   } | null>(null);
+  // Discussion branching: resolved/open anchors on THIS session (parent),
+  // rebuilt from the persisted log so a branched message shows its marker and a
+  // chip that reopens the child. Refreshed on branch/merge and on reconnect.
+  const [anchors, setAnchors] = useState<BranchAnchor[]>([]);
+  // The highlight a pending `branch` frame was sent for, so onBranched can
+  // label the sibling tab with the quote before the anchor lands in replay.
+  const pendingBranchRef = useRef<{ quote: string } | null>(null);
+  // A branch the user is composing the accept-summary for (the accept dialog).
+  const [accepting, setAccepting] = useState<BranchAnchor | null>(null);
+  // Lets callbacks outside the seam effect (the accept dialog) refresh anchors.
+  const reconcileAnchorsRef = useRef<() => void>(() => {});
   // Files picked into the composer (paperclip): text files spool to the
   // workspace on send (the prompt carries path references) and the chips
   // clear once it's sent.
@@ -391,10 +410,27 @@ export function ChatTab({
         .catch(() => {});
     };
 
+    /** Refresh the parent's discussion-branch anchors from the persisted log,
+     *  so a branched message's marker and the accept dialog reflect the latest
+     *  open/accepted/discarded state. */
+    const reconcileAnchors = () => {
+      const sid = sessionRef.current;
+      if (!sid) return;
+      fetchReplay(sid)
+        .then((events) => {
+          if (!closed && sessionRef.current === sid) {
+            setAnchors(anchorsFromReplay(events));
+          }
+        })
+        .catch(() => {});
+    };
+    reconcileAnchorsRef.current = reconcileAnchors;
+
     const reconcileAfterGap = () => {
       const c = chatRef.current;
       if (!c.turnActive) {
         reconcile();
+        reconcileAnchors();
         return;
       }
       healAtTurnEnd = true;
@@ -436,6 +472,8 @@ export function ChatTab({
         gap = false;
         sessionRef.current = id;
         setBoundSession(id);
+        // Seed the parent's branch anchors on first bind / rebind.
+        reconcileAnchors();
         // Announce our display name so the roster names us (host name is
         // client-side; a guest's announce is ignored server-side). Re-fires on
         // every rebind, so a reconnect re-registers us automatically.
@@ -454,6 +492,21 @@ export function ChatTab({
         if (seam.prompt(edit.text, edit.parts, hostName(sessionRef.current))) {
           dispatch({ type: "user", text: edit.text, parts: edit.parts });
         }
+      },
+      onBranched: (child) => {
+        // The server opened an anchored child session beside this (parent) one.
+        // This connection is NOT rebound — open the child in a sibling tab and
+        // refresh the parent's anchors so the branched message gets its marker.
+        const pending = pendingBranchRef.current;
+        pendingBranchRef.current = null;
+        handleRef.current.onOpenBranch?.(child, pending?.quote ?? "discussion");
+        reconcileAnchors();
+      },
+      onMerged: () => {
+        // A branch was accepted or discarded: the parent log changed (a merged
+        // context segment and/or a resolved anchor). Refresh the anchors so the
+        // marker flips to "discussed".
+        reconcileAnchors();
       },
       onEnvelope: (env) => {
         // A human-to-human side-chat line belongs to the People panel, not the
@@ -1099,6 +1152,43 @@ export function ChatTab({
     [chat.items],
   );
 
+  /** Open an anchored sub-discussion about a highlighted span. The server forks
+   *  the parent up to the anchored event and seeds the child; this connection
+   *  stays bound to the parent (onBranched opens the child in a sibling tab). */
+  const onBranch = useCallback(
+    (seq: number, start: number, end: number, quote: string) => {
+      const seam = seamRef.current;
+      if (!seam) return;
+      pendingBranchRef.current = { quote };
+      // The child id is allocated server-side; we let the server name it and
+      // learn it from the branched frame.
+      const childId = `branch-${sessionRef.current ?? "s"}-${Date.now().toString(36)}`;
+      if (!seam.branch(childId, seq, start, end, quote)) {
+        pendingBranchRef.current = null;
+      }
+    },
+    [],
+  );
+
+  /** Reopen an existing branch's child session in a sibling tab. */
+  const onOpenBranch = useCallback((child: string, quote: string) => {
+    handleRef.current.onOpenBranch?.(child, quote);
+  }, []);
+
+  /** Commit the accept dialog: merge the curated summary back into the parent
+   *  and close the dialog. onMerged refreshes the anchor markers. */
+  const onAcceptBranch = useCallback((child: string, summary: string) => {
+    const seam = seamRef.current;
+    if (seam && summary.trim()) seam.acceptBranch(child, summary.trim());
+    setAccepting(null);
+  }, []);
+
+  /** Discard a branch without merging anything back. */
+  const onDiscardBranch = useCallback((child: string) => {
+    seamRef.current?.discardBranch(child);
+    setAccepting(null);
+  }, []);
+
   // The transcript hooks must be referentially stable across streaming
   // deltas or React.memo(Item) re-renders every row per token anyway. The
   // callbacks read through refs (handleRef / resubmitEditRef), so the object
@@ -1145,6 +1235,12 @@ export function ChatTab({
         onCancel: onEditCancel,
         onSubmit: onEditSubmit,
       },
+      // Discussion branching is owner-only and needs an idle, connected seam
+      // (the server refuses to branch under an in-flight turn).
+      onBranch: usable && !chat.turnActive ? onBranch : undefined,
+      anchors,
+      onOpenBranch,
+      onResolveBranch: usable && !chat.turnActive ? setAccepting : undefined,
     }),
     [
       chat.children,
@@ -1156,6 +1252,9 @@ export function ChatTab({
       onEditStart,
       onEditCancel,
       onEditSubmit,
+      onBranch,
+      anchors,
+      onOpenBranch,
     ],
   );
 
@@ -1312,6 +1411,14 @@ export function ChatTab({
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       {!fresh && (
         <ChatView items={chat.items} working={working} hooks={transcriptHooks} />
+      )}
+      {accepting && (
+        <BranchDialog
+          anchor={accepting}
+          onAccept={onAcceptBranch}
+          onDiscard={onDiscardBranch}
+          onCancel={() => setAccepting(null)}
+        />
       )}
 
       <div
@@ -1537,6 +1644,122 @@ export function ChatTab({
           </div>
         </div>
       </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The accept dialog for a discussion branch: the curated conclusion the user
+ * carries back to the main thread. It auto-drafts the summary from the child
+ * discussion's last assistant message (the conclusion, usually), which the user
+ * edits before accepting. Accept merges it into the parent context as a fenced
+ * segment; Discard closes the branch and merges nothing.
+ */
+function BranchDialog({
+  anchor,
+  onAccept,
+  onDiscard,
+  onCancel,
+}: {
+  anchor: BranchAnchor;
+  onAccept: (child: string, summary: string) => void;
+  onDiscard: (child: string) => void;
+  onCancel: () => void;
+}) {
+  const [summary, setSummary] = useState(anchor.summary ?? "");
+  const [loading, setLoading] = useState(!anchor.summary);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  useAutosize(taRef, summary, 320);
+
+  // Auto-draft from the child's last assistant message (its conclusion). The
+  // user edits this before it crosses back, so a rough draft is fine.
+  useEffect(() => {
+    if (anchor.summary) return;
+    let cancelled = false;
+    fetchReplay(anchor.child)
+      .then((events) => {
+        if (cancelled) return;
+        let draft = "";
+        for (const ev of events) {
+          if (ev.type === "assistant" && ev.text) draft = ev.text;
+        }
+        setSummary(draft.trim());
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [anchor.child, anchor.summary]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  return (
+    <div
+      className="absolute inset-0 z-30 flex items-center justify-center bg-canvas/70 p-4 backdrop-blur-sm"
+      onClick={onCancel}
+    >
+      <div
+        className="w-full max-w-lg space-y-3 rounded-lg border border-line bg-card p-4 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 text-bright">
+          <GitBranch size={15} className="text-accent" />
+          <span className="text-[14px] font-medium">Bring this discussion back</span>
+        </div>
+        <p className="text-[12px] text-muted">
+          Only this conclusion is carried into the main thread (the full
+          side-discussion stays in its own tab). Edit it to say exactly what the
+          main thread should know.
+        </p>
+        {anchor.quote && (
+          <div className="rounded border border-line/60 bg-panel px-2.5 py-1.5 text-[12px] text-faint">
+            About: “{anchor.quote.length > 120 ? anchor.quote.slice(0, 120) + "…" : anchor.quote}”
+          </div>
+        )}
+        <textarea
+          ref={taRef}
+          value={summary}
+          onChange={(e) => setSummary(e.target.value)}
+          placeholder={loading ? "Drafting a summary from the discussion…" : "What should the main thread take away?"}
+          className="block max-h-80 w-full resize-none rounded-md border border-line bg-panel px-3 py-2 text-[13px] leading-relaxed text-bright outline-none focus:border-accent"
+          rows={4}
+        />
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => onDiscard(anchor.child)}
+            className="cursor-pointer rounded-md px-2.5 py-1.5 text-[12px] text-muted hover:bg-hover hover:text-red"
+          >
+            Discard branch
+          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onCancel}
+              className="cursor-pointer rounded-md px-2.5 py-1.5 text-[12px] text-muted hover:bg-hover hover:text-text"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => onAccept(anchor.child, summary)}
+              disabled={!summary.trim()}
+              className="flex cursor-pointer items-center gap-1.5 rounded-md bg-btn px-3 py-1.5 text-[12px] font-medium text-canvas transition-opacity disabled:cursor-default disabled:opacity-30"
+            >
+              <Check size={13} /> Accept & merge
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

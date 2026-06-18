@@ -79,11 +79,14 @@ func ProjectEvent(e Event) (Message, bool) {
 	case EventToolResult:
 		r := e.Payload.(ToolResultPayload).Result
 		return Message{Role: RoleTool, ToolCallID: r.CallID, Content: r.Content, Parts: r.Blocks}, true
-	case EventCompressed, EventContext, EventUsage, EventInterrupted, EventConfig, EventChatNote:
+	case EventCompressed, EventContext, EventUsage, EventInterrupted, EventConfig, EventChatNote, EventBranchAnchor:
 		// EventChatNote is human-to-human side chat: it lives on the log for
 		// replay but MUST NOT reach the model. This is the single event->Message
 		// mapping home, so excluding it here keeps it out of every projection
 		// (live, replay, compaction folding, and the recall tool) at once.
+		// EventBranchAnchor is anchor/merge bookkeeping with no conversational
+		// projection: only the accepted summary reaches the model, injected as a
+		// ContextPayload segment, so the anchor itself is excluded here too.
 		return Message{}, false
 	}
 	return Message{}, false

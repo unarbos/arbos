@@ -28,7 +28,18 @@ export type ReplayEvent =
       details?: unknown;
     }
   | { type: "interrupted"; seq: number }
-  | { type: "chat_note"; seq: number; text: string; author?: string };
+  | { type: "chat_note"; seq: number; text: string; author?: string }
+  | {
+      type: "branch_anchor";
+      seq: number;
+      branch: string;
+      anchor_seq: number;
+      anchor_start?: number;
+      anchor_end?: number;
+      quote: string;
+      branch_status: "open" | "accepted" | "discarded";
+      summary?: string;
+    };
 
 /** One selectable model from the provider's catalog (OpenRouter's listing). */
 export interface ModelOption {

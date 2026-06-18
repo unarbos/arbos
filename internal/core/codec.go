@@ -40,6 +40,8 @@ func DecodePayload(kind EventKind, data []byte) (EventPayload, error) {
 		return unmarshalPayload[ConfigPayload](kind, data)
 	case EventChatNote:
 		return unmarshalPayload[ChatNotePayload](kind, data)
+	case EventBranchAnchor:
+		return unmarshalPayload[BranchAnchorPayload](kind, data)
 	}
 	// Unknown discriminator: a newer log read by an older binary. The caller
 	// (loader) decides whether to skip or fail; we do not guess. See ADR-0010.

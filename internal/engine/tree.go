@@ -15,3 +15,25 @@ import (
 func (e *Engine) ForkSession(ctx context.Context, source, newID core.SessionID, throughSeq int64) error {
 	return sessiontree.Fork(ctx, e.store, source, newID, throughSeq, e.clock.Now())
 }
+
+// BranchSession opens an anchored sub-discussion: it forks source up to the
+// anchored event, records the anchor on the parent, and seeds the child with
+// the side-discussion framing. The child is a live session the caller binds on
+// a separate door (a sibling tab), so the parent stays open beside it. Like
+// ForkSession it is a control-plane store operation over an idle source.
+func (e *Engine) BranchSession(ctx context.Context, source, newID core.SessionID, anchor core.BranchAnchorPayload) error {
+	return sessiontree.Branch(ctx, e.store, source, newID, anchor, e.clock.Now())
+}
+
+// AcceptBranch resolves an open branch by merging summary back into parent as a
+// fenced context segment and marking the anchor accepted. The full child
+// transcript is left intact.
+func (e *Engine) AcceptBranch(ctx context.Context, parent, branch core.SessionID, summary string) error {
+	return sessiontree.Accept(ctx, e.store, parent, branch, summary, e.clock.Now())
+}
+
+// DiscardBranch resolves an open branch without merging anything back, marking
+// the anchor discarded so the parent UI can close it.
+func (e *Engine) DiscardBranch(ctx context.Context, parent, branch core.SessionID) error {
+	return sessiontree.Discard(ctx, e.store, parent, branch, e.clock.Now())
+}

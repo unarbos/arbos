@@ -17,9 +17,15 @@ import (
 )
 
 type clientFrame struct {
-	Type      string          `json:"type"`
-	SessionID core.SessionID  `json:"session_id,omitempty"`
-	Intent    json.RawMessage `json:"intent,omitempty"`
+	Type         string          `json:"type"`
+	SessionID    core.SessionID  `json:"session_id,omitempty"`
+	Intent       json.RawMessage `json:"intent,omitempty"`
+	NewSessionID core.SessionID  `json:"new_session_id,omitempty"`
+	AnchorSeq    int64           `json:"anchor_seq,omitempty"`
+	AnchorStart  int             `json:"anchor_start,omitempty"`
+	AnchorEnd    int             `json:"anchor_end,omitempty"`
+	AnchorQuote  string          `json:"anchor_quote,omitempty"`
+	Summary      string          `json:"summary,omitempty"`
 }
 
 type serverFrame struct {
@@ -252,4 +258,104 @@ func TestControlDrainOnEOF(t *testing.T) {
 		t.Fatal("serve did not return after stdin EOF")
 	}
 	_ = cw.Close()
+}
+
+// TestControlBranchAcceptFlow exercises the discussion-branching frames over
+// the seam: a parent session is opened and given a turn, a branch frame opens
+// an anchored child (WITHOUT rebinding the connection — the parent stays the
+// bound session), and accept_branch merges a curated summary back into the
+// parent as a fenced context segment.
+func TestControlBranchAcceptFlow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "branch.db")
+	store, err := sqlite.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	eng := engine.New(fake.Provider{}, fake.Tools{}, store, fake.NewClock(),
+		engine.Config{Model: "fake", MaxIterations: 5})
+	h := serve(t, eng)
+
+	h.send(t, clientFrame{Type: "open", SessionID: "parent"})
+	h.readUntil(t, "opened")
+	h.send(t, clientFrame{Type: "intent", Intent: encIntent(t, core.PromptIntent{Text: "explain"})})
+	for {
+		ev := h.readUntil(t, "event")
+		env, err := core.DecodeEnvelope(ev.Envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := env.Event.(core.TurnComplete); ok {
+			break
+		}
+	}
+
+	// Open a branch anchored at seq 0; the server must answer "branched" and
+	// must NOT switch the bound session away from the parent.
+	h.send(t, clientFrame{Type: "branch", NewSessionID: "child", AnchorSeq: 0, AnchorQuote: "explain"})
+	br := h.readUntil(t, "branched")
+	if br.SessionID != "child" {
+		t.Fatalf("branched session = %q, want child", br.SessionID)
+	}
+
+	// The child exists, is parented to the parent, and carries the seeded
+	// branch-anchor framing segment.
+	ctx := context.Background()
+	cs, err := store.Get(ctx, "child")
+	if err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if cs.ParentID != "parent" {
+		t.Errorf("child ParentID = %q, want parent", cs.ParentID)
+	}
+	pev, _ := store.Events(ctx, "parent")
+	if a, ok := core.LatestBranchAnchor(pev, "child"); !ok || a.Status != core.BranchOpen {
+		t.Errorf("parent anchor after branch = %+v ok=%v, want open", a, ok)
+	}
+
+	// Accept merges a curated summary back into the parent.
+	h.send(t, clientFrame{Type: "accept_branch", NewSessionID: "child", Summary: "the agreed conclusion"})
+	mg := h.readUntil(t, "merged")
+	if mg.SessionID != "child" {
+		t.Fatalf("merged session = %q, want child", mg.SessionID)
+	}
+	pev, _ = store.Events(ctx, "parent")
+	if a, ok := core.LatestBranchAnchor(pev, "child"); !ok || a.Status != core.BranchAccepted {
+		t.Errorf("parent anchor after accept = %+v ok=%v, want accepted", a, ok)
+	}
+	var fenced bool
+	src := "<<" + core.BranchSegmentSource("child") + ">>"
+	for _, m := range core.ProjectContext(pev) {
+		if len(m.Content) >= len(src) && m.Content[:len(src)] == src {
+			fenced = true
+		}
+	}
+	if !fenced {
+		t.Error("parent context has no fenced branch segment after accept")
+	}
+}
+
+// TestControlBranchRefusesNoSession proves the branch frame errors cleanly when
+// no session is bound, rather than panicking.
+func TestControlBranchRefusesNoSession(t *testing.T) {
+	eng := engine.New(fake.Provider{}, fake.Tools{}, fake.NewStore(), fake.NewClock(),
+		engine.Config{Model: "fake", MaxIterations: 5})
+	cr, sw := io.Pipe()
+	sr, cw := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- control.Serve(context.Background(), eng, cr, cw, func() core.SessionID { return "auto" }, 0)
+	}()
+	defer func() { _ = sw.Close(); _ = cw.Close() }()
+	scan := bufio.NewScanner(sr)
+	enc := json.NewEncoder(sw)
+	_ = enc.Encode(clientFrame{Type: "branch", AnchorSeq: 0})
+	for scan.Scan() {
+		var f serverFrame
+		if json.Unmarshal(scan.Bytes(), &f) == nil && f.Type == "error" {
+			return
+		}
+	}
+	t.Fatal("expected an error frame for branch with no session")
 }

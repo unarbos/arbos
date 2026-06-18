@@ -11,6 +11,7 @@ package sessiontree
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/unarbos/arbos/internal/core"
@@ -64,4 +65,89 @@ func Fork(ctx context.Context, store ports.SessionStore, source, newID core.Sess
 		}
 	}
 	return nil
+}
+
+// SourceBranchAnchor is the Segment.Source seeded into a freshly opened branch
+// so the child agent knows it is in a focused side-discussion about a specific
+// highlighted fragment, without that framing polluting the visible message
+// stream. Like every injected segment it is fenced and superseded per source.
+const SourceBranchAnchor = "branch_anchor"
+
+// Branch opens an anchored sub-discussion about a highlighted span of source.
+// It is Fork(throughSeq = anchor.Seq) — the child sees the parent's history up
+// to and including the event the highlight lives in, but nothing after, so the
+// side-thread is a genuine "step aside at this point" — followed by two records:
+//
+//   - on the PARENT: a BranchAnchorPayload (Status open) marking where the
+//     highlight is and which child it opened, so the parent UI can render the
+//     anchor and later resolve it on accept;
+//   - on the CHILD: a ContextPayload segment (SourceBranchAnchor) framing the
+//     side-discussion around the quoted fragment, injected (not a visible
+//     message) so it reaches the model as fenced context.
+//
+// anchor.Branch must equal newID and anchor.Seq must be a valid source seq; the
+// caller (engine) sets these. Failures after the fork leave the child session
+// in place (the caller decides whether to retry or abandon it).
+func Branch(ctx context.Context, store ports.SessionStore, source, newID core.SessionID, anchor core.BranchAnchorPayload, now time.Time) error {
+	if err := Fork(ctx, store, source, newID, anchor.Seq, now); err != nil {
+		return err
+	}
+	anchor.Branch = newID
+	anchor.Status = core.BranchOpen
+	anchor.Summary = ""
+	pa := core.NewBranchAnchorEvent(source, anchor, now)
+	if err := store.AppendEvent(ctx, pa); err != nil {
+		return err
+	}
+	seed := "You are in a focused side-discussion the user opened about this highlighted fragment of the conversation:\n\n\u201c" + anchor.Quote + "\u201d\n\nDiscuss it in depth. When the user accepts, only a short curated conclusion is carried back to the main thread."
+	seg := core.NewContextEvent(newID, []core.Segment{{Source: SourceBranchAnchor, Content: seed}}, now)
+	return store.AppendEvent(ctx, seg)
+}
+
+// Accept resolves an open branch: it appends the curated summary to the PARENT
+// as a ContextPayload segment under the branch's unique source (so it projects
+// as a fenced block and a re-accept supersedes rather than accumulates), and
+// records the resolution as a BranchAnchorPayload (Status accepted) carrying the
+// summary. The full child transcript persists untouched — only the conclusion
+// crosses back, the delegation contract made durable and user-curated.
+//
+// It reads the latest anchor for branch from the parent log to recover Seq and
+// Quote, so the caller need only supply parent, branch, and the (possibly
+// user-edited) summary.
+func Accept(ctx context.Context, store ports.SessionStore, parent, branch core.SessionID, summary string, now time.Time) error {
+	events, err := store.Events(ctx, parent)
+	if err != nil {
+		return err
+	}
+	anchor, ok := core.LatestBranchAnchor(events, branch)
+	if !ok {
+		return fmt.Errorf("accept branch %q: no anchor on parent %q", branch, parent)
+	}
+	seg := core.NewContextEvent(parent, []core.Segment{{
+		Source:  core.BranchSegmentSource(branch),
+		Content: "Resolved side-discussion about \u201c" + anchor.Quote + "\u201d:\n" + summary,
+	}}, now)
+	if err := store.AppendEvent(ctx, seg); err != nil {
+		return err
+	}
+	anchor.Status = core.BranchAccepted
+	anchor.Summary = summary
+	return store.AppendEvent(ctx, core.NewBranchAnchorEvent(parent, anchor, now))
+}
+
+// Discard resolves an open branch without merging anything back: it records a
+// BranchAnchorPayload (Status discarded) on the parent so the UI can mark the
+// anchor closed. The child transcript persists (reopenable); no context segment
+// is injected, so the parent's model context is unchanged.
+func Discard(ctx context.Context, store ports.SessionStore, parent, branch core.SessionID, now time.Time) error {
+	events, err := store.Events(ctx, parent)
+	if err != nil {
+		return err
+	}
+	anchor, ok := core.LatestBranchAnchor(events, branch)
+	if !ok {
+		return fmt.Errorf("discard branch %q: no anchor on parent %q", branch, parent)
+	}
+	anchor.Status = core.BranchDiscarded
+	return store.AppendEvent(ctx, core.NewBranchAnchorEvent(parent, anchor, now))
 }

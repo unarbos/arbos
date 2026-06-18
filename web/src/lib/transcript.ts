@@ -39,6 +39,9 @@ export type TranscriptItem =
       id: number;
       text: string;
       streaming: boolean;
+      /** The event's position in the persisted log, present only on replay-
+       *  seeded items. The discussion-branching highlight anchors to it. */
+      seq?: number;
       stopReason?: StopReason;
       usage?: Usage;
       /** Web-search sources the provider grounded this message on (a "Sources"
@@ -700,6 +703,35 @@ export function peopleFromReplay(events: ReplayEvent[]): PeopleMessage[] {
   return out;
 }
 
+/** A discussion-branch anchor reduced to its latest status, for the parent
+ *  transcript's "discussed" markers. The branch_anchor replay rows are
+ *  append-only (open -> accepted/discarded), so the LAST row per branch wins. */
+export interface BranchAnchor {
+  child: string;
+  seq: number;
+  quote: string;
+  status: "open" | "accepted" | "discarded";
+  summary?: string;
+}
+
+/** Collapse a session replay's branch_anchor rows into the current state of each
+ *  branch (latest row per child wins), so the transcript can mark a branched
+ *  message and offer to reopen its child discussion. */
+export function anchorsFromReplay(events: ReplayEvent[]): BranchAnchor[] {
+  const byChild = new Map<string, BranchAnchor>();
+  for (const ev of events) {
+    if (ev.type !== "branch_anchor") continue;
+    byChild.set(ev.branch, {
+      child: ev.branch,
+      seq: ev.anchor_seq,
+      quote: ev.quote,
+      status: ev.branch_status,
+      summary: ev.summary,
+    });
+  }
+  return [...byChild.values()];
+}
+
 export function replayToItems(events: ReplayEvent[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   const toolIndex = new Map<string, number>();
@@ -718,6 +750,7 @@ export function replayToItems(events: ReplayEvent[]): TranscriptItem[] {
             id: id++,
             text: ev.text ?? "",
             streaming: false,
+            seq: ev.seq,
             citations: ev.citations,
             images: images.length > 0 ? images : undefined,
           });
@@ -762,6 +795,10 @@ export function replayToItems(events: ReplayEvent[]): TranscriptItem[] {
       case "chat_note":
         // Human-to-human side chat is rendered in the People panel, never in
         // the agent transcript — peopleFromReplay extracts these rows instead.
+        break;
+      case "branch_anchor":
+        // Discussion-branch bookkeeping: surfaced via anchorsFromReplay as a
+        // marker on the branched message, never as a transcript row of its own.
         break;
       default: {
         const never: never = ev;

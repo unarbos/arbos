@@ -174,7 +174,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 //
 // It also watches the frames it carries: opened/switched/forked name the
 // session this connection is bound to, which is what lets the outbox fan-out
-// deliver a chat's notices to that chat alone. Sniffing the stream keeps
+// deliver a chat's notices to that chat alone. (A branched frame does NOT
+// rebind — the parent connection stays on its session; the child is driven by
+// its own sibling connection — so it is deliberately absent here.) Sniffing the
+// stream keeps
 // control.Serve ignorant of the gateway (the seam stays frontend-agnostic).
 type wsLineWriter struct {
 	ctx context.Context

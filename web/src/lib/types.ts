@@ -177,12 +177,34 @@ export type ClientFrame =
       session_id?: string;
       new_session_id?: string;
       through_seq?: number;
-    };
+    }
+  /**
+   * Open an anchored sub-discussion about a highlighted span of the bound
+   * (parent) session. Unlike fork it does NOT rebind this connection — the
+   * frontend opens the child in a sibling tab — so the two threads run side by
+   * side. The anchor fields locate the highlight on the parent.
+   */
+  | {
+      type: "branch";
+      new_session_id?: string;
+      anchor_seq?: number;
+      anchor_start?: number;
+      anchor_end?: number;
+      anchor_quote?: string;
+    }
+  /** Merge a branch's curated conclusion back into the bound (parent) session. */
+  | { type: "accept_branch"; new_session_id: string; summary: string }
+  /** Close a branch without merging anything back. */
+  | { type: "discard_branch"; new_session_id: string };
 
 export type ServerFrame =
   | { type: "opened"; session_id: string }
   | { type: "switched"; session_id: string }
   | { type: "forked"; session_id: string }
+  /** A branch this connection opened succeeded; session_id is the new child. */
+  | { type: "branched"; session_id: string }
+  /** A branch was accepted or discarded; session_id is the resolved child. */
+  | { type: "merged"; session_id: string }
   | { type: "event"; envelope: Envelope }
   | { type: "error"; error: string }
   // Gateway-level outbox delivery: the agent's voice between turns

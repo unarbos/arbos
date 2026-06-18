@@ -549,6 +549,35 @@ export default function App() {
   );
 
   /**
+   * Open a discussion branch's child session as a live chat tab beside its
+   * parent, so the two threads run side by side. It is a full chat tab (its own
+   * seam, composer, and transcript) seeded by the child session id — unlike a
+   * run tab, the branch is interactive: the user discusses in it and then
+   * accepts from the parent. The title is the highlighted quote.
+   */
+  const openBranchTab = useCallback(
+    (fromKey: number, child: string, label: string) => {
+      const title = label
+        ? `⤷ ${label.length > 24 ? label.slice(0, 24) + "…" : label}`
+        : "⤷ discussion";
+      openAside(
+        fromKey,
+        (t) =>
+          (!t.kind || t.kind === "chat") &&
+          (t.sessionId === child || t.resumeId === child),
+        (t) => t,
+        (key, pane) => ({
+          ...freshTab(key, pane),
+          title,
+          resumeId: child,
+          sessionId: child,
+        }),
+      );
+    },
+    [openAside],
+  );
+
+  /**
    * Show a terminal beside the chat: an agent command's live journal (a job
    * terminal, from its card or the background bar) or an interactive shell.
    * A job already open re-uses its tab — the same job seen from two cards is
@@ -1153,6 +1182,8 @@ export default function App() {
                   onOpenRun: (run) => openRun(tab.key, run),
                   onOpenTerminal: (term) => openTerminal(tab.key, term),
                   onOpenPlan: (node) => openPlanTab(node),
+                  onOpenBranch: (child, label) =>
+                    openBranchTab(tab.key, child, label),
                 }}
               />
             )}

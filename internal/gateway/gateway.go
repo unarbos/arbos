@@ -963,7 +963,7 @@ func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
 // carries only what the UI renders — the projection/provider views stay
 // server-side.
 type replayJSON struct {
-	Type      string              `json:"type"` // user | assistant | tool_result | interrupted
+	Type      string              `json:"type"` // user | assistant | tool_result | interrupted | chat_note | branch_anchor
 	Seq       int64               `json:"seq"`  // source event seq, the fork point for rewind/edit
 	Text      string              `json:"text,omitempty"`
 	Author    string              `json:"author,omitempty"` // display name of a multi-party guest who sent a user message
@@ -974,6 +974,17 @@ type replayJSON struct {
 	Content   string              `json:"content,omitempty"`
 	IsError   bool                `json:"is_error,omitempty"`
 	Details   json.RawMessage     `json:"details,omitempty"`
+
+	// branch_anchor: a discussion-branch anchor on THIS session (the parent).
+	// The UI renders a "discussed" marker on the message at AnchorSeq and a chip
+	// that reopens the child session.
+	Branch       string `json:"branch,omitempty"`        // child session the anchor opened
+	AnchorSeq    *int64 `json:"anchor_seq,omitempty"`    // parent event the highlight lives in (pointer: seq 0 is valid)
+	AnchorStart  int    `json:"anchor_start"`            // rune offset into the rendered event text (0 is valid, never omit)
+	AnchorEnd    int    `json:"anchor_end"`              // rune offset, exclusive (0 is valid, never omit)
+	Quote        string `json:"quote,omitempty"`         // the highlighted text
+	BranchStatus string `json:"branch_status,omitempty"` // open | accepted | discarded
+	Summary      string `json:"summary,omitempty"`       // curated conclusion (accepted)
 }
 
 // sessionMetaJSON is the durable per-session state a resumed tab seeds its
@@ -1041,6 +1052,22 @@ func (s *Server) sessionReplay(ctx context.Context, id core.SessionID) (map[stri
 			})
 		case core.InterruptPayload:
 			out = append(out, replayJSON{Type: "interrupted", Seq: ev.Seq})
+		case core.BranchAnchorPayload:
+			// A discussion-branch anchor: surfaced so the parent transcript can
+			// mark the branched message and offer to reopen the child. It has no
+			// conversational projection, so it rides as its own replay row.
+			anchorSeq := p.Seq
+			out = append(out, replayJSON{
+				Type:         "branch_anchor",
+				Seq:          ev.Seq,
+				Branch:       string(p.Branch),
+				AnchorSeq:    &anchorSeq,
+				AnchorStart:  p.Start,
+				AnchorEnd:    p.End,
+				Quote:        p.Quote,
+				BranchStatus: string(p.Status),
+				Summary:      p.Summary,
+			})
 		case core.ChatNotePayload:
 			// Human-to-human side chat: replayed into the people panel, never
 			// merged into the agent transcript. (This is a Go type switch, NOT

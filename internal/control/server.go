@@ -16,10 +16,15 @@
 //	  {"type":"compact"}                           // shorthand for CompactIntent
 //	  {"type":"switch_session","session_id":"abc"} // bind another session
 //	  {"type":"fork","session_id":"child",...}     // fork from current session
+//	  {"type":"branch","new_session_id":"c",...}   // open an anchored sub-discussion (does NOT rebind)
+//	  {"type":"accept_branch","new_session_id":"c","summary":"..."} // merge a branch's conclusion into this (parent) session
+//	  {"type":"discard_branch","new_session_id":"c"}             // close a branch without merging
 //	server -> client:
 //	  {"type":"opened","session_id":"abc"}
 //	  {"type":"switched","session_id":"abc"}
 //	  {"type":"forked","session_id":"child"}
+//	  {"type":"branched","session_id":"child"}
+//	  {"type":"merged","session_id":"child"}
 //	  {"type":"event","envelope":{...}}
 //	  {"type":"error","error":"..."}
 package control
@@ -51,8 +56,16 @@ type clientFrame struct {
 	Model     string          `json:"model,omitempty"`
 	Enabled   bool            `json:"enabled,omitempty"` // set_web_search: target toggle state
 
-	NewSessionID core.SessionID `json:"new_session_id,omitempty"` // fork: id for the new branch (optional)
+	NewSessionID core.SessionID `json:"new_session_id,omitempty"` // fork/branch: id for the new branch (optional for fork)
 	ThroughSeq   *int64         `json:"through_seq,omitempty"`    // fork: last source seq to include; nil = whole log, negative = empty branch
+
+	// branch: anchor of a sub-discussion onto the current (parent) session.
+	AnchorSeq   int64  `json:"anchor_seq,omitempty"`   // parent event the highlight lives in
+	AnchorStart int    `json:"anchor_start,omitempty"` // rune offset into the rendered event text
+	AnchorEnd   int    `json:"anchor_end,omitempty"`   // rune offset, exclusive
+	AnchorQuote string `json:"anchor_quote,omitempty"` // the highlighted text
+	// accept_branch: the curated (possibly user-edited) conclusion to merge back.
+	Summary string `json:"summary,omitempty"`
 }
 
 // seamMaxLine bounds a single client frame (one newline-delimited line). It
@@ -270,6 +283,76 @@ func Serve(ctx context.Context, eng *engine.Engine, r io.Reader, w io.Writer, ne
 			}
 			_ = enc.write(serverFrame{Type: "forked", SessionID: newID})
 			_ = enc.write(serverFrame{Type: "switched", SessionID: newID})
+
+		case "branch":
+			// Open an anchored sub-discussion about a highlighted span of the
+			// current session. Unlike fork it does NOT rebind this connection:
+			// the parent stays live on this door and the frontend opens the child
+			// in a SIBLING tab (its own connection), so the two threads run side
+			// by side. The child is a fork up to the anchored event plus a seeded
+			// framing segment; the parent gets an open anchor record.
+			if conv == nil {
+				_ = enc.write(serverFrame{Type: "error", Error: "branch: no session open"})
+				return
+			}
+			parent := conv.ID()
+			turnMu.Lock()
+			busy := turnActive
+			turnMu.Unlock()
+			if busy {
+				_ = enc.write(serverFrame{Type: "error", Error: "branch: busy: a turn is in flight, interrupt it first"})
+				return
+			}
+			childID := f.NewSessionID
+			if childID == "" {
+				childID = newSessionID()
+			}
+			anchor := core.BranchAnchorPayload{
+				Seq:   f.AnchorSeq,
+				Start: f.AnchorStart,
+				End:   f.AnchorEnd,
+				Quote: f.AnchorQuote,
+			}
+			if err := eng.BranchSession(sctx, parent, childID, anchor); err != nil {
+				_ = enc.write(serverFrame{Type: "error", Error: "branch: " + err.Error()})
+				return
+			}
+			_ = enc.write(serverFrame{Type: "branched", SessionID: childID})
+
+		case "accept_branch":
+			// Merge a branch's curated conclusion back into THIS (parent) session
+			// as a fenced context segment and mark the anchor accepted. The full
+			// child transcript is left intact. The branch id is new_session_id.
+			if conv == nil {
+				_ = enc.write(serverFrame{Type: "error", Error: "accept_branch: no session open"})
+				return
+			}
+			if f.NewSessionID == "" {
+				_ = enc.write(serverFrame{Type: "error", Error: "accept_branch requires new_session_id (the branch)"})
+				return
+			}
+			if err := eng.AcceptBranch(sctx, conv.ID(), f.NewSessionID, f.Summary); err != nil {
+				_ = enc.write(serverFrame{Type: "error", Error: "accept_branch: " + err.Error()})
+				return
+			}
+			_ = enc.write(serverFrame{Type: "merged", SessionID: f.NewSessionID})
+
+		case "discard_branch":
+			// Close a branch without merging anything back: mark its anchor
+			// discarded on this (parent) session.
+			if conv == nil {
+				_ = enc.write(serverFrame{Type: "error", Error: "discard_branch: no session open"})
+				return
+			}
+			if f.NewSessionID == "" {
+				_ = enc.write(serverFrame{Type: "error", Error: "discard_branch requires new_session_id (the branch)"})
+				return
+			}
+			if err := eng.DiscardBranch(sctx, conv.ID(), f.NewSessionID); err != nil {
+				_ = enc.write(serverFrame{Type: "error", Error: "discard_branch: " + err.Error()})
+				return
+			}
+			_ = enc.write(serverFrame{Type: "merged", SessionID: f.NewSessionID})
 
 		case "set_model":
 			if conv == nil {

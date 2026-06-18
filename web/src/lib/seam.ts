@@ -23,6 +23,12 @@ export interface SeamHandlers {
   onSession?: (id: string) => void;
   /** A fork this connection requested succeeded and is now bound. */
   onForked?: (id: string) => void;
+  /** A branch this connection opened succeeded; id is the new child session
+   *  (this connection is NOT rebound — the parent stays bound). */
+  onBranched?: (id: string) => void;
+  /** A branch this connection accepted or discarded was resolved; id is the
+   *  child. The parent's transcript should reconcile to show the merge. */
+  onMerged?: (id: string) => void;
   onEnvelope?: (env: Envelope) => void;
   onError?: (msg: string) => void;
   /** Outbox delivery (gateway broadcast): an ambient message between turns. */
@@ -85,6 +91,12 @@ export class SeamClient {
         case "forked":
           this.handlers.onSession?.(frame.session_id);
           this.handlers.onForked?.(frame.session_id);
+          break;
+        case "branched":
+          this.handlers.onBranched?.(frame.session_id);
+          break;
+        case "merged":
+          this.handlers.onMerged?.(frame.session_id);
           break;
         case "event":
           this.handlers.onEnvelope?.(frame.envelope);
@@ -194,6 +206,40 @@ export class SeamClient {
    */
   fork(throughSeq: number): boolean {
     return this.send({ type: "fork", through_seq: throughSeq });
+  }
+
+  /**
+   * Open an anchored sub-discussion about a highlighted span of the bound
+   * (parent) session. The server answers `branched` with the new child id; this
+   * connection stays bound to the parent (the caller opens the child in a
+   * sibling tab). anchorSeq locates the highlighted event; start/end are rune
+   * offsets into its rendered text; quote is the highlighted text itself.
+   */
+  branch(
+    childId: string,
+    anchorSeq: number,
+    start: number,
+    end: number,
+    quote: string,
+  ): boolean {
+    return this.send({
+      type: "branch",
+      new_session_id: childId,
+      anchor_seq: anchorSeq,
+      anchor_start: start,
+      anchor_end: end,
+      anchor_quote: quote,
+    });
+  }
+
+  /** Merge a branch's curated conclusion back into the bound (parent) session. */
+  acceptBranch(childId: string, summary: string): boolean {
+    return this.send({ type: "accept_branch", new_session_id: childId, summary });
+  }
+
+  /** Close a branch without merging anything back. */
+  discardBranch(childId: string): boolean {
+    return this.send({ type: "discard_branch", new_session_id: childId });
   }
 
   interrupt(): boolean {

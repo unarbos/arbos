@@ -10,9 +10,11 @@ import {
   Clock,
   FileText,
   Globe,
+  GitBranch,
   ListTodo,
   Loader2,
   Maximize2,
+  MessageSquareQuote,
   Pencil,
   Repeat,
   SquareTerminal,
@@ -29,6 +31,21 @@ import { detailsJob, jobFromDetails, type TermRef } from "@/lib/term";
 import type { ChatState, TranscriptItem } from "@/lib/transcript";
 import type { Citation, ContentBlock, ToolCall } from "@/lib/types";
 import { useAutosize } from "@/lib/useAutosize";
+
+/** A resolved (or open) discussion-branch anchor, as the parent transcript
+ *  needs it to render a "discussed" marker on the branched message. */
+export interface BranchAnchorView {
+  /** The child session the anchor opened. */
+  child: string;
+  /** The parent event seq the highlight lives in. */
+  seq: number;
+  /** The highlighted text. */
+  quote: string;
+  /** open | accepted | discarded. */
+  status: "open" | "accepted" | "discarded";
+  /** The curated conclusion merged back (accepted anchors only). */
+  summary?: string;
+}
 
 /** Hooks the transcript needs from its host (sub-agent tab opening). */
 export interface TranscriptHooks {
@@ -55,6 +72,20 @@ export interface TranscriptHooks {
   onRetry?: () => void;
   /** Whether a retry can be issued now (seam connected and no turn running). */
   canRetry?: boolean;
+  /**
+   * Discussion branching: open an anchored sub-discussion about a highlighted
+   * span of a message. seq is the highlighted event's position in the log,
+   * start/end are rune offsets into the item's rendered text, quote is the
+   * selected text. Absent in read-only panels (sub-agents) and when no seq is
+   * known (a live, not-yet-replayed item). */
+  onBranch?: (seq: number, start: number, end: number, quote: string) => void;
+  /** Resolved branch anchors on THIS session, keyed by the parent event seq —
+   *  used to render a "discussed" marker on a previously-branched message. */
+  anchors?: BranchAnchorView[];
+  /** Reopen a branch's child session in a sibling tab. */
+  onOpenBranch?: (child: string, quote: string) => void;
+  /** Open the accept/discard dialog for an OPEN branch (owner-only). */
+  onResolveBranch?: (anchor: BranchAnchorView) => void;
   /** Your own display name in this chat (the host's chosen name, or a guest's
    *  name from /api/me). Used to suppress the label on your OWN messages — you
    *  see other participants' names, never your own. */
@@ -250,13 +281,26 @@ const Item = memo(function Item({
           edit={hooks?.edit}
           onOpenSurface={hooks?.onOpenSurface}
           selfName={hooks?.selfName}
+          anchors={hooks?.anchors}
+          onBranch={hooks?.onBranch}
+          onOpenBranch={hooks?.onOpenBranch}
+          onResolveBranch={hooks?.onResolveBranch}
         />
       );
 
     case "assistant":
       return (
         <div className="group/msg min-w-0 break-words py-1">
-          <Markdown content={item.text} streaming={item.streaming} />
+          <BranchableText
+            seq={item.seq}
+            text={item.text}
+            anchors={hooks?.anchors}
+            onBranch={item.streaming ? undefined : hooks?.onBranch}
+            onOpenBranch={hooks?.onOpenBranch}
+            onResolveBranch={hooks?.onResolveBranch}
+          >
+            <Markdown content={item.text} streaming={item.streaming} />
+          </BranchableText>
           {item.images && item.images.length > 0 && (
             <PartImages
               parts={item.images}
@@ -538,16 +582,172 @@ function CollapsiblePromptBody({ body }: { body: string }) {
 /** Height cap for a collapsed prompt card, in px (~10 lines of prose). */
 const PROMPT_COLLAPSED_MAX_PX = 220;
 
+/**
+ * Wraps a message's prose so the user can highlight any span and open an
+ * anchored sub-discussion about it (discussion branching). On a mouse-up that
+ * leaves a non-empty selection inside this block, a floating "Discuss" button
+ * appears at the selection; clicking it fires onBranch with the rune offsets of
+ * the selection within the block's text and the selected text itself.
+ *
+ * When this message already has resolved/open branch anchors (matched by seq),
+ * a quiet strip beneath it lists them: each chip reopens the child discussion,
+ * and an accepted one shows its merged conclusion on hover.
+ *
+ * Branching is disabled (children render plainly) when onBranch is absent —
+ * read-only panels, live streaming messages, and items with no known seq.
+ */
+function BranchableText({
+  seq,
+  text,
+  anchors,
+  onBranch,
+  onOpenBranch,
+  onResolveBranch,
+  children,
+}: {
+  seq?: number;
+  text: string;
+  anchors?: BranchAnchorView[];
+  onBranch?: (seq: number, start: number, end: number, quote: string) => void;
+  onOpenBranch?: (child: string, quote: string) => void;
+  onResolveBranch?: (anchor: BranchAnchorView) => void;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [sel, setSel] = useState<{ x: number; y: number; quote: string } | null>(
+    null,
+  );
+  const branchable = onBranch !== undefined && seq !== undefined;
+  const mine = (anchors ?? []).filter(
+    (a) => a.seq === seq && a.status !== "discarded",
+  );
+
+  const clear = () => setSel(null);
+
+  const onMouseUp = () => {
+    if (!branchable) return;
+    const s = window.getSelection();
+    if (!s || s.isCollapsed || s.rangeCount === 0) {
+      clear();
+      return;
+    }
+    const root = ref.current;
+    if (!root) return;
+    const range = s.getRangeAt(0);
+    // The selection must lie inside THIS message's prose, not span others.
+    if (!root.contains(range.commonAncestorContainer)) {
+      clear();
+      return;
+    }
+    const quote = s.toString().trim();
+    if (!quote) {
+      clear();
+      return;
+    }
+    const rect = range.getBoundingClientRect();
+    const host = root.getBoundingClientRect();
+    setSel({
+      x: rect.left - host.left + rect.width / 2,
+      y: rect.top - host.top,
+      quote,
+    });
+  };
+
+  const doBranch = () => {
+    if (!sel || seq === undefined) return;
+    // Best-effort rune offsets of the quote within the block text; the Quote
+    // itself is the display source of truth (the kernel freezes it on the log).
+    const idx = text.indexOf(sel.quote);
+    const start = idx >= 0 ? idx : 0;
+    const end = idx >= 0 ? idx + sel.quote.length : sel.quote.length;
+    onBranch?.(seq, start, end, sel.quote);
+    window.getSelection()?.removeAllRanges();
+    clear();
+  };
+
+  return (
+    <div className="relative" ref={ref} onMouseUp={branchable ? onMouseUp : undefined}>
+      {children}
+      {sel && (
+        <div
+          className="absolute z-20 -translate-x-1/2 -translate-y-full pb-1"
+          style={{ left: sel.x, top: sel.y }}
+        >
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={doBranch}
+            className="flex cursor-pointer items-center gap-1 rounded-md border border-line bg-card px-2 py-1 text-[12px] font-medium text-bright shadow-md hover:bg-hover"
+          >
+            <GitBranch size={12} className="text-accent" />
+            Discuss
+          </button>
+        </div>
+      )}
+      {mine.length > 0 && (
+        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+          {mine.map((a) => (
+            <span key={a.child} className="flex max-w-full items-center">
+              <button
+                type="button"
+                onClick={() => onOpenBranch?.(a.child, a.quote)}
+                title={
+                  a.status === "accepted"
+                    ? `Discussed · merged: ${a.summary ?? ""}`
+                    : "Open sub-discussion"
+                }
+                className={`flex max-w-full cursor-pointer items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] ${
+                  a.status === "accepted"
+                    ? "border-accent/40 bg-accent/10 text-accent"
+                    : "border-line/70 bg-panel text-muted hover:text-text"
+                }`}
+              >
+                {a.status === "accepted" ? (
+                  <Check size={11} />
+                ) : (
+                  <MessageSquareQuote size={11} />
+                )}
+                <span className="truncate">
+                  {a.status === "accepted" ? "discussed" : "discussing"}: “
+                  {a.quote.length > 32 ? a.quote.slice(0, 32) + "…" : a.quote}”
+                </span>
+              </button>
+              {a.status === "open" && onResolveBranch && (
+                <button
+                  type="button"
+                  onClick={() => onResolveBranch(a)}
+                  title="Bring this discussion back to the main thread"
+                  className="ml-1 cursor-pointer rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[11px] text-accent hover:bg-accent/20"
+                >
+                  Accept…
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UserItem({
   item,
   edit,
   onOpenSurface,
   selfName,
+  anchors,
+  onBranch,
+  onOpenBranch,
+  onResolveBranch,
 }: {
   item: Extract<TranscriptItem, { kind: "user" }>;
   edit?: TranscriptEditHooks;
   onOpenSurface?: (surface: Surface) => void;
   selfName?: string;
+  anchors?: BranchAnchorView[];
+  onBranch?: (seq: number, start: number, end: number, quote: string) => void;
+  onOpenBranch?: (child: string, quote: string) => void;
+  onResolveBranch?: (anchor: BranchAnchorView) => void;
 }) {
   const editing = edit?.editingId === item.id;
   const { body, files } = splitAttachments(item.text);
@@ -578,7 +778,18 @@ function UserItem({
             </div>
           )}
           <AttachmentChips files={files} onOpenSurface={onOpenSurface} />
-          {body && <CollapsiblePromptBody body={body} />}
+          {body && (
+            <BranchableText
+              seq={item.seq}
+              text={body}
+              anchors={anchors}
+              onBranch={onBranch}
+              onOpenBranch={onOpenBranch}
+              onResolveBranch={onResolveBranch}
+            >
+              <CollapsiblePromptBody body={body} />
+            </BranchableText>
+          )}
           <UserAttachments parts={item.parts} />
           {edit?.canEdit && (
             <button
