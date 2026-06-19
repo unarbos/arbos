@@ -92,8 +92,10 @@ export interface TranscriptHooks {
   anchors?: BranchAnchorView[];
   /** Reopen a branch's child session in a sibling tab. */
   onOpenBranch?: (child: string, quote: string) => void;
-  /** Open the accept/discard dialog for an OPEN branch (owner-only). */
+  /** Open the accept dialog for an OPEN branch (owner-only). */
   onResolveBranch?: (anchor: BranchAnchorView) => void;
+  /** Discard an OPEN branch directly from the anchor chip, no dialog. */
+  onDiscardBranch?: (child: string) => void;
   /** Your own display name in this chat (the host's chosen name, or a guest's
    *  name from /api/me). Used to suppress the label on your OWN messages — you
    *  see other participants' names, never your own. */
@@ -293,6 +295,7 @@ const Item = memo(function Item({
           onBranch={hooks?.onBranch}
           onOpenBranch={hooks?.onOpenBranch}
           onResolveBranch={hooks?.onResolveBranch}
+          onDiscardBranch={hooks?.onDiscardBranch}
         />
       );
 
@@ -306,6 +309,7 @@ const Item = memo(function Item({
             onBranch={item.streaming ? undefined : hooks?.onBranch}
             onOpenBranch={hooks?.onOpenBranch}
             onResolveBranch={hooks?.onResolveBranch}
+            onDiscardBranch={hooks?.onDiscardBranch}
           >
             <Markdown content={item.text} streaming={item.streaming} />
           </BranchableText>
@@ -611,6 +615,7 @@ function BranchableText({
   onBranch,
   onOpenBranch,
   onResolveBranch,
+  onDiscardBranch,
   children,
 }: {
   seq?: number;
@@ -625,6 +630,7 @@ function BranchableText({
   ) => void;
   onOpenBranch?: (child: string, quote: string) => void;
   onResolveBranch?: (anchor: BranchAnchorView) => void;
+  onDiscardBranch?: (child: string) => void;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -737,6 +743,16 @@ function BranchableText({
                   Accept…
                 </button>
               )}
+              {a.status === "open" && onDiscardBranch && (
+                <button
+                  type="button"
+                  onClick={() => onDiscardBranch(a.child)}
+                  title="Discard this side-discussion (nothing is merged back)"
+                  className="ml-1 cursor-pointer rounded border border-line/70 bg-panel px-1.5 py-0.5 text-[11px] text-muted hover:border-red/40 hover:text-red"
+                >
+                  Discard
+                </button>
+              )}
             </span>
           ))}
         </div>
@@ -754,6 +770,7 @@ function UserItem({
   onBranch,
   onOpenBranch,
   onResolveBranch,
+  onDiscardBranch,
 }: {
   item: Extract<TranscriptItem, { kind: "user" }>;
   edit?: TranscriptEditHooks;
@@ -769,6 +786,7 @@ function UserItem({
   ) => void;
   onOpenBranch?: (child: string, quote: string) => void;
   onResolveBranch?: (anchor: BranchAnchorView) => void;
+  onDiscardBranch?: (child: string) => void;
 }) {
   const editing = edit?.editingId === item.id;
   const { body, files } = splitAttachments(item.text);
@@ -807,6 +825,7 @@ function UserItem({
               onBranch={onBranch}
               onOpenBranch={onOpenBranch}
               onResolveBranch={onResolveBranch}
+              onDiscardBranch={onDiscardBranch}
             >
               <CollapsiblePromptBody body={body} />
             </BranchableText>

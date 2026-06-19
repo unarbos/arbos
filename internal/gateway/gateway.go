@@ -996,6 +996,10 @@ type sessionMetaJSON struct {
 	WebSearch bool   `json:"web_search"`
 	WebFetch  bool   `json:"web_fetch"`
 	ImageGen  bool   `json:"image_gen"`
+	// BranchFragment is set when this session is a discussion branch: the
+	// highlighted fragment it is scoped to, so the branch tab can render a
+	// "Discussing: «fragment»" header. Empty for a normal chat.
+	BranchFragment string `json:"branch_fragment,omitempty"`
 }
 
 // handleSessionEvents replays a session's visible history so a resumed tab
@@ -1027,6 +1031,12 @@ func (s *Server) sessionReplay(ctx context.Context, id core.SessionID) (map[stri
 			WebSearch: sess.WebSearch,
 			WebFetch:  sess.WebFetch,
 			ImageGen:  sess.ImageGen,
+		}
+		// A discussion branch carries a self-anchor (Branch == its own id) whose
+		// Quote is the highlighted fragment it was opened to discuss; surface it
+		// so the branch tab can render a fragment-only header.
+		if a, ok := core.LatestBranchAnchor(events, id); ok {
+			meta.BranchFragment = a.Quote
 		}
 	}
 	out := make([]replayJSON, 0, len(events))

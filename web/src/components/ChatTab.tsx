@@ -333,6 +333,11 @@ export function ChatTab({
   const [accepting, setAccepting] = useState<BranchAnchor | null>(null);
   // Lets callbacks outside the seam effect (the accept dialog) refresh anchors.
   const reconcileAnchorsRef = useRef<() => void>(() => {});
+  // When this tab is a discussion branch, the highlighted fragment it is scoped
+  // to (from the session record), shown as a header so the branch chat displays
+  // ONLY the highlighted part — the containing message stays invisible model
+  // context, never rendered.
+  const [branchFragment, setBranchFragment] = useState<string | null>(null);
   // Files picked into the composer (paperclip): text files spool to the
   // workspace on send (the prompt carries path references) and the chips
   // clear once it's sent.
@@ -612,6 +617,9 @@ export function ChatTab({
         .then(({ events, session }) => {
           dispatch({ type: "replay", items: replayToItems(events) });
           if (session?.model) setModel(session.model);
+          // A discussion branch carries the fragment it is scoped to; show it
+          // as a header so the branch chat displays ONLY the highlighted part.
+          if (session?.branch_fragment) setBranchFragment(session.branch_fragment);
         })
         .catch(() => {})
         .finally(() => seam.connect());
@@ -1242,6 +1250,7 @@ export function ChatTab({
       anchors,
       onOpenBranch,
       onResolveBranch: usable && !chat.turnActive ? setAccepting : undefined,
+      onDiscardBranch: usable && !chat.turnActive ? onDiscardBranch : undefined,
     }),
     [
       chat.children,
@@ -1256,6 +1265,7 @@ export function ChatTab({
       onBranch,
       anchors,
       onOpenBranch,
+      onDiscardBranch,
     ],
   );
 
@@ -1410,6 +1420,19 @@ export function ChatTab({
   return (
     <div ref={rootRef} className="flex min-h-0 min-w-0 flex-1">
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      {branchFragment && (
+        <div className="flex shrink-0 items-start gap-2 border-b border-line/60 bg-panel px-3.5 py-2">
+          <GitBranch size={13} className="mt-0.5 shrink-0 text-accent" />
+          <div className="min-w-0">
+            <div className="text-[10.5px] uppercase tracking-wider text-faint select-none">
+              Discussing
+            </div>
+            <div className="break-words text-[13px] text-bright">
+              “{branchFragment}”
+            </div>
+          </div>
+        </div>
+      )}
       {!fresh && (
         <ChatView items={chat.items} working={working} hooks={transcriptHooks} />
       )}

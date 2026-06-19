@@ -120,7 +120,14 @@ func Branch(ctx context.Context, store ports.SessionStore, source, newID core.Se
 		return err
 	}
 	seg := core.NewContextEvent(newID, []core.Segment{{Source: SourceBranchAnchor, Content: branchSeed(anchor)}}, now)
-	return store.AppendEvent(ctx, seg)
+	if err := store.AppendEvent(ctx, seg); err != nil {
+		return err
+	}
+	// Write a self-anchor on the CHILD too (Branch == newID): it has no
+	// conversational projection, so it never reaches the model, but it lets the
+	// gateway read the child's highlighted fragment (anchor.Quote) for the
+	// branch tab's "Discussing: «fragment»" header without parsing the seed prose.
+	return store.AppendEvent(ctx, core.NewBranchAnchorEvent(newID, anchor, now))
 }
 
 // branchSeed renders the child's framing context: the containing message as the

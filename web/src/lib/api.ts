@@ -117,6 +117,9 @@ export interface SessionMeta {
   web_search: boolean;
   web_fetch: boolean;
   image_gen: boolean;
+  /** Set when this session is a discussion branch: the highlighted fragment it
+   *  is scoped to, so the branch tab can render a fragment-only header. */
+  branch_fragment?: string;
 }
 
 export async function fetchReplay(sessionId: string): Promise<ReplayEvent[]> {
