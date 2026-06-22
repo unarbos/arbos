@@ -48,8 +48,7 @@ func findArticle(n *html.Node) *html.Node {
 
 // mdWriter accumulates markdown, separating block elements with blank lines.
 type mdWriter struct {
-	b       strings.Builder
-	pending bool // a block was written; emit a blank line before the next
+	b strings.Builder
 }
 
 // sep ensures a blank line before the next block (but not at the very start).
@@ -232,10 +231,10 @@ func (w *mdWriter) inline(n *html.Node) string {
 	var walk func(*html.Node)
 	walk = func(x *html.Node) {
 		for c := x.FirstChild; c != nil; c = c.NextSibling {
-			switch {
-			case c.Type == html.TextNode:
+			switch c.Type {
+			case html.TextNode:
 				b.WriteString(collapseSpaceEdges(c.Data))
-			case c.Type == html.ElementNode:
+			case html.ElementNode:
 				switch c.DataAtom {
 				case atom.Strong, atom.B:
 					b.WriteString("**" + strings.TrimSpace(w.inline(c)) + "**")
@@ -268,6 +267,8 @@ func (w *mdWriter) inline(n *html.Node) string {
 				default:
 					walk(c)
 				}
+			default:
+				// Comment/doctype/document nodes carry no inline content.
 			}
 		}
 	}
