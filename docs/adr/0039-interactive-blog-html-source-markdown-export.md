@@ -22,15 +22,11 @@ people now expect a shareable technical write-up to be:
   framed as an internal demo page, has no reading typography, no citation
   model, and no shareable reading link or markdown export.
 
-Two reference posts set the bar (analyzed 2026-06-19):
-
-1. **Chris Tate, "Generative UI for Claude Code, Codex and Pi"** — a coding
-   agent renders *real interactive UI* (charts, forms, 3D, terminal output,
-   diffs) "instead of a wall of markdown." Pi is named as a supported harness.
-   The artifact the agent emits is live UI, not prose.
-2. **nathan, "gzip can generate Shakespeare"** — a short, beautiful, *shareable*
-   technical write-up: long-form reading with an embedded interactive demo,
-   linked from social.
+The bar is set by the current generation of technical write-ups: long-form,
+beautiful reading with *real interactive UI* embedded in the page — charts a
+reader can poke, runnable demos, diagrams, 3D — "instead of a wall of
+markdown," and shareable as a link. The artifact is an HTML document, not
+decorated prose.
 
 The synthesis the user wants: a `/blog` whose output is a **beautiful,
 interactive HTML document with JavaScript** (the canvas's power) carrying
@@ -206,8 +202,8 @@ the declarative palette that survives export.
   Less disruptive — extend the markdown fence vocabulary (we already have
   ` ```chart `/` ```mermaid `) and render those live. But it caps the ceiling at
   "markdown plus a few known widgets": no arbitrary layout, no 3D, no custom
-  interactive demo like the references show, and it keeps the two-parser
-  duplication. The reference posts are HTML documents, not decorated markdown.
+  interactive demo, and it keeps the two-parser duplication. The target
+  artifacts are HTML documents, not decorated markdown.
 - **Two separate artifacts forever (`/blog` md, `/canvas` html).** Status quo.
   Keeps the dual parser, gives blogs no interactivity and canvases no reading
   typography or export, and leaves the user maintaining two long-form tools that

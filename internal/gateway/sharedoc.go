@@ -396,6 +396,11 @@ const sharedDocHead = `<!doctype html><html><head>
     font-size:15px; line-height:1.7; color-scheme:dark; -webkit-font-smoothing:antialiased;
     background:var(--canvas); color:var(--text); margin:0;
   }
+  /* Reading serif for an .article body (a self-contained HTML blog shares as
+     its own page; a legacy .md doc renders here in sans). */
+  .article { font-family:Newsreader,Charter,"Iowan Old Style","Source Serif 4",Georgia,Cambria,serif;
+    font-size:18px; line-height:1.72; max-width:38rem; margin:0 auto; padding:2.4rem 1.4rem 1rem;
+    font-feature-settings:"kern" 1,"liga" 1,"onum" 1,"calt" 1; text-rendering:optimizeLegibility; }
   ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
   .doc { max-width: 46rem; margin: 0 auto; padding: 2.6rem 1.2rem 1rem; }
   .doc h1 { font-size:1.9rem; line-height:1.25; color:var(--bright); margin:.2em 0 .5em; font-weight:700; }

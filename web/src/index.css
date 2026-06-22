@@ -38,6 +38,12 @@
   --font-mono:
     ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo,
     Consolas, monospace;
+  /* Reading serif for long-form article surfaces (the .article type system,
+     blogs, the doc reader). A token so the face swaps in one line; a system
+     serif stack today, self-hostable later. */
+  --font-serif:
+    Newsreader, Charter, "Iowan Old Style", "Source Serif 4", "Source Serif Pro",
+    Georgia, Cambria, "Times New Roman", serif;
 }
 
 html,

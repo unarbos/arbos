@@ -190,6 +190,10 @@ const FONT_SANS =
   '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif';
 const FONT_MONO =
   'ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace';
+// Reading serif for long-form article surfaces (a blog's .article body). A
+// canvas/blog reaches for var(--font-serif, …); inject it so it resolves.
+const FONT_SERIF =
+  'Newsreader, Charter, "Iowan Old Style", "Source Serif 4", "Source Serif Pro", Georgia, Cambria, "Times New Roman", serif';
 
 /**
  * Wrap raw canvas HTML for the panel's iframe: a <base> into /raw so the
@@ -205,7 +209,7 @@ export function themedCanvasDoc(html: string, theme: Theme, path: string): strin
   const style =
     `<style data-arbos-theme>:root{${vars}` +
     `--color-hover:color-mix(in srgb, var(--color-bright) 8%, transparent);` +
-    `--font-sans:${FONT_SANS};--font-mono:${FONT_MONO};` +
+    `--font-sans:${FONT_SANS};--font-mono:${FONT_MONO};--font-serif:${FONT_SERIF};` +
     `color-scheme:${theme.dark ? "dark" : "light"};}</style>`;
   const headRe = /<head[^>]*>/i;
   const withBase = headRe.test(html)
