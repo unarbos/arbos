@@ -74,7 +74,32 @@ The user may run a **light** theme: never hardcode white/black or assume darknes
 3. **Body sections** (`<h2>` per sub-question), prose first, with interactive islands, tables, or short lists where they carry the point. Synthesize across sources; do not stitch quotes. Surface uncertainty explicitly.
 4. **Sources** — a numbered list (`<ol>`), each entry: title, publisher/author, URL, and date if known.
 
-Cite inline with a superscript link: `<a class="cite" href="#cite-src-N">[N]</a>`, and give the matching source `<li id="cite-src-N" class="src">…</li>` so clicking jumps to it. Place a citation on the specific claim it supports — not vaguely at a paragraph's end. Every figure, quote, and contested claim carries one. Restrained, factual voice; no filler, no emoji.
+Cite inline with a superscript link and give the cited claim a stable id so the source can point back at it:
+
+```html
+<!-- inline, on the claim -->
+Gandalf proved it<a class="cite" id="cite-ref-1" href="#cite-src-1">[1]</a>.
+<!-- in the Sources list -->
+<li id="cite-src-1" class="src">Title — Publisher, https://example.com <a class="backref" href="#cite-ref-1" title="Back to where this is cited">↩</a></li>
+```
+
+Each citation marker is `<a class="cite" id="cite-ref-N" href="#cite-src-N">[N]</a>` and each source is `<li id="cite-src-N" class="src">… <a class="backref" href="#cite-ref-N">↩</a></li>`. (If a source is cited from several places, the back-link points at the first; that is fine.)
+
+**Cite links MUST be made to work with JavaScript.** A blog renders inside a sandboxed iframe with a *null origin*, so a bare `href="#cite-src-N"` resolves against `about:srcdoc` and **404s instead of jumping**. Keep the `href` (it makes the link work when the page is opened standalone), but also intercept in-page hash clicks and scroll with JS. Include this script (it handles both the `[N]` markers and the `↩` back-links generically):
+
+```html
+<script>
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest('a[href^="#"]');
+    if (!a) return;
+    var id = decodeURIComponent(a.getAttribute("href").slice(1));
+    var t = id && document.getElementById(id);
+    if (t) { e.preventDefault(); t.scrollIntoView({ behavior: "smooth", block: "center" }); }
+  });
+</script>
+```
+
+Style a cited source's `:target` so the jump is visible (e.g. a brief highlight), and make `.backref` quiet (`var(--color-faint)`, `var(--color-accent)` on hover). Place a citation on the specific claim it supports — not vaguely at a paragraph's end. Every figure, quote, and contested claim carries one. Restrained, factual voice; no filler, no emoji.
 
 ### Interactive islands — where a blog beats a markdown report
 
