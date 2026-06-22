@@ -283,6 +283,23 @@ func sandboxArtifact(w http.ResponseWriter) {
 // it — so a canvas's relative assets resolve through the scoped raw route.
 var headOpenRe = regexp.MustCompile(`(?i)<head[^>]*>`)
 
+// anchorScrollScript guarantees in-page anchors work on a shared artifact. A
+// shared canvas/blog is served into an opaque (null) origin (sandboxArtifact),
+// where a bare href="#id" resolves against the document URL and 404s rather
+// than scrolling — breaking a blog's [n] citation links and their ↩ back-links.
+// We inject a delegated click listener that intercepts in-page hash links and
+// scrolls within the document. Mirrors the panel's ANCHOR_SCROLL_SCRIPT
+// (web/src/lib/surface.ts), so the doc panel and the public share page behave
+// identically and neither depends on the artifact shipping its own script.
+const anchorScrollScript = `<script data-arbos-anchor-scroll>` +
+	`document.addEventListener("click",function(e){` +
+	`var a=e.target.closest&&e.target.closest('a[href^="#"]');if(!a)return;` +
+	`var id=decodeURIComponent(a.getAttribute("href").slice(1));if(!id)return;` +
+	`var t=document.getElementById(id);if(t){e.preventDefault();` +
+	`t.scrollIntoView({behavior:"smooth",block:"center"});` +
+	`if(t.id)try{history.replaceState(null,"","#"+t.id)}catch(_){}}` +
+	`});</script>`
+
 // serveSharedFile serves a file artifact. HTML (a canvas) gets a <base>
 // injected so its relative assets load through /s/<token>/raw/; every other
 // type is served as itself so the browser renders it natively (image, PDF) or
@@ -333,6 +350,9 @@ func (s *Server) serveSharedFile(w http.ResponseWriter, r *http.Request, g share
 	} else {
 		doc = base + doc
 	}
+	// Make in-page anchors (cite links, back-links) scroll under the null
+	// origin — appended last so it runs regardless of the artifact's own JS.
+	doc += anchorScrollScript
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = io.WriteString(w, doc)
 }

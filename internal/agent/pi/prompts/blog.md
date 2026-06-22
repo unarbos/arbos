@@ -85,19 +85,7 @@ Gandalf proved it<a class="cite" id="cite-ref-1" href="#cite-src-1">[1]</a>.
 
 Each citation marker is `<a class="cite" id="cite-ref-N" href="#cite-src-N">[N]</a>` and each source is `<li id="cite-src-N" class="src">… <a class="backref" href="#cite-ref-N">↩</a></li>`. (If a source is cited from several places, the back-link points at the first; that is fine.)
 
-**Cite links MUST be made to work with JavaScript.** A blog renders inside a sandboxed iframe with a *null origin*, so a bare `href="#cite-src-N"` resolves against `about:srcdoc` and **404s instead of jumping**. Keep the `href` (it makes the link work when the page is opened standalone), but also intercept in-page hash clicks and scroll with JS. Include this script (it handles both the `[N]` markers and the `↩` back-links generically):
-
-```html
-<script>
-  document.addEventListener("click", function (e) {
-    var a = e.target.closest('a[href^="#"]');
-    if (!a) return;
-    var id = decodeURIComponent(a.getAttribute("href").slice(1));
-    var t = id && document.getElementById(id);
-    if (t) { e.preventDefault(); t.scrollIntoView({ behavior: "smooth", block: "center" }); }
-  });
-</script>
-```
+Just use the `href` — **you do not need to write any JavaScript for the cite links to scroll.** A blog renders in a sandboxed null-origin iframe where a bare `href="#id"` would normally 404 instead of jumping, but the arbos renderer injects an in-page anchor-scroll handler for every blog (both in the doc panel and on the public share link), so a click on any `[N]` marker or `↩` back-link smoothly scrolls to its target. Author the `href`/`id` markup above and the scrolling just works; do not add your own click-interception script.
 
 Style a cited source's `:target` so the jump is visible (e.g. a brief highlight), and make `.backref` quiet (`var(--color-faint)`, `var(--color-accent)` on hover). Place a citation on the specific claim it supports — not vaguely at a paragraph's end. Every figure, quote, and contested claim carries one. Restrained, factual voice; no filler, no emoji.
 

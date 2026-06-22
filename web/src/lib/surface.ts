@@ -196,9 +196,29 @@ const FONT_SERIF =
   'Newsreader, Charter, "Iowan Old Style", "Source Serif 4", "Source Serif Pro", Georgia, Cambria, "Times New Roman", serif';
 
 /**
+ * A canvas/blog renders in a sandboxed iframe with a *null* origin, so a bare
+ * `href="#id"` resolves against `about:srcdoc` and 404s instead of jumping —
+ * breaking every in-page anchor (a blog's `[n]` citation links and their `↩`
+ * back-links most of all). The panel guarantees in-page scrolling by injecting
+ * this delegated listener: any click on an in-page hash link is intercepted and
+ * scrolled within the document. It rides in the binary, so EVERY canvas/blog
+ * gets working anchors regardless of whether its own HTML shipped such a script.
+ */
+const ANCHOR_SCROLL_SCRIPT =
+  `<script data-arbos-anchor-scroll>` +
+  `document.addEventListener("click",function(e){` +
+  `var a=e.target.closest&&e.target.closest('a[href^="#"]');if(!a)return;` +
+  `var id=decodeURIComponent(a.getAttribute("href").slice(1));if(!id)return;` +
+  `var t=document.getElementById(id);if(t){e.preventDefault();` +
+  `t.scrollIntoView({behavior:"smooth",block:"center"});` +
+  `if(t.id)try{history.replaceState(null,"","#"+t.id)}catch(_){}}` +
+  `});</script>`;
+
+/**
  * Wrap raw canvas HTML for the panel's iframe: a <base> into /raw so the
- * file's relative assets still resolve from srcdoc, and the active theme's
- * tokens appended LAST so they win over anything the file defines.
+ * file's relative assets still resolve from srcdoc, the active theme's tokens
+ * appended LAST so they win over anything the file defines, and the in-page
+ * anchor-scroll listener so citation/back-links work under the null origin.
  */
 export function themedCanvasDoc(html: string, theme: Theme, path: string): string {
   const dir = path.slice(0, path.lastIndexOf("/") + 1);
@@ -215,5 +235,5 @@ export function themedCanvasDoc(html: string, theme: Theme, path: string): strin
   const withBase = headRe.test(html)
     ? html.replace(headRe, (m) => m + base)
     : base + html;
-  return withBase + style;
+  return withBase + style + ANCHOR_SCROLL_SCRIPT;
 }
