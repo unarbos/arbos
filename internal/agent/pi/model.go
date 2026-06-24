@@ -66,7 +66,10 @@ func SeededModelRegistry() *ModelRegistry {
 		ModelInfo{ID: "gemini-2.5-flash", ContextWindow: 1_048_576},
 		// OpenAI-compatible
 		ModelInfo{ID: "gpt-5", ContextWindow: 400_000},
+		ModelInfo{ID: "gpt-5.5", ContextWindow: 400_000},
 		ModelInfo{ID: "gpt-4o", ContextWindow: 128_000},
+		// gm (saygm.com) frontier ids — bare, no provider prefix (ADR-0040)
+		ModelInfo{ID: "claude-opus-4-8", ContextWindow: 1_000_000},
 	)
 }
 

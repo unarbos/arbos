@@ -134,11 +134,23 @@ var providerSpecs = map[string]providerSpec{
 }
 
 // LoadConfig resolves the host configuration from the environment, backed by
-// the two stores the Settings tab writes: the host preference file (endpoint)
-// and the secret vault (key). Env wins where both exist — an exported var is
-// launch-explicit; the stored values are the durable default underneath.
+// the two stores the Settings tab writes: the host preference file (endpoint /
+// configured providers) and the secret vault (keys). Env wins where both exist
+// — an exported var is launch-explicit; the stored values are the durable
+// default underneath.
+//
+// Provider resolution (ADR-0040): the environment always defines the BASELINE
+// provider (ARBOS_PROVIDER + its base/key envs, plus the OpenRouter onboarding
+// branch). When the settings file lists providers AND the environment did not
+// pin one explicitly, the file's active entry takes over — this is how the UI's
+// multi-provider selection becomes effective. When the file has no providers
+// (every pre-existing install, every fresh one), resolution is byte-identical
+// to the single-provider behavior, reading the legacy LLMBaseURL/DefaultModel
+// fields. No migration is written here; the file only grows providers[] when
+// the user saves through the panel.
 func LoadConfig() Config {
 	name := os.Getenv("ARBOS_PROVIDER")
+	envProvider := name != "" // the env explicitly pinned an adapter
 	spec, ok := providerSpecs[name]
 	if !ok {
 		name = "openai"
@@ -167,6 +179,35 @@ func LoadConfig() Config {
 		defaultModel = openRouterModel
 		if base == "" {
 			base = OpenRouterBase
+		}
+	}
+	storedDefaultModel := stored.DefaultModel
+	// Multi-provider selection (ADR-0040): the stored active entry overrides the
+	// adapter/endpoint/key/model derived above, UNLESS the environment pinned a
+	// provider explicitly (env stays launch-explicit and wins). The entry's own
+	// vault key replaces the onboarding key name, so each provider's credential
+	// is resolved under its own name. An empty list leaves everything as the
+	// single-provider resolution above — the lazy-migration fall-through.
+	if act, ok := stored.Active(); ok && !envProvider {
+		if s, known := providerSpecs[act.ProviderName]; known {
+			name, spec = act.ProviderName, s
+			if act.Endpoint != "" {
+				base = act.Endpoint
+			} else {
+				base = s.defaultBase
+			}
+			if act.KeyVaultName != "" {
+				keyEnv = act.KeyVaultName
+			} else {
+				keyEnv = s.keyEnv
+			}
+			defaultModel = s.defaultModel
+			if act.DefaultModel != "" {
+				defaultModel = act.DefaultModel
+			}
+			// The active entry's model is the stored default; don't also apply
+			// the legacy mirror field (it tracks the same value anyway).
+			storedDefaultModel = act.DefaultModel
 		}
 	}
 	imageModel := os.Getenv("ARBOS_IMAGE_MODEL")
@@ -198,7 +239,7 @@ func LoadConfig() Config {
 	// underneath the launch-explicit env, same precedence as the endpoint.
 	// Honored only with a real key — the fake provider keeps its fixed id.
 	if cfg.Model == "" && cfg.HasLLM {
-		cfg.Model = stored.DefaultModel
+		cfg.Model = storedDefaultModel
 	}
 	if cfg.Model == "" {
 		cfg.Model = "fake"

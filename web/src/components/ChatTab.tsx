@@ -27,6 +27,7 @@ import {
   fetchJobTail,
   fetchModels,
   fetchReplay,
+  fetchLLM,
   fetchReplayFull,
   HttpError,
   killJob,
@@ -356,6 +357,9 @@ export function ChatTab({
   // The provider catalog, kept so the composer can size the context gauge
   // against the active model's context_length.
   const [catalog, setCatalog] = useState<ModelOption[]>([]);
+  // The active provider's display label (ADR-0040), shown beside the model
+  // picker. Empty on a single-provider host that never used the provider list.
+  const [providerLabel, setProviderLabel] = useState("");
   // Dictation (the mic button): the host machine captures its own microphone
   // and transcribes on-device. "starting"/"transcribing" are the host's
   // round-trips; "recording" is live capture, toggled off with another click.
@@ -906,6 +910,14 @@ export function ChatTab({
         setModel((m) => m || c.current);
         setCatalog(c.models);
       })
+      .catch(() => {});
+  }, []);
+
+  // The active provider label for the composer chip (ADR-0040). Best-effort:
+  // a single-provider host reports no label and the chip stays hidden.
+  useEffect(() => {
+    fetchLLM()
+      .then((i) => setProviderLabel(i.active_label ?? ""))
       .catch(() => {});
   }, []);
 
@@ -1604,6 +1616,13 @@ export function ChatTab({
             <div className="flex items-center justify-between px-2 pt-1 pb-2">
               <span className="flex items-center gap-2 select-none">
                 <ModelPicker current={model} onSelect={selectModel} />
+                {providerLabel && (
+                  <Tooltip side="top" label={`Provider: ${providerLabel}`}>
+                    <span className="max-w-[140px] truncate rounded-full border border-line px-2 py-0.5 text-[11px] text-muted select-none">
+                      {providerLabel}
+                    </span>
+                  </Tooltip>
+                )}
                 <ContextCircle used={usedTokens} total={contextLength} />
               </span>
               <span className="flex items-center gap-1.5">

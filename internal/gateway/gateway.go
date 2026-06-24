@@ -400,6 +400,13 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /api/llm", sameOrigin(s.handleLLMGet))
 		mux.HandleFunc("PUT /api/llm", sameOrigin(s.handleLLMPut))
 		mux.HandleFunc("GET /api/llm/credits", sameOrigin(s.handleLLMCredits))
+		// Multi-provider configuration (ADR-0040): add/edit/remove a configured
+		// provider and select the active one. Same-origin, like the rest — a
+		// drive-by page must never reconfigure the host's providers.
+		mux.HandleFunc("POST /api/llm/providers", sameOrigin(s.handleProvidersPost))
+		mux.HandleFunc("PUT /api/llm/providers/{id}", sameOrigin(s.handleProviderPut))
+		mux.HandleFunc("DELETE /api/llm/providers/{id}", sameOrigin(s.handleProviderDelete))
+		mux.HandleFunc("POST /api/llm/providers/{id}/activate", sameOrigin(s.handleProviderActivate))
 	}
 	if s.Messenger != nil {
 		// Same-origin throughout: registering a bot hands the agent's tools

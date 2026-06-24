@@ -535,6 +535,34 @@ export interface LLMInfo {
   boot_id: string;
   /** True while a saved change waits for the agent to go idle. */
   restart_pending: boolean;
+  /** Configured providers (ADR-0040); empty on a host that never used the
+   * multi-provider panel. active_provider_id names the live one; active_label
+   * is its display name (also shown beside the composer's model selector). */
+  providers?: ProviderView[];
+  active_provider_id?: string;
+  active_label?: string;
+}
+
+/** One configured provider as the panel sees it. The key is never returned;
+ * key_set reports only whether one resolves. env_sourced rows are read-only
+ * (owned by the environment). */
+export interface ProviderView {
+  id: string;
+  label: string;
+  provider_name: string;
+  endpoint: string;
+  key_set: boolean;
+  env_sourced: boolean;
+}
+
+/** The write shape for adding/editing a provider. key is write-only; omit
+ * (or null) to leave an existing credential untouched on edit. */
+export interface ProviderInput {
+  label: string;
+  provider_name: string;
+  endpoint: string;
+  default_model: string;
+  key?: string | null;
 }
 
 /** The fields a provider save sends — only what changed. The key is
@@ -576,6 +604,43 @@ export async function fetchLLMCredits(): Promise<LLMCredits> {
   const res = await fetch("/api/llm/credits");
   if (!res.ok) throw new Error(await errorText(res, `credits: ${res.status}`));
   return (await res.json()) as LLMCredits;
+}
+
+/** Add a configured provider (ADR-0040). The host applies it by restarting
+ * gracefully, same as a single-provider save. */
+export async function addProvider(p: ProviderInput): Promise<void> {
+  const res = await fetch("/api/llm/providers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(p),
+  });
+  if (!res.ok) throw new Error(await errorText(res, `add provider: ${res.status}`));
+}
+
+/** Edit a configured provider in place. Omit key to keep the stored one. */
+export async function updateProvider(id: string, p: ProviderInput): Promise<void> {
+  const res = await fetch(`/api/llm/providers/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(p),
+  });
+  if (!res.ok) throw new Error(await errorText(res, `update provider: ${res.status}`));
+}
+
+/** Remove a configured provider and its key. */
+export async function removeProvider(id: string): Promise<void> {
+  const res = await fetch(`/api/llm/providers/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await errorText(res, `remove provider: ${res.status}`));
+}
+
+/** Select the active provider; the host restarts gracefully to apply it. */
+export async function activateProvider(id: string): Promise<void> {
+  const res = await fetch(`/api/llm/providers/${encodeURIComponent(id)}/activate`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(await errorText(res, `activate provider: ${res.status}`));
 }
 
 /** What a scoped share link points at: one artifact in its own namespace, or

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -518,10 +520,36 @@ func settingsAdmin(s *settings.Store) gateway.SettingsStore {
 	return s
 }
 
-// llmKeyName is the vault entry the provider panel's key saves under — the
-// same name the install flow exports and LoadConfig's onboarding path
-// resolves, so a pasted key and an exported one are one credential.
+// llmKeyName is the vault entry the single-provider panel's key saves under —
+// the same name the install flow exports and LoadConfig's onboarding path
+// resolves, so a pasted key and an exported one are one credential. The
+// multi-provider panel (ADR-0040) instead keys each provider under
+// providerKeyName(id) so several credentials coexist.
 const llmKeyName = "OPENROUTER_API_KEY"
+
+// providerKeyName is the vault entry name for a configured provider's key: one
+// per provider id, so multiple providers' credentials coexist (ADR-0040).
+func providerKeyName(id string) string { return "LLM_KEY_" + id }
+
+// newProviderID mints a short opaque id for a new provider entry.
+func newProviderID() string {
+	var b [6]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// vaultHasName reports whether the vault holds an entry by name (presence only).
+func vaultHasName(vault *secret.Store, name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, e := range vault.List() {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
+}
 
 // llmAdmin wires the Settings tab's provider panel: read the effective
 // endpoint/key state, persist changes (endpoint into the preference file,
@@ -560,8 +588,39 @@ func llmAdmin(cfg piwire.Config, host *piwire.Host, vault *secret.Store) *gatewa
 		return false
 	}
 	credits := cfg.CreditsFetcher()
+	// providerKeySet reports whether a stored provider entry has a resolvable
+	// key (env or vault) under its own vault name.
+	providerKeySet := func(p settings.ProviderEntry) bool {
+		return os.Getenv(p.KeyVaultName) != "" || vaultHasName(vault, p.KeyVaultName)
+	}
+	// providerViews renders the stored providers for the panel, marking the
+	// boot-time env/onboarding provider (if it isn't itself a stored entry) as
+	// a read-only env-sourced row so the UI shows it but cannot edit/delete it.
+	providerViews := func(st settings.Settings) ([]gateway.ProviderView, string, string) {
+		var views []gateway.ProviderView
+		for _, p := range st.Providers {
+			label := p.Label
+			if label == "" {
+				label = p.ProviderName
+			}
+			views = append(views, gateway.ProviderView{
+				ID: p.ID, Label: label, ProviderName: p.ProviderName,
+				Endpoint: p.Endpoint, KeySet: providerKeySet(p),
+			})
+		}
+		activeID, activeLabel := st.ActiveProviderID, ""
+		if act, ok := st.Active(); ok {
+			activeID = act.ID
+			if activeLabel = act.Label; activeLabel == "" {
+				activeLabel = act.ProviderName
+			}
+		}
+		return views, activeID, activeLabel
+	}
 	admin := &gateway.LLMAdmin{
 		Info: func() gateway.LLMInfo {
+			st := host.Settings.Get()
+			views, activeID, activeLabel := providerViews(st)
 			return gateway.LLMInfo{
 				Endpoint:   effectiveEndpoint(),
 				Provider:   cfg.ProviderName,
@@ -570,7 +629,10 @@ func llmAdmin(cfg piwire.Config, host *piwire.Host, vault *secret.Store) *gatewa
 				OpenRouter: credits != nil,
 				// True while a saved change waits out a busy agent; the
 				// gateway stamps BootID itself.
-				RestartPending: host.Engine.RestartPending(),
+				RestartPending:   host.Engine.RestartPending(),
+				Providers:        views,
+				ActiveProviderID: activeID,
+				ActiveLabel:      activeLabel,
 			}
 		},
 		SetEndpoint: func(u string) error {
@@ -590,6 +652,60 @@ func llmAdmin(cfg piwire.Config, host *piwire.Host, vault *secret.Store) *gatewa
 			}, v)
 		},
 		Apply: func() { host.Engine.RequestRestart() },
+	}
+	// setProviderKey stores a provider entry's key under its own vault name,
+	// bound to the entry's endpoint host (anti-exfiltration). Empty endpoint
+	// binds to no host (the broker default-denies until resolved).
+	setProviderKey := func(keyName, endpoint, value string) error {
+		hostName := ""
+		if u, err := url.Parse(endpoint); err == nil {
+			hostName = u.Hostname()
+		}
+		return vault.Set(secret.Entry{
+			Name:  keyName,
+			Label: "LLM API key (Settings → Model Provider)",
+			Hosts: []string{hostName},
+		}, value)
+	}
+	admin.AddProvider = func(in gateway.ProviderInput) error {
+		id := newProviderID()
+		keyName := providerKeyName(id)
+		if in.Key != nil && strings.TrimSpace(*in.Key) != "" {
+			if err := setProviderKey(keyName, in.Endpoint, strings.TrimSpace(*in.Key)); err != nil {
+				return err
+			}
+		}
+		return host.Settings.AddProvider(settings.ProviderEntry{
+			ID:           id,
+			Label:        in.Label,
+			ProviderName: in.ProviderName,
+			Endpoint:     strings.TrimSpace(in.Endpoint),
+			KeyVaultName: keyName,
+			DefaultModel: strings.TrimSpace(in.DefaultModel),
+		})
+	}
+	admin.UpdateProvider = func(id string, in gateway.ProviderInput) error {
+		keyName := providerKeyName(id)
+		if in.Key != nil && strings.TrimSpace(*in.Key) != "" {
+			if err := setProviderKey(keyName, in.Endpoint, strings.TrimSpace(*in.Key)); err != nil {
+				return err
+			}
+		}
+		return host.Settings.UpdateProvider(settings.ProviderEntry{
+			ID:           id,
+			Label:        in.Label,
+			ProviderName: in.ProviderName,
+			Endpoint:     strings.TrimSpace(in.Endpoint),
+			KeyVaultName: keyName,
+			DefaultModel: strings.TrimSpace(in.DefaultModel),
+		})
+	}
+	admin.RemoveProvider = func(id string) error {
+		_ = vault.Delete(providerKeyName(id))
+		return host.Settings.RemoveProvider(id)
+	}
+	admin.SetActiveProvider = func(id string) error {
+		return host.Settings.SetActiveProvider(id)
 	}
 	if credits != nil {
 		admin.Credits = func(ctx context.Context) (gateway.LLMCredits, error) {
