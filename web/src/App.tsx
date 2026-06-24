@@ -1215,6 +1215,7 @@ export default function App() {
                   onOpenRun: (run) => openRun(tab.key, run),
                   onOpenTerminal: (term) => openTerminal(tab.key, term),
                   onOpenPlan: (node) => openPlanTab(node),
+                  onConfigureProvider: openProviderSetup,
                   onOpenBranch: (child, label) =>
                     openBranchTab(tab.key, child, label),
                 }}

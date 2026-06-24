@@ -72,6 +72,9 @@ export interface TranscriptHooks {
   onRetry?: () => void;
   /** Whether a retry can be issued now (seam connected and no turn running). */
   canRetry?: boolean;
+  /** Open the Provider settings panel — the error card's shortcut when a turn
+   *  failed on a bad or missing API key. Absent in read-only panels. */
+  onConfigureProvider?: () => void;
   /**
    * Discussion branching: open an anchored sub-discussion about a highlighted
    * span of a message. seq is the highlighted event's position in the log,
@@ -409,6 +412,7 @@ const Item = memo(function Item({
           retryable={item.retryable}
           onRetry={hooks?.onRetry}
           canRetry={hooks?.canRetry}
+          onConfigureProvider={hooks?.onConfigureProvider}
         />
       );
 

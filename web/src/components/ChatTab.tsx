@@ -243,6 +243,9 @@ export interface ChatTabHandle {
   onOpenTerminal?: (term: TermRef) => void;
   /** A plan card was clicked — open its goal tree and code in a panel. */
   onOpenPlan?: (node: number) => void;
+  /** The error card's "Go to provider panel" was clicked after a turn failed
+   *  on a bad or missing API key — open the Provider settings panel. */
+  onConfigureProvider?: () => void;
   /** A discussion branch was opened (or reopened) — open the child session in
    *  a sibling tab beside the parent so the two threads run side by side. The
    *  label is the highlighted quote, truncated. */
@@ -1234,6 +1237,7 @@ export function ChatTab({
       onOpenTerminal: (term: TermRef) =>
         handleRef.current.onOpenTerminal?.(term),
       onOpenPlan: (node: number) => handleRef.current.onOpenPlan?.(node),
+      onConfigureProvider: () => handleRef.current.onConfigureProvider?.(),
       onRetry,
       canRetry: usable && !chat.turnActive,
       selfName,

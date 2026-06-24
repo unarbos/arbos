@@ -6,6 +6,7 @@ import {
   Hourglass,
   Plug,
   RotateCcw,
+  Settings,
   TriangleAlert,
   type LucideProps,
 } from "lucide-react";
@@ -32,6 +33,9 @@ export interface ErrorCardProps {
   onRetry?: () => void;
   /** Whether a retry can be issued right now (seam connected, turn idle). */
   canRetry?: boolean;
+  /** Open the Provider settings panel; shown when the failure points at a bad
+   *  or missing API key, where fixing the provider is the real next step. */
+  onConfigureProvider?: () => void;
 }
 
 type Tone = "warn" | "error";
@@ -42,6 +46,9 @@ interface Presentation {
   /** One line of plain-language guidance under the title. */
   hint: string;
   tone: Tone;
+  /** Surface a shortcut to the Provider settings panel — the fix for a
+   *  rejected request is almost always there. */
+  configureProvider?: boolean;
 }
 
 // The provider presentation keys on the kernel's already-computed retryable
@@ -64,6 +71,7 @@ function present(category: ErrorCategory, retryable: boolean): Presentation {
             title: "Couldn't reach the model",
             hint: "The model provider rejected the request (often a bad or missing API key, or an unknown model). Check your provider settings.",
             tone: "error",
+            configureProvider: true,
           };
     case "connection":
       return {
@@ -119,6 +127,7 @@ export function ErrorCard({
   retryable,
   onRetry,
   canRetry,
+  onConfigureProvider,
 }: ErrorCardProps) {
   const [open, setOpen] = useState(false);
   const p = present(category, retryable);
@@ -127,6 +136,7 @@ export function ErrorCard({
   // doesn't already say; a bare "provider error" placeholder is just noise.
   const detail = message.trim();
   const hasDetail = detail !== "" && detail.toLowerCase() !== "provider error";
+  const showProvider = Boolean(p.configureProvider && onConfigureProvider);
 
   return (
     <div
@@ -138,8 +148,19 @@ export function ErrorCard({
         <div className="text-[13px] font-medium text-bright">{p.title}</div>
         <div className="mt-0.5 text-[12px] leading-relaxed text-muted">{p.hint}</div>
 
-        {(hasDetail || (retryable && onRetry)) && (
+        {(hasDetail || showProvider || (retryable && onRetry)) && (
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            {showProvider && (
+              <button
+                type="button"
+                onClick={onConfigureProvider}
+                className="inline-flex items-center gap-1.5 rounded-md border border-line/70 bg-card px-2 py-1 text-[12px] text-bright transition-colors hover:bg-panel"
+                title="Open Provider settings"
+              >
+                <Settings size={12} />
+                Go to provider panel
+              </button>
+            )}
             {retryable && onRetry && (
               <button
                 type="button"
