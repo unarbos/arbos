@@ -1455,8 +1455,9 @@ export function ChatTab({
             ? "flex min-h-0 flex-1 items-center justify-center overflow-y-auto py-10"
             : "shrink-0"
         }
+        style={fresh ? undefined : { paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 1.25rem)" }}
       >
-        <div className="safe-pb mx-auto w-full max-w-4xl space-y-2 px-3.5 pb-3.5 pt-1">
+        <div className="mx-auto w-full max-w-4xl space-y-2 px-3.5 pt-1">
           {reconnecting && !fresh && (
             <div className="flex items-center gap-2 rounded-md border border-warn/40 bg-warn/10 px-3 py-1.5 text-[12px] text-warn">
               <Loader2 size={12} className="shrink-0 animate-spin" />
