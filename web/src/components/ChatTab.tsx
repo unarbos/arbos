@@ -17,7 +17,7 @@ import { QuestionCard, type QuestionCardHandle } from "./QuestionCard";
 import { ChatView } from "./ChatView";
 import { CommandMenu } from "./CommandMenu";
 import { ContextCircle } from "./ContextCircle";
-import { ModelPicker } from "./ModelPicker";
+import { ModelPicker, ProviderPicker } from "./ModelPicker";
 import { QueuedMessages, type QueuedMessage } from "./QueuedMessages";
 import type { RunRef } from "./RunView";
 import { Tooltip } from "./Tooltip";
@@ -25,10 +25,12 @@ import {
   cancelPlanNode,
   fetchChildren,
   fetchJobTail,
+  activateProvider,
   fetchModels,
   fetchReplay,
   fetchLLM,
   fetchReplayFull,
+  resetModelsCache,
   HttpError,
   killJob,
   startVoice,
@@ -39,6 +41,7 @@ import {
   writeFileBase64,
   type ChildRun,
   type ModelOption,
+  type ProviderView,
 } from "@/lib/api";
 import { notifyRunComplete } from "@/lib/notify";
 import {
@@ -354,13 +357,21 @@ export function ChatTab({
   // The active model, shown in the composer's picker. Seeds from the host's
   // configured default; a pick sends set_model on the live seam and re-labels.
   const [model, setModel] = useState("");
+  // Latest model for the reconnect reseed (the seam callback reads it after a
+  // host restart to decide whether we're still on the offline "fake" double).
+  const modelRef = useRef(model);
+  modelRef.current = model;
   // The provider catalog, kept so the composer can size the context gauge
   // against the active model's context_length.
   const [catalog, setCatalog] = useState<ModelOption[]>([]);
-  // The active provider's display label (ADR-0040), shown beside the model
-  // picker ONLY when more than one provider is configured (with a single
-  // provider the chip is redundant). Empty hides it.
+  // The active provider's display name (ADR-0040), shown as the chip beside the
+  // model picker so it's always clear which provider key the chat is using.
+  // Empty (a host with no named provider) hides it.
   const [providerLabel, setProviderLabel] = useState("");
+  // The configured providers and which one is active, so the chip is a selector
+  // (like the model picker) that can switch the active provider in place.
+  const [providers, setProviders] = useState<ProviderView[]>([]);
+  const [activeProviderId, setActiveProviderId] = useState("");
   // Dictation (the mic button): the host machine captures its own microphone
   // and transcribes on-device. "starting"/"transcribing" are the host's
   // round-trips; "recording" is live capture, toggled off with another click.
@@ -492,7 +503,36 @@ export function ChatTab({
         // every rebind, so a reconnect re-registers us automatically.
         seam.announceName(hostName(id));
         handleRef.current.onSession?.(id);
-        if (rebound) reconcileAfterGap();
+        if (rebound) {
+          reconcileAfterGap();
+          // A rebind after a host restart can mean a provider was just
+          // configured: the offline "fake" model this session was stamped with
+          // is no longer what runs. Re-read the catalog fresh and, if we're
+          // still on the offline double while a real model is now live, switch
+          // the durable session onto it — otherwise an already-open chat keeps
+          // talking to the fake provider until it's reopened.
+          resetModelsCache();
+          fetchModels()
+            .then((c) => {
+              setCatalog(c.models);
+              const cur = modelRef.current;
+              if ((cur === "" || cur === "fake") && c.current && c.current !== "fake") {
+                setModel(c.current);
+                seam.setModel(c.current);
+              }
+            })
+            .catch(() => {});
+          // A new (or renamed) provider — or a switch from this very chip —
+          // changes the chip beside the model: it names the active provider key
+          // we're talking to and lists the rest to switch between.
+          fetchLLM()
+            .then((i) => {
+              setProviderLabel(i.active_label ?? "");
+              setProviders(i.providers ?? []);
+              setActiveProviderId(i.active_provider_id ?? "");
+            })
+            .catch(() => {});
+        }
       },
       onForked: () => {
         // The server confirmed a rewind-and-edit fork and rebound this
@@ -914,15 +954,16 @@ export function ChatTab({
       .catch(() => {});
   }, []);
 
-  // The active provider label for the composer chip (ADR-0040). Best-effort:
-  // a single-provider host reports no label and the chip stays hidden.
+  // The active provider name for the composer chip (ADR-0040), so the chat
+  // always shows which provider key it's using, plus the full list so the chip
+  // can switch providers. Best-effort.
   useEffect(() => {
     fetchLLM()
-      .then((i) =>
-        // Only surface the provider chip when there's an actual choice — two
-        // or more configured providers. One provider (or none) hides it.
-        setProviderLabel((i.providers?.length ?? 0) > 1 ? (i.active_label ?? "") : ""),
-      )
+      .then((i) => {
+        setProviderLabel(i.active_label ?? "");
+        setProviders(i.providers ?? []);
+        setActiveProviderId(i.active_provider_id ?? "");
+      })
       .catch(() => {});
   }, []);
 
@@ -970,6 +1011,15 @@ export function ChatTab({
       markDirtyIfBusy();
     }
   }, [markDirtyIfBusy]);
+
+  // Switch the active provider from the chip. Unlike a model pick (a live seam
+  // frame), this restarts the host gracefully to rebuild the provider; the chip
+  // flips to the new one once the seam reconnects and re-reads /api/llm. Mirror
+  // the new active id immediately so the menu's highlight tracks the choice.
+  const selectProvider = useCallback((id: string) => {
+    setActiveProviderId(id);
+    void activateProvider(id).catch(() => {});
+  }, []);
 
   // Toggle dictation: first click starts capture, the next stops it and folds
   // the transcript into the composer. On-device host dictation (Apple Speech)
@@ -1548,7 +1598,7 @@ export function ChatTab({
             />
           )}
 
-          <div className="relative rounded-[10px] border border-line bg-panel transition-colors focus-within:border-line/0 focus-within:ring-1 focus-within:ring-accent/40">
+          <div className="relative -mx-3 rounded-[10px] border border-line bg-panel transition-colors focus-within:border-line/0 focus-within:ring-1 focus-within:ring-accent/40">
             {slash.open && (
               <CommandMenu
                 commands={slash.matches}
@@ -1622,11 +1672,11 @@ export function ChatTab({
               <span className="flex items-center gap-2 select-none">
                 <ModelPicker current={model} onSelect={selectModel} />
                 {providerLabel && (
-                  <Tooltip side="top" label={`Provider: ${providerLabel}`}>
-                    <span className="max-w-[140px] truncate rounded-full border border-line px-2 py-0.5 text-[11px] text-muted select-none">
-                      {providerLabel}
-                    </span>
-                  </Tooltip>
+                  <ProviderPicker
+                    providers={providers}
+                    activeId={activeProviderId}
+                    onSelect={selectProvider}
+                  />
                 )}
                 <ContextCircle used={usedTokens} total={contextLength} />
               </span>

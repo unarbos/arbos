@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Check, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 
 import {
   activateProvider,
@@ -8,16 +8,70 @@ import {
   fetchLLMCredits,
   removeProvider,
   resetModelsCache,
+  updateProvider,
   type LLMCredits,
   type LLMInfo,
   type ProviderInput,
   type ProviderView,
 } from "@/lib/api";
 
-const ADAPTERS = [
-  { id: "openai", label: "OpenAI-compatible (OpenAI, OpenRouter, gm, vLLM…)" },
-  { id: "anthropic", label: "Anthropic (native)" },
-  { id: "google", label: "Google Gemini (native)" },
+/**
+ * The providers a user can add by name. Picking one fills in everything for
+ * them — the entry's display name becomes the provider name and the endpoint
+ * is prefilled (still editable) — so all that's left to type is the key.
+ * `adapter` is the request shape the host builds ("openai" covers every
+ * OpenAI-compatible endpoint: OpenRouter, vLLM, GM, OpenAI itself).
+ */
+const PROVIDER_PRESETS: {
+  id: string;
+  name: string;
+  adapter: string;
+  endpoint: string;
+}[] = [
+  {
+    id: "openrouter",
+    name: "OpenRouter",
+    adapter: "openai",
+    endpoint: "https://openrouter.ai/api/v1",
+  },
+  {
+    id: "openai",
+    name: "OpenAI",
+    adapter: "openai",
+    endpoint: "https://api.openai.com/v1",
+  },
+  {
+    id: "google",
+    name: "Google",
+    adapter: "google",
+    endpoint: "https://generativelanguage.googleapis.com",
+  },
+  {
+    id: "anthropic",
+    name: "Anthropic",
+    adapter: "anthropic",
+    endpoint: "https://api.anthropic.com",
+  },
+  {
+    id: "vllm",
+    name: "vLLM",
+    adapter: "openai",
+    endpoint: "http://localhost:8000/v1",
+  },
+  {
+    id: "gm",
+    name: "GM",
+    adapter: "openai",
+    endpoint: "https://api.saygm.com/v1",
+  },
+];
+
+/** The request shapes (adapters) a provider can use, for the full edit form.
+ * "openai" covers every OpenAI-compatible endpoint. */
+const ADAPTER_OPTIONS = [
+  { id: "openai", label: "OpenAI-compatible" },
+  { id: "anthropic", label: "Anthropic" },
+  { id: "google", label: "Google Gemini" },
 ];
 
 /**
@@ -166,6 +220,28 @@ function ProviderList({
               busy={busy}
               onActivate={() => void applyThenSync(() => activateProvider(p.id))}
               onRemove={() => void applyThenSync(() => removeProvider(p.id))}
+              onRename={(name) =>
+                void applyThenSync(() =>
+                  updateProvider(p.id, {
+                    label: name,
+                    provider_name: p.provider_name,
+                    endpoint: p.endpoint,
+                    default_model: "",
+                    key: null,
+                  }),
+                )
+              }
+              onSaveDetails={(d) =>
+                void applyThenSync(() =>
+                  updateProvider(p.id, {
+                    label: p.label,
+                    provider_name: d.providerName,
+                    endpoint: d.endpoint,
+                    default_model: "",
+                    key: d.key,
+                  }),
+                )
+              }
             />
           ))}
         </div>
@@ -199,69 +275,221 @@ function ProviderList({
   );
 }
 
-/** One row in the provider list: active radio, label/endpoint, key state, and
- * a delete button (hidden for env-sourced read-only entries). */
+/** One row in the provider list. Two edit affordances (hidden for env-sourced
+ * read-only entries): double-click the name to rename it inline, or click the
+ * pencil to expand the full edit form (request shape, endpoint, key). The name
+ * is the entry's free-text label — defaulted to the provider's name on add. */
 function ProviderRow({
   p,
   active,
   busy,
   onActivate,
   onRemove,
+  onRename,
+  onSaveDetails,
 }: {
   p: ProviderView;
   active: boolean;
   busy: boolean;
   onActivate: () => void;
   onRemove: () => void;
+  onRename: (name: string) => void;
+  onSaveDetails: (d: { providerName: string; endpoint: string; key: string | null }) => void;
 }) {
+  const [editingName, setEditingName] = useState(false);
+  const [name, setName] = useState(p.label);
+  const [expanded, setExpanded] = useState(false);
+
+  const commitName = () => {
+    const next = name.trim();
+    setEditingName(false);
+    if (next !== "" && next !== p.label) onRename(next);
+    else setName(p.label);
+  };
+
   return (
-    <div className="flex items-center gap-3 border-b border-line/20 px-4 py-2.5 last:border-b-0">
-      <input
-        type="radio"
-        checked={active}
-        disabled={busy}
-        onChange={onActivate}
-        aria-label={`Activate ${p.label}`}
-        className="cursor-pointer accent-green"
-      />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2 text-[12px] text-bright">
-          <span className="truncate">{p.label}</span>
-          <span className="shrink-0 rounded bg-panel px-1 text-[10px] text-muted">
-            {p.provider_name}
-          </span>
-          {active && <span className="shrink-0 text-[10px] text-green">active</span>}
-          {p.env_sourced && (
-            <span className="shrink-0 text-[10px] text-faint">env</span>
-          )}
-        </div>
-        <div className="mt-0.5 truncate font-mono text-[11px] text-faint">
-          {p.endpoint || "(adapter default)"}
-          {" · "}
-          {p.key_set ? (
-            <span className="text-green">key set</span>
-          ) : (
-            <span className="text-warn">no key</span>
-          )}
-        </div>
-      </div>
-      {!p.env_sourced && (
-        <button
-          type="button"
-          aria-label={`Remove ${p.label}`}
-          title="Remove provider"
+    <div className="border-b border-line/20 last:border-b-0">
+      <div className="flex items-center gap-3 px-4 py-2.5">
+        <input
+          type="radio"
+          checked={active}
           disabled={busy}
-          onClick={onRemove}
-          className="flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted hover:bg-hover hover:text-red disabled:opacity-40"
-        >
-          <Trash2 size={13} />
-        </button>
+          onChange={onActivate}
+          aria-label={`Activate ${p.label}`}
+          className="cursor-pointer accent-green"
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 text-[12px] text-bright">
+            {editingName ? (
+              <input
+                autoFocus
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onBlur={commitName}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitName();
+                  if (e.key === "Escape") {
+                    setName(p.label);
+                    setEditingName(false);
+                  }
+                }}
+                aria-label="Provider name"
+                className="min-w-0 flex-1 rounded border border-line bg-panel px-1 py-0.5 text-[12px] text-bright outline-none"
+              />
+            ) : (
+              <span
+                onDoubleClick={() => {
+                  if (p.env_sourced || busy) return;
+                  setName(p.label);
+                  setEditingName(true);
+                }}
+                title={p.env_sourced ? undefined : "Double-click to rename"}
+                className={`truncate ${p.env_sourced ? "" : "cursor-text"}`}
+              >
+                {p.label}
+              </span>
+            )}
+            {active && <span className="shrink-0 text-[10px] text-green">active</span>}
+            {p.env_sourced && (
+              <span className="shrink-0 text-[10px] text-faint">env</span>
+            )}
+          </div>
+          <div className="mt-0.5 truncate font-mono text-[11px] text-faint">
+            {p.endpoint || "(adapter default)"}
+            {" · "}
+            {p.key_set ? (
+              <span className="text-green">key set</span>
+            ) : (
+              <span className="text-warn">no key</span>
+            )}
+          </div>
+        </div>
+        {!p.env_sourced && (
+          <button
+            type="button"
+            aria-label={`Edit ${p.label}`}
+            title="Edit endpoint & key"
+            disabled={busy}
+            onClick={() => setExpanded((v) => !v)}
+            className={`flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md hover:bg-hover hover:text-bright disabled:opacity-40 ${
+              expanded ? "text-bright" : "text-muted"
+            }`}
+          >
+            <Pencil size={13} />
+          </button>
+        )}
+        {!p.env_sourced && (
+          <button
+            type="button"
+            aria-label={`Remove ${p.label}`}
+            title="Remove provider"
+            disabled={busy}
+            onClick={onRemove}
+            className="flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted hover:bg-hover hover:text-red disabled:opacity-40"
+          >
+            <Trash2 size={13} />
+          </button>
+        )}
+      </div>
+      {expanded && !p.env_sourced && (
+        <ProviderEditForm
+          p={p}
+          busy={busy}
+          onCancel={() => setExpanded(false)}
+          onSave={(d) => {
+            setExpanded(false);
+            onSaveDetails(d);
+          }}
+        />
       )}
     </div>
   );
 }
 
-/** The inline form for adding a provider: label, adapter, endpoint, key. */
+/** The inline full-edit form a row expands into from the pencil: change the
+ * request shape, the endpoint, and the key (left blank to keep the stored one).
+ * The name is renamed separately, by double-clicking it in the row. */
+function ProviderEditForm({
+  p,
+  busy,
+  onCancel,
+  onSave,
+}: {
+  p: ProviderView;
+  busy: boolean;
+  onCancel: () => void;
+  onSave: (d: { providerName: string; endpoint: string; key: string | null }) => void;
+}) {
+  const [providerName, setProviderName] = useState(p.provider_name);
+  const [endpoint, setEndpoint] = useState(p.endpoint);
+  const [key, setKey] = useState("");
+  const canSave = !busy && endpoint.trim() !== "";
+
+  const inputCls =
+    "w-full rounded-md border border-line bg-panel px-2 py-1 font-mono text-[12px] text-bright outline-none placeholder:text-faint";
+  return (
+    <div className="flex flex-col gap-2 px-4 pt-1 pb-3">
+      <select
+        value={providerName}
+        onChange={(e) => setProviderName(e.target.value)}
+        className="w-full cursor-pointer rounded-md border border-line bg-panel px-2 py-1 text-[12px] text-bright outline-none"
+      >
+        {ADAPTER_OPTIONS.map((a) => (
+          <option key={a.id} value={a.id}>
+            {a.label}
+          </option>
+        ))}
+      </select>
+      <input
+        value={endpoint}
+        onChange={(e) => setEndpoint(e.target.value)}
+        placeholder="Endpoint"
+        spellCheck={false}
+        className={inputCls}
+      />
+      <input
+        type="password"
+        value={key}
+        onChange={(e) => setKey(e.target.value)}
+        placeholder={p.key_set ? "API key (leave blank to keep current)" : "API key"}
+        autoComplete="off"
+        className={inputCls}
+      />
+      <div className="flex items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+          className="cursor-pointer rounded-md px-2.5 py-1 text-[12px] text-muted hover:bg-hover disabled:opacity-40"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          disabled={!canSave}
+          onClick={() =>
+            onSave({
+              providerName,
+              endpoint: endpoint.trim(),
+              key: key.trim() === "" ? null : key.trim(),
+            })
+          }
+          className="flex cursor-pointer items-center gap-1 rounded-md bg-green/90 px-2.5 py-1 text-[12px] text-white hover:bg-green disabled:cursor-default disabled:opacity-40"
+        >
+          <Check size={13} /> Save &amp; apply
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The inline form for adding a provider. The user just picks a provider by
+ * name (OpenRouter, OpenAI, …) and we do the rest: the entry is named after
+ * the provider, its adapter is chosen, and its endpoint is prefilled. Only the
+ * endpoint stays editable (for self-hosted bases like vLLM) and the key is the
+ * one thing we have to ask for.
+ */
 function AddProviderForm({
   busy,
   onCancel,
@@ -271,45 +499,38 @@ function AddProviderForm({
   onCancel: () => void;
   onSubmit: (p: ProviderInput) => void;
 }) {
-  const [label, setLabel] = useState("");
-  const [providerName, setProviderName] = useState("openai");
-  const [endpoint, setEndpoint] = useState("");
-  const [defaultModel, setDefaultModel] = useState("");
+  const [presetId, setPresetId] = useState(PROVIDER_PRESETS[0].id);
+  const preset =
+    PROVIDER_PRESETS.find((p) => p.id === presetId) ?? PROVIDER_PRESETS[0];
+  // Endpoint follows the picked provider but stays editable. `null` means
+  // "untouched, mirror the preset"; once the user edits it we keep their text.
+  const [endpointEdit, setEndpointEdit] = useState<string | null>(null);
+  const endpoint = endpointEdit ?? preset.endpoint;
   const [key, setKey] = useState("");
-  const canAdd = !busy && (label.trim() !== "" || endpoint.trim() !== "");
+  const canAdd = !busy && endpoint.trim() !== "";
 
   const inputCls =
     "w-full rounded-md border border-line bg-panel px-2 py-1 font-mono text-[12px] text-bright outline-none placeholder:text-faint";
   return (
     <div className="flex flex-col gap-2">
-      <input
-        value={label}
-        onChange={(e) => setLabel(e.target.value)}
-        placeholder="Label (e.g. gm, My OpenRouter)"
-        className={inputCls}
-      />
       <select
-        value={providerName}
-        onChange={(e) => setProviderName(e.target.value)}
+        value={presetId}
+        onChange={(e) => {
+          setPresetId(e.target.value);
+          setEndpointEdit(null);
+        }}
         className="w-full cursor-pointer rounded-md border border-line bg-panel px-2 py-1 text-[12px] text-bright outline-none"
       >
-        {ADAPTERS.map((a) => (
-          <option key={a.id} value={a.id}>
-            {a.label}
+        {PROVIDER_PRESETS.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
           </option>
         ))}
       </select>
       <input
         value={endpoint}
-        onChange={(e) => setEndpoint(e.target.value)}
-        placeholder="Endpoint (blank = adapter default)"
-        spellCheck={false}
-        className={inputCls}
-      />
-      <input
-        value={defaultModel}
-        onChange={(e) => setDefaultModel(e.target.value)}
-        placeholder="Default model (optional)"
+        onChange={(e) => setEndpointEdit(e.target.value)}
+        placeholder="Endpoint"
         spellCheck={false}
         className={inputCls}
       />
@@ -335,10 +556,10 @@ function AddProviderForm({
           disabled={!canAdd}
           onClick={() =>
             onSubmit({
-              label: label.trim(),
-              provider_name: providerName,
+              label: preset.name,
+              provider_name: preset.adapter,
               endpoint: endpoint.trim(),
-              default_model: defaultModel.trim(),
+              default_model: "",
               key: key.trim() === "" ? null : key.trim(),
             })
           }

@@ -191,9 +191,10 @@ func (s *Store) AddProvider(p ProviderEntry) error {
 }
 
 // UpdateProvider replaces the entry with the matching ID in place, preserving
-// order. Returns an error when no entry matches. KeyVaultName is preserved when
-// the incoming entry leaves it empty, so an edit that doesn't touch the key
-// never orphans the existing vault binding.
+// order. Returns an error when no entry matches. KeyVaultName and DefaultModel
+// are preserved when the incoming entry leaves them empty, so an edit that only
+// touches one field (e.g. a rename) never orphans the existing vault binding or
+// clears the stored default model.
 func (s *Store) UpdateProvider(p ProviderEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -204,6 +205,9 @@ func (s *Store) UpdateProvider(p ProviderEntry) error {
 		if next[i].ID == p.ID {
 			if p.KeyVaultName == "" {
 				p.KeyVaultName = next[i].KeyVaultName
+			}
+			if p.DefaultModel == "" {
+				p.DefaultModel = next[i].DefaultModel
 			}
 			next[i] = p
 			found = true

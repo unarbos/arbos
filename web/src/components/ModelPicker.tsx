@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, Infinity as InfinityIcon, Loader2 } from "lucide-react";
+import { ChevronDown, Loader2 } from "lucide-react";
 
-import { fetchModels, type ModelOption } from "@/lib/api";
+import { fetchModels, type ModelOption, type ProviderView } from "@/lib/api";
 import { Tooltip } from "./Tooltip";
 
 /** The provider catalog, shared across every picker via the api-layer cache
@@ -167,7 +167,6 @@ export function ModelPicker({
       onClick={() => setOpen((v) => !v)}
       className="flex max-w-[220px] cursor-pointer items-center gap-1 rounded-full border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:text-text"
     >
-      <InfinityIcon size={11} className="shrink-0" />
       {current || emptyLabel ? (
         <span className="truncate">
           {current ? shortLabel(current) : emptyLabel}
@@ -254,6 +253,127 @@ export function ModelPicker({
                     {m.name}
                   </span>
                 )}
+              </button>
+            ))}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+/**
+ * The provider selector beside the model chip: a chip naming the active
+ * provider that opens a list of the configured providers, so the chat can
+ * switch which provider key it talks to without leaving for Settings. Picking a
+ * different one activates it — the host restarts gracefully at its next idle
+ * moment and the chat reconnects on its own. Mirrors ModelPicker's chip and
+ * portaled-dropdown shape so the two read as a pair.
+ */
+export function ProviderPicker({
+  providers,
+  activeId,
+  onSelect,
+}: {
+  providers: ProviderView[];
+  activeId: string;
+  onSelect: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const measure = () =>
+      setAnchor(rootRef.current?.getBoundingClientRect() ?? null);
+    measure();
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t) || menuRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const active = providers.find((p) => p.id === activeId);
+  const label = active?.label || "provider";
+
+  const pick = (id: string) => {
+    setOpen(false);
+    if (id !== activeId) onSelect(id);
+  };
+
+  const chip = (
+    <button
+      type="button"
+      aria-label={`Provider: ${label}`}
+      onClick={() => setOpen((v) => !v)}
+      className="flex max-w-[160px] cursor-pointer items-center gap-1 rounded-full border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:text-text"
+    >
+      <span className="truncate">{label}</span>
+      <ChevronDown size={10} className="shrink-0 text-faint" />
+    </button>
+  );
+
+  return (
+    <div ref={rootRef} className="relative" data-keep-focus>
+      {open ? (
+        chip
+      ) : (
+        <Tooltip side="top" label={`Provider: ${label}`}>
+          {chip}
+        </Tooltip>
+      )}
+
+      {open && anchor && createPortal(
+        <div
+          ref={menuRef}
+          data-keep-focus
+          style={menuPosition(anchor, "up", "left")}
+          className="fixed z-50 flex w-72 flex-col overflow-hidden rounded-lg border border-line bg-card shadow-xl shadow-black/40"
+        >
+          <div className="min-h-0 flex-1 overflow-y-auto py-1">
+            {providers.length === 0 && (
+              <div className="px-3 py-2 text-[12px] text-faint">
+                No providers configured
+              </div>
+            )}
+            {providers.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => pick(p.id)}
+                className="flex w-full cursor-pointer flex-col items-start gap-0.5 px-3 py-1.5 text-left transition-colors hover:bg-hover"
+              >
+                <span className="flex w-full items-center gap-2">
+                  <span
+                    className={`min-w-0 flex-1 truncate text-[12px] ${
+                      p.id === activeId ? "text-accent" : "text-text"
+                    }`}
+                  >
+                    {p.label}
+                  </span>
+                  {p.id === activeId && (
+                    <span className="shrink-0 text-[10px] text-green">active</span>
+                  )}
+                </span>
+                <span className="w-full truncate font-mono text-[11px] text-muted/70">
+                  {p.endpoint || "(adapter default)"}
+                </span>
               </button>
             ))}
           </div>
