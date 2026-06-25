@@ -66,6 +66,19 @@ path. No new long-lived provider object, no engine change.
   and a per-entry endpoint + write-only key. The composer renders the active
   provider's label beside the model selector.
 
+- **One panel for everyone (Option A).** A host that never adopted the new
+  shape has an empty `settings.Providers`, so the UI would otherwise have no
+  way to create the first entry — a dead end. Instead the web door's `Info`
+  SYNTHESIZES a single row (id `"default"`) from the boot-resolved
+  single-provider config whenever the stored list is empty, so the list is
+  never empty for a configured-or-onboarding host and there is exactly one
+  panel: a single-provider host is just "a list of length 1" with an Add
+  button. The synthetic row is not persisted until the first mutation
+  (add/edit/remove/activate), which seeds it as the first real `Providers[]`
+  entry (keeping its legacy `OPENROUTER_API_KEY` vault binding) before applying
+  the change — so adopting multi-provider mode never loses the existing config.
+  The legacy single-provider form is removed.
+
 ## Consequences
 
 - Several providers/adapters are configurable from the UI (not just env), each

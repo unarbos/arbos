@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Check, Plus, RefreshCw, Trash2 } from "lucide-react";
 
 import {
@@ -8,7 +8,6 @@ import {
   fetchLLMCredits,
   removeProvider,
   resetModelsCache,
-  saveLLM,
   type LLMCredits,
   type LLMInfo,
   type ProviderInput,
@@ -33,23 +32,12 @@ const ADAPTERS = [
  */
 export function ProviderSettings({ query }: { query: string }) {
   const [info, setInfo] = useState<LLMInfo | null>(null);
-  const [endpoint, setEndpoint] = useState("");
-  const [key, setKey] = useState("");
   const [credits, setCredits] = useState<LLMCredits | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [applying, setApplying] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  // The endpoint the loaded info reported, to detect an actual edit.
-  const loadedEndpoint = useRef("");
 
-  // sync adopts a server picture into the form — only called on mount and
-  // once an apply has provably landed, so it never clobbers mid-edit or
-  // mid-apply input with stale pre-restart values.
+  // sync adopts a server picture and refreshes credits when the active
+  // endpoint is OpenRouter. Called on mount and once an apply has landed.
   const sync = useCallback((i: LLMInfo) => {
     setInfo(i);
-    setEndpoint(i.endpoint);
-    loadedEndpoint.current = i.endpoint;
     if (i.openrouter && i.key_set) {
       fetchLLMCredits().then(setCredits).catch(() => setCredits(null));
     } else {
@@ -70,164 +58,20 @@ export function ProviderSettings({ query }: { query: string }) {
     !q || "model provider endpoint api key credits openrouter".includes(q);
   if (!matches) return null;
 
-  // Multi-provider mode: once the host reports a providers[] list, the panel
-  // renders the list + add form instead of the single endpoint/key form
-  // (ADR-0040). A host that never used the new panel reports no list and keeps
-  // the original single-provider form below.
-  if (info.providers && info.providers.length > 0) {
-    return (
-      <ProviderList
-        info={info}
-        credits={credits}
-        onChanged={(fresh) => sync(fresh)}
-        onRefreshCredits={() =>
-          fetchLLMCredits().then(setCredits).catch(() => setCredits(null))
-        }
-      />
-    );
-  }
-
-  const endpointChanged = endpoint.trim() !== loadedEndpoint.current;
-  const canSave = !busy && !applying && (endpointChanged || key.trim() !== "");
-
-  // The host applies a save by re-execing at its next idle moment, so a
-  // successful fetch right after saving may still be the OLD process (or a
-  // restart parked behind a busy agent). The boot id is the proof: poll until
-  // it changes, surfacing the pending state, before adopting what the server
-  // reports — otherwise the form would snap back to the old endpoint and the
-  // save would look like it never happened.
-  const save = async () => {
-    const prevBoot = info.boot_id;
-    // Whether this save is the first time a provider gets configured — the
-    // onboarding case, where the catalog and the launch model were the
-    // keyless fakes and the whole app should come up fresh on the real one.
-    const wasUnconfigured = !info.key_set;
-    setBusy(true);
-    setError(null);
-    try {
-      await saveLLM({
-        ...(endpointChanged ? { endpoint: endpoint.trim() } : {}),
-        ...(key.trim() !== "" ? { key: key.trim() } : {}),
-      });
-    } catch (e) {
-      setBusy(false);
-      setError(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    setKey("");
-    setBusy(false);
-    setApplying(true);
-    setStatus("Applying — restarting arbos…");
-    try {
-      for (let i = 0; i < 60; i++) {
-        await new Promise((r) => setTimeout(r, 1500));
-        try {
-          const fresh = await fetchLLM();
-          if (fresh.boot_id !== prevBoot) {
-            // The new host is up with a real models endpoint where it had
-            // none — drop the keyless catalog the page cached at load so
-            // every picker fetches the provider's models on next open.
-            resetModelsCache();
-            if (fresh.key_set && wasUnconfigured) {
-              // Onboarding: reboot the SPA so the model chip, the default
-              // model, and the composer all come up on the configured
-              // provider at once, with nothing of value to lose yet.
-              window.location.reload();
-              return;
-            }
-            sync(fresh);
-            return;
-          }
-          if (fresh.restart_pending) {
-            setStatus("Saved — applying once the agent finishes its current work…");
-          }
-        } catch {
-          // Host mid-restart; keep polling.
-        }
-      }
-      setError(
-        "Saved, but the restart hasn't landed yet — it applies at the next idle moment.",
-      );
-    } finally {
-      setApplying(false);
-      setStatus(null);
-    }
-  };
-
+  // One panel for everyone (ADR-0040 Option A): the host always reports at
+  // least one provider — a real entry, or a single synthesized row from the
+  // current single-provider config — so the list is the only view. A
+  // single-provider host is just "a list of length 1" with a clear path to
+  // add a second.
   return (
-    <div className="mb-6">
-      <div className="mb-2 px-1 text-[12px] text-muted select-none">
-        Model Provider
-      </div>
-      <div className="overflow-hidden rounded-xl bg-card/50">
-        <p className="border-b border-line/30 px-4 py-2.5 text-[11.5px] leading-relaxed text-faint">
-          Where the agent's LLM requests go. The key is encrypted on this
-          machine and never shown again. Saving restarts arbos at its next
-          idle moment — this page reconnects by itself.
-        </p>
-
-        {error && (
-          <div className="border-b border-line/30 px-4 py-2 text-[11.5px] text-red">
-            {error}
-          </div>
-        )}
-
-        <div className="flex flex-col gap-2.5 px-4 py-3.5">
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-faint">Endpoint</span>
-            <input
-              value={endpoint}
-              onChange={(e) => setEndpoint(e.target.value)}
-              placeholder="https://openrouter.ai/api/v1"
-              spellCheck={false}
-              className="w-full rounded-md border border-line bg-panel px-2 py-1 font-mono text-[12px] text-bright outline-none placeholder:text-faint"
-            />
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-faint">
-              API key{" "}
-              {info.key_set && (
-                <span className="text-green">— configured</span>
-              )}
-            </span>
-            <input
-              type="password"
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-              placeholder={
-                info.key_set ? "•••••••• (unchanged)" : "sk-or-… (openrouter.ai/keys)"
-              }
-              autoComplete="off"
-              className="w-full rounded-md border border-line bg-panel px-2 py-1 font-mono text-[12px] text-bright outline-none placeholder:text-faint"
-            />
-          </label>
-
-          <div className="mt-0.5 flex items-center justify-between gap-2">
-            <span className="text-[11.5px] text-faint">
-              {applying && status ? status : `Active model: ${info.model}`}
-            </span>
-            <button
-              type="button"
-              onClick={() => void save()}
-              disabled={!canSave}
-              className="flex cursor-pointer items-center gap-1 rounded-md bg-green/90 px-2.5 py-1 text-[12px] text-white hover:bg-green disabled:cursor-default disabled:opacity-40"
-            >
-              <Check size={13} /> Save &amp; apply
-            </button>
-          </div>
-        </div>
-
-        {info.openrouter && info.key_set && (
-          <CreditsRow
-            credits={credits}
-            onRefresh={() =>
-              fetchLLMCredits().then(setCredits).catch(() => setCredits(null))
-            }
-          />
-        )}
-      </div>
-    </div>
+    <ProviderList
+      info={info}
+      credits={credits}
+      onChanged={(fresh) => sync(fresh)}
+      onRefreshCredits={() =>
+        fetchLLMCredits().then(setCredits).catch(() => setCredits(null))
+      }
+    />
   );
 }
 

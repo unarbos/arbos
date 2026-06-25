@@ -593,19 +593,50 @@ func llmAdmin(cfg piwire.Config, host *piwire.Host, vault *secret.Store) *gatewa
 	providerKeySet := func(p settings.ProviderEntry) bool {
 		return os.Getenv(p.KeyVaultName) != "" || vaultHasName(vault, p.KeyVaultName)
 	}
-	// providerViews renders the stored providers for the panel, marking the
-	// boot-time env/onboarding provider (if it isn't itself a stored entry) as
-	// a read-only env-sourced row so the UI shows it but cannot edit/delete it.
+	// legacySyntheticID is the stable id of the one synthesized provider row
+	// shown to a host that has never adopted the multi-provider shape (no
+	// settings.Providers). It lets the panel render the current single-provider
+	// config AS a one-row list (ADR-0040 Option A) so there is exactly one
+	// panel and a clear path to add a second provider — instead of a dead-end
+	// legacy form. The first mutation seeds the real list from this row.
+	const legacySyntheticID = "default"
+	// syntheticEntry materializes the boot-resolved single-provider config as a
+	// ProviderEntry, so a legacy/unconfigured host presents one editable row.
+	syntheticEntry := func() settings.ProviderEntry {
+		return settings.ProviderEntry{
+			ID:           legacySyntheticID,
+			Label:        cfg.ProviderName,
+			ProviderName: cfg.ProviderName,
+			Endpoint:     effectiveEndpoint(),
+			KeyVaultName: llmKeyName,
+			DefaultModel: host.Settings.Get().DefaultModel,
+		}
+	}
+	// providerViews renders the stored providers for the panel. When none are
+	// stored it synthesizes a single row from the boot config (Option A), so the
+	// list is never empty for a configured-or-onboarding host and the
+	// single-provider case is just "a list of length 1".
 	providerViews := func(st settings.Settings) ([]gateway.ProviderView, string, string) {
+		entries := st.Providers
+		var synthActive string
+		if len(entries) == 0 {
+			e := syntheticEntry()
+			entries = []settings.ProviderEntry{e}
+			synthActive = e.ID
+		}
 		var views []gateway.ProviderView
-		for _, p := range st.Providers {
+		for _, p := range entries {
 			label := p.Label
 			if label == "" {
 				label = p.ProviderName
 			}
+			keySet := providerKeySet(p)
+			if p.ID == legacySyntheticID {
+				keySet = keySet || cfg.HasLLM // honor env/onboarding key under llmKeyName
+			}
 			views = append(views, gateway.ProviderView{
 				ID: p.ID, Label: label, ProviderName: p.ProviderName,
-				Endpoint: p.Endpoint, KeySet: providerKeySet(p),
+				Endpoint: p.Endpoint, KeySet: keySet,
 			})
 		}
 		activeID, activeLabel := st.ActiveProviderID, ""
@@ -614,8 +645,21 @@ func llmAdmin(cfg piwire.Config, host *piwire.Host, vault *secret.Store) *gatewa
 			if activeLabel = act.Label; activeLabel == "" {
 				activeLabel = act.ProviderName
 			}
+		} else if synthActive != "" {
+			activeID, activeLabel = synthActive, views[0].Label
 		}
 		return views, activeID, activeLabel
+	}
+	// seedFromSynthetic persists the synthesized legacy row as the first real
+	// providers[] entry the first time a mutation arrives on a host that still
+	// has an empty list, so editing/activating/removing the "default" row, or
+	// adding a second provider, transitions cleanly into multi-provider mode
+	// without losing the current configuration.
+	seedFromSynthetic := func() error {
+		if len(host.Settings.Get().Providers) > 0 {
+			return nil
+		}
+		return host.Settings.AddProvider(syntheticEntry())
 	}
 	admin := &gateway.LLMAdmin{
 		Info: func() gateway.LLMInfo {
@@ -668,6 +712,12 @@ func llmAdmin(cfg piwire.Config, host *piwire.Host, vault *secret.Store) *gatewa
 		}, value)
 	}
 	admin.AddProvider = func(in gateway.ProviderInput) error {
+		// Materialize the current single-provider config as the first real entry
+		// before appending the new one, so adding a second provider on a legacy
+		// host keeps the original alongside it (Option A).
+		if err := seedFromSynthetic(); err != nil {
+			return err
+		}
 		id := newProviderID()
 		keyName := providerKeyName(id)
 		if in.Key != nil && strings.TrimSpace(*in.Key) != "" {
@@ -685,7 +735,16 @@ func llmAdmin(cfg piwire.Config, host *piwire.Host, vault *secret.Store) *gatewa
 		})
 	}
 	admin.UpdateProvider = func(id string, in gateway.ProviderInput) error {
+		// Editing the synthesized "default" row persists it as a real entry first.
+		if err := seedFromSynthetic(); err != nil {
+			return err
+		}
+		// The synthetic row keeps its legacy vault key name (llmKeyName); a real
+		// entry uses its per-id name. Resolve which applies to this id.
 		keyName := providerKeyName(id)
+		if id == legacySyntheticID {
+			keyName = llmKeyName
+		}
 		if in.Key != nil && strings.TrimSpace(*in.Key) != "" {
 			if err := setProviderKey(keyName, in.Endpoint, strings.TrimSpace(*in.Key)); err != nil {
 				return err
@@ -701,10 +760,21 @@ func llmAdmin(cfg piwire.Config, host *piwire.Host, vault *secret.Store) *gatewa
 		})
 	}
 	admin.RemoveProvider = func(id string) error {
-		_ = vault.Delete(providerKeyName(id))
+		// Removing the synthesized "default" row would otherwise be a no-op (it
+		// isn't stored yet); seed it first so the delete acts on a real entry.
+		if err := seedFromSynthetic(); err != nil {
+			return err
+		}
+		if id != legacySyntheticID {
+			_ = vault.Delete(providerKeyName(id))
+		}
 		return host.Settings.RemoveProvider(id)
 	}
 	admin.SetActiveProvider = func(id string) error {
+		// Activating the synthesized "default" row persists it first.
+		if err := seedFromSynthetic(); err != nil {
+			return err
+		}
 		return host.Settings.SetActiveProvider(id)
 	}
 	if credits != nil {
