@@ -1234,15 +1234,46 @@ export function ChatTab({
    *  the parent up to the anchored event and seeds the child; this connection
    *  stays bound to the parent (onBranched opens the child in a sibling tab). */
   const onBranch = useCallback(
-    (seq: number, start: number, end: number, quote: string, message: string) => {
+    async (seq: number, start: number, end: number, quote: string, message: string) => {
       const seam = seamRef.current;
+      const session = sessionRef.current;
       if (!seam) return;
+      // A freshly-streamed message has no replayed seq yet (it arrives with -1).
+      // Resolve the real log seq the same way resubmitEdit does: read the
+      // persisted log and find the user/assistant event whose text matches this
+      // message. Without this the Discuss button only worked after a refresh.
+      let resolvedSeq = seq;
+      if (resolvedSeq < 0) {
+        if (!session) return;
+        try {
+          const events = await fetchReplay(session);
+          let found = -1;
+          for (let i = events.length - 1; i >= 0; i--) {
+            const e = events[i];
+            if ((e.type === "user" || e.type === "assistant") && e.text === message) {
+              found = e.seq;
+              break;
+            }
+          }
+          if (found < 0) {
+            dispatch({
+              type: "seam-error",
+              message: "discuss: this message isn't in the session log yet — try again in a moment",
+            });
+            return;
+          }
+          resolvedSeq = found;
+        } catch (e) {
+          dispatch({ type: "seam-error", message: `discuss: ${errMsg(e)}` });
+          return;
+        }
+      }
       pendingBranchRef.current = { quote };
       // The child id is allocated client-side (the server learns it from the
       // branch frame). message is the full containing message — the branch is
       // scoped to the fragment within it, not the whole thread.
       const childId = `branch-${sessionRef.current ?? "s"}-${Date.now().toString(36)}`;
-      if (!seam.branch(childId, seq, start, end, quote, message)) {
+      if (!seam.branch(childId, resolvedSeq, start, end, quote, message)) {
         pendingBranchRef.current = null;
       }
     },

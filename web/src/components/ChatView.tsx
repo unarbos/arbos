@@ -641,7 +641,12 @@ function BranchableText({
   const [sel, setSel] = useState<{ x: number; y: number; quote: string } | null>(
     null,
   );
-  const branchable = onBranch !== undefined && seq !== undefined;
+  // A message is branchable as soon as it can take a highlight — we no longer
+  // require a known seq up front. Freshly-streamed items have no seq until a
+  // replay assigns one, so gating on seq hid the Discuss button until a refresh.
+  // When seq is unknown we pass -1; ChatTab.onBranch resolves the real seq from
+  // the persisted log at branch time (the same way resubmitEdit does for edits).
+  const branchable = onBranch !== undefined;
   const mine = (anchors ?? []).filter(
     (a) => a.seq === seq && a.status !== "discarded",
   );
@@ -678,14 +683,16 @@ function BranchableText({
   };
 
   const doBranch = () => {
-    if (!sel || seq === undefined) return;
+    if (!sel) return;
     // Best-effort rune offsets of the quote within the block text; the Quote
     // itself is the display source of truth (the kernel freezes it on the log).
     // The full block text is the containing message — the branch's scope.
     const idx = text.indexOf(sel.quote);
     const start = idx >= 0 ? idx : 0;
     const end = idx >= 0 ? idx + sel.quote.length : sel.quote.length;
-    onBranch?.(seq, start, end, sel.quote, text);
+    // seq -1 means "unknown" (a freshly-streamed message not yet replayed);
+    // ChatTab resolves the real log seq from the message text at branch time.
+    onBranch?.(seq ?? -1, start, end, sel.quote, text);
     window.getSelection()?.removeAllRanges();
     clear();
   };
