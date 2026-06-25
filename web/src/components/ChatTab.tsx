@@ -358,7 +358,8 @@ export function ChatTab({
   // against the active model's context_length.
   const [catalog, setCatalog] = useState<ModelOption[]>([]);
   // The active provider's display label (ADR-0040), shown beside the model
-  // picker. Empty on a single-provider host that never used the provider list.
+  // picker ONLY when more than one provider is configured (with a single
+  // provider the chip is redundant). Empty hides it.
   const [providerLabel, setProviderLabel] = useState("");
   // Dictation (the mic button): the host machine captures its own microphone
   // and transcribes on-device. "starting"/"transcribing" are the host's
@@ -917,7 +918,11 @@ export function ChatTab({
   // a single-provider host reports no label and the chip stays hidden.
   useEffect(() => {
     fetchLLM()
-      .then((i) => setProviderLabel(i.active_label ?? ""))
+      .then((i) =>
+        // Only surface the provider chip when there's an actual choice — two
+        // or more configured providers. One provider (or none) hides it.
+        setProviderLabel((i.providers?.length ?? 0) > 1 ? (i.active_label ?? "") : ""),
+      )
       .catch(() => {});
   }, []);
 
