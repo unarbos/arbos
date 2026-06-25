@@ -210,8 +210,14 @@ func renderTrajectory(sess core.Session, events []core.Event, selfPath string) s
 		// bytes as `arbos export`.
 		jsonHref := esc(selfPath + "?format=" + string(fmtJSONL))
 		msgHref := esc(selfPath + "?format=" + string(fmtMessages))
-		b.WriteString(`<a class="raw" href="` + jsonHref + `">event log (JSONL)</a>`)
-		b.WriteString(`<a class="raw" href="` + msgHref + `">messages</a>`)
+		// target="_top" is load-bearing: the page is served sandboxed
+		// (Content-Security-Policy: sandbox allow-scripts) into an opaque/null
+		// origin, where a navigation to a same-path relative link does not resolve
+		// against the share URL and the click does nothing. Breaking out to the top
+		// frame makes it a normal top-level navigation to the NDJSON response
+		// (which is not sandboxed), so the link actually loads.
+		b.WriteString(`<a class="raw" target="_top" rel="noopener" href="` + jsonHref + `">event log (JSONL)</a>`)
+		b.WriteString(`<a class="raw" target="_top" rel="noopener" href="` + msgHref + `">messages</a>`)
 	}
 	b.WriteString(`</div>`)
 	b.WriteString(`</header>`)
