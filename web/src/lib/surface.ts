@@ -66,6 +66,14 @@ export function dirSurface(path: string, title?: string): Surface {
   return { kind: "dir", path, title };
 }
 
+/** Whether a canvas path is a blog article (under blog/, an .html file), which
+ *  opens in the WYSIWYG BlogSurface editor rather than the read-only canvas
+ *  iframe. Blogs live in blog/ by convention (the +blog flow and the /blog
+ *  tool both write there). */
+export function isBlogPath(path: string): boolean {
+  return /(^|\/)blog\//.test(path) && /\.html?$/i.test(path);
+}
+
 /**
  * The People surface for a session: the human-to-human side chat for the
  * collaborators on a board, opened as its own tab beside the conversation

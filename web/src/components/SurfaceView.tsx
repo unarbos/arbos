@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -32,12 +32,19 @@ import { columnCount, delimiterFor, parseCsv, toCsv } from "@/lib/csv";
 import {
   dirSurface,
   fileSurface,
+  isBlogPath,
   joinDirPath,
   rawUrl,
   surfaceTitle,
   themedCanvasDoc,
   type Surface,
 } from "@/lib/surface";
+
+// The WYSIWYG blog editor is heavy (bundles KaTeX) and only loads when a blog
+// article is opened, so it is code-split behind a lazy import.
+const BlogSurface = lazy(() =>
+  import("./BlogSurface").then((m) => ({ default: m.BlogSurface })),
+);
 import { useTheme } from "@/lib/theme";
 import { errMsg, toastError } from "@/lib/toast";
 import { useDocumentVisible } from "@/lib/useDocumentVisible";
@@ -208,7 +215,17 @@ export function SurfaceView({
 
       {missing && <MissingNotice />}
       <div className="min-h-0 min-w-0 flex-1">
-        {surface.kind === "canvas" ? (
+        {surface.kind === "canvas" && isBlogPath(surface.path) ? (
+          <Suspense
+            fallback={
+              <div className="flex items-center gap-2 p-4 text-faint">
+                <Loader2 size={13} className="animate-spin" /> Loading editor…
+              </div>
+            }
+          >
+            <BlogSurface surface={surface} active={active} />
+          </Suspense>
+        ) : surface.kind === "canvas" ? (
           <CanvasSurface surface={surface} tick={tick} />
         ) : surface.kind === "pdf" ? (
           <iframe
