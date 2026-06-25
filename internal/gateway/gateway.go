@@ -1017,6 +1017,11 @@ type sessionMetaJSON struct {
 	// highlighted fragment it is scoped to, so the branch tab can render a
 	// "Discussing: «fragment»" header. Empty for a normal chat.
 	BranchFragment string `json:"branch_fragment,omitempty"`
+	// BranchParent is the parent session id when this session is an OPEN
+	// discussion branch, so the branch tab can offer Accept/Discard that resolve
+	// the branch back into its parent. Empty once the branch is resolved (or for
+	// a normal chat) — a resolved branch has nothing left to merge.
+	BranchParent string `json:"branch_parent,omitempty"`
 }
 
 // handleSessionEvents replays a session's visible history so a resumed tab
@@ -1051,9 +1056,15 @@ func (s *Server) sessionReplay(ctx context.Context, id core.SessionID) (map[stri
 		}
 		// A discussion branch carries a self-anchor (Branch == its own id) whose
 		// Quote is the highlighted fragment it was opened to discuss; surface it
-		// so the branch tab can render a fragment-only header.
+		// so the branch tab can render a fragment-only header. The parent id (from
+		// the session record) lets the branch tab resolve the discussion back into
+		// its parent from inside the branch — but only while it is still OPEN, since
+		// a resolved branch has nothing left to merge.
 		if a, ok := core.LatestBranchAnchor(events, id); ok {
 			meta.BranchFragment = a.Quote
+			if sess.ParentID != "" && a.Status == core.BranchOpen {
+				meta.BranchParent = string(sess.ParentID)
+			}
 		}
 	}
 	out := make([]replayJSON, 0, len(events))

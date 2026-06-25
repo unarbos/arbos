@@ -129,6 +129,10 @@ export interface SessionMeta {
   /** Set when this session is a discussion branch: the highlighted fragment it
    *  is scoped to, so the branch tab can render a fragment-only header. */
   branch_fragment?: string;
+  /** Parent session id when this is an OPEN discussion branch, so the branch tab
+   *  can offer Accept/Discard that resolve it back into its parent. Empty once
+   *  the branch is resolved or for a normal chat. */
+  branch_parent?: string;
 }
 
 export async function fetchReplay(sessionId: string): Promise<ReplayEvent[]> {

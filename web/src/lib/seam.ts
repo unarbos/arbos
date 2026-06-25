@@ -244,6 +244,45 @@ export class SeamClient {
     return this.send({ type: "discard_branch", new_session_id: childId });
   }
 
+  /**
+   * Resolve a branch from a connection NOT bound to the parent (the branch tab
+   * itself, whose seam is bound to the child). accept_branch/discard_branch are
+   * scoped to the connection's bound session, so we open a transient WS, bind it
+   * to the parent, send the resolve frame, then close. One-shot and fire-and-
+   * forget: the parent tab (if open) reconciles its anchors off its own `merged`
+   * frame; here we just need the store mutation to land.
+   */
+  static resolveBranchFromChild(
+    parentId: string,
+    childId: string,
+    accept: { summary: string } | null,
+  ): void {
+    const ws = new WebSocket(wsUrl());
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: "open", session_id: parentId }));
+      ws.send(
+        JSON.stringify(
+          accept
+            ? { type: "accept_branch", new_session_id: childId, summary: accept.summary }
+            : { type: "discard_branch", new_session_id: childId },
+        ),
+      );
+    };
+    // Close once the server acknowledges (merged) or on any error/timeout, so
+    // the transient connection never lingers.
+    ws.onmessage = (e) => {
+      try {
+        const f = JSON.parse(e.data as string) as ServerFrame;
+        if (f.type === "merged" || f.type === "error") ws.close();
+      } catch {
+        /* ignore */
+      }
+    };
+    setTimeout(() => {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
+    }, 5000);
+  }
+
   interrupt(): boolean {
     return this.intent({ kind: "interrupt", data: {} });
   }

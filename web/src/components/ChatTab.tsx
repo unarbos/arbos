@@ -345,6 +345,10 @@ export function ChatTab({
   // ONLY the highlighted part — the containing message stays invisible model
   // context, never rendered.
   const [branchFragment, setBranchFragment] = useState<string | null>(null);
+  // The parent session id when THIS tab is an open discussion branch, so the
+  // branch tab can offer Accept/Discard that resolve the discussion back into
+  // its parent from inside the branch. Null for a normal chat or a resolved one.
+  const [branchParent, setBranchParent] = useState<string | null>(null);
   // Files picked into the composer (paperclip): text files spool to the
   // workspace on send (the prompt carries path references) and the chips
   // clear once it's sent.
@@ -668,6 +672,9 @@ export function ChatTab({
           // A discussion branch carries the fragment it is scoped to; show it
           // as a header so the branch chat displays ONLY the highlighted part.
           if (session?.branch_fragment) setBranchFragment(session.branch_fragment);
+          // An OPEN branch also carries its parent id, so the branch tab can
+          // resolve the discussion back into the parent from inside the branch.
+          setBranchParent(session?.branch_parent ?? null);
         })
         .catch(() => {})
         .finally(() => seam.connect());
@@ -1299,6 +1306,31 @@ export function ChatTab({
     setAccepting(null);
   }, []);
 
+  // Resolving THIS branch from inside the branch tab. accept_branch/discard_branch
+  // are scoped to the parent's connection, but this tab's seam is bound to the
+  // child, so we route through a transient parent-bound connection. The branch
+  // tab knows its parent via branchParent (the open-branch meta).
+  const [resolvingHere, setResolvingHere] = useState(false);
+  const onAcceptHere = useCallback(
+    (summary: string) => {
+      const sid = sessionRef.current;
+      if (!branchParent || !sid || !summary.trim()) return;
+      SeamClient.resolveBranchFromChild(branchParent, sid, { summary: summary.trim() });
+      setResolvingHere(false);
+      // The branch is now resolved on the parent; this tab's parent link is
+      // stale, so hide the in-branch controls until a reload re-reads the meta.
+      setBranchParent(null);
+    },
+    [branchParent],
+  );
+  const onDiscardHere = useCallback(() => {
+    const sid = sessionRef.current;
+    if (!branchParent || !sid) return;
+    SeamClient.resolveBranchFromChild(branchParent, sid, null);
+    setResolvingHere(false);
+    setBranchParent(null);
+  }, [branchParent]);
+
   // The transcript hooks must be referentially stable across streaming
   // deltas or React.memo(Item) re-renders every row per token anyway. The
   // callbacks read through refs (handleRef / resubmitEditRef), so the object
@@ -1525,7 +1557,7 @@ export function ChatTab({
       {branchFragment && (
         <div className="flex shrink-0 items-start gap-2 border-b border-line/60 bg-panel px-3.5 py-2">
           <GitBranch size={13} className="mt-0.5 shrink-0 text-accent" />
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <div className="text-[10.5px] uppercase tracking-wider text-faint select-none">
               Discussing
             </div>
@@ -1533,6 +1565,28 @@ export function ChatTab({
               “{branchFragment}”
             </div>
           </div>
+          {/* Resolve the discussion back into the parent from inside the branch.
+              Only an OPEN branch with a known parent shows these. */}
+          {branchParent && (
+            <div className="flex shrink-0 items-center gap-1.5 self-center">
+              <button
+                type="button"
+                onClick={() => setResolvingHere(true)}
+                title="Bring this discussion's conclusion back to the main thread"
+                className="flex cursor-pointer items-center gap-1 rounded border border-accent/40 bg-accent/10 px-2 py-1 text-[11px] text-accent hover:bg-accent/20"
+              >
+                <Check size={12} /> Accept
+              </button>
+              <button
+                type="button"
+                onClick={onDiscardHere}
+                title="Discard this discussion (nothing is merged back)"
+                className="cursor-pointer rounded border border-line/70 bg-panel px-2 py-1 text-[11px] text-muted hover:border-red/40 hover:text-red"
+              >
+                Discard
+              </button>
+            </div>
+          )}
         </div>
       )}
       {!fresh && (
@@ -1544,6 +1598,14 @@ export function ChatTab({
           onAccept={onAcceptBranch}
           onDiscard={onDiscardBranch}
           onCancel={() => setAccepting(null)}
+        />
+      )}
+      {resolvingHere && sessionRef.current && (
+        <BranchDialog
+          anchor={{ child: sessionRef.current, seq: -1, quote: branchFragment ?? "", status: "open" }}
+          onAccept={(_child, summary) => onAcceptHere(summary)}
+          onDiscard={onDiscardHere}
+          onCancel={() => setResolvingHere(false)}
         />
       )}
 
