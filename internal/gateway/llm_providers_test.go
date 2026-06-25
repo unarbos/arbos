@@ -10,12 +10,12 @@ import (
 // fakeAdmin records the multi-provider seam calls so the handlers can be
 // exercised without a real settings store / vault.
 type fakeAdmin struct {
-	added    []ProviderInput
-	updated  map[string]ProviderInput
-	removed  []string
+	added     []ProviderInput
+	updated   map[string]ProviderInput
+	removed   []string
 	activated []string
-	applied  int
-	failNext error
+	applied   int
+	failNext  error
 }
 
 func newFakeServer(a *fakeAdmin) *Server {
