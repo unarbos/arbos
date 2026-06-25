@@ -1,8 +1,10 @@
 package piwire
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/fake"
+	"github.com/unarbos/arbos/internal/modelcatalog"
 	"github.com/unarbos/arbos/internal/ports"
 	"github.com/unarbos/arbos/internal/provider/anthropic"
 	"github.com/unarbos/arbos/internal/provider/google"
@@ -337,6 +340,46 @@ func (c Config) ModelsURL() string {
 		return ""
 	}
 	return strings.TrimRight(c.BaseURL, "/") + "/models"
+}
+
+// catalogDecorate returns the request decorator that attaches the active
+// provider's credential to a model-catalog request, through the same broker
+// (and host-allowlist) the chat path uses. Nil when no LLM is configured.
+// OpenRouter's /models is public so the header is harmless there; providers
+// whose /models returns 401 to an anonymous GET (e.g. api.saygm.com) need it.
+func (c Config) catalogDecorate() modelcatalog.Decorate {
+	if !c.HasLLM || c.BaseURL == "" {
+		return nil
+	}
+	spec, ok := providerSpecs[c.ProviderName]
+	if !ok {
+		spec = providerSpecs["openai"]
+	}
+	host := ""
+	if u, err := url.Parse(c.BaseURL); err == nil {
+		host = u.Hostname()
+	}
+	ref := core.SecretRef{Name: c.KeyEnv}
+	broker := secret.NewBroker(c.keyProvider(), secret.Binding{
+		Ref:    ref,
+		Hosts:  []string{host},
+		Inject: spec.inject,
+	})
+	return func(ctx context.Context, req *http.Request) error {
+		return broker.Apply(ctx, ref, req)
+	}
+}
+
+// ModelCatalog fetches the provider's live model listing with the active
+// provider's credential attached. It is the one authenticated catalog read
+// shared by the gateway's /api/models proxy and the agent's list_models /
+// set_model tools. Returns nil (no error) when no LLM is configured.
+func (c Config) ModelCatalog(ctx context.Context) ([]modelcatalog.Model, error) {
+	u := c.ModelsURL()
+	if u == "" {
+		return nil, nil
+	}
+	return modelcatalog.FetchAuth(ctx, u, c.catalogDecorate())
 }
 
 // NewProvider builds the configured LLM adapter. Without a key it returns the

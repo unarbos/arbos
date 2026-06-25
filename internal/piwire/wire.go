@@ -20,7 +20,6 @@ import (
 	"github.com/unarbos/arbos/internal/extension/builtin"
 	"github.com/unarbos/arbos/internal/mcp"
 	"github.com/unarbos/arbos/internal/mind"
-	"github.com/unarbos/arbos/internal/modelcatalog"
 	"github.com/unarbos/arbos/internal/obs"
 	"github.com/unarbos/arbos/internal/outbox"
 	"github.com/unarbos/arbos/internal/plan"
@@ -253,10 +252,8 @@ func Assemble(cfg HostConfig) (*Host, error) {
 	// can name exactly the models the user sees there. Nil (no LLM, no
 	// catalog endpoint) keeps set_model blind and skips list_models.
 	var catalog setmodel.Catalog
-	if u := cfg.Config.ModelsURL(); u != "" {
-		catalog = func(ctx context.Context) ([]modelcatalog.Model, error) {
-			return modelcatalog.Fetch(ctx, u)
-		}
+	if cfg.Config.ModelsURL() != "" {
+		catalog = cfg.Config.ModelCatalog
 	}
 	if err := setmodel.RegisterTool(topTools, deliver, setDefault, catalog); err != nil {
 		if theMind != nil {

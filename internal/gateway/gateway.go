@@ -66,10 +66,11 @@ type Server struct {
 	// Speak synthesizes text to MP3 — the "spoken responses" setting. Wired by
 	// the host to the provider's audio endpoint; nil disables the route.
 	Speak func(ctx context.Context, text string) (io.ReadCloser, error)
-	// ModelsURL is the provider's model-catalog endpoint (e.g. OpenRouter's
-	// public {base}/models). Empty leaves the picker with just the current
-	// model and no catalog to filter.
-	ModelsURL string
+	// ModelCatalog fetches the provider's live model listing, with the active
+	// provider's credential attached at the boundary (so a provider whose
+	// /models requires the key, not just OpenRouter's public one, lists). Nil
+	// leaves the picker with just the current model and no catalog to filter.
+	ModelCatalog func(ctx context.Context) ([]modelcatalog.Model, error)
 	// Model is the host's configured default model, returned as the active
 	// selection so the composer can show what's running before a switch.
 	Model string
@@ -670,12 +671,21 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 // so the picker shows the active selection on open.
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	out := []modelcatalog.Model{}
-	if s.ModelsURL != "" {
-		if list, err := modelcatalog.Fetch(r.Context(), s.ModelsURL); err == nil {
+	var fetchErr string
+	if s.ModelCatalog != nil {
+		if list, err := s.ModelCatalog(r.Context()); err != nil {
+			fetchErr = err.Error()
+		} else if list != nil {
 			out = list
 		}
 	}
-	writeJSON(w, map[string]any{"models": out, "current": s.Model})
+	resp := map[string]any{"models": out, "current": s.Model}
+	// Surface the fetch failure so the picker can say why it's empty instead of
+	// silently showing nothing (e.g. a provider whose /models rejected the key).
+	if fetchErr != "" {
+		resp["error"] = fetchErr
+	}
+	writeJSON(w, resp)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -49,10 +49,14 @@ export interface ModelOption {
   context_length?: number;
 }
 
-/** The composer's model picker: the provider catalog + the active selection. */
+/** The composer's model picker: the provider catalog + the active selection.
+ *  error is set when the host reached the provider's /models but the fetch
+ *  failed (e.g. the endpoint rejected the key), so the picker can explain an
+ *  empty list instead of silently showing nothing. */
 export interface ModelCatalog {
   models: ModelOption[];
   current: string;
+  error?: string;
 }
 
 /** The catalog request shared by every consumer (one fetch per page load):
@@ -67,8 +71,13 @@ export function fetchModels(): Promise<ModelCatalog> {
       const body = (await res.json()) as {
         models?: ModelOption[];
         current?: string;
+        error?: string;
       };
-      return { models: body.models ?? [], current: body.current ?? "" };
+      return {
+        models: body.models ?? [],
+        current: body.current ?? "",
+        error: body.error,
+      };
     })().catch((e: unknown) => {
       modelsPromise = null; // let a later caller retry a failed fetch
       throw e;

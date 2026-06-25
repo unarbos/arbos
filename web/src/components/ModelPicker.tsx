@@ -7,11 +7,16 @@ import { Tooltip } from "./Tooltip";
 
 /** The provider catalog, shared across every picker via the api-layer cache
  *  (one fetch per page load, invalidated by resetModelsCache on a provider
- *  change). An empty list stands in for a fetch that couldn't complete. */
-function loadCatalog(): Promise<ModelOption[]> {
+ *  change). An empty list stands in for a fetch that couldn't complete; error
+ *  carries why the provider's /models failed (e.g. it rejected the key) so the
+ *  dropdown can explain an empty list instead of showing a bare "No models". */
+function loadCatalog(): Promise<{ models: ModelOption[]; error?: string }> {
   return fetchModels()
-    .then((c) => c.models)
-    .catch(() => []);
+    .then((c) => ({ models: c.models, error: c.error }))
+    .catch((e: unknown) => ({
+      models: [],
+      error: e instanceof Error ? e.message : String(e),
+    }));
 }
 
 /** A model id shown compactly in the chip: the slug tail, e.g. `kimi-k2`. */
@@ -53,6 +58,7 @@ export function ModelPicker({
 }) {
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<ModelOption[] | null>(null);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
   // The chip's viewport rect — the portaled dropdown anchors to it with
@@ -65,7 +71,10 @@ export function ModelPicker({
 
   useEffect(() => {
     if (!open || models) return;
-    loadCatalog().then(setModels);
+    loadCatalog().then((c) => {
+      setModels(c.models);
+      setCatalogError(c.error ?? null);
+    });
   }, [open, models]);
 
   useLayoutEffect(() => {
@@ -211,7 +220,9 @@ export function ModelPicker({
             )}
             {models !== null && filtered.length === 0 && (
               <div className="px-3 py-2 text-[12px] text-faint">
-                No models match
+                {catalogError && (models?.length ?? 0) === 0 && !query
+                  ? `Couldn't load models — ${catalogError}`
+                  : "No models match"}
               </div>
             )}
             {filtered.map((m, i) => (

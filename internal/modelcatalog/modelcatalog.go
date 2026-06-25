@@ -28,13 +28,33 @@ type Model struct {
 // the listing is a small JSON blob, so the timeout is generous.
 var client = &http.Client{Timeout: 10 * time.Second}
 
+// Decorate mutates the outbound catalog request before it is sent — the seam
+// for attaching the provider's credential at the trusted boundary (the broker
+// resolves the key here, never the caller). Nil means an unauthenticated GET,
+// which is all OpenRouter's public /models needs.
+type Decorate func(ctx context.Context, req *http.Request) error
+
 // Fetch reads an OpenAI-compatible /models listing (the shape OpenRouter and
-// the OpenAI API both return: {"data":[{id,name,...}]}). The endpoint is
-// public on OpenRouter; no auth header is sent.
+// the OpenAI API both return: {"data":[{id,name,...}]}) with no auth header —
+// sufficient for OpenRouter's public endpoint. Providers whose /models
+// requires the key (e.g. api.saygm.com) need FetchAuth.
 func Fetch(ctx context.Context, url string) ([]Model, error) {
+	return FetchAuth(ctx, url, nil)
+}
+
+// FetchAuth is Fetch with an optional request decorator, so a provider whose
+// /models endpoint demands the API key (returning 401 to an anonymous GET)
+// has the credential attached at the boundary. A nil decorate is identical to
+// Fetch.
+func FetchAuth(ctx context.Context, url string, decorate Decorate) ([]Model, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
+	}
+	if decorate != nil {
+		if err := decorate(ctx, req); err != nil {
+			return nil, err
+		}
 	}
 	resp, err := client.Do(req)
 	if err != nil {

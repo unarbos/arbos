@@ -145,7 +145,7 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 		NewSessionID: piwire.NewSessionID,
 		Drain:        cfg.ServeDrainTimeout,
 		Model:        cfg.Model,
-		ModelsURL:    cfg.ModelsURL(),
+		ModelCatalog: cfg.ModelCatalog,
 		Commands:     func() []gateway.CommandInfo { return slashCommands(cwd) },
 		// The surface panels (show's canvases, code, docs) read workspace
 		// files back through the gateway, rooted where the tools run.
