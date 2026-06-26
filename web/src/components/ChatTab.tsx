@@ -368,6 +368,12 @@ export function ChatTab({
   // The provider catalog, kept so the composer can size the context gauge
   // against the active model's context_length.
   const [catalog, setCatalog] = useState<ModelOption[]>([]);
+  // The host's configured default model for the active provider (/api/models
+  // `current`). It is the fallback the model reconciler switches to when this
+  // session carries an id the active provider doesn't know — e.g. a model set
+  // while a different provider was active, which would otherwise 400 the next
+  // turn with "unknown model".
+  const hostDefaultRef = useRef("");
   // The active provider's display name (ADR-0040), shown as the chip beside the
   // model picker so it's always clear which provider key the chat is using.
   // Empty (a host with no named provider) hides it.
@@ -519,6 +525,7 @@ export function ChatTab({
           fetchModels()
             .then((c) => {
               setCatalog(c.models);
+              hostDefaultRef.current = c.current;
               const cur = modelRef.current;
               if ((cur === "" || cur === "fake") && c.current && c.current !== "fake") {
                 setModel(c.current);
@@ -957,6 +964,7 @@ export function ChatTab({
       .then((c) => {
         setModel((m) => m || c.current);
         setCatalog(c.models);
+        hostDefaultRef.current = c.current;
       })
       .catch(() => {});
   }, []);
@@ -1018,6 +1026,36 @@ export function ChatTab({
       markDirtyIfBusy();
     }
   }, [markDirtyIfBusy]);
+
+  // Graceful fallback when the session's model isn't valid for the active
+  // provider. A model id is provider-specific (an OpenRouter slug like
+  // "anthropic/claude-opus-4.8" vs a bare "claude-opus-4-8" another endpoint
+  // names the same family); a session set while one provider was active then
+  // switched to another would carry an id the new provider rejects, failing
+  // the very next turn with "unknown model". When the live catalog is loaded
+  // and doesn't list the current model, switch to the host default (which is
+  // the active provider's own default, so it's in the catalog) and tell the
+  // user once. set_model is idle-only, so this lands before the next turn —
+  // self-healing after any provider switch. Re-fires on catalog/provider
+  // change; settles immediately because the fallback id is in the catalog.
+  useEffect(() => {
+    if (catalog.length === 0) return;
+    if (!model || model === "fake") return;
+    if (catalog.some((m) => m.id === model)) return;
+    const fallback = hostDefaultRef.current;
+    if (!fallback || fallback === model) return;
+    // Only fall back to an id the active provider actually lists — otherwise
+    // the catalog is the wrong provider's (or stale) and switching would just
+    // trade one unknown model for another.
+    if (!catalog.some((m) => m.id === fallback)) return;
+    if (!seamRef.current?.setModel(fallback)) return;
+    setModel(fallback);
+    markDirtyIfBusy();
+    dispatch({
+      type: "notice",
+      text: `Model “${model}” isn't available on ${providerLabel || "the active provider"} — switched to “${fallback}”.`,
+    });
+  }, [catalog, model, boundSession, providerLabel, markDirtyIfBusy]);
 
   // Switch the active provider from the chip. Unlike a model pick (a live seam
   // frame), this restarts the host gracefully to rebuild the provider; the chip
