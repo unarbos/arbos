@@ -35,6 +35,39 @@ const (
 	EventBranchAnchor     EventKind = "branch_anchor"
 )
 
+// Audience declares who an event federates to, independent of whether the
+// agent's own model projects it (see ProjectEvent) — the two are orthogonal
+// axes (ADR-0041 D1). It is additive (ADR-0010): the zero value is
+// AudienceLocal, so an event with no Audience set — including every event
+// decoded from a log written before this field existed — keeps the pre-Matrix
+// behavior of never leaving the box.
+type Audience uint8
+
+const (
+	// AudienceLocal events are the agent's private trajectory (reasoning,
+	// usage, injected context, compaction summaries): never federated.
+	AudienceLocal Audience = iota
+	// AudienceRoom events federate to every member/server of the room.
+	AudienceRoom
+)
+
+// DefaultAudience is the federation baseline for an event kind (ADR-0041 D1).
+// The engine/adapter may raise a specific event above its default — e.g. a
+// tool_result shared in a collaborative working room — but never lowers it.
+// The switch is exhaustive (no default case) so a new EventKind cannot be added
+// without declaring its audience here.
+func DefaultAudience(k EventKind) Audience {
+	switch k {
+	case EventUserMessage, EventAssistantMessage, EventChatNote:
+		return AudienceRoom
+	case EventToolResult, EventUsage, EventCompressed, EventContext,
+		EventInterrupted, EventConfig, EventBranchAnchor:
+		return AudienceLocal
+	}
+	// Unknown/future kinds default to the safe, non-federating audience.
+	return AudienceLocal
+}
+
 // EventPayload is a sealed sum type: the kernel's event payloads are a closed
 // set, each carrying exactly the data its kind needs. This makes "exactly one
 // payload, matching the kind" a structural guarantee enforced by the compiler
@@ -243,7 +276,12 @@ type Event struct {
 	TurnID    int64
 	Version   int // schema version of this row; see CurrentEventVersion
 	CreatedAt time.Time
-	Payload   EventPayload
+	// Audience declares whether this event federates to the room (AudienceRoom)
+	// or stays in the agent's private local store (AudienceLocal). Zero value is
+	// AudienceLocal, so it is additive and backward-compatible (ADR-0041 D1): the
+	// store/adapter populate it; the kernel turn loop does not branch on it.
+	Audience Audience
+	Payload  EventPayload
 }
 
 // Validate enforces the persistable invariants. Stores MUST call it on append

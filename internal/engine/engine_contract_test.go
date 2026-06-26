@@ -7,6 +7,7 @@ import (
 
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/fake"
+	"github.com/unarbos/arbos/internal/matrix"
 	"github.com/unarbos/arbos/internal/ports"
 	"github.com/unarbos/arbos/internal/sqlite"
 )
@@ -26,6 +27,14 @@ func storeFactories(t *testing.T) map[string]func() ports.SessionStore {
 			}
 			t.Cleanup(func() { _ = s.Close() })
 			return s
+		},
+		// The Matrix composite store in local-only mode (nil mirror): its
+		// authoritative local capture must reproduce the full golden suite
+		// byte-for-byte, which is what makes it a provable drop-in for the
+		// kernel (the Matrix mirror is a side-effect proven separately). See
+		// internal/matrix and ADR-0041 D1/D2.
+		"matrix-local": func() ports.SessionStore {
+			return matrix.NewStore(fake.NewStore(), nil)
 		},
 	}
 }

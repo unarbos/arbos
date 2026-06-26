@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -30,10 +31,12 @@ import (
 	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/engine"
 	"github.com/unarbos/arbos/internal/envfile"
+	"github.com/unarbos/arbos/internal/matrix"
 	"github.com/unarbos/arbos/internal/obs"
 	"github.com/unarbos/arbos/internal/outbox"
 	"github.com/unarbos/arbos/internal/piwire"
 	"github.com/unarbos/arbos/internal/plan"
+	"github.com/unarbos/arbos/internal/ports"
 	"github.com/unarbos/arbos/internal/sqlite"
 )
 
@@ -133,19 +136,43 @@ func assemble(cfg piwire.Config, dbPath string, approve, quiet bool) (*piwire.Ho
 	if quiet {
 		logger = piwire.NewQuietLogger()
 	}
+
+	// The engine's store is the durable sqlite log by default. With Matrix
+	// enabled (ADR-0041), wrap it in the composite store so the embedded
+	// homeserver mirrors Room-audience events into per-session rooms while the
+	// sqlite log stays the authoritative local capture (which is also what the
+	// gateway reads). Off by default: the wrap is identity, behavior unchanged.
+	var engineStore ports.SessionStore = store
+	var matrixShutdown func()
+	if os.Getenv(matrixEnvFlag) == "1" {
+		mirror, shutdown, merr := startEmbeddedMatrix(filepath.Dir(dbPath))
+		if merr != nil {
+			_ = store.Close()
+			return nil, nil, nil, fmt.Errorf("start embedded matrix: %w", merr)
+		}
+		engineStore = matrix.NewStore(store, mirror)
+		matrixShutdown = shutdown
+	}
+
 	host, err := piwire.Assemble(piwire.HostConfig{
 		Config:   cfg,
-		Store:    store,
+		Store:    engineStore,
 		Observer: obs.NewSlogObserver(logger),
 		Approve:  approve,
 		Logger:   logger,
 	})
 	if err != nil {
+		if matrixShutdown != nil {
+			matrixShutdown()
+		}
 		_ = store.Close()
 		return nil, nil, nil, err
 	}
 	cleanup := func() {
 		host.Cleanup()
+		if matrixShutdown != nil {
+			matrixShutdown()
+		}
 		_ = store.Close()
 	}
 	return host, store, cleanup, nil

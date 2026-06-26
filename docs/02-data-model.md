@@ -51,9 +51,21 @@ type Event struct {
     Seq       int64        // monotonic within a session, store-assigned
     Version   int          // schema version of this row (ADR-0010)
     CreatedAt time.Time
+    Audience  Audience     // who the event federates to; zero = Local (ADR-0041 D1)
     Payload   EventPayload // exactly one variant, structurally guaranteed
 }
 ```
+
+`Audience` (`Local` | `Room`) is a federation-visibility axis **orthogonal** to
+whether the model projects the event (`ProjectEvent`): a shared `tool_result` is
+both projected and federated, a `chat_note` is federated but not projected, and
+token usage is neither. It is additive (ADR-0010): the zero value is
+`AudienceLocal`, so an event with no audience set — including every event in a
+log written before the field existed — keeps the pre-Matrix behavior of never
+leaving the box. `DefaultAudience(kind)` is the per-kind baseline (prose and
+chat notes default to `Room`; reasoning/usage/context/compaction stay `Local`).
+The substrate adapter (`internal/matrix`), not the kernel, acts on it; the turn
+loop never branches on it. See ADR-0041 D1.
 
 Events are built only via per-kind constructors (`NewMessageEvent`, …) that
 stamp `Version`, and `Event.Validate` (called by the store on every append)
