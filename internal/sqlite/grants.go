@@ -74,3 +74,56 @@ func (s *Store) RevokeGrant(ctx context.Context, token string) error {
 	}
 	return nil
 }
+
+// ShareSeat is one Matrix room membership a share token created — the session
+// whose room a guest joined and the trusted display name they joined under.
+type ShareSeat struct {
+	Session string
+	Author  string
+}
+
+// AddShareSeat durably records that a share token seated a guest in a session's
+// room, so a later revoke can kick exactly that guest even across a restart.
+// Idempotent: re-seating the same (token, session, author) is a no-op.
+func (s *Store) AddShareSeat(ctx context.Context, token, session, author string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO share_seats (token, session, author) VALUES (?, ?, ?)`,
+		token, session, author)
+	if err != nil {
+		return fmt.Errorf("add share seat: %w", err)
+	}
+	return nil
+}
+
+// ShareSeats returns the seats a token created — the guests to kick when it is
+// revoked.
+func (s *Store) ShareSeats(ctx context.Context, token string) ([]ShareSeat, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT session, author FROM share_seats WHERE token = ?`, token)
+	if err != nil {
+		return nil, fmt.Errorf("share seats %q: %w", token, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []ShareSeat
+	for rows.Next() {
+		var seat ShareSeat
+		if err := rows.Scan(&seat.Session, &seat.Author); err != nil {
+			return nil, fmt.Errorf("scan share seat: %w", err)
+		}
+		out = append(out, seat)
+	}
+	return out, rows.Err()
+}
+
+// DeleteShareSeats drops every seat a token created — called as the token is
+// revoked, after its guests have been kicked.
+func (s *Store) DeleteShareSeats(ctx context.Context, token string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM share_seats WHERE token = ?`, token); err != nil {
+		return fmt.Errorf("delete share seats: %w", err)
+	}
+	return nil
+}

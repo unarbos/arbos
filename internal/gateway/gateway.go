@@ -10,6 +10,8 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -100,6 +102,13 @@ type Server struct {
 	// Messenger is the Telegram bridge behind the Messenger tab (bot
 	// registry + live conversation stream). nil disables the routes.
 	Messenger *messenger.Service
+	// Matrix is the door onto the embedded Matrix substrate (ADR-0041): it
+	// resolves a session to its room and exposes the homeserver coordinates an
+	// external Matrix client would dial. nil when ARBOS_MATRIX is off, so the
+	// room route is simply absent and the rest of the gateway is unchanged. The
+	// gateway still reads the authoritative sqlite Store for everything else —
+	// Matrix is a separate, additive handle, never a replacement.
+	Matrix MatrixBridge
 
 	mu      sync.Mutex
 	clients map[*wsLineWriter]bool
@@ -110,6 +119,44 @@ type Server struct {
 	terms termHost
 }
 
+// MatrixBridge is the gateway's narrow view of the embedded Matrix substrate
+// (implemented by *matrix.Bridge). It is an interface here so the gateway never
+// imports a Matrix client type — the browser door stays a thin seam translator
+// and all mautrix coupling lives in internal/matrix.
+type MatrixBridge interface {
+	// RoomID resolves the room mirroring a session, if one was provisioned.
+	RoomID(sid core.SessionID) (roomID string, ok bool)
+	// HomeserverURL is the base URL an external Matrix client dials to reach
+	// the same rooms the web door renders.
+	HomeserverURL() string
+	// AgentID and HumanID are the room's two resident seats (ADR-0041 D9): the
+	// autonomous agent and the person operating it.
+	AgentID() string
+	HumanID() string
+	// Watch streams text messages posted into the node's session rooms, decoded
+	// to primitives so the gateway stays free of any Matrix type. foreign marks
+	// a message that did NOT originate from this arbos (it lacks the life.arbos
+	// metadata) — i.e. one typed from an external Matrix client or a federated
+	// peer. Blocks until ctx is cancelled.
+	Watch(ctx context.Context, fn func(session core.SessionID, sender, body string, foreign bool)) error
+	// InviteGuest seats a shared-chat participant (by trusted display name) in a
+	// session's room as their own Matrix identity, so room membership reflects
+	// the share and the guest's messages mirror under their own seat. Returns
+	// the guest's Matrix user id. Best-effort: the bespoke seam still carries
+	// the guest regardless.
+	InviteGuest(ctx context.Context, sid core.SessionID, author string) (userID string, err error)
+	// RemoveGuest unseats a participant when their share is revoked — kicking
+	// them from the room so membership tracks the grant's lifecycle. Best-effort.
+	RemoveGuest(ctx context.Context, sid core.SessionID, author string) error
+	// GuestSession returns a seated guest's live Matrix access token + user id,
+	// so the browser can drive Matrix as that identity (the browser-as-Matrix-
+	// client path). ok is false when the guest isn't currently seated.
+	GuestSession(sid core.SessionID, author string) (accessToken, userID string, ok bool)
+	// OperatorSession returns the operating person's own Matrix credentials
+	// (@human), so the operator's browser/TUI can drive Matrix as that identity.
+	OperatorSession() (accessToken, userID string, ok bool)
+}
+
 // VoiceRecorder captures speech from the host machine's microphone and
 // transcribes it on the host. Start begins capture; Stop ends it and returns
 // the recognized text. The recording spans the two calls (start, then stop),
@@ -117,6 +164,29 @@ type Server struct {
 type VoiceRecorder interface {
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) (string, error)
+}
+
+// recordSeat durably remembers that a share token seated a guest in a session's
+// room, so a later revoke — even across a restart — can kick exactly them. The
+// store dedups (token, session, author), so re-redeeming under the same name
+// records once. A nil store (no history) simply skips it.
+func (s *Server) recordSeat(ctx context.Context, token, session, author string) {
+	if s.Store == nil {
+		return
+	}
+	_ = s.Store.AddShareSeat(ctx, token, session, author)
+}
+
+// takeSeats returns and clears the seats a token created — the guests to kick
+// when the token is revoked. Durable, so it survives a restart between seating
+// and revoke.
+func (s *Server) takeSeats(ctx context.Context, token string) []sqlite.ShareSeat {
+	if s.Store == nil {
+		return nil
+	}
+	seats, _ := s.Store.ShareSeats(ctx, token)
+	_ = s.Store.DeleteShareSeats(ctx, token)
+	return seats
 }
 
 // register adds a live browser connection to the outbox fan-out.
@@ -321,6 +391,138 @@ func (s *Server) DeliverOutbox(ctx context.Context) {
 	}
 }
 
+// watchRooms handles messages arriving into a session's Matrix room from
+// OUTSIDE the engine — a participant typing from an external Matrix client, or a
+// federated peer — so the room is a live inbound channel, not only a mirror of
+// the local stream (ADR-0041 "the room is the session"). arbos-originated
+// messages are skipped (they already rendered from the local stream, so acting
+// on them would echo).
+//
+// A foreign message into a LIVE session (one with a warm actor — a door is
+// open) is injected as a prompt, so it drives an agent turn whose reply mirrors
+// back to the room: talk to your agent from any Matrix client. The OriginRoom
+// stamp both echoes the prompt to the attached frontends AND tells the mirror
+// not to re-publish it (it is already in the room). With no live actor there is
+// nothing to run it autonomously, so it surfaces as a notice instead. Blocks
+// until ctx is cancelled; run it as a goroutine next to DeliverOutbox. A nil
+// bridge makes it a no-op.
+func (s *Server) WatchRooms(ctx context.Context) {
+	if s.Matrix == nil {
+		return
+	}
+	_ = s.Matrix.Watch(ctx, func(session core.SessionID, sender, body string, foreign bool) {
+		if !foreign {
+			return // arbos-originated; already on the browser's local stream
+		}
+		// Origin = the room door, so the user Message echoes to every attached
+		// frontend AND the mirror leaves the (already-present) room copy alone.
+		// Author attributes it to the external sender.
+		intent := core.PromptIntent{Text: body, Origin: core.OriginRoom, Author: matrixLocalpart(sender)}
+		if conv := s.Engine.Live(session); conv != nil {
+			// A warm actor (a door is open): just drive it. Send off the sync
+			// goroutine so a full intent buffer never stalls the watcher.
+			go conv.Send(intent)
+			return
+		}
+		// No warm actor: wake the closed session, run the turn, detach when it
+		// ends. In its own goroutine so the sync loop keeps flowing.
+		go s.runRoomTurn(ctx, session, sender, body, intent)
+	})
+}
+
+// roomTurnMax bounds an autonomous room-driven turn so a hung turn can never
+// leak the attachment that keeps the actor warm. Generous: a real turn (tools,
+// retries) finishes well inside it.
+const roomTurnMax = 10 * time.Minute
+
+// runRoomTurn wakes a CLOSED session to answer a message that arrived from an
+// external Matrix client: it attaches (starting the actor), drives one turn,
+// and detaches the moment the turn reaches a terminal event — the same
+// attach/run/release shape the scheduler and Telegram bridge use. The agent's
+// reply mirrors back to the room, so a chat nobody has open can still be reached
+// from any Matrix client. On attach failure (the session is active on another
+// engine) the message surfaces as a notice instead, so it is never lost.
+func (s *Server) runRoomTurn(ctx context.Context, session core.SessionID, sender, body string, intent core.PromptIntent) {
+	conv, release, err := s.Engine.Attach(session)
+	if err != nil {
+		s.deliverRoomMessage(string(session), sender, body)
+		return
+	}
+	defer release()
+	// Subscribe before sending so the turn's terminal can't be missed; the
+	// stream is forward-only (no backlog), so the first depth-0 terminal after
+	// the send is this turn's.
+	sub, cancelSub := conv.Subscribe()
+	defer cancelSub()
+	conv.Send(intent)
+	timeout := time.NewTimer(roomTurnMax)
+	defer timeout.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timeout.C:
+			return
+		case env, ok := <-sub:
+			if !ok {
+				return // the actor exited
+			}
+			if env.SessionID != session || env.Depth != 0 {
+				continue
+			}
+			switch env.Event.(type) {
+			case core.TurnComplete, core.Interrupted, core.ErrorEvent:
+				return
+			}
+		}
+	}
+}
+
+// deliverRoomMessage pushes an externally-originated room message to the
+// connections bound to its session, as a session-scoped notice (the same
+// ambient frame the outbox uses). The sender's localpart attributes it so the
+// reader sees who spoke from the other client.
+func (s *Server) deliverRoomMessage(session, sender, body string) {
+	peers := s.sessionPeers(session)
+	if len(peers) == 0 {
+		return
+	}
+	// Mark the external origin so the reader can tell a room message from a
+	// participant on another client apart from the agent's own outbox voice.
+	text := body
+	if lp := matrixLocalpart(sender); lp != "" {
+		text = lp + " (via Matrix): " + body
+	} else {
+		text = "(via Matrix) " + body
+	}
+	b, err := json.Marshal(noticeFrame{
+		Type:      "notice",
+		Text:      text,
+		Session:   session,
+		CreatedAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return
+	}
+	line := append(b, '\n')
+	for _, c := range peers {
+		_, _ = c.Write(line)
+	}
+}
+
+// matrixLocalpart pulls the localpart out of a Matrix user id ("@human:host" ->
+// "human") for human-readable attribution. A non-mxid string is returned as-is.
+func matrixLocalpart(userID string) string {
+	if !strings.HasPrefix(userID, "@") {
+		return userID
+	}
+	rest := userID[1:]
+	if i := strings.IndexByte(rest, ':'); i >= 0 {
+		return rest[:i]
+	}
+	return rest
+}
+
 // Handler builds the route table.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -346,6 +548,11 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /api/sessions/{id}/children", s.handleSessionChildren)
 		mux.HandleFunc("GET /api/activity", s.handleActivity)
 		mux.HandleFunc("GET /api/plan/{id}", s.handlePlan)
+	}
+	if s.Matrix != nil {
+		// The room backing a session (ADR-0041): the UI reads this to show a
+		// chat is a real, addressable Matrix room and offer "open elsewhere".
+		mux.HandleFunc("GET /api/sessions/{id}/room", s.handleSessionRoom)
 	}
 	if s.KillJob != nil {
 		mux.HandleFunc("POST /api/jobs/{id}/kill", sameOrigin(s.handleKillJob))
@@ -422,6 +629,12 @@ func (s *Server) Handler() http.Handler {
 	if s.Dist != nil {
 		mux.Handle("/", spaHandler(s.Dist))
 	}
+	if s.Auth == nil && s.Matrix != nil {
+		// Loopback operator (no auth gate): still expose the capabilities probe
+		// so the local operator's browser can fetch its own Matrix credentials
+		// (@human) and drive the room as that identity.
+		mux.HandleFunc("GET /api/me", s.handleMe)
+	}
 	if s.Auth != nil {
 		// Capabilities probe: the SPA reads this to enter share mode (a
 		// scoped session principal renders just the granted chat).
@@ -444,9 +657,58 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST "+loginPath, s.Auth.handleLogin)
 		// scopeGuard runs outermost: a scoped share-session cookie is held to
 		// a deny-by-default allowlist; every other principal passes through.
-		return s.scopeGuard(s.Auth.wrap(mux))
+		// The Matrix proxy wraps even that: /_matrix carries its own bearer-token
+		// auth and must bypass the arbos cookie gate entirely.
+		return s.withMatrixProxy(s.scopeGuard(s.Auth.wrap(mux)))
 	}
-	return mux
+	return s.withMatrixProxy(mux)
+}
+
+// withMatrixProxy puts the embedded homeserver's Client-Server API on this same
+// public origin: it intercepts /_matrix/* (and the .well-known discovery doc)
+// ahead of the arbos cookie gate and reverse-proxies to the loopback homeserver.
+// Matrix requests authenticate with their own access token, not the arbos
+// cookie, so they bypass the gate by design. Putting the homeserver on the
+// gateway's origin means a remote browser reaches it over the same forest
+// tunnel as the SPA — no separate port, no mixed-content block — so the
+// browser-as-Matrix-client path (and any third-party client pointed at this
+// URL) works beyond loopback (ADR-0041 H1 follow-on). A no-op when Matrix is
+// off or the homeserver URL doesn't parse, leaving the door exactly as it was.
+func (s *Server) withMatrixProxy(h http.Handler) http.Handler {
+	if s.Matrix == nil {
+		return h
+	}
+	target, err := url.Parse(s.Matrix.HomeserverURL())
+	if err != nil || target.Host == "" {
+		return h
+	}
+	rp := httputil.NewSingleHostReverseProxy(target)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/.well-known/matrix/client":
+			s.serveMatrixWellKnown(w, r)
+		case strings.HasPrefix(r.URL.Path, "/_matrix/"):
+			rp.ServeHTTP(w, r)
+		default:
+			h.ServeHTTP(w, r)
+		}
+	})
+}
+
+// serveMatrixWellKnown answers Matrix client discovery (MSC1929 /.well-known)
+// with this gateway's own origin as the homeserver base URL, so a third-party
+// client given just the public host finds the proxied Client-Server API here
+// rather than the homeserver's loopback server_name. The spec requires it be
+// CORS-open so a browser client (Element web) can read it cross-origin.
+func (s *Server) serveMatrixWellKnown(w http.ResponseWriter, r *http.Request) {
+	scheme := "https"
+	if r.TLS == nil && !strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "http"
+	}
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	writeJSON(w, map[string]any{
+		"m.homeserver": map[string]any{"base_url": scheme + "://" + r.Host},
+	})
 }
 
 // wsAccept builds the WebSocket accept posture for one request. With auth on
@@ -1035,6 +1297,35 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, payload)
+}
+
+// roomJSON is the Matrix coordinates of a session: the room mirroring it, the
+// homeserver an external Matrix client dials, and the room's two resident seats
+// (agent + person). The UI uses it to show a chat is a real, federated-ready
+// room with real members (ADR-0041).
+type roomJSON struct {
+	RoomID     string `json:"room_id"`
+	Homeserver string `json:"homeserver,omitempty"`
+	AgentID    string `json:"agent_id,omitempty"`
+	HumanID    string `json:"human_id,omitempty"`
+}
+
+// handleSessionRoom returns the room backing a session. 404 when the session
+// has no mirrored room yet (created before mirroring, or mirroring failed) —
+// the chat still works through the seam; it just isn't reachable as a room.
+func (s *Server) handleSessionRoom(w http.ResponseWriter, r *http.Request) {
+	id := core.SessionID(r.PathValue("id"))
+	roomID, ok := s.Matrix.RoomID(id)
+	if !ok {
+		http.Error(w, "session has no room", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, roomJSON{
+		RoomID:     roomID,
+		Homeserver: s.Matrix.HomeserverURL(),
+		AgentID:    s.Matrix.AgentID(),
+		HumanID:    s.Matrix.HumanID(),
+	})
 }
 
 // sessionReplay builds the replay payload (visible transcript + durable

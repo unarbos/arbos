@@ -149,16 +149,28 @@ type Session struct {
     ParentID   SessionID // fork/branch lineage; empty for a root session (NOT compression)
     Status     SessionStatus
     Model      string    // durable model authority: set at creation, updated by SetModelIntent
-    Principal  string    // RESERVED: who owns/authorizes (gateway/frontend phase)
-    Origin     string    // RESERVED: originating surface, e.g. "telegram:chat/123"
+    Principal  string    // who owns/authorizes (PrincipalLocal on a single-user host)
+    Origin     string    // originating door: "scheduler" | "room" | "telegram:chat/123" | …
+    Owner      SessionID // the chat a machine-spawned run serves; empty for a chat itself
+    SpawnedBy  string    // what spawned a machine session, e.g. "node:12" (display only)
     CreatedAt  time.Time
     UpdatedAt  time.Time
 }
 ```
 
-`Principal`/`Origin` are reserved now (cheap) for auth and reply-routing when the
-gateway/frontend phase arrives, rather than threaded through every call site
-later (a migration). Empty for local single-user sessions today. See ADR-0019.
+`Origin` is the door a session/message arrived through (`core.OriginScheduler`,
+`core.OriginRoom`, a Telegram chat id) — presentation provenance that also drives
+cross-door echo suppression; empty for the local terminal.
+
+The lineage/identity fields (`Principal`, `ParentID`, `Owner`, `SpawnedBy`) are
+**slated to collapse into Matrix relations** under ADR-0041 (D4/D15/D11): a
+session's authority becomes its room membership + power levels (the `sender` the
+homeserver stamps, replacing `Principal`), and fork/owner/spawn lineage becomes
+`m.relates_to` / thread / room-hierarchy relations. They remain on the row today
+because `sessiontree`, the scheduler, and delegation still key on them, and the
+Matrix-relations replacement lands with the multi-node/federation phase. With
+Matrix the default substrate the room mirrors the session (`matrix.Store`); this
+struct stays the kernel's substrate-neutral record until that collapse.
 
 Compression is **in-place**, not a session rotation: a `CompressionPayload`
 event is appended to the live session's log and `Project` folds the replaced

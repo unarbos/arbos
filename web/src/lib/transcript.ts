@@ -118,6 +118,13 @@ export type TranscriptItem =
   /** Outbox delivery — the agent speaking up between turns. */
   | { kind: "notice"; id: number; text: string }
   /**
+   * A human-to-human side note (chat_note), folded inline into the conversation
+   * timeline (ADR-0038/0041): people on the session talking to EACH OTHER, never
+   * to the model. Rendered as a distinct, dim side-chat row — in the timeline,
+   * not a separate panel.
+   */
+  | { kind: "chatnote"; id: number; text: string; author?: string }
+  /**
    * A sub-agent that arrived without a delegate row to attach to (e.g. a
    * relay from a tool the UI doesn't know) — still a clickable tab.
    */
@@ -555,9 +562,15 @@ function applyEnvelope(state: ChatState, env: Envelope): ChatState {
       };
 
     case "chat_note":
-      // Human-to-human side chat is handled by the People panel (ChatTab routes
-      // it before dispatch), never the agent transcript — ignore it here.
-      return state;
+      // Human-to-human side chat, folded inline into the timeline (ADR-0038):
+      // a distinct side-note row, excluded from the model projection but shown
+      // in the conversation where it belongs — not a separate panel.
+      return push(state, {
+        kind: "chatnote",
+        id: state.nextId,
+        text: ev.data.text,
+        author: ev.data.author,
+      });
 
     default: {
       const never: never = ev;
@@ -681,27 +694,9 @@ function trackBackground(
 /**
  * Fold a replayed event log into transcript items — the persisted-history
  * mirror of applyEnvelope. Tool calls come from assistant messages; results
- * attach to them by call id.
+ * attach to them by call id. (Side notes fold inline as `chatnote` items,
+ * handled in replayToItems — there is no separate People-panel list anymore.)
  */
-/** One human-to-human side-chat line for the People panel (separate from the
- *  agent transcript). */
-export interface PeopleMessage {
-  id: number;
-  text: string;
-  author: string;
-}
-
-/** Extract the side-chat lines from a session replay, in log order. */
-export function peopleFromReplay(events: ReplayEvent[]): PeopleMessage[] {
-  const out: PeopleMessage[] = [];
-  let id = 1;
-  for (const ev of events) {
-    if (ev.type === "chat_note") {
-      out.push({ id: id++, text: ev.text, author: ev.author ?? "" });
-    }
-  }
-  return out;
-}
 
 /** A discussion-branch anchor reduced to its latest status, for the parent
  *  transcript's "discussed" markers. The branch_anchor replay rows are
@@ -796,8 +791,10 @@ export function replayToItems(events: ReplayEvent[]): TranscriptItem[] {
         items.push({ kind: "interrupted", id: id++ });
         break;
       case "chat_note":
-        // Human-to-human side chat is rendered in the People panel, never in
-        // the agent transcript — peopleFromReplay extracts these rows instead.
+        // Human-to-human side chat, folded inline into the timeline (ADR-0038):
+        // a side-note row in the conversation, never part of the model
+        // projection.
+        items.push({ kind: "chatnote", id: id++, text: ev.text, author: ev.author });
         break;
       case "branch_anchor":
         // Discussion-branch bookkeeping: surfaced via anchorsFromReplay as a

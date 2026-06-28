@@ -139,6 +139,28 @@ export async function fetchReplay(sessionId: string): Promise<ReplayEvent[]> {
   return (await fetchReplayFull(sessionId)).events;
 }
 
+/** The Matrix coordinates of a session (ADR-0041): the room mirroring it and
+ *  the homeserver + the two resident seats (agent + person) an external Matrix
+ *  client dials. Present only when the node runs the embedded homeserver. */
+export interface SessionRoom {
+  room_id: string;
+  homeserver?: string;
+  agent_id?: string;
+  human_id?: string;
+}
+
+/**
+ * Fetch the Matrix room backing a session, or null when this node isn't running
+ * the embedded homeserver (the route 404s) or the session has no room yet. Used
+ * by the chat header to show that a conversation is a real, addressable room.
+ */
+export async function fetchRoom(sessionId: string): Promise<SessionRoom | null> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/room`);
+  if (res.status === 404) return null; // Matrix off, or no room for this session
+  if (!res.ok) throw new Error(`room: ${res.status}`);
+  return (await res.json()) as SessionRoom;
+}
+
 /** Replay plus the session record's control state (model, provider toggles). */
 export async function fetchReplayFull(
   sessionId: string,
@@ -693,6 +715,20 @@ export async function shareArtifact(
 /** The current principal's capabilities. A full login (or a full-agent share)
  *  is "local" — the whole workspace; a session-scoped share is "share", which
  *  the SPA renders as just that one chat, read-only or writable. */
+/** A seated guest's own Matrix credentials, handed to their browser so it can
+ *  read and drive the session's room as that identity directly (ADR-0041 P2,
+ *  the browser-as-Matrix-client path). Present only when the node runs the
+ *  embedded homeserver and the guest has been seated; absent otherwise, in
+ *  which case the SPA falls back to the bespoke seam. */
+export interface MatrixSession {
+  access_token: string;
+  user_id: string;
+  /** The single room a guest is scoped to. Omitted for the operator, whose
+   *  client syncs every room they're a member of. */
+  room_id?: string;
+  homeserver: string;
+}
+
 export interface Me {
   kind: "local" | "share";
   scope?: string;
@@ -701,6 +737,8 @@ export interface Me {
   /** A share guest's self-asserted display name, so the SPA can label the
    *  guest's own messages live (the server stamps it on the wire regardless). */
   name?: string;
+  /** The guest's own Matrix credentials when seated (browser-as-Matrix-client). */
+  matrix?: MatrixSession;
 }
 
 export async function fetchMe(): Promise<Me> {

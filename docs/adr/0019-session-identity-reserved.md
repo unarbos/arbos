@@ -1,8 +1,14 @@
 # ADR-0019 — Session identity: reserve Principal and Origin
 
-- Status: Accepted (fields reserved now; keying/auth semantics defined in the gateway/frontend phase)
+- Status: Superseded by ADR-0041 (D4/D15). `Principal` collapsed into the Matrix
+  `sender` (a session's authority is room membership + power levels, not a
+  reserved field); `Origin` survives as the door-provenance label it always was
+  (`core.OriginScheduler`, `core.OriginRoom`, `"telegram:…"`) and is now also the
+  cross-door echo key. Kept here as the historical reservation that motivated
+  the collapse.
 - Date: 2026-06-08
-- Relates to: ADR-0014 (ParentID is fork lineage, not identity)
+- Relates to: ADR-0014 (ParentID is fork lineage, not identity); superseded by
+  ADR-0041 (the room is the session)
 
 ## Context
 

@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import { PeopleChat } from "./PeopleChat";
-import { fetchReplay } from "@/lib/api";
 import { hostName } from "@/lib/identity";
 import { SeamClient } from "@/lib/seam";
-import { peopleFromReplay, type PeopleMessage } from "@/lib/transcript";
 
 /**
  * The People surface: the human-to-human side chat for the collaborators on a
@@ -27,12 +25,10 @@ export function PeopleSurface({
   readOnly?: boolean;
 }) {
   const sessionId = surface.path;
-  const [messages, setMessages] = useState<PeopleMessage[]>([]);
   const [roster, setRoster] = useState<string[]>([]);
   const [typing, setTyping] = useState<string[]>([]);
   const [connected, setConnected] = useState(false);
 
-  const idRef = useRef(1);
   const seamRef = useRef<SeamClient | null>(null);
   const selfName = hostName(sessionId);
   const selfNameRef = useRef(selfName);
@@ -40,26 +36,16 @@ export function PeopleSurface({
   const typingTimers = useRef<Map<string, number>>(new Map());
   const lastTypingPing = useRef(0);
 
-  // One scoped seam per session: bind it (replaying chat_notes from the log and
-  // registering us in the roster), then route presence + side-chat frames here.
-  // Own lines are echo-filtered server-side, so an inbound chat_note is always
-  // from someone else. Reconnects re-bind and re-announce automatically.
+  // One scoped seam per session: bind it (registering us in the roster), then
+  // route presence frames here. Side notes themselves render inline in the
+  // conversation timeline (ADR-0038), so this panel only carries presence +
+  // posting — it no longer mirrors the message list. Reconnects re-bind and
+  // re-announce automatically.
   useEffect(() => {
     let closed = false;
     let connectAttempts = 0;
     let retry: number | undefined;
     const timers = typingTimers.current;
-
-    const replay = () => {
-      fetchReplay(sessionId)
-        .then((events) => {
-          if (closed) return;
-          const ppl = peopleFromReplay(events);
-          idRef.current = ppl.length + 1;
-          setMessages(ppl);
-        })
-        .catch(() => {});
-    };
 
     const noteTyping = (name: string) => {
       if (name === selfNameRef.current) return;
@@ -92,16 +78,6 @@ export function PeopleSurface({
       onSession: (id) => {
         if (id !== sessionId) return;
         seam.announceName(hostName(id));
-        replay();
-      },
-      onEnvelope: (env) => {
-        if (env.depth === 0 && env.event.kind === "chat_note") {
-          const d = env.event.data;
-          setMessages((p) => [
-            ...p,
-            { id: idRef.current++, text: d.text, author: d.author ?? "" },
-          ]);
-        }
       },
       onRoster: (sess, users) => {
         // An empty room arrives as JSON null (a Go nil slice), so default it —
@@ -126,10 +102,9 @@ export function PeopleSurface({
   }, [sessionId]);
 
   const send = (text: string) => {
-    const name = hostName(sessionId);
-    if (seamRef.current?.chatNote(text, name)) {
-      setMessages((p) => [...p, { id: idRef.current++, text, author: name }]);
-    }
+    // The note broadcasts to the session; it renders inline in the conversation
+    // (and for everyone else) rather than in a list here.
+    seamRef.current?.chatNote(text, hostName(sessionId));
   };
 
   // Throttled typing ping: at most one per ~1.5s while actively typing.
@@ -142,7 +117,6 @@ export function PeopleSurface({
 
   return (
     <PeopleChat
-      messages={messages}
       selfName={selfName}
       canPost={!readOnly && connected}
       roster={roster}

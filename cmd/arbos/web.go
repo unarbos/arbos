@@ -41,14 +41,6 @@ import (
 // forestURL additionally joins a forest head and serves the same gateway
 // (auth gate included) at the assigned public URL through an outbound tunnel.
 func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve bool) error {
-	host, store, cleanup, err := assemble(cfg, dbPath, approve, false)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
-	cfg.WarnIfNoLLM(os.Stderr)
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -63,6 +55,12 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	// in a directory takes the lock and owns these singletons; a later one
 	// still serves as a local viewer on a walked port (ADR-0035) but runs none
 	// of them, and never claims the public forest URL.
+	//
+	// Ownership is decided BEFORE assembling, because the embedded Matrix
+	// homeserver is one of those directory singletons: it binds a fixed
+	// loopback port, so a second instance that tried to start it would collide
+	// and fail to boot at all — defeating the viewer fallback. assemble gets
+	// wantMatrix=primary, so a viewer simply runs without Matrix.
 	cwd, _ := os.Getwd()
 	primary := true
 	if cwd != "" {
@@ -70,11 +68,19 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 		if lockErr != nil {
 			primary = false
 			forestURL = "" // a viewer never claims the directory's public URL
-			fmt.Fprintf(os.Stderr, "arbos: another arbos is already running in this directory — this instance is a local viewer only (no Telegram bridge, scheduler, or public URL)\n")
+			fmt.Fprintf(os.Stderr, "arbos: another arbos is already running in this directory — this instance is a local viewer only (no Telegram bridge, scheduler, embedded Matrix, or public URL)\n")
 		} else {
 			defer release()
 		}
 	}
+
+	host, store, matrixBridge, cleanup, err := assemble(cfg, dbPath, approve, false, primary)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	cfg.WarnIfNoLLM(os.Stderr)
 
 	if primary {
 		// Retire runs a previous instance left active when it died: a delegated
@@ -184,6 +190,13 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 		HostSettings: settingsAdmin(host.Settings),
 		// The Settings tab's provider panel (endpoint, key, credits).
 		LLM: llmAdmin(cfg, host, secrets),
+	}
+	// The embedded Matrix substrate, when ARBOS_MATRIX is on (ADR-0041): the
+	// gateway resolves a session to its room through this. Guarded so a typed
+	// nil bridge never becomes a non-nil interface (which would advertise the
+	// room route with nothing behind it).
+	if matrixBridge != nil {
+		gw.Matrix = matrixBridge
 	}
 	if dist != "" {
 		// Override the embedded bundle with a directory (UI development).
@@ -316,6 +329,11 @@ func runWeb(cfg piwire.Config, dbPath, addr, dist, forestURL string, approve boo
 	// second instance must not claim and re-deliver the same outbox messages.
 	if primary {
 		go gw.DeliverOutbox(ctx)
+		// Watch the node's session rooms for messages arriving from outside the
+		// engine (an external Matrix client logged in as the person, or a
+		// federated peer) and surface them to the browser. No-op when Matrix is
+		// off. Primary-only, like the outbox: one watcher per directory.
+		go gw.WatchRooms(ctx)
 	}
 
 	// BaseContext ties every request — including hijacked WebSocket seam

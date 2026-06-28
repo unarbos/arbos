@@ -1,12 +1,66 @@
 # ADR-0041 — The room is the session: every arbos is a Matrix homeserver
 
-- Status: Proposed (sketch)
+- Status: Accepted (single-node substrate implemented + verified; the
+  distributed phases — federation, E2EE/SSSS, multi-agent, payments — are
+  accepted-but-pending a multi-node deployment to build and verify). See
+  **Implementation status** below.
 - Date: 2026-06-26
 - License impact: **adopts AGPL-3.0 for arbos** (was MIT) — required to bake in
   Dendrite (AGPL) and the mautrix/gomuks stack; see License.
 - Amends: ADR-0033 (hosted backend + device identity), ADR-0034 (gateway auth,
   tunnel, the forest), ADR-0035 (agent = (dir, machine), derived URLs),
   ADR-0036 (agent wallet), ADR-0013/0038 (delegation; multi-party + side notes)
+
+## Implementation status
+
+The **single-node substrate is implemented and verified end-to-end** (Go suite +
+frontend type-check green; the guest and inbound flows confirmed live in a
+browser against the embedded homeserver):
+
+- Every arbos embeds its own Matrix homeserver (Dendrite, in-process,
+  `internal/matrix/hs`), **default-on for the web door** (`ARBOS_MATRIX=0` is the
+  escape hatch; a one-shot CLI run boots no homeserver). Vendored fork under
+  `third_party/dendrite`; LICENSE relicensed MIT → AGPL-3.0.
+- `core.Audience` (D1) splits the federation axis from model projection; the
+  `life.arbos.*` wire contract (D10) lives in `internal/matrix/wire.go`; a
+  kernel-purity test keeps `internal/core` free of any Matrix/storage type.
+- `matrix.Store` is the composite `SessionStore` (D2): authoritative local
+  sqlite capture + a per-session room mirror, with **durable room resolution**
+  (a resumed session re-resolves its room from the homeserver).
+- Two resident identities (D9): `@agent` and `@human`; a session room is
+  two-membered, and the mirror publishes each event under its **true author**
+  (D4) — the person's messages as `@human`, the agent's as `@agent`.
+- The room is a **live inbound channel** (the watcher injects externally-posted
+  messages as prompts — talk to your agent from any Matrix client — echo-safe
+  via the `life.arbos` metadata and `OriginRoom`, into live *or* closed sessions).
+- A chat share **seats a guest as their own Matrix identity** (`@guest-…`), and
+  the guest's browser drives the room as a Matrix client (`web/src/lib/matrix.ts`
+  + `MatrixRoomView`), read via `/sync` and write via the room — **membership is
+  the live authority** (revoke kicks them); the operator's `/api/me` likewise
+  hands the operator their `@human` credentials.
+- Side notes (D1/ADR-0038) **fold inline** into the one timeline.
+- The **outbound redaction twin** (D12) scrubs managed-secret values from the
+  room copy of an event while the local log keeps full fidelity.
+- The `.arbos/` key/identity **tool denylist** (D3) and a deterministic /
+  idempotent / lazy **bootstrap** (agent + person on first web start) are in.
+
+**Deferred, pending a multi-node deployment** (≥2 nodes + the forest relay,
+and/or the Matrix crypto stack — these cannot be built or verified in one
+loopback node):
+
+- The operator's local seam **stays** as the D6 presentation channel
+  (streaming/tools/approvals never federate); it is not "replaced by Matrix."
+- **Federation** over the relay, cross-node rooms, remote delegation, the
+  `server_name`/web-entry split (D8), and `TransportAgent`.
+- **E2EE / SSSS / cross-signing / key backup** (D12/D14) and the always-on
+  **commons** node + person `@const` linking (D9).
+- **Multi-agent working rooms** (D13: addressed-only activation, dual budget,
+  hop-counter loops) and **wallet / agent-to-agent payments** (ADR-0036).
+- The lineage collapse (`ParentID`/`Owner`/`SpawnedBy` → Matrix relations,
+  D15/D11) waits on session relations (threads / `m.relates_to`) existing as the
+  replacement; the fields remain load-bearing for `sessiontree`/scheduler until
+  then. Likewise the bespoke seam/share/grant retire **after** default-on Matrix
+  soaks (they are still the `ARBOS_MATRIX=0` fallback).
 
 ## Context
 

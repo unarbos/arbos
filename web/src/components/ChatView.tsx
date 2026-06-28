@@ -392,6 +392,26 @@ const Item = memo(function Item({
     case "interrupted":
       return <div className="text-muted">Stopped</div>;
 
+    case "chatnote":
+      // Human-to-human side note, inline in the timeline: a dim aside the agent
+      // never sees. Attributed to its author; your own notes carry your name
+      // (or none), matching the "see others, not yourself" convention elsewhere.
+      return (
+        <div className="flex items-start gap-2 rounded-md border border-dashed border-line/60 bg-card/40 px-3 py-1.5">
+          <MessageSquareQuote size={12} className="mt-1 shrink-0 text-faint" />
+          <div className="min-w-0 flex-1">
+            {item.author && item.author !== hooks?.selfName && (
+              <div className="text-[10.5px] uppercase tracking-wider text-faint select-none">
+                {item.author} · side note
+              </div>
+            )}
+            <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-muted">
+              {item.text}
+            </span>
+          </div>
+        </div>
+      );
+
     case "notice":
       // The agent's voice between turns (outbox): a scheduled firing or
       // finished background work speaking up, ambient like Cursor's rows.
@@ -1354,6 +1374,7 @@ function childActivity(child: ChatState): string {
       case "interrupted":
       case "error":
       case "notice":
+      case "chatnote":
       case "subagent":
         continue;
       default: {

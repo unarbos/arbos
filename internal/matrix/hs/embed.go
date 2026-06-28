@@ -37,10 +37,16 @@ func Start(ctx context.Context, dataDir, serverName, bindAddr string) (*Homeserv
 		return nil, fmt.Errorf("matrix/hs: create data dir: %w", err)
 	}
 	srv, err := dendrite.Start(dendrite.Options{
-		ServerName:       serverName,
-		DataDir:          dataDir,
-		BindAddr:         bindAddr,
-		OpenRegistration: true, // loopback-only; the appservice/identity flow replaces this later
+		ServerName: serverName,
+		DataDir:    dataDir,
+		BindAddr:   bindAddr,
+		// Closed registration: the node provisions its own users (agent, person,
+		// guests) through the admin CreateAccount path below, never the public
+		// client register flow. This must stay off because the client-server API
+		// is reverse-proxied onto the gateway's public door (ADR-0041 H1
+		// follow-on) — open registration there would let anyone who reaches the
+		// forest URL mint an account on the homeserver.
+		OpenRegistration: false,
 	})
 	if err != nil {
 		return nil, err

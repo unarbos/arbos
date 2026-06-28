@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/unarbos/arbos/internal/core"
 	"github.com/unarbos/arbos/internal/share"
 )
 
@@ -109,22 +110,87 @@ func sessionScopeAllows(r *http.Request, ref string, perm share.Perm) bool {
 	}
 }
 
+// matrixCredsExposable reports whether the SPA may be handed live Matrix
+// credentials for the browser-as-Matrix-client path. True whenever Matrix is on:
+// the Client-Server API is reverse-proxied onto this same origin
+// (withMatrixProxy), so the homeserver is reachable wherever the SPA is — over
+// the forest tunnel for a remote browser, loopback for a local one — with no
+// mixed-content block. (This lifts the earlier loopback-only restriction now
+// that the homeserver is no longer stranded on 127.0.0.1:18008; ADR-0041 H1.)
+func (s *Server) matrixCredsExposable() bool {
+	return s.Matrix != nil
+}
+
+// matrixCreds shapes the credential payload the SPA's Matrix client consumes
+// (see MatrixSession in api.ts). The homeserver is left empty to mean
+// "same origin": the client resolves it to its own location.origin, where
+// withMatrixProxy serves the proxied Client-Server API. roomID is empty for the
+// operator (who syncs every room) and set for a seated guest (one room).
+func matrixCreds(token, userID, roomID string) map[string]any {
+	creds := map[string]any{
+		"access_token": token,
+		"user_id":      userID,
+		"homeserver":   "", // same origin as the SPA (see withMatrixProxy)
+	}
+	if roomID != "" {
+		creds["room_id"] = roomID
+	}
+	return creds
+}
+
 // handleMe reports the current principal's capabilities so the SPA can enter
 // share mode: a full login (or full-agent share) sees the whole workspace; a
 // session-scoped share is dropped onto just that chat, read-only or writable.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"kind": "local"}
-	if sub, ok := s.Auth.principal(r); ok && strings.HasPrefix(sub, sharePrincipal) {
-		if g, live := s.shareGrant(r, strings.TrimPrefix(sub, sharePrincipal)); live && g.Scope.Kind == share.ScopeSession {
-			out = map[string]any{
-				"kind":    "share",
-				"scope":   string(g.Scope.Kind),
-				"session": g.Scope.Ref,
-				"perm":    permWord(g.Perm),
-				// The guest's self-asserted name, so their own browser can label
-				// their messages live (the server already stamps it on the wire).
-				"name": s.Auth.principalName(r),
+	guest := false
+	if s.Auth != nil {
+		if sub, ok := s.Auth.principal(r); ok && strings.HasPrefix(sub, sharePrincipal) {
+			if g, live := s.shareGrant(r, strings.TrimPrefix(sub, sharePrincipal)); live && g.Scope.Kind == share.ScopeSession {
+				guest = true
+				name := s.Auth.principalName(r)
+				out = map[string]any{
+					"kind":    "share",
+					"scope":   string(g.Scope.Kind),
+					"session": g.Scope.Ref,
+					"perm":    permWord(g.Perm),
+					// The guest's self-asserted name, so their own browser can
+					// label their messages live (the server stamps it on the wire).
+					"name": name,
+				}
+				// Browser-as-Matrix-client (ADR-0041 P2): when this guest has
+				// been seated in the session's room, hand their browser the
+				// account's token + room coordinates so it drives the room as
+				// that identity — membership, not the bearer token, the live
+				// authority. Absent (e.g. across a restart) the SPA keeps the seam.
+				//
+				// Only on a loopback-only door (matrixCredsExposable): the
+				// embedded homeserver binds 127.0.0.1 and isn't tunneled, so a
+				// remote guest's browser can neither reach it (nor fetch http://
+				// from an https page — mixed content). Handing a remote guest
+				// these creds would route them to a dead room; instead they fall
+				// back to the seam, which works over the tunnel (ADR-0041 H1).
+				// And only for a writable share — a seat is send power, so a
+				// read-only guest is never seated and gets no token (H2).
+				if s.matrixCredsExposable() && g.Perm >= share.PermWrite {
+					if token, userID, ok := s.Matrix.GuestSession(core.SessionID(g.Scope.Ref), name); ok {
+						if roomID, hasRoom := s.Matrix.RoomID(core.SessionID(g.Scope.Ref)); hasRoom {
+							out["matrix"] = matrixCreds(token, userID, roomID)
+						}
+					}
+				}
 			}
+		}
+	}
+	// The local operator (not a scoped guest): hand their own Matrix identity
+	// (@human) so their browser/TUI can drive Matrix as the operator. There is
+	// no single room — the operator is a member of every session room, so their
+	// client syncs them all (room_id is omitted). Loopback-only, same as the
+	// guest path: the embedded homeserver isn't reachable from a remote
+	// operator browser over the forest tunnel (H1).
+	if !guest && s.matrixCredsExposable() {
+		if token, userID, ok := s.Matrix.OperatorSession(); ok {
+			out["matrix"] = matrixCreds(token, userID, "")
 		}
 	}
 	writeJSON(w, out)

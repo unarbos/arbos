@@ -12,7 +12,8 @@ import {
   type TabInfo,
 } from "./components/TabStrip";
 import { ThemePicker } from "./components/ThemePicker";
-import type { SharePerm } from "./lib/api";
+import { MatrixRoomView } from "./components/MatrixRoomView";
+import type { MatrixSession, SharePerm } from "./lib/api";
 import { peopleSurface } from "./lib/surface";
 import { useMediaQuery } from "./lib/useMediaQuery";
 
@@ -59,7 +60,18 @@ const PANEL_TITLE: Record<PanelKind, string> = {
   people: "People",
 };
 
-export function ShareChat({ session, perm }: { session: string; perm: SharePerm }) {
+export function ShareChat({
+  session,
+  perm,
+  matrix,
+}: {
+  session: string;
+  perm: SharePerm;
+  /** The guest's own Matrix credentials, when seated (ADR-0041 P2). Present
+   *  turns the chat pane into a Matrix-native view driven by the guest's own
+   *  identity instead of the bespoke seam; absent keeps the seam path. */
+  matrix?: MatrixSession;
+}) {
   const canWrite = perm === "write" || perm === "admin";
 
   // The chat is always open. At most one companion is docked beside it.
@@ -134,27 +146,32 @@ export function ShareChat({ session, perm }: { session: string; perm: SharePerm 
     </>
   );
 
-  const chatPane = (paneVisible: boolean) => (
-    <ChatTab
-      active={paneVisible}
-      focused={paneVisible}
-      focusTick={0}
-      resumeId={session}
-      readOnly={!canWrite}
-      handle={{
-        onBusy: setChatBusy,
-        onTitle: (text) => {
-          if (!titlePinned) setChatTitle(tabTitle(text));
-        },
-        // The chat's People rail opens the same panel as the top-row People
-        // button. Only People is openable in this chrome — every other surface
-        // (files, canvases) is 403 for a guest.
-        onOpenSurface: (s) => {
-          if (s.kind === "people") openPanel("people");
-        },
-      }}
-    />
-  );
+  const chatPane = (paneVisible: boolean) =>
+    matrix ? (
+      // Browser-as-Matrix-client (ADR-0041 P2): a seated guest drives the room
+      // as their own Matrix identity, not the bespoke seam.
+      <MatrixRoomView session={matrix} sessionId={session} canWrite={canWrite} />
+    ) : (
+      <ChatTab
+        active={paneVisible}
+        focused={paneVisible}
+        focusTick={0}
+        resumeId={session}
+        readOnly={!canWrite}
+        handle={{
+          onBusy: setChatBusy,
+          onTitle: (text) => {
+            if (!titlePinned) setChatTitle(tabTitle(text));
+          },
+          // The chat's People rail opens the same panel as the top-row People
+          // button. Only People is openable in this chrome — every other surface
+          // (files, canvases) is 403 for a guest.
+          onOpenSurface: (s) => {
+            if (s.kind === "people") openPanel("people");
+          },
+        }}
+      />
+    );
 
   const companionPane = (kind: CompanionKind, paneVisible: boolean) =>
     kind === "history" ? (

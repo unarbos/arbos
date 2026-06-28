@@ -65,7 +65,7 @@ func run(cfg piwire.Config, serve bool, dbPath, task, session string, approve, o
 }
 
 func runServe(cfg piwire.Config, dbPath string, approve bool) error {
-	host, _, cleanup, err := assemble(cfg, dbPath, approve, false)
+	host, _, _, cleanup, err := assemble(cfg, dbPath, approve, false, false)
 	if err != nil {
 		return err
 	}
@@ -90,7 +90,7 @@ func runServe(cfg piwire.Config, dbPath string, approve bool) error {
 }
 
 func runOneShot(cfg piwire.Config, dbPath, task, session string, approve, once bool) error {
-	host, store, cleanup, err := assemble(cfg, dbPath, approve, true)
+	host, store, _, cleanup, err := assemble(cfg, dbPath, approve, true, false)
 	if err != nil {
 		return err
 	}
@@ -127,10 +127,10 @@ func runOneShot(cfg piwire.Config, dbPath, task, session string, approve, once b
 // of the console so an interactive one-shot run shows only its transcript; the
 // headless serve seam stays verbose on stderr. The store is returned alongside
 // the host for read-only frontend projections (the brief and handoff).
-func assemble(cfg piwire.Config, dbPath string, approve, quiet bool) (*piwire.Host, *sqlite.Store, func(), error) {
+func assemble(cfg piwire.Config, dbPath string, approve, quiet, wantMatrix bool) (*piwire.Host, *sqlite.Store, *matrix.Bridge, func(), error) {
 	store, err := piwire.OpenStore(dbPath)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("open store: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("open store: %w", err)
 	}
 	logger := piwire.NewLogger()
 	if quiet {
@@ -141,17 +141,60 @@ func assemble(cfg piwire.Config, dbPath string, approve, quiet bool) (*piwire.Ho
 	// enabled (ADR-0041), wrap it in the composite store so the embedded
 	// homeserver mirrors Room-audience events into per-session rooms while the
 	// sqlite log stays the authoritative local capture (which is also what the
-	// gateway reads). Off by default: the wrap is identity, behavior unchanged.
+	// gateway reads). The bridge is the gateway's separate read-handle onto the
+	// same substrate (session->room resolution + homeserver coordinates); nil
+	// when Matrix is off.
+	//
+	// Matrix is the default substrate for the web door (the multi-party door
+	// every participant shares), so the operator runs on a real homeserver as
+	// @human with the room as the shared mirror — keeping the local seam as the
+	// D6 presentation channel (streaming/tools/approvals never federate). A
+	// one-shot CLI run does not boot a homeserver (wantMatrix is false there);
+	// ARBOS_MATRIX overrides either way ("0" forces off, "1" forces on).
+	matrixOn := wantMatrix
+	matrixForced := false // explicitly requested via ARBOS_MATRIX=1
+	switch os.Getenv(matrixEnvFlag) {
+	case "1":
+		matrixOn = true
+		matrixForced = true
+	case "0":
+		matrixOn = false
+	}
 	var engineStore ports.SessionStore = store
+	var matrixBridge *matrix.Bridge
 	var matrixShutdown func()
-	if os.Getenv(matrixEnvFlag) == "1" {
-		mirror, shutdown, merr := startEmbeddedMatrix(filepath.Dir(dbPath))
-		if merr != nil {
+	if matrixOn {
+		em, shutdown, merr := startEmbeddedMatrix(filepath.Dir(dbPath))
+		switch {
+		case merr != nil && matrixForced:
+			// The operator asked for Matrix explicitly — a failure to start it
+			// is fatal, not a silent downgrade.
 			_ = store.Close()
-			return nil, nil, nil, fmt.Errorf("start embedded matrix: %w", merr)
+			return nil, nil, nil, nil, fmt.Errorf("start embedded matrix: %w", merr)
+		case merr != nil:
+			// Default-on, but the embedded homeserver couldn't start — most
+			// commonly its fixed loopback port is already held by another arbos
+			// node on this machine (a second instance in a different directory,
+			// each its own directory primary). Degrade to the local-only path
+			// rather than refusing to boot: the web door still serves, just
+			// without the shared Matrix substrate (ADR-0041 H3).
+			fmt.Fprintf(os.Stderr, "arbos: embedded Matrix unavailable (%v) — serving without it\n", merr)
+		default:
+			// One guest registry, shared between the mirror (which reads it to
+			// route a guest's messages as their own identity) and the bridge
+			// (which writes it as it seats a guest in a shared chat's room).
+			guests := matrix.NewGuestRegistry()
+			// Outbound redaction twin (D12): scrub managed-secret values from the
+			// copy mirrored to the room. Only when a vault is configured.
+			var redact func(string) string
+			if cfg.Vault != nil {
+				redact = redactSecretsFn(cfg.Vault)
+			}
+			mstore := matrix.NewStore(store, matrix.NewClientMirror(em.agent, em.human, em.humanID, guests, redact))
+			engineStore = mstore
+			matrixBridge = matrix.NewBridge(em.agent, em.human, mstore, em.homeserverURL, em.agentID, em.humanID, guests, em.provision)
+			matrixShutdown = shutdown
 		}
-		engineStore = matrix.NewStore(store, mirror)
-		matrixShutdown = shutdown
 	}
 
 	host, err := piwire.Assemble(piwire.HostConfig{
@@ -166,7 +209,7 @@ func assemble(cfg piwire.Config, dbPath string, approve, quiet bool) (*piwire.Ho
 			matrixShutdown()
 		}
 		_ = store.Close()
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	cleanup := func() {
 		host.Cleanup()
@@ -175,7 +218,7 @@ func assemble(cfg piwire.Config, dbPath string, approve, quiet bool) (*piwire.Ho
 		}
 		_ = store.Close()
 	}
-	return host, store, cleanup, nil
+	return host, store, matrixBridge, cleanup, nil
 }
 
 func oneShot(ctx context.Context, eng *engine.Engine, store *sqlite.Store, cfg piwire.Config, task, session string, approve, once bool) error {

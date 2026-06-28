@@ -4,6 +4,7 @@ import {
   Check,
   FileText,
   GitBranch,
+  Globe,
   Loader2,
   Mic,
   Paperclip,
@@ -30,6 +31,7 @@ import {
   fetchReplay,
   fetchLLM,
   fetchReplayFull,
+  fetchRoom,
   resetModelsCache,
   HttpError,
   killJob,
@@ -42,6 +44,7 @@ import {
   type ChildRun,
   type ModelOption,
   type ProviderView,
+  type SessionRoom,
 } from "@/lib/api";
 import { notifyRunComplete } from "@/lib/notify";
 import {
@@ -168,6 +171,26 @@ function audioFormat(file: File): string {
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** The localpart of a Matrix user id ("@human:host" -> "human"), for the room
+ *  badge's compact attribution. A non-mxid string is returned unchanged. */
+function mxLocalpart(userID?: string): string {
+  if (!userID || !userID.startsWith("@")) return userID ?? "";
+  const rest = userID.slice(1);
+  const i = rest.indexOf(":");
+  return i >= 0 ? rest.slice(0, i) : rest;
+}
+
+/** A homeserver URL's host:port ("http://127.0.0.1:18008" -> "127.0.0.1:18008")
+ *  for the room badge. Falls back to the raw string on a parse failure. */
+function hostLabel(url?: string): string {
+  if (!url) return "";
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
 
 /** A spooled file's destination: a short unique prefix keeps re-attaches of
@@ -297,6 +320,10 @@ export function ChatTab({
   // background bar's rows; clicking one opens it in a run tab beside us.
   const [runs, setRuns] = useState<ChildRun[]>([]);
   const [boundSession, setBoundSession] = useState<string | null>(resumeId);
+  // The Matrix room backing this chat (ADR-0041), or null when the node isn't
+  // running the embedded homeserver. Drives the subtle "this chat is a real,
+  // addressable room" badge; absent entirely on the default (non-Matrix) path.
+  const [room, setRoom] = useState<SessionRoom | null>(null);
   // The host's display name for this chat (set in the Share dialog). Kept in
   // state so setting it relabels the host's own messages live.
   const [selfName, setSelfName] = useState(() => hostName(resumeId));
@@ -573,13 +600,11 @@ export function ChatTab({
         reconcileAnchors();
       },
       onEnvelope: (env) => {
-        // A human-to-human side-chat line belongs to the People panel, not the
-        // agent transcript: the People surface owns the message list on its own
-        // scoped seam, so the chat tab simply ignores chat_notes here. depth>0
-        // (a delegated child) never surfaces here.
-        if (env.depth === 0 && env.event.kind === "chat_note") {
-          return;
-        }
+        // Human-to-human side notes (chat_note) now fold inline into the
+        // timeline (ADR-0038): the reducer renders them as a dim side-note row
+        // in the conversation, so they flow through dispatch like any event
+        // rather than being shunted to a separate panel. depth>0 (a delegated
+        // child) still folds into its own sub-agent transcript below.
         // The agent presenting a file (the show tool) opens its panel the
         // moment the result streams in — live only, top-level only: a
         // resumed transcript renders chips to re-open, and a delegated
@@ -785,6 +810,27 @@ export function ChatTab({
       window.clearInterval(id);
     };
   }, [active, docVisible, boundSession]);
+
+  // Resolve the Matrix room backing this chat once a session is bound. 404s
+  // (Matrix off, or no room yet) clear the badge; best-effort either way, so a
+  // node without the embedded homeserver simply shows no badge.
+  useEffect(() => {
+    if (!boundSession) {
+      setRoom(null);
+      return;
+    }
+    let stop = false;
+    fetchRoom(boundSession)
+      .then((r) => {
+        if (!stop) setRoom(r);
+      })
+      .catch(() => {
+        if (!stop) setRoom(null);
+      });
+    return () => {
+      stop = true;
+    };
+  }, [boundSession]);
 
   // The background bar's jobs list is folded from the transcript, which only
   // learns of a job's end if some LATER tool result happens to mention it —
@@ -1625,6 +1671,24 @@ export function ChatTab({
               </button>
             </div>
           )}
+        </div>
+      )}
+      {room && (
+        <div
+          className="flex shrink-0 items-center gap-1.5 border-b border-line/40 bg-panel/50 px-3.5 py-1 text-[11px] text-faint select-none"
+          title={`Matrix room ${room.room_id}${room.homeserver ? `\nHomeserver: ${room.homeserver}` : ""}\nYou: ${room.human_id ?? "?"}\nAgent: ${room.agent_id ?? "?"}\n\nThis conversation is a real Matrix room — reachable from any Matrix client signed in to this homeserver.`}
+        >
+          <Globe size={11} className="shrink-0 text-accent/70" />
+          <span className="truncate">
+            Matrix room · you’re{" "}
+            <span className="text-muted">{mxLocalpart(room.human_id) || "you"}</span>
+            {room.homeserver && (
+              <>
+                {" "}
+                · <span className="text-muted">{hostLabel(room.homeserver)}</span>
+              </>
+            )}
+          </span>
         </div>
       )}
       {!fresh && (

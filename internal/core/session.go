@@ -78,6 +78,14 @@ type Session struct {
 // own origins ("telegram:chat/123") per the reservation above.
 const OriginScheduler = "scheduler"
 
+// OriginRoom marks a user message that arrived through the session's shared
+// room — a participant typing from an external client federated into the room,
+// rather than a local door. Like every door origin it drives cross-door echo
+// suppression: the message is already present in the room, so the Matrix mirror
+// recognizes this origin and does not re-publish it (which would duplicate it),
+// while the attached frontends still render it as the cross-door echo.
+const OriginRoom = "room"
+
 // PrincipalLocal is the principal of every session on a single-user local
 // host — the address the agent's voice targets until real accounts exist.
 const PrincipalLocal = "local"

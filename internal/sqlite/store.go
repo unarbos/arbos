@@ -212,6 +212,19 @@ CREATE TABLE IF NOT EXISTS boards (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+-- share_seats records the Matrix room seats a share token created (ADR-0041): a
+-- chat-share guest is seated in the session's room as their own identity, and
+-- this lets a revoke — possibly across a restart, when the in-memory registry
+-- is gone — kick exactly the guests that token seated, so room membership
+-- tracks the grant's lifecycle. One link can seat many named guests, hence the
+-- composite key.
+CREATE TABLE IF NOT EXISTS share_seats (
+    token   TEXT NOT NULL,
+    session TEXT NOT NULL,
+    author  TEXT NOT NULL,
+    PRIMARY KEY (token, session, author)
+);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate: %w", err)

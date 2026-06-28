@@ -61,7 +61,7 @@ function Root() {
   }, [me]);
   if (!me) return null; // a blink while /api/me resolves
   if (me.kind === "share" && me.session) {
-    return <ShareChat session={me.session} perm={me.perm ?? "read"} />;
+    return <ShareChat session={me.session} perm={me.perm ?? "read"} matrix={me.matrix} />;
   }
   return <App />;
 }

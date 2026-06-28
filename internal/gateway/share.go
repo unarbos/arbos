@@ -172,7 +172,18 @@ func (s *Server) handleShareLink(w http.ResponseWriter, r *http.Request) {
 // only the logged-in operator revokes. Revoking an unknown token is a no-op
 // success, so a double-click or a stale management view doesn't error.
 func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
-	if err := s.Store.RevokeGrant(r.Context(), r.PathValue("token")); err != nil {
+	token := r.PathValue("token")
+	// Kick the guests this link seated in their rooms, so revocation removes
+	// them from the Matrix membership too — not just the bespoke seam (which
+	// the live grant check denies the moment the grant is gone). Best-effort and
+	// before the grant is dropped, so the membership and the grant retire
+	// together.
+	if s.Matrix != nil {
+		for _, seat := range s.takeSeats(r.Context(), token) {
+			_ = s.Matrix.RemoveGuest(r.Context(), core.SessionID(seat.Session), seat.Author)
+		}
+	}
+	if err := s.Store.RevokeGrant(r.Context(), token); err != nil {
 		http.Error(w, "could not revoke", http.StatusInternalServerError)
 		return
 	}
@@ -220,6 +231,27 @@ func (s *Server) handleShareView(w http.ResponseWriter, r *http.Request) {
 		name := sanitizeGuestName(q.Get("name"))
 		if name == "" {
 			name = "Guest"
+		}
+		// Matrix-native sharing (ADR-0041 Step 4): seat this guest in the
+		// session's room as their own identity, so room membership reflects the
+		// share and their messages mirror under their own seat — not the host's.
+		// Best-effort and additive: the scoped seam below carries the guest
+		// regardless, and a node without the embedded homeserver skips this.
+		//
+		// Write-only: a seat is room membership, and the embedded room grants
+		// members the default send power, so a seated guest can post directly
+		// via the Matrix client (and drive the agent). That is exactly the
+		// write capability a read-only share must withhold — so a read-only
+		// guest is never seated and falls back to the seam, where the perm gate
+		// enforces observe-only. Without this gate the Matrix path silently
+		// escalates every read-only share to writable (ADR-0041 D5/D6).
+		if s.Matrix != nil && g.Perm >= share.PermWrite {
+			if _, err := s.Matrix.InviteGuest(r.Context(), core.SessionID(g.Scope.Ref), name); err == nil {
+				// Remember the seat so revoking this link kicks them (membership
+				// tracks the grant lifecycle). A seating failure must never block
+				// joining — the bespoke seam is the floor.
+				s.recordSeat(r.Context(), g.Token, g.Scope.Ref, name)
+			}
 		}
 		s.setShareCookie(w, r, g, name)
 	case share.ScopeAll:
