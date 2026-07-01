@@ -8,6 +8,7 @@ import {
   Globe,
   Loader2,
   MessageSquare,
+  NotebookPen,
   Orbit,
   Plus,
   Rows2,
@@ -59,7 +60,8 @@ export type NewTabKind =
   | "terminal"
   | "files"
   | "browser"
-  | "messenger";
+  | "messenger"
+  | "blog";
 
 /**
  * Drag wiring shared across strips (the drag state lives in App, so a tab can
@@ -230,6 +232,7 @@ const NEW_TAB_ITEMS: { kind: NewTabKind; label: string; icon: React.ReactNode }[
   { kind: "files", label: "Files", icon: <FolderTree size={13} /> },
   { kind: "browser", label: "Browser", icon: <Globe size={13} /> },
   { kind: "messenger", label: "Messenger", icon: <Send size={13} /> },
+  { kind: "blog", label: "Blog", icon: <NotebookPen size={13} /> },
 ];
 
 /**

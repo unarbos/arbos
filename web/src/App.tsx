@@ -45,9 +45,11 @@ import {
   createBrowserTab,
   fetchLLM,
   listBrowserTabs,
+  writeFile,
   type SessionSummary,
   type ShareScope,
 } from "./lib/api";
+import { defaultBlogTemplate } from "./lib/blog";
 import { ShareDialog } from "./components/ShareDialog";
 import {
   computePlaces,
@@ -796,6 +798,32 @@ export default function App() {
     });
   }, []);
 
+  /** A fresh blank blog: seed a new blog/<date>.html from the default template,
+   *  write it to disk, then open it in its own tab — which routes to the
+   *  WYSIWYG BlogSurface editor (isBlogPath). Unlike /blog (a research run),
+   *  this is an empty article ready to type into. */
+  const newBlogTab = useCallback((pane?: number) => {
+    const date = new Date().toISOString().slice(0, 10);
+    const stamp = Date.now().toString(36);
+    const path = `blog/untitled-${date}-${stamp}.html`;
+    writeFile(path, defaultBlogTemplate())
+      .then(() => {
+        setLayout((s) => {
+          const into = pane ?? s.focusedPane;
+          const surface: Surface = { kind: "canvas", path, title: "Untitled blog" };
+          const tab = surfaceTab(nextKey.current++, into, surface);
+          return normalize({
+            ...s,
+            tabs: [...s.tabs, tab],
+            paneActive: { ...s.paneActive, [into]: tab.key },
+            focusedPane: into,
+            focusTick: s.focusTick + 1,
+          });
+        });
+      })
+      .catch((e) => toastError(errMsg(e)));
+  }, []);
+
   /** The settings panel as a singleton tab, opened from the top-left gear. */
   const openSettingsTab = useCallback(
     () => openSingleton((t) => t.kind === "settings", settingsTab),
@@ -940,6 +968,9 @@ export default function App() {
         case "messenger":
           newMessengerTab(pane);
           break;
+        case "blog":
+          newBlogTab(pane);
+          break;
         default: {
           const exhaustive: never = kind;
           throw new Error(`unknown tab kind: ${String(exhaustive)}`);
@@ -953,6 +984,7 @@ export default function App() {
       openFilesTab,
       openBrowserTab,
       newMessengerTab,
+      newBlogTab,
     ],
   );
 
