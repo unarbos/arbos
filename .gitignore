@@ -1,0 +1,6 @@
+/target
+/desktop/target
+.arbos/
+.DS_Store
+__pycache__/
+*.log
