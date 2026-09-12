@@ -8,3 +8,4 @@ pub mod pty;
 pub mod sched;
 pub mod serve;
 pub mod tools;
+pub mod worktree;
