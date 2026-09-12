@@ -225,7 +225,15 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
                 hooks.broadcast(tree_frame(&place));
             }
             _ = tail.tick() => {
-                for agent in list_agents(&place).unwrap_or_default() {
+                let agents = list_agents(&place).unwrap_or_default();
+                // A deleted chat takes its cursors with it, so a folder
+                // recreated under the same id starts from its first line.
+                tails.retain(|id, _| agents.iter().any(|a| a.id.as_str() == id));
+                announced.retain(|key| {
+                    key.split_once('/')
+                        .is_some_and(|(id, _)| agents.iter().any(|a| a.id.as_str() == id))
+                });
+                for agent in agents {
                     // Detached jobs that finished since the last tick. The
                     // notice goes on the transcript either way; a wake only
                     // when the agent is idle — a running turn reloads the

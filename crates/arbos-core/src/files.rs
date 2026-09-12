@@ -205,21 +205,43 @@ pub struct TranscriptTail {
     /// Physical lines consumed, blank and damaged ones included, so `seq`
     /// matches `load_transcript`.
     pub lines: u64,
+    /// Identity of the file the offset belongs to. A different inode is a
+    /// different file (the folder was deleted and recreated, or a fork's
+    /// transcript was copied in), whatever its length.
+    identity: Option<(u64, u64)>,
+}
+
+fn file_identity(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
 }
 
 impl TranscriptTail {
     /// Events on lines appended since the last call, each stamped with its
-    /// 1-based physical line. A file that shrank below the offset was
-    /// replaced; the tail starts over from its beginning.
+    /// 1-based physical line. A file that shrank below the offset, or that
+    /// is a different file than last time, was replaced; the tail starts
+    /// over from its beginning.
     pub fn read_new(&mut self, path: &Path) -> Result<Vec<Event>> {
         use std::io::{Read, Seek, SeekFrom};
         let Ok(mut file) = File::open(path) else {
             return Ok(Vec::new());
         };
-        let len = file.metadata()?.len();
-        if len < self.offset {
+        let meta = file.metadata()?;
+        let len = meta.len();
+        let identity = file_identity(&meta);
+        let replaced = len < self.offset || (self.identity.is_some() && identity != self.identity);
+        if replaced {
             *self = Self::default();
         }
+        self.identity = identity;
         if len == self.offset {
             return Ok(Vec::new());
         }
