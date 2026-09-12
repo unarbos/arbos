@@ -7,4 +7,5 @@ pub mod plan;
 pub mod pty;
 pub mod sched;
 pub mod serve;
+pub mod setup;
 pub mod tools;

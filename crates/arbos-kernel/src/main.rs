@@ -12,8 +12,10 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(arbos_kernel::serve::run(place))
         }
+        "setup" => arbos_kernel::setup::run(arbos_kernel::setup::Args::parse(args)?),
         "help" | "-h" | "--help" => {
             println!("arbos-kernel serve [place]");
+            println!("{}", arbos_kernel::setup::USAGE);
             Ok(())
         }
         other => bail!("unknown command {other}"),
