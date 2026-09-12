@@ -23,6 +23,7 @@ use bezel::{
 };
 
 mod general;
+mod model;
 mod performance;
 mod theme;
 mod typography;
@@ -45,16 +46,23 @@ const CONTENT_MAX_WIDTH: f32 = 860.;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     General,
+    Model,
     Appearance,
     Performance,
 }
 
 impl Section {
-    const ALL: [Self; 3] = [Self::General, Self::Appearance, Self::Performance];
+    const ALL: [Self; 4] = [
+        Self::General,
+        Self::Model,
+        Self::Appearance,
+        Self::Performance,
+    ];
 
     fn title(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Model => "Model",
             Self::Appearance => "Appearance",
             Self::Performance => "Performance",
         }
@@ -65,6 +73,7 @@ impl Section {
     /// and the gap under the whole block is the same either way.
     fn subtitle(self) -> Option<&'static str> {
         match self {
+            Self::Model => Some("Who answers the chat, and with which key."),
             Self::General | Self::Appearance | Self::Performance => None,
         }
     }
@@ -72,6 +81,7 @@ impl Section {
     fn glyph(self) -> &'static str {
         match self {
             Self::General => icons::system::SETTINGS_MINIMALISTIC,
+            Self::Model => icons::system::KEY_MINIMALISTIC,
             Self::Appearance => icons::system::SUN,
             Self::Performance => icons::devices::CPU,
         }
@@ -81,6 +91,7 @@ impl Section {
 pub struct SettingsWindow {
     workspace: Entity<Workspace>,
     section: Section,
+    host: model::HostPanel,
 }
 
 /// Open the window, or bring the open one forward — a second settings window
@@ -118,7 +129,11 @@ pub fn open(
         },
         |window, cx| {
             appearance::observe_window(window, cx).detach();
-            cx.new(|_cx| SettingsWindow { workspace, section })
+            cx.new(|_cx| SettingsWindow {
+                workspace,
+                section,
+                host: model::HostPanel::new(),
+            })
         },
     )
     .ok()
@@ -130,6 +145,11 @@ impl SettingsWindow {
     /// re-read on the way in rather than trusted from whenever it was opened.
     fn show(&mut self, section: Section, cx: &mut Context<Self>) {
         self.section = section;
+        if section == Section::Model {
+            // config.toml may have been edited by hand or by `arbos-kernel
+            // setup` since the window opened.
+            self.host.refresh();
+        }
         cx.notify();
     }
 
@@ -214,6 +234,7 @@ impl Render for SettingsWindow {
                             )
                             .child(match self.section {
                                 Section::General => self.general_body(cx),
+                                Section::Model => self.model_body(cx),
                                 Section::Appearance => self.appearance_body(cx),
                                 Section::Performance => self.performance_body(cx),
                             }),
