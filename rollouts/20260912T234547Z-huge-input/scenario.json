@@ -1,0 +1,7 @@
+{
+  "name": "huge-input",
+  "doc": "A 4 MB prompt, then a normal one. The kernel must survive and the transcript must stay parseable.",
+  "tags": [
+    "adversarial"
+  ]
+}

@@ -1,0 +1,14 @@
+1789256735538 kernel started pid 1612657
+1789256747140 BREAK tail-cursor-stale: root was deleted and recreated; its new transcript has 6 lines but the attach stream broadcast 0 wake/user event frames (serve.rs keeps a per-agent line cursor that never resets)
+1789256747155 kernel stopped with code 0
+1789256747156 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789256747156 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789256747156 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789256747156 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789256747156 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789256747156 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789256747156 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789256747156 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789256747156 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789256747156 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789256747163 bugs: seen qa-002-live-events-stop-after-agent-recreate.md, new a2776c674a.md, seen a2776c674a.md, seen a2776c674a.md, seen a2776c674a.md, seen a2776c674a.md, seen a2776c674a.md, seen a2776c674a.md, seen a2776c674a.md, seen a2776c674a.md, seen a2776c674a.md

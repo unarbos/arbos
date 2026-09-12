@@ -1,0 +1,11 @@
+{"ts": 1789256721878, "scenario": "boot-idle", "model": "openai/gpt-4.1-mini", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789256728184, "scenario": "prompt-no-key", "model": "openai/gpt-4.1-mini", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789256728324, "scenario": "second-serve", "model": "openai/gpt-4.1-mini", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789256735525, "scenario": "concurrent-sessions", "model": "openai/gpt-4.1-mini", "prompt_tokens": 25256, "completion_tokens": 32, "usd": 0.01015}
+{"ts": 1789256747162, "scenario": "rapid-create-delete", "model": "openai/gpt-4.1-mini", "prompt_tokens": 17492, "completion_tokens": 181, "usd": 0.00729}
+{"ts": 1789256764567, "scenario": "huge-input", "model": "openai/gpt-4.1-mini", "prompt_tokens": 11944, "completion_tokens": 480, "usd": 0.00555}
+{"ts": 1789256827312, "scenario": "malformed-folder", "model": "openai/gpt-4.1-mini", "prompt_tokens": 6095, "completion_tokens": 28, "usd": 0.00248}
+{"ts": 1789256829489, "scenario": "malformed-frames", "model": "openai/gpt-4.1-mini", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789256839049, "scenario": "kill-mid-turn-restart", "model": "openai/gpt-4.1-mini", "prompt_tokens": 9518, "completion_tokens": 106, "usd": 0.00398}
+{"ts": 1789256849451, "scenario": "ordinary-task", "model": "openai/gpt-4.1-mini", "prompt_tokens": 9467, "completion_tokens": 165, "usd": 0.00405}
+{"ts": 1789256976801, "scenario": "kickoff-session", "model": "openai/gpt-4.1-mini", "prompt_tokens": 333822, "completion_tokens": 6834, "usd": 0.14446}

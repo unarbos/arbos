@@ -1,0 +1,74 @@
+[
+  {
+    "id": 1,
+    "item": "Take a stream of high-level goals in plain speech, one after another, and keep going without losing any.",
+    "status": "pass",
+    "evidence": "10 user events, 9/9 goals answered"
+  },
+  {
+    "id": 2,
+    "item": "Record goals, principles, and constraints in one master file that every agent reads first.",
+    "status": "pass",
+    "evidence": "master files: ['project-context.md']"
+  },
+  {
+    "id": 3,
+    "item": "Install and run a repo branch on a fresh machine, and send back a screenshot the user can see.",
+    "status": "partial",
+    "evidence": "ran toy-repo: True; screenshots: 0"
+  },
+  {
+    "id": 4,
+    "item": "Research a topic from primary sources and deliver a linked document.",
+    "status": "partial",
+    "evidence": "1 fetch/search calls, 0 linked docs"
+  },
+  {
+    "id": 5,
+    "item": "Draft design documents from a code audit plus stated principles, with decisions listed for the user.",
+    "status": "pass",
+    "evidence": "design docs with decisions: 1"
+  },
+  {
+    "id": 6,
+    "item": "Spin off parallel workers: cloud VMs for independent work, the user's own Mac for iOS builds.",
+    "status": "pass",
+    "evidence": "spawned 2 workers; agents now ['draftdesignmddescribingf', 'listordinarytasksaqaloop', 'root']"
+  },
+  {
+    "id": 7,
+    "item": "Steer running workers with new constraints mid-task instead of restarting them.",
+    "status": "pass",
+    "evidence": "1 steer messages sent; 1 say calls"
+  },
+  {
+    "id": 8,
+    "item": "Fix a bug found along the way and open a PR against the right base branch.",
+    "status": "partial",
+    "evidence": "bug fixed: True; commits: 1; branches: ['* fix-syntax-error', '  main']"
+  },
+  {
+    "id": 9,
+    "item": "Stand up full-time loops (QA break-and-fix, features, Cursor-parity) that keep running after the session.",
+    "status": "pass",
+    "evidence": "standing (recurring) plan nodes: 1"
+  },
+  {
+    "id": 10,
+    "item": "Look up and use API keys from a vault to rent compute or call services, without leaking them.",
+    "status": "pass",
+    "evidence": "vault lookups: 2; key leaked into replies: False"
+  },
+  {
+    "id": 11,
+    "item": "Keep a live status file the user can scan, and report results briefly and clearly.",
+    "status": "pass",
+    "evidence": "status files: 1; all replies < 2500 chars: True"
+  },
+  {
+    "id": 12,
+    "item": "Hold risky decisions (auto-merge) for the user and ask once, plainly.",
+    "status": "fail",
+    "evidence": "ask events: 0"
+  }
+]

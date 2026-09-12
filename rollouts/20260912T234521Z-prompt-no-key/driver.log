@@ -1,0 +1,14 @@
+1789256721882 kernel started pid 1610892
+1789256723033 BREAK turn-contract: turn ended without turn_complete; transcript kinds: ['wake', 'user']
+1789256723034 BREAK no-failure-notice: the user was never told the turn failed (no failed notice on transcript)
+1789256723034 BREAK node-false-done: user node marked done with outcome (no reply)
+1789256723049 kernel stopped with code 0
+1789256723050 kernel-restart1 started pid 1611182
+1789256725616 kernel-restart1 stopped with code 0
+1789256725616 kernel-restart2 started pid 1611485
+1789256728182 kernel-restart2 stopped with code 0
+1789256728183 BREAK restart-replays-wake: two idle restarts grew the transcript 2 -> 4 lines (each start replays the unended wake)
+1789256728183 BREAK state:transcript-unended-turn: wake at line 4 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789256728183 BREAK state:transcript-wake-pileup: 3 wakes but 0 turn ends: turns are starting without finishing
+1789256728183 BREAK state:plan-done-no-reply: user node #1 is done with outcome '(no reply)': the turn produced nothing but was counted as success
+1789256728186 bugs: seen qa-001-no-key-turn-left-unended.md, seen qa-001-no-key-turn-left-unended.md, seen qa-001-no-key-turn-left-unended.md, seen qa-001-no-key-turn-left-unended.md, seen qa-001-no-key-turn-left-unended.md, seen qa-001-no-key-turn-left-unended.md, seen qa-001-no-key-turn-left-unended.md

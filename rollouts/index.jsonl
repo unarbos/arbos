@@ -1,0 +1,13 @@
+{"ts": 1789256709209, "rollout": "20260912T234507Z-boot-idle", "scenario": "boot-idle", "status": "pass", "breaks": []}
+{"ts": 1789256709346, "rollout": "20260912T234509Z-second-serve", "scenario": "second-serve", "status": "pass", "breaks": []}
+{"ts": 1789256721880, "rollout": "20260912T234519Z-boot-idle", "scenario": "boot-idle", "status": "pass", "breaks": []}
+{"ts": 1789256728189, "rollout": "20260912T234521Z-prompt-no-key", "scenario": "prompt-no-key", "status": "break", "breaks": ["turn-contract", "no-failure-notice", "node-false-done", "restart-replays-wake", "state:transcript-unended-turn", "state:transcript-wake-pileup", "state:plan-done-no-reply"]}
+{"ts": 1789256728326, "rollout": "20260912T234528Z-second-serve", "scenario": "second-serve", "status": "pass", "breaks": []}
+{"ts": 1789256735534, "rollout": "20260912T234528Z-concurrent-sessions", "scenario": "concurrent-sessions", "status": "pass", "breaks": []}
+{"ts": 1789256747169, "rollout": "20260912T234535Z-rapid-create-delete", "scenario": "rapid-create-delete", "status": "break", "breaks": ["tail-cursor-stale", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing"]}
+{"ts": 1789256764607, "rollout": "20260912T234547Z-huge-input", "scenario": "huge-input", "status": "break", "breaks": ["kernel-hang-on-sigint", "state:lock-leftover"]}
+{"ts": 1789256827316, "rollout": "20260912T234604Z-malformed-folder", "scenario": "malformed-folder", "status": "break", "breaks": ["state:focus-target", "state:agent-md-missing", "state:agent-parent-dangling", "state:transcript-bad-lines", "state:plan-done-unattempted"]}
+{"ts": 1789256829492, "rollout": "20260912T234707Z-malformed-frames", "scenario": "malformed-frames", "status": "break", "breaks": ["focus-unvalidated", "state:agent-md-missing", "state:transcript-unended-turn", "state:plan-active-after-stop", "state:attempt-running-after-stop"]}
+{"ts": 1789256839051, "rollout": "20260912T234709Z-kill-mid-turn-restart", "scenario": "kill-mid-turn-restart", "status": "pass", "breaks": []}
+{"ts": 1789256849454, "rollout": "20260912T234719Z-ordinary-task", "scenario": "ordinary-task", "status": "pass", "breaks": []}
+{"ts": 1789256976818, "rollout": "20260912T234729Z-kickoff-session", "scenario": "kickoff-session", "status": "break", "breaks": ["state:transcript-unended-turn", "state:plan-active-after-stop", "state:attempt-running-after-stop"]}
