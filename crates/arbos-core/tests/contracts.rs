@@ -3,11 +3,12 @@
 //! lock that keeps two kernels off one folder.
 
 use arbos_core::{
-    Do, Node, NodeStatus, Place, PlaceLock, Usage, When,
+    Do, Event, EventKind, Node, NodeStatus, Place, PlaceLock, TranscriptTail, Usage, When,
+    append_event, load_transcript,
     node::can_transition,
     wire::{Frame, TreeNode},
 };
-use std::path::PathBuf;
+use std::{io::Write, path::PathBuf};
 
 fn tmp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -266,6 +267,79 @@ fn node_serialises_with_snake_case_do_kinds() {
     }
     assert_eq!(NodeStatus::parse("Canceled"), Some(NodeStatus::Cancelled));
     assert_eq!(NodeStatus::parse("nope"), None);
+}
+
+#[test]
+fn transcript_tail_reads_only_new_lines_and_numbers_them_like_load_transcript() {
+    let dir = tmp("tail");
+    let path = dir.join("transcript.jsonl");
+    let mut tail = TranscriptTail::default();
+    assert!(
+        tail.read_new(&path).unwrap().is_empty(),
+        "missing file is empty"
+    );
+
+    append_event(
+        &path,
+        &Event::new(EventKind::User {
+            text: "one".into(),
+            attachments: vec![],
+        }),
+    )
+    .unwrap();
+    // A damaged line and a blank line still occupy their line numbers.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"not json\n\n")
+        .unwrap();
+    append_event(&path, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+
+    let first = tail.read_new(&path).unwrap();
+    let full = load_transcript(&path).unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+        first.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        full.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        "seq must match the physical line, as load_transcript numbers it"
+    );
+    assert_eq!(first[1].seq, 4);
+    assert!(
+        tail.read_new(&path).unwrap().is_empty(),
+        "nothing new, nothing returned"
+    );
+
+    // A writer mid-append: the partial line waits for its newline.
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    f.write_all(br#"{"ts":1,"kind":"user","text":"two"}"#)
+        .unwrap();
+    assert!(tail.read_new(&path).unwrap().is_empty());
+    f.write_all(b"\n").unwrap();
+    let next = tail.read_new(&path).unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].seq, 5);
+
+    // The file was replaced by a shorter one: the tail starts over.
+    std::fs::write(&path, "").unwrap();
+    append_event(
+        &path,
+        &Event::new(EventKind::User {
+            text: "fresh".into(),
+            attachments: vec![],
+        }),
+    )
+    .unwrap();
+    let again = tail.read_new(&path).unwrap();
+    assert_eq!(again.len(), 1);
+    assert_eq!(
+        again[0].seq, 1,
+        "a replaced file is numbered from its first line"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

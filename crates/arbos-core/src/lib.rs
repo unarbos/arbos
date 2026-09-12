@@ -19,8 +19,8 @@ pub use agent::validate_id;
 pub use agent::{ALL_TOOLS, Agent, AgentId};
 pub use event::{Event, EventKind, ToolRec, Usage};
 pub use files::{
-    Layout, ROOT_ID, append_event, append_events, bootstrap, create_chat, list_agents, load_agent,
-    load_transcript, needs_serve, read_focus, write_focus,
+    Layout, ROOT_ID, TranscriptTail, append_event, append_events, bootstrap, create_chat,
+    list_agents, load_agent, load_transcript, needs_serve, read_focus, write_focus,
 };
 pub use lock::PlaceLock;
 pub use node::{Attempt, Do, Node, NodeId, Status as NodeStatus, Verdict, When};
