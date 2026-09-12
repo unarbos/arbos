@@ -68,6 +68,29 @@ fn looks_like_tool_call_text(content: &str) -> bool {
     obj.keys().filter(|k| keys.contains(&k.as_str())).count() >= 1
 }
 
+/// End a turn that could not start. The reason lands on the transcript as
+/// a failed notice, so the window shows it instead of a silent stderr line.
+fn refuse(
+    transcript: &std::path::Path,
+    place: &Place,
+    agent: &Agent,
+    message: String,
+) -> Result<()> {
+    eprintln!("turn {}: {message}", agent.id);
+    append_events(
+        transcript,
+        &[
+            Event::new(EventKind::Notice {
+                text: message,
+                failed: true,
+            }),
+            Event::new(EventKind::TurnComplete { usage: None }),
+        ],
+    )?;
+    tools::file_hooks::after_turn(place, agent);
+    Ok(())
+}
+
 pub struct TurnOpts {
     pub place: Place,
     pub agent: Agent,
@@ -126,11 +149,16 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         });
     }
 
-    let key = host.api_key().ok_or_else(|| {
-        anyhow::anyhow!("no API key (set INCEPTION_API_KEY or ~/.config/arbos/config.toml)")
-    })?;
+    // No key or no usable base: the turn cannot start. Say so on the
+    // transcript, where the window shows it, and close the turn so the
+    // wake is not replayed as unfinished at the next kernel start.
+    let (key, api_base) = match (host.api_key(), host.config.api_base()) {
+        (Some(key), Ok(base)) => (key, base),
+        (None, _) => return refuse(&transcript, &place, &agent, host.missing_key_hint()),
+        (_, Err(e)) => return refuse(&transcript, &place, &agent, format!("{e:#}")),
+    };
     let model = if agent.model == "inherit" || agent.model.is_empty() {
-        host.config.model.clone()
+        host.config.model()
     } else {
         agent.model.clone()
     };
@@ -140,7 +168,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // cap on it too, never a raise: a 16k model planned against 128k has
     // every request past 16k rejected. A provider that does not say gets
     // the old default.
-    let listed = crate::provider::context_window(&host.config.api_base, &key, &model).await;
+    let listed = crate::provider::context_window(&api_base, &key, &model).await;
     let limit = match (host.config.window_tokens, listed) {
         (0, Some(c)) => c.min(host.config.window_tokens_max.max(MIN_WINDOW)),
         (0, None) => DEFAULT_WINDOW,
@@ -154,7 +182,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // nothing rather than guess high and get a 400.
     let output_cap = match host.config.max_output_tokens {
         0 => None,
-        cap => crate::provider::max_completion_tokens(&host.config.api_base, &key, &model)
+        cap => crate::provider::max_completion_tokens(&api_base, &key, &model)
             .await
             .map(|n| n.min(cap)),
     }
@@ -184,9 +212,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let mut calib = 1.0f64;
 
     let mut models = Models::new(model.clone(), &host.config.fallback_models);
-    let policy = host.config.retry_policy();
+    let policy = crate::retry::RetryPolicy::from_config(&host.config);
     let mut provider = Provider {
-        base: host.config.api_base.clone(),
+        base: api_base,
         key,
         model,
         reasoning_effort: host.config.reasoning_effort.clone(),

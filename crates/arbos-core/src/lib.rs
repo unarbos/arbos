@@ -8,6 +8,7 @@ mod agent;
 pub mod chattitle;
 mod event;
 pub mod files;
+pub mod host;
 mod lock;
 pub mod node;
 mod page;
@@ -22,6 +23,7 @@ pub use files::{
     Layout, ROOT_ID, append_event, append_events, bootstrap, create_chat, list_agents, load_agent,
     load_transcript, needs_serve, read_focus, write_focus,
 };
+pub use host::{Host, HostConfig, KeySource, ProviderKind};
 pub use lock::PlaceLock;
 pub use node::{Attempt, Do, Node, NodeId, Status as NodeStatus, Verdict, When};
 pub use page::{Page, PageKind};

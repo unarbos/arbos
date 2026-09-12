@@ -39,11 +39,16 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
     bootstrap(&place)?;
     let host = Host::load()?;
     host.remember_place(place.path());
-    if let Some(key) = host.api_key() {
-        let base = host.config.api_base.clone();
-        tokio::spawn(async move {
-            arbos_engine::warm(&base, &key).await;
-        });
+    match (host.api_key(), host.config.api_base()) {
+        (Some(key), Ok(base)) => {
+            tokio::spawn(async move {
+                arbos_engine::warm(&base, &key).await;
+            });
+        }
+        // Serve anyway: the window opens, and the first turn puts the same
+        // line on its transcript. Here it goes to the kernel log.
+        (None, _) => eprintln!("{}", host.missing_key_hint()),
+        (_, Err(e)) => eprintln!("{e:#}"),
     }
 
     let grep = PlaceGrep::start(place.path.clone());

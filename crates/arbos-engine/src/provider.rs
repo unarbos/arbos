@@ -1,4 +1,5 @@
 use anyhow::Result;
+use arbos_core::host::{ProviderKind, attribution_headers};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{sync::OnceLock, time::Duration};
@@ -271,10 +272,68 @@ fn http() -> &'static reqwest::Client {
     })
 }
 
+/// The key, plus whatever the host behind `base` asks apps to send with it
+/// (OpenRouter: `HTTP-Referer` and `X-Title`, so usage is filed under Arbos).
+fn authed(req: reqwest::RequestBuilder, base: &str, key: &str) -> reqwest::RequestBuilder {
+    let mut req = req.bearer_auth(key);
+    for (name, value) in attribution_headers(ProviderKind::infer(base)) {
+        req = req.header(*name, *value);
+    }
+    req
+}
+
 /// Open the TLS + HTTP/2 session before the first user turn, and remember
 /// the model list so `context_window` can answer without a round trip.
 pub async fn warm(base: &str, key: &str) {
     let _ = models_list(base, key).await;
+}
+
+/// GET `{base}{path}` with the key; a non-2xx is an error naming the status.
+async fn get_json(base: &str, key: &str, path: &str) -> Result<Value> {
+    let url = format!("{}{path}", base.trim_end_matches('/'));
+    let resp = authed(http().get(url), base, key).send().await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        let detail = error_message(&text);
+        anyhow::bail!(
+            "{} {}{}",
+            status.as_u16(),
+            status_label(status.as_u16()),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        );
+    }
+    Ok(resp.json().await?)
+}
+
+/// Is this key accepted by the host behind `base`? OpenRouter's `/models`
+/// is public and proves nothing, so there the check is `/key`, which
+/// answers 401 to a bad key. Elsewhere `/models` needs the key.
+pub async fn check_key(base: &str, key: &str) -> Result<()> {
+    let path = match ProviderKind::infer(base) {
+        ProviderKind::OpenRouter => "/key",
+        ProviderKind::OpenAi | ProviderKind::Custom => "/models",
+    };
+    get_json(base, key, path).await.map(|_| ())
+}
+
+/// The ids the provider lists at `{base}/models`, or the failure to ask.
+/// Uncached: setup calls this once to offer a pick list.
+pub async fn list_model_ids(base: &str, key: &str) -> Result<Vec<String>> {
+    let v = get_json(base, key, "/models").await?;
+    Ok(v.get("data")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|m| m.get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// `{base}/models`, fetched once per process per base.
@@ -286,7 +345,7 @@ async fn models_list(base: &str, key: &str) -> Option<Value> {
         return Some(v);
     }
     let url = format!("{}/models", base.trim_end_matches('/'));
-    let resp = http().get(url).bearer_auth(key).send().await.ok()?;
+    let resp = authed(http().get(url), base, key).send().await.ok()?;
     let v: Value = resp.json().await.ok()?;
     if let Ok(mut c) = cache.lock() {
         c.insert(base.to_string(), v.clone());
@@ -419,7 +478,9 @@ impl Provider {
         trace: &mut Trace,
     ) -> Result<Completion> {
         let t0 = std::time::Instant::now();
-        let request = http().post(url).bearer_auth(&self.key).json(&body).send();
+        let request = authed(http().post(url), &self.base, &self.key)
+            .json(&body)
+            .send();
         // The wait for headers is bounded like the wait for each chunk. A
         // provider that queues the request and says nothing held one call
         // for 195 s before its first byte; the connect timeout does not
