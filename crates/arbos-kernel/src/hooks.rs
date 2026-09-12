@@ -48,6 +48,17 @@ pub struct KernelHooks {
     /// Serialises `spawn`: the child cap and the id check read the agents
     /// folder, so concurrent calls must not interleave.
     spawn_lock: Mutex<()>,
+    /// Parsed `plan.jsonl` per agent, keyed by the file's (length, mtime).
+    /// One turn's end reads the plan five or six times in a row; a plan
+    /// that holds a large prompt made that a multi-second stall of the
+    /// serve loop (QA bug qa-003).
+    plans: Mutex<HashMap<String, PlanCache>>,
+}
+
+struct PlanCache {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    nodes: Arc<Vec<Node>>,
 }
 
 impl KernelHooks {
@@ -68,6 +79,7 @@ impl KernelHooks {
             running: Mutex::new(HashSet::new()),
             sent: Mutex::new(HashMap::new()),
             spawn_lock: Mutex::new(()),
+            plans: Mutex::new(HashMap::new()),
         })
     }
 
@@ -270,7 +282,27 @@ impl KernelHooks {
     }
 
     pub fn plan_nodes(&self, agent: &str) -> Vec<Node> {
-        node::load_nodes(&self.layout(agent).plan_jsonl()).unwrap_or_default()
+        let path = self.layout(agent).plan_jsonl();
+        let Ok(meta) = std::fs::metadata(&path) else {
+            self.plans.lock().unwrap().remove(agent);
+            return Vec::new();
+        };
+        let (len, modified) = (meta.len(), meta.modified().ok());
+        if let Some(c) = self.plans.lock().unwrap().get(agent) {
+            if c.len == len && c.modified == modified {
+                return c.nodes.as_ref().clone();
+            }
+        }
+        let nodes = node::load_nodes(&path).unwrap_or_default();
+        self.plans.lock().unwrap().insert(
+            agent.to_string(),
+            PlanCache {
+                len,
+                modified,
+                nodes: Arc::new(nodes.clone()),
+            },
+        );
+        nodes
     }
 
     pub fn plan_attempts(&self, agent: &str) -> Vec<arbos_core::Attempt> {

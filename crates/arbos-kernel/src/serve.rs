@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use arbos_core::{
-    Event, EventKind, Place, PlaceLock, Usage, Wake, WakeKind, append_event, bootstrap,
-    files::Layout, list_agents, load_agent, load_transcript, needs_serve, write_focus,
+    Event, EventKind, Place, PlaceLock, TranscriptTail, Usage, Wake, WakeKind, append_event,
+    bootstrap, files::Layout, list_agents, load_agent, load_transcript, needs_serve, write_focus,
 };
 use arbos_engine::{Host, JobsRoot, Registry};
 use base64::Engine;
@@ -145,7 +145,11 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
 
     let mut tick = interval(Duration::from_secs(5));
     let mut tail = interval(Duration::from_millis(200));
-    let mut tails: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // One incremental reader per agent. Each poll reads only what was
+    // appended since the last one.
+    let mut tails: std::collections::HashMap<String, TranscriptTail> =
+        std::collections::HashMap::new();
+    shutdown_backstop(place.lock_path());
     // Detached jobs the desktop has been told about, as `agent/jN`. The
     // row opens once, and closes when the job finishes.
     let mut announced: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -274,16 +278,12 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
                         }
                     }
                     let path = Layout::new(&place, agent.id.as_str()).transcript();
-                    let events = load_transcript(&path).unwrap_or_default();
-                    let seen = tails.entry(agent.id.to_string()).or_insert(0);
-                    if events.len() > *seen {
-                        for ev in events.iter().skip(*seen) {
-                            hooks.broadcast(Frame::Event {
-                                agent: agent.id.to_string(),
-                                event: ev.clone(),
-                            });
-                        }
-                        *seen = events.len();
+                    let tail = tails.entry(agent.id.to_string()).or_default();
+                    for ev in tail.read_new(&path).unwrap_or_default() {
+                        hooks.broadcast(Frame::Event {
+                            agent: agent.id.to_string(),
+                            event: ev,
+                        });
                     }
                 }
             }
@@ -417,6 +417,23 @@ fn handle_frame(
         }
         _ => {}
     }
+}
+
+/// Ctrl-C must end the process even when the serve loop is busy. The loop
+/// handles the signal itself and exits cleanly; this task is the backstop:
+/// if the loop has not returned a few seconds later, drop the lock file
+/// (the `PlaceLock` guard would have) and exit, rather than leave a kernel
+/// the user cannot stop.
+fn shutdown_backstop(lock_path: std::path::PathBuf) {
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_err() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        eprintln!("arbos-kernel: serve loop did not stop within 5s of Ctrl-C; exiting");
+        let _ = std::fs::remove_file(&lock_path);
+        std::process::exit(130);
+    });
 }
 
 fn snapshot(place: &Place) -> Frame {
