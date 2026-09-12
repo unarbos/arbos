@@ -4,10 +4,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     /// Identity: the 1-based physical line in transcript.jsonl. Not
-    /// written (the position is the identity); set by `load_transcript`,
-    /// 0 on an event not yet on disk. Stable because the file is
-    /// append-only and a bad line still occupies its line.
-    #[serde(skip)]
+    /// written to the file (the position is the identity); set by
+    /// `load_transcript`, 0 on an event not yet on disk. Stable because the
+    /// file is append-only and a bad line still occupies its line.
+    ///
+    /// On the wire it is written when nonzero, so a client can tell a
+    /// transcript line (the record) from a live emit (streaming text, a
+    /// tool starting) that has no line yet. A line re-read from disk
+    /// carries the number the reader gave it, so the field is never
+    /// authoritative in the file.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub seq: u64,
     pub ts: i64,
     #[serde(flatten)]
@@ -129,6 +135,10 @@ pub struct ToolRec {
 pub struct Usage {
     pub used: u64,
     pub size: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Event {

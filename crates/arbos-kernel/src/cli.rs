@@ -1,0 +1,458 @@
+//! `arbos-kernel run` and `arbos-kernel attach`: the kernel from a shell.
+//!
+//! Scripts, CI, and the QA loop talk to a kernel the way the desktop does,
+//! over the loopback frames in `.arbos/kernel.json`, without a window.
+//! `run` sends one prompt and streams that agent's turn to stdout; `attach`
+//! streams everything until Ctrl-C.
+
+use anyhow::{Context, Result, bail};
+use arbos_core::{Event, EventKind, Place, wire::Frame};
+use serde::Deserialize;
+use std::io::{BufRead, IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
+
+pub const USAGE: &str = "arbos-kernel run [--place DIR] [--agent ID] [--json] [--steer] [--timeout SECS] [--no-spawn] \"<prompt>\"\narbos-kernel attach [--place DIR] [--agent ID] [--json]";
+
+/// How long to wait for a kernel this command started to write its port.
+const READY_WAIT: Duration = Duration::from_secs(60);
+/// After the kernel says the agent is idle, how long the transcript tail
+/// has to deliver `turn_complete` (it ticks every 200 ms).
+const IDLE_GRACE: Duration = Duration::from_millis(1500);
+
+/// What `run` exits with, so a script can branch on it.
+pub const EXIT_OK: i32 = 0;
+pub const EXIT_ERROR: i32 = 1;
+pub const EXIT_FAILED_TURN: i32 = 2;
+pub const EXIT_WAITING: i32 = 3;
+pub const EXIT_TIMEOUT: i32 = 4;
+
+#[derive(Debug, Clone)]
+pub struct Args {
+    pub place: PathBuf,
+    pub agent: String,
+    pub json: bool,
+    pub steer: bool,
+    pub timeout: Option<Duration>,
+    pub no_spawn: bool,
+    pub prompt: Option<String>,
+}
+
+impl Args {
+    pub fn parse(mut argv: impl Iterator<Item = String>) -> Result<Self> {
+        let mut args = Self {
+            place: std::env::current_dir()?,
+            agent: "root".into(),
+            json: false,
+            steer: false,
+            timeout: None,
+            no_spawn: false,
+            prompt: None,
+        };
+        let mut rest: Vec<String> = Vec::new();
+        while let Some(a) = argv.next() {
+            match a.as_str() {
+                "--place" | "-C" => {
+                    args.place = PathBuf::from(argv.next().context("--place needs a directory")?)
+                }
+                "--agent" | "-a" => args.agent = argv.next().context("--agent needs an id")?,
+                "--json" => args.json = true,
+                "--steer" => args.steer = true,
+                "--no-spawn" => args.no_spawn = true,
+                "--timeout" => {
+                    let s = argv.next().context("--timeout needs seconds")?;
+                    let secs: u64 = s.parse().with_context(|| format!("--timeout {s:?}"))?;
+                    args.timeout = (secs > 0).then(|| Duration::from_secs(secs));
+                }
+                "-h" | "--help" => {
+                    println!("{USAGE}");
+                    std::process::exit(0);
+                }
+                other if other.starts_with("--") => bail!("unknown flag {other}\n{USAGE}"),
+                _ => rest.push(a),
+            }
+        }
+        if !rest.is_empty() {
+            args.prompt = Some(rest.join(" "));
+        }
+        Ok(args)
+    }
+}
+
+#[derive(Deserialize)]
+struct KernelJson {
+    url: String,
+    pid: u32,
+}
+
+/// Send one prompt, stream the turn, return the exit code.
+pub fn run(args: Args) -> Result<i32> {
+    let prompt = args
+        .prompt
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .context("run needs a prompt")?;
+    let place = Place::new(std::fs::canonicalize(&args.place).unwrap_or(args.place.clone()));
+    let addr = kernel_addr(&place, !args.no_spawn)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let stream = TcpStream::connect(&addr)
+            .await
+            .with_context(|| format!("connect {addr}"))?;
+        let (r, mut w) = stream.into_split();
+        let mut lines = BufReader::new(r).lines();
+        let frame = Frame::User {
+            agent: args.agent.clone(),
+            text: prompt.clone(),
+            steer: args.steer,
+            attachments: vec![],
+        };
+        w.write_all(format!("{}\n", serde_json::to_string(&frame)?).as_bytes())
+            .await?;
+        let deadline = args.timeout.map(|t| Instant::now() + t);
+        // A fresh kernel replays the whole transcript once to whoever is
+        // attached; our turn starts at the line that echoes our prompt.
+        let mut started = false;
+        let mut failed = false;
+        // The kernel says "idle" the moment the turn's task ends; the
+        // transcript tail that carries turn_complete follows on its own
+        // tick, and can even land after the idle. So: once our turn has
+        // started and the agent is idle, a quiet stretch means the turn
+        // ended without completing (an error path the kernel logged).
+        let mut idle = false;
+        let mut quiet_since = Instant::now();
+        loop {
+            let mut limit = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+            if started && idle {
+                let grace = (quiet_since + IDLE_GRACE).saturating_duration_since(Instant::now());
+                limit = Some(limit.map_or(grace, |l| l.min(grace)));
+            }
+            let next = match limit {
+                Some(left) => match tokio::time::timeout(left, lines.next_line()).await {
+                    Ok(r) => r,
+                    Err(_) if started && idle && deadline.is_none_or(|d| Instant::now() < d) => {
+                        eprintln!(
+                            "run: the turn ended without completing; see {}",
+                            place.path.join(".arbos").join("kernel.log").display()
+                        );
+                        return Ok(EXIT_FAILED_TURN);
+                    }
+                    Err(_) => {
+                        eprintln!("run: timed out after {:?}", args.timeout.unwrap_or_default());
+                        return Ok(EXIT_TIMEOUT);
+                    }
+                },
+                None => lines.next_line().await,
+            };
+            let Some(line) = next? else {
+                eprintln!("run: the kernel closed the connection");
+                return Ok(EXIT_ERROR);
+            };
+            let Ok(frame) = serde_json::from_str::<Frame>(&line) else {
+                continue;
+            };
+            match frame {
+                // Live emits (seq 0: streaming text, a tool starting) are
+                // for a window; the transcript lines that follow them are
+                // the record, and the only thing printed here.
+                Frame::Event { agent, event } if agent == args.agent && event.seq > 0 => {
+                    if !started {
+                        started = matches!(&event.kind, EventKind::User { text, .. } if *text == prompt);
+                        if !started {
+                            continue;
+                        }
+                    }
+                    quiet_since = Instant::now();
+                    if let EventKind::Notice { failed: true, .. } = &event.kind {
+                        failed = true;
+                    }
+                    print_event(&event, args.json);
+                    if matches!(event.kind, EventKind::TurnComplete { .. }) {
+                        return Ok(if failed { EXIT_FAILED_TURN } else { EXIT_OK });
+                    }
+                }
+                Frame::Turn { agent, state, .. } if agent == args.agent => {
+                    idle = state == "idle";
+                    quiet_since = Instant::now();
+                }
+                Frame::Ask {
+                    agent,
+                    question,
+                    options,
+                } if agent == args.agent && started => {
+                    match answer(&agent, &question, &options)? {
+                        Some(reply) => {
+                            w.write_all(format!("{}\n", serde_json::to_string(&reply)?).as_bytes())
+                                .await?;
+                        }
+                        None => {
+                            eprintln!(
+                                "run: the agent is waiting on a question and there is no terminal to answer it; open the place in the app or answer over the frames"
+                            );
+                            return Ok(EXIT_WAITING);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    })
+}
+
+/// Stream events until Ctrl-C.
+pub fn attach(args: Args, all_agents: bool) -> Result<i32> {
+    let place = Place::new(std::fs::canonicalize(&args.place).unwrap_or(args.place.clone()));
+    let addr = kernel_addr(&place, !args.no_spawn)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let stream = TcpStream::connect(&addr)
+            .await
+            .with_context(|| format!("connect {addr}"))?;
+        let (r, _w) = stream.into_split();
+        let mut lines = BufReader::new(r).lines();
+        eprintln!("attached to {} at {addr}; Ctrl-C to stop", place.path.display());
+        loop {
+            let line = tokio::select! {
+                l = lines.next_line() => l?,
+                _ = tokio::signal::ctrl_c() => return Ok(EXIT_OK),
+            };
+            let Some(line) = line else {
+                eprintln!("attach: the kernel closed the connection");
+                return Ok(EXIT_ERROR);
+            };
+            let Ok(frame) = serde_json::from_str::<Frame>(&line) else {
+                continue;
+            };
+            match frame {
+                Frame::Event { agent, event }
+                    if event.seq > 0 && (all_agents || agent == args.agent) =>
+                {
+                    if args.json {
+                        let mut v = serde_json::to_value(&event)?;
+                        if let Some(o) = v.as_object_mut() {
+                            o.insert("agent".into(), serde_json::Value::String(agent));
+                        }
+                        println!("{v}");
+                    } else {
+                        print!("[{agent}] ");
+                        print_event(&event, false);
+                    }
+                }
+                Frame::Ask {
+                    agent,
+                    question,
+                    options,
+                } if all_agents || agent == args.agent => {
+                    if args.json {
+                        println!(
+                            "{}",
+                            serde_json::json!({"kind": "ask", "agent": agent, "question": question, "options": options})
+                        );
+                    } else {
+                        println!("[{agent}] ? {question} {}", options.join(" / "));
+                    }
+                }
+                _ => {}
+            }
+        }
+    })
+}
+
+/// The kernel's loopback address, starting one when none is alive.
+fn kernel_addr(place: &Place, may_spawn: bool) -> Result<String> {
+    if let Some(addr) = live_addr(place) {
+        return Ok(addr);
+    }
+    if !may_spawn {
+        bail!(
+            "no kernel is serving {} (looked at {}); start one with `arbos-kernel serve` or drop --no-spawn",
+            place.path.display(),
+            place.kernel_json().display()
+        );
+    }
+    spawn_kernel(place)?;
+    let deadline = Instant::now() + READY_WAIT;
+    while Instant::now() < deadline {
+        if let Some(addr) = live_addr(place) {
+            return Ok(addr);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    bail!(
+        "started a kernel for {} but it wrote no live {} within {:?}; see .arbos/kernel.log",
+        place.path.display(),
+        place.kernel_json().display(),
+        READY_WAIT
+    )
+}
+
+/// `host:port` from kernel.json when its pid is alive and the port answers.
+fn live_addr(place: &Place) -> Option<String> {
+    let text = std::fs::read_to_string(place.kernel_json()).ok()?;
+    let info: KernelJson = serde_json::from_str(&text).ok()?;
+    if !pid_alive(info.pid) {
+        return None;
+    }
+    let addr = info.url.strip_prefix("tcp://")?.to_string();
+    std::net::TcpStream::connect_timeout(&addr.parse().ok()?, Duration::from_secs(2)).ok()?;
+    Some(addr)
+}
+
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        Path::new(&format!("/proc/{pid}")).exists()
+            || Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// `arbos-kernel serve <place>` in its own process group, logging to
+/// `.arbos/kernel.log`, so it outlives this command and its terminal.
+fn spawn_kernel(place: &Place) -> Result<()> {
+    let dir = place.path.join(".arbos");
+    std::fs::create_dir_all(&dir)?;
+    let log = std::fs::File::create(dir.join("kernel.log"))?;
+    let err = log.try_clone()?;
+    let me = std::env::current_exe().context("locate arbos-kernel")?;
+    let mut cmd = Command::new(me);
+    cmd.arg("serve")
+        .arg(&place.path)
+        .current_dir(&place.path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn().context("start arbos-kernel serve")?;
+    eprintln!("started a kernel for {}", place.path.display());
+    Ok(())
+}
+
+/// Ask the person at the terminal. None when there is no terminal.
+fn answer(agent: &str, question: &str, options: &[String]) -> Result<Option<Frame>> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    let approval = options.len() == 2
+        && options.iter().any(|o| o == "allow")
+        && options.iter().any(|o| o == "deny")
+        && question.starts_with("allow ");
+    let mut out = std::io::stdout();
+    writeln!(out, "? {question}")?;
+    if !options.is_empty() {
+        writeln!(out, "  options: {}", options.join(" / "))?;
+    }
+    write!(out, "> ")?;
+    out.flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let text = line.trim().to_string();
+    Ok(Some(if approval {
+        Frame::Approve {
+            agent: agent.to_string(),
+            call_id: String::new(),
+            allow: matches!(
+                text.to_ascii_lowercase().as_str(),
+                "y" | "yes" | "allow" | "a"
+            ),
+        }
+    } else {
+        Frame::Answer {
+            agent: agent.to_string(),
+            text,
+        }
+    }))
+}
+
+/// One event to stdout: the transcript line as JSON (with its `seq` and
+/// `ts`), or a line a person reads.
+fn print_event(event: &Event, json: bool) {
+    if json {
+        if let Ok(s) = serde_json::to_string(event) {
+            println!("{s}");
+        }
+        return;
+    }
+    match &event.kind {
+        EventKind::Assistant { text, .. } => {
+            if !text.trim().is_empty() {
+                println!("{text}");
+            }
+        }
+        EventKind::Tool(rec) => {
+            let args = rec.args.as_ref().map(|a| a.to_string()).unwrap_or_default();
+            let args = clip(&args, 100);
+            let result = rec
+                .error
+                .as_deref()
+                .or(rec.body.as_deref())
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("");
+            println!(
+                "  [{}] {args} -> {}{}",
+                rec.name,
+                clip(result, 120),
+                if rec.error.is_some() { " (error)" } else { "" }
+            );
+        }
+        EventKind::Say { from, text } => println!("  [{from}] {text}"),
+        EventKind::Notice { text, failed } => {
+            println!("  [{}] {text}", if *failed { "failed" } else { "notice" })
+        }
+        EventKind::Ask {
+            question, options, ..
+        } => {
+            println!("  ? {question} {}", options.join(" / "))
+        }
+        EventKind::Interrupted { detail } => println!("  [interrupted] {detail}"),
+        EventKind::TurnComplete { usage } => {
+            if let Some(u) = usage {
+                eprintln!(
+                    "(turn complete; {} of {} context tokens used)",
+                    u.used, u.size
+                );
+            }
+        }
+        EventKind::Wake { .. }
+        | EventKind::User { .. }
+        | EventKind::Thinking { .. }
+        | EventKind::Answer { .. }
+        | EventKind::Approval { .. }
+        | EventKind::Fold { .. }
+        | EventKind::Compaction { .. }
+        | EventKind::WindowReset {} => {}
+    }
+}
+
+fn clip(s: &str, n: usize) -> String {
+    let s = s.replace('\n', " ");
+    if s.chars().count() <= n {
+        s
+    } else {
+        let cut: String = s.chars().take(n).collect();
+        format!("{cut}…")
+    }
+}
