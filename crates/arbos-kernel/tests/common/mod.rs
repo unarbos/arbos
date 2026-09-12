@@ -15,24 +15,43 @@ pub struct Kernel {
     pub child: Child,
     pub place: PathBuf,
     pub url: String,
-    _scratch: PathBuf,
+    pub scratch: PathBuf,
 }
 
 /// Start `serve` on a fresh folder with its own config home. No API key is
 /// set, so a prompt fails fast without a model; that is enough to exercise
 /// the kernel's own bookkeeping.
 pub fn start_kernel(name: &str) -> Kernel {
+    start_kernel_with(name, "trace = false\n")
+}
+
+/// Same, with the given `config.toml` body (e.g. an `api_base` that points
+/// at a fake model server).
+pub fn start_kernel_with(name: &str, config: &str) -> Kernel {
     let scratch = std::env::temp_dir().join(format!(
         "arbos-kernel-{name}-{}-{}",
         std::process::id(),
         arbos_core::now_ms()
     ));
+    let xdg = scratch.join("xdg");
+    std::fs::create_dir_all(scratch.join("place")).unwrap();
+    std::fs::create_dir_all(xdg.join("arbos")).unwrap();
+    std::fs::write(xdg.join("arbos").join("config.toml"), config).unwrap();
+    std::fs::create_dir_all(scratch.join("home")).unwrap();
+    spawn(scratch)
+}
+
+/// A second kernel on the same place and config, after the first one is
+/// gone: what a restart looks like.
+pub fn restart_kernel(k: &Kernel, config: &str) -> Kernel {
+    let xdg = k.scratch.join("xdg");
+    std::fs::write(xdg.join("arbos").join("config.toml"), config).unwrap();
+    spawn(k.scratch.clone())
+}
+
+fn spawn(scratch: PathBuf) -> Kernel {
     let place = scratch.join("place");
     let xdg = scratch.join("xdg");
-    std::fs::create_dir_all(&place).unwrap();
-    std::fs::create_dir_all(xdg.join("arbos")).unwrap();
-    std::fs::write(xdg.join("arbos").join("config.toml"), "trace = false\n").unwrap();
-    std::fs::create_dir_all(scratch.join("home")).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_arbos-kernel"))
         .arg("serve")
         .arg(&place)
@@ -61,7 +80,7 @@ pub fn start_kernel(name: &str) -> Kernel {
         child,
         place,
         url,
-        _scratch: scratch,
+        scratch,
     }
 }
 
