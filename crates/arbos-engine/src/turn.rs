@@ -126,9 +126,46 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         });
     }
 
-    let key = host.api_key().ok_or_else(|| {
-        anyhow::anyhow!("no API key (set INCEPTION_API_KEY or ~/.config/arbos/config.toml)")
-    })?;
+    let end = |usage: Option<Usage>, interrupted: Option<&str>| -> Result<()> {
+        let mut batch = Vec::new();
+        if let Some(detail) = interrupted {
+            batch.push(Event::new(EventKind::Interrupted {
+                detail: detail.into(),
+            }));
+        }
+        batch.push(Event::new(EventKind::TurnComplete { usage }));
+        append_events(&transcript, &batch)?;
+        tools::file_hooks::after_turn(&place, &agent);
+        Ok(())
+    };
+
+    // No key is a failed turn, not an aborted one: the wake above is already
+    // on the transcript, so leaving here without `TurnComplete` would make
+    // `needs_serve` replay it on every kernel start and let the plan close
+    // the node as a success with "(no reply)".
+    let Some(key) = host.api_key() else {
+        let env = host
+            .config
+            .api_key_env
+            .as_deref()
+            .unwrap_or("OPENAI_API_KEY");
+        let message = format!(
+            "no API key: set api_key in {}/config.toml or export {env}",
+            host.dir.display()
+        );
+        if wake.kind == WakeKind::Compact {
+            anyhow::bail!("{message}");
+        }
+        eprintln!("turn {}: {message}", agent.id);
+        append_event(
+            &transcript,
+            &Event::new(EventKind::Notice {
+                text: message,
+                failed: true,
+            }),
+        )?;
+        return end(None, None);
+    };
     let model = if agent.model == "inherit" || agent.model.is_empty() {
         host.config.model.clone()
     } else {
@@ -208,19 +245,6 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         hooks: Arc::clone(&hooks),
         bash_wait_ms: host.config.bash_wait_ms,
         hops: wake.hops,
-    };
-
-    let end = |usage: Option<Usage>, interrupted: Option<&str>| -> Result<()> {
-        let mut batch = Vec::new();
-        if let Some(detail) = interrupted {
-            batch.push(Event::new(EventKind::Interrupted {
-                detail: detail.into(),
-            }));
-        }
-        batch.push(Event::new(EventKind::TurnComplete { usage }));
-        append_events(&transcript, &batch)?;
-        tools::file_hooks::after_turn(&place, &agent);
-        Ok(())
     };
 
     let mut nudged = false;
