@@ -102,6 +102,12 @@ impl Attach {
         }
     }
 
+    /// A raw line, for what is not a frame.
+    pub fn send_raw(&mut self, line: &str) {
+        self.writer.write_all(line.as_bytes()).unwrap();
+        self.writer.write_all(b"\n").unwrap();
+    }
+
     pub fn send(&mut self, frame: serde_json::Value) {
         let mut line = frame.to_string();
         line.push('\n');
