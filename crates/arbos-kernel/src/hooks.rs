@@ -13,6 +13,7 @@ use arbos_core::{
     node::{self, DEFAULT_HOPS},
     validate_id,
 };
+use arbos_engine::{Steer, TurnControl};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -26,6 +27,28 @@ use crate::{
     browser::{BrowserHub, BrowserOut},
     sched::{MAX_CHILDREN, MAX_DEPTH},
 };
+
+/// How a `say` reaches another agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SayMode {
+    /// On their transcript for their next turn.
+    Note,
+    /// Queue a turn for them now; the reply comes back as a message.
+    Request,
+    /// Into their running turn at the next tool boundary; a turn if idle.
+    Steer,
+}
+
+impl SayMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "note" => Some(Self::Note),
+            "request" => Some(Self::Request),
+            "steer" => Some(Self::Steer),
+            _ => None,
+        }
+    }
+}
 
 pub struct KernelHooks {
     pub place: Place,
@@ -42,6 +65,9 @@ pub struct KernelHooks {
     pub plan_lock: Mutex<()>,
     /// Agents with a turn in flight. The serve loop keeps it current.
     pub running: Mutex<HashSet<String>>,
+    /// The control handle of every turn in flight, shared with the
+    /// scheduler. `say mode=steer` reaches a live turn through it.
+    pub in_flight: Arc<Mutex<HashMap<String, TurnControl>>>,
     /// `(to, text)` already sent this turn, per agent. Cleared when a turn
     /// starts, so a model that loops on one message sends it once.
     sent: Mutex<HashMap<String, HashSet<String>>>,
@@ -66,6 +92,7 @@ impl KernelHooks {
             browsers: BrowserHub::new(),
             plan_lock: Mutex::new(()),
             running: Mutex::new(HashSet::new()),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
             sent: Mutex::new(HashMap::new()),
             spawn_lock: Mutex::new(()),
         })
@@ -91,6 +118,45 @@ impl KernelHooks {
 
     pub fn turn_ended(&self, agent: &str) {
         self.running.lock().unwrap().remove(agent);
+    }
+
+    /// Put `steer` into `agent`'s live turn. False when no turn is running,
+    /// so the caller queues a turn instead.
+    pub fn steer(&self, agent: &str, steer: Steer) -> bool {
+        let control = self.in_flight.lock().unwrap().get(agent).cloned();
+        match control {
+            Some(c) => {
+                c.push(steer);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A turn ended with steers still queued: it never reached another
+    /// tool boundary. Each becomes a turn of its own, so nothing said to a
+    /// running agent is lost to timing.
+    pub fn requeue_steers(&self, agent: &str, steers: Vec<Steer>) {
+        for steer in steers {
+            let result = match steer {
+                Steer::User(text) => self.inbox(agent, Node::inbox(&text, "user")),
+                Steer::Say { from, text } => append_event(
+                    &self.layout(agent).transcript(),
+                    &Event::new(EventKind::Say {
+                        from: from.clone(),
+                        text: text.clone(),
+                    }),
+                )
+                .and_then(|_| {
+                    let mut n = Node::inbox(&text, format!("agent:{from}"));
+                    n.hops = DEFAULT_HOPS;
+                    self.inbox(agent, n)
+                }),
+            };
+            if let Err(e) = result {
+                eprintln!("requeue steer for {agent}: {e:#}");
+            }
+        }
     }
 
     pub fn live_children(&self, parent: &AgentId) -> usize {
@@ -761,15 +827,17 @@ impl KernelHooks {
 
     /// Send to another agent or the user. Returns the receipt the sender reads.
     ///
-    /// `request` queues a turn for them and carries a reply budget; a note
-    /// lands on their transcript for their next turn. `hops_in` is the
-    /// budget this turn was started with.
+    /// `Request` queues a turn for them and carries a reply budget; a
+    /// `Note` lands on their transcript for their next turn; a `Steer` goes
+    /// into their live turn at its next tool boundary, or queues a turn
+    /// when they are idle. `hops_in` is the budget this turn was started
+    /// with.
     pub fn say(
         &self,
         from: &AgentId,
         to: &str,
         text: &str,
-        request: bool,
+        mode: SayMode,
         hops_in: u8,
     ) -> Result<String> {
         let text = text.trim();
@@ -787,6 +855,23 @@ impl KernelHooks {
         let target = self.resolve(from, to)?;
         let tid = target.id.as_str();
         self.dedupe(from, tid, text)?;
+        let label = format!("{} ({})", target.name, tid);
+        // A steer into a live turn is appended by that turn when it takes
+        // it, so the line sits at the boundary where the model read it.
+        // Every other mode writes the line now.
+        if mode == SayMode::Steer
+            && self.steer(
+                tid,
+                Steer::Say {
+                    from: from.to_string(),
+                    text: text.to_string(),
+                },
+            )
+        {
+            return Ok(format!(
+                "Sent to {label} as a steer: it is running now and reads this at its next tool boundary, in the same turn. Its reply, if any, arrives here as a message from it."
+            ));
+        }
         append_event(
             &self.layout(tid).transcript(),
             &Event::new(EventKind::Say {
@@ -795,11 +880,20 @@ impl KernelHooks {
             }),
         )?;
         let busy = self.is_running(tid);
-        let label = format!("{} ({})", target.name, tid);
+        let request = match mode {
+            SayMode::Note => false,
+            SayMode::Request => true,
+            // Idle, so there is no turn to steer: start one.
+            SayMode::Steer => true,
+        };
         if !request {
             return Ok(format!(
                 "Sent to {label} as a note; it will read it at its next turn{}.",
-                if busy { " (it is running now)" } else { "" }
+                if busy {
+                    " (it is running now; use mode steer to reach the current turn)"
+                } else {
+                    ""
+                }
             ));
         }
         let hops = if hops_in > 0 {
@@ -820,14 +914,16 @@ impl KernelHooks {
         let mut n = Node::inbox(text, format!("agent:{from}"));
         n.hops = hops;
         self.inbox(tid, n)?;
-        Ok(if busy {
-            format!(
+        Ok(match (mode, busy) {
+            (SayMode::Steer, _) => format!(
+                "Sent to {label} as a steer; it was idle, so a turn starts for it now. Its reply will arrive here as a message from it."
+            ),
+            (SayMode::Request | SayMode::Note, true) => format!(
                 "Sent to {label} as a request; it is running now, so a turn is queued after its current one. Its reply will arrive here as a message from it."
-            )
-        } else {
-            format!(
+            ),
+            (SayMode::Request | SayMode::Note, false) => format!(
                 "Sent to {label} as a request; a turn is queued for it. Its reply will arrive here as a message from it."
-            )
+            ),
         })
     }
 

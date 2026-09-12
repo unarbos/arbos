@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::{
     batch::BatchCfg,
     compact,
-    control::TurnControl,
+    control::{Steer, TurnControl},
     host::Host,
     prompt::{skill_names, skip_tools},
     provider::{Interrupted, Provider},
@@ -236,13 +236,14 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             return end(None, Some("stop"));
         }
         if let Some(steer) = control.take_steer() {
-            append_event(
-                &transcript,
-                &Event::new(EventKind::User {
-                    text: steer,
+            let kind = match steer {
+                Steer::User(text) => EventKind::User {
+                    text,
                     attachments: vec![],
-                }),
-            )?;
+                },
+                Steer::Say { from, text } => EventKind::Say { from, text },
+            };
+            append_event(&transcript, &Event::new(kind))?;
             events = load_transcript(&transcript)?;
         }
 
