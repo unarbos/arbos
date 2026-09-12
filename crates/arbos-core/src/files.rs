@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
@@ -75,26 +75,27 @@ pub fn bootstrap(place: &Place) -> Result<Agent> {
     if !place.user_md().exists() {
         std::fs::write(place.user_md(), "")?;
     }
-    if !place.focus_path().exists() {
-        std::fs::write(place.focus_path(), format!(".arbos/agents/{ROOT_ID}\n"))?;
-    }
     let root = Layout::new(place, ROOT_ID);
-    if root.agent_md().exists() {
+    let agent = if root.agent_md().exists() {
         let mut agent = Agent::load(&root.dir)?;
         if agent.cwd.is_none() {
             agent.cwd = Some(place.path.clone());
             let _ = agent.save(&root.dir);
         }
-        return Ok(agent);
-    }
-    let mut agent = Agent::root(ROOT_ID);
-    agent.cwd = Some(place.path.clone());
-    agent.save(&root.dir)?;
-    touch(&root.transcript())?;
-    std::fs::create_dir_all(root.jobs())?;
-    if !root.plan_md().exists() {
-        std::fs::write(root.plan_md(), "")?;
-    }
+        agent
+    } else {
+        let mut agent = Agent::root(ROOT_ID);
+        agent.cwd = Some(place.path.clone());
+        agent.save(&root.dir)?;
+        touch(&root.transcript())?;
+        std::fs::create_dir_all(root.jobs())?;
+        if !root.plan_md().exists() {
+            std::fs::write(root.plan_md(), "")?;
+        }
+        agent
+    };
+    // After root exists, so a missing or dangling focus can settle on it.
+    let _ = read_focus(place);
     Ok(agent)
 }
 
@@ -126,15 +127,44 @@ pub fn create_chat(place: &Place) -> Result<Agent> {
     Ok(agent)
 }
 
+/// The focus names one agent folder of this place, as `.arbos/agents/<id>`.
+/// Accepts that form or a bare `<id>`. Anything else is refused: the file
+/// is written by whoever can reach the attach socket and read back by every
+/// client and every prompt, so it must never carry an arbitrary path
+/// (QA bug qa-004).
+pub fn validate_focus(place: &Place, path: &str) -> Result<String> {
+    let trimmed = path.trim().trim_start_matches("./");
+    let id = trimmed
+        .strip_prefix(".arbos/agents/")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    crate::validate_id(id).with_context(|| format!("focus {path:?}"))?;
+    if !place.agent_dir(id).join("agent.md").exists() {
+        bail!("focus {path:?}: no agent {id}");
+    }
+    Ok(format!(".arbos/agents/{id}"))
+}
+
+fn root_focus() -> String {
+    format!(".arbos/agents/{ROOT_ID}")
+}
+
+/// The focused agent folder. A missing or invalid file reads as root, and
+/// is rewritten so every reader agrees.
 pub fn read_focus(place: &Place) -> String {
-    std::fs::read_to_string(place.focus_path())
-        .unwrap_or_default()
-        .trim()
-        .to_string()
+    let raw = std::fs::read_to_string(place.focus_path()).unwrap_or_default();
+    match validate_focus(place, &raw) {
+        Ok(focus) => focus,
+        Err(_) => {
+            let _ = std::fs::write(place.focus_path(), format!("{}\n", root_focus()));
+            root_focus()
+        }
+    }
 }
 
 pub fn write_focus(place: &Place, path: &str) -> Result<()> {
-    std::fs::write(place.focus_path(), format!("{}\n", path.trim()))
+    let focus = validate_focus(place, path)?;
+    std::fs::write(place.focus_path(), format!("{focus}\n"))
         .with_context(|| format!("write {}", place.focus_path().display()))
 }
 

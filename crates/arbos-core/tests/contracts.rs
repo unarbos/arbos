@@ -3,9 +3,11 @@
 //! lock that keeps two kernels off one folder.
 
 use arbos_core::{
-    Do, Node, NodeStatus, Place, PlaceLock, Usage, When,
+    Do, Node, NodeStatus, Place, PlaceLock, Usage, When, bootstrap, create_chat,
     node::can_transition,
+    read_focus, validate_focus,
     wire::{Frame, TreeNode},
+    write_focus,
 };
 use std::path::PathBuf;
 
@@ -266,6 +268,59 @@ fn node_serialises_with_snake_case_do_kinds() {
     }
     assert_eq!(NodeStatus::parse("Canceled"), Some(NodeStatus::Cancelled));
     assert_eq!(NodeStatus::parse("nope"), None);
+}
+
+#[test]
+fn focus_only_ever_names_an_existing_agent_folder() {
+    // qa-004: the focus file is written from the attach socket and read by
+    // every client and every prompt. It must not carry arbitrary paths.
+    let dir = tmp("focus");
+    let place = Place::new(&dir);
+    bootstrap(&place).unwrap();
+    let chat = create_chat(&place).unwrap();
+    let id = chat.id.as_str();
+
+    assert_eq!(
+        validate_focus(&place, id).unwrap(),
+        format!(".arbos/agents/{id}")
+    );
+    assert_eq!(
+        validate_focus(&place, &format!(".arbos/agents/{id}/")).unwrap(),
+        format!(".arbos/agents/{id}")
+    );
+    for bad in [
+        "../../../../etc/passwd",
+        ".arbos/agents/../../etc",
+        "/etc/passwd",
+        ".arbos/agents/does-not-exist",
+        "",
+        ".arbos/agents/a b",
+    ] {
+        assert!(
+            validate_focus(&place, bad).is_err(),
+            "{bad:?} must be refused"
+        );
+        assert!(
+            write_focus(&place, bad).is_err(),
+            "{bad:?} must not be written"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(place.focus_path()).unwrap().trim(),
+        ".arbos/agents/root",
+        "refused writes leave the file as it was"
+    );
+
+    // A dangling focus on disk reads as root and is repaired.
+    std::fs::write(place.focus_path(), ".arbos/agents/gone\n").unwrap();
+    assert_eq!(read_focus(&place), ".arbos/agents/root");
+    assert_eq!(
+        std::fs::read_to_string(place.focus_path()).unwrap().trim(),
+        ".arbos/agents/root"
+    );
+    write_focus(&place, id).unwrap();
+    assert_eq!(read_focus(&place), format!(".arbos/agents/{id}"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
