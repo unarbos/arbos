@@ -214,6 +214,13 @@ pub struct Provider {
     /// response headers, every raw chunk with its arrival time, and the
     /// parsed result. None = no tracing.
     pub trace: Option<std::path::PathBuf>,
+    /// What the trace file says about where the call sits: the agent, the
+    /// purpose (`turn`, `compact`), and the transcript line the call's
+    /// result lands on. The turn sets `trace_line` before every step; the
+    /// call ids in the file match the `tool` events' `call_id`.
+    pub trace_agent: String,
+    pub trace_purpose: String,
+    pub trace_line: u64,
 }
 
 /// Everything one provider call did, for the trace file.
@@ -221,6 +228,14 @@ pub struct Provider {
 struct Trace {
     started_ms: i64,
     ended_ms: i64,
+    /// Which agent, why (`turn`, `compact`), and the 1-based transcript
+    /// line the resulting `assistant`/`compaction` event is expected on.
+    agent: String,
+    purpose: String,
+    transcript_line: u64,
+    /// The `call_id`s this call produced; the transcript's `tool` events
+    /// carry the same ids.
+    call_ids: Vec<String>,
     url: String,
     model: String,
     request: Value,
@@ -242,7 +257,14 @@ impl Trace {
             return;
         }
         let n = std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0);
-        let path = dir.join(format!("{:04}-{}.json", n + 1, self.started_ms));
+        // `0007-1789250000000-L42.json`: the 42 is the transcript line, so
+        // `ls trace/` alone maps a call to the transcript.
+        let path = dir.join(format!(
+            "{:04}-{}-L{}.json",
+            n + 1,
+            self.started_ms,
+            self.transcript_line
+        ));
         if let Ok(text) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(path, text);
         }
@@ -386,6 +408,9 @@ impl Provider {
         let url = format!("{}/chat/completions", self.base.trim_end_matches('/'));
         let mut trace = Trace {
             started_ms: now_ms(),
+            agent: self.trace_agent.clone(),
+            purpose: self.trace_purpose.clone(),
+            transcript_line: self.trace_line,
             url: url.clone(),
             model: self.model.clone(),
             request: if self.trace.is_some() {
@@ -402,6 +427,7 @@ impl Provider {
             Ok(c) => {
                 trace.content = c.content.clone();
                 trace.calls = c.calls.clone();
+                trace.call_ids = c.calls.iter().map(|c| c.id.clone()).collect();
                 trace.usage = c.usage;
             }
             Err(e) => trace.error = Some(format!("{e:#}")),

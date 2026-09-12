@@ -193,6 +193,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         stream_idle: std::time::Duration::from_millis(host.config.stream_idle_ms.max(1_000)),
         max_tokens: output_cap,
         trace: host.config.trace.then(|| layout.dir.join("trace")),
+        trace_agent: agent.id.to_string(),
+        trace_purpose: "turn".into(),
+        trace_line: 0,
     };
     let batch_cfg = BatchCfg {
         max_parallel: host.config.max_parallel_tools,
@@ -287,6 +290,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             let room = limit.saturating_sub(tool_tokens + managed.estimated);
             provider.max_tokens = Some(cap.min(room).max(MIN_OUTPUT_TOKENS));
         }
+        // The reply lands on the line after the last one loaded. Another
+        // writer may slip in between; the call ids still tie the two.
+        provider.trace_line = events.last().map(|e| e.seq).unwrap_or(0) + 1;
         let step = model_step(
             StepCx {
                 provider: &mut provider,

@@ -3,6 +3,7 @@ pub mod browser;
 pub mod doors;
 pub mod grep;
 pub mod hooks;
+pub mod klog;
 pub mod plan;
 pub mod pty;
 pub mod sched;

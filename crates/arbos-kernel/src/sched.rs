@@ -76,6 +76,16 @@ impl Scheduler {
             return;
         }
         let control = TurnControl::new();
+        let started = std::time::Instant::now();
+        crate::klog::info(
+            "turn_start",
+            Some(&id),
+            format!(
+                "wake={} node={}",
+                wake.kind.as_str(),
+                wake.node.map(|n| n.to_string()).unwrap_or_default()
+            ),
+        );
         self.in_flight
             .lock()
             .unwrap()
@@ -84,7 +94,7 @@ impl Scheduler {
             let agent = match load_agent(&place, &wake.agent) {
                 Ok(a) => a,
                 Err(e) => {
-                    eprintln!("load agent: {e:#}");
+                    crate::klog::error("load_agent", Some(&id), format!("{e:#}"));
                     let _ = done.send(id);
                     return;
                 }
@@ -108,8 +118,17 @@ impl Scheduler {
                 control,
             })
             .await;
-            if let Err(e) = res {
-                eprintln!("turn: {e:#}");
+            match &res {
+                Ok(()) => crate::klog::info(
+                    "turn_end",
+                    Some(&id),
+                    format!("{:.1}s", started.elapsed().as_secs_f64()),
+                ),
+                Err(e) => crate::klog::error(
+                    "turn_error",
+                    Some(&id),
+                    format!("{e:#} after {:.1}s", started.elapsed().as_secs_f64()),
+                ),
             }
             let _ = done.send(id);
         });
