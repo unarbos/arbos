@@ -37,6 +37,12 @@ impl Scheduler {
         }
     }
 
+    pub fn stop_for(&self, id: &str, reason: &str) {
+        if let Some(c) = self.control(id) {
+            c.stop_for(reason);
+        }
+    }
+
     /// Returns false when no turn is running for the agent.
     pub fn steer(&self, id: &str, text: String) -> bool {
         match self.control(id) {
