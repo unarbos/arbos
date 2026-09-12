@@ -88,6 +88,24 @@ pub struct RunCx {
     pub hops: u8,
 }
 
+impl RunCx {
+    /// Where the file tools may reach. The place, or — for a child that
+    /// works in its own worktree under `.arbos/worktrees/` — that worktree,
+    /// so an isolated child cannot edit its parent's checkout by path.
+    pub fn root(&self) -> &Path {
+        confinement_root(&self.place, &self.cwd)
+    }
+}
+
+/// See [`RunCx::root`].
+pub fn confinement_root<'a>(place: &'a Place, cwd: &'a Path) -> &'a Path {
+    if cwd.starts_with(place.worktrees_dir()) {
+        cwd
+    } else {
+        place.path()
+    }
+}
+
 #[derive(Debug)]
 pub struct ToolOut {
     pub body: String,

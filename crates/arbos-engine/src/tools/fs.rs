@@ -36,13 +36,7 @@ impl Tool for Ls {
         )))
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
-        blocking(move || {
-            ls(
-                cx.place.path(),
-                &cx.cwd,
-                opt_str(&args, "path").unwrap_or("."),
-            )
-        })
+        blocking(move || ls(cx.root(), &cx.cwd, opt_str(&args, "path").unwrap_or(".")))
     }
 }
 
@@ -69,7 +63,7 @@ impl Tool for Read {
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         blocking(move || {
             read(
-                cx.place.path(),
+                cx.root(),
                 &cx.cwd,
                 req(&args, "path")?,
                 opt_u64(&args, "offset"),
@@ -129,10 +123,48 @@ impl Tool for GrepTool {
             } else {
                 grep_walk(&cx.cwd, pattern, glob)?
             };
+            // The index covers the whole place. A child in its own
+            // worktree sees only its worktree, with paths relative to it:
+            // the same file would otherwise show up twice, and the copy in
+            // the parent's checkout is one it may not touch.
+            if let Ok(prefix) = cx.root().strip_prefix(cx.place.path())
+                && !prefix.as_os_str().is_empty()
+            {
+                let prefix = format!("{}/", prefix.to_string_lossy());
+                let root_s = format!("{}/", cx.root().to_string_lossy());
+                hits.retain_mut(|h| {
+                    let p = h.path.trim_start_matches("./").to_string();
+                    if let Some(rest) = p.strip_prefix(&prefix) {
+                        h.path = rest.to_string();
+                        true
+                    } else if let Some(rest) = h.path.strip_prefix(&root_s) {
+                        h.path = rest.to_string();
+                        true
+                    } else {
+                        false
+                    }
+                });
+            } else {
+                // And the parent does not see its children's worktrees:
+                // each is a copy of files it already has.
+                let wt = format!(
+                    "{}/",
+                    cx.place
+                        .worktrees_dir()
+                        .strip_prefix(cx.place.path())
+                        .unwrap_or(&cx.place.worktrees_dir())
+                        .to_string_lossy()
+                );
+                let wt_abs = format!("{}/", cx.place.worktrees_dir().to_string_lossy());
+                hits.retain(|h| {
+                    let p = h.path.trim_start_matches("./");
+                    !p.starts_with(&wt) && !h.path.starts_with(&wt_abs)
+                });
+            }
             // Every other agent's grep takes a path; models send one. Hits
             // outside it are noise that sends the model to the wrong file.
             if let Some(scope) = opt_str(&args, "path").filter(|p| *p != ".") {
-                let root = confine(cx.place.path(), &cx.cwd, scope)?;
+                let root = confine(cx.root(), &cx.cwd, scope)?;
                 let root_s = root.to_string_lossy().into_owned();
                 let rel = scope.trim_start_matches("./").trim_end_matches('/');
                 hits.retain(|h| {
@@ -193,7 +225,7 @@ impl Tool for Write {
             let path = req(&args, "path")?;
             // `content` for `contents` is the usual slip.
             let contents = req(&args, "contents").or_else(|_| req(&args, "content"))?;
-            note_inferred_path(write(cx.place.path(), &cx.cwd, path, contents), &args, path)
+            note_inferred_path(write(cx.root(), &cx.cwd, path, contents), &args, path)
         })
     }
 }
@@ -246,7 +278,7 @@ impl Tool for Edit {
         blocking(move || {
             let path = req(&args, "path")
                 .map_err(|e| anyhow::anyhow!("{e}. edit always needs path — the file you read"))?;
-            let root = cx.place.path();
+            let root = cx.root();
             let out = if hashline::looks_like_hashline(&args) {
                 hashline::edit(root, &cx.cwd, path, &args)
             } else if let (None, Some(content)) =
