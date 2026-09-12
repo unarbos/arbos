@@ -143,6 +143,11 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
         }
     });
 
+    // One signal stream for the life of the loop. A fresh `ctrl_c()` per
+    // `select!` iteration misses a signal that lands while a branch body
+    // runs: the old listener is gone and the new one is not yet registered.
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut tick = interval(Duration::from_secs(5));
     let mut tail = interval(Duration::from_millis(200));
     // One incremental reader per agent. Each poll reads only what was
@@ -295,7 +300,11 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
                     }
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
+            _ = sigint.recv() => {
+                println!("arbos-kernel stopping");
+                break;
+            }
+            _ = sigterm.recv() => {
                 println!("arbos-kernel stopping");
                 break;
             }
@@ -434,11 +443,19 @@ fn handle_frame(
 /// the user cannot stop.
 fn shutdown_backstop(lock_path: std::path::PathBuf) {
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_err() {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (Ok(mut int), Ok(mut term)) = (
+            signal(SignalKind::interrupt()),
+            signal(SignalKind::terminate()),
+        ) else {
             return;
+        };
+        tokio::select! {
+            _ = int.recv() => {}
+            _ = term.recv() => {}
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
-        eprintln!("arbos-kernel: serve loop did not stop within 5s of Ctrl-C; exiting");
+        eprintln!("arbos-kernel: serve loop did not stop within 5s of the signal; exiting");
         let _ = std::fs::remove_file(&lock_path);
         std::process::exit(130);
     });
