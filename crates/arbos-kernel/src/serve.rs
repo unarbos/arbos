@@ -294,6 +294,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
             }
             _ = sigint.recv() => {
                 println!("arbos-kernel stopping");
+                stop_turns(&sched, &hooks, &clock, &mut done_rx).await;
                 break;
             }
             _ = sigterm.recv() => {
