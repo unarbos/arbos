@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-pub const USAGE: &str = "arbos-kernel run [--place DIR] [--agent ID] [--json] [--steer] [--timeout SECS] [--no-spawn] \"<prompt>\"\narbos-kernel answer [--place DIR] [--agent ID] [--follow] [--json] (\"<text>\" | --approve | --deny)\narbos-kernel attach [--place DIR] [--agent ID] [--json]";
+pub const USAGE: &str = "arbos-kernel run [--place DIR] [--agent ID] [--json] [--steer] [--timeout SECS] [--no-spawn] \"<prompt>\"\narbos-kernel answer [--place DIR] [--agent ID] [--follow] [--json] (\"<text>\" | --approve | --deny)\narbos-kernel attach [--place DIR | --hub MACHINE[/PROJECT]] [--agent ID] [--json]   (--hub: a kernel on another machine, by name, through ~/.config/arbos/hub.toml)";
 
 /// How long to wait for a kernel this command started to write its port.
 const READY_WAIT: Duration = Duration::from_secs(60);
@@ -43,6 +43,9 @@ pub struct Args {
     pub follow: bool,
     /// `answer` only: a bash approval instead of a text answer.
     pub allow: Option<bool>,
+    /// `attach` only: a kernel by machine name through the hub,
+    /// `<machine>` or `<machine>/<project>`.
+    pub hub: Option<String>,
 }
 
 impl Args {
@@ -57,6 +60,7 @@ impl Args {
             prompt: None,
             follow: false,
             allow: None,
+            hub: None,
         };
         let mut rest: Vec<String> = Vec::new();
         while let Some(a) = argv.next() {
@@ -71,6 +75,9 @@ impl Args {
                 "--follow" | "-f" => args.follow = true,
                 "--approve" => args.allow = Some(true),
                 "--deny" => args.allow = Some(false),
+                "--hub" => {
+                    args.hub = Some(argv.next().context("--hub needs <machine>[/<project>]")?)
+                }
                 "--timeout" => {
                     let s = argv.next().context("--timeout needs seconds")?;
                     let secs: u64 = s.parse().with_context(|| format!("--timeout {s:?}"))?;
@@ -271,23 +278,54 @@ pub fn answer_cmd(args: Args, allow: Option<bool>, follow: bool) -> Result<i32> 
     })
 }
 
-/// Stream events until Ctrl-C.
+/// Stream events until Ctrl-C. With `--hub`, the kernel is one on another
+/// machine, reached by name through the hub; the frames are the same.
 pub fn attach(args: Args, all_agents: bool) -> Result<i32> {
-    let place = Place::new(std::fs::canonicalize(&args.place).unwrap_or(args.place.clone()));
-    let addr = kernel_addr(&place, !args.no_spawn)?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
+    let (tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
     rt.block_on(async move {
-        let stream = TcpStream::connect(&addr)
-            .await
-            .with_context(|| format!("connect {addr}"))?;
-        let (r, _w) = stream.into_split();
-        let mut lines = BufReader::new(r).lines();
-        eprintln!("attached to {} at {addr}; Ctrl-C to stop", place.path.display());
+        if let Some(target) = args.hub.clone() {
+            let cfg = arbos_core::HubConfig::resolve(None, None)?
+                .context("attach --hub: no hub in ~/.config/arbos/hub.toml (or ARBOS_HUB)")?;
+            let (machine, project) = match target.split_once('/') {
+                Some((m, p)) => (m.to_string(), Some(p.to_string())),
+                None => (target.clone(), None),
+            };
+            let ws = crate::hub_link::attach(&cfg, &machine, project.as_deref()).await?;
+            eprintln!("attached to {target} through {}; Ctrl-C to stop", cfg.url);
+            tokio::spawn(async move {
+                let mut ws = ws;
+                while let Some(text) = crate::hub_link::next_text(&mut ws).await {
+                    for l in text.lines().filter(|l| !l.trim().is_empty()) {
+                        if tx.send(l.to_string()).is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+        } else {
+            let place =
+                Place::new(std::fs::canonicalize(&args.place).unwrap_or(args.place.clone()));
+            let addr = kernel_addr(&place, !args.no_spawn)?;
+            let stream = TcpStream::connect(&addr)
+                .await
+                .with_context(|| format!("connect {addr}"))?;
+            let (r, _w) = stream.into_split();
+            eprintln!("attached to {} at {addr}; Ctrl-C to stop", place.path.display());
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(r).lines();
+                while let Ok(Some(l)) = lines.next_line().await {
+                    if tx.send(l).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
         loop {
             let line = tokio::select! {
-                l = lines.next_line() => l?,
+                l = lines.recv() => l,
                 _ = tokio::signal::ctrl_c() => return Ok(EXIT_OK),
             };
             let Some(line) = line else {
@@ -297,40 +335,44 @@ pub fn attach(args: Args, all_agents: bool) -> Result<i32> {
             let Ok(frame) = serde_json::from_str::<Frame>(&line) else {
                 continue;
             };
-            match frame {
-                Frame::Event { agent, event }
-                    if event.seq > 0 && (all_agents || agent == args.agent) =>
-                {
-                    if args.json {
-                        let mut v = serde_json::to_value(&event)?;
-                        if let Some(o) = v.as_object_mut() {
-                            o.insert("agent".into(), serde_json::Value::String(agent));
-                        }
-                        println!("{v}");
-                    } else {
-                        print!("[{agent}] ");
-                        print_event(&event, false);
-                    }
-                }
-                Frame::Ask {
-                    agent,
-                    question,
-                    options,
-                    ..
-                } if all_agents || agent == args.agent => {
-                    if args.json {
-                        println!(
-                            "{}",
-                            serde_json::json!({"kind": "ask", "agent": agent, "question": question, "options": options})
-                        );
-                    } else {
-                        println!("[{agent}] ? {question} {}", options.join(" / "));
-                    }
-                }
-                _ => {}
-            }
+            print_attached(&frame, &args, all_agents)?;
         }
     })
+}
+
+/// One live frame as an attach line, when it is for the agent asked about.
+fn print_attached(frame: &Frame, args: &Args, all_agents: bool) -> Result<()> {
+    match frame {
+        Frame::Event { agent, event } if event.seq > 0 && (all_agents || *agent == args.agent) => {
+            if args.json {
+                let mut v = serde_json::to_value(event)?;
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("agent".into(), serde_json::Value::String(agent.clone()));
+                }
+                println!("{v}");
+            } else {
+                print!("[{agent}] ");
+                print_event(event, false);
+            }
+        }
+        Frame::Ask {
+            agent,
+            question,
+            options,
+            ..
+        } if all_agents || *agent == args.agent => {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::json!({"kind": "ask", "agent": agent, "question": question, "options": options})
+                );
+            } else {
+                println!("[{agent}] ? {question} {}", options.join(" / "));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// The kernel's loopback address, starting one when none is alive.

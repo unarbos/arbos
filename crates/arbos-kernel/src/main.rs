@@ -27,6 +27,18 @@ fn main() -> Result<()> {
                         // SAFETY: before the runtime and its threads start.
                         unsafe { std::env::set_var(arbos_kernel::access::BIND_ENV, addr) };
                     }
+                    "--hub" => set_env(
+                        arbos_kernel::hub_link::URL_ENV,
+                        &args.next().context("--hub needs a wss:// url")?,
+                    ),
+                    "--machine" => set_env(
+                        arbos_kernel::hub_link::MACHINE_ENV,
+                        &args.next().context("--machine needs a name")?,
+                    ),
+                    "--project" => set_env(
+                        arbos_kernel::hub_link::PROJECT_ENV,
+                        &args.next().context("--project needs a name")?,
+                    ),
                     "--until-idle" => set_env(arbos_kernel::idle::UNTIL_IDLE_ENV, "1"),
                     "--horizon" => set_env(
                         arbos_kernel::idle::HORIZON_ENV,
@@ -91,14 +103,19 @@ fn main() -> Result<()> {
             let code = arbos_kernel::rewind::run(arbos_kernel::rewind::Args::parse(args)?)?;
             std::process::exit(code);
         }
+        "worker" => {
+            let code = arbos_kernel::worker::run(arbos_kernel::worker::Args::parse(args)?)?;
+            std::process::exit(code);
+        }
         "help" | "-h" | "--help" => {
             println!(
-                "arbos-kernel serve [place] [--provider replay --replies FILE] [--bind HOST:PORT] [--until-idle] [--horizon 1h] [--now 2026-09-13T09:00:00Z]   (off loopback: tokens in <place>/.arbos/access.toml, [[client]] name/token|token_env/role)"
+                "arbos-kernel serve [place] [--provider replay --replies FILE] [--bind HOST:PORT] [--hub wss://URL --machine NAME [--project NAME]] [--until-idle] [--horizon 1h] [--now 2026-09-13T09:00:00Z]   (off loopback: tokens in <place>/.arbos/access.toml, [[client]] name/token|token_env/role; --hub registers with an arbos-hub, token from ~/.config/arbos/hub.toml or ARBOS_HUB_TOKEN)"
             );
             println!("{}", arbos_kernel::rollout::USAGE);
             println!("{}", arbos_kernel::setup::USAGE);
             println!("{}", arbos_kernel::cli::USAGE);
             println!("{}", arbos_kernel::rewind::USAGE);
+            println!("{}", arbos_kernel::worker::USAGE);
             Ok(())
         }
         other => bail!("unknown command {other}"),

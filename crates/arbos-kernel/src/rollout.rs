@@ -353,6 +353,7 @@ fn replay(bundle: &Path, out: Option<&Path>, timeout: Option<u64>) -> Result<i32
         prompt: Some(prompt),
         follow: false,
         allow: None,
+        hub: None,
     })?;
 
     let now = load_transcript(&layout.transcript()).unwrap_or_default();

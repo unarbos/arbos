@@ -52,10 +52,18 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
     };
     let agents_md = first_agents_md(place);
     let git = crate::tools::git_guard::GitRules::load(place.path()).prompt_line();
-    let machines = arbos_core::Machines::load()
+    // Two rosters: machines reached over ssh (the user's file) and machines
+    // registered on the hub (mirrored into .arbos/machines/ by the kernel).
+    let mut machines = arbos_core::Machines::load()
         .ok()
         .and_then(|m| m.roster())
         .unwrap_or_default();
+    if let Some(hub) = arbos_core::hub::roster_line(place) {
+        if !machines.is_empty() {
+            machines.push('\n');
+        }
+        machines.push_str(&hub);
+    }
     let kind = if agent.kind.is_empty() {
         String::new()
     } else {

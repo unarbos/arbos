@@ -1,21 +1,27 @@
-//! A child on another machine, reached over SSH.
+//! A child on another machine.
 //!
-//! `spawn host=<name>` syncs the project to that machine's dedicated
-//! directory, puts an `arbos-kernel` there when it lacks one, starts it,
-//! opens an `ssh -N -L` tunnel to its attach port, and sends the brief to
-//! its root agent. Locally the child is an agent folder with `remote:
+//! Two roads lead there. **ssh** (`machines.toml`): `spawn host=<name>`
+//! syncs the project to that machine's dedicated directory, puts an
+//! `arbos-kernel` there when it lacks one, starts it, opens an `ssh -N -L`
+//! tunnel to its attach port, and sends the brief to its root agent.
+//! **hub** (`.arbos/machines/`, no ssh route): the machine's worker is
+//! claimed through `arbos-hub`; it starts a kernel in the checkout it
+//! already has (a worktree of it), and the hub joins this kernel to it.
+//! Nothing is synced and no port is open on either side.
+//!
+//! Either way the child is, locally, an agent folder with `remote:
 //! <machine>:<path>` in `agent.md`; its transcript mirrors the remote one,
 //! and the remote's replies reach the parent as messages from the child.
-//!
 //! This is the design's "clients are views onto the kernel that owns the
-//! folder" with SSH as the carrier; the hub and WebSocket route replaces
-//! the tunnel later without changing what the parent or the child sees.
+//! folder"; only the carrier differs.
 
 use anyhow::{Context, Result, bail};
+use arbos_core::hub::HubFrame;
 use arbos_core::{
-    Agent, AgentId, Event, EventKind, Layout, Machine, Machines, Node, Place, append_event,
+    Agent, AgentId, Event, EventKind, Layout, Machine, Machines, Mode, Node, Place, append_event,
     append_events, node::DEFAULT_HOPS, validate_id, wire::Frame,
 };
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -25,15 +31,22 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
 
 use crate::hooks::KernelHooks;
+use crate::hub_link;
 
 /// How long to wait for the remote kernel to write its port, and for the
 /// tunnel to accept.
 const REMOTE_READY: Duration = Duration::from_secs(60);
 const TUNNEL_READY: Duration = Duration::from_secs(20);
+/// A claim through the hub: the worker may cut a worktree and start a
+/// kernel that then has to register.
+const CLAIM_READY: Duration = Duration::from_secs(150);
 /// After the remote says idle, the time its transcript tail has to settle.
 const SETTLE: Duration = Duration::from_millis(1500);
+/// Transcript lines fetched per `history` request over the hub.
+const HISTORY_LIMIT: u32 = 2000;
 
 /// One remote child, as remembered across kernel restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +58,18 @@ pub struct Record {
     /// Lines of the remote root's transcript already copied here.
     #[serde(default)]
     pub mirrored: usize,
+    /// `ssh` (default; the machine is in machines.toml) or `hub`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub route: String,
+    /// Hub route: the project name the remote kernel registered under.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project: String,
+}
+
+impl Record {
+    fn via_hub(&self) -> bool {
+        self.route == "hub"
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -71,13 +96,90 @@ impl RecordsFile {
     }
 }
 
+/// How a link reaches the remote kernel, and how it reads the transcript.
+enum Route {
+    /// An ssh tunnel to its loopback port; the transcript is read over ssh.
+    Ssh {
+        machine: Machine,
+        tunnel: Mutex<Option<Child>>,
+    },
+    /// The hub joined us; the transcript is read with `history` frames.
+    Hub,
+}
+
 /// A live link to one remote child.
 pub struct Link {
     pub record: Record,
-    machine: Machine,
+    route: Route,
     /// Frames for the remote kernel; the relay task writes them.
     to_remote: mpsc::UnboundedSender<Frame>,
-    tunnel: Mutex<Option<Child>>,
+}
+
+/// The two ends of a connection to a remote kernel, as channels, so the
+/// relay is the same over an ssh tunnel (TCP lines) and the hub
+/// (WebSocket messages).
+struct Carrier {
+    tx: mpsc::UnboundedSender<Frame>,
+    rx: mpsc::UnboundedReceiver<Frame>,
+}
+
+impl Carrier {
+    fn tcp(stream: TcpStream) -> Self {
+        let (r, mut w) = stream.into_split();
+        let (tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
+        let (in_tx, rx) = mpsc::unbounded_channel::<Frame>();
+        tokio::spawn(async move {
+            while let Some(f) = out_rx.recv().await {
+                let Ok(s) = serde_json::to_string(&f) else { continue };
+                if w.write_all(format!("{s}\n").as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(r).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Ok(f) = serde_json::from_str::<Frame>(&line)
+                    && in_tx.send(f).is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Self { tx, rx }
+    }
+
+    fn ws(ws: hub_link::Ws) -> Self {
+        let (mut sink, mut source) = ws.split();
+        let (tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
+        let (in_tx, rx) = mpsc::unbounded_channel::<Frame>();
+        tokio::spawn(async move {
+            while let Some(f) = out_rx.recv().await {
+                let Ok(s) = serde_json::to_string(&f) else { continue };
+                if sink.send(Message::Text(s.into())).await.is_err() {
+                    break;
+                }
+            }
+        });
+        tokio::spawn(async move {
+            while let Some(msg) = source.next().await {
+                let text = match msg {
+                    Ok(Message::Text(t)) => t.to_string(),
+                    Ok(Message::Binary(b)) => String::from_utf8_lossy(&b).to_string(),
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(_) => continue,
+                };
+                for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                    if let Ok(f) = serde_json::from_str::<Frame>(line)
+                        && in_tx.send(f).is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        });
+        Self { tx, rx }
+    }
 }
 
 #[derive(Default)]
@@ -135,6 +237,31 @@ impl RemoteHub {
             }
         };
         for record in file.remotes {
+            if record.via_hub() {
+                let hooks = Arc::clone(hooks);
+                tokio::spawn(async move {
+                    let outcome = async {
+                        let cfg = hub_link::config_from_env()?
+                            .context("no hub configured (~/.config/arbos/hub.toml)")?;
+                        let ws = hub_link::attach(&cfg, &record.machine, Some(&record.project))
+                            .await?;
+                        attach(
+                            Arc::clone(&hooks),
+                            record.clone(),
+                            Route::Hub,
+                            Carrier::ws(ws),
+                            true,
+                            None,
+                        )
+                        .await
+                    }
+                    .await;
+                    if let Err(e) = outcome {
+                        note_reattach_failure(&hooks, &record, e);
+                    }
+                });
+                continue;
+            }
             let Some(machine) = machines.get(&record.machine).cloned() else {
                 eprintln!(
                     "remote: {} is not in machines.toml; {} stays detached",
@@ -144,7 +271,6 @@ impl RemoteHub {
             };
             let hooks = Arc::clone(hooks);
             tokio::spawn(async move {
-                let h = Arc::clone(&hooks);
                 let r = record.clone();
                 let m = machine.clone();
                 let ready = tokio::task::spawn_blocking(move || {
@@ -152,37 +278,54 @@ impl RemoteHub {
                     open_tunnel(&m, port)
                 })
                 .await;
-                match ready {
+                let outcome = match ready {
                     Ok(Ok((child, local_port))) => {
-                        if let Err(e) =
-                            attach(hooks, machine, record.clone(), child, local_port, None).await
-                        {
-                            eprintln!("remote: re-attach {}: {e:#}", record.agent);
+                        match TcpStream::connect(("127.0.0.1", local_port)).await {
+                            Ok(stream) => {
+                                attach(
+                                    Arc::clone(&hooks),
+                                    record.clone(),
+                                    Route::Ssh {
+                                        machine,
+                                        tunnel: Mutex::new(Some(child)),
+                                    },
+                                    Carrier::tcp(stream),
+                                    false,
+                                    None,
+                                )
+                                .await
+                            }
+                            Err(e) => Err(anyhow::anyhow!("connect the tunnel: {e}")),
                         }
                     }
-                    Ok(Err(e)) => {
-                        eprintln!("remote: re-attach {}: {e:#}", record.agent);
-                        let _ = append_event(
-                            &h.layout(&record.agent).transcript(),
-                            &Event::new(EventKind::Notice {
-                                text: format!(
-                                    "could not re-attach to {} at {}: {e:#}",
-                                    record.machine, record.path
-                                ),
-                                failed: true,
-                            }),
-                        );
-                    }
-                    Err(e) => eprintln!("remote: re-attach task: {e}"),
+                    Ok(Err(e)) => Err(e),
+                    Err(e) => Err(anyhow::anyhow!("re-attach task: {e}")),
+                };
+                if let Err(e) = outcome {
+                    note_reattach_failure(&hooks, &record, e);
                 }
             });
         }
     }
 }
 
-/// `spawn host=<name>`: the whole road from a brief to a child working on
-/// another machine. Blocking work (ssh, rsync, scp) runs on the caller's
-/// blocking thread; the relay is an async task.
+fn note_reattach_failure(hooks: &KernelHooks, record: &Record, e: anyhow::Error) {
+    eprintln!("remote: re-attach {}: {e:#}", record.agent);
+    let _ = append_event(
+        &hooks.layout(&record.agent).transcript(),
+        &Event::new(EventKind::Notice {
+            text: format!(
+                "could not re-attach to {} at {}: {e:#}",
+                record.machine, record.path
+            ),
+            failed: true,
+        }),
+    );
+}
+
+/// `spawn host=<name>`: a machine from `machines.toml` is reached over
+/// ssh; one only the hub knows is claimed through it. Neither, and the
+/// error names both files.
 pub async fn spawn_remote(
     hooks: Arc<KernelHooks>,
     parent: Agent,
@@ -190,56 +333,117 @@ pub async fn spawn_remote(
     host: String,
 ) -> Result<(AgentId, String)> {
     let machines = Machines::load()?;
-    let machine = machines.get(&host).cloned().ok_or_else(|| {
-        anyhow::anyhow!(
-            "no machine named {host:?} in {}. Known: {}",
-            Machines::path().display(),
-            if machines.machine.is_empty() {
-                "(none; add a [[machine]] with name, ssh, dir)".to_string()
-            } else {
-                machines
-                    .machine
-                    .iter()
-                    .map(|m| m.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            }
-        )
-    })?;
-    let place = hooks.place.clone();
-    let project = place
-        .path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .filter(|n| !n.is_empty())
-        .unwrap_or("project")
-        .to_string();
-    // The local stand-in first, so the window shows the child while the
-    // sync runs. Same id rules as a local spawn. Each child gets a place
-    // of its own on the machine — its own copy, kernel, and root — so two
-    // children never share a transcript.
-    let id = hooks.remote_child_id(&brief)?;
+    if let Some(machine) = machines.get(&host).cloned() {
+        return spawn_ssh(hooks, parent, brief, machine).await;
+    }
+    if let Some(info) = arbos_core::hub::roster_machine(&hooks.place, &host) {
+        if !info.worker {
+            bail!(
+                "{} is on the hub but runs no worker, so nothing can start a kernel there. Start `arbos-kernel worker --dir <checkouts>` on it, or message an agent it already serves with say to={}/<agent>.",
+                info.name,
+                info.name
+            );
+        }
+        return spawn_hub(hooks, parent, brief, info).await;
+    }
+    let mut known: Vec<String> = machines.machine.iter().map(|m| m.name.clone()).collect();
+    known.extend(
+        arbos_core::hub::read_roster(&hooks.place)
+            .into_iter()
+            .map(|m| m.name),
+    );
+    bail!(
+        "no machine named {host:?} in {} or .arbos/machines/. Known: {}",
+        Machines::path().display(),
+        if known.is_empty() {
+            "(none; add a [[machine]] with name, ssh, dir, or register one on the hub)".to_string()
+        } else {
+            known.join(", ")
+        }
+    )
+}
+
+/// The local stand-in for a remote child: the window shows it while the
+/// far side comes up. Same id rules as a local spawn.
+fn stand_in(
+    hooks: &KernelHooks,
+    parent: &Agent,
+    brief: &str,
+    machine: &str,
+    remote_path: &str,
+    notice: String,
+) -> Result<(String, Agent)> {
+    let place = &hooks.place;
+    let id = hooks.remote_child_id(brief)?;
     validate_id(&id)?;
-    let remote_path = machine.place_for_child(&project, &id);
     let mut child = Agent::root(&id);
     child.name = brief.chars().take(48).collect();
     child.parent = Some(parent.id.clone());
     child.model = parent.model.clone();
     child.allowlist = parent.allowlist.clone();
-    child.remote = Some(format!("{}:{}", machine.name, remote_path));
+    child.mode = parent.mode;
+    child.remote = Some(format!("{machine}:{remote_path}"));
     child.save(&place.agent_dir(&id))?;
-    std::fs::create_dir_all(Layout::new(&place, &id).jobs())?;
+    std::fs::create_dir_all(Layout::new(place, &id).jobs())?;
     append_event(
-        &Layout::new(&place, &id).transcript(),
+        &Layout::new(place, &id).transcript(),
         &Event::new(EventKind::Notice {
-            text: format!(
-                "Runs on {} ({}) at {}. Syncing the project and starting a kernel there…",
-                machine.name, machine.ssh, remote_path
-            ),
+            text: notice,
             failed: false,
         }),
     )?;
     hooks.broadcast_tree();
+    Ok((id, child))
+}
+
+fn remember(place: &Place, record: &Record) -> Result<()> {
+    let mut file = RecordsFile::load(place);
+    file.remotes.retain(|r| r.agent != record.agent);
+    file.remotes.push(record.clone());
+    file.save(place)
+}
+
+fn project_name(place: &Place) -> String {
+    place
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("project")
+        .to_string()
+}
+
+fn first_prompt(parent: &Agent, brief: &str, remote_path: &str, machine: &str, how: &str) -> String {
+    format!(
+        "You were spawned by agent {} on another machine for this mission:\n\n{brief}\n\nYou work in {remote_path} on {machine}, {how}. Do it now; report results in your final reply — it is delivered to your parent as a message from you. If you change files, commit them on a branch and name it in the report.",
+        parent.id
+    )
+}
+
+/// The ssh road: sync, install, start, tunnel, brief.
+async fn spawn_ssh(
+    hooks: Arc<KernelHooks>,
+    parent: Agent,
+    brief: String,
+    machine: Machine,
+) -> Result<(AgentId, String)> {
+    let place = hooks.place.clone();
+    let project = project_name(&place);
+    // Each child gets a place of its own on the machine — its own copy,
+    // kernel, and root — so two children never share a transcript.
+    let id = hooks.remote_child_id(&brief)?;
+    let remote_path = machine.place_for_child(&project, &id);
+    let (id, child) = stand_in(
+        &hooks,
+        &parent,
+        &brief,
+        &machine.name,
+        &remote_path,
+        format!(
+            "Runs on {} ({}) at {}. Syncing the project and starting a kernel there…",
+            machine.name, machine.ssh, remote_path
+        ),
+    )?;
 
     let m = machine.clone();
     let rp = remote_path.clone();
@@ -276,11 +480,10 @@ pub async fn spawn_remote(
         machine: machine.name.clone(),
         path: remote_path.clone(),
         mirrored: already,
+        route: String::new(),
+        project: String::new(),
     };
-    let mut file = RecordsFile::load(&place);
-    file.remotes.retain(|r| r.agent != id);
-    file.remotes.push(record.clone());
-    file.save(&place)?;
+    remember(&place, &record)?;
     append_event(
         &Layout::new(&place, &id).transcript(),
         &Event::new(EventKind::Notice {
@@ -291,16 +494,25 @@ pub async fn spawn_remote(
             failed: false,
         }),
     )?;
-    let first = format!(
-        "You were spawned by agent {} on another machine for this mission:\n\n{brief}\n\nYou work in {remote_path} on {}, a copy of the project synced from the parent's machine. Do it now; report results in your final reply — it is delivered to your parent as a message from you. If you change files, commit them on a branch and name it in the report.",
-        parent.id, machine.name
+    let first = first_prompt(
+        &parent,
+        &brief,
+        &remote_path,
+        &machine.name,
+        "a copy of the project synced from the parent's machine",
     );
+    let stream = TcpStream::connect(("127.0.0.1", local_port))
+        .await
+        .with_context(|| format!("connect the tunnel to {}", machine.name))?;
     attach(
         Arc::clone(&hooks),
-        machine.clone(),
         record,
-        tunnel,
-        local_port,
+        Route::Ssh {
+            machine: machine.clone(),
+            tunnel: Mutex::new(Some(tunnel)),
+        },
+        Carrier::tcp(stream),
+        false,
         Some(first),
     )
     .await?;
@@ -313,41 +525,161 @@ pub async fn spawn_remote(
     ))
 }
 
-/// Connect through the tunnel, send the brief (when given), and run the
-/// relay for the life of the link.
+/// The hub road: claim the machine's worker for this project, in a
+/// worktree of its checkout, and ride the same socket to the new kernel.
+async fn spawn_hub(
+    hooks: Arc<KernelHooks>,
+    parent: Agent,
+    brief: String,
+    info: arbos_core::MachineInfo,
+) -> Result<(AgentId, String)> {
+    let cfg = hub_link::config_from_env()?.context(
+        "this kernel has no hub configured (start it with --hub, or write ~/.config/arbos/hub.toml)",
+    )?;
+    let place = hooks.place.clone();
+    let project = project_name(&place);
+    if !info.projects.iter().any(|p| p.name == project) {
+        bail!(
+            "{} has no checkout named {project:?} (it offers: {}). The worker runs in an existing checkout; clone the project into its --dir first.",
+            info.name,
+            if info.projects.is_empty() {
+                "none".to_string()
+            } else {
+                info.projects
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        );
+    }
+    let (id, child) = stand_in(
+        &hooks,
+        &parent,
+        &brief,
+        &info.name,
+        &format!("{project} (worktree)"),
+        format!(
+            "Runs on {} through the hub {}. Claiming its worker for a worktree of {project}…",
+            info.name, cfg.url
+        ),
+    )?;
+    let claimed = async {
+        let token = cfg.token()?;
+        let mut ws = hub_link::connect(&cfg.claim_url(&info.name), &token).await?;
+        hub_link::send_json(
+            &mut ws,
+            &HubFrame::Claim {
+                id: String::new(),
+                project: project.clone(),
+                isolate: true,
+                from: format!("{}/{}", cfg.machine, parent.id),
+            },
+        )
+        .await?;
+        let answer = tokio::time::timeout(CLAIM_READY, hub_link::next_text(&mut ws))
+            .await
+            .with_context(|| format!("no answer to the claim of {} within {CLAIM_READY:?}", info.name))?
+            .with_context(|| format!("the hub closed the claim of {}", info.name))?;
+        match serde_json::from_str::<HubFrame>(&answer) {
+            Ok(HubFrame::Claimed {
+                ok: true,
+                project,
+                place,
+                ..
+            }) => Ok((ws, project, place)),
+            Ok(HubFrame::Claimed { detail, .. }) => bail!("{}: {detail}", info.name),
+            Ok(HubFrame::Error { detail }) => bail!("hub: {detail}"),
+            Ok(other) => bail!("hub answered {other:?} to the claim"),
+            Err(e) => bail!("hub answered something that is not a frame: {e}"),
+        }
+    }
+    .await;
+    let (ws, served, remote_path) = match claimed {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(place.agent_dir(&id));
+            hooks.broadcast_tree();
+            return Err(e);
+        }
+    };
+    // Fix the stand-in's address now that the worker named the place.
+    if let Ok(mut a) = arbos_core::load_agent(&place, &AgentId::new(&id)) {
+        a.remote = Some(format!("{}:{remote_path}", info.name));
+        let _ = a.save(&place.agent_dir(&id));
+    }
+    let record = Record {
+        agent: id.clone(),
+        parent: parent.id.to_string(),
+        machine: info.name.clone(),
+        path: remote_path.clone(),
+        mirrored: 0,
+        route: "hub".into(),
+        project: served.clone(),
+    };
+    remember(&place, &record)?;
+    append_event(
+        &Layout::new(&place, &id).transcript(),
+        &Event::new(EventKind::Notice {
+            text: format!(
+                "Worker on {} started a kernel for {served} at {remote_path}; attached through the hub (no ssh, no open port).",
+                info.name
+            ),
+            failed: false,
+        }),
+    )?;
+    let first = first_prompt(
+        &parent,
+        &brief,
+        &remote_path,
+        &info.name,
+        "a git worktree of that machine's own checkout of the project",
+    );
+    attach(
+        Arc::clone(&hooks),
+        record,
+        Route::Hub,
+        Carrier::ws(ws),
+        false,
+        Some(first),
+    )
+    .await?;
+    Ok((
+        AgentId::new(id),
+        format!(
+            "on {} at {remote_path} through the hub (its reports arrive here as messages from it; say to={} reaches it)",
+            info.name, child.id
+        ),
+    ))
+}
+
+/// Wait for the greeting (unless already taken), send the brief (when
+/// given), and run the relay for the life of the link.
 async fn attach(
     hooks: Arc<KernelHooks>,
-    machine: Machine,
     record: Record,
-    tunnel: Child,
-    local_port: u16,
+    route: Route,
+    mut carrier: Carrier,
+    greeted: bool,
     first: Option<String>,
 ) -> Result<()> {
-    let stream = TcpStream::connect(("127.0.0.1", local_port))
-        .await
-        .with_context(|| format!("connect the tunnel to {}", machine.name))?;
-    let (r, mut w) = stream.into_split();
-    let mut lines = BufReader::new(r).lines();
-    // The kernel greets every client with a snapshot. No greeting means
-    // the tunnel is up but nothing answers behind it (a stale port).
-    match tokio::time::timeout(TUNNEL_READY, lines.next_line()).await {
-        Ok(Ok(Some(_))) => {}
-        Ok(Ok(None)) | Ok(Err(_)) => bail!(
-            "the tunnel to {} opened but the kernel there closed the connection; see {}/.arbos/kernel.log on it",
-            machine.name,
-            record.path
-        ),
-        Err(_) => bail!(
-            "no answer from the kernel on {} within {TUNNEL_READY:?}",
-            machine.name
-        ),
+    let machine = record.machine.clone();
+    if !greeted {
+        // The kernel greets every client. No greeting means the carrier is
+        // up but nothing answers behind it (a stale port).
+        match tokio::time::timeout(TUNNEL_READY, carrier.rx.recv()).await {
+            Ok(Some(_)) => {}
+            Ok(None) => bail!(
+                "the link to {machine} opened but the kernel there closed the connection; see {}/.arbos/kernel.log on it",
+                record.path
+            ),
+            Err(_) => bail!("no answer from the kernel on {machine} within {TUNNEL_READY:?}"),
+        }
     }
-    let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
     let link = Arc::new(Link {
         record: record.clone(),
-        machine: machine.clone(),
-        to_remote: tx,
-        tunnel: Mutex::new(Some(tunnel)),
+        route,
+        to_remote: carrier.tx.clone(),
     });
     hooks
         .remotes
@@ -355,7 +687,17 @@ async fn attach(
         .lock()
         .unwrap()
         .insert(record.agent.clone(), Arc::clone(&link));
-    let mirrored = record.mirrored;
+    // The parent's leash applies on the far side too: a child spawned in
+    // ask or plan mode runs that way there.
+    let mode = arbos_core::load_agent(&hooks.place, &AgentId::new(&record.agent))
+        .map(|a| a.mode)
+        .unwrap_or(Mode::Auto);
+    if mode != Mode::Auto {
+        let _ = link.to_remote.send(Frame::SetMode {
+            agent: "root".into(),
+            mode: mode.as_str().to_string(),
+        });
+    }
     if let Some(text) = first {
         link.to_remote
             .send(Frame::User {
@@ -366,126 +708,156 @@ async fn attach(
             })
             .ok();
     }
-    tokio::spawn(async move {
-        let mut running = false;
-        let mut idle_at: Option<Instant> = None;
-        let mut mirrored = mirrored;
-        loop {
-            tokio::select! {
-                out = rx.recv() => {
-                    let Some(frame) = out else { break };
-                    if let Ok(s) = serde_json::to_string(&frame) {
-                        if w.write_all(format!("{s}\n").as_bytes()).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                line = lines.next_line() => {
-                    match line {
-                        Ok(Some(line)) => {
-                            let Ok(frame) = serde_json::from_str::<Frame>(&line) else { continue };
-                            if let Frame::Turn { agent, state, .. } = frame
-                                && agent == "root"
-                            {
-                                if state == "running" {
-                                    running = true;
-                                    idle_at = None;
-                                } else if state == "idle" && running {
-                                    idle_at = Some(Instant::now());
-                                }
-                            }
-                        }
-                        _ => break,
-                    }
-                }
-                _ = tokio::time::sleep(Duration::from_millis(300)) => {}
-            }
-            if let Some(at) = idle_at
-                && at.elapsed() >= SETTLE
-            {
-                idle_at = None;
-                running = false;
-                let m = link.machine.clone();
-                let path = link.record.path.clone();
-                let from = mirrored;
-                let fetched =
-                    tokio::task::spawn_blocking(move || remote_transcript_tail(&m, &path, from))
-                        .await;
-                match fetched {
-                    Ok(Ok(events)) if !events.is_empty() => {
-                        mirrored += events.len();
-                        let _ =
-                            append_events(&hooks.layout(&link.record.agent).transcript(), &events);
-                        // Remember where the mirror stands for a restart.
-                        let mut file = RecordsFile::load(&hooks.place);
-                        for r in &mut file.remotes {
-                            if r.agent == link.record.agent {
-                                r.mirrored = mirrored;
-                            }
-                        }
-                        let _ = file.save(&hooks.place);
-                        let reply = events
-                            .iter()
-                            .rev()
-                            .find_map(|e| match &e.kind {
-                                EventKind::Assistant { text, .. } if !text.trim().is_empty() => {
-                                    Some(text.clone())
-                                }
-                                _ => None,
-                            })
-                            .or_else(|| {
-                                events.iter().rev().find_map(|e| match &e.kind {
-                                    EventKind::Notice { text, failed: true } => {
-                                        Some(format!("(failed on {}) {text}", link.machine.name))
-                                    }
-                                    _ => None,
-                                })
-                            });
-                        if let Some(text) = reply {
-                            if let Err(e) = deliver(&hooks, &link.record, &text) {
-                                eprintln!("remote: deliver from {}: {e:#}", link.record.agent);
-                            }
-                        }
-                        hooks.broadcast_tree();
-                    }
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => {
-                        eprintln!("remote: read transcript on {}: {e:#}", link.machine.name)
-                    }
-                    Err(e) => eprintln!("remote: transcript task: {e}"),
-                }
-            }
-        }
-        // The socket or the tunnel went away.
-        hooks
-            .remotes
-            .links
-            .lock()
-            .unwrap()
-            .remove(&link.record.agent);
-        if let Some(mut t) = link.tunnel.lock().unwrap().take() {
-            let _ = t.kill();
-        }
-        let _ = append_event(
-            &hooks.layout(&link.record.agent).transcript(),
-            &Event::new(EventKind::Notice {
-                text: format!(
-                    "the link to {} closed; a kernel restart re-attaches it",
-                    link.machine.name
-                ),
-                failed: true,
-            }),
-        );
-        let _ = deliver(
-            &hooks,
-            &link.record,
-            &format!(
-                "(link to {} lost; the remote kernel may still be working — restart this kernel to re-attach)",
-                link.machine.name
-            ),
-        );
-    });
+    tokio::spawn(relay(hooks, link, carrier.rx));
     Ok(())
+}
+
+/// Watch the remote root's turns; when one ends, fetch the new transcript
+/// lines, mirror them locally, and deliver the reply to the parent.
+async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::UnboundedReceiver<Frame>) {
+    let mut running = false;
+    let mut idle_at: Option<Instant> = None;
+    let mut mirrored = link.record.mirrored;
+    // Hub route: `replayed` lines gathered until `history_end`.
+    let mut collecting: Option<Vec<Event>> = None;
+    loop {
+        tokio::select! {
+            frame = rx.recv() => {
+                let Some(frame) = frame else { break };
+                match frame {
+                    Frame::Turn { agent, state, .. } if agent == "root" => {
+                        if state == "running" {
+                            running = true;
+                            idle_at = None;
+                        } else if state == "idle" && running {
+                            idle_at = Some(Instant::now());
+                        }
+                    }
+                    Frame::Replayed { agent, event } if agent == "root" => {
+                        if let Some(buf) = collecting.as_mut() {
+                            buf.push(event);
+                        }
+                    }
+                    Frame::HistoryEnd { agent, to, .. } if agent == "root" => {
+                        if let Some(events) = collecting.take() {
+                            if !events.is_empty() {
+                                mirrored = to as usize;
+                                mirror(&hooks, &link, events, mirrored);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+        }
+        if let Some(at) = idle_at
+            && at.elapsed() >= SETTLE
+        {
+            idle_at = None;
+            running = false;
+            match &link.route {
+                Route::Ssh { machine, .. } => {
+                    let m = machine.clone();
+                    let path = link.record.path.clone();
+                    let from = mirrored;
+                    let fetched =
+                        tokio::task::spawn_blocking(move || remote_transcript_tail(&m, &path, from))
+                            .await;
+                    match fetched {
+                        Ok(Ok(events)) if !events.is_empty() => {
+                            mirrored += events.len();
+                            mirror(&hooks, &link, events, mirrored);
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            eprintln!("remote: read transcript on {}: {e:#}", machine.name)
+                        }
+                        Err(e) => eprintln!("remote: transcript task: {e}"),
+                    }
+                }
+                Route::Hub => {
+                    collecting = Some(Vec::new());
+                    let _ = link.to_remote.send(Frame::History {
+                        agent: "root".into(),
+                        since: mirrored as u64,
+                        limit: HISTORY_LIMIT,
+                    });
+                }
+            }
+        }
+    }
+    // The socket or the tunnel went away.
+    hooks
+        .remotes
+        .links
+        .lock()
+        .unwrap()
+        .remove(&link.record.agent);
+    if let Route::Ssh { tunnel, .. } = &link.route
+        && let Some(mut t) = tunnel.lock().unwrap().take()
+    {
+        let _ = t.kill();
+    }
+    let _ = append_event(
+        &hooks.layout(&link.record.agent).transcript(),
+        &Event::new(EventKind::Notice {
+            text: format!(
+                "the link to {} closed; a kernel restart re-attaches it",
+                link.record.machine
+            ),
+            failed: true,
+        }),
+    );
+    let _ = deliver(
+        &hooks,
+        &link.record,
+        &format!(
+            "(link to {} lost; the remote kernel may still be working — restart this kernel to re-attach)",
+            link.record.machine
+        ),
+    );
+}
+
+/// New remote lines: onto the child's local transcript, the mirror mark
+/// into `remotes.json`, and the reply to the parent.
+fn mirror(hooks: &KernelHooks, link: &Link, events: Vec<Event>, mirrored: usize) {
+    let events: Vec<Event> = events
+        .into_iter()
+        .map(|mut e| {
+            e.seq = 0;
+            e
+        })
+        .collect();
+    let _ = append_events(&hooks.layout(&link.record.agent).transcript(), &events);
+    let mut file = RecordsFile::load(&hooks.place);
+    for r in &mut file.remotes {
+        if r.agent == link.record.agent {
+            r.mirrored = mirrored;
+        }
+    }
+    let _ = file.save(&hooks.place);
+    let reply = events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.kind {
+            EventKind::Assistant { text, .. } if !text.trim().is_empty() => Some(text.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            events.iter().rev().find_map(|e| match &e.kind {
+                EventKind::Notice { text, failed: true } => {
+                    Some(format!("(failed on {}) {text}", link.record.machine))
+                }
+                _ => None,
+            })
+        });
+    if let Some(text) = reply
+        && let Err(e) = deliver(hooks, &link.record, &text)
+    {
+        eprintln!("remote: deliver from {}: {e:#}", link.record.agent);
+    }
+    hooks.broadcast_tree();
 }
 
 /// The remote reply as a message from the child on the parent's
