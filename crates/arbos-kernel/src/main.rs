@@ -22,6 +22,11 @@ fn main() -> Result<()> {
                 match a.as_str() {
                     "--provider" => provider = args.next(),
                     "--replies" => replies = args.next(),
+                    "--bind" => {
+                        let addr = args.next().context("--bind needs host:port")?;
+                        // SAFETY: before the runtime and its threads start.
+                        unsafe { std::env::set_var(arbos_kernel::access::BIND_ENV, addr) };
+                    }
                     other if other.starts_with('-') => bail!("serve: unknown flag {other}"),
                     other => place = Some(other.to_string()),
                 }
@@ -66,7 +71,9 @@ fn main() -> Result<()> {
             std::process::exit(code);
         }
         "help" | "-h" | "--help" => {
-            println!("arbos-kernel serve [place] [--provider replay --replies FILE]");
+            println!(
+                "arbos-kernel serve [place] [--provider replay --replies FILE] [--bind HOST:PORT]   (off loopback: tokens in <place>/.arbos/access.toml, [[client]] name/token|token_env/role)"
+            );
             println!("{}", arbos_kernel::rollout::USAGE);
             println!("{}", arbos_kernel::setup::USAGE);
             println!("{}", arbos_kernel::cli::USAGE);

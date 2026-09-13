@@ -8,6 +8,13 @@ pub enum Frame {
     /// First frame on every connection: what the kernel speaks and how
     /// much of the focused agent's transcript it replays right after the
     /// snapshot. `protocol` 1 = hello + replay + history + deltas.
+    /// Client → kernel, first frame from a peer that is not on this
+    /// machine: a token from `.arbos/access.toml`. A WebSocket client may
+    /// send it as `Authorization: Bearer` or `?token=` instead. Loopback
+    /// peers never need it.
+    Auth {
+        token: String,
+    },
     Hello {
         protocol: u32,
         kernel: String,
