@@ -19,8 +19,7 @@ use anyhow::{Context, Result, bail};
 use arbos_core::{EventKind, Layout, Place, load_transcript};
 use arbos_engine::git::{Checkpoint, checkpoints, restore};
 
-pub const USAGE: &str =
-    "arbos-kernel rewind <place> [--agent ID] (--list | --to LINE | --back N) [--files] [--yes]";
+pub const USAGE: &str = "arbos-kernel rewind <place> [--agent ID] (--list | --to LINE | --back N | --commit SHA) [--files] [--yes]\narbos-kernel log <place> [-n N]";
 
 #[derive(Debug, Clone)]
 pub struct Args {
@@ -29,6 +28,8 @@ pub struct Args {
     pub list: bool,
     pub to: Option<u64>,
     pub back: Option<u64>,
+    /// Put the whole `.arbos/` record back to this commit of its repository.
+    pub commit: Option<String>,
     pub files: bool,
     pub yes: bool,
 }
@@ -41,6 +42,7 @@ impl Args {
             list: false,
             to: None,
             back: None,
+            commit: None,
             files: false,
             yes: false,
         };
@@ -65,6 +67,9 @@ impl Args {
                             .context("--back: not a number")?,
                     )
                 }
+                "--commit" | "-c" => {
+                    out.commit = Some(args.next().context("--commit needs a sha")?)
+                }
                 "--files" => out.files = true,
                 "--yes" | "-y" => out.yes = true,
                 other if other.starts_with('-') => bail!("rewind: unknown flag {other}\n{USAGE}"),
@@ -75,7 +80,7 @@ impl Args {
                 other => bail!("rewind: unexpected argument {other}\n{USAGE}"),
             }
         }
-        if !out.list && out.to.is_none() && out.back.is_none() {
+        if !out.list && out.to.is_none() && out.back.is_none() && out.commit.is_none() {
             bail!("rewind: say --list, --to LINE, or --back N\n{USAGE}");
         }
         Ok(out)
@@ -115,7 +120,52 @@ pub fn run(args: Args) -> Result<i32> {
             (i + 1, cp, one_line(&opener, 70))
         })
         .collect();
+    // The whole record back to a commit of .arbos/: every agent, every
+    // plan, as they were. Forward commit; the pre-rewind state is one back.
+    if let Some(sha) = &args.commit {
+        if kernel_alive(&place) {
+            bail!(
+                "a kernel is serving {}; stop it first",
+                place.path.display()
+            );
+        }
+        if !args.yes {
+            print!(
+                "rewind the whole .arbos/ record of {} to {sha}? [y/N] ",
+                place.path.display()
+            );
+            use std::io::Write;
+            std::io::stdout().flush()?;
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer)?;
+            if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                println!("nothing done");
+                return Ok(1);
+            }
+        }
+        let new = crate::snapshot::rewind_to(&place, sha)?;
+        println!(
+            ".arbos/ is back at {sha}; recorded as commit {new}. Start the kernel to continue from there."
+        );
+        if args.files {
+            println!(
+                "(--files applies to per-agent rewinds; the project's own repository was not touched)"
+            );
+        }
+        return Ok(0);
+    }
     if args.list {
+        match crate::snapshot::log(&place, 8) {
+            Ok(lines) if !lines.is_empty() => {
+                println!(
+                    "recent .arbos/ commits (rewind --commit SHA takes the whole record back):"
+                );
+                for l in &lines {
+                    println!("  {l}");
+                }
+            }
+            _ => {}
+        }
         println!(
             "{} turns on {} ({} transcript lines):",
             turns.len(),
@@ -215,6 +265,12 @@ pub fn run(args: Args) -> Result<i32> {
         "transcript cut; the {dropped} lines are in {}",
         side.display()
     );
+    if let Ok(Some(sha)) = crate::snapshot::commit(
+        &place,
+        &format!("rewind {} to line {}", args.agent, target.line),
+    ) {
+        println!("recorded in .arbos/ as commit {sha}");
+    }
     if args.files {
         let agent = arbos_core::Agent::load(&layout.dir)?;
         let cwd = agent.cwd.clone().unwrap_or_else(|| place.path.clone());
@@ -230,7 +286,7 @@ pub fn run(args: Args) -> Result<i32> {
 }
 
 fn kernel_alive(place: &Place) -> bool {
-    let Ok(text) = std::fs::read_to_string(place.kernel_json()) else {
+    let Ok(text) = std::fs::read_to_string(place.kernel_json_read()) else {
         return false;
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {

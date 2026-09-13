@@ -15,7 +15,7 @@ fn an_attach_client_cannot_point_the_focus_outside_the_agents_folder() {
         a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
             .is_some()
     );
-    let focus = k.place.join(".arbos").join("focus");
+    let focus = k.place.join(".arbos").join("runtime").join("focus");
     assert_eq!(
         std::fs::read_to_string(&focus).unwrap().trim(),
         ".arbos/agents/root"

@@ -60,8 +60,8 @@ fn an_unwritable_claim_closes_its_attempt_and_backs_off() {
         latest.len()
     );
     assert!(open.is_empty(), "attempts left open: {open:?}");
-    let log =
-        std::fs::read_to_string(k.place.join(".arbos").join("kernel.log")).unwrap_or_default();
+    let log = std::fs::read_to_string(k.place.join(".arbos").join("runtime").join("kernel.log"))
+        .unwrap_or_default();
     assert!(
         log.contains("claim_failed"),
         "kernel.log has no claim_failed line"

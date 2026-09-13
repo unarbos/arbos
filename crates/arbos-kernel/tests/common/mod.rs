@@ -63,7 +63,7 @@ fn spawn(scratch: PathBuf) -> Kernel {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn arbos-kernel");
-    let kernel_json = place.join(".arbos").join("kernel.json");
+    let kernel_json = place.join(".arbos").join("runtime").join("kernel.json");
     let deadline = Instant::now() + Duration::from_secs(20);
     let url = loop {
         if let Ok(text) = std::fs::read_to_string(&kernel_json) {
@@ -168,5 +168,5 @@ pub fn wait_exit(child: &mut Child, timeout: Duration) -> Option<i32> {
 }
 
 pub fn lock_path(place: &Path) -> PathBuf {
-    place.join(".arbos").join("lock")
+    place.join(".arbos").join("runtime").join("lock")
 }

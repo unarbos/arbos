@@ -1879,7 +1879,13 @@ pub fn voice_stop(_workspace: &Path) -> Result<String> {
     crate::voice::stop()
 }
 
+/// `runtime/kernel.json` since the file-system design's Phase 1; the old
+/// root location while kernels from before it are still around.
 fn kernel_json(workspace: &Path) -> PathBuf {
+    let new = workspace.join(".arbos").join("runtime").join("kernel.json");
+    if new.exists() {
+        return new;
+    }
     workspace.join(".arbos").join("kernel.json")
 }
 
@@ -1926,10 +1932,12 @@ pub fn tcp_addr(url: &str) -> Option<std::net::SocketAddr> {
 
 fn spawn(workspace: &Path) -> Result<Child> {
     let bin = arbos_bin()?;
-    let dir = workspace.join(".arbos");
+    // The kernel's stdout/stderr go under runtime/: process facts, never
+    // part of the .arbos/ record.
+    let dir = workspace.join(".arbos").join("runtime");
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let log = std::fs::File::create(dir.join("kernel.log"))
-        .with_context(|| format!("create {}/kernel.log", dir.display()))?;
+    let log = std::fs::File::create(dir.join("kernel.out.log"))
+        .with_context(|| format!("create {}/kernel.out.log", dir.display()))?;
     let err = log.try_clone()?;
     // The kernel picks its own loopback port and writes it to kernel.json
     // as `tcp://127.0.0.1:port`. Do not invent an HTTP URL here — that
@@ -1969,7 +1977,7 @@ fn wait_ready(workspace: &Path, mut child: Child) -> Result<WebInfo> {
 }
 
 fn kernel_log_tail(workspace: &Path) -> String {
-    let path = workspace.join(".arbos").join("kernel.log");
+    let path = workspace.join(".arbos").join("runtime").join("kernel.out.log");
     let Ok(body) = std::fs::read_to_string(path) else {
         return String::new();
     };
@@ -2127,7 +2135,7 @@ fn ssh_probe(host: &str, path: &Path) -> Result<Probe> {
         r#"os=$(uname -s | tr A-Z a-z); a=$(uname -m); case "$a" in x86_64|amd64) a=amd64;; aarch64|arm64) a=arm64;; esac; echo "$os-$a"
 if [ -x "{bin}" ]; then sha=$(sha256sum "{bin}" 2>/dev/null | cut -d" " -f1); ver=$("{bin}" --version 2>/dev/null || echo -); else sha=-; ver=-; fi
 echo "$sha"; echo "$ver"
-f={dir}/.arbos/kernel.json
+f={dir}/.arbos/runtime/kernel.json; [ -f "$f" ] || f={dir}/.arbos/kernel.json
 if [ -f "$f" ]; then pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$f"); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then cat "$f"; fi; fi"#,
         bin = REMOTE_BIN,
         dir = dir,
@@ -2324,7 +2332,10 @@ fn wait_remote_json(host: &str, path: &Path) -> Result<WebInfo> {
     let dir = shell_path(&path.to_string_lossy());
     let deadline = Instant::now() + READY_WAIT;
     while Instant::now() < deadline {
-        let out = ssh_run(host, &format!("cat {dir}/.arbos/kernel.json 2>/dev/null"))?;
+        let out = ssh_run(
+            host,
+            &format!("cat {dir}/.arbos/runtime/kernel.json 2>/dev/null || cat {dir}/.arbos/kernel.json 2>/dev/null"),
+        )?;
         if out.status == 0
             && let Ok(info) = serde_json::from_str::<WebInfo>(&out.stdout)
         {

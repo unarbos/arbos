@@ -97,5 +97,5 @@ pub fn git_sha() -> &'static str {
 }
 
 pub fn log_path_for(arbos_dir: &Path) -> PathBuf {
-    arbos_dir.join("kernel.log")
+    arbos_dir.join("runtime").join("kernel.log")
 }
