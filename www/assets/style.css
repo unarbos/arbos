@@ -6,7 +6,7 @@
   --line-strong: #363636;
   --fg: #e7e7e7;
   --fg-muted: #9a9a9a;
-  --fg-faint: #6b6b6b;
+  --fg-faint: #8a8a8a;
   --accent: #a48cff;
   --accent-strong: #b7a3ff;
   --accent-dim: rgba(164, 140, 255, 0.14);
@@ -44,6 +44,14 @@ a {
 }
 
 a:hover { color: var(--accent-strong); text-decoration: underline; text-underline-offset: 0.15em; }
+
+p a, li a, .lede a, .btn-note a, .foot span a {
+  text-decoration: underline;
+  text-decoration-color: rgba(164, 140, 255, 0.45);
+  text-underline-offset: 0.15em;
+}
+
+p a:hover, li a:hover { text-decoration-color: var(--accent-strong); }
 
 :focus-visible {
   outline: 2px solid var(--accent);
@@ -387,6 +395,7 @@ kbd {
   border-radius: var(--radius-sm);
   background: var(--bg-raised);
   color: var(--fg);
+  text-decoration: none;
 }
 
 .doclist a:hover { background: var(--bg-hover); border-color: var(--line-strong); text-decoration: none; }
@@ -428,6 +437,7 @@ kbd {
   margin-left: -1px;
   border-left: 1px solid transparent;
   color: var(--fg-muted);
+  text-decoration: none;
 }
 
 .toc a:hover { color: var(--fg); border-left-color: var(--line-strong); text-decoration: none; }
