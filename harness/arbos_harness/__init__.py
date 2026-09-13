@@ -3,8 +3,8 @@
 The program is `arbos-swe-run` (bundled here), which runs `arbos-kernel run`
 headless inside the task's container, then leaves the patch, the exported
 rollout bundle, and a `result.json` under `/tmp/vf-arbos/out`, which the
-harness copies to the host. Model calls go to the interception endpoint as a custom OpenAI-compatible
-provider, so the trace verifiers records is the sample.
+harness copies to the host. Model calls go to the interception endpoint as a
+custom OpenAI-compatible provider, so the trace verifiers records is the sample.
 
     uv run eval swebench-verified --env.agent.harness.id arbos-harness \
         --env.agent.runtime.type docker -m <model> \
