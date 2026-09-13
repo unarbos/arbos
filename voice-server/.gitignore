@@ -9,3 +9,5 @@ models/
 out/
 *.token
 __pycache__/
+tests/out/
+tests/.cache/

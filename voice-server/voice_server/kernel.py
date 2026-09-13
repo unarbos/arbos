@@ -43,6 +43,9 @@ class KernelClient:
         self.focus = "root"
         self.listeners: list[Listener] = []
         self._reader_task: asyncio.Task | None = None
+        # Answers to `read`/`tail`/`list`, keyed by (reply type, path); one waiter per key.
+        self._waiting: dict[tuple[str, str], asyncio.Future] = {}
+        self.hello: dict = {}
 
     # ------------------------------------------------------------------ connection
 
@@ -102,6 +105,14 @@ class KernelClient:
 
     def _track(self, frame: dict) -> None:
         kind = frame.get("type")
+        if kind in ("file", "chunk", "listing"):
+            fut = self._waiting.pop((kind, str(frame.get("path", ""))), None)
+            if fut is not None and not fut.done():
+                fut.set_result(frame)
+            return
+        if kind == "hello":
+            self.hello = frame
+            return
         if kind in ("snapshot", "tree"):
             seen = set()
             for node in frame.get("tree", []):
@@ -136,9 +147,68 @@ class KernelClient:
         elif kind == "ask" and self.auto_approve and str(frame.get("question", "")).startswith("allow "):
             self.send({"type": "approve", "agent": frame["agent"], "call_id": "", "allow": True})
 
+    # ------------------------------------------------------------------ files (Read/Tail/List frames)
+
+    async def _ask_file(self, request: dict, reply_type: str, timeout: float) -> dict:
+        key = (reply_type, str(request.get("path", "")))
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._waiting[key] = fut
+        try:
+            self.send(request)
+            return await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            return {"type": reply_type, "path": key[1], "error": f"no answer from the kernel in {timeout:.0f}s"}
+        finally:
+            self._waiting.pop(key, None)
+
+    async def read(self, path: str, *, timeout: float = 10.0) -> dict:
+        """One file under `.arbos/` as text: `{path, text, size, truncated?, error?}`."""
+        return await self._ask_file({"type": "read", "path": path}, "file", timeout)
+
+    async def tail(self, path: str, *, from_: int = 0, limit: int = 65536, timeout: float = 10.0) -> dict:
+        """Bytes `from_..from_+limit` of a file, cut to a line boundary: `{path, from, to, size, text, error?}`."""
+        return await self._ask_file({"type": "tail", "path": path, "from": from_, "limit": limit}, "chunk", timeout)
+
+    async def list(self, path: str = "", *, timeout: float = 10.0) -> dict:
+        """Entries of a folder under `.arbos/`: `{path, entries: [{name, dir, size, modified}], error?}`."""
+        return await self._ask_file({"type": "list", "path": path}, "listing", timeout)
+
+    async def transcript_tail(self, agent: str, *, bytes_: int = 200_000) -> list[dict]:
+        """The last events of an agent's transcript, parsed. Uses `tail` so a long log costs one read."""
+        path = f"agents/{agent}/transcript.jsonl"
+        probe = await self.tail(path, from_=0, limit=1)
+        size = int(probe.get("size") or 0)
+        if probe.get("error") and not size:
+            return []
+        start = max(0, size - bytes_)
+        chunk = await self.tail(path, from_=start, limit=bytes_)
+        events: list[dict] = []
+        for line in str(chunk.get("text") or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return events
+
     # ------------------------------------------------------------------ turns
 
-    async def turn(self, text: str, agent: str = "root", *, steer: bool = False, timeout: float = 120.0) -> AsyncIterator[str]:
+    def send_user(self, text: str, agent: str = "root", *, channel: str = "", steer: bool | None = None) -> None:
+        """One user message to an agent, and back to whatever else you were doing. `channel` says
+        where the words came from (`voice` | `text`); the kernel writes it into the inbox file.
+        `steer` defaults to "the agent is running now"."""
+        if steer is None:
+            state = self.agents.get(agent)
+            steer = bool(state and state.running)
+        frame: dict = {"type": "user", "agent": agent, "text": text, "steer": steer, "attachments": []}
+        if channel:
+            frame["channel"] = channel
+        self.send(frame)
+
+    async def turn(self, text: str, agent: str = "root", *, steer: bool = False, timeout: float = 120.0,
+                   channel: str = "") -> AsyncIterator[str]:
         """Send one user turn and yield the agent's assistant text deltas until it goes idle."""
         queue: asyncio.Queue[str | None] = asyncio.Queue()
         started = False
@@ -166,7 +236,7 @@ class KernelClient:
         emitted = ""
         idle = False
         try:
-            self.send({"type": "user", "agent": agent, "text": text, "steer": steer, "attachments": []})
+            self.send_user(text, agent, channel=channel, steer=steer)
             deadline = time.monotonic() + timeout
             while True:
                 # After `turn idle` the kernel may still send the whole assistant text once more

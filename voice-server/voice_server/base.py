@@ -14,7 +14,8 @@ from . import protocol as P
 from .audio import float_to_pcm16, pcm16_to_float, resample_whole
 from .echo import EchoGate
 from .engines import Engines
-from .tools import ToolRunner
+from .narrator import Narrator, openrouter_key
+from .tools import CALL_TOOLS, TOOLS, ToolRunner
 
 log = logging.getLogger("voice.session")
 
@@ -45,6 +46,8 @@ class SessionDefaults:
     speed: float = 1.0
     reply: str = "none"
     instructions: str | None = None
+    # Narrator model for `more_detail` answers (OpenRouter id); None = extractive answers only.
+    narrator_model: str | None = None
 
 
 class BaseSession:
@@ -72,6 +75,13 @@ class BaseSession:
         self.tools.on_result = self._on_tool_result
         self.mirror_agents = engines.kernel is not None
         self.echo = EchoGate(self.rate) if tuning.echo_gate else None
+        # Call mode: the caller talks to a project's main agent; the narrator speaks highlights.
+        self.call_mode = False
+        self.channel = "voice"  # what the caller's utterances are filed as in the inbox
+        self.project = ""  # `<machine>/<project>` from session.start; empty = the gateway's kernel
+        self.screen = "on your screen"
+        self.narrator: Narrator | None = None
+        self.user_talking = False
 
     # ------------------------------------------------------------------ hooks for engines
 
@@ -91,7 +101,65 @@ class BaseSession:
         await self._speak(text, self.gen)
         self._emit_for_gen(self.gen, P.RESPONSE_DONE)
 
+    def arbos_talking(self) -> bool:
+        """Is reply audio (the model's or ours) on its way to the caller right now?"""
+        return False
+
     async def on_close(self) -> None: ...
+
+    # ------------------------------------------------------------------ call mode
+
+    def on_user_final(self, text: str) -> None:
+        """A finished caller utterance. In call mode it goes to the main agent as a `voice` message."""
+        self.user_talking = False
+        if self.call_mode and self.narrator is not None and text.strip():
+            self.narrator.user_said_later(text, channel=self.channel)
+
+    def note_interrupt(self) -> None:
+        """The caller cut in (barge-in or an `interrupt` frame): the narrator drops what it was saying."""
+        if self.narrator is not None:
+            self.narrator.interrupted()
+
+    async def speak_narration(self, text: str) -> None:
+        """Voice one narrator line as a reply turn the client can play: response.started,
+        response.transcript, audio, response.done. Interrupted audio is dropped by the gen tag."""
+        gen = self.gen
+        self._emit_for_gen(gen, P.RESPONSE_STARTED)
+        self._emit_for_gen(gen, P.RESPONSE_TRANSCRIPT, text=text)
+        await self._speak(text, gen)
+        self._emit_for_gen(gen, P.RESPONSE_DONE)
+
+    def _start_call(self) -> None:
+        kernel = self.engines.kernel
+        if kernel is None:
+            self._emit(P.ERROR, message="call mode needs a kernel behind the gateway; staying in plain voice mode")
+            self.call_mode = False
+            return
+        if self.narrator is not None:
+            return
+        if self.project and not self._project_is_ours(self.project):
+            # Slice 1 serves the gateway's own kernel; a hub attach per call is next.
+            self._emit(P.ERROR, message=f"project {self.project!r} is not this gateway's kernel; using its kernel")
+        self.narrator = Narrator(
+            kernel,
+            speak=self.speak_narration,
+            emit=self._emit,
+            screen=self.screen,
+            model=self.defaults.narrator_model,
+            api_key=openrouter_key() if self.defaults.narrator_model else None,
+            user_talking=lambda: self.user_talking,
+            arbos_talking=self.arbos_talking,
+        )
+        self.tools.narrator = self.narrator
+        self.tools.schemas = CALL_TOOLS
+        self.narrator.start()
+        log.info("[%s] call mode: narrating %s (channel %s)", self.sid, self.project or "the gateway's kernel", self.channel)
+
+    def _project_is_ours(self, project: str) -> bool:
+        kernel = self.engines.kernel
+        place = str(getattr(kernel, "place", "") or "")
+        name = project.rsplit("/", 1)[-1]
+        return bool(place) and place.rstrip("/").rsplit("/", 1)[-1] == name
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -112,6 +180,9 @@ class BaseSession:
         finally:
             if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
                 self.engines.kernel.listeners.remove(self._mirror)
+            if self.narrator is not None:
+                log.info("[%s] narrator: %s", self.sid, self.narrator.stats)
+                self.narrator.close()
             self.tools.close()
             if self.text_task:
                 self.text_task.cancel()
@@ -164,12 +235,15 @@ class BaseSession:
             tools=[t["name"] for t in self.tools_available()],
             kernel=bool(self.engines.kernel and self.engines.kernel.connected),
             voice=self.voice,
+            mode="call" if self.call_mode else "voice",
+            narrator=self.narrator is not None,
+            channel=self.channel,
         )
 
     def tools_available(self) -> list[dict]:
-        from .tools import TOOLS
-
-        return TOOLS if self.engines.kernel else []
+        if not self.engines.kernel:
+            return []
+        return CALL_TOOLS if self.call_mode else TOOLS
 
     # ------------------------------------------------------------------ control
 
@@ -191,10 +265,15 @@ class BaseSession:
             if text:
                 await self.on_speak(text)
         elif kind == P.INTERRUPT:
+            self.note_interrupt()
             await self.on_interrupt("client")
         elif kind == P.TEXT_INPUT:
             text = str(msg.get("text", "")).strip()
-            if text:
+            if text and self.call_mode and self.narrator is not None:
+                # Typed during a call: the same inbox as the spoken words, filed as `text`.
+                self.narrator.user_said(text, channel="text")
+                self._emit(P.TEXT_DONE, text="", cancelled=False, forwarded=True)
+            elif text:
                 self._start_text_turn(text)
         elif kind == P.TEXT_CANCEL:
             if self.text_task and not self.text_task.done():
@@ -237,6 +316,18 @@ class BaseSession:
                 self._emit(P.ERROR, message="server started without a reply backend; staying speech-only")
             else:
                 self.reply_kind = reply
+        if isinstance(msg.get("project"), str):
+            self.project = msg["project"].strip()
+        if msg.get("channel") in ("voice", "text"):
+            self.channel = msg["channel"]
+        if isinstance(msg.get("screen"), str) and msg["screen"].strip():
+            self.screen = msg["screen"].strip()
+        mode = msg.get("mode")
+        if mode == "call":
+            self.call_mode = True
+            self._start_call()
+        elif mode == "voice":
+            self.call_mode = False
 
     # ------------------------------------------------------------------ gateway TTS (Kokoro)
 

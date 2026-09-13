@@ -14,14 +14,14 @@ from .kernel import KernelClient
 from .protocol import ASR_RATE
 from .reply import ReplyBackend, build_reply
 from .tts import TTS, build_tts
-from .vad import SileroVAD
+from .vad import EnergyVAD, SileroVAD, build_vad
 
 log = logging.getLogger("voice.engines")
 
 
 @dataclass
 class Engines:
-    vad: SileroVAD
+    vad: SileroVAD | EnergyVAD
     asr: ASR
     tts: TTS
     reply: ReplyBackend | None
@@ -41,7 +41,7 @@ class Engines:
             except Exception as exc:
                 raise SystemExit(f"could not attach to the Arbos kernel: {exc}")
 
-        vad = SileroVAD(f"{args.model_dir}/silero_vad.onnx")
+        vad = build_vad(f"{args.model_dir}/silero_vad.onnx")
         asr = build_asr(
             args.asr, model=args.asr_model, device=args.device, compute_type=args.compute_type,
             beam_size=args.beam_size, threads=args.threads,
@@ -70,7 +70,8 @@ class Engines:
     async def warm_up(self, voice: str) -> None:
         """First calls are slow (kernel selection, lazy loads). Pay that before the first caller."""
         t0 = time.monotonic()
-        self.asr.transcribe(np.zeros(ASR_RATE, dtype=np.float32), partial=False, language="en")
+        if self.engine == "pipeline":
+            self.asr.transcribe(np.zeros(ASR_RATE, dtype=np.float32), partial=False, language="en")
         async for _ in self.tts.stream("Ready.", voice, 1.0):
             pass
         log.info("warm-up done in %.1fs", time.monotonic() - t0)

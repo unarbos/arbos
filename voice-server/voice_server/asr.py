@@ -68,7 +68,18 @@ class FasterWhisperASR:
         return text
 
 
+class NullASR:
+    """No recogniser. For the duplex engine (the speech model transcribes) and the test harness."""
+
+    name = "none"
+
+    def transcribe(self, audio16k: np.ndarray, *, partial: bool, language: str | None) -> str:
+        return ""
+
+
 def build_asr(kind: str, *, model: str, device: str, compute_type: str, beam_size: int, threads: int) -> ASR:
     if kind == "faster-whisper":
         return FasterWhisperASR(model, device, compute_type, beam_size, threads)
+    if kind == "none":
+        return NullASR()
     raise ValueError(f"unknown ASR backend {kind!r}")

@@ -51,14 +51,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     models.add_argument("--model-dir", default=os.environ.get("VOICE_MODEL_DIR", "models"),
                         help="holds silero_vad.onnx, kokoro-v1.0.onnx, voices-v1.0.bin (see deploy/run.sh)")
     models.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
-    models.add_argument("--asr", default="faster-whisper", choices=["faster-whisper"])
+    models.add_argument("--asr", default="faster-whisper", choices=["faster-whisper", "none"],
+                        help="none: no recogniser (duplex engine only; the speech model transcribes)")
     models.add_argument("--asr-model", default=None,
                         help="faster-whisper model name or CTranslate2 dir (default: large-v3-turbo on cuda, small.en on cpu)")
     models.add_argument("--compute-type", default=None, help="CTranslate2 compute type (default: float16 on cuda, int8 on cpu)")
     models.add_argument("--beam-size", type=int, default=3, help="beam for the final transcript; partials use 1")
     models.add_argument("--threads", type=int, default=max(2, min(8, (os.cpu_count() or 4) // 2)), help="CPU threads for ASR")
     models.add_argument("--language", default="en", help="ASR language hint; 'auto' to detect per utterance")
-    models.add_argument("--tts", default="kokoro", choices=["kokoro"])
+    models.add_argument("--tts", default="kokoro", choices=["kokoro", "tone"],
+                        help="tone: a placeholder tone per sentence, no weights (test harness)")
     models.add_argument("--voice", default="af_heart", help="default Kokoro voice (session.start may override)")
     models.add_argument("--speed", type=float, default=1.0)
 
@@ -67,6 +69,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                        help="none: speech only, the client sends replies with 'speak'. openrouter: OpenRouter model with the Arbos tools "
                             "(env OPENROUTER_API_KEY). kernel: the kernel's main agent answers")
     reply.add_argument("--reply-model", default="openai/gpt-4.1-mini", help="OpenRouter model id")
+    reply.add_argument("--narrator-model", default=os.environ.get("VOICE_NARRATOR_MODEL") or None,
+                       help="call mode: OpenRouter model that turns transcript excerpts into `more_detail` answers "
+                            "(needs OPENROUTER_API_KEY). Default: none, the narrator answers from the record verbatim")
 
     turn = parser.add_argument_group("turn taking (ms)")
     turn.add_argument("--end-silence-ms", type=int, default=600, help="silence that ends an utterance")
@@ -129,7 +134,7 @@ async def serve_forever(args: argparse.Namespace) -> None:
         raise SystemExit(f"unknown voice {args.voice!r}; have: {', '.join(engines.tts.voices)}")
     await engines.warm_up(args.voice)
     defaults = SessionDefaults(language=args.language, voice=args.voice, speed=args.speed, reply=args.reply,
-                               instructions=args.instructions)
+                               instructions=args.instructions, narrator_model=args.narrator_model)
     tuning = Tuning(
         start_threshold=args.vad_threshold,
         end_threshold=max(0.1, args.vad_threshold - 0.15),

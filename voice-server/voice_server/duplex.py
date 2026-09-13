@@ -22,7 +22,6 @@ import websockets
 from . import protocol as P
 from .audio import Resampler, float_to_pcm16, pcm16_to_float
 from .base import BaseSession
-from .tools import TOOLS
 
 log = logging.getLogger("voice.duplex")
 
@@ -44,9 +43,23 @@ DEFAULT_INSTRUCTIONS = (
     "the user to speak. Silence from the user means they are listening or thinking; do not fill it."
 )
 
+CALL_INSTRUCTIONS = (
+    "You are the voice of Arbos on a call with a software engineer about one project. Everything the user "
+    "says is already delivered to the project's main agent, which does the work and dispatches sub-agents; "
+    "results are read out to the user by a narrator, not by you. Your job: acknowledge in at most one short "
+    "sentence ('On it.' 'One moment.' 'Noted.'), then wait quietly. Never do work yourself, never invent tasks, "
+    "never summarise results you have not been given. When the user asks for more about something that was "
+    "reported (why, what exactly, say it again), call more_detail with their question and read its answer "
+    "back in one or two plain sentences. When they ask how things are going, call agent_status. For a quick "
+    "general-knowledge question, answer in one sentence. Silence means the user is listening; do not fill it."
+)
+
 
 class DuplexSession(BaseSession):
     engine = "duplex"
+
+    def arbos_talking(self) -> bool:
+        return self.response_open
 
     async def on_open(self) -> None:
         self.up: websockets.ClientConnection | None = None
@@ -90,7 +103,7 @@ class DuplexSession(BaseSession):
         created = json.loads(await asyncio.wait_for(self.up.recv(), 20))
         if created.get("type") != "session.created":
             log.warning("[%s] upstream first message was %s", self.sid, created.get("type"))
-        tools = [t for t in TOOLS] if self.tools_available() else []
+        tools = list(self.tools_available())
         await self.up.send(json.dumps({
             "type": "session.update",
             "event_id": str(uuid.uuid4()),
@@ -99,7 +112,7 @@ class DuplexSession(BaseSession):
                     "input": {"format": {"type": "audio/pcm", "rate": UPSTREAM_RATE}},
                     "output": {"format": {"type": "audio/pcm", "rate": UPSTREAM_RATE}},
                 },
-                "instructions": _ascii(self.instructions or DEFAULT_INSTRUCTIONS),
+                "instructions": _ascii(self.instructions or (CALL_INSTRUCTIONS if self.call_mode else DEFAULT_INSTRUCTIONS)),
                 "tools": tools,
             },
         }))
@@ -124,9 +137,11 @@ class DuplexSession(BaseSession):
     def _translate(self, msg: dict) -> None:
         kind = msg.get("type", "")
         if kind == "input_audio_buffer.speech_started":
+            self.user_talking = True
             self._emit(P.SPEECH_STARTED)
         elif kind == "input_audio_buffer.speech_stopped":
             self.user_stopped_at = time.monotonic()
+            self.user_talking = False
             self._emit(P.SPEECH_STOPPED)
         elif kind == "conversation.item.input_audio_transcription.delta":
             self._emit(P.TRANSCRIPT_DELTA, text=msg.get("delta", ""))
@@ -135,6 +150,7 @@ class DuplexSession(BaseSession):
                 self.user_turns += 1
             self._emit(P.TRANSCRIPT_FINAL, text=msg.get("transcript", ""))
             log.info("[%s] user: %r", self.sid, msg.get("transcript", ""))
+            self.on_user_final(str(msg.get("transcript", "")))
         elif kind == "response.created":
             pass  # the model's "response" spans long stretches of silence; we derive turns from the audio
         elif kind == "response.output_audio.delta":

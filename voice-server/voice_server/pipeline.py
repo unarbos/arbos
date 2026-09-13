@@ -70,8 +70,13 @@ class PipelineSession(BaseSession):
     async def on_report_speech(self, text: str) -> None:
         self.work.put_nowait(SpeakItem(text=text, gen=self.gen))
 
+    def arbos_talking(self) -> bool:
+        return self.responding
+
     def _interrupt(self, cause: str) -> None:
         active = self.responding
+        if cause == "barge-in":
+            self.note_interrupt()
         self.gen += 1
         while not self.work.empty():
             self.work.get_nowait()
@@ -140,6 +145,7 @@ class PipelineSession(BaseSession):
         self.silence_ms = 0
         self.last_partial_ms = 0
         self.emitted_words = []
+        self.user_talking = True
         self._emit(P.SPEECH_STARTED)
         log.info("[%s] speech.started", self.sid)
         if self.responding:
@@ -148,6 +154,7 @@ class PipelineSession(BaseSession):
     def _end_utterance(self) -> None:
         self.in_speech = False
         self.speech_run_ms = 0
+        self.user_talking = False
         self._emit(P.SPEECH_STOPPED)
         keep_silence = max(1, 240 // WINDOW_MS)
         trim = max(0, self.silence_ms // WINDOW_MS - keep_silence)
@@ -208,7 +215,9 @@ class PipelineSession(BaseSession):
             "[%s] transcript.final %.0fms audio, asr %.0fms: %r",
             self.sid, audio.size / P.ASR_RATE * 1000, (time.monotonic() - started) * 1000, text,
         )
-        if text and self.reply_kind != "none" and self.engines.reply:
+        if text and self.call_mode and self.narrator is not None:
+            self.on_user_final(text)  # to the main agent; the narrator speaks the highlight
+        elif text and self.reply_kind != "none" and self.engines.reply:
             self.work.put_nowait(ReplyItem(user_text=text, gen=self.gen))
 
     # ------------------------------------------------------------------ responses
