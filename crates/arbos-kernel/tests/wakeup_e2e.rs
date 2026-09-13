@@ -257,3 +257,61 @@ fn a_leftover_job_is_reaped_at_start_unless_kept() {
     let _ = children[1].wait();
     let _ = k.child.kill();
 }
+
+/// qa-020's lesson, and the steward's hold on #130: a job's recorded pid
+/// can belong to another program by the time the kernel starts. Such a
+/// process is never killed — only a pid the leash's argv or the process
+/// start time proves to be the job's is.
+#[test]
+fn a_foreign_process_with_a_reused_pid_survives_kernel_start() {
+    use std::os::unix::process::CommandExt;
+    let mut foreign: Option<std::process::Child> = None;
+    let mut k = start_kernel_replay_prepared("reuse", "", "", |place| {
+        write_root_agent(place);
+        let dir = place.join(".arbos/agents/root/jobs/j1");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Any bash, nothing to do with the job: no job-folder marker in
+        // its argv, started now rather than three days ago.
+        let child = std::process::Command::new("bash")
+            .args(["-c", "sleep 300"])
+            .process_group(0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            serde_json::json!({
+                "command": "bash feed.sh",
+                "cwd": "/tmp", "pid": child.id(),
+                "started_ms": arbos_core::now_ms() - 3 * 86_400_000
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("out.log"), "").unwrap();
+        std::fs::write(dir.join("detached"), "").unwrap();
+        foreign = Some(child);
+    });
+    let mut foreign = foreign.unwrap();
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        foreign.try_wait().unwrap().is_none(),
+        "the foreign bash (pid {}) was killed at kernel start",
+        foreign.id()
+    );
+    let log = std::fs::read_to_string(k.place.join(".arbos/runtime/kernel.log")).unwrap();
+    assert!(!log.contains("\"job_reaped\""), "{log}");
+    assert!(
+        log.contains("\"job_pid_reused\"") || log.contains("\"job_unverified\""),
+        "{log}"
+    );
+    let _ = foreign.kill();
+    let _ = foreign.wait();
+    let _ = k.child.kill();
+}

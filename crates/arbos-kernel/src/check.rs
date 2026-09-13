@@ -326,12 +326,20 @@ pub fn check(place: &Place) -> Result<Report> {
     // for writing that is not this one.
     for agent in &agents {
         let root = arbos_engine::JobsRoot::for_agent(place, &agent.id);
-        for (id, pid, command) in root.leftovers() {
+        for (id, pid, command, who) in root.leftovers() {
+            let what = match who {
+                arbos_engine::PidIdentity::Ours => {
+                    "job still running from an earlier kernel run; the kernel ends it at its next start (add a `keep` file to the job folder to spare it)"
+                }
+                _ => {
+                    "a process holds this job's pid and this machine cannot tell whether it is the job; the kernel leaves it running — kill it by hand if it is"
+                }
+            };
             r.warn(
                 format!(".arbos/agents/{}/jobs/{id}", agent.id),
                 None,
                 format!(
-                    "job still running from an earlier kernel run (pid {pid}): {} — the kernel ends it at its next start; add a `keep` file to the job folder to spare it",
+                    "{what} (pid {pid}): {}",
                     arbos_core::text::clip(command.trim(), 80)
                 ),
             );

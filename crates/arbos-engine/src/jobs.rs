@@ -331,10 +331,10 @@ impl JobsRoot {
     /// restart. A folder holding a `keep` file is left alone (a job the
     /// user asked to survive). The pid is checked against the job's own
     /// command before the signal, so a reused pid is never killed.
-    pub fn reap_leftovers(&self) -> Vec<String> {
-        let mut reaped = Vec::new();
+    pub fn reap_leftovers(&self) -> Reaped {
+        let mut out = Reaped::default();
         let Ok(entries) = fs::read_dir(&self.0) else {
-            return reaped;
+            return out;
         };
         for e in entries.flatten() {
             let dir = e.path();
@@ -344,36 +344,53 @@ impl JobsRoot {
             if !job.running() || dir.join("keep").exists() {
                 continue;
             }
-            if !process_looks_like(job.meta.pid, &dir, &job.meta) {
-                continue;
-            }
-            let _ = fs::write(
-                dir.join("killed"),
-                "killed: left over from an earlier kernel run (reaped at start)\n",
-            );
-            crate::tools::kill_job(job.meta.pid);
-            reaped.push(format!(
+            let line = format!(
                 "{} (pid {}, started {}): {}",
                 job.id,
                 job.meta.pid,
                 arbos_core::inbox::rfc3339(job.meta.started_ms),
                 arbos_core::text::clip(job.meta.command.trim(), 80)
-            ));
+            );
+            match pid_identity(job.meta.pid, &dir, &job.meta) {
+                PidIdentity::Ours => {
+                    let _ = fs::write(
+                        dir.join("killed"),
+                        "killed: left over from an earlier kernel run (reaped at start)\n",
+                    );
+                    crate::tools::kill_job(job.meta.pid);
+                    out.reaped.push(line);
+                }
+                PidIdentity::Foreign => {
+                    // The pid is someone else's now; the job itself is gone.
+                    let _ = fs::write(
+                        dir.join("killed"),
+                        "killed: the process was gone when the kernel started (its pid now belongs to another program)\n",
+                    );
+                    out.foreign.push(line);
+                }
+                PidIdentity::Unverified => out.unverified.push(line),
+                PidIdentity::Gone => {}
+            }
         }
-        reaped
+        out
     }
 
     /// Jobs of this agent still alive from an earlier kernel run, listed
-    /// (for `check`): id, pid, command.
-    pub fn leftovers(&self) -> Vec<(String, u32, String)> {
+    /// (for `check`): id, pid, command, and whether the pid was verified
+    /// as the job's own.
+    pub fn leftovers(&self) -> Vec<(String, u32, String, PidIdentity)> {
         let Ok(entries) = fs::read_dir(&self.0) else {
             return Vec::new();
         };
         entries
             .flatten()
             .filter_map(|e| load_dir(&e.path()).ok().map(|j| (e.path(), j)))
-            .filter(|(dir, j)| j.running() && process_looks_like(j.meta.pid, dir, &j.meta))
-            .map(|(_, j)| (j.id.clone(), j.meta.pid, j.meta.command.clone()))
+            .filter(|(_, j)| j.running())
+            .map(|(dir, j)| {
+                let who = pid_identity(j.meta.pid, &dir, &j.meta);
+                (j.id.clone(), j.meta.pid, j.meta.command.clone(), who)
+            })
+            .filter(|(_, _, _, who)| matches!(who, PidIdentity::Ours | PidIdentity::Unverified))
             .collect()
     }
 
@@ -560,32 +577,56 @@ fn pid_alive(_pid: u32) -> bool {
     false
 }
 
+/// What `reap_leftovers` found, as lines for the log.
+#[derive(Debug, Default, Clone)]
+pub struct Reaped {
+    /// Ended: the job's own process, still running.
+    pub reaped: Vec<String>,
+    /// Left alone: the pid now belongs to another program.
+    pub foreign: Vec<String>,
+    /// Left alone: no way to tell whose the process is on this machine.
+    pub unverified: Vec<String>,
+}
+
+/// What a job's recorded pid is today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PidIdentity {
+    /// No process with that pid.
+    Gone,
+    /// The job's own process: the leash's argv names this job folder, or
+    /// (Linux) the process started within two minutes of the job.
+    Ours,
+    /// A live process that is provably not the job (a reused pid).
+    Foreign,
+    /// A live process this machine gives no way to check (no /proc start
+    /// time, no job-folder marker in its argv — a job from before the
+    /// leash on macOS, say). Never killed; `check` and the log say so.
+    Unverified,
+}
+
 /// Whether `pid` is (still) the process of this job and not a later
-/// process that got the same number. On Linux the process's start time
-/// (from /proc) must sit within two minutes of the job's `started_ms`;
-/// elsewhere its command line must name the job's folder (the leash's
-/// first argument) or the job's program.
-fn process_looks_like(pid: u32, dir: &Path, meta: &Meta) -> bool {
+/// process that got the same number. Only two proofs count: the leash's
+/// argv carries the job folder, and on Linux /proc gives a start time.
+/// Nothing is ever matched by program name — a reused pid that is now
+/// any `bash` must not be `killpg`'d at kernel start (steward's hold on
+/// #130, and qa-020's history).
+fn pid_identity(pid: u32, dir: &Path, meta: &Meta) -> PidIdentity {
     if !pid_alive(pid) {
-        return false;
+        return PidIdentity::Gone;
+    }
+    let dir_s = dir.to_string_lossy();
+    let args = process_args(pid);
+    if args.as_deref().is_some_and(|a| a.contains(dir_s.as_ref())) {
+        return PidIdentity::Ours;
     }
     if let Some(started) = process_start_ms(pid) {
-        return (started - meta.started_ms).abs() < 120_000;
+        return if (started - meta.started_ms).abs() < 120_000 {
+            PidIdentity::Ours
+        } else {
+            PidIdentity::Foreign
+        };
     }
-    let Some(args) = process_args(pid) else {
-        // No way to look (no /proc, no ps): trust the pid file.
-        return true;
-    };
-    let dir_s = dir.to_string_lossy();
-    let program = meta
-        .command
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .rsplit('/')
-        .next()
-        .unwrap_or("");
-    args.contains(dir_s.as_ref()) || (!program.is_empty() && args.contains(program))
+    PidIdentity::Unverified
 }
 
 /// Linux: when `pid` started, as Unix millis, from /proc/<pid>/stat field

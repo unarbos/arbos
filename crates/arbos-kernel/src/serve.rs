@@ -219,8 +219,21 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     // spares it.
     for agent in list_agents(&place).unwrap_or_default() {
         let root = arbos_engine::JobsRoot::for_agent(&place, &agent.id);
-        for line in root.reap_leftovers() {
-            crate::klog::warn("job_reaped", Some(agent.id.as_str()), &line);
+        let found = root.reap_leftovers();
+        for line in &found.reaped {
+            crate::klog::warn("job_reaped", Some(agent.id.as_str()), line);
+        }
+        for line in &found.foreign {
+            crate::klog::info("job_pid_reused", Some(agent.id.as_str()), line);
+        }
+        for line in &found.unverified {
+            crate::klog::warn(
+                "job_unverified",
+                Some(agent.id.as_str()),
+                format!(
+                    "{line} — a process holds this pid but this machine gives no way to tell whether it is the job; left running (kill it by hand if it is, or add a `keep` file)"
+                ),
+            );
         }
     }
 
