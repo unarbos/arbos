@@ -580,7 +580,10 @@ mod tests {
         let bad = "# Demo\n\n<tldr>\n- [a](x) — 1\n- [b](x) — 2\n- [c](x) — 3\n- [d](x) — 4\n- five without link\n</tldr>\n\n## S\n- [x] [done1](x) — a\n- [ ] [open](x) — b\n- plain bullet\n- [ ] no link here\n- [x] [done2](x) — c\n- [x] [done3](x) — d\n- [x] [done4](x) — e\n";
         let found = lint_notes(bad);
         let whats: Vec<&str> = found.iter().map(|p| p.what.as_str()).collect();
-        assert!(whats.iter().any(|w| w.contains("no top line linking")), "{whats:?}");
+        assert!(
+            whats.iter().any(|w| w.contains("no top line linking")),
+            "{whats:?}"
+        );
         assert!(
             whats.iter().any(|w| w.contains("more than 4 bullets")),
             "{whats:?}"

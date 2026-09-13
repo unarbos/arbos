@@ -1,4 +1,5 @@
 pub mod access;
+pub mod acp_worker;
 pub mod attach;
 pub mod browser;
 pub mod check;
