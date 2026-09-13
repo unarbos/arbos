@@ -299,6 +299,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             return;
         }
         let id = wake.agent.to_string();
+        // Notes waiting in the inbox (wake = false) go on the transcript
+        // before the model reads it, whatever started this turn.
+        hooks.take_notes(&id);
         hooks.turn_started(&id);
         hooks.broadcast(Frame::Turn {
             agent: id,

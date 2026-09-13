@@ -9,7 +9,7 @@
 
 use arbos_core::{
     Agent, Attempt, Do, Event, EventKind, Node, NodeId, NodeStatus as Status, Verdict, Wake,
-    WakeKind, list_agents, load_transcript, needs_serve,
+    WakeKind, append_event, inbox, list_agents, load_transcript, needs_serve,
     node::{self, WakeReason},
     wire::PlanNode,
 };
@@ -131,7 +131,8 @@ pub fn scan(hooks: &Arc<KernelHooks>, clock: &Arc<Clock>) -> Vec<Wake> {
         }
         let id = agent.id.as_str();
         let nodes = hooks.plan_nodes(id);
-        if nodes.is_empty() {
+        // An empty plan still has an inbox.
+        if nodes.is_empty() && inbox::list(&hooks.place, id).is_empty() {
             continue;
         }
         let fire = node::fireable(&nodes, now);
@@ -163,6 +164,41 @@ pub fn scan(hooks: &Arc<KernelHooks>, clock: &Arc<Clock>) -> Vec<Wake> {
         }
         if hooks.is_running(id) || clock.turn_for(id).is_some() {
             continue;
+        }
+        // Inbox first: a message that asks for a turn. The claim is the
+        // rename into turns/tNNNN/cause.md; the wake carries its words.
+        if let Some(filed) = inbox::list(&hooks.place, id)
+            .into_iter()
+            .find(|f| f.msg.wake && !hooks.inbox_backing_off(&f.name, now))
+        {
+            match inbox::claim(&hooks.place, id, &filed) {
+                Ok(turn_dir) => {
+                    if let Some(wake) = wake_from_message(hooks, &agent, &filed.msg, &turn_dir) {
+                        wakes.push(wake);
+                        hooks.broadcast(hooks.plan_frame(id));
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    // Told once, then left alone for a minute: a full disk or
+                    // a read-only folder does not become a log storm.
+                    if hooks.inbox_backoff(&filed.name, now) {
+                        crate::klog::warn(
+                            "inbox_claim_failed",
+                            Some(id),
+                            format!("{}: {e:#}", filed.name),
+                        );
+                        hooks.broadcast(arbos_core::wire::Frame::Error {
+                            agent: Some(id.to_string()),
+                            detail: format!(
+                                "could not start the turn for your message ({}): {e:#}; will try again in a minute",
+                                filed.name
+                            ),
+                        });
+                    }
+                    continue;
+                }
+            }
         }
         let Some((n, reason)) = fire.wakes.into_iter().next() else {
             continue;
@@ -290,6 +326,138 @@ fn worktree_note(place: &std::path::Path, agent: &Agent) -> String {
     )
 }
 
+/// The newest `turns/tNNNN/meta.toml` without `ended` gets `ended`, the
+/// verdict, and the outcome (the turn's last words, or why it stopped).
+fn close_turn_folder(hooks: &KernelHooks, agent: &str) {
+    let turns = inbox::turns_dir(&hooks.place, agent);
+    let Ok(rd) = std::fs::read_dir(&turns) else {
+        return;
+    };
+    let mut open: Vec<std::path::PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let meta = p.join("meta.toml");
+            std::fs::read_to_string(&meta).is_ok_and(|t| !t.contains("\nended = "))
+                && p.join("cause.md").exists()
+        })
+        .collect();
+    open.sort();
+    let Some(dir) = open.pop() else {
+        return;
+    };
+    let events = load_transcript(&hooks.layout(agent).transcript()).unwrap_or_default();
+    let lo = std::fs::read_to_string(dir.join("meta.toml"))
+        .ok()
+        .and_then(|t| {
+            t.lines().find_map(|l| {
+                l.strip_prefix("transcript_lo = ")?
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
+        })
+        .unwrap_or(0);
+    let (outcome, ok) = turn_outcome(&events, lo);
+    let verdict = if ok { "success" } else { "failed" };
+    let line: String = outcome
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect();
+    let mut text = std::fs::read_to_string(dir.join("meta.toml")).unwrap_or_default();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&format!(
+        "ended = \"{}\"\nverdict = \"{verdict}\"\noutcome = {}\ntranscript_hi = {}\n",
+        inbox::rfc3339(arbos_core::now_ms()),
+        toml_string(&line),
+        events.len()
+    ));
+    let tmp = dir.join(format!(".meta.toml.tmp-{}", std::process::id()));
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, dir.join("meta.toml"));
+    }
+}
+
+fn toml_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The turn an inbox message starts. A user's words become the `user`
+/// line the turn writes; a peer's request lands on the transcript here as
+/// a `say`, and the turn wakes to read it; a brief is the child's mission
+/// spelled out; the kernel's own words (a failed command, a condition)
+/// are the prompt. `turn_dir` is where the claimed file went.
+fn wake_from_message(
+    hooks: &KernelHooks,
+    agent: &Agent,
+    msg: &inbox::Message,
+    turn_dir: &std::path::Path,
+) -> Option<Wake> {
+    let from = msg.from.as_str();
+    let (kind, text) = match (msg.kind.as_str(), from) {
+        ("brief", _) => {
+            let parent = from.strip_prefix("agent:").unwrap_or(from);
+            (
+                WakeKind::Plan,
+                Some(format!(
+                    "You were spawned by agent {parent} for this mission:\n\n{}\n\nDo it now. If it has several steps, decompose it with plan add and work them. Standing work (\"every N\", \"keep doing\") is a plan node with when.every, never a loop held open. Report results to your parent with say to={parent} (mode request when you need an answer from it). Your own folder is .arbos/agents/{}/.{}",
+                    msg.body,
+                    agent.id,
+                    worktree_note(hooks.place.path(), agent)
+                )),
+            )
+        }
+        (_, "user") | (_, "") => (WakeKind::User, Some(msg.body.clone())),
+        (_, "kernel") => (WakeKind::Plan, Some(msg.body.clone())),
+        (_, who) if who.starts_with("user:") => (WakeKind::User, Some(msg.body.clone())),
+        (_, who) => {
+            // A peer's words go on the transcript now; the turn reads them.
+            let from_id = who.strip_prefix("agent:").unwrap_or(who).to_string();
+            if let Err(e) = append_event(
+                &hooks.layout(agent.id.as_str()).transcript(),
+                &Event::new(EventKind::Say {
+                    from: from_id,
+                    text: msg.body.clone(),
+                }),
+            ) {
+                crate::klog::warn(
+                    "inbox_say_failed",
+                    Some(agent.id.as_str()),
+                    format!("{e:#}"),
+                );
+                return None;
+            }
+            (WakeKind::Say, None)
+        }
+    };
+    let lo = load_transcript(&hooks.layout(agent.id.as_str()).transcript())
+        .map(|e| e.len() as u64)
+        .unwrap_or(0);
+    let _ = std::fs::write(
+        turn_dir.join("meta.toml"),
+        format!(
+            "started = \"{}\"\nfrom = \"{}\"\nkind = \"{}\"\ntranscript_lo = {lo}\n",
+            inbox::rfc3339(arbos_core::now_ms()),
+            msg.from,
+            msg.kind
+        ),
+    );
+    Some(Wake {
+        agent: agent.id.clone(),
+        kind,
+        text,
+        attachments: msg.attachments.clone(),
+        steer: false,
+        node: None,
+        hops: msg.hops,
+    })
+}
+
 fn wake_for(
     place: &std::path::Path,
     agent: &Agent,
@@ -394,6 +562,9 @@ pub fn abandon(hooks: &KernelHooks, clock: &Clock, agent: &str) {
 /// from what the transcript says, unless the model already moved the node.
 pub fn finish_turn(hooks: &KernelHooks, clock: &Clock, agent: &str) {
     let Some(meta) = clock.turns.lock().unwrap().remove(agent) else {
+        // Not a plan node's turn: an inbox message's. Its record is the
+        // turn folder; close it.
+        close_turn_folder(hooks, agent);
         return;
     };
     let now = arbos_core::now_ms();

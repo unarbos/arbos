@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 use arbos_core::{
     Agent, AgentId, Event, EventKind, Node, NodeId, Place, Wake, append_event,
     files::Layout,
-    list_agents,
+    inbox, list_agents,
     node::{self, DEFAULT_HOPS},
     validate_id,
 };
@@ -139,6 +139,8 @@ pub struct KernelHooks {
     /// Serialises `spawn`: the child cap and the id check read the agents
     /// folder, so concurrent calls must not interleave.
     spawn_lock: Mutex<()>,
+    /// Inbox files whose claim failed: name → when to try again (ms).
+    inbox_retry: Mutex<HashMap<String, i64>>,
     /// Tree caps from `config.toml` (`max_depth`, `max_children`); the
     /// constants in `sched` are the defaults.
     pub caps: Caps,
@@ -189,6 +191,7 @@ impl KernelHooks {
             in_flight: Arc::new(Mutex::new(HashMap::new())),
             sent: Mutex::new(HashMap::new()),
             spawn_lock: Mutex::new(()),
+            inbox_retry: Mutex::new(HashMap::new()),
             plans: Mutex::new(HashMap::new()),
             remotes: crate::remote::RemoteHub::default(),
         })
@@ -303,18 +306,11 @@ impl KernelHooks {
         for steer in steers {
             let result = match steer {
                 Steer::User(text) => self.inbox(agent, Node::inbox(&text, "user")),
-                Steer::Say { from, text } => append_event(
-                    &self.layout(agent).transcript(),
-                    &Event::new(EventKind::Say {
-                        from: from.clone(),
-                        text: text.clone(),
-                    }),
-                )
-                .and_then(|_| {
+                Steer::Say { from, text } => {
                     let mut n = Node::inbox(&text, format!("agent:{from}"));
                     n.hops = DEFAULT_HOPS;
                     self.inbox(agent, n)
-                }),
+                }
             };
             if let Err(e) = result {
                 eprintln!("requeue steer for {agent}: {e:#}");
@@ -602,9 +598,31 @@ impl KernelHooks {
     }
 
     pub fn plan_frame(&self, agent: &str) -> Frame {
+        let mut nodes =
+            crate::plan::wire_nodes(&self.plan_nodes(agent), &self.plan_attempts(agent));
+        // Inbox files ride along as the queued rows the window already
+        // draws (`inbox: true`), never as plan nodes.
+        for filed in inbox::list(&self.place, agent) {
+            nodes.push(arbos_core::wire::PlanNode {
+                id: inbox_id(&filed.name),
+                parent: 0,
+                goal: filed.msg.body.clone(),
+                status: "pending".into(),
+                when: if filed.msg.wake {
+                    "ready".into()
+                } else {
+                    "waits".into()
+                },
+                do_kind: "agent".into(),
+                last: String::new(),
+                origin: filed.msg.from.clone(),
+                standing: false,
+                inbox: true,
+            });
+        }
         Frame::Plan {
             agent: agent.to_string(),
-            nodes: crate::plan::wire_nodes(&self.plan_nodes(agent), &self.plan_attempts(agent)),
+            nodes,
         }
     }
 
@@ -728,7 +746,13 @@ impl KernelHooks {
     }
 
     /// A message into `agent`: one root node that fires a turn when ready.
-    pub fn inbox(&self, agent: &str, mut n: Node) -> Result<NodeId> {
+    /// Put a message in an agent's inbox. It is a file
+    /// (`inbox/<time>-<from>-<seq>.md`, see `arbos_core::inbox`), not a
+    /// plan node: plan nodes are goals. The node passed in is the message
+    /// as the callers still build it — goal, origin, attachments, hops —
+    /// and is translated. The id returned names the file for the window's
+    /// rows (`plan_op cancel|run` on it removes or wakes the file).
+    pub fn inbox(&self, agent: &str, n: Node) -> Result<NodeId> {
         if !arbos_core::agent_exists(&self.place, agent) {
             bail!("no agent {agent}");
         }
@@ -737,22 +761,70 @@ impl KernelHooks {
         if n.goal.trim().is_empty() && n.attachments.is_empty() {
             bail!("empty prompt");
         }
-        let _g = self.plan_lock.lock().unwrap();
-        let nodes = self.plan_nodes(agent);
-        n.id = node::next_node_id(&nodes);
-        n.parent = 0;
-        n.seq = nodes
-            .iter()
-            .filter(|x| x.parent == 0)
-            .map(|x| x.seq)
-            .max()
-            .map(|m| m + 1)
-            .unwrap_or(0);
-        n.when.wake = true;
-        self.write_node(agent, &n)?;
-        drop(_g);
+        let (from, kind) = match n.origin.as_str() {
+            o if o.starts_with("spawn:") => (format!("agent:{}", &o["spawn:".len()..]), "brief"),
+            "" | "user" => ("user".to_string(), "request"),
+            o => (o.to_string(), "request"),
+        };
+        let mut msg = inbox::Message::new(from, kind, n.goal.clone());
+        msg.wake = true;
+        msg.hops = n.hops;
+        msg.attachments = n.attachments.clone();
+        let name = inbox::deliver(&self.place, agent, &msg)?;
         self.plan_changed(agent);
-        Ok(n.id)
+        Ok(inbox_id(&name))
+    }
+
+    /// Note a failed claim. True the first time (say so), false while the
+    /// minute's back-off still runs.
+    pub fn inbox_backoff(&self, name: &str, now: i64) -> bool {
+        let mut m = self.inbox_retry.lock().unwrap();
+        m.retain(|_, until| *until > now - 3_600_000);
+        let first = !m.contains_key(name);
+        m.insert(name.to_string(), now + 60_000);
+        first
+    }
+
+    pub fn inbox_backing_off(&self, name: &str, now: i64) -> bool {
+        self.inbox_retry
+            .lock()
+            .unwrap()
+            .get(name)
+            .is_some_and(|until| *until > now)
+    }
+
+    pub fn inbox_files(&self, agent: &str) -> Vec<inbox::Filed> {
+        inbox::list(&self.place, agent)
+    }
+
+    /// Messages with `wake = false` waiting for this agent: onto its
+    /// transcript now (a `say` from a peer, a notice from the kernel), and
+    /// out of the inbox. Called as a turn starts, whatever caused it.
+    pub fn take_notes(&self, agent: &str) -> usize {
+        let mut taken = 0;
+        for filed in inbox::list(&self.place, agent) {
+            if filed.msg.wake {
+                continue;
+            }
+            let event = match filed.msg.from.as_str() {
+                "kernel" => EventKind::Notice {
+                    text: filed.msg.body.clone(),
+                    failed: false,
+                },
+                from => EventKind::Say {
+                    from: from.strip_prefix("agent:").unwrap_or(from).to_string(),
+                    text: filed.msg.body.clone(),
+                },
+            };
+            if append_event(&self.layout(agent).transcript(), &Event::new(event)).is_ok() {
+                let _ = std::fs::remove_file(&filed.path);
+                taken += 1;
+            }
+        }
+        if taken > 0 {
+            self.broadcast(self.plan_frame(agent));
+        }
+        taken
     }
 
     /// Move a node through its life. `status` None on a recurring node
@@ -921,6 +993,25 @@ impl KernelHooks {
     /// A window action on a node.
     pub fn plan_op(&self, agent: &str, id: NodeId, op: &str, text: &str) -> Result<()> {
         use arbos_core::NodeStatus as S;
+        if is_inbox_id(id) {
+            let Some(filed) = inbox::list(&self.place, agent)
+                .into_iter()
+                .find(|f| inbox_id(&f.name) == id)
+            else {
+                bail!("that message is no longer in the inbox");
+            };
+            match op {
+                "cancel" => inbox::remove(&self.place, agent, &filed.name)?,
+                "run" => {
+                    let mut filed = filed;
+                    filed.msg.wake = true;
+                    inbox::rewrite(&filed)?;
+                }
+                other => bail!("{other}: not an operation on an inbox message (cancel, run)"),
+            }
+            self.plan_changed(agent);
+            return Ok(());
+        }
         match op {
             "cancel" => {
                 let _ = self.plan_update(
@@ -1246,13 +1337,6 @@ impl KernelHooks {
                 ));
             }
         }
-        append_event(
-            &self.layout(tid).transcript(),
-            &Event::new(EventKind::Say {
-                from: from.to_string(),
-                text: text.to_string(),
-            }),
-        )?;
         let busy = self.is_running(tid);
         let request = match mode {
             SayMode::Note => false,
@@ -1260,7 +1344,14 @@ impl KernelHooks {
             // Idle, so there is no turn to steer: start one.
             SayMode::Steer => true,
         };
+        // A note is an inbox file the peer reads at the start of its next
+        // turn; a request is one that starts a turn. Nothing is written into
+        // the peer's transcript from here: its own turn does that.
+        let mut note = inbox::Message::new(format!("agent:{from}"), "message", text);
+        note.wake = false;
         if !request {
+            inbox::deliver(&self.place, tid, &note)?;
+            self.broadcast(self.plan_frame(tid));
             return Ok(format!(
                 "Sent to {label} as a note; it will read it at its next turn{}.",
                 if busy {
@@ -1276,11 +1367,15 @@ impl KernelHooks {
             DEFAULT_HOPS
         };
         if hops == 0 {
+            inbox::deliver(&self.place, tid, &note)?;
+            self.broadcast(self.plan_frame(tid));
             return Ok(format!(
                 "Sent to {label} as a note: this exchange's request budget is spent, so no turn is queued. It will read it at its next turn."
             ));
         }
         if target.paused {
+            inbox::deliver(&self.place, tid, &note)?;
+            self.broadcast(self.plan_frame(tid));
             return Ok(format!(
                 "Sent to {label} as a note: it is paused, so no turn is queued."
             ));
@@ -1491,4 +1586,19 @@ fn slug(brief: &str) -> String {
         s = format!("a{s}");
     }
     s.to_ascii_lowercase()
+}
+
+/// The id a window sees for an inbox file: bit 40 set, then a hash of the
+/// name. Plan node ids are small integers, so the two never collide.
+pub fn inbox_id(name: &str) -> NodeId {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    (1u64 << 40) | (h & 0xffff_ffff)
+}
+
+pub fn is_inbox_id(id: NodeId) -> bool {
+    id & (1u64 << 40) != 0
 }

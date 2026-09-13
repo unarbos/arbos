@@ -99,27 +99,28 @@ fn ctrl_c_during_a_turn_ends_it_on_the_transcript_and_closes_its_node() {
         transcript.contains("kernel stopping"),
         "the interrupted line says why: {transcript}"
     );
-    let plan = std::fs::read_to_string(
+    // The prompt's record is its turn folder (an inbox file, claimed):
+    // closed, with the reason, not left open.
+    let meta = std::fs::read_to_string(
         k.place
             .join(".arbos")
             .join("agents")
             .join("root")
-            .join("plan.jsonl"),
+            .join("turns")
+            .join("t0001")
+            .join("meta.toml"),
     )
     .unwrap();
-    let last = plan.lines().last().unwrap();
-    let node: serde_json::Value = serde_json::from_str(last).unwrap();
-    assert_ne!(
-        node["status"], "active",
-        "the node is closed, not left active: {last}"
+    assert!(
+        meta.contains("\nended = "),
+        "the turn folder is closed, not left open: {meta}"
     );
     assert!(
-        node["outcome"]
-            .as_str()
-            .unwrap_or("")
-            .contains("kernel stopping"),
-        "the node says it was stopped: {last}"
+        meta.contains("kernel stopping"),
+        "the turn record says it was stopped: {meta}"
     );
+    // No plan node and no attempt for a prompt any more: the inbox file
+    // and its turn folder are the whole record.
     let attempts = std::fs::read_to_string(
         k.place
             .join(".arbos")
@@ -127,12 +128,10 @@ fn ctrl_c_during_a_turn_ends_it_on_the_transcript_and_closes_its_node() {
             .join("root")
             .join("attempts.jsonl"),
     )
-    .unwrap();
-    let last_attempt: serde_json::Value =
-        serde_json::from_str(attempts.lines().last().unwrap()).unwrap();
+    .unwrap_or_default();
     assert!(
-        last_attempt["ended_ms"].is_number(),
-        "the attempt ended: {last_attempt}"
+        attempts.trim().is_empty(),
+        "a prompt leaves no attempt behind: {attempts}"
     );
 
     // A restart does not resume the ended turn: the transcript stays put.
