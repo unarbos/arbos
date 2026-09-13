@@ -70,6 +70,40 @@ impl Isolate {
     }
 }
 
+/// How big the agent tree may grow.
+#[derive(Debug, Clone, Copy)]
+pub struct Caps {
+    pub depth: usize,
+    pub children: usize,
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Self {
+            depth: MAX_DEPTH,
+            children: MAX_CHILDREN,
+        }
+    }
+}
+
+impl Caps {
+    /// From the host config; zero or absurd values fall back to the defaults.
+    pub fn from_config(cfg: &arbos_core::HostConfig) -> Self {
+        Self {
+            depth: if (1..=8).contains(&cfg.max_depth) {
+                cfg.max_depth
+            } else {
+                MAX_DEPTH
+            },
+            children: if (1..=64).contains(&cfg.max_children) {
+                cfg.max_children
+            } else {
+                MAX_CHILDREN
+            },
+        }
+    }
+}
+
 pub struct KernelHooks {
     pub place: Place,
     /// Housekeeping wakes only (`Serve`, `Compact`). Work goes through the plan.
@@ -99,6 +133,9 @@ pub struct KernelHooks {
     /// Serialises `spawn`: the child cap and the id check read the agents
     /// folder, so concurrent calls must not interleave.
     spawn_lock: Mutex<()>,
+    /// Tree caps from `config.toml` (`max_depth`, `max_children`); the
+    /// constants in `sched` are the defaults.
+    pub caps: Caps,
     /// Parsed `plan.jsonl` per agent, keyed by the file's (length, mtime).
     /// One turn's end reads the plan five or six times in a row; a plan
     /// that holds a large prompt made that a multi-second stall of the
@@ -120,10 +157,20 @@ impl KernelHooks {
         wakes: mpsc::UnboundedSender<Wake>,
         kick: mpsc::UnboundedSender<()>,
     ) -> Arc<Self> {
+        Self::with_caps(place, wakes, kick, Caps::default())
+    }
+
+    pub fn with_caps(
+        place: Place,
+        wakes: mpsc::UnboundedSender<Wake>,
+        kick: mpsc::UnboundedSender<()>,
+        caps: Caps,
+    ) -> Arc<Self> {
         Arc::new(Self {
             place,
             wakes,
             kick,
+            caps,
             frames: Mutex::new(Vec::new()),
             asks: Mutex::new(HashMap::new()),
             waits: Mutex::new(HashMap::new()),
@@ -1002,11 +1049,19 @@ impl KernelHooks {
         // cap and the id check both read the agents folder, so without the
         // lock ten calls all see zero children and all pass.
         let _one_at_a_time = self.spawn_lock.lock().unwrap();
-        if parent.depth(&list_agents(&self.place).unwrap_or_default()) >= MAX_DEPTH {
-            bail!("spawn depth cap {MAX_DEPTH}");
+        let depth = parent.depth(&list_agents(&self.place).unwrap_or_default());
+        if depth >= self.caps.depth {
+            bail!(
+                "spawn: the agent tree is capped at {} levels below the root and you are on level {depth}; do this work yourself or ask your parent to spawn. `max_depth` in config.toml changes the cap.",
+                self.caps.depth
+            );
         }
-        if self.live_children(&parent.id) >= MAX_CHILDREN {
-            bail!("spawn cap {MAX_CHILDREN} children");
+        let live = self.live_children(&parent.id);
+        if live >= self.caps.children {
+            bail!(
+                "spawn: you already have {live} live children, the cap (`max_children` in config.toml is {}); wait for one to report, or give an existing child the work with say.",
+                self.caps.children
+            );
         }
         // Two children with the same brief get distinct ids (`-2`, `-3`, …)
         // rather than the second one failing.
