@@ -22,6 +22,7 @@ tokio.workspace = true
 tgrep-core = { path = "../../vendor/tgrep/tgrep-core" }
 regex = "1"
 glob = "0.3"
+toml = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 uuid = { version = "1", features = ["v4"] }
 which = "7"
