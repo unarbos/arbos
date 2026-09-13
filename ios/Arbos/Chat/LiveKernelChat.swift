@@ -1,13 +1,13 @@
 import Foundation
 
-/// The main chat read off a live `arbos-kernel` through `ArbosKernelClient`.
+/// The main chat read straight off a phone-reachable `arbos-kernel` through
+/// `ArbosKernelClient`.
 ///
-/// The kernel broadcasts transcript lines as they are appended, from the
-/// moment we attach. It does not replay history over the attach socket
-/// (the desktop reads `transcript.jsonl` from disk or over ssh), so a
-/// fresh attach starts empty and fills as the agent works. Text arrives
-/// one `assistant` event per model step, not token by token; each step
-/// lands as one delta.
+/// On attach the kernel replays the focused agent's recent transcript
+/// (`replayed` … `history_end`), which becomes the chat's history in one
+/// go. Live replies stream token by token as `assistant_delta`; the kernel
+/// then sends `turn idle` and the whole `assistant` event, which replaces
+/// the streamed text rather than adding to it.
 @MainActor
 final class LiveKernelChat: ChatSource {
     private let client: ArbosKernelClient
@@ -17,6 +17,11 @@ final class LiveKernelChat: ChatSource {
     private var focus = "root"
     private var children: Set<String> = []
     private var childNames: [String: String] = [:]
+    private var history: [ChatItem] = []
+    private var replaying = true
+    /// A reply is being streamed; the next `assistant` event is its final
+    /// text, not a new message.
+    private var streamed = false
 
     let updates: AsyncStream<ChatUpdate>
 
@@ -29,23 +34,22 @@ final class LiveKernelChat: ChatSource {
     }
 
     func start() async throws {
-        try await client.attach(endpoint)
         pump = Task { [weak self, client] in
             for await frame in client.frames {
                 guard let self, !Task.isCancelled else { return }
                 self.handle(frame)
             }
-            self?.stream?.yield(.dropped("kernel closed"))
         }
+        try await client.attach(endpoint)
     }
 
     func send(text: String, steer: Bool) async throws {
-        try await client.send(text: text, steer: steer)
+        try client.send(text: text, steer: steer)
     }
 
     func stop() {
         pump?.cancel()
-        Task { await client.detach() }
+        client.detach()
         stream?.finish()
     }
 
@@ -53,17 +57,29 @@ final class LiveKernelChat: ChatSource {
 
     private func handle(_ frame: KernelFrame) {
         switch frame {
+        case .hello(let focus, _):
+            self.focus = focus
         case .snapshot(let focusPath, let agents):
-            focus = focusPath.split(separator: "/").last.map(String.init) ?? "root"
+            focus = focusPath.split(separator: "/").last.map(String.init) ?? focus
             remember(agents)
             stream?.yield(.agents(agents))
         case .tree(let agents):
             remember(agents)
             stream?.yield(.agents(agents))
+        case .replayed(let agent, let event):
+            guard agent == focus else { return }
+            if let item = item(for: event) { history.append(item) }
+        case .historyEnd(let agent):
+            guard agent == focus else { return }
+            replaying = false
+            stream?.yield(.history(history))
+            history.removeAll()
+        case .assistantDelta(let agent, let text):
+            guard agent == focus, !text.isEmpty else { return }
+            streamed = true
+            stream?.yield(.agentDelta(text))
         case .event(let agent, let event):
-            if agent == focus {
-                handleFocused(event)
-            }
+            if agent == focus { handleLive(event) }
         case .turn(let agent, let state):
             if agent == focus {
                 stream?.yield(.turn(running: state == "running"))
@@ -78,50 +94,60 @@ final class LiveKernelChat: ChatSource {
                 stream?.yield(.agentDone)
                 stream?.yield(.item(ChatItem(.agent(question, streaming: false))))
             }
-        case .other:
-            break
+        case .other(let type):
+            if type == "closed" { stream?.yield(.dropped("kernel closed")) }
         }
     }
 
-    private func handleFocused(_ event: KernelEvent) {
-        switch event {
-        case .user(let text), .answer(let text):
-            stream?.yield(.agentDone)
-            stream?.yield(.item(ChatItem(.user(text))))
-        case .assistant(let text):
-            // One event is one finished model step. Close it at once so
-            // the call can speak it before the step's tools finish.
+    private func handleLive(_ event: KernelEvent) {
+        if case .assistant(let text) = event {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
-            stream?.yield(.agentDelta(trimmed))
-            stream?.yield(.agentDone)
+            if streamed {
+                streamed = false
+                stream?.yield(.agentReplace(trimmed))
+            } else {
+                stream?.yield(.agentDelta(trimmed))
+                stream?.yield(.agentDone)
+            }
+            return
+        }
+        if case .tool(let record) = event, record.name == "spawn", let child = record.child {
+            children.insert(child)
+            childNames[child] = record.args?["brief"] as? String ?? child
+        }
+        guard let item = item(for: event) else { return }
+        stream?.yield(.agentDone)
+        stream?.yield(.item(item))
+    }
+
+    /// One transcript line as a chat row; nil for lines the chat does not
+    /// draw (wakes, thinking, turn boundaries).
+    private func item(for event: KernelEvent) -> ChatItem? {
+        switch event {
+        case .user(let text), .answer(let text):
+            return ChatItem(.user(text))
+        case .assistant(let text):
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : ChatItem(.agent(trimmed, streaming: false))
         case .tool(let record):
-            stream?.yield(.agentDone)
             if record.name == "spawn", let child = record.child {
                 let brief = record.args?["brief"] as? String ?? child
                 children.insert(child)
                 childNames[child] = brief
-                stream?.yield(.item(ChatItem(.subagent(name: brief, status: "spawned"))))
-            } else {
-                stream?.yield(.item(ChatItem(.tool(
-                    label: record.label, failed: record.error != nil, seconds: record.seconds
-                ))))
+                return ChatItem(.subagent(name: brief, status: "spawned"))
             }
+            return ChatItem(.tool(label: record.label, failed: record.error != nil, seconds: record.seconds))
         case .say(let from, let text):
-            stream?.yield(.agentDone)
-            stream?.yield(.item(ChatItem(.subagent(name: childNames[from] ?? from, status: text))))
+            return ChatItem(.subagent(name: childNames[from] ?? from, status: text))
         case .ask(let question):
-            stream?.yield(.agentDone)
-            stream?.yield(.item(ChatItem(.agent(question, streaming: false))))
+            return ChatItem(.agent(question, streaming: false))
         case .notice(let text, let failed):
-            stream?.yield(.item(ChatItem(.notice(text, failed: failed))))
-        case .turnComplete:
-            stream?.yield(.agentDone)
+            return ChatItem(.notice(text, failed: failed))
         case .interrupted(let detail):
-            stream?.yield(.agentDone)
-            stream?.yield(.item(ChatItem(.notice(detail.isEmpty ? "stopped" : detail, failed: false))))
-        case .thinking, .other:
-            break
+            return ChatItem(.notice(detail.isEmpty ? "stopped" : detail, failed: false))
+        case .thinking, .turnComplete, .other:
+            return nil
         }
     }
 

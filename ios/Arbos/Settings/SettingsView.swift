@@ -5,6 +5,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var keyDraft = ""
     @State private var tokenDraft = ""
+    @State private var kernelTokenDraft = ""
 
     var body: some View {
         NavigationStack {
@@ -40,15 +41,17 @@ struct SettingsView: View {
                     Text(voiceFooter)
                 }
                 Section {
-                    TextField("Host", text: $settings.kernelHost)
+                    TextField("wss://host/", text: $settings.kernelURL)
+                        .keyboardType(.URL)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
-                    TextField("Port", value: $settings.kernelPort, format: .number)
-                        .keyboardType(.numberPad)
+                    SecureField(kernelTokenPlaceholder, text: $kernelTokenDraft)
+                        .textContentType(.password)
+                        .autocorrectionDisabled()
                 } header: {
-                    Text("Arbos kernel (direct)")
+                    Text("Arbos kernel")
                 } footer: {
-                    Text("Only needed without a speech server. The attach port from .arbos/kernel.json, reachable from this phone.")
+                    Text("The main chat: history and streaming replies come from here. The voice server talks to the same kernel.")
                 }
             }
             .navigationTitle("Settings")
@@ -58,6 +61,7 @@ struct SettingsView: View {
                     Button("Done") {
                         if !keyDraft.isEmpty { settings.saveOpenAIKey(keyDraft) }
                         if !tokenDraft.isEmpty { settings.saveVoiceToken(tokenDraft) }
+                        if !kernelTokenDraft.isEmpty { settings.saveKernelToken(kernelTokenDraft) }
                         dismiss()
                     }
                 }
@@ -78,5 +82,9 @@ struct SettingsView: View {
 
     private var tokenPlaceholder: String {
         settings.voiceToken.isEmpty ? "Server token" : "Token saved · paste to replace"
+    }
+
+    private var kernelTokenPlaceholder: String {
+        settings.kernelToken.isEmpty ? "Kernel token" : "Token saved · paste to replace"
     }
 }

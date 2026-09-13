@@ -6,11 +6,14 @@ import Foundation
 final class AppSettings: ObservableObject {
     private static let openAIKeyAccount = "openai-api-key"
     private static let voiceTokenAccount = "voice-server-token"
+    private static let kernelTokenAccount = "kernel-token"
 
-    /// Interim endpoint: a Cloudflare quick tunnel in front of the
-    /// `voice-server/` gateway. `voice.arbos.life` replaces it once DNS is
-    /// set (see PR #56).
+    /// Interim endpoints: Cloudflare quick tunnels in front of the
+    /// `voice-server/` gateway and the phone kernel. `voice.arbos.life` and
+    /// `kernel-api.arbos.life` replace them once DNS is set. When a tunnel
+    /// restarts, `EndpointDirectory` finds the new name.
     static let defaultVoiceServerURL = "wss://inline-voice-occupations-ultram.trycloudflare.com/ws"
+    static let defaultKernelURL = "wss://live-got-person-permits.trycloudflare.com/"
 
     static let callInstructions = """
     You are Arbos, Jacob's agent. He is talking to you by voice while out \
@@ -29,14 +32,13 @@ final class AppSettings: ObservableObject {
     @Published var selfHostedURL: String {
         didSet { defaults.set(selfHostedURL, forKey: "selfHostedURL") }
     }
-    @Published var kernelHost: String {
-        didSet { defaults.set(kernelHost, forKey: "kernelHost") }
-    }
-    @Published var kernelPort: Int {
-        didSet { defaults.set(kernelPort, forKey: "kernelPort") }
+    /// `wss://host/`. The token goes in the `Authorization` header.
+    @Published var kernelURL: String {
+        didSet { defaults.set(kernelURL, forKey: "kernelURL") }
     }
     @Published private(set) var openAIKey: String
     @Published private(set) var voiceToken: String
+    @Published private(set) var kernelToken: String
 
     private let defaults: UserDefaults
 
@@ -46,26 +48,29 @@ final class AppSettings: ObservableObject {
         provider = VoiceProvider.available.contains(stored) ? stored : .selfHosted
         openAIModel = defaults.string(forKey: "openAIModel") ?? "gpt-realtime"
         selfHostedURL = defaults.string(forKey: "selfHostedURL") ?? Self.defaultVoiceServerURL
-        kernelHost = defaults.string(forKey: "kernelHost") ?? ""
-        kernelPort = defaults.integer(forKey: "kernelPort")
+        kernelURL = defaults.string(forKey: "kernelURL") ?? Self.defaultKernelURL
         openAIKey = Keychain.read(Self.openAIKeyAccount) ?? ""
         #if DEBUG
-        // `-voiceToken …` on the launch line lands in the argument domain of
-        // UserDefaults (never on disk). Move it into the Keychain so a
-        // simulator run can be configured from a script.
-        if let injected = defaults.string(forKey: "voiceToken"), !injected.isEmpty {
-            Keychain.write(injected, account: Self.voiceTokenAccount)
+        // `-voiceToken …` / `-kernelToken …` on the launch line land in the
+        // argument domain of UserDefaults (never on disk). Move them into
+        // the Keychain so a scripted run can be configured.
+        for (key, account) in [("voiceToken", Self.voiceTokenAccount), ("kernelToken", Self.kernelTokenAccount)] {
+            if let injected = defaults.string(forKey: key), !injected.isEmpty {
+                Keychain.write(injected, account: account)
+            }
         }
         #endif
         voiceToken = Keychain.read(Self.voiceTokenAccount) ?? ""
+        kernelToken = Keychain.read(Self.kernelTokenAccount) ?? ""
     }
 
     var isConfigured: Bool { provider.isConfigured(self) }
 
-    /// Where the kernel listens, if the user filled it in.
+    /// Where the kernel listens, once both the URL and the token are set.
     var kernelEndpoint: ArbosKernelClient.Endpoint? {
-        guard !kernelHost.isEmpty, (1...65535).contains(kernelPort) else { return nil }
-        return .init(host: kernelHost, port: UInt16(kernelPort))
+        guard !kernelToken.isEmpty, let url = URL(string: kernelURL), let scheme = url.scheme,
+              ["ws", "wss"].contains(scheme.lowercased()) else { return nil }
+        return .init(url: url, token: kernelToken)
     }
 
     func saveOpenAIKey(_ key: String) {
@@ -76,5 +81,10 @@ final class AppSettings: ObservableObject {
     func saveVoiceToken(_ token: String) {
         Keychain.write(token, account: Self.voiceTokenAccount)
         voiceToken = Keychain.read(Self.voiceTokenAccount) ?? ""
+    }
+
+    func saveKernelToken(_ token: String) {
+        Keychain.write(token, account: Self.kernelTokenAccount)
+        kernelToken = Keychain.read(Self.kernelTokenAccount) ?? ""
     }
 }

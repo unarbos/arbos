@@ -36,6 +36,9 @@ enum ChatUpdate {
     case agentDelta(String)
     /// Close the open agent message.
     case agentDone
+    /// The kernel's final text for the message just streamed. Replaces what
+    /// the deltas built, so the same words do not show twice.
+    case agentReplace(String)
     case turn(running: Bool)
     case agents([KernelAgent])
     case dropped(String)

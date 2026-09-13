@@ -52,12 +52,20 @@ final class ChatStore: ObservableObject {
         return name
     }
 
-    /// Speech server first (it carries the kernel's chat and the text
-    /// channel), then a direct kernel, then the scripted chat so the screen
-    /// is still real. Safe to call again.
+    /// The kernel itself first (it replays history and streams tokens),
+    /// then the speech server's mirror, then the scripted chat so the
+    /// screen is still real. If the configured kernel host is down, the
+    /// published endpoint file is consulted once. Safe to call again.
     func connect() async {
         guard mode == .offline else { return }
         mode = .connecting
+        if let endpoint = settings.kernelEndpoint {
+            if await attachKernel(endpoint) { return }
+            if let fresh = await EndpointDirectory.fetch()?.kernelURL, fresh != settings.kernelURL {
+                settings.kernelURL = fresh
+                if let moved = settings.kernelEndpoint, await attachKernel(moved) { return }
+            }
+        }
         if settings.provider == .selfHosted, settings.isConfigured {
             let server = VoiceServerChat(link: link)
             if (try? await server.start()) != nil {
@@ -66,16 +74,24 @@ final class ChatStore: ObservableObject {
             }
             server.stop()
         }
-        if let endpoint = settings.kernelEndpoint {
-            let live = LiveKernelChat(endpoint: endpoint)
-            if (try? await live.start()) != nil {
-                adopt(live, mode: .live)
-                return
-            }
-        }
         let mock = MockKernelChat()
         try? await mock.start()
         adopt(mock, mode: .mock)
+    }
+
+    private func attachKernel(_ endpoint: ArbosKernelClient.Endpoint) async -> Bool {
+        let live = LiveKernelChat(endpoint: endpoint)
+        // Frames start arriving during attach; the pump must be running
+        // before the history replay lands.
+        adopt(live, mode: .connecting)
+        if (try? await live.start()) != nil {
+            mode = .live
+            return true
+        }
+        live.stop()
+        pump?.cancel()
+        source = nil
+        return false
     }
 
     func disconnect() {
@@ -115,6 +131,7 @@ final class ChatStore: ObservableObject {
     // MARK: - Private
 
     private func adopt(_ source: ChatSource, mode: Mode) {
+        pump?.cancel()
         self.source = source
         self.mode = mode
         pump = Task { [weak self] in
@@ -144,6 +161,17 @@ final class ChatStore: ObservableObject {
             }
         case .agentDone:
             closeOpenAgentMessage()
+        case .agentReplace(let text):
+            // `turn idle` usually closed (and announced) the streamed
+            // message already; only announce here if it is still open.
+            if let index = items.lastIndex(where: { if case .agent = $0.kind { return true } else { return false } }) {
+                let wasOpen = items[index].isStreamingAgent
+                items[index].kind = .agent(text, streaming: false)
+                if wasOpen, !text.isEmpty { onAgentMessage?(text) }
+            } else {
+                items.append(ChatItem(.agent(text, streaming: false)))
+                if !text.isEmpty { onAgentMessage?(text) }
+            }
         case .turn(let running):
             busy = running
             if !running { closeOpenAgentMessage() }
