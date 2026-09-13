@@ -8,7 +8,7 @@
 use anyhow::{Result, bail};
 use arbos_core::{
     Agent, AgentId, Event, EventKind, NodeId, Place, Wake, append_event, files::Layout, inbox,
-    list_agents, notes, subscription, validate_id,
+    list_agents, notes, subscription, validate_id, waiting,
 };
 use arbos_engine::TurnControl;
 use serde_json::Value;
@@ -108,8 +108,6 @@ pub struct KernelHooks {
     /// "Scan the plans now." Sent after every plan write.
     pub kick: mpsc::UnboundedSender<()>,
     pub frames: Mutex<Vec<mpsc::UnboundedSender<Frame>>>,
-    /// Pending questions by agent: the ask's id and the receiver.
-    pub asks: Mutex<HashMap<String, (String, oneshot::Sender<String>)>>,
     /// Every ask/approve id this kernel issued. An answer that names one of
     /// these but not the pending one is late or a duplicate and is refused;
     /// an id the kernel never issued is an old client's guess (qa-021).
@@ -172,7 +170,6 @@ impl KernelHooks {
             kick,
             caps,
             frames: Mutex::new(Vec::new()),
-            asks: Mutex::new(HashMap::new()),
             issued: Mutex::new(HashSet::new()),
             approve_seq: std::sync::atomic::AtomicU64::new(1),
             waits: Mutex::new(HashMap::new()),
@@ -975,24 +972,35 @@ impl KernelHooks {
     }
 
     /// Post a question. The receiver resolves when the user answers.
+    /// Park a question: `waiting/ask-<id>.toml`, the `ask` transcript line,
+    /// and the live frame. No channel — the turn ends after this call, and
+    /// the answer arrives as an inbox file that starts the next turn. A
+    /// kernel restart leaves the question standing.
     pub fn ask(
         &self,
         agent: &AgentId,
         question: &str,
         options: &[String],
         call_id: &str,
-    ) -> Result<oneshot::Receiver<String>> {
-        let (tx, rx) = oneshot::channel();
+    ) -> Result<String> {
         let id = if call_id.is_empty() {
             format!("ask-{}", arbos_core::now_ms())
         } else {
             call_id.to_string()
         };
         self.issued.lock().unwrap().insert(id.clone());
-        self.asks
-            .lock()
-            .unwrap()
-            .insert(agent.to_string(), (id.clone(), tx));
+        waiting::write(
+            &self.place,
+            agent.as_str(),
+            &waiting::Waiting {
+                kind: "ask".into(),
+                id: id.clone(),
+                question: question.to_string(),
+                options: options.to_vec(),
+                tool: String::new(),
+                asked: inbox::rfc3339(arbos_core::now_ms()),
+            },
+        )?;
         // The same id on the transcript line, so a client that sees the live
         // frame and then the line knows they are one question.
         append_event(
@@ -1007,12 +1015,42 @@ impl KernelHooks {
             agent: agent.to_string(),
             question: question.to_string(),
             options: options.to_vec(),
-            id: Some(id),
+            id: Some(id.clone()),
         });
-        Ok(rx)
+        Ok(id)
     }
 
-    /// Post an allow/deny prompt. The receiver resolves when the user answers.
+    /// The parked questions of `agent`, oldest first.
+    pub fn pending_asks(&self, agent: &str) -> Vec<waiting::Waiting> {
+        waiting::asks(&self.place, agent)
+    }
+
+    /// Take the answer to a parked question: the waiting file goes, the
+    /// `answer` line is written, and an inbox file of `kind = "answer"`
+    /// starts the agent's next turn with the words. An empty answer is the
+    /// Skip button and says so to the model.
+    pub fn answer(&self, agent: &str, ask_id: &str, text: &str) -> Result<()> {
+        waiting::remove(&self.place, agent, "ask", ask_id);
+        append_event(
+            &self.layout(agent).transcript(),
+            &Event::new(EventKind::Answer {
+                text: text.to_string(),
+            }),
+        )?;
+        let body = if text.trim().is_empty() {
+            "The user skipped this question without answering. Choose a sensible default yourself, say which you chose, and continue.".to_string()
+        } else {
+            text.to_string()
+        };
+        let mut msg = inbox::Message::new("user", "answer", body);
+        msg.wake = true;
+        msg.reply_to = ask_id.to_string();
+        self.deliver(agent, &msg)?;
+        Ok(())
+    }
+
+    /// Post an allow/deny prompt. The receiver resolves when the user
+    /// answers; `waiting/approve-N.toml` mirrors it meanwhile.
     pub fn approve(&self, agent: &AgentId, tool: &str, command: &str) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         let n = self
@@ -1024,49 +1062,67 @@ impl KernelHooks {
             .lock()
             .unwrap()
             .insert(agent.to_string(), (tool.to_string(), id.clone(), tx));
+        let question = format!("allow {tool}: {command}");
+        let _ = waiting::write(
+            &self.place,
+            agent.as_str(),
+            &waiting::Waiting {
+                kind: "approve".into(),
+                id: id.clone(),
+                question: question.clone(),
+                options: vec!["allow".into(), "deny".into()],
+                tool: tool.to_string(),
+                asked: inbox::rfc3339(arbos_core::now_ms()),
+            },
+        );
         self.broadcast(Frame::Ask {
             agent: agent.to_string(),
-            question: format!("allow {tool}: {command}"),
+            question,
             options: vec!["allow".into(), "deny".into()],
             id: Some(id),
         });
         rx
     }
 
-    /// Whether an answer may resolve `agent`'s pending question. `given` is
-    /// the id the client sent (empty = none). Ok(pending id) or the reason.
+    /// Whether an answer may resolve one of `agent`'s pending questions.
+    /// `given` is the id the client sent (empty = none); `pending` the ids
+    /// waiting. Ok(the id it resolves) or the reason.
     pub fn answer_allowed(
         &self,
         agent: &str,
         given: &str,
-        pending: Option<&str>,
-        pending_total: usize,
-    ) -> std::result::Result<(), String> {
-        let Some(pending) = pending else {
+        pending: &[String],
+    ) -> std::result::Result<String, String> {
+        let Some(first) = pending.first() else {
             return Err(format!("no question is pending for {agent}"));
         };
         // Blind: no id, or the agent id (what the desktop's approve sent
         // before asks had ids). Only safe when there is exactly one
         // question it could mean.
         if given.is_empty() || given == agent {
-            if pending_total == 1 {
-                return Ok(());
+            if pending.len() == 1 {
+                return Ok(first.clone());
             }
             return Err(format!(
-                "answer without an ask id while {pending_total} questions are pending; send id {pending:?}"
+                "answer without an ask id while {} questions are pending; send id {first:?}",
+                pending.len()
             ));
         }
-        if !self.issued.lock().unwrap().contains(given) {
+        if pending.iter().any(|p| p == given) {
+            return Ok(given.to_string());
+        }
+        if !self.issued.lock().unwrap().contains(given)
+            && !waiting::list(&self.place, agent)
+                .iter()
+                .any(|w| w.id == given)
+        {
             return Err(format!(
-                "answer names ask {given:?}, which this kernel never issued; the pending question is {pending:?}"
+                "answer names ask {given:?}, which this kernel never issued; the pending question is {first:?}"
             ));
         }
-        if given != pending {
-            return Err(format!(
-                "answer names ask {given:?} but the pending question is {pending:?}; a late or duplicate answer resolves nothing"
-            ));
-        }
-        Ok(())
+        Err(format!(
+            "answer names ask {given:?} but the pending question is {first:?}; a late or duplicate answer resolves nothing"
+        ))
     }
 
     pub fn browser(&self, agent: &AgentId, action: &str, args: &Value) -> Result<BrowserOut> {

@@ -555,6 +555,7 @@ fn read_image(file: &Path) -> Result<ToolOut> {
         child: None,
         images: vec![shown],
         diff: None,
+        park: None,
     })
 }
 

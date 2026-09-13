@@ -166,6 +166,7 @@ fn add(path: &Path, text: &str) -> Result<ToolOut> {
         child: None,
         images: vec![],
         diff: None,
+        park: None,
     })
 }
 
@@ -213,5 +214,6 @@ fn forget(path: &Path, text: &str) -> Result<ToolOut> {
         child: None,
         images: vec![],
         diff: None,
+        park: None,
     })
 }

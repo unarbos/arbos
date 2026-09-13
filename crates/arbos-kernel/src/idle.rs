@@ -123,7 +123,12 @@ pub fn verdict(hooks: &Arc<KernelHooks>, horizon_ms: i64) -> Verdict {
             ));
         }
     }
-    let waiting: Vec<String> = hooks.asks.lock().unwrap().keys().cloned().collect();
+    let waiting: Vec<String> = list_agents(&hooks.place)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| !hooks.pending_asks(a.id.as_str()).is_empty())
+        .map(|a| a.id.to_string())
+        .collect();
     if !waiting.is_empty() {
         return Verdict::Waiting(waiting);
     }

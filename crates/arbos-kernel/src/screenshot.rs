@@ -89,6 +89,7 @@ impl Tool for Screenshot {
                 child: None,
                 images: vec![shown],
                 diff: None,
+                park: None,
             })
         })
     }

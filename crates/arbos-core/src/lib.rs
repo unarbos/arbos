@@ -22,6 +22,7 @@ pub mod prs;
 pub mod skills;
 pub mod subscription;
 pub mod text;
+pub mod waiting;
 mod wake;
 pub mod wire;
 

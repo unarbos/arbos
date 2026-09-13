@@ -145,9 +145,22 @@ pub struct ToolOut {
     pub images: Vec<String>,
     /// Display diff for the transcript card. The model never sees this.
     pub diff: Option<String>,
+    /// The turn ends after this call, with this notice: the tool parked
+    /// the agent (an `ask` waits for the user as a file; the answer starts
+    /// the next turn).
+    pub park: Option<String>,
 }
 
 impl ToolOut {
+    /// End the turn after this call. `body` is what the model would see if
+    /// it ran on — it does not; `why` is the notice on the transcript.
+    pub fn parked(body: impl Into<String>, why: impl Into<String>) -> Self {
+        Self {
+            park: Some(why.into()),
+            ..Self::text(body)
+        }
+    }
+
     pub fn text(body: impl Into<String>) -> Self {
         Self {
             body: body.into(),
@@ -155,6 +168,7 @@ impl ToolOut {
             child: None,
             images: Vec::new(),
             diff: None,
+            park: None,
         }
     }
 
@@ -165,6 +179,7 @@ impl ToolOut {
             child: None,
             images: Vec::new(),
             diff: None,
+            park: None,
         }
     }
 
