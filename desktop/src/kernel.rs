@@ -795,6 +795,16 @@ fn list_local_agents(path: &Path) -> Option<Vec<SessionSummary>> {
 
 /// What the kernel called one agent, read off its `agent.md`. Local
 /// places only; a remote child is named when the listing next runs.
+/// `mode:` from a local agent's `agent.md`, for the composer's Mode switch.
+pub fn agent_mode(place: &Place, id: &str) -> Option<String> {
+    if place.host.is_some() || !safe_session_id(id) {
+        return None;
+    }
+    let dir = place.path.join(".arbos").join("agents").join(id);
+    let agent = arbos_core::Agent::load(&dir).ok()?;
+    Some(agent.mode.as_str().to_string())
+}
+
 pub fn agent_name(place: &Place, id: &str) -> Option<String> {
     if place.host.is_some() || !safe_session_id(id) {
         return None;

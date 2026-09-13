@@ -35,7 +35,9 @@ pub struct KernelHooks {
     pub kick: mpsc::UnboundedSender<()>,
     pub frames: Mutex<Vec<mpsc::UnboundedSender<Frame>>>,
     pub asks: Mutex<HashMap<String, oneshot::Sender<String>>>,
-    pub approves: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    /// Pending allow/deny questions by agent: the tool asked about, and
+    /// the receiver. One at a time per agent (approvals are interactive).
+    pub approves: Mutex<HashMap<String, (String, oneshot::Sender<bool>)>>,
     pub browsers: BrowserHub,
     /// Serialises plan file writes. One kernel per place holds the lock, so
     /// this is the whole claim story.
@@ -911,8 +913,10 @@ impl KernelHooks {
     /// Post an allow/deny prompt. The receiver resolves when the user answers.
     pub fn approve(&self, agent: &AgentId, tool: &str, command: &str) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
-        let key = format!("{agent}:{tool}");
-        self.approves.lock().unwrap().insert(key, tx);
+        self.approves
+            .lock()
+            .unwrap()
+            .insert(agent.to_string(), (tool.to_string(), tx));
         self.broadcast(Frame::Ask {
             agent: agent.to_string(),
             question: format!("allow {tool}: {command}"),

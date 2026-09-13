@@ -82,6 +82,11 @@ pub enum Frame {
         agent: String,
         model: String,
     },
+    /// auto | ask | plan — how much the agent may do without asking.
+    SetMode {
+        agent: String,
+        mode: String,
+    },
     VoiceStart,
     VoiceStop,
     Refresh,
@@ -152,4 +157,6 @@ pub struct TreeNode {
     pub paused: bool,
     pub model: String,
     pub kind: String,
+    #[serde(default)]
+    pub mode: String,
 }

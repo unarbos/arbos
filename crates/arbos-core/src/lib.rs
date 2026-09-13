@@ -16,7 +16,7 @@ mod wake;
 pub mod wire;
 
 pub use agent::validate_id;
-pub use agent::{ALL_TOOLS, Agent, AgentId};
+pub use agent::{ALL_TOOLS, Agent, AgentId, Mode};
 pub use event::{Event, EventKind, ToolRec, Usage};
 pub use files::{
     Layout, ROOT_ID, append_event, append_events, bootstrap, create_chat, list_agents, load_agent,

@@ -41,7 +41,7 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
     };
     let agents_md = first_agents_md(place);
     format!(
-        "You: {id}\nName: {name}\nParent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nProject: {project}\nCwd: {cwd}\nFocus: {focus}\nSkills (read SKILL.md for the body): {skills}\n{agents}",
+        "You: {id}\nName: {name}\nParent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\nProject: {project}\nCwd: {cwd}\nFocus: {focus}\nSkills (read SKILL.md for the body): {skills}\n{agents}",
         id = agent.id,
         name = agent.name,
         parent = agent.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),
@@ -49,6 +49,7 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
         model = agent.model,
         allow = agent.allowlist.join(", "),
         ro = agent.readonly,
+        mode = agent.mode.describe(),
         agents = agents_md,
     )
 }

@@ -93,7 +93,8 @@ impl Tool for Bash {
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         Box::pin(async move {
             let cmd = req(&args, "command")?;
-            if needs_approval(cmd) {
+            // In ask mode the call was already allowed before it ran.
+            if needs_approval(cmd) && cx.agent.mode != arbos_core::Mode::Ask {
                 let allowed = tokio::select! {
                     r = cx.hooks.approve(&cx.agent.id, "bash", cmd) => r?,
                     _ = cx.cancel.cancelled() => bail!("interrupted while waiting for approval"),

@@ -75,6 +75,8 @@ pub struct Prepared {
     pub tool: Arc<dyn crate::tool::Tool>,
     pub args: Value,
     pub plan: Plan,
+    /// Ask mode: the user allows or denies this call before it runs.
+    pub ask_first: bool,
 }
 
 /// Allowlist → `before-tool` hook (may rewrite) → allowlist again → `plan`.
@@ -157,7 +159,7 @@ pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Res
             decided.args["path"] = serde_json::json!(p);
         }
     }
-    let plan = tool.plan(
+    let mut plan = tool.plan(
         &PlanCx {
             root: cx.place.path(),
             cwd: &cx.cwd,
@@ -168,12 +170,28 @@ pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Res
     // Readonly is a property of the footprint, not of the tool name. This
     // catches a hook that rewrites a read into a write, and a bash command
     // that is not on the read-only list.
-    if cx.agent.readonly && !plan.access.is_readonly() {
+    let writes = !plan.access.is_readonly();
+    if writes && cx.agent.mode == arbos_core::Mode::Plan && decided.tool != "ask" {
+        anyhow::bail!(
+            "plan mode: {} would write. Put the change in your plan and your reply, and ask the user to switch you to ask or auto to carry it out.",
+            decided.tool
+        );
+    }
+    if cx.agent.readonly && writes {
         anyhow::bail!("readonly agent: {} would write", decided.tool);
+    }
+    // Ask mode: a write waits for the user. Interactive, so writes are
+    // asked one at a time and never race a read of the same file.
+    // `ask` is exclusive because it waits on the user, not because it
+    // writes; asking permission to ask would be absurd.
+    let ask_first = writes && cx.agent.mode == arbos_core::Mode::Ask && decided.tool != "ask";
+    if ask_first {
+        plan = plan.interactive();
     }
     Ok(Prepared {
         tool: Arc::clone(tool),
         args: decided.args,
         plan,
+        ask_first,
     })
 }

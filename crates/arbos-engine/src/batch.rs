@@ -111,6 +111,25 @@ impl Outcome {
     }
 }
 
+/// One line naming a call for the allow/deny question: the path, the
+/// command, or the arguments, cut short.
+fn summarise_call(_name: &str, args: &serde_json::Value) -> String {
+    let key = ["command", "path", "patch", "url", "text", "brief"]
+        .iter()
+        .find_map(|k| args.get(*k).and_then(serde_json::Value::as_str));
+    let body = match key {
+        Some(v) => v.to_string(),
+        None => args.to_string(),
+    };
+    let body = body.replace('\n', " ");
+    let cut: String = body.chars().take(160).collect();
+    if cut.len() < body.len() {
+        format!("{cut}…")
+    } else {
+        cut
+    }
+}
+
 enum State {
     /// Arrived; not yet through preflight.
     New,
@@ -254,6 +273,27 @@ pub async fn run(
                     diff: None,
                 })));
                 let handle = set.spawn(async move {
+                    // Ask mode: the user sees the call and says allow or deny.
+                    if prepared.ask_first {
+                        let summary = summarise_call(&call.name, &prepared.args);
+                        let allowed = tokio::select! {
+                            r = call_cx.hooks.approve(&call_cx.agent.id, &call.name, &summary) => r.unwrap_or(false),
+                            _ = call_cx.cancel.cancelled() => false,
+                        };
+                        if !allowed {
+                            return (
+                                i,
+                                Outcome::Ran {
+                                    out: Err(anyhow::anyhow!(
+                                        "the user did not allow {} ({summary}). Do not retry it unchanged; say what you wanted to do and why, and go on with what is allowed.",
+                                        call.name
+                                    )),
+                                    started,
+                                    ended: arbos_core::now_ms(),
+                                },
+                            );
+                        }
+                    }
                     let out = prepared.tool.run(call_cx, prepared.args).await;
                     (
                         i,

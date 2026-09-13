@@ -376,15 +376,19 @@ fn handle_frame(
             call_id,
             allow,
         } => {
-            let key = format!("{agent}:bash");
-            if let Some(tx) = hooks.approves.lock().unwrap().remove(&key) {
+            let pending = hooks.approves.lock().unwrap().remove(&agent);
+            let tool = pending
+                .as_ref()
+                .map(|(tool, _)| tool.clone())
+                .unwrap_or_else(|| "bash".into());
+            if let Some((_, tx)) = pending {
                 let _ = tx.send(allow);
             }
             // The decision is part of the record: the transcript shows what
             // was allowed or denied, not just a failed tool.
             let event = Event::new(EventKind::Approval {
                 call_id,
-                tool: "bash".into(),
+                tool,
                 allowed: allow,
             });
             let _ = append_event(&Layout::new(place, &agent).transcript(), &event);
@@ -402,6 +406,25 @@ fn handle_frame(
                 a.model = model;
                 let _ = a.save(&place.agent_dir(&agent));
             }
+        }
+        Frame::SetMode { agent, mode } => {
+            let Some(mode) = arbos_core::Mode::parse(&mode) else {
+                eprintln!("set mode {agent}: unknown mode {mode:?}");
+                return;
+            };
+            if let Ok(mut a) = load_agent(place, &arbos_core::AgentId::new(&agent)) {
+                a.mode = mode;
+                let _ = a.save(&place.agent_dir(&agent));
+                // On the record, so the transcript says when the leash changed.
+                let _ = append_event(
+                    &Layout::new(place, &agent).transcript(),
+                    &Event::new(EventKind::Notice {
+                        text: format!("mode: {} — {}", mode.as_str(), mode.describe()),
+                        failed: false,
+                    }),
+                );
+            }
+            hooks.broadcast(tree_frame(place));
         }
         Frame::VoiceStart => {
             let _ = doors::voice_start();
@@ -457,6 +480,7 @@ fn tree_nodes(place: &Place) -> Vec<TreeNode> {
             paused: a.paused,
             model: a.model,
             kind: "agent".into(),
+            mode: a.mode.as_str().into(),
         })
         .collect()
 }
