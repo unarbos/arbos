@@ -1102,6 +1102,7 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
             for path in attachments {
                 message.add_file_path(path);
             }
+            message.sent_at = (ev.ts > 0).then_some(ev.ts);
             Some(ChatItem::User(message))
         }
         // An empty line is a step boundary for the kernel's projection, not

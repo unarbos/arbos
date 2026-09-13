@@ -19,13 +19,14 @@ use crate::{
         place::Place,
         project::Project,
         record,
-        session::{self, ChatSession, Command},
+        session::{self, ChatItem, ChatSession, Command},
         settings::{self, Feature, Settings},
         state::{self, State},
         surface::{self, Bind, Surface, SurfaceId, SurfaceKind},
         watch::{self, Watch},
     },
     reading,
+    view::component::transcript,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bezel::{
@@ -1574,6 +1575,55 @@ impl Workspace {
             return;
         };
         self.fork_session(id, cx);
+    }
+
+    /// Thumbs on a turn's answer. Stored on the prompt that started the
+    /// turn (so it reopens lit) and appended to the agent's
+    /// `feedback.jsonl` in the place, for QA and the kernel. Clicking the
+    /// lit thumb clears the vote.
+    pub fn vote_turn(&mut self, id: u64, turn: usize, value: i8, cx: &mut Context<Self>) {
+        let mut line: Option<serde_json::Value> = None;
+        self.with_session(id, cx, |chat| {
+            let answer = transcript::answer_of(&chat.items, turn).unwrap_or_default();
+            let Some(ChatItem::User(message)) = chat.items.get_mut(turn) else {
+                return;
+            };
+            let next = if message.feedback == Some(value) {
+                None
+            } else {
+                Some(value)
+            };
+            message.feedback = next;
+            chat.flush();
+            if chat.host.is_none() {
+                if let Some(agent) = chat.agent_session.as_deref() {
+                    line = Some(serde_json::json!({
+                        "ts": arbos_core::now_ms(),
+                        "agent": agent,
+                        "turn": turn,
+                        "vote": next.unwrap_or(0),
+                        "answer": answer.chars().take(200).collect::<String>(),
+                    }));
+                    let path = chat
+                        .cwd
+                        .join(".arbos")
+                        .join("agents")
+                        .join(agent)
+                        .join("feedback.jsonl");
+                    if let Some(v) = &line {
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                        {
+                            use std::io::Write as _;
+                            let _ = writeln!(f, "{v}");
+                        }
+                    }
+                }
+            }
+        });
+        cx.notify();
     }
 
     /// Whole-log copy of a chat as a new root. The source stays where it is.

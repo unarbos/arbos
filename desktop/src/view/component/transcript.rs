@@ -17,7 +17,7 @@ use crate::{
 use bezel::{
     gpui::{
         AnyElement, ClipboardItem, Context, Empty, Hsla, Pixels, ScrollHandle, SharedString,
-        StyledText, TextRun, Window, canvas, div, font, img, point, prelude::*, px, rgb,
+        StyledText, TextRun, Window, canvas, div, font, img, point, prelude::*, px, rgb, svg,
     },
     motion::Painter,
     theme::{HighlightKind, TextStyle, Theme, Typeset, ink},
@@ -479,6 +479,13 @@ fn turns(items: &[ChatItem]) -> Vec<Turn> {
 
 /// The assistant reply that belongs to this step — Agent prose after the
 /// tools and thoughts, not the chat name and not earlier turns.
+/// The answer text of the turn whose prompt sits at `first`, for a vote's
+/// record. Empty when the turn has no answer yet.
+pub fn answer_of(items: &[ChatItem], first: usize) -> Option<String> {
+    let turn = turns(items).into_iter().find(|t| t.range.start == first)?;
+    turn_answer(items, &turn)
+}
+
 fn turn_answer(items: &[ChatItem], turn: &Turn) -> Option<String> {
     let parts: Vec<&str> = (turn.answer_from..turn.range.end)
         .filter_map(|ix| match items.get(ix) {
@@ -2489,7 +2496,93 @@ fn turn_footer(
                         .text_color(theme.text_faint),
                 ),
         );
+    // Cursor: thumbs up, thumbs down, then "Just now" / "2m ago".
+    let (vote, sent_at) = match chat.items.get(turn) {
+        Some(ChatItem::User(message)) => (message.feedback, message.sent_at),
+        _ => (None, None),
+    };
+    let thumb = |up: bool, cx: &mut Context<Workspace>| {
+        let value: i8 = if up { 1 } else { -1 };
+        let lit = vote == Some(value);
+        let (name, path, tip) = if up {
+            ("up", crate::assets::THUMBS_UP_ICON, "Good answer")
+        } else {
+            ("down", crate::assets::THUMBS_DOWN_ICON, "Bad answer")
+        };
+        div()
+            .id(SharedString::from(format!("vote-{name}-{id}-{turn}")))
+            .cursor_pointer()
+            .rounded(px(4.))
+            .p(px(3.))
+            .hover(|el| el.bg(theme.element_hover))
+            .active(|el| el.bg(theme.element_active))
+            .tooltip(move |window, cx| Tooltip::text(tip, window, cx))
+            .on_click(cx.listener(move |this, _, _, cx| this.vote_turn(id, turn, value, cx)))
+            .child(
+                svg()
+                    .path(path)
+                    .size(px(12.))
+                    .text_color(if lit { theme.accent } else { theme.text_faint }),
+            )
+    };
+    let row = row
+        .child(thumb(true, cx))
+        .child(thumb(false, cx))
+        .when_some(sent_at.and_then(relative_time), |row, when| {
+            row.child(
+                div()
+                    .id(SharedString::from(format!("turn-time-{id}-{turn}")))
+                    .pl(px(4.))
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(when)),
+            )
+        });
     row.into_any_element()
+}
+
+/// "Just now", "2m ago", "3h ago", "Yesterday", "3d ago", then a date.
+/// `None` for a missing or absurd time (an old transcript with `ts: 0`).
+fn relative_time(at_ms: i64) -> Option<String> {
+    if at_ms <= 0 {
+        return None;
+    }
+    let now = arbos_core::now_ms();
+    let secs = (now - at_ms).max(0) / 1000;
+    Some(match secs {
+        s if s < 60 => "Just now".to_owned(),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s if s < 2 * 86_400 => "Yesterday".to_owned(),
+        s if s < 7 * 86_400 => format!("{}d ago", s / 86_400),
+        _ => {
+            let days = at_ms / 86_400_000;
+            let (y, m, d) = civil_from_days(days);
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            let this_year = civil_from_days(now / 86_400_000).0;
+            if y == this_year {
+                format!("{} {d}", MONTHS[(m - 1) as usize])
+            } else {
+                format!("{} {d}, {y}", MONTHS[(m - 1) as usize])
+            }
+        }
+    })
+}
+
+/// Days since 1970-01-01 → (year, month, day). Howard Hinnant's algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// The settled turn's one line above the answer: everything that happened,
@@ -3556,6 +3649,8 @@ mod selection_tests {
                 text: String::new(),
                 images: vec![image.clone(), image],
                 files: Vec::new(),
+                sent_at: None,
+                feedback: None,
             }),
             ChatItem::Agent("two pictures".into()),
         ];

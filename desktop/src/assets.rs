@@ -33,6 +33,9 @@ pub const DELEGATE_ICON: &str = "arbos/delegate.svg";
 pub const HOME_ICON: &str = "arbos/home.svg";
 /// Rounded rect with two dots — the remote / Cursor mark.
 pub const REMOTE_ICON: &str = "arbos/remote.svg";
+/// Feedback under an answer. Bezel's set has no thumbs.
+pub const THUMBS_UP_ICON: &str = "arbos/thumbs-up.svg";
+pub const THUMBS_DOWN_ICON: &str = "arbos/thumbs-down.svg";
 
 pub struct Assets;
 
@@ -46,6 +49,12 @@ impl AssetSource for Assets {
         }
         if path == REMOTE_ICON {
             return Ok(Some(Cow::Borrowed(include_bytes!("view/remote.svg"))));
+        }
+        if path == THUMBS_UP_ICON {
+            return Ok(Some(Cow::Borrowed(include_bytes!("view/thumbs-up.svg"))));
+        }
+        if path == THUMBS_DOWN_ICON {
+            return Ok(Some(Cow::Borrowed(include_bytes!("view/thumbs-down.svg"))));
         }
         if let Some(bytes) = icons::Assets.load(path)? {
             return Ok(Some(bytes));
