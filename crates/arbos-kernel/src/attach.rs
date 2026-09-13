@@ -33,6 +33,19 @@ pub async fn read_loop(
             continue;
         }
         match serde_json::from_str::<Frame>(&line) {
+            // A type this kernel does not know: say so, keep the connection.
+            Ok(Frame::Unknown) => {
+                let kind = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+                    .unwrap_or_default();
+                let detail = format!("unknown frame type {kind:?}");
+                crate::klog::warn("frame_rejected", None, &detail);
+                let _ = out.send(Frame::Error {
+                    agent: None,
+                    detail,
+                });
+            }
             Ok(frame) => {
                 if tx.send(frame).is_err() {
                     break;

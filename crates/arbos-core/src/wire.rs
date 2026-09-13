@@ -186,6 +186,11 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         url: Option<String>,
     },
+    /// A frame type this build does not know. A kernel newer than the
+    /// client (or the reverse) adds frames; an old reader must skip them,
+    /// not drop the connection. Never sent on purpose.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A plan node as the window draws it. Strings are pre-rendered so the
