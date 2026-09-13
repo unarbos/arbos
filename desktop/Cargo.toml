@@ -80,6 +80,12 @@ arbos-core = { path = "../crates/arbos-core" }
 # (wasm-bindgen =0.2.104) and clashes with bezel's wasm-bindgen ^0.2.120.
 js-sys = "0.3.104"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# bezel's `platform` feature turns on `font-kit` and nothing else, and
+# gpui_platform on Linux panics at startup unless a window backend is enabled.
+# Naming the crate here unifies these features into bezel's own copy of it.
+gpui_platform = { version = "0.3.9", package = "bezel-gpui-platform", features = ["x11", "wayland"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Collection behavior and the transparent titlebar — AppKit, not gpui.
 objc = "0.2"

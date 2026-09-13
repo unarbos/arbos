@@ -1,6 +1,7 @@
 pub mod attach;
 pub mod browser;
 pub mod doors;
+pub mod github;
 pub mod grep;
 pub mod hooks;
 pub mod plan;
