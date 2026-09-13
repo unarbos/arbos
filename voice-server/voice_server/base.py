@@ -11,7 +11,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import protocol as P
-from .audio import float_to_pcm16, resample_whole
+from .audio import float_to_pcm16, pcm16_to_float, resample_whole
+from .echo import EchoGate
 from .engines import Engines
 from .tools import ToolRunner
 
@@ -33,6 +34,7 @@ class Tuning:
     max_utterance_s: int = 60
     out_frame_ms: int = 100
     max_lead_ms: int = 1500  # how far ahead of real-time playback we send reply audio
+    echo_gate: bool = True  # silence uplink frames that are our own reply coming back through the mic
 
 
 @dataclass
@@ -69,6 +71,7 @@ class BaseSession:
         self.tools.on_call = self._on_tool_call
         self.tools.on_result = self._on_tool_result
         self.mirror_agents = engines.kernel is not None
+        self.echo = EchoGate(self.rate) if tuning.echo_gate else None
 
     # ------------------------------------------------------------------ hooks for engines
 
@@ -103,7 +106,7 @@ class BaseSession:
                 if isinstance(message, (bytes, bytearray)):
                     if not self.ready_sent:
                         self._send_ready()
-                    await self.on_audio(bytes(message))
+                    await self.on_audio(self._gate_uplink(bytes(message)))
                 elif await self._on_control(message):
                     break
         finally:
@@ -116,7 +119,16 @@ class BaseSession:
                 await self.on_close()
             finally:
                 sender.cancel()
+            if self.echo:
+                log.info("[%s] echo gate: %s", self.sid, self.echo.stats)
             log.info("[%s] closed", self.sid)
+
+    def _gate_uplink(self, data: bytes) -> bytes:
+        """Silence frames that are our own reply coming back through the mic."""
+        if self.echo is None:
+            return data
+        samples, is_echo = self.echo.filter(pcm16_to_float(data))
+        return float_to_pcm16(samples) if is_echo else data
 
     async def _sender(self) -> None:
         while True:
@@ -133,7 +145,9 @@ class BaseSession:
     def _emit_for_gen(self, gen: int, msg_type: str, **fields) -> None:
         self.out.put_nowait((gen, json.dumps({"type": msg_type, **fields})))
 
-    def _emit_audio(self, gen: int, pcm: bytes) -> None:
+    def _emit_audio(self, gen: int, pcm: bytes, ahead_s: float = 0.0) -> None:
+        if self.echo is not None and gen == self.gen:
+            self.echo.remember(pcm16_to_float(pcm), ahead_s)
         self.out.put_nowait((gen, pcm))
 
     def _send_ready(self) -> None:
@@ -185,6 +199,9 @@ class BaseSession:
         elif kind == P.TEXT_CANCEL:
             if self.text_task and not self.text_task.done():
                 self.text_task.cancel()
+        elif kind == P.CLIENT_SPEAKING:
+            if self.echo is not None:
+                self.echo.client_speaking = bool(msg.get("speaking", False))
         elif kind == P.SESSION_END:
             return True
         else:
@@ -196,8 +213,10 @@ class BaseSession:
         rate = int(fmt.get("rate", self.rate) or self.rate)
         if not 8000 <= rate <= 48000:
             self._emit(P.ERROR, message=f"unsupported rate {rate}; using {self.rate}")
-        else:
+        elif rate != self.rate:
             self.rate = rate
+            if self.echo is not None:
+                self.echo = EchoGate(rate)
         if "language" in msg:
             self.language = msg["language"] or None
         voice = msg.get("voice")
@@ -238,11 +257,13 @@ class BaseSession:
                 chunk = resample_whole(chunk, self.engines.tts.rate, self.rate)
             pcm = float_to_pcm16(chunk)
             for i in range(0, len(pcm), frame_bytes):
+                ahead = 0.0
                 if first_at is not None:
                     ahead = sent_s - (time.monotonic() - first_at)
                     if ahead > lead_s:
                         await asyncio.sleep(ahead - lead_s)
-                self._emit_audio(gen, pcm[i : i + frame_bytes])
+                        ahead = lead_s
+                self._emit_audio(gen, pcm[i : i + frame_bytes], max(0.0, ahead))
                 sent_s += frame_s
                 if first_at is None:
                     first_at = time.monotonic()

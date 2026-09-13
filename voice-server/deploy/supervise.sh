@@ -21,6 +21,7 @@ log() { echo "$(date -u +%FT%TZ) $*"; }
 gateway_fails=0; quick_fails=0; nim_fails=0; phone_fails=0; kquick_fails=0; tick=0
 last_url="$(cat "$VOICE_HOME/public-url.txt" 2>/dev/null || true)"
 last_kurl="$(cat "$VOICE_HOME/kernel-url.txt" 2>/dev/null || true)"
+last_hurl="$(cat "$VOICE_HOME/hub-url.txt" 2>/dev/null || true)"
 
 current_quick_url() {
   grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$VOICE_HOME/logs/quick.log" 2>/dev/null | tail -1
@@ -64,7 +65,7 @@ while true; do
           echo "$url" > "$VOICE_HOME/public-url.txt"
           last_url="$url"
           log "public url is now $url"
-          [ -x "$SRC/deploy/publish-url.sh" ] && "$SRC/deploy/publish-url.sh" "$url" "$last_kurl" 2>&1 | sed 's/^/publish: /'
+          [ -x "$SRC/deploy/publish-url.sh" ] && "$SRC/deploy/publish-url.sh" "$url" "$last_kurl" "$last_hurl" 2>&1 | sed 's/^/publish: /'
         fi
       else
         quick_fails=$((quick_fails + 1))
@@ -98,7 +99,7 @@ while true; do
         if [ "$kurl" != "$last_kurl" ]; then
           echo "$kurl" > "$VOICE_HOME/kernel-url.txt"; last_kurl="$kurl"
           log "kernel public url is now $kurl"
-          [ -x "$SRC/deploy/publish-url.sh" ] && "$SRC/deploy/publish-url.sh" "$last_url" "$kurl" 2>&1 | sed 's/^/publish: /'
+          [ -x "$SRC/deploy/publish-url.sh" ] && "$SRC/deploy/publish-url.sh" "$last_url" "$kurl" "$last_hurl" 2>&1 | sed 's/^/publish: /'
         fi
       else
         kquick_fails=$((kquick_fails + 1))
@@ -108,6 +109,17 @@ while true; do
           tmux kill-session -t "=kquick" 2>/dev/null; kquick_fails=0
         fi
       fi
+    fi
+  fi
+
+  # 6. mesh hub URL (another service on this host writes it); republish when it changes
+  hub_file="${HUB_URL_FILE:-/root/arbos-hub/public-url.txt}"
+  if [ -s "$hub_file" ]; then
+    hurl="$(head -1 "$hub_file" | tr -d '[:space:]')"
+    if [ -n "$hurl" ] && [ "$hurl" != "$last_hurl" ]; then
+      echo "$hurl" > "$VOICE_HOME/hub-url.txt"; last_hurl="$hurl"
+      log "hub public url is now $hurl"
+      [ -x "$SRC/deploy/publish-url.sh" ] && "$SRC/deploy/publish-url.sh" "$last_url" "$last_kurl" "$hurl" 2>&1 | sed 's/^/publish: /'
     fi
   fi
 

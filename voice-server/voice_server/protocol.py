@@ -14,6 +14,7 @@ SPEAK = "speak"
 INTERRUPT = "interrupt"
 TEXT_INPUT = "text.input"
 TEXT_CANCEL = "text.cancel"
+CLIENT_SPEAKING = "client.speaking"
 SESSION_END = "session.end"
 
 # server -> client, text channel and agent bridge
@@ -61,6 +62,9 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
     {"type":"interrupt"}           drop the current reply and everything queued
     {"type":"text.input","text":"..."}   TEXT CHANNEL: a typed turn; answered with text.delta* + text.done
     {"type":"text.cancel"}         stop the running text turn
+    {"type":"client.speaking","speaking":true|false}
+                                   optional: the app is playing reply audio right now. Tightens the
+                                   server's echo gate (see below). Send false when playback drains.
     {"type":"session.end"}         close
 
   server -> client
@@ -127,6 +131,14 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
   Barge-in
     Audio already sent cannot be recalled, so the client must flush its playback queue on
     speech.started (the iOS client does). The client may also send "interrupt".
+
+  Echo gate (server side, independent of the phone's echo cancellation)
+    While reply audio is on its way to the speaker (and 0.6 s after), every uplink frame is
+    cross-correlated with the reply audio sent in the last 3 s. A match is our own voice
+    coming back through the mic: the frame is replaced with silence before the speech model
+    or VAD sees it. A frame much louder than the predicted echo is the user talking over us
+    and passes, so barge-in keeps working. "client.speaking":true lowers the thresholds.
+    --no-echo-gate turns it off.
 
   Health   GET /healthz -> 200 "ok" (no auth)
 """

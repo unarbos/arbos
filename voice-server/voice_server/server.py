@@ -76,6 +76,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     turn.add_argument("--vad-threshold", type=float, default=0.5)
     turn.add_argument("--max-lead-ms", type=int, default=1500,
                       help="reply audio is sent at most this far ahead of real-time playback (small = fast interrupt)")
+    turn.add_argument("--no-echo-gate", action="store_true", help="do not silence uplink frames that match our own reply audio")
 
     parser.add_argument("--print-protocol", action="store_true", help="print the wire protocol and exit")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -137,6 +138,7 @@ async def serve_forever(args: argparse.Namespace) -> None:
         end_silence_ms=args.end_silence_ms,
         partial_interval_ms=args.partial_interval_ms,
         max_lead_ms=args.max_lead_ms,
+        echo_gate=not args.no_echo_gate,
     )
 
     session_class = DuplexSession if engines.engine == "duplex" else PipelineSession

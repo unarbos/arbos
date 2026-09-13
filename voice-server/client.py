@@ -58,11 +58,38 @@ def first_speech_sample(x: np.ndarray, thresh: float = 0.01) -> int:
     return int(loud[0]) if loud.size else 0
 
 
+class Speaker:
+    """Pretend speaker + mic coupling: plays reply audio in real time and feeds it back into the
+    mic after `delay_ms`, scaled by `gain`. This is what a phone without echo cancellation does."""
+
+    def __init__(self, gain: float, delay_ms: int):
+        self.gain = gain
+        self.buffer = bytearray()
+        self.played: list[np.ndarray] = []
+        self.delay_frames = max(0, delay_ms // FRAME_MS)
+
+    def receive(self, pcm: bytes) -> None:
+        self.buffer += pcm
+
+    def tick(self) -> np.ndarray:
+        """Advance one frame; return what the mic hears from the speaker right now."""
+        chunk, self.buffer = self.buffer[: FRAME * 2], self.buffer[FRAME * 2 :]
+        now = pcm16_to_float(bytes(chunk)) if chunk else np.zeros(0, dtype=np.float32)
+        if now.size < FRAME:
+            now = np.concatenate([now, np.zeros(FRAME - now.size, dtype=np.float32)])
+        self.played.append(now)
+        if len(self.played) <= self.delay_frames:
+            return np.zeros(FRAME, dtype=np.float32)
+        heard = self.played.pop(0)
+        return heard * self.gain
+
+
 class Mic:
     """Sends 40 ms frames in real time, forever: WAV audio when queued, silence otherwise."""
 
-    def __init__(self, ws):
+    def __init__(self, ws, speaker: Speaker | None = None):
         self.ws = ws
+        self.speaker = speaker
         self.queue: list[tuple[np.ndarray, dict]] = []
         self.marks: dict[str, float] = {}
 
@@ -89,6 +116,8 @@ class Mic:
                     frame = np.concatenate([frame, np.zeros(FRAME - frame.size, dtype=np.float32)])
             else:
                 frame = np.zeros(FRAME, dtype=np.float32)
+            if self.speaker is not None:
+                frame = frame + self.speaker.tick() + np.random.normal(0, 0.0005, FRAME).astype(np.float32)
             await self.ws.send(float_to_pcm16(frame))
             next_at += FRAME_MS / 1000
             await asyncio.sleep(max(0.0, next_at - time.monotonic()))
@@ -129,6 +158,8 @@ class Run:
         self.ws = None
         self.response_open = False
         self.player = Player(args.play)
+        self.speaker = Speaker(args.loopback, args.loopback_delay_ms) if args.loopback > 0 else None
+        self.finals: list[str] = []
         self.metrics: dict[str, float] = {}
 
     def log(self, text: str) -> None:
@@ -151,6 +182,8 @@ class Run:
                 self._resolve("audio.first", {})
             self.audio += message
             self.player.write(bytes(message))
+            if self.speaker is not None:
+                self.speaker.receive(bytes(message))
             return
         msg = json.loads(message)
         kind = msg.pop("type")
@@ -161,6 +194,7 @@ class Run:
             return
         if kind == "transcript.final":
             self.log(f"<- transcript.final: you: {msg.get('text')}")
+            self.finals.append(msg.get("text", ""))
             self.line = ""
         elif kind == "response.done" and msg.get("interrupted"):
             self.interrupted_at = now
@@ -176,9 +210,11 @@ class Run:
         elif kind == "response.started":
             self.response_open = True
             self.log(f"<- {kind}")
+            self._speaking_marker(True)
         elif kind == "response.done":
             self.response_open = False
             self.log(f"<- {kind} {msg if msg else ''}")
+            self._speaking_marker(False)
         elif kind == "text.delta":
             self.text_line += msg.get("text", "")
             if self.waiters.get("text.delta"):
@@ -192,6 +228,10 @@ class Run:
         else:
             self.log(f"<- {kind} {msg if msg else ''}")
         self._resolve(kind, msg)
+
+    def _speaking_marker(self, speaking: bool) -> None:
+        if self.args.speaking_marker and self.ws is not None:
+            asyncio.create_task(self.ws.send(json.dumps({"type": "client.speaking", "speaking": speaking})))
 
     def _resolve(self, kind: str, msg: dict) -> None:
         fut = self.waiters.pop(kind, None)
@@ -210,6 +250,10 @@ async def main() -> None:
     ap.add_argument("--text", default=None, help="also send this on the text channel (text.input) and time the streamed answer")
     ap.add_argument("--agent-wav", default=None,
                     help="third utterance that asks for work ('send an agent to ...'); waits for tool.call and agent.done")
+    ap.add_argument("--loopback", type=float, default=0.0,
+                    help="echo test: feed the reply audio back into the mic at this gain (e.g. 0.5), like a phone without AEC")
+    ap.add_argument("--loopback-delay-ms", type=int, default=320, help="speaker-to-mic delay for --loopback")
+    ap.add_argument("--speaking-marker", action="store_true", help="send client.speaking true/false around playback")
     ap.add_argument("--out", default="out", help="directory for reply WAVs and metrics.json")
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--agent-timeout", type=float, default=240.0, help="how long to wait for agent.done")
@@ -223,7 +267,7 @@ async def main() -> None:
     async with websockets.connect(args.url, max_size=4 * 1024 * 1024, compression=None) as ws:
         run.log(f"connected to {args.url.split('?')[0]}")
         run.ws = ws
-        mic = Mic(ws)
+        mic = Mic(ws, run.speaker)
         reader = asyncio.create_task(_read(ws, run))
         ready = run.wait("session.ready")
         t_start = time.monotonic()
@@ -336,6 +380,12 @@ async def main() -> None:
             run.log("waiting for the spoken report to finish")
             await asyncio.sleep(6.0)
 
+        if run.speaker is not None:
+            # let the model hear the tail of its own voice and see whether it answers itself
+            run.log("loopback: waiting to see if the server hears its own voice")
+            await asyncio.sleep(8.0)
+            run.metrics["echo.user_transcripts"] = len(run.finals)
+            run.metrics["echo.transcripts"] = " | ".join(t[:60] for t in run.finals)
         run.metrics["reply.audio_seconds"] = len(run.audio) / 2 / RATE
         await ws.send(json.dumps({"type": "session.end"}))
         mic_task.cancel()
