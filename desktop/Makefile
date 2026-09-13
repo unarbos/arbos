@@ -11,6 +11,9 @@ ARCH     := $(shell uname -m)
 ICON     := assets/icon.png
 ICON_SRC := bundle/icon.png
 APP      := target/bundle/Arbos.app
+# The identifier the signature is designated by — read from the plist so the
+# two cannot drift.
+BUNDLE_ID := $(shell plutil -extract CFBundleIdentifier raw -o - bundle/Info.plist)
 ICONSET  := target/bundle/Arbos.iconset
 DMG      := target/bundle/Arbos-$(VERSION)-$(ARCH).dmg
 DMGSTAGE := target/bundle/dmg
@@ -62,7 +65,13 @@ bundle:
 	@# hardened runtime tccd refuses even to ask without it (bundle/
 	@# entitlements.plist). Agents are spawned, not loaded, and nothing here is
 	@# sandboxed, so nothing else is declared.
-	codesign --force --options runtime --timestamp --entitlements bundle/entitlements.plist --sign "$(SIGN)" $(APP)
+	@# Ad-hoc only: pin the designated requirement to the bundle identifier.
+	@# Left to itself an ad-hoc signature is designated by its cdhash, so to
+	@# TCC every rebuild is a new app and the microphone is asked for again.
+	@# A certificate brings its own stable requirement and leaves this out.
+	codesign --force --options runtime --timestamp --entitlements bundle/entitlements.plist \
+		$(if $(filter -,$(SIGN)),--requirements '=designated => identifier "$(BUNDLE_ID)"',) \
+		--sign "$(SIGN)" $(APP)
 	@echo "built $(APP) $(VERSION)"
 
 dmg: bundle
