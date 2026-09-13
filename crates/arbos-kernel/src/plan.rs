@@ -20,6 +20,9 @@ pub fn reclaim(hooks: &KernelHooks) {
     for agent in list_agents(&hooks.place).unwrap_or_default() {
         let id = agent.id.as_str();
         while close_turn_folder(hooks, id, Some("kernel restarted before this turn ended")) {}
+        // A blocking allow/deny prompt does not outlive its turn; a parked
+        // question does, and stays.
+        arbos_core::waiting::clear_approves(&hooks.place, id);
         hooks.broadcast(hooks.plan_frame(id));
     }
 }

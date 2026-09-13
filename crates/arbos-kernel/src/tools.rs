@@ -130,6 +130,7 @@ impl Tool for Spawn {
                     child: Some(id.to_string()),
                     images: vec![],
                     diff: None,
+                    park: None,
                 });
             }
             let kind = opt_str(&args, "kind");
@@ -198,6 +199,7 @@ impl Tool for Spawn {
                 child: Some(id.to_string()),
                 images: vec![],
                 diff: None,
+                park: None,
             })
         })
     }
@@ -528,22 +530,15 @@ impl Tool for Ask {
         Box::pin(async move {
             let q = req(&args, "question")?;
             let options = opt_strings(&args, "options");
-            let rx = hooks.ask(&cx.agent.id, q, &options, &cx.call_id)?;
-            let answer = tokio::select! {
-                r = rx => r.ok(),
-                _ = cx.cancel.cancelled() => anyhow::bail!("interrupted while waiting for the user"),
-            };
-            // An empty answer is the Skip button: say so, so the model
-            // carries on with a default instead of reporting an empty reply.
-            let answer = answer.map(|a| {
-                if a.trim().is_empty() {
-                    "The user skipped this question without answering. Choose a sensible default yourself, say which you chose, and continue.".to_string()
-                } else {
-                    a
-                }
-            });
-            Ok(ToolOut::text(
-                answer.unwrap_or_else(|| "(waiting for user)".into()),
+            // Park: the question is a file, the turn ends after this call,
+            // and the user's answer starts the next turn as a message
+            // (Cursor's shape; restart-safe).
+            let id = hooks.ask(&cx.agent.id, q, &options, &cx.call_id)?;
+            Ok(ToolOut::parked(
+                format!(
+                    "Question {id} is with the user. This turn ends here; their answer arrives as your next message."
+                ),
+                "Waiting for your answer",
             ))
         })
     }
@@ -710,6 +705,7 @@ impl Tool for Browser {
                 child: None,
                 images: vec![shown],
                 diff: None,
+                park: None,
             })
         })
     }

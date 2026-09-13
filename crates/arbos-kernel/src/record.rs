@@ -287,6 +287,7 @@ fn finish(mut rec: Recording) -> Result<ToolOut> {
         child: None,
         images,
         diff: None,
+        park: None,
     })
 }
 

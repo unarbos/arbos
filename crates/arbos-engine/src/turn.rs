@@ -603,7 +603,15 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         }
 
         let mut results: Vec<Event> = Vec::with_capacity(outcomes.len());
+        // A tool that parked the agent (an `ask`): its result is written,
+        // then the turn ends; the answer starts the next one.
+        let mut parked: Option<String> = None;
         for (call, outcome) in outcomes {
+            if let crate::batch::Outcome::Ran { out: Ok(o), .. } = &outcome
+                && let Some(why) = &o.park
+            {
+                parked = Some(why.clone());
+            }
             let sig = format!("{}\u{0}{}", call.name, call.arguments);
             let mut ev = outcome.into_event(&call);
             if let EventKind::Tool(rec) = &mut ev.kind {
@@ -660,6 +668,14 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 agent.id
             );
             return Ok(());
+        }
+        if let Some(why) = parked {
+            results.push(Event::new(EventKind::Notice {
+                text: why,
+                failed: false,
+            }));
+            append_events(&transcript, &results)?;
+            return end(None, None);
         }
         append_events(&transcript, &results)?;
         events = load_transcript(&transcript)?;

@@ -1838,7 +1838,12 @@ impl ChatSession {
                 if let Some(prompt) = self.permission.take() {
                     self.dismiss_permission(prompt, false);
                 }
-                self.questions = None;
+                // A question parks the turn: the kernel ends it and waits
+                // for the answer as a file. The card stays; answering
+                // starts the next turn. A stopped or failed turn drops it.
+                if !matches!(result, Ok(StopReason::EndTurn)) {
+                    self.questions = None;
+                }
                 self.finish_thinking();
                 self.streaming = false;
                 self.turn_open = false;

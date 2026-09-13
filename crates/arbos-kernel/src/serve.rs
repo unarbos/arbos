@@ -736,24 +736,23 @@ fn handle_frame(
             }
         }
         Frame::Answer { agent, text, id } => {
-            // Only the question this answer names may resolve; a late or
+            // Only a question that is pending may resolve; a late or
             // duplicate answer (the same ask arriving twice through the live
             // frame and the transcript tail, qa-021) is refused, not applied.
-            let verdict = {
-                let asks = hooks.asks.lock().unwrap();
-                let pending = asks.get(&agent).map(|(id, _)| id.as_str());
-                hooks.answer_allowed(&agent, id.as_deref().unwrap_or(""), pending, asks.len())
+            let pending: Vec<String> = hooks
+                .pending_asks(&agent)
+                .into_iter()
+                .map(|w| w.id)
+                .collect();
+            let ask_id = match hooks.answer_allowed(&agent, id.as_deref().unwrap_or(""), &pending) {
+                Ok(ask_id) => ask_id,
+                Err(why) => {
+                    refuse(hooks, Some(&agent), format!("answer refused: {why}"));
+                    return;
+                }
             };
-            if let Err(why) = verdict {
-                refuse(hooks, Some(&agent), format!("answer refused: {why}"));
-                return;
-            }
-            let _ = append_event(
-                &Layout::new(place, &agent).transcript(),
-                &Event::new(EventKind::Answer { text: text.clone() }),
-            );
-            if let Some((_, tx)) = hooks.asks.lock().unwrap().remove(&agent) {
-                let _ = tx.send(text);
+            if let Err(e) = hooks.answer(&agent, &ask_id, &text) {
+                refuse(hooks, Some(&agent), format!("answer: {e:#}"));
             }
         }
         Frame::Approve {
@@ -763,14 +762,20 @@ fn handle_frame(
         } => {
             let verdict = {
                 let approves = hooks.approves.lock().unwrap();
-                let pending = approves.get(&agent).map(|(_, id, _)| id.as_str());
-                hooks.answer_allowed(&agent, &call_id, pending, approves.len())
+                let pending: Vec<String> = approves
+                    .get(&agent)
+                    .map(|(_, id, _)| vec![id.clone()])
+                    .unwrap_or_default();
+                hooks.answer_allowed(&agent, &call_id, &pending)
             };
             if let Err(why) = verdict {
                 refuse(hooks, Some(&agent), format!("approval refused: {why}"));
                 return;
             }
             let pending = hooks.approves.lock().unwrap().remove(&agent);
+            if let Some((_, id, _)) = &pending {
+                arbos_core::waiting::remove(place, &agent, "approve", id);
+            }
             let tool = pending
                 .as_ref()
                 .map(|(tool, _, _)| tool.clone())
