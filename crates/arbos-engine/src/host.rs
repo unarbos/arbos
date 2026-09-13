@@ -33,9 +33,10 @@ pub struct HostConfig {
     pub speculate: bool,
     /// How long `bash` stays attached before the command continues as a job.
     pub bash_wait_ms: u64,
-    /// Models to try, in order, when the primary keeps failing. A switch
-    /// lasts one turn; the next turn tries the primary again. Accepts an
-    /// array or a comma-separated string.
+    /// Models to try, in order, when the primary keeps failing or its
+    /// provider errors out. A switch lasts one turn; the next turn tries
+    /// the primary again. Accepts an array or a comma-separated string.
+    /// Empty on OpenRouter = a built-in list; `["none"]` = no fallback.
     #[serde(deserialize_with = "list_or_csv")]
     pub fallback_models: Vec<String>,
     /// Provider calls per model before moving to the next, including the first.

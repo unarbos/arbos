@@ -183,7 +183,11 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // provider prompt_tokens ÷ our estimate. 1.0 until the first step reports.
     let mut calib = 1.0f64;
 
-    let mut models = Models::new(model.clone(), &host.config.fallback_models);
+    let mut models = Models::with_defaults(
+        model.clone(),
+        &host.config.fallback_models,
+        &host.config.api_base,
+    );
     let policy = host.config.retry_policy();
     let mut provider = Provider {
         base: host.config.api_base.clone(),

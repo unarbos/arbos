@@ -76,7 +76,19 @@ pub fn verdict(
         };
     }
     if !transient {
-        return Verdict::Fail;
+        // The key, the account, or the permission: the same everywhere.
+        if matches!(e.status, Some(401) | Some(402) | Some(403)) {
+            return Verdict::Fail;
+        }
+        // A provider's own failure — an error frame mid-stream, a 400 the
+        // model's backend produced ("Corrupted thought signature") — is
+        // this model's, not the request's. Another model is another
+        // request; if it fails the same way, that is the end.
+        return if more_models {
+            Verdict::Fallback
+        } else {
+            Verdict::Fail
+        };
     }
     if let Some(hint) = e.retry_after {
         if hint > policy.max_server_delay {
@@ -125,15 +137,35 @@ pub struct Models {
     current: usize,
 }
 
+/// Fallbacks a turn gets on OpenRouter when config.toml names none: one
+/// key, every model, so a second opinion costs nothing to set up.
+pub const OPENROUTER_FALLBACKS: &[&str] = &[
+    "openai/gpt-5.6-terra",
+    "anthropic/claude-opus-5",
+    "google/gemini-3.8-flash",
+];
+
 impl Models {
     pub fn new(primary: String, fallbacks: &[String]) -> Self {
         let mut list = vec![primary];
         for f in fallbacks {
-            if !f.trim().is_empty() && !list.contains(f) {
-                list.push(f.trim().to_string());
+            let f = f.trim();
+            if !f.is_empty() && f != "none" && !list.iter().any(|x| x == f) {
+                list.push(f.to_string());
             }
         }
         Self { list, current: 0 }
+    }
+
+    /// `new`, plus the OpenRouter defaults when `fallbacks` is empty and
+    /// `base` is openrouter.ai. `fallback_models = ["none"]` forbids them.
+    pub fn with_defaults(primary: String, fallbacks: &[String], base: &str) -> Self {
+        if fallbacks.is_empty() && base.contains("openrouter.ai") {
+            let defaults: Vec<String> =
+                OPENROUTER_FALLBACKS.iter().map(|s| s.to_string()).collect();
+            return Self::new(primary, &defaults);
+        }
+        Self::new(primary, fallbacks)
     }
 
     pub fn current(&self) -> &str {
