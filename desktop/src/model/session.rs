@@ -383,6 +383,12 @@ pub struct ChatSession {
     /// The `Agent` item the current step's deltas are building, until the
     /// step's recorded line replaces it. Runtime only.
     streaming_agent: Option<usize>,
+    /// A "Rewind here" was sent for the turn whose prompt is this item;
+    /// the kernel's `rewound` cuts the pane there. Runtime only.
+    rewind_to: Option<usize>,
+    /// `draft` was set by the model (a rewind put the prompt back) and the
+    /// composer, which otherwise owns the text while bound, must take it.
+    pub draft_pushed: bool,
     /// The agent's own name for the session, from `SessionInfoUpdate`.
     pub title: String,
     /// The name you typed, which the agent never overwrites. Two fields rather
@@ -506,6 +512,8 @@ impl ChatSession {
             flight: None,
             thought_at: None,
             streaming_agent: None,
+            rewind_to: None,
+            draft_pushed: false,
             title: String::new(),
             name: None,
             updated: SystemTime::now(),
@@ -566,6 +574,8 @@ impl ChatSession {
             flight: None,
             thought_at: None,
             streaming_agent: None,
+            rewind_to: None,
+            draft_pushed: false,
             title: record.title,
             name: record.name,
             updated,
@@ -626,6 +636,8 @@ impl ChatSession {
             flight: None,
             thought_at: None,
             streaming_agent: None,
+            rewind_to: None,
+            draft_pushed: false,
             title,
             name,
             updated,
@@ -1257,6 +1269,39 @@ impl ChatSession {
         }
     }
 
+    /// "Rewind here" on the turn whose prompt is item `ix`: the kernel cuts
+    /// its transcript at that turn's start and, with `files`, puts the
+    /// project back; the pane follows when `rewound` arrives. The prompt
+    /// goes back into the composer so it can be sent again, changed.
+    pub fn rewind(&mut self, ix: usize, files: bool) {
+        let Connection::Live(session) = &self.connection else {
+            self.notice(true, "rewind needs a live kernel connection");
+            return;
+        };
+        if self.busy() {
+            self.notice(true, "stop the turn before rewinding");
+            return;
+        }
+        // The footer may sit under a `From` block inside the turn; the
+        // turn starts at the last user prompt at or before it.
+        let Some(start) = self
+            .items
+            .iter()
+            .take(ix + 1)
+            .rposition(|item| matches!(item, ChatItem::User(_)))
+        else {
+            return;
+        };
+        let turn = self
+            .items
+            .iter()
+            .take(start + 1)
+            .filter(|item| matches!(item, ChatItem::User(_)))
+            .count() as u32;
+        self.rewind_to = Some(start);
+        session.rewind(turn, files);
+    }
+
     /// Pause or resume the agent.
     pub fn set_paused(&mut self, paused: bool) {
         if let Connection::Live(session) = &self.connection {
@@ -1493,6 +1538,36 @@ impl ChatSession {
                 });
                 self.flush();
             }
+            Event::Rewound { dropped, restored } => {
+                match self.rewind_to.take() {
+                    Some(ix) if ix < self.items.len() => {
+                        if let ChatItem::User(message) = &self.items[ix] {
+                            self.draft = message.text.clone();
+                            self.draft_pushed = true;
+                        }
+                        self.items.truncate(ix);
+                    }
+                    // Another window asked: take the kernel's transcript as
+                    // it now is.
+                    _ => {
+                        if let Some(sid) = &self.agent_session
+                            && let Some(replay) =
+                                crate::kernel::session_history(&self.place(), sid)
+                        {
+                            self.items = replay.items;
+                        }
+                    }
+                }
+                self.transcript = transcript::State::default();
+                self.streaming_agent = None;
+                self.questions = None;
+                let what = match restored {
+                    Some(r) => format!("rewound: {dropped} transcript lines cut; project back to {r}"),
+                    None => format!("rewound: {dropped} transcript lines cut; files untouched"),
+                };
+                self.notice(false, &what);
+                self.flush();
+            }
             Event::AssistantFinal(text) => {
                 self.finish_thinking();
                 let text = text.trim_matches('\n').to_string();
@@ -1520,6 +1595,11 @@ impl ChatSession {
             }
             Event::Aside(text) => {
                 self.notice(false, &text);
+                self.flush();
+            }
+            Event::Refused(detail) => {
+                self.rewind_to = None;
+                self.notice(true, &detail);
                 self.flush();
             }
             Event::NeedApproval { request_id, title } => {

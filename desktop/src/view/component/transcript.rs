@@ -2795,6 +2795,28 @@ fn turn_footer(
                         .size(px(12.))
                         .text_color(theme.text_faint),
                 ),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("rewind-turn-{id}-{turn}")))
+                .cursor_pointer()
+                .rounded(px(4.))
+                .p(px(3.))
+                .hover(|el| el.bg(theme.element_hover))
+                .active(|el| el.bg(theme.element_active))
+                .tooltip(|window, cx| {
+                    Tooltip::text(
+                        "Rewind here: chat and files back to before this prompt",
+                        window,
+                        cx,
+                    )
+                })
+                .on_click(cx.listener(move |this, _, _, cx| this.rewind_turn(id, turn, cx)))
+                .child(
+                    icons::icon(icons::system::RESTART)
+                        .size(px(12.))
+                        .text_color(theme.text_faint),
+                ),
         );
     // Cursor: thumbs up, thumbs down, then "Just now" / "2m ago".
     let (vote, sent_at) = match chat.items.get(turn) {

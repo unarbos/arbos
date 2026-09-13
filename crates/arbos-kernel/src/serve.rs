@@ -21,6 +21,7 @@ use crate::{
     hooks::KernelHooks,
     klog, plan,
     pty::PtyHub,
+    rewind,
     sched::Scheduler,
     tools,
 };
@@ -316,15 +317,23 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
                 hooks.broadcast(tree_frame(&place));
                 hooks.kick();
             }
+            // A rewind is handled here, beside the tails: the transcript
+            // shrinks, and the tail for that agent must be put at the new
+            // end before its next tick, or the cut file would be read again
+            // from the top and replayed to every window.
             Some(frame) = frame_in_rx.recv() => {
-                handle_frame(
-                    &place,
-                    frame,
-                    &wake_tx,
-                    &hooks,
-                    &sched,
-                    &ptys,
-                );
+                if let Frame::Rewind { agent, turn, files } = frame {
+                    rewind_live(&place, &hooks, &mut tails, &agent, turn, files);
+                } else {
+                    handle_frame(
+                        &place,
+                        frame,
+                        &wake_tx,
+                        &hooks,
+                        &sched,
+                        &ptys,
+                    );
+                }
             }
             _ = tick.tick() => {
                 hooks.kick();
@@ -503,7 +512,11 @@ fn handle_frame(
         if !arbos_core::agent_exists(place, &agent) {
             // Answered and logged, not just printed: the client that named
             // a missing agent is the one that needs to hear it (#14 + #24).
-            refuse(hooks, Some(&agent), format!("no agent {agent:?} in this place"));
+            refuse(
+                hooks,
+                Some(&agent),
+                format!("no agent {agent:?} in this place"),
+            );
             return;
         }
     }
@@ -1066,4 +1079,73 @@ async fn serve_client(
             klog::info("attach_close", None, format!("who={}", who.name));
         }
     }
+}
+
+/// `rewind` from an attached client. The agent must be idle. The cut is
+/// done here (fast: two file writes); the tail is moved to the new end;
+/// files are restored on the blocking pool, and `rewound` goes out to
+/// every client when that is done.
+fn rewind_live(
+    place: &Place,
+    hooks: &Arc<KernelHooks>,
+    tails: &mut std::collections::HashMap<String, TranscriptTail>,
+    agent: &str,
+    turn: u32,
+    files: bool,
+) {
+    let refuse = |detail: String| {
+        klog::warn("rewind_refused", Some(agent), &detail);
+        hooks.broadcast(Frame::Error {
+            agent: Some(agent.to_string()),
+            detail,
+        });
+    };
+    if hooks.is_running(agent) {
+        return refuse("rewind: the agent is running; stop the turn first".into());
+    }
+    let done = match rewind::cut(place, agent, rewind::Target::Turn(turn)) {
+        Ok(c) => c,
+        Err(e) => return refuse(format!("rewind: {e:#}")),
+    };
+    // The tail's next read starts where the file now ends, so nothing of
+    // what remains is replayed.
+    let mut fresh = TranscriptTail::default();
+    let _ = fresh.read_new(&Layout::new(place, agent).transcript());
+    tails.insert(agent.to_string(), fresh);
+    klog::info(
+        "rewind",
+        Some(agent),
+        format!(
+            "turn={turn} line={} dropped={} files={files} archive={}",
+            done.checkpoint.line,
+            done.dropped,
+            done.archive.display()
+        ),
+    );
+    let hooks = Arc::clone(hooks);
+    let place = place.clone();
+    let agent = agent.to_string();
+    tokio::task::spawn_blocking(move || {
+        let restored = if files {
+            match rewind::restore_files(&place, &agent, &done.checkpoint) {
+                Ok(what) => Some(what),
+                Err(e) => {
+                    hooks.broadcast(Frame::Error {
+                        agent: Some(agent.clone()),
+                        detail: format!("rewind: transcript cut, files not restored: {e:#}"),
+                    });
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        hooks.broadcast(Frame::Rewound {
+            agent: agent.clone(),
+            line: done.checkpoint.line,
+            dropped: done.dropped,
+            restored,
+        });
+        hooks.broadcast(hooks.plan_frame(&agent));
+    });
 }

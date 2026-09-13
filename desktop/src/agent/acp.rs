@@ -52,10 +52,19 @@ pub enum Event {
     /// The agent spoke between turns: a callback fired, or background work
     /// finished. Not a turn, and not a failure.
     Aside(String),
+    /// The kernel refused or failed something this window asked for
+    /// (`error` frame): shown as a failed notice, kept on the pane.
+    Refused(String),
     /// A whole assistant step as the transcript recorded it (an `event`
     /// with a `seq`). Authoritative: it replaces whatever the deltas of
     /// that step built, so the reply never shows twice.
     AssistantFinal(String),
+    /// The kernel cut the transcript (`rewound`): how many lines went, and
+    /// what project state came back, when files were restored.
+    Rewound {
+        dropped: u64,
+        restored: Option<String>,
+    },
     /// The kernel paused the turn for a tool the user must allow.
     NeedApproval {
         request_id: String,
@@ -340,6 +349,16 @@ impl Session {
         });
     }
 
+    /// Put the agent back to the start of its `turn`-th user turn
+    /// ("Rewind here"); `files` restores the project too.
+    pub fn rewind(&self, turn: u32, files: bool) {
+        let _ = self.send_frame(&Frame::Rewind {
+            agent: self.session_id.clone(),
+            turn,
+            files,
+        });
+    }
+
     /// Pause or resume the agent (`/pause`, `/resume`).
     pub fn set_paused(&self, paused: bool) {
         let _ = self.send_frame(&Frame::Pause {
@@ -464,6 +483,18 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
         | Frame::Hello { .. }
         | Frame::Replayed { .. }
         | Frame::HistoryEnd { .. } => Vec::new(),
+        Frame::Rewound {
+            agent: id,
+            dropped,
+            restored,
+            ..
+        } if id == agent => vec![Event::Rewound { dropped, restored }],
+        // The kernel's answer to a bad ask (an unknown agent, a rewind it
+        // cannot do): the reason belongs in the chat, not in a log.
+        Frame::Error {
+            agent: Some(id),
+            detail,
+        } if id == agent => vec![Event::Refused(detail)],
         Frame::Plan { agent: id, nodes } if id == agent => vec![Event::Plan(nodes)],
         Frame::Board {
             owner,

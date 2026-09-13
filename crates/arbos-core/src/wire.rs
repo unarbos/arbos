@@ -48,6 +48,28 @@ pub enum Frame {
         to: u64,
         total: u64,
     },
+    /// Client → kernel: put `agent` back to the start of its `turn`-th user
+    /// turn (1-based, counting `user` transcript lines). The transcript is
+    /// cut there (the cut lines are archived beside it) and, with `files`,
+    /// the project's tracked files go back to that turn's checkpoint. The
+    /// agent must be idle. Answered with `rewound`, or an `error`.
+    Rewind {
+        agent: String,
+        turn: u32,
+        #[serde(default)]
+        files: bool,
+    },
+    /// Kernel → every client: the transcript of `agent` now ends before
+    /// `line`; `dropped` lines went to the archive; `restored` names the
+    /// project state put back, when files were. Reload the chat from the
+    /// files or cut your own copy — the lines will not be replayed.
+    Rewound {
+        agent: String,
+        line: u64,
+        dropped: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restored: Option<String>,
+    },
     /// Live text as the model streams it, one frame per chunk. The whole
     /// step arrives later as an `event` with a `seq` (the transcript line).
     AssistantDelta {

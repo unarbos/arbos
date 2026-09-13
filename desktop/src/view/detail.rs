@@ -471,9 +471,24 @@ impl Arbos {
         let usage = live.and_then(|chat| chat.usage);
         let next_id = chat.map(|chat| chat.id);
         let next_draft = chat.map(|chat| chat.draft.clone()).unwrap_or_default();
+        let pushed = chat.is_some_and(|chat| chat.draft_pushed);
         let (old_id, held) = self
             .composer
             .update(cx, |composer, cx| (composer.bound(), composer.content(cx)));
+        if pushed && old_id == next_id {
+            // The model set the draft (a rewind handed the prompt back):
+            // the composer takes it over whatever was typed.
+            if let Some(id) = next_id {
+                self.workspace.update(cx, |workspace, _| {
+                    if let Some(chat) = workspace.session_mut(id) {
+                        chat.draft_pushed = false;
+                    }
+                });
+            }
+            self.composer.update(cx, |composer, cx| {
+                composer.take_draft(&next_draft, cx);
+            });
+        }
         if old_id != next_id {
             if let Some(old) = old_id {
                 self.workspace.update(cx, |workspace, _| {
