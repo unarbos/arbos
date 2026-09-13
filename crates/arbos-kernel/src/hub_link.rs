@@ -103,12 +103,19 @@ pub async fn send_json<T: serde::Serialize>(ws: &mut Ws, v: &T) -> Result<()> {
     Ok(())
 }
 
-/// What every registrant says about itself.
-pub fn labels() -> Vec<String> {
-    vec![
+/// What every registrant says about itself, plus the words it was given.
+pub fn labels(extra: &[String]) -> Vec<String> {
+    let mut out = vec![
         std::env::consts::OS.to_string(),
         std::env::consts::ARCH.to_string(),
-    ]
+    ];
+    for l in extra {
+        let l = l.trim();
+        if !l.is_empty() && !out.iter().any(|x| x == l) {
+            out.push(l.to_string());
+        }
+    }
+    out
 }
 
 pub fn user_name() -> String {
@@ -133,6 +140,7 @@ pub async fn register(
     project: Option<String>,
     place: Option<String>,
     projects: Vec<String>,
+    extra_labels: &[String],
     capabilities: Vec<String>,
 ) -> Result<u64> {
     send_json(
@@ -145,7 +153,7 @@ pub async fn register(
             project,
             place,
             projects,
-            labels: labels(),
+            labels: labels(extra_labels),
             capabilities,
             version: klog::version().to_string(),
             protocol: HUB_PROTOCOL,
@@ -224,6 +232,7 @@ async fn session(
         Some(project.to_string()),
         Some(place.path.display().to_string()),
         Vec::new(),
+        &[],
         Vec::new(),
     )
     .await?;

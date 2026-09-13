@@ -121,6 +121,7 @@ async fn session(cfg: &HubConfig, dir: &Path, args: &Args) -> Result<()> {
         None,
         Some(dir.display().to_string()),
         projects.clone(),
+        &args.labels,
         args.capabilities.clone(),
     )
     .await?;

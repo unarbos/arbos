@@ -351,11 +351,27 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         if entry.is_empty() {
             entry.since = arbos_core::now_ms();
         }
-        entry.user = user;
-        entry.host = host;
-        entry.labels = labels;
-        entry.capabilities = capabilities;
-        entry.version = version;
+        // A machine is described by every registrant on it: the worker
+        // says `gpu`, a kernel says the version. Words add up; none erase.
+        if !user.is_empty() {
+            entry.user = user;
+        }
+        if !host.is_empty() {
+            entry.host = host;
+        }
+        for l in labels {
+            if !entry.labels.contains(&l) {
+                entry.labels.push(l);
+            }
+        }
+        for c in capabilities {
+            if !entry.capabilities.contains(&c) {
+                entry.capabilities.push(c);
+            }
+        }
+        if !version.is_empty() {
+            entry.version = version;
+        }
         match kind {
             RegistrantKind::Worker => {
                 entry.worker = Some(Arc::clone(&reg));
