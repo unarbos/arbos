@@ -39,6 +39,9 @@ pub const COORDINATOR_TOOLS: &[&str] = &[
     "changes",
     "jobs",
     "screenshot",
+    // `secret list` answers "do we have a key for X" without a value ever
+    // showing; `use` arms a worker's bash through the kernel.
+    "secret",
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

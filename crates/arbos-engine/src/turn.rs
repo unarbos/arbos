@@ -143,7 +143,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // writer may have landed between; the reload sees that too.
     let mut events = load_transcript(&transcript)?;
 
-    let cwd = agent.cwd.clone().unwrap_or_else(|| place.path.clone());
+    let cwd = agent.work_dir(&place.path);
     {
         let snap = cwd.clone();
         let agent_dir = layout.dir.clone();

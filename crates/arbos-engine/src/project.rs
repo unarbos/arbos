@@ -345,7 +345,7 @@ pub fn project(
         out.push(None, system(seg));
     }
 
-    let cwd = agent.cwd.clone().unwrap_or_else(|| place.path.clone());
+    let cwd = agent.work_dir(&place.path);
     let mut budget = ImageBudget::new(items, cwd.clone());
     let cite = cite_path(agent);
     let superseded = superseded_results(items);
