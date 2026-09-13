@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use arbos_core::{Agent, Layout, Place, list_agents, node};
+use arbos_core::{Agent, Layout, Place, list_agents, notes, subscription};
 use serde::Serialize;
 
 pub const USAGE: &str = "arbos-kernel check <place> [--json] [--quiet]";
@@ -199,13 +199,15 @@ pub fn check(place: &Place) -> Result<Report> {
             );
         }
         let layout = Layout::new(place, a.id.as_str());
-        check_plan(&mut r, &rel(&layout.plan_jsonl()), &layout.plan_jsonl());
-        check_jsonl::<arbos_core::Attempt>(
-            &mut r,
-            &rel(&layout.attempts_jsonl()),
-            &layout.attempts_jsonl(),
-            "attempt",
-        );
+        check_subscriptions(&mut r, &rel(&layout.dir.join("subscriptions")), &layout.dir.join("subscriptions"));
+        check_notes(&mut r, &rel(&layout.dir.join("notes.md")), &layout.dir.join("notes.md"));
+        if layout.plan_jsonl().exists() {
+            r.warn(
+                rel(&layout.plan_jsonl()),
+                None,
+                "plan.jsonl is from a kernel before subscriptions/notes.md; the next kernel start migrates it (nodes → notes.md lines, subscriptions, inbox files)",
+            );
+        }
         check_jsonl::<arbos_core::Event>(
             &mut r,
             &rel(&layout.transcript()),
@@ -319,43 +321,64 @@ pub fn check(place: &Place) -> Result<Report> {
     Ok(r)
 }
 
-fn check_plan(r: &mut Report, rel: &str, path: &Path) {
-    if !path.exists() {
-        return;
-    }
-    let Ok(text) = std::fs::read_to_string(path) else {
-        r.error(rel, None, "unreadable");
+/// Every `subscriptions/*.toml` must parse and validate; ids must not
+/// repeat; a due instant must be an RFC 3339 stamp.
+fn check_subscriptions(r: &mut Report, rel: &str, dir: &Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     let mut ids = Vec::new();
-    let mut parents = Vec::new();
-    for (i, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
+    let mut paths: Vec<_> = rd.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for p in paths {
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if name.starts_with('.') {
             continue;
         }
-        match serde_json::from_str::<node::Node>(line) {
-            Ok(n) => {
-                ids.push(n.id);
-                if n.parent != 0 {
-                    parents.push((i + 1, n.id, n.parent));
+        let file_rel = format!("{rel}/{name}");
+        if p.extension().is_none_or(|x| x != "toml") {
+            r.warn(&file_rel, None, "not a .toml file; the watcher ignores it");
+            continue;
+        }
+        match subscription::read(&p) {
+            Ok(sub) => {
+                if let Err(e) = sub.validate() {
+                    r.error(&file_rel, None, format!("{e:#}"));
+                }
+                if ids.contains(&sub.id) {
+                    r.error(&file_rel, None, format!("id {} repeats another file's", sub.id));
+                }
+                ids.push(sub.id);
+                if !name.starts_with(&format!("{:04}-", sub.id)) {
+                    r.warn(&file_rel, None, format!("file name does not start with {:04}-", sub.id));
+                }
+                if sub.next_due.is_some() && sub.next_due_ms().is_none() {
+                    r.error(&file_rel, None, "next_due is not an RFC 3339 instant");
                 }
             }
-            Err(e) => r.error(rel, Some(i + 1), format!("not a plan node: {e}")),
+            Err(e) => r.error(&file_rel, None, format!("{e:#}")),
         }
     }
-    for (line, id, parent) in parents {
-        if !ids.contains(&parent) {
-            r.error(
-                rel,
-                Some(line),
-                format!("node #{id} names parent #{parent}, which is not in the plan"),
-            );
+}
+
+/// `notes.md` is free Markdown; the check says when it holds checkbox
+/// lines the parser cannot read (a mark other than space or x).
+fn check_notes(r: &mut Report, rel: &str, path: &Path) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for (i, line) in text.lines().enumerate() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("- [")
+            && let Some(end) = rest.find(']')
+            && !matches!(&rest[..end], " " | "" | "x" | "X")
+        {
+            r.warn(rel, Some(i + 1), format!("checkbox mark {:?} is not one the plan tool reads (space or x)", &rest[..end]));
         }
     }
-    // The folded view the kernel keeps: one line per id at the end.
-    match node::load_nodes(path) {
-        Ok(_) => {}
-        Err(e) => r.error(rel, None, format!("{e:#}")),
+    let n = notes::read_path(path).items().len();
+    if n > 200 {
+        r.warn(rel, None, format!("{n} items; the prompt shows them all — archive the done ones"));
     }
 }
 

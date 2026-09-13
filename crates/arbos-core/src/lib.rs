@@ -14,12 +14,14 @@ pub mod host;
 pub mod inbox;
 mod lock;
 pub mod machines;
-pub mod node;
+pub mod notes;
 mod page;
 mod place;
 pub mod project;
 pub mod prs;
 pub mod skills;
+pub mod subscription;
+pub mod text;
 mod wake;
 pub mod wire;
 
@@ -35,7 +37,9 @@ pub use files::{
 pub use host::{Host, HostConfig, KeySource, ProviderKind};
 pub use lock::PlaceLock;
 pub use machines::{Machine, Machines};
-pub use node::{Attempt, Do, Node, NodeId, Status as NodeStatus, Verdict, When};
+/// A row id in the window's plan frame (inbox file, subscription, notes
+/// item): see `wire::PlanNode`.
+pub type NodeId = u64;
 pub use page::{Page, PageKind};
 pub use place::Place;
 pub use prs::{PrRec, load_prs, record_pr};

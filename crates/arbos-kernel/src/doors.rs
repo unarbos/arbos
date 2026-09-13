@@ -1,7 +1,7 @@
 //! Extra attaches on the same tree: MCP tools, Telegram, voice, refresh.
 
 use anyhow::Result;
-use arbos_core::{Node, Place, Wake, WakeKind};
+use arbos_core::{Place, Wake, WakeKind};
 use serde_json::Value;
 use std::{
     process::{Command, Stdio},
@@ -36,7 +36,7 @@ pub async fn telegram_loop(token: String, hooks: Arc<KernelHooks>) {
                 else {
                     continue;
                 };
-                let _ = hooks.inbox("root", Node::inbox(text, "user"));
+                let _ = hooks.inbox("root", &text, "user", Vec::new());
             }
         }
     }
@@ -68,9 +68,7 @@ pub fn voice_stop(hooks: &KernelHooks) -> Result<String> {
     } else {
         format!("voice file {}", path.display())
     };
-    let mut n = Node::inbox(text.clone(), "user");
-    n.attachments = vec![path.display().to_string()];
-    let _ = hooks.inbox("root", n);
+    let _ = hooks.inbox("root", &text, "user", vec![path.display().to_string()]);
     Ok(text)
 }
 

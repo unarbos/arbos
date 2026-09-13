@@ -7,11 +7,9 @@
 
 use anyhow::{Result, bail};
 use arbos_core::{
-    Agent, AgentId, Event, EventKind, Node, NodeId, Place, Wake, append_event,
+    Agent, AgentId, Event, EventKind, NodeId, Place, Wake, append_event,
     files::Layout,
-    inbox, list_agents,
-    node::{self, DEFAULT_HOPS},
-    validate_id,
+    inbox, list_agents, notes, subscription, validate_id,
 };
 use arbos_engine::TurnControl;
 use serde_json::Value;
@@ -150,19 +148,8 @@ pub struct KernelHooks {
     /// Tree caps from `config.toml` (`max_depth`, `max_children`); the
     /// constants in `sched` are the defaults.
     pub caps: Caps,
-    /// Parsed `plan.jsonl` per agent, keyed by the file's (length, mtime).
-    /// One turn's end reads the plan five or six times in a row; a plan
-    /// that holds a large prompt made that a multi-second stall of the
-    /// serve loop (QA bug qa-003).
-    plans: Mutex<HashMap<String, PlanCache>>,
     /// Children on other machines, reached over SSH.
     pub remotes: crate::remote::RemoteHub,
-}
-
-struct PlanCache {
-    len: u64,
-    modified: Option<std::time::SystemTime>,
-    nodes: Arc<Vec<Node>>,
 }
 
 impl KernelHooks {
@@ -200,7 +187,6 @@ impl KernelHooks {
             sent: Mutex::new(HashMap::new()),
             spawn_lock: Mutex::new(()),
             inbox_retry: Mutex::new(HashMap::new()),
-            plans: Mutex::new(HashMap::new()),
             remotes: crate::remote::RemoteHub::default(),
         })
     }
@@ -306,281 +292,19 @@ impl KernelHooks {
     }
 }
 
-// ── plan store ──────────────────────────────────────────────────────────
-
-/// One node as the `plan` tool takes it.
-#[derive(Debug, Clone, Default)]
-pub struct NewNode {
-    pub goal: String,
-    pub check: String,
-    pub after: Option<String>,
-    pub every: Option<String>,
-    pub wake: bool,
-    pub condition: String,
-    pub shell: String,
-    pub notify: String,
-    pub ask: bool,
-    pub par: bool,
-}
-
-/// `"0"`, `"0s"`, `"0m"`: a duration a model writes to mean "none".
-fn is_zero_duration(x: &str) -> bool {
-    let t = x.trim().to_ascii_lowercase();
-    let digits: String = t
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '.')
-        .collect();
-    let unit = &t[digits.len()..];
-    !digits.is_empty()
-        && digits.chars().all(|c| c == '0' || c == '.')
-        && matches!(
-            unit.trim(),
-            "" | "s"
-                | "sec"
-                | "secs"
-                | "m"
-                | "min"
-                | "mins"
-                | "h"
-                | "hr"
-                | "hrs"
-                | "d"
-                | "day"
-                | "days"
-                | "ms"
-        )
-}
-
-impl NewNode {
-    /// `{goal, check, when:{after, every, wake, condition}, do:{shell, notify, ask}, par}`.
-    pub fn from_json(v: &Value) -> Result<Self> {
-        let s = |k: &str, o: Option<&Value>| -> String {
-            o.and_then(|o| o.get(k))
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string()
-        };
-        let b = |k: &str, o: Option<&Value>| -> bool {
-            o.and_then(|o| o.get(k))
-                .map(|x| x.as_bool().unwrap_or_else(|| x.as_str() == Some("true")))
-                .unwrap_or(false)
-        };
-        let when = v.get("when");
-        let do_ = v.get("do");
-        // Models fill every field: `after: "0s"` next to `every: "1h"` means
-        // "no delay", not a second trigger. Zero is unset.
-        let opt = |x: String| {
-            if x.is_empty() || is_zero_duration(&x) {
-                None
-            } else {
-                Some(x)
-            }
-        };
-        Ok(Self {
-            goal: s("goal", Some(v)),
-            check: s("check", Some(v)),
-            after: opt(s("after", when)),
-            every: opt(s("every", when)),
-            wake: b("wake", when) || b("onDeps", when) || b("on_deps", when),
-            condition: s("condition", when),
-            shell: s("shell", do_),
-            notify: s("notify", do_),
-            ask: b("ask", do_),
-            par: b("par", Some(v)),
-        })
-    }
-
-    fn build(&self, now_ms: i64) -> Result<Node> {
-        if self.goal.is_empty() {
-            bail!("goal must not be empty");
-        }
-        let mut n = Node::new(self.goal.clone());
-        n.check = self.check.clone();
-        let mut execs = 0;
-        if !self.shell.is_empty() {
-            // shell + notify: run it, then deliver the output. The template
-            // must place the output: a fixed message on a reading node
-            // hides what was read.
-            if !self.notify.is_empty() && !self.notify.contains("{output}") {
-                bail!(
-                    "do.notify on a shell node must contain {{output}} (where the command's output goes), got {:?}",
-                    self.notify
-                );
-            }
-            n.do_ = arbos_core::Do::Shell {
-                cmd: self.shell.clone(),
-                report: (!self.notify.is_empty()).then(|| self.notify.clone()),
-            };
-            execs += 1;
-        } else if !self.notify.is_empty() {
-            n.do_ = arbos_core::Do::Notify {
-                text: self.notify.clone(),
-            };
-            execs += 1;
-        }
-        if self.ask {
-            n.do_ = arbos_core::Do::Ask;
-            execs += 1;
-        }
-        if execs > 1 {
-            bail!("do: ask cannot combine with shell or notify (omit do for an agent task)");
-        }
-        let mut trig = 0;
-        if let Some(after) = &self.after {
-            let ms = node::parse_duration_ms(after).ok_or_else(|| {
-                anyhow::anyhow!("when.after must be a duration like \"30m\", got {after:?}")
-            })?;
-            n.when.after_ms = Some(now_ms + ms as i64);
-            trig += 1;
-        }
-        if let Some(every) = &self.every {
-            let ms = node::parse_duration_ms(every).ok_or_else(|| {
-                anyhow::anyhow!("when.every must be a duration like \"1h\", got {every:?}")
-            })?;
-            if ms < node::MIN_EVERY_MS {
-                bail!(
-                    "when.every must be at least {}; for a finer mechanical cadence use a background bash job",
-                    node::human_ms(node::MIN_EVERY_MS)
-                );
-            }
-            n.when.every_ms = Some(ms);
-            n.when.next_due_ms = Some(now_ms + ms as i64);
-            trig += 1;
-        }
-        if trig > 1 {
-            bail!("when: choose one of after, every (or omit for ready)");
-        }
-        // `wake` says "fire a turn of me when this is ready". A timed node
-        // already does; so does a mechanical one. It only adds meaning on a
-        // plain agent node, so elsewhere it is accepted and implied.
-        if self.wake && trig == 0 && matches!(n.do_, arbos_core::Do::Agent) {
-            n.when.wake = true;
-        }
-        // A schedule written into the goal instead of `when` never fires.
-        // Refuse it with the fix, rather than store a node that only looks
-        // scheduled. A one-shot `after` does not make "every hour" true
-        // either (QA bug qa-009): the node fires once and the user was told
-        // it recurs.
-        if n.when.every_ms.is_none() {
-            let g = n.goal.to_ascii_lowercase();
-            let words = [
-                "every ",
-                "each ",
-                "hourly",
-                "daily",
-                "weekly",
-                "per minute",
-                "per hour",
-            ];
-            if words
-                .iter()
-                .any(|w| g.starts_with(w) || g.contains(&format!(" {w}")))
-            {
-                let fate = if n.when.after_ms.is_some() {
-                    "when.after fires it once and then it is done"
-                } else {
-                    "it would never fire"
-                };
-                bail!(
-                    "the goal reads like a recurring job but when.every is not set, so {fate}. Set when:{{every:\"1h\"}} (or the period you mean; omit after) and keep the goal as what each firing does"
-                );
-            }
-            let deferred_wording = g.starts_with("after ")
-                || (g.starts_with("in ")
-                    && node::parse_duration_ms(
-                        g[3..]
-                            .split_whitespace()
-                            .take(2)
-                            .collect::<Vec<_>>()
-                            .join("")
-                            .as_str(),
-                    )
-                    .is_some());
-            if trig == 0 && deferred_wording {
-                bail!(
-                    "the goal reads like a deferred task but when.after is not set, so it would never fire. Set when:{{after:\"30m\"}} (or the delay you mean)"
-                );
-            }
-        }
-        if !self.condition.is_empty() {
-            if n.when.every_ms.is_none() {
-                bail!("when.condition needs when.every (the poll period to re-check it on)");
-            }
-            if !matches!(n.do_, arbos_core::Do::Agent | arbos_core::Do::Notify { .. }) {
-                bail!(
-                    "when.condition fires an agent or notify do, not a {} node. For a command on a schedule drop when.condition and keep when.every (the shell runs each period; add do.notify to report its output). To run the command only when a check passes, put the check inside the command: shell:\"<check> && <command>\"",
-                    n.do_.kind()
-                );
-            }
-            n.when.condition = self.condition.clone();
-        }
-        Ok(n)
-    }
-}
-
-/// `kind` spellings that mean "no custom definition".
-pub fn is_no_kind(kind: &str) -> bool {
-    matches!(
-        kind.trim().to_ascii_lowercase().as_str(),
-        "default" | "none" | "null" | "auto" | "standard" | "generic" | "inherit" | "-"
-    )
-}
+// ── plan store: notes, subscriptions, inbox ─────────────────────────────
 
 impl KernelHooks {
     pub fn layout(&self, agent: &str) -> Layout {
         Layout::new(&self.place, agent)
     }
 
-    pub fn plan_nodes(&self, agent: &str) -> Vec<Node> {
-        let path = self.layout(agent).plan_jsonl();
-        let Ok(meta) = std::fs::metadata(&path) else {
-            self.plans.lock().unwrap().remove(agent);
-            return Vec::new();
-        };
-        let (len, modified) = (meta.len(), meta.modified().ok());
-        if let Some(c) = self.plans.lock().unwrap().get(agent) {
-            if c.len == len && c.modified == modified {
-                return c.nodes.as_ref().clone();
-            }
-        }
-        let nodes = node::load_nodes(&path).unwrap_or_default();
-        self.plans.lock().unwrap().insert(
-            agent.to_string(),
-            PlanCache {
-                len,
-                modified,
-                nodes: Arc::new(nodes.clone()),
-            },
-        );
-        nodes
-    }
-
-    pub fn plan_attempts(&self, agent: &str) -> Vec<arbos_core::Attempt> {
-        node::load_attempts(&self.layout(agent).attempts_jsonl()).unwrap_or_default()
-    }
-
-    /// Write one node and tell the window. Callers hold `plan_lock`.
-    fn write_node(&self, agent: &str, n: &Node) -> Result<()> {
-        node::save_node(&self.layout(agent).plan_jsonl(), n)
-    }
-
-    /// The plan as text. Also refreshes `plan.md`.
-    pub fn plan_render(&self, agent: &str) -> String {
-        let nodes = self.plan_nodes(agent);
-        let last = node::last_attempts(&self.plan_attempts(agent));
-        let text = node::render(&nodes, &last, arbos_core::now_ms());
-        if !nodes.is_empty() {
-            let _ = std::fs::write(self.layout(agent).plan_md(), format!("{text}\n"));
-        }
-        text
-    }
-
+    /// What the window draws: standing subscriptions, open notes items,
+    /// and queued inbox messages, as one list.
     pub fn plan_frame(&self, agent: &str) -> Frame {
-        let mut nodes =
-            crate::plan::wire_nodes(&self.plan_nodes(agent), &self.plan_attempts(agent));
+        let mut nodes = crate::plan::wire_rows(&self.place, agent);
         // Inbox files ride along as the queued rows the window already
-        // draws (`inbox: true`), never as plan nodes.
+        // draws (`inbox: true`).
         for filed in inbox::list(&self.place, agent) {
             nodes.push(arbos_core::wire::PlanNode {
                 id: inbox_id(&filed.name),
@@ -605,155 +329,74 @@ impl KernelHooks {
         }
     }
 
-    /// After any plan write: settle parents, render, broadcast, scan.
+    /// After any write to notes, subscriptions, or the inbox: broadcast
+    /// and scan.
     pub fn plan_changed(&self, agent: &str) {
-        self.settle_parents(agent);
-        let _ = self.plan_render(agent);
         self.broadcast(self.plan_frame(agent));
         self.kick();
     }
 
-    /// A goal whose every step is done is done — when it has no check of
-    /// its own and nobody is working it. A failed or blocked step leaves
-    /// the parent open so the failure stays in view.
-    fn settle_parents(&self, agent: &str) {
-        use arbos_core::NodeStatus as S;
-        let _g = self.plan_lock.lock().unwrap();
-        let nodes = self.plan_nodes(agent);
-        let now = arbos_core::now_ms();
-        let mut changed = true;
-        let mut nodes = nodes;
-        while changed {
-            changed = false;
-            let snapshot = nodes.clone();
-            for n in nodes.iter_mut() {
-                if n.status != S::Pending
-                    || !n.check.is_empty()
-                    || !matches!(n.do_, arbos_core::Do::Agent)
-                {
-                    continue;
-                }
-                let kids: Vec<&Node> = snapshot.iter().filter(|k| k.parent == n.id).collect();
-                if kids.is_empty() {
-                    continue;
-                }
-                let all_done = kids
-                    .iter()
-                    .all(|k| matches!(k.status, S::Done | S::Cancelled) || k.recurring());
-                let any_open_standing = kids.iter().any(|k| k.recurring() && !k.terminal());
-                if !all_done || any_open_standing {
-                    continue;
-                }
-                n.status = S::Done;
-                n.outcome = "every step finished".into();
-                n.updated_ms = now;
-                let _ = self.write_node(agent, n);
-                changed = true;
-            }
-        }
+    /// The agent's checklist, for the `plan` tool.
+    pub fn notes(&self, agent: &str) -> notes::Notes {
+        notes::load(&self.place, agent)
     }
 
-    /// Append nodes under `parent` (0 = new roots). Returns the ids.
-    pub fn plan_add(
+    pub fn save_notes(&self, agent: &str, n: &notes::Notes) -> Result<()> {
+        notes::save(&self.place, agent, n)?;
+        self.plan_changed(agent);
+        Ok(())
+    }
+
+    /// `subscribe add`: validated, numbered, saved.
+    pub fn subscribe(
         &self,
         agent: &str,
-        parent: NodeId,
-        new: &[NewNode],
-        origin: &str,
-    ) -> Result<Vec<NodeId>> {
-        if new.is_empty() {
-            bail!("plan add: nodes must not be empty");
-        }
-        let now = arbos_core::now_ms();
-        let _g = self.plan_lock.lock().unwrap();
-        let nodes = self.plan_nodes(agent);
-        if parent != 0 && !nodes.iter().any(|n| n.id == parent) {
-            bail!("plan add: no node #{parent}");
-        }
-        let mut next = node::next_node_id(&nodes);
-        let mut ids = Vec::with_capacity(new.len());
-        let mut built = Vec::with_capacity(new.len());
-        // parent 0 with several nodes starts a plan: the first is the
-        // mission root, the rest hang under it in order.
-        let (root_spec, rest, under) = if parent == 0 && new.len() > 1 {
-            (Some(&new[0]), &new[1..], next)
-        } else {
-            (None, new, parent)
-        };
-        if let Some(spec) = root_spec {
-            let mut n = spec
-                .build(now)
-                .map_err(|e| anyhow::anyhow!("plan add: nodes[0]: {e}"))?;
-            n.id = next;
-            n.parent = 0;
-            n.seq = nodes
-                .iter()
-                .filter(|x| x.parent == 0)
-                .map(|x| x.seq + 1)
-                .max()
-                .unwrap_or(0);
-            n.origin = origin.to_string();
-            next += 1;
-            ids.push(n.id);
-            built.push(n);
-        }
-        let existing_max = nodes
-            .iter()
-            .filter(|n| n.parent == under)
-            .map(|n| n.seq)
-            .max();
-        let par: Vec<bool> = rest.iter().map(|n| n.par).collect();
-        let seqs = node::assign_seqs(existing_max, &par);
-        for (i, spec) in rest.iter().enumerate() {
-            let mut n = spec.build(now).map_err(|e| {
-                anyhow::anyhow!("plan add: nodes[{}]: {e}", i + root_spec.is_some() as usize)
-            })?;
-            n.id = next;
-            n.parent = under;
-            n.seq = seqs[i];
-            n.origin = origin.to_string();
-            next += 1;
-            ids.push(n.id);
-            built.push(n);
-        }
-        for n in &built {
-            self.write_node(agent, n)?;
-        }
-        drop(_g);
+        sub: subscription::Subscription,
+        after: Option<&str>,
+    ) -> Result<subscription::Subscription> {
+        let sub = subscription::add(&self.place, agent, sub, after)?;
         self.plan_changed(agent);
-        Ok(ids)
+        Ok(sub)
     }
 
-    /// A message into `agent`: one root node that fires a turn when ready.
-    /// Put a message in an agent's inbox. It is a file
-    /// (`inbox/<time>-<from>-<seq>.md`, see `arbos_core::inbox`), not a
-    /// plan node: plan nodes are goals. The node passed in is the message
-    /// as the callers still build it — goal, origin, attachments, hops —
-    /// and is translated. The id returned names the file for the window's
-    /// rows (`plan_op cancel|run` on it removes or wakes the file).
-    pub fn inbox(&self, agent: &str, n: Node) -> Result<NodeId> {
+    pub fn unsubscribe(&self, agent: &str, id: u32) -> Result<bool> {
+        let gone = subscription::remove(&self.place, agent, id)?;
+        if gone {
+            self.plan_changed(agent);
+        }
+        Ok(gone)
+    }
+
+    /// A message file for `agent`, from whoever `msg.from` says. The one
+    /// door every producer uses.
+    pub fn deliver(&self, agent: &str, msg: &inbox::Message) -> Result<String> {
         if !arbos_core::agent_exists(&self.place, agent) {
             bail!("no agent {agent}");
         }
         // Nothing to say and nothing attached is not a message; storing it
         // would fire a model turn on an empty prompt (QA bug qa-008).
-        if n.goal.trim().is_empty() && n.attachments.is_empty() {
+        if msg.body.trim().is_empty() && msg.attachments.is_empty() {
             bail!("empty prompt");
         }
-        let (from, kind) = match n.origin.as_str() {
+        let name = inbox::deliver(&self.place, agent, msg)?;
+        self.plan_changed(agent);
+        Ok(name)
+    }
+    /// A user prompt (or another producer's words) as an inbox file.
+    /// `from`: `user`, `user:<name>`, `agent:<id>`, `kernel`.
+    pub fn inbox(&self, agent: &str, text: &str, from: &str, attachments: Vec<String>) -> Result<NodeId> {
+        let (from, kind) = match from {
             o if o.starts_with("spawn:") => (format!("agent:{}", &o["spawn:".len()..]), "brief"),
             "" | "user" => ("user".to_string(), "request"),
             o => (o.to_string(), "request"),
         };
-        let mut msg = inbox::Message::new(from, kind, n.goal.clone());
+        let mut msg = inbox::Message::new(from, kind, text.to_string());
         msg.wake = true;
-        msg.hops = n.hops;
-        msg.attachments = n.attachments.clone();
-        let name = inbox::deliver(&self.place, agent, &msg)?;
-        self.plan_changed(agent);
+        msg.hops = inbox::DEFAULT_HOPS;
+        msg.attachments = attachments;
+        let name = self.deliver(agent, &msg)?;
         Ok(inbox_id(&name))
     }
-
     /// Note a failed claim. True the first time (say so), false while the
     /// minute's back-off still runs.
     pub fn inbox_backoff(&self, name: &str, now: i64) -> bool {
@@ -806,109 +449,6 @@ impl KernelHooks {
         taken
     }
 
-    /// Move a node through its life. `status` None on a recurring node
-    /// records one recurrence. Returns the acknowledgement line.
-    pub fn plan_update(
-        &self,
-        agent: &str,
-        id: NodeId,
-        status: Option<arbos_core::NodeStatus>,
-        outcome: &str,
-        by: &str,
-    ) -> Result<String> {
-        use arbos_core::NodeStatus as S;
-        let now = arbos_core::now_ms();
-        let outcome = outcome.trim();
-        let _g = self.plan_lock.lock().unwrap();
-        let nodes = self.plan_nodes(agent);
-        let Some(mut n) = nodes.iter().find(|n| n.id == id).cloned() else {
-            bail!("plan update: no node #{id}");
-        };
-        let attempts_path = self.layout(agent).attempts_jsonl();
-        let Some(to) = status else {
-            if !n.recurring() {
-                bail!("plan update: node #{id}: status is required for a one-shot node");
-            }
-            if outcome.is_empty() {
-                bail!("plan update: node #{id}: a recurrence needs an outcome");
-            }
-            let attempts = self.plan_attempts(agent);
-            let a = arbos_core::Attempt {
-                id: node::next_attempt_id(&attempts),
-                node: id,
-                kind: "agent".into(),
-                started_ms: now,
-                ended_ms: Some(now),
-                verdict: Some(arbos_core::Verdict::Success),
-                outcome: outcome.to_string(),
-                verified_by: by.to_string(),
-                transcript_lo: None,
-                transcript_hi: None,
-                job: None,
-            };
-            node::save_attempt(&attempts_path, &a)?;
-            n.status = S::Pending;
-            n.outcome = outcome.to_string();
-            n.attempt = None;
-            n.updated_ms = now;
-            self.write_node(agent, &n)?;
-            drop(_g);
-            self.plan_changed(agent);
-            return Ok(format!("Recorded recurrence of #{id}."));
-        };
-        node::can_transition(&n, to).map_err(|e| anyhow::anyhow!("plan update: {e}"))?;
-        if matches!(to, S::Done | S::Failed | S::Blocked) && outcome.is_empty() {
-            bail!(
-                "plan update: node #{id}: {} needs an outcome — say what happened or what is needed",
-                to.as_str()
-            );
-        }
-        if !outcome.is_empty() {
-            n.outcome = outcome.to_string();
-        }
-        n.status = to;
-        n.updated_ms = now;
-        if matches!(to, S::Done | S::Failed | S::Cancelled | S::Pending) {
-            n.attempt = None;
-        }
-        if to == S::Done || to == S::Failed {
-            let attempts = self.plan_attempts(agent);
-            // Close the running attempt if the model is finishing its own
-            // node mid-turn; otherwise record a fresh one.
-            let open = attempts
-                .iter()
-                .find(|a| a.node == id && a.running())
-                .cloned();
-            let mut a = open.unwrap_or(arbos_core::Attempt {
-                id: node::next_attempt_id(&attempts),
-                node: id,
-                kind: "agent".into(),
-                started_ms: now,
-                ended_ms: None,
-                verdict: None,
-                outcome: String::new(),
-                verified_by: String::new(),
-                transcript_lo: None,
-                transcript_hi: None,
-                job: None,
-            });
-            a.ended_ms = Some(now);
-            a.verdict = Some(if to == S::Done {
-                arbos_core::Verdict::Success
-            } else {
-                arbos_core::Verdict::Fail
-            });
-            a.outcome = n.outcome.clone();
-            a.verified_by = by.to_string();
-            node::save_attempt(&attempts_path, &a)?;
-        }
-        self.write_node(agent, &n)?;
-        drop(_g);
-        self.plan_changed(agent);
-        Ok(format!("#{id} -> {}.", to.as_str()))
-    }
-
-    /// `agent` and everything under it, depth-first.
     pub fn descendants(&self, agent: &str) -> Vec<String> {
         let agents = list_agents(&self.place).unwrap_or_default();
         let mut out = vec![agent.to_string()];
@@ -932,46 +472,38 @@ impl KernelHooks {
     /// of it and its children goes to blocked (run ▶ resumes one), and
     /// their running jobs are killed. Turns are the scheduler's to stop.
     pub fn stop_work(&self, agent: &str) -> Vec<String> {
-        use arbos_core::NodeStatus as S;
-        let now = arbos_core::now_ms();
         let ids = self.descendants(agent);
         for id in &ids {
             let root = arbos_engine::JobsRoot::for_agent(&self.place, &AgentId::new(id));
             for job in root.list() {
                 root.kill(&job);
             }
-            let layout = self.layout(id);
-            let _g = self.plan_lock.lock().unwrap();
             let mut changed = false;
-            for mut n in self.plan_nodes(id) {
-                let scheduled = n.armed() || n.gated();
-                if !scheduled || n.terminal() || n.status == S::Blocked {
-                    continue;
+            // A queued prompt that has not run is dropped with the stop; a
+            // standing subscription pauses until someone presses run.
+            for filed in inbox::list(&self.place, id) {
+                if filed.msg.wake && std::fs::remove_file(&filed.path).is_ok() {
+                    changed = true;
                 }
-                // An inbox message that has not run yet is a queued prompt;
-                // stopping the agent drops it too.
-                if node::is_inbox(&[], &n) && n.status == S::Pending && n.parent == 0 {
-                    n.status = S::Cancelled;
-                } else {
-                    n.status = S::Blocked;
-                }
-                n.attempt = None;
-                n.outcome = "stopped by the user — press run to resume".into();
-                n.updated_ms = now;
-                let _ = node::save_node(&layout.plan_jsonl(), &n);
-                changed = true;
             }
-            drop(_g);
+            for mut sub in subscription::list(&self.place, id) {
+                if !sub.paused {
+                    sub.paused = true;
+                    sub.last = "stopped by the user — press run to resume".into();
+                    let _ = subscription::save(&self.place, id, &sub);
+                    changed = true;
+                }
+            }
             if changed {
                 self.plan_changed(id);
             }
         }
         ids
     }
-
-    /// A window action on a node.
+    /// A window action on a row of the plan frame: an inbox message
+    /// (cancel, run), a subscription (cancel, run, pause, reopen), or a
+    /// notes item (check, uncheck, cancel).
     pub fn plan_op(&self, agent: &str, id: NodeId, op: &str, text: &str) -> Result<()> {
-        use arbos_core::NodeStatus as S;
         if is_inbox_id(id) {
             let Some(filed) = inbox::list(&self.place, agent)
                 .into_iter()
@@ -991,60 +523,59 @@ impl KernelHooks {
             self.plan_changed(agent);
             return Ok(());
         }
-        match op {
-            "cancel" => {
-                let _ = self.plan_update(
-                    agent,
-                    id,
-                    Some(S::Cancelled),
-                    "cancelled from the window",
-                    "user",
-                );
-            }
-            "reopen" => {
-                let _ = self.plan_update(
-                    agent,
-                    id,
-                    Some(S::Pending),
-                    "reopened from the window",
-                    "user",
-                );
-            }
-            "run" => {
-                let now = arbos_core::now_ms();
-                let _g = self.plan_lock.lock().unwrap();
-                let nodes = self.plan_nodes(agent);
-                let Some(mut n) = nodes.iter().find(|n| n.id == id).cloned() else {
-                    bail!("no node #{id}");
-                };
-                if n.status != S::Pending {
-                    n.status = S::Pending;
-                    n.attempt = None;
-                    n.outcome.clear();
+        if id & crate::plan::SUB_ID_BIT != 0 {
+            let sid = (id & !crate::plan::SUB_ID_BIT) as u32;
+            let Some(mut sub) = subscription::get(&self.place, agent, sid) else {
+                bail!("no subscription #{sid}");
+            };
+            match op {
+                "cancel" => {
+                    self.unsubscribe(agent, sid)?;
+                    return Ok(());
                 }
-                n.when.after_ms = None;
-                if n.recurring() {
-                    n.when.next_due_ms = Some(now);
+                "pause" => sub.paused = true,
+                "reopen" | "resume" => {
+                    sub.paused = false;
+                    if sub.next_due.is_none() {
+                        sub.next_due = Some(inbox::rfc3339(arbos_core::now_ms()));
+                    }
                 }
-                if matches!(n.do_, arbos_core::Do::Agent) {
-                    n.when.wake = true;
+                "run" => {
+                    sub.paused = false;
+                    sub.next_due = Some(inbox::rfc3339(arbos_core::now_ms()));
                 }
-                n.updated_ms = now;
-                self.write_node(agent, &n)?;
-                drop(_g);
-                self.plan_changed(agent);
+                other => bail!("{other}: not an operation on a subscription (cancel, run, pause, reopen)"),
             }
-            "answer" => {
-                let text = text.trim();
-                if text.is_empty() {
-                    bail!("an answer needs text");
-                }
-                let _ = self.plan_update(agent, id, Some(S::Done), text, "user");
-            }
-            other => bail!("unknown plan op {other}"),
+            subscription::save(&self.place, agent, &sub)?;
+            self.plan_changed(agent);
+            return Ok(());
         }
-        Ok(())
+        if id & crate::plan::NOTE_ID_BIT != 0 {
+            let n = (id & !crate::plan::NOTE_ID_BIT) as usize;
+            let mut notes = self.notes(agent);
+            match op {
+                "check" | "answer" => {
+                    notes.check(n, true, Some(text))?;
+                }
+                "uncheck" | "reopen" => {
+                    notes.check(n, false, None)?;
+                }
+                "cancel" => {
+                    notes.remove(n)?;
+                }
+                other => bail!("{other}: not an operation on a notes item (check, uncheck, cancel)"),
+            }
+            return self.save_notes(agent, &notes);
+        }
+        bail!("unknown plan row #{id}")
     }
+}
+/// A `kind` a model writes to mean "the default one".
+pub fn is_no_kind(kind: &str) -> bool {
+    matches!(
+        kind.trim().to_ascii_lowercase().as_str(),
+        "default" | "none" | "null" | "auto" | "standard" | "generic" | "inherit" | "-"
+    )
 }
 
 // ── agents ──────────────────────────────────────────────────────────────
@@ -1193,12 +724,9 @@ impl KernelHooks {
         if let Some(d) = def.as_ref().filter(|d| !d.body.is_empty()) {
             std::fs::write(layout.instructions(), format!("{}\n", d.body))?;
         }
-        // The brief is the child's first node: its mission root. It fires
-        // a turn now with the mission spelled out; the child decomposes
-        // under it with plan add and reports back with say.
-        let mut n = Node::inbox(brief, format!("spawn:{}", parent.id));
-        n.hops = DEFAULT_HOPS;
-        self.inbox(&id, n)?;
+        // The brief is the child's first message: its mission, as a
+        // `kind = "brief"` inbox file that fires a turn now.
+        self.inbox(&id, brief, &format!("spawn:{}", parent.id), Vec::new())?;
         Ok((AgentId::new(id), worktree))
     }
 
@@ -1289,7 +817,7 @@ impl KernelHooks {
             msg.hops = if hops_in > 0 {
                 hops_in - 1
             } else {
-                DEFAULT_HOPS
+                inbox::DEFAULT_HOPS
             };
             inbox::deliver(&self.place, tid, &msg)?;
             self.plan_changed(tid);
@@ -1352,7 +880,7 @@ impl KernelHooks {
         let hops = if hops_in > 0 {
             hops_in - 1
         } else {
-            DEFAULT_HOPS
+            inbox::DEFAULT_HOPS
         };
         if hops == 0 {
             inbox::deliver(&self.place, tid, &note)?;
@@ -1368,9 +896,10 @@ impl KernelHooks {
                 "Sent to {label} as a note: it is paused, so no turn is queued."
             ));
         }
-        let mut n = Node::inbox(text, format!("agent:{from}"));
-        n.hops = hops;
-        self.inbox(tid, n)?;
+        let mut msg = inbox::Message::new(format!("agent:{from}"), "request", text.to_string());
+        msg.wake = true;
+        msg.hops = hops;
+        self.deliver(tid, &msg)?;
         Ok(match (mode, busy) {
             (SayMode::Steer, _) => format!(
                 "Sent to {label} as a steer; it was idle, so a turn starts for it now. Its reply will arrive here as a message from it."
@@ -1404,7 +933,7 @@ impl KernelHooks {
         let mut inbox = std::fs::read_to_string(self.place.user_md()).unwrap_or_default();
         inbox.push_str(&format!(
             "- {} [{from}] {}\n",
-            node::clock(arbos_core::now_ms()),
+            subscription::clock(arbos_core::now_ms()),
             text.replace('\n', " ")
         ));
         std::fs::write(self.place.user_md(), inbox)?;
