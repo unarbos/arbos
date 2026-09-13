@@ -94,6 +94,14 @@ impl Outcome {
                 None,
             ),
         };
+        // The transcript is the record the model and the user read: no
+        // granted secret, and not the kernel's own key, gets written into it.
+        let secrets = crate::secrets::store();
+        let (body, error) = if secrets.has_any() {
+            (secrets.redact(&body), error.map(|e| secrets.redact(&e)))
+        } else {
+            (body, error)
+        };
         Event::new(EventKind::Tool(ToolRec {
             name: call.name.clone(),
             call_id: call.id.clone(),

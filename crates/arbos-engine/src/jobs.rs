@@ -153,6 +153,9 @@ impl JobsRoot {
             .stdin(Stdio::null())
             .stdout(Stdio::from(journal))
             .stderr(Stdio::from(err_fd));
+        // Secrets the agent asked to use, by name; their values are
+        // redacted from everything that comes back.
+        cmd.envs(crate::secrets::store().env());
         #[cfg(unix)]
         cmd.process_group(0);
         let child = match cmd.spawn() {

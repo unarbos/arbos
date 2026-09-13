@@ -6,5 +6,6 @@ pub mod hooks;
 pub mod plan;
 pub mod pty;
 pub mod sched;
+pub mod secret_tool;
 pub mod serve;
 pub mod tools;

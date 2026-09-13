@@ -12,6 +12,7 @@ pub mod project;
 mod prompt;
 mod provider;
 mod retry;
+pub mod secrets;
 mod step;
 pub mod summarise;
 mod tool;
