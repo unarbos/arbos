@@ -284,6 +284,19 @@ impl Arbos {
         if self.builtin_command(id, &text.text, cx) {
             return;
         }
+        // "stop" while the chat works is the Stop button, not a follow-up.
+        let busy = self
+            .workspace
+            .read(cx)
+            .active_session()
+            .is_some_and(|chat| chat.busy());
+        if busy && text.attachments.is_empty() && arbos_core::is_stop_word(&text.text) {
+            self.workspace.update(cx, |workspace, cx| {
+                workspace.cancel(id, cx);
+                workspace.with_session(id, cx, |chat| chat.notice(false, "Stopped by you"));
+            });
+            return;
+        }
         if self
             .workspace
             .read(cx)
@@ -490,9 +503,24 @@ impl Arbos {
         let usage = live.and_then(|chat| chat.usage);
         let next_id = chat.map(|chat| chat.id);
         let next_draft = chat.map(|chat| chat.draft.clone()).unwrap_or_default();
+        let pushed = chat.is_some_and(|chat| chat.draft_pushed);
         let (old_id, held) = self
             .composer
             .update(cx, |composer, cx| (composer.bound(), composer.content(cx)));
+        if pushed && old_id == next_id {
+            // The model set the draft: the composer takes it over whatever
+            // was typed.
+            if let Some(id) = next_id {
+                self.workspace.update(cx, |workspace, _| {
+                    if let Some(chat) = workspace.session_mut(id) {
+                        chat.draft_pushed = false;
+                    }
+                });
+            }
+            self.composer.update(cx, |composer, cx| {
+                composer.take_draft(&next_draft, cx);
+            });
+        }
         if old_id != next_id {
             if let Some(old) = old_id {
                 self.workspace.update(cx, |workspace, _| {
@@ -1570,7 +1598,20 @@ impl Arbos {
         if nodes.is_empty() && queued == 0 {
             return None;
         }
+        // Follow-ups the kernel holds are not the plan: they get rows of
+        // their own, and "Plan" is for goals and standing work only.
+        let queued_nodes: Vec<PlanNode> = chat
+            .plan
+            .iter()
+            .filter(|n| n.inbox && n.status == "pending")
+            .cloned()
+            .collect();
         let answering = chat.answering;
+        let live_since = chat.live_since;
+        let followups = self.followups(id, &queued_nodes, &theme, cx);
+        if nodes.is_empty() {
+            return followups;
+        }
         let steps = nodes
             .iter()
             .filter(|n| !n.standing && n.do_kind != "ask")
@@ -1579,8 +1620,7 @@ impl Arbos {
         let asks = nodes.iter().filter(|n| n.do_kind == "ask").count();
         let failed = nodes.iter().filter(|n| n.status == "failed").count();
         let running = nodes.iter().any(|n| n.status == "active");
-        let since = chat
-            .live_since
+        let since = live_since
             .and_then(|at| at.elapsed().ok())
             .unwrap_or_default();
         let mut parts: Vec<String> = Vec::new();
@@ -1595,9 +1635,6 @@ impl Arbos {
         }
         if failed > 0 {
             parts.push(plural(failed, "failed", "failed"));
-        }
-        if queued > 0 {
-            parts.push(plural(queued, "message queued", "messages queued"));
         }
         let folded = self.plan_folded;
 
@@ -1704,6 +1741,151 @@ impl Arbos {
             )
         });
 
+        let strip = div()
+            .rounded(px(Theme::surface_radius()))
+            .px(px(root::COMPOSER_PAD_X))
+            .py(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(header)
+            .children(rows)
+            .surface(&theme, composer::SURFACE);
+        Some(match followups {
+            Some(rows) => div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(strip)
+                .child(rows)
+                .into_any_element(),
+            None => strip.into_any_element(),
+        })
+    }
+
+    /// Messages the kernel holds for this chat that have not run yet
+    /// ("Send follow-up" while a turn was busy). One header, a row per
+    /// message with its words, and three ways out: send it into the
+    /// running turn now, take it back into the composer, or drop it.
+    fn followups(
+        &self,
+        id: u64,
+        queued: &[PlanNode],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if queued.is_empty() {
+            return None;
+        }
+        let header = div()
+            .id("followups-head")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                icons::icon(icons::system::CHAT_ROUND_LINE)
+                    .size(px(12.))
+                    .text_color(theme.text_faint),
+            )
+            .child(
+                div()
+                    .text_style(TextStyle::Callout)
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(plural(
+                        queued.len(),
+                        "follow-up queued",
+                        "follow-ups queued",
+                    ))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .child("runs when this turn ends"),
+            );
+        let rows = queued.iter().map(|n| {
+            let node = n.id;
+            let text = n.goal.clone();
+            let group = SharedString::from(format!("followup-{id}-{node}"));
+            let control = |key: &str,
+                           label: &'static str,
+                           tip: &'static str,
+                           cx: &mut Context<Self>,
+                           act: fn(&mut Self, u64, u64, String, &mut Context<Self>)| {
+                let text = text.clone();
+                div()
+                    .id(SharedString::from(format!("followup-{key}-{id}-{node}")))
+                    .flex_none()
+                    .cursor_pointer()
+                    .px(px(4.))
+                    .rounded(px(4.))
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+                    .tooltip(move |window, cx| {
+                        bezel::ui::tooltip::Tooltip::text(tip, window, cx)
+                    })
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        act(this, id, node, text.clone(), cx)
+                    }))
+            };
+            div()
+                .group(group)
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(8.))
+                .pl(px(18.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_style(TextStyle::Body)
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(text.clone())),
+                )
+                .child(control(
+                    "send",
+                    "Send now",
+                    "Interrupt the running turn and send this now",
+                    cx,
+                    |this, id, node, text, cx| {
+                        this.workspace.update(cx, |workspace, cx| {
+                            workspace.with_session(id, cx, |chat| chat.plan_op(node, "cancel", ""));
+                            workspace.force(id, text, cx);
+                        });
+                    },
+                ))
+                .child(control(
+                    "edit",
+                    "Edit",
+                    "Take it back into the composer",
+                    cx,
+                    |this, id, node, text, cx| {
+                        this.workspace.update(cx, |workspace, cx| {
+                            workspace.with_session(id, cx, |chat| {
+                                chat.plan_op(node, "cancel", "");
+                                chat.draft = text;
+                                chat.draft_pushed = true;
+                            });
+                        });
+                    },
+                ))
+                .child(control(
+                    "remove",
+                    "Remove",
+                    "Drop this follow-up",
+                    cx,
+                    |this, id, node, _text, cx| {
+                        this.workspace.update(cx, |workspace, cx| {
+                            workspace.with_session(id, cx, |chat| chat.plan_op(node, "cancel", ""));
+                        });
+                    },
+                ))
+        });
         Some(
             div()
                 .rounded(px(Theme::surface_radius()))
@@ -1714,7 +1896,7 @@ impl Arbos {
                 .gap(px(6.))
                 .child(header)
                 .children(rows)
-                .surface(&theme, composer::SURFACE)
+                .surface(theme, composer::SURFACE)
                 .into_any_element(),
         )
     }

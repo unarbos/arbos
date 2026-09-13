@@ -565,6 +565,21 @@ fn handle_frame(
                 eprintln!("inbox {agent}: empty prompt");
                 return;
             }
+            // "stop" typed at a running agent is the Stop button, not a
+            // follow-up: the turn ends now and the transcript says who did it.
+            if attachments.is_empty() && sched.has_job(&agent) && arbos_core::is_stop_word(&text) {
+                for id in hooks.stop_work(&agent) {
+                    sched.stop(&id);
+                }
+                let _ = append_event(
+                    &Layout::new(place, &agent).transcript(),
+                    &Event::new(EventKind::Notice {
+                        text: "Stopped by you".into(),
+                        failed: false,
+                    }),
+                );
+                return;
+            }
             if steer && sched.has_job(&agent) {
                 sched.steer(&agent, text);
                 return;

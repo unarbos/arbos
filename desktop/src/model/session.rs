@@ -383,6 +383,9 @@ pub struct ChatSession {
     /// The `Agent` item the current step's deltas are building, until the
     /// step's recorded line replaces it. Runtime only.
     streaming_agent: Option<usize>,
+    /// `draft` was set by the model (a follow-up taken back, a rewind) and
+    /// the composer, which otherwise owns the text while bound, must take it.
+    pub draft_pushed: bool,
     /// The agent's own name for the session, from `SessionInfoUpdate`.
     pub title: String,
     /// The name you typed, which the agent never overwrites. Two fields rather
@@ -506,6 +509,7 @@ impl ChatSession {
             flight: None,
             thought_at: None,
             streaming_agent: None,
+            draft_pushed: false,
             title: String::new(),
             name: None,
             updated: SystemTime::now(),
@@ -566,6 +570,7 @@ impl ChatSession {
             flight: None,
             thought_at: None,
             streaming_agent: None,
+            draft_pushed: false,
             title: record.title,
             name: record.name,
             updated,
@@ -626,6 +631,7 @@ impl ChatSession {
             flight: None,
             thought_at: None,
             streaming_agent: None,
+            draft_pushed: false,
             title,
             name,
             updated,
