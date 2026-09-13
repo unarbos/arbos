@@ -1,0 +1,2 @@
+A standing shell node with a report, due one second before the kernel's clock
+starts. Expect: one say line "BTC: 42", node done, kernel idle.
