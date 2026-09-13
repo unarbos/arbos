@@ -19,8 +19,9 @@
 //! for, and why a greyed item's shortcut still reaches the keymap underneath.
 
 use crate::view::root::{
-    Arbos, CloseProject, NewSession, NewTab, NextEntry, NextTab, OpenProject, OpenSettings,
-    PrevEntry, PrevTab, TogglePanel, ZoomIn, ZoomOut, ZoomReset,
+    Arbos, CloseProject, EndCall, NewSession, NewTab, NextEntry, NextTab, OpenProject,
+    OpenSettings, PrevEntry, PrevTab, StartCall, ToggleMute, TogglePanel, ZoomIn, ZoomOut,
+    ZoomReset,
 };
 use bezel::{
     gpui::{
@@ -176,6 +177,11 @@ fn menus() -> Vec<Menu> {
         Menu::new("View").items([
             MenuItem::action("Toggle Panel", TogglePanel),
             MenuItem::separator(),
+            // A call to the project in front, through the speech server.
+            MenuItem::action("Call Project", StartCall),
+            MenuItem::action("End Call", EndCall),
+            MenuItem::action("Mute", ToggleMute),
+            MenuItem::separator(),
             // Drawn ⇧⌘] and ⇧⌘[, which is why those are bound first: the
             // `ctrl-tab` pair these also answer to is a chord gpui cannot
             // hand macOS, and an item that named it would teach ⌃T.
@@ -253,6 +259,9 @@ impl Arbos {
         let entries = self.showing(cx).is_some();
 
         root.on_action(cx.listener(Self::toggle_panel_action))
+            .on_action(cx.listener(Self::start_call_action))
+            .on_action(cx.listener(Self::end_call_action))
+            .on_action(cx.listener(Self::toggle_mute_action))
             .on_action(cx.listener(Self::open_project_action))
             .on_action(cx.listener(Self::new_tab_action))
             .on_action(cx.listener(Self::open_settings_action))

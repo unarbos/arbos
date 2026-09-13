@@ -63,7 +63,10 @@ actions!(
         DeleteChat,
         ZoomIn,
         ZoomOut,
-        ZoomReset
+        ZoomReset,
+        StartCall,
+        EndCall,
+        ToggleMute
     ]
 );
 
@@ -216,6 +219,10 @@ pub fn init(cx: &mut App) {
         // before the window is offered it, and the editor's own `cmd-b` —
         // bold — is not reached while this one is on the bar.
         KeyBinding::new("cmd-b", TogglePanel, None),
+        // Call the project in front: a full-duplex conversation with its
+        // main agent through the speech server. ⇧⌘C again hangs up.
+        KeyBinding::new("cmd-shift-c", StartCall, None),
+        KeyBinding::new("cmd-shift-m", ToggleMute, None),
         KeyBinding::new("cmd-1", ShowChat, None),
         // What a browser binds its zoom to. `cmd-=` first so the menu
         // draws ⌘= like Safari; `cmd-+` is the same key with shift held.
@@ -465,6 +472,18 @@ fn stepped(at: Option<usize>, len: usize, step: isize) -> Option<usize> {
 
 /// The root view. It owns no app state — only the chrome's own: whether the
 /// panel is out, which pane is showing, and whichever name is being typed.
+/// A live call: one per window, to the project that was in front when it
+/// started. Everything spoken lands in that project's main chat.
+#[derive(Debug, Clone)]
+pub struct Call {
+    /// The project's session id whose chat takes the `voice ·` lines.
+    pub session: u64,
+    pub label: String,
+    pub since: std::time::Instant,
+    /// Start is in flight: the button shows a spinner, End is a no-op.
+    pub connecting: bool,
+}
+
 pub struct Arbos {
     pub(crate) workspace: Entity<Workspace>,
     /// The open session menu was opened from the chat header's `⋯`, so it
@@ -522,6 +541,8 @@ pub struct Arbos {
     /// The loop that carries the speech server's agent activity into the
     /// chat is running.
     voice_mirror_on: bool,
+    /// The call in progress: which project it is for, and since when.
+    pub(crate) call: Option<Call>,
     /// Native Fn monitor. Lives with the window so Drop removes it.
     #[cfg(target_os = "macos")]
     _fn_monitor: Option<crate::view::fn_key::Monitor>,
@@ -683,6 +704,7 @@ impl Arbos {
             fn_held: false,
             voice_want_stop: false,
             voice_mirror_on: false,
+            call: None,
             #[cfg(target_os = "macos")]
             _fn_monitor: None,
             draft_flush: Task::ready(()),
@@ -1311,6 +1333,183 @@ impl Arbos {
         }
     }
 
+    // ------------------------------------------------------------------ calls
+
+    /// Whether a call can start: a speech server is set up and a project
+    /// with a main chat is in front.
+    pub(crate) fn can_call(&self, cx: &App) -> bool {
+        crate::voice_ws::configured() && self.workspace.read(cx).active_id().is_some()
+    }
+
+    /// ⇧⌘C and the panel's handset: start a call to the project in front,
+    /// or hang up the one that is live.
+    pub(crate) fn start_call_action(
+        &mut self,
+        _: &StartCall,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.call.is_some() {
+            self.end_call(cx);
+        } else {
+            self.start_call(cx);
+        }
+    }
+
+    pub(crate) fn end_call_action(&mut self, _: &EndCall, _: &mut Window, cx: &mut Context<Self>) {
+        self.end_call(cx);
+    }
+
+    pub(crate) fn toggle_mute_action(
+        &mut self,
+        _: &ToggleMute,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_mute(cx);
+    }
+
+    /// Call the project in front. The gateway opens a call session to that
+    /// project's main agent; from then on the mic is open, the caller's
+    /// words go to the agent as `voice` messages, and the narrator's
+    /// highlights are spoken and written into the chat as `voice ·` lines.
+    pub(crate) fn start_call(&mut self, cx: &mut Context<Self>) {
+        if self.call.is_some() {
+            return;
+        }
+        let workspace = self.workspace.read(cx);
+        let Some(session) = workspace.active_id() else {
+            return;
+        };
+        let Some(project) = workspace.active_project() else {
+            return;
+        };
+        if !crate::voice_ws::configured() {
+            self.voice_error(
+                "no speech server: set voice_url (and voice_token) in ~/.config/arbos/config.toml to call a project",
+                cx,
+            );
+            return;
+        }
+        let label = Workspace::tab_label(project);
+        // Dictation, if a take is open, ends: the call owns the mic.
+        if self.composer.read(cx).is_recording() {
+            self.stop_voice(cx);
+        }
+        self.call = Some(Call {
+            session,
+            label: label.clone(),
+            since: std::time::Instant::now(),
+            connecting: true,
+        });
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let started = cx
+                .background_executor()
+                .spawn(async move { crate::voice_ws::call_start(&label) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match started {
+                    Ok(()) => {
+                        if let Some(call) = this.call.as_mut() {
+                            call.connecting = false;
+                        }
+                        this.workspace.update(cx, |workspace, cx| {
+                            workspace.with_session(session, cx, |chat| {
+                                chat.notice(false, "voice · call started");
+                            });
+                        });
+                        this.start_call_mirror(cx);
+                    }
+                    Err(e) => {
+                        this.call = None;
+                        this.voice_error(&format!("call failed: {e:#}"), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Hang up. The gateway closes the session; the chat keeps the record.
+    pub(crate) fn end_call(&mut self, cx: &mut Context<Self>) {
+        let Some(call) = self.call.take() else {
+            return;
+        };
+        crate::voice_ws::call_end();
+        let mins = call.since.elapsed().as_secs() / 60;
+        let secs = call.since.elapsed().as_secs() % 60;
+        self.workspace.update(cx, |workspace, cx| {
+            workspace.with_session(call.session, cx, |chat| {
+                chat.notice(false, &format!("voice · call ended after {mins}:{secs:02}"));
+            });
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_mute(&mut self, cx: &mut Context<Self>) {
+        if self.call.is_none() {
+            return;
+        }
+        let muted = !crate::voice_ws::status().muted;
+        if let Err(e) = crate::voice_ws::call_mute(muted) {
+            self.voice_error(&format!("mute failed: {e:#}"), cx);
+        }
+        cx.notify();
+    }
+
+    /// While the call is live: the narrator's lines land in the call's chat
+    /// as `voice ·` notices, the strip repaints, and a dropped session ends
+    /// the call on this side too.
+    fn start_call_mirror(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                let lines = crate::voice_ws::drain_mirror();
+                let status = crate::voice_ws::status();
+                let live = crate::voice_ws::in_call();
+                let keep = this.update(cx, |this, cx| {
+                    let Some(call) = this.call.clone() else {
+                        return false;
+                    };
+                    if !lines.is_empty() {
+                        this.workspace.update(cx, |workspace, cx| {
+                            workspace.with_session(call.session, cx, |chat| {
+                                for m in &lines {
+                                    if let Some(line) = call_line(m) {
+                                        chat.notice(false, &line);
+                                    }
+                                }
+                            });
+                        });
+                    }
+                    if let Some(e) = status.error.as_deref()
+                        && !live
+                    {
+                        this.voice_error(&format!("call dropped: {e}"), cx);
+                    }
+                    if !live && !call.connecting {
+                        this.call = None;
+                        this.workspace.update(cx, |workspace, cx| {
+                            workspace.with_session(call.session, cx, |chat| {
+                                chat.notice(false, "voice · call ended");
+                            });
+                        });
+                    }
+                    cx.notify();
+                    this.call.is_some()
+                });
+                if !matches!(keep, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn open_project_action(
         &mut self,
         _: &OpenProject,
@@ -1527,6 +1726,22 @@ fn keep_macos_glass(_window: &Window) {
 
 #[cfg(not(target_os = "macos"))]
 fn keep_macos_glass(_window: &Window) {}
+
+/// One `voice ·` line for the chat during a call: what the narrator said,
+/// marked by kind so a question or a failure reads as one. Everything else
+/// the mirror carries (the agent bridge) is already in the chat, which is
+/// attached to the same kernel: nothing.
+fn call_line(m: &crate::voice_ws::Mirror) -> Option<String> {
+    let text: String = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match m.kind.as_str() {
+        "narrator.say/report" => Some(format!("voice · {text}")),
+        "narrator.say/ask" => Some(format!("voice · asked: {text}")),
+        "narrator.say/error" => Some(format!("voice · {text}")),
+        "narrator.say/detail" => Some(format!("voice · detail: {text}")),
+        k if k.starts_with("narrator.say") => Some(format!("voice · {text}")),
+        _ => None,
+    }
+}
 
 /// One notice line for a mirrored speech-server event: who, what, words.
 fn mirror_line(m: &crate::voice_ws::Mirror) -> String {

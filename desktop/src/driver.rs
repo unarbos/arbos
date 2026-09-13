@@ -1083,6 +1083,23 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
             "focused": composer_focused,
             "recording": composer.is_recording(),
         },
+        // The call to the project in front, when one is live: what the
+        // strip shows, so a test can assert on it without pixels.
+        "call": this.call.as_ref().map(|call| {
+            let voice = crate::voice_ws::status();
+            json!({
+                "active": true,
+                "connecting": call.connecting,
+                "session": call.session,
+                "label": call.label,
+                "phase": voice.phase.map(|p| p.as_str()),
+                "muted": voice.muted,
+                "partial": voice.text,
+                "reply": voice.reply,
+                "last_said": voice.last_said,
+                "seconds": call.since.elapsed().as_secs(),
+            })
+        }),
         "active_project": workspace.active,
         "active_session": workspace.active_id(),
         "active_surface": workspace.active_surface().map(|surface| surface.id.0),

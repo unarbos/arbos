@@ -20,7 +20,7 @@ use crate::{
 use bezel::{
     gpui::{
         AnyElement, App, ClickEvent, Context, Div, Hsla, Render, SharedString, Stateful, Window,
-        div, prelude::*, px,
+        div, prelude::*, px, svg,
     },
     theme::{TextStyle, Theme, Typeset},
     ui::{icons, popover, tooltip::Tooltip, widgets::Buttons},
@@ -192,6 +192,7 @@ impl Arbos {
             })
             .collect();
 
+        let call_btn = self.call_button(&theme, cx);
         let mut body = div()
             .id("panel-scroll")
             .flex_1()
@@ -201,7 +202,7 @@ impl Arbos {
             .pb(px(SECTION_GAP))
             .flex()
             .flex_col()
-            .child(self.panel_head(&name, &where_, branch.as_deref(), glyph, tint, &theme))
+            .child(self.panel_head(&name, &where_, branch.as_deref(), glyph, tint, call_btn, &theme))
             .child(section_head(
                 "Agents",
                 (working > 0).then(|| format!("{working} working")),
@@ -262,7 +263,8 @@ impl Arbos {
         )
     }
 
-    /// The project's name, where it lives, and the branch checked out there.
+    /// The project's name, where it lives, and the branch checked out there;
+    /// the handset that calls it at the end of the name line.
     fn panel_head(
         &self,
         name: &str,
@@ -270,6 +272,7 @@ impl Arbos {
         branch: Option<&str>,
         glyph: &'static str,
         tint: Hsla,
+        call: AnyElement,
         theme: &Theme,
     ) -> AnyElement {
         div()
@@ -288,7 +291,14 @@ impl Arbos {
                     .text_style(TextStyle::Body)
                     .text_color(theme.text)
                     .child(icons::icon(glyph).size(px(13.)).text_color(tint))
-                    .child(div().min_w_0().truncate().child(SharedString::from(name.to_string()))),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(name.to_string())),
+                    )
+                    .child(call),
             )
             .child(
                 div()
@@ -300,6 +310,57 @@ impl Arbos {
                         None => where_.to_string(),
                     })),
             )
+            .into_any_element()
+    }
+
+    /// The handset: a call to this project's main agent through the speech
+    /// server. Green-tinted while a call is live, when it means hang up; a
+    /// spinner while the call connects; faint with a tooltip that says why
+    /// when no speech server is set up.
+    fn call_button(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let live = self.call.is_some();
+        let connecting = self.call.as_ref().is_some_and(|call| call.connecting);
+        let can = self.can_call(cx);
+        let (path, tip, tint) = match (live, can) {
+            (true, _) => (
+                crate::assets::PHONE_OFF_ICON,
+                "End call",
+                theme.danger,
+            ),
+            (false, true) => (crate::assets::PHONE_ICON, "Call this project", theme.text_muted),
+            (false, false) => (
+                crate::assets::PHONE_ICON,
+                "Call needs a speech server: set voice_url in config.toml",
+                theme.text_faint,
+            ),
+        };
+        let glyph: AnyElement = if connecting {
+            transcript::spinner(
+                self.call.as_ref().map(|call| call.since.elapsed()).unwrap_or_default(),
+                theme.text_muted,
+                cx,
+            )
+        } else {
+            svg().path(path).size(px(13.)).text_color(tint).into_any_element()
+        };
+        theme
+            .ghost("panel-call")
+            .flex_none()
+            .size(px(22.))
+            .rounded(px(5.))
+            .items_center()
+            .justify_center()
+            .when(live, |el| el.bg(theme.danger.opacity(0.12)))
+            .tooltip(move |window, cx| Tooltip::with_keystroke(tip, "⇧⌘C", window, cx))
+            .child(glyph)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                if live {
+                    this.end_call(cx);
+                } else if can {
+                    this.start_call(cx);
+                }
+            }))
             .into_any_element()
     }
 

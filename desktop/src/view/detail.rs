@@ -869,7 +869,11 @@ impl Arbos {
                     )
                     .child(div().truncate().child(SharedString::from(machine))),
             )
-            .children(self.voice_status(theme, cx))
+            .children(if self.call.is_some() {
+                self.call_strip(theme, cx)
+            } else {
+                self.voice_status(theme, cx)
+            })
             .child(div().flex_1())
             .children(since.map(|since| {
                 div()
@@ -877,6 +881,150 @@ impl Arbos {
                     .child(transcript::spinner(since, theme.text_faint, cx))
             }))
             .into_any_element()
+    }
+
+    /// The call, in the row under the composer: an orb that breathes with
+    /// the mic while the caller talks and waves while Arbos speaks, the live
+    /// words (the caller's partial line, then the narrator's last line),
+    /// Mute, End. The composer above stays usable: typed words go to the
+    /// same agent as `text`.
+    fn call_strip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::voice_ws::Phase;
+        let call = self.call.as_ref()?;
+        let status = crate::voice_ws::status();
+        Painter::of(cx).lease(VOICE_FPS, Duration::from_millis(300), cx);
+        let t = voice_phase().as_secs_f32();
+        let reduce = cx.reduce_motion();
+        let speaking = status.phase == Some(Phase::Speaking);
+        let listening = matches!(status.phase, Some(Phase::Listening | Phase::Ready));
+        // The orb: 14 px at rest; the mic level swells it while the caller
+        // talks, a slow wave while Arbos does. Muted: hollow.
+        let swell = if reduce {
+            0.0
+        } else if speaking {
+            0.25 * (t * 5.0).sin().abs()
+        } else if listening && !status.muted {
+            (status.level * 0.6).min(0.5)
+        } else {
+            0.0
+        };
+        let size = 12.0 + 8.0 * swell;
+        let orb_color = if call.connecting {
+            theme.text_faint
+        } else if speaking {
+            theme.accent
+        } else {
+            theme.success
+        };
+        let orb = div()
+            .flex_none()
+            .w(px(20.))
+            .h(px(20.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .size(px(size))
+                    .rounded_full()
+                    .when(!status.muted, |el| el.bg(orb_color))
+                    .when(status.muted, |el| el.border_2().border_color(theme.text_faint)),
+            );
+        let label = if call.connecting {
+            "Calling…".to_string()
+        } else if speaking {
+            "Arbos".to_string()
+        } else if status.muted {
+            "Muted".to_string()
+        } else {
+            "Listening".to_string()
+        };
+        // One line of live words: what the caller is saying now, else the
+        // last thing the narrator said.
+        let words = if !status.text.trim().is_empty() && !speaking {
+            format!("you: {}", status.text.trim())
+        } else if !status.reply.trim().is_empty() && speaking {
+            format!("voice: {}", status.reply.trim())
+        } else if !status.last_said.is_empty() {
+            format!("voice: {}", status.last_said)
+        } else {
+            String::new()
+        };
+        let words: String = words.split_whitespace().collect::<Vec<_>>().join(" ");
+        let words: String = if words.chars().count() > 90 {
+            words.chars().take(90).collect::<String>() + "…"
+        } else {
+            words
+        };
+        let muted = status.muted;
+        let mute = theme
+            .ghost("call-mute")
+            .flex_none()
+            .h(px(20.))
+            .px(px(6.))
+            .rounded(px(4.))
+            .items_center()
+            .gap(px(4.))
+            .text_style(TextStyle::Caption)
+            .text_color(if muted { theme.danger } else { theme.text_muted })
+            .when(muted, |el| el.bg(theme.danger.opacity(0.12)))
+            .tooltip(move |window, cx| {
+                Tooltip::with_keystroke(if muted { "Unmute" } else { "Mute" }, "⇧⌘M", window, cx)
+            })
+            .child(
+                icons::icon(if muted { icons::media::VOLUME_MUTE } else { icons::media::MICROPHONE })
+                    .size(px(11.))
+                    .text_color(if muted { theme.danger } else { theme.text_muted }),
+            )
+            .child(if muted { "Unmute" } else { "Mute" })
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_mute(cx)));
+        let end = theme
+            .ghost("call-end")
+            .flex_none()
+            .h(px(20.))
+            .px(px(6.))
+            .rounded(px(4.))
+            .items_center()
+            .gap(px(4.))
+            .text_style(TextStyle::Caption)
+            .text_color(theme.danger)
+            .bg(theme.danger.opacity(0.12))
+            .tooltip(|window, cx| Tooltip::with_keystroke("End call", "⇧⌘C", window, cx))
+            .child(
+                svg()
+                    .path(crate::assets::PHONE_OFF_ICON)
+                    .size(px(11.))
+                    .text_color(theme.danger),
+            )
+            .child("End")
+            .on_click(cx.listener(|this, _, _, cx| this.end_call(cx)));
+        Some(
+            div()
+                .id("composer-call-strip")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .pl(px(8.))
+                .min_w_0()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_muted)
+                .child(orb)
+                .child(SharedString::from(label))
+                .when(!words.is_empty(), |row| {
+                    row.child(
+                        div()
+                            .id("call-words")
+                            .max_w(px(420.))
+                            .truncate()
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(words)),
+                    )
+                })
+                .child(mute)
+                .child(end)
+                .into_any_element(),
+        )
     }
 
     /// "Listening" with a level meter while the mic is open, "Speaking"
