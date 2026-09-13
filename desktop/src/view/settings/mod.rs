@@ -129,10 +129,10 @@ pub fn open(
         },
         |window, cx| {
             appearance::observe_window(window, cx).detach();
-            cx.new(|_cx| SettingsWindow {
+            cx.new(|cx| SettingsWindow {
                 workspace,
                 section,
-                host: model::HostPanel::new(),
+                host: model::HostPanel::new(cx),
             })
         },
     )
