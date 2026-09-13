@@ -131,6 +131,7 @@ impl JobsRoot {
         command: &str,
         cwd: &Path,
         timeout_ms: Option<u64>,
+        sandbox: Option<&crate::sandbox::Sandbox>,
     ) -> Result<(Job, Child)> {
         fs::create_dir_all(&self.0).with_context(|| format!("jobs dir {}", self.0.display()))?;
         self.prune();
@@ -146,9 +147,20 @@ impl JobsRoot {
             sh_quote(&cwd.display().to_string()),
             sh_quote(&exit_path.display().to_string())
         );
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(&script)
+        // Inside a sandbox the wrapper shell runs there too, so the exit
+        // file is written from within (the jobs dir is under the place).
+        let (program, args) = match sandbox {
+            Some(sb) => match sb.wrap(&script, cwd) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&dir);
+                    return Err(e);
+                }
+            },
+            None => ("sh".to_string(), vec!["-c".to_string(), script.clone()]),
+        };
+        let mut cmd = Command::new(program);
+        cmd.args(args)
             .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::from(journal))

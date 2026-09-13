@@ -121,7 +121,8 @@ impl Tool for Bash {
             };
 
             let root = JobsRoot::for_agent(&cx.place, &cx.agent.id);
-            let (job, mut child) = root.spawn(cmd, &dir, timeout_ms)?;
+            let sandbox = crate::sandbox::for_agent(&cx.place, &cx.agent);
+            let (job, mut child) = root.spawn(cmd, &dir, timeout_ms, sandbox.as_ref())?;
             let journal = job.journal().display().to_string();
 
             // Reap in the background so the call can return before the

@@ -414,7 +414,7 @@ async fn run_job(hooks: &KernelHooks, agent: &Agent, cmd: &str) -> (Option<Strin
         .clone()
         .unwrap_or_else(|| hooks.place.path.clone());
     let root = JobsRoot::for_agent(&hooks.place, &agent.id);
-    let (job, mut child) = match root.spawn(cmd, &cwd, Some(CMD_TIMEOUT.as_millis() as u64)) {
+    let (job, mut child) = match root.spawn(cmd, &cwd, Some(CMD_TIMEOUT.as_millis() as u64), None) {
         Ok(x) => x,
         Err(e) => return (None, -1, format!("could not start: {e}")),
     };
