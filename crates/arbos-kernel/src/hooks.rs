@@ -7,9 +7,8 @@
 
 use anyhow::{Result, bail};
 use arbos_core::{
-    Agent, AgentId, Event, EventKind, NodeId, Place, Wake, append_event,
-    files::Layout,
-    inbox, list_agents, notes, subscription, validate_id,
+    Agent, AgentId, Event, EventKind, NodeId, Place, Wake, append_event, files::Layout, inbox,
+    list_agents, notes, subscription, validate_id,
 };
 use arbos_engine::TurnControl;
 use serde_json::Value;
@@ -384,7 +383,13 @@ impl KernelHooks {
     }
     /// A user prompt (or another producer's words) as an inbox file.
     /// `from`: `user`, `user:<name>`, `agent:<id>`, `kernel`.
-    pub fn inbox(&self, agent: &str, text: &str, from: &str, attachments: Vec<String>) -> Result<NodeId> {
+    pub fn inbox(
+        &self,
+        agent: &str,
+        text: &str,
+        from: &str,
+        attachments: Vec<String>,
+    ) -> Result<NodeId> {
         let (from, kind) = match from {
             o if o.starts_with("spawn:") => (format!("agent:{}", &o["spawn:".len()..]), "brief"),
             "" | "user" => ("user".to_string(), "request"),
@@ -544,7 +549,9 @@ impl KernelHooks {
                     sub.paused = false;
                     sub.next_due = Some(inbox::rfc3339(arbos_core::now_ms()));
                 }
-                other => bail!("{other}: not an operation on a subscription (cancel, run, pause, reopen)"),
+                other => bail!(
+                    "{other}: not an operation on a subscription (cancel, run, pause, reopen)"
+                ),
             }
             subscription::save(&self.place, agent, &sub)?;
             self.plan_changed(agent);
@@ -563,7 +570,9 @@ impl KernelHooks {
                 "cancel" => {
                     notes.remove(n)?;
                 }
-                other => bail!("{other}: not an operation on a notes item (check, uncheck, cancel)"),
+                other => {
+                    bail!("{other}: not an operation on a notes item (check, uncheck, cancel)")
+                }
             }
             return self.save_notes(agent, &notes);
         }

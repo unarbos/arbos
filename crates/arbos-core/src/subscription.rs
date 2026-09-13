@@ -174,9 +174,13 @@ impl Subscription {
             bail!("kind must be one of {}", KINDS.join(", "));
         }
         if let Some(e) = &self.every {
-            let ms = parse_duration_ms(e).with_context(|| format!("every {e:?} is not a duration (30m, 2h, 1d)"))?;
+            let ms = parse_duration_ms(e)
+                .with_context(|| format!("every {e:?} is not a duration (30m, 2h, 1d)"))?;
             if ms < MIN_EVERY_MS {
-                bail!("every {e:?} is under the minimum of {}s", MIN_EVERY_MS / 1000);
+                bail!(
+                    "every {e:?} is under the minimum of {}s",
+                    MIN_EVERY_MS / 1000
+                );
             }
         }
         match self.kind.as_str() {
@@ -221,7 +225,10 @@ impl Subscription {
             bail!("deliver_to must be agent or user");
         }
         if self.deliver_to == "user" && self.kind != "shell" {
-            bail!("deliver_to = user is for shell (a reading with no model turn); a {} wakes the agent", self.kind);
+            bail!(
+                "deliver_to = user is for shell (a reading with no model turn); a {} wakes the agent",
+                self.kind
+            );
         }
         Ok(())
     }
@@ -242,7 +249,11 @@ pub fn align_at(due_ms: i64, at: Option<&str>) -> i64 {
         };
         let base = due_ms - due_ms.rem_euclid(hour_ms);
         let target = base + m * 60_000;
-        return if target >= due_ms { target } else { target + hour_ms };
+        return if target >= due_ms {
+            target
+        } else {
+            target + hour_ms
+        };
     }
     let Some((h, m)) = at.split_once(':') else {
         return due_ms;
@@ -252,7 +263,11 @@ pub fn align_at(due_ms: i64, at: Option<&str>) -> i64 {
     };
     let base = due_ms - due_ms.rem_euclid(day_ms);
     let target = base + h * hour_ms + m * 60_000;
-    if target >= due_ms { target } else { target + day_ms }
+    if target >= due_ms {
+        target
+    } else {
+        target + day_ms
+    }
 }
 
 pub fn dir(place: &Place, agent: &str) -> PathBuf {
@@ -307,7 +322,12 @@ pub fn save(place: &Place, agent: &str, sub: &Subscription) -> Result<PathBuf> {
 
 /// Add `sub` with the next free id; `next_due` is set from `after`,
 /// `every`, and `at` when the caller left it empty.
-pub fn add(place: &Place, agent: &str, mut sub: Subscription, after: Option<&str>) -> Result<Subscription> {
+pub fn add(
+    place: &Place,
+    agent: &str,
+    mut sub: Subscription,
+    after: Option<&str>,
+) -> Result<Subscription> {
     let now = crate::now_ms();
     let existing = list(place, agent);
     sub.id = existing.iter().map(|s| s.id).max().unwrap_or(0) + 1;
@@ -315,12 +335,16 @@ pub fn add(place: &Place, agent: &str, mut sub: Subscription, after: Option<&str
         sub.created = crate::inbox::rfc3339(now);
     }
     if sub.next_due.is_none() {
-        if after.is_none() && sub.every_ms().is_none() && matches!(sub.kind.as_str(), "timer" | "shell") {
+        if after.is_none()
+            && sub.every_ms().is_none()
+            && matches!(sub.kind.as_str(), "timer" | "shell")
+        {
             bail!("{} needs every (recurring) or after (one-shot)", sub.kind);
         }
         let first = match after {
             Some(a) => {
-                let ms = parse_duration_ms(a).with_context(|| format!("after {a:?} is not a duration"))?;
+                let ms = parse_duration_ms(a)
+                    .with_context(|| format!("after {a:?} is not a duration"))?;
                 now + ms as i64
             }
             None => match sub.every_ms() {
@@ -461,7 +485,12 @@ mod tests {
         assert!(fired.next_due_ms().unwrap() > now + 7_000_000);
         let listed = list(&p, "root");
         assert_eq!(listed.len(), 1);
-        assert!(path_of(&p, "root", 1).unwrap().to_string_lossy().ends_with("0001-run-tests.toml"));
+        assert!(
+            path_of(&p, "root", 1)
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("0001-run-tests.toml")
+        );
     }
 
     #[test]
@@ -497,8 +526,14 @@ mod tests {
         let day = 86_400_000;
         let t = day * 100 + 10 * 3_600_000; // 10:00
         assert_eq!(align_at(t, Some("09:00")), day * 101 + 9 * 3_600_000);
-        assert_eq!(align_at(t, Some("11:30")), day * 100 + 11 * 3_600_000 + 30 * 60_000);
-        assert_eq!(align_at(t + 20 * 60_000, Some(":15")), t + 3_600_000 + 15 * 60_000);
+        assert_eq!(
+            align_at(t, Some("11:30")),
+            day * 100 + 11 * 3_600_000 + 30 * 60_000
+        );
+        assert_eq!(
+            align_at(t + 20 * 60_000, Some(":15")),
+            t + 3_600_000 + 15 * 60_000
+        );
         assert_eq!(align_at(t, None), t);
     }
 }

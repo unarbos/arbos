@@ -498,7 +498,12 @@ fn deliver(hooks: &KernelHooks, record: &Record, text: &str) -> Result<()> {
             text: text.to_string(),
         }),
     )?;
-    hooks.inbox(&record.parent, text, &format!("agent:{}", record.agent), Vec::new())?;
+    hooks.inbox(
+        &record.parent,
+        text,
+        &format!("agent:{}", record.agent),
+        Vec::new(),
+    )?;
     Ok(())
 }
 

@@ -105,12 +105,16 @@ pub fn verdict(hooks: &Arc<KernelHooks>, horizon_ms: i64) -> Verdict {
             continue;
         }
         let id = agent.id.as_str();
-        if arbos_core::inbox::list(&hooks.place, id).iter().any(|f| f.msg.wake) {
+        if arbos_core::inbox::list(&hooks.place, id)
+            .iter()
+            .any(|f| f.msg.wake)
+        {
             return Verdict::Busy(format!("{id}: a message waits for a turn"));
         }
-        if let Some(sub) = subscription::list(&hooks.place, id).into_iter().find(|s| {
-            !s.paused && s.next_due_ms().is_some_and(|due| due <= now + horizon_ms)
-        }) {
+        if let Some(sub) = subscription::list(&hooks.place, id)
+            .into_iter()
+            .find(|s| !s.paused && s.next_due_ms().is_some_and(|due| due <= now + horizon_ms))
+        {
             let due = sub.next_due_ms().unwrap_or(now);
             return Verdict::Busy(format!(
                 "{id}: subscription #{} due in {}s",

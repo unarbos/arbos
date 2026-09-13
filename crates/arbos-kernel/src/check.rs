@@ -199,8 +199,16 @@ pub fn check(place: &Place) -> Result<Report> {
             );
         }
         let layout = Layout::new(place, a.id.as_str());
-        check_subscriptions(&mut r, &rel(&layout.dir.join("subscriptions")), &layout.dir.join("subscriptions"));
-        check_notes(&mut r, &rel(&layout.dir.join("notes.md")), &layout.dir.join("notes.md"));
+        check_subscriptions(
+            &mut r,
+            &rel(&layout.dir.join("subscriptions")),
+            &layout.dir.join("subscriptions"),
+        );
+        check_notes(
+            &mut r,
+            &rel(&layout.dir.join("notes.md")),
+            &layout.dir.join("notes.md"),
+        );
         if layout.plan_jsonl().exists() {
             r.warn(
                 rel(&layout.plan_jsonl()),
@@ -360,7 +368,10 @@ fn check_subscriptions(r: &mut Report, rel: &str, dir: &Path) {
     let mut paths: Vec<_> = rd.flatten().map(|e| e.path()).collect();
     paths.sort();
     for p in paths {
-        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if name.starts_with('.') {
             continue;
         }
@@ -375,11 +386,19 @@ fn check_subscriptions(r: &mut Report, rel: &str, dir: &Path) {
                     r.error(&file_rel, None, format!("{e:#}"));
                 }
                 if ids.contains(&sub.id) {
-                    r.error(&file_rel, None, format!("id {} repeats another file's", sub.id));
+                    r.error(
+                        &file_rel,
+                        None,
+                        format!("id {} repeats another file's", sub.id),
+                    );
                 }
                 ids.push(sub.id);
                 if !name.starts_with(&format!("{:04}-", sub.id)) {
-                    r.warn(&file_rel, None, format!("file name does not start with {:04}-", sub.id));
+                    r.warn(
+                        &file_rel,
+                        None,
+                        format!("file name does not start with {:04}-", sub.id),
+                    );
                 }
                 if sub.next_due.is_some() && sub.next_due_ms().is_none() {
                     r.error(&file_rel, None, "next_due is not an RFC 3339 instant");
@@ -402,12 +421,23 @@ fn check_notes(r: &mut Report, rel: &str, path: &Path) {
             && let Some(end) = rest.find(']')
             && !matches!(&rest[..end], " " | "" | "x" | "X")
         {
-            r.warn(rel, Some(i + 1), format!("checkbox mark {:?} is not one the plan tool reads (space or x)", &rest[..end]));
+            r.warn(
+                rel,
+                Some(i + 1),
+                format!(
+                    "checkbox mark {:?} is not one the plan tool reads (space or x)",
+                    &rest[..end]
+                ),
+            );
         }
     }
     let n = notes::read_path(path).items().len();
     if n > 200 {
-        r.warn(rel, None, format!("{n} items; the prompt shows them all — archive the done ones"));
+        r.warn(
+            rel,
+            None,
+            format!("{n} items; the prompt shows them all — archive the done ones"),
+        );
     }
 }
 

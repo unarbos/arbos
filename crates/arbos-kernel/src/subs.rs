@@ -12,7 +12,11 @@ use std::{
     time::Duration,
 };
 
-use arbos_core::{Agent, inbox, list_agents, subscription::{self, Subscription}, text};
+use arbos_core::{
+    Agent, inbox, list_agents,
+    subscription::{self, Subscription},
+    text,
+};
 use arbos_engine::JobsRoot;
 
 use crate::hooks::KernelHooks;
@@ -46,7 +50,15 @@ pub fn tick(hooks: &Arc<KernelHooks>, now: i64) {
                 let _ = inbox::deliver(
                     &hooks.place,
                     id,
-                    &message(&sub, false, format!("Subscription #{} ({}) expired and was removed.", sub.id, sub.label())),
+                    &message(
+                        &sub,
+                        false,
+                        format!(
+                            "Subscription #{} ({}) expired and was removed.",
+                            sub.id,
+                            sub.label()
+                        ),
+                    ),
                 );
                 hooks.plan_changed(id);
                 continue;
@@ -71,7 +83,11 @@ pub fn fire_now(hooks: &Arc<KernelHooks>, agent: &str, id: u32) -> anyhow::Resul
 fn message(sub: &Subscription, wake: bool, body: String) -> inbox::Message {
     inbox::Message {
         from: format!("subscription:{}", sub.id),
-        kind: if wake { "wake".into() } else { "message".into() },
+        kind: if wake {
+            "wake".into()
+        } else {
+            "message".into()
+        },
         wake,
         hops: 0,
         body,
@@ -86,7 +102,11 @@ fn settle(hooks: &KernelHooks, agent: &str, mut sub: Subscription, now: i64, las
     if sub.next_due.is_none() {
         let _ = subscription::remove(&hooks.place, agent, sub.id);
     } else if let Err(e) = subscription::save(&hooks.place, agent, &sub) {
-        crate::klog::warn("subscription_save_failed", Some(agent), format!("#{}: {e:#}", sub.id));
+        crate::klog::warn(
+            "subscription_save_failed",
+            Some(agent),
+            format!("#{}: {e:#}", sub.id),
+        );
     }
     hooks.plan_changed(agent);
 }
@@ -104,7 +124,11 @@ fn fire(hooks: &Arc<KernelHooks>, agent: &Agent, sub: Subscription, now: i64) {
         }
         "inbox" => {
             let path = std::path::PathBuf::from(sub.path.clone().unwrap_or_default());
-            let path = if path.is_absolute() { path } else { hooks.place.path.join(path) };
+            let path = if path.is_absolute() {
+                path
+            } else {
+                hooks.place.path.join(path)
+            };
             let seen: HashSet<String> = sub
                 .seen
                 .as_deref()
@@ -126,8 +150,16 @@ fn fire(hooks: &Arc<KernelHooks>, agent: &Agent, sub: Subscription, now: i64) {
             let first_look = sub.seen.is_none();
             sub.seen = Some(serde_json::to_string(&now_names).unwrap_or_default());
             let outcome = if !new.is_empty() && !first_look {
-                let list: Vec<String> = new.iter().map(|n| format!("{}/{n}", path.display())).collect();
-                let body = format!("{}\n\nNew in {}:\n{}", sub.prompt, path.display(), list.join("\n"));
+                let list: Vec<String> = new
+                    .iter()
+                    .map(|n| format!("{}/{n}", path.display()))
+                    .collect();
+                let body = format!(
+                    "{}\n\nNew in {}:\n{}",
+                    sub.prompt,
+                    path.display(),
+                    list.join("\n")
+                );
                 match inbox::deliver(&hooks.place, id, &message(&sub, true, body)) {
                     Ok(_) => format!("{} new file(s)", new.len()),
                     Err(e) => format!("could not deliver: {e:#}"),
@@ -175,7 +207,10 @@ fn fire(hooks: &Arc<KernelHooks>, agent: &Agent, sub: Subscription, now: i64) {
                     } else {
                         let body = format!(
                             "{}\n\nSubscription #{} ran `{}` (exit 0). Output:\n{}",
-                            sub.prompt, sub.id, cmd, if tail.is_empty() { "(none)" } else { &tail }
+                            sub.prompt,
+                            sub.id,
+                            cmd,
+                            if tail.is_empty() { "(none)" } else { &tail }
                         );
                         match inbox::deliver(&hooks.place, id, &message(&sub, true, body)) {
                             Ok(_) => format!("exit 0 — {}", text::clip(&tail, 120)),
@@ -183,10 +218,21 @@ fn fire(hooks: &Arc<KernelHooks>, agent: &Agent, sub: Subscription, now: i64) {
                         }
                     }
                 } else {
-                    let why = if silent && code == 0 { "no output for the reading".to_string() } else { format!("exit {code}") };
+                    let why = if silent && code == 0 {
+                        "no output for the reading".to_string()
+                    } else {
+                        format!("exit {code}")
+                    };
                     let body = format!(
                         "Subscription #{} (`{}`) failed: {why}. Output tail:\n{}\nDiagnose and act: fix the cause, change the command (subscribe remove {} and add a new one), or remove it and say so.",
-                        sub.id, cmd, if tail.is_empty() { "(no output captured)" } else { &tail }, sub.id
+                        sub.id,
+                        cmd,
+                        if tail.is_empty() {
+                            "(no output captured)"
+                        } else {
+                            &tail
+                        },
+                        sub.id
                     );
                     let _ = inbox::deliver(&hooks.place, id, &message(&sub, true, body));
                     format!("{why} — {}", text::clip(&tail, 120))
@@ -230,13 +276,23 @@ fn fire(hooks: &Arc<KernelHooks>, agent: &Agent, sub: Subscription, now: i64) {
                     let mut current = current;
                     current.seen = outcome.seen.or(current.seen);
                     current.error = outcome.error;
-                    settle(&hooks, &agent_id, current, arbos_core::now_ms(), outcome.last);
+                    settle(
+                        &hooks,
+                        &agent_id,
+                        current,
+                        arbos_core::now_ms(),
+                        outcome.last,
+                    );
                 }
                 hooks.kick();
             });
         }
         other => {
-            crate::klog::warn("subscription_kind", Some(id), format!("#{}: unknown kind {other}", sub.id));
+            crate::klog::warn(
+                "subscription_kind",
+                Some(id),
+                format!("#{}: unknown kind {other}", sub.id),
+            );
             let mut sub = sub;
             sub.paused = true;
             let _ = subscription::save(&hooks.place, id, &sub);
@@ -257,14 +313,20 @@ fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
     let pr = sub.pr.unwrap_or(0);
     match crate::github::snapshot(&repo, pr) {
         Ok(now) => {
-            let prev: Option<crate::github::Snapshot> =
-                sub.seen.as_deref().and_then(|s| serde_json::from_str(s).ok());
+            let prev: Option<crate::github::Snapshot> = sub
+                .seen
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
             let lines: Vec<String> = match &prev {
                 Some(p) => crate::github::diff(p, &now)
                     .into_iter()
                     .filter(|l| {
                         let is_check = l.starts_with("check ");
-                        if sub.kind == "github_ci" { is_check } else { !is_check }
+                        if sub.kind == "github_ci" {
+                            is_check
+                        } else {
+                            !is_check
+                        }
                     })
                     .collect(),
                 None => Vec::new(),
@@ -276,7 +338,11 @@ fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
                     "{repo}#{pr} ({}): {}{}",
                     now.title,
                     lines.join("; "),
-                    if sub.prompt.is_empty() { String::new() } else { format!(". You asked: {}", sub.prompt) }
+                    if sub.prompt.is_empty() {
+                        String::new()
+                    } else {
+                        format!(". You asked: {}", sub.prompt)
+                    }
                 );
                 let mut msg = message(sub, true, text.clone());
                 msg.from = "github".into();

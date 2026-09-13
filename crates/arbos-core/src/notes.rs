@@ -176,17 +176,20 @@ impl Notes {
         let insert_at = if section.is_empty() {
             None
         } else {
-            self.lines.iter().position(|l| l.trim() == heading).map(|h| {
-                // After the last item line of this section.
-                let mut end = h + 1;
-                while end < self.lines.len() && !self.lines[end].starts_with("## ") {
-                    end += 1;
-                }
-                while end > h + 1 && self.lines[end - 1].trim().is_empty() {
-                    end -= 1;
-                }
-                end
-            })
+            self.lines
+                .iter()
+                .position(|l| l.trim() == heading)
+                .map(|h| {
+                    // After the last item line of this section.
+                    let mut end = h + 1;
+                    while end < self.lines.len() && !self.lines[end].starts_with("## ") {
+                        end += 1;
+                    }
+                    while end > h + 1 && self.lines[end - 1].trim().is_empty() {
+                        end -= 1;
+                    }
+                    end
+                })
         };
         let line = format!("- [ ] {}", text.trim());
         match insert_at {
@@ -207,7 +210,9 @@ impl Notes {
     /// Rewrite item `n`'s text (the status readout is part of it).
     pub fn update(&mut self, n: usize, text: &str) -> Result<()> {
         let ix = self.line_of(n).with_context(|| format!("no item {n}"))?;
-        let done = parse_item_line(&self.lines[ix]).map(|(d, _)| d).unwrap_or(false);
+        let done = parse_item_line(&self.lines[ix])
+            .map(|(d, _)| d)
+            .unwrap_or(false);
         self.lines[ix] = format!("- [{}] {}", if done { 'x' } else { ' ' }, text.trim());
         Ok(())
     }
@@ -220,15 +225,26 @@ impl Notes {
         let (_, text) = parse_item_line(&self.lines[ix]).context("not an item")?;
         let mut text = text.to_string();
         if let Some(r) = readout.map(str::trim).filter(|r| !r.is_empty()) {
-            let label = text.split_once(" — ").map(|(l, _)| l).unwrap_or(&text).to_string();
+            let label = text
+                .split_once(" — ")
+                .map(|(l, _)| l)
+                .unwrap_or(&text)
+                .to_string();
             text = format!("{label} — {r}");
         }
         let line = format!("- [{}] {text}", if done { 'x' } else { ' ' });
         self.lines.remove(ix);
         // The section's span after removal.
-        let start = (0..ix).rev().find(|&i| self.lines[i].starts_with("## ") || self.lines[i].starts_with("### ")).map(|h| h + 1).unwrap_or(0);
+        let start = (0..ix)
+            .rev()
+            .find(|&i| self.lines[i].starts_with("## ") || self.lines[i].starts_with("### "))
+            .map(|h| h + 1)
+            .unwrap_or(0);
         let mut end = start;
-        while end < self.lines.len() && !self.lines[end].starts_with("## ") && !self.lines[end].starts_with("### ") {
+        while end < self.lines.len()
+            && !self.lines[end].starts_with("## ")
+            && !self.lines[end].starts_with("### ")
+        {
             end += 1;
         }
         while end > start && self.lines[end - 1].trim().is_empty() {
@@ -282,7 +298,12 @@ impl Notes {
                     out.push_str(&format!("## {section}\n"));
                 }
             }
-            out.push_str(&format!("[{}] {} {}\n", if i.done { 'x' } else { ' ' }, i.n, i.text));
+            out.push_str(&format!(
+                "[{}] {} {}\n",
+                if i.done { 'x' } else { ' ' },
+                i.n,
+                i.text
+            ));
         }
         out.trim_end().to_string()
     }
@@ -300,7 +321,10 @@ pub fn items_from_json(v: &serde_json::Value) -> Result<Vec<(String, String)>> {
                 if let Some(s) = o.get("section").and_then(|s| s.as_str()) {
                     section = s.to_string();
                 }
-                let text = o.get("text").and_then(|t| t.as_str()).context("item needs text")?;
+                let text = o
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .context("item needs text")?;
                 out.push((section.clone(), text.to_string()));
             }
             _ => bail!("an item is a string or {{section, text}}"),
@@ -340,19 +364,36 @@ mod tests {
         assert!(items[2].done && items[2].label() == "#96");
         for k in 0..3 {
             n.add("Kernel", &format!("t{k}"));
-            let last = n.items().into_iter().filter(|i| i.section == "Kernel" && !i.done).last().unwrap();
+            let last = n
+                .items()
+                .into_iter()
+                .filter(|i| i.section == "Kernel" && !i.done)
+                .last()
+                .unwrap();
             n.check(last.n, true, None).unwrap();
         }
-        let done: Vec<_> = n.items().into_iter().filter(|i| i.section == "Kernel" && i.done).collect();
+        let done: Vec<_> = n
+            .items()
+            .into_iter()
+            .filter(|i| i.section == "Kernel" && i.done)
+            .collect();
         assert_eq!(done.len(), DONE_KEPT);
         assert_eq!(done.last().unwrap().text, "t2");
-        assert!(n.items().iter().any(|i| i.section == "Desktop"), "{}", n.render());
+        assert!(
+            n.items().iter().any(|i| i.section == "Desktop"),
+            "{}",
+            n.render()
+        );
     }
 
     #[test]
     fn set_add_update_remove_round_trip() {
         let mut n = Notes::default();
-        n.set(&[("Plan".into(), "read the issue".into()), ("Plan".into(), "fix".into()), ("Verify".into(), "run tests".into())]);
+        n.set(&[
+            ("Plan".into(), "read the issue".into()),
+            ("Plan".into(), "fix".into()),
+            ("Verify".into(), "run tests".into()),
+        ]);
         assert_eq!(n.items().len(), 3);
         assert_eq!(n.add("Plan", "commit"), 4);
         assert_eq!(n.items()[2].text, "commit");
@@ -360,7 +401,11 @@ mod tests {
         assert_eq!(n.items()[0].readout(), Some("done reading"));
         n.remove(2).unwrap();
         assert_eq!(n.items().len(), 3);
-        assert!(n.show().contains("## Verify\n[ ] 3 run tests"), "{}", n.show());
+        assert!(
+            n.show().contains("## Verify\n[ ] 3 run tests"),
+            "{}",
+            n.show()
+        );
         assert!(n.render().contains("## Plan\n- [ ] read the issue — done reading\n- [ ] commit\n\n## Verify\n- [ ] run tests\n"), "{}", n.render());
     }
 }

@@ -288,12 +288,15 @@ impl Tool for PlanTool {
                 args.get("n")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as usize)
-                    .ok_or_else(|| anyhow::anyhow!("plan {op}: n (the item number from show) is required"))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("plan {op}: n (the item number from show) is required")
+                    })
             };
             let ack = match op {
                 "set" => {
                     let items = arbos_core::notes::items_from_json(
-                        args.get("items").ok_or_else(|| anyhow::anyhow!("plan set: items is required"))?,
+                        args.get("items")
+                            .ok_or_else(|| anyhow::anyhow!("plan set: items is required"))?,
                     )?;
                     notes.set(&items);
                     hooks.save_notes(agent, &notes)?;
@@ -310,7 +313,12 @@ impl Tool for PlanTool {
                     let done = args.get("done").and_then(|v| v.as_bool()).unwrap_or(true);
                     let item = notes.check(k, done, opt_str(&args, "readout"))?;
                     hooks.save_notes(agent, &notes)?;
-                    format!("{} {}: {}", if done { "Checked" } else { "Reopened" }, k, item.text)
+                    format!(
+                        "{} {}: {}. Items are renumbered after a check (done ones sink); use the numbers in this list.",
+                        if done { "Checked" } else { "Reopened" },
+                        k,
+                        item.text
+                    )
                 }
                 "update" => {
                     let k = n()?;
@@ -325,7 +333,9 @@ impl Tool for PlanTool {
                     format!("Removed: {}", item.text)
                 }
                 "show" => String::new(),
-                other => anyhow::bail!("plan: unknown op {other:?} (set, add, check, update, remove, show)"),
+                other => anyhow::bail!(
+                    "plan: unknown op {other:?} (set, add, check, update, remove, show)"
+                ),
             };
             let shown = hooks.notes(agent).show();
             Ok(ToolOut::text(if ack.is_empty() {
@@ -399,7 +409,7 @@ impl Tool for SubscribeTool {
                         cmd: opt_str(&args, "cmd").map(str::to_string),
                         path: opt_str(&args, "path").map(str::to_string),
                         repo: opt_str(&args, "repo").map(str::to_string),
-                        pr: args.get("pr").and_then(|v| v.as_u64()),
+                        pr: args.get("pr").and_then(|v| v.as_u64()).filter(|n| *n > 0),
                         deliver_to: opt_str(&args, "deliver_to").unwrap_or("agent").to_string(),
                         notify: opt_str(&args, "notify").map(str::to_string),
                         expires: opt_str(&args, "expires").map(str::to_string),
@@ -434,7 +444,9 @@ impl Tool for SubscribeTool {
                     format!("Subscription #{k} {op}d.")
                 }
                 "list" => String::new(),
-                other => anyhow::bail!("subscribe: unknown op {other:?} (add, list, remove, pause, resume)"),
+                other => anyhow::bail!(
+                    "subscribe: unknown op {other:?} (add, list, remove, pause, resume)"
+                ),
             };
             let subs = arbos_core::subscription::list(&hooks.place, agent);
             let listing = if subs.is_empty() {
@@ -442,7 +454,8 @@ impl Tool for SubscribeTool {
             } else {
                 subs.iter()
                     .map(|s| {
-                        let mut line = format!("#{} {} — {} · {}", s.id, s.kind, s.label(), s.when_line());
+                        let mut line =
+                            format!("#{} {} — {} · {}", s.id, s.kind, s.label(), s.when_line());
                         if !s.last.is_empty() {
                             line.push_str(&format!(" · last: {}", s.last));
                         }

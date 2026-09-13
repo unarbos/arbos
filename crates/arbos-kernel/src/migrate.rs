@@ -163,7 +163,10 @@ fn migrate_plan(place: &Place, agent: &str, path: &Path) -> Option<String> {
         }
         let scheduled = n.when.every_ms.is_some() || n.when.after_ms.is_some();
         if scheduled || !n.when.condition.is_empty() {
-            let every = n.when.every_ms.map(|ms| subscription::human_ms(ms.max(subscription::MIN_EVERY_MS)));
+            let every = n
+                .when
+                .every_ms
+                .map(|ms| subscription::human_ms(ms.max(subscription::MIN_EVERY_MS)));
             let due = n
                 .when
                 .next_due_ms
@@ -187,7 +190,11 @@ fn migrate_plan(place: &Place, agent: &str, path: &Path) -> Option<String> {
                 created: inbox::rfc3339(if n.created_ms > 0 { n.created_ms } else { now }),
                 next_due: Some(inbox::rfc3339(due.max(now))),
                 last_fired: None,
-                last: if n.outcome.is_empty() { String::new() } else { format!("(migrated) {}", n.outcome) },
+                last: if n.outcome.is_empty() {
+                    String::new()
+                } else {
+                    format!("(migrated) {}", n.outcome)
+                },
                 error: None,
                 seen: None,
             };
@@ -197,7 +204,11 @@ fn migrate_plan(place: &Place, agent: &str, path: &Path) -> Option<String> {
                     sub.cmd = Some(cmd.clone());
                     if let Some(r) = report {
                         sub.deliver_to = "user".into();
-                        sub.notify = Some(if r.contains("{output}") { r.clone() } else { format!("{r} {{output}}") });
+                        sub.notify = Some(if r.contains("{output}") {
+                            r.clone()
+                        } else {
+                            format!("{r} {{output}}")
+                        });
                     }
                     if every.is_none() {
                         sub.every = Some("1h".into());
@@ -231,7 +242,11 @@ fn migrate_plan(place: &Place, agent: &str, path: &Path) -> Option<String> {
             match subscription::add(place, agent, sub, None) {
                 Ok(_) => n_subs += 1,
                 Err(e) => {
-                    crate::klog::warn("migrate_subscription", Some(agent), format!("node #{}: {e:#}", n.id));
+                    crate::klog::warn(
+                        "migrate_subscription",
+                        Some(agent),
+                        format!("node #{}: {e:#}", n.id),
+                    );
                     n_dropped += 1;
                 }
             }
@@ -239,7 +254,9 @@ fn migrate_plan(place: &Place, agent: &str, path: &Path) -> Option<String> {
         }
         if n.status == "pending" && is_inbox_node(n, &nodes) {
             let (from, kind) = match n.origin.as_str() {
-                o if o.starts_with("spawn:") => (format!("agent:{}", &o["spawn:".len()..]), "brief"),
+                o if o.starts_with("spawn:") => {
+                    (format!("agent:{}", &o["spawn:".len()..]), "brief")
+                }
                 "" | "user" => ("user".to_string(), "request"),
                 o => (o.to_string(), "request"),
             };
@@ -254,7 +271,9 @@ fn migrate_plan(place: &Place, agent: &str, path: &Path) -> Option<String> {
             }
         }
         // A goal with children is a section; its children are the lines.
-        if nodes.iter().any(|k| k.parent == n.id && matches!(k.status.as_str(), "pending" | "active" | "blocked")) {
+        if nodes.iter().any(|k| {
+            k.parent == n.id && matches!(k.status.as_str(), "pending" | "active" | "blocked")
+        }) {
             continue;
         }
         // An open goal: one checklist line, with its last outcome as the
@@ -334,7 +353,9 @@ fn migrate_github(place: &Place, path: &Path) -> Option<String> {
         }
     }
     let _ = std::fs::rename(path, path.with_extension("json.migrated"));
-    Some(format!("subscriptions.json: {n} pull-request follow(s) → github_pr files"))
+    Some(format!(
+        "subscriptions.json: {n} pull-request follow(s) → github_pr files"
+    ))
 }
 
 #[cfg(test)]
@@ -346,7 +367,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".arbos/agents/root")).unwrap();
         let p = Place::new(dir);
-        arbos_core::Agent::root("root").save(&p.agent_dir("root")).unwrap();
+        arbos_core::Agent::root("root")
+            .save(&p.agent_dir("root"))
+            .unwrap();
         p
     }
 
@@ -359,7 +382,10 @@ mod tests {
             r#"{"id":1,"goal":"Ship the feature","status":"pending","origin":"user"}"#,
             r#"{"id":2,"parent":1,"seq":1,"goal":"write the code","status":"done","outcome":"merged"}"#,
             r#"{"id":3,"parent":1,"seq":2,"goal":"write the docs","status":"pending","outcome":"half done"}"#,
-            &format!(r#"{{"id":4,"goal":"check the build","when":{{"every_ms":3600000,"next_due_ms":{}}},"do":{{"kind":"shell","cmd":"make test","report":"build: {{output}}"}},"status":"pending"}}"#, now + 1000),
+            &format!(
+                r#"{{"id":4,"goal":"check the build","when":{{"every_ms":3600000,"next_due_ms":{}}},"do":{{"kind":"shell","cmd":"make test","report":"build: {{output}}"}},"status":"pending"}}"#,
+                now + 1000
+            ),
             r#"{"id":5,"goal":"remind me to stretch","when":{"after_ms":9999999999999},"status":"pending"}"#,
             r#"{"id":6,"goal":"hello from the phone","status":"pending","origin":"user","when":{"wake":true}}"#,
         ];

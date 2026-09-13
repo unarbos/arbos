@@ -7,8 +7,7 @@
 
 use arbos_core::{
     Agent, Event, EventKind, Wake, WakeKind, append_event, inbox, list_agents, load_transcript,
-    notes, subscription,
-    wire::PlanNode,
+    notes, subscription, wire::PlanNode,
 };
 use std::sync::Arc;
 
@@ -324,7 +323,11 @@ pub fn wire_rows(place: &arbos_core::Place, agent: &str) -> Vec<PlanNode> {
             id: SUB_ID_BIT | u64::from(sub.id),
             parent: 0,
             goal: sub.label(),
-            status: if sub.paused { "blocked".into() } else { "pending".into() },
+            status: if sub.paused {
+                "blocked".into()
+            } else {
+                "pending".into()
+            },
             when: sub.when_line(),
             do_kind: match sub.kind.as_str() {
                 "shell" if sub.deliver_to == "user" => "notify".into(),
@@ -349,7 +352,11 @@ pub fn wire_rows(place: &arbos_core::Place, agent: &str) -> Vec<PlanNode> {
             when: String::new(),
             do_kind: "agent".into(),
             last: item.readout().unwrap_or("").to_string(),
-            origin: if item.section.is_empty() { String::new() } else { item.section.clone() },
+            origin: if item.section.is_empty() {
+                String::new()
+            } else {
+                item.section.clone()
+            },
             standing: false,
             inbox: false,
         });

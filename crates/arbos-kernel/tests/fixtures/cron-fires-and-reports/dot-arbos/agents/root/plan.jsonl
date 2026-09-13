@@ -1,1 +1,0 @@
-{"id":1,"parent":0,"seq":0,"goal":"BTC price","when":{"after_ms":1789290000000},"do":{"kind":"shell","cmd":"echo 42","report":"BTC: {output}"},"status":"pending","origin":"user","created_ms":1789280000000,"updated_ms":1789280000000}

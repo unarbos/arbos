@@ -1,3 +1,4 @@
-An inbox node (a user prompt the kernel holds) and a one-line replies.jsonl.
-Expect: the replay provider answers, the turn completes, the node is done.
-The state lives in dot-arbos/ (the repo ignores .arbos/); the runner renames it.
+A pending message node in a pre-Phase-2 plan.jsonl. Expect: the kernel
+migrates it to an inbox file at start, the turn runs against the scripted
+replies, completes, and turns/t0001/meta.toml records a success.
+State travels as dot-arbos/ (the repo ignores .arbos/); the runner renames it.
