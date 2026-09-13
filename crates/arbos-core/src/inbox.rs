@@ -137,7 +137,7 @@ pub fn deliver(place: &Place, agent: &str, msg: &Message) -> Result<String> {
     let who = slug(&msg.from);
     let text = msg.render()?;
     for seq in 0..1000u32 {
-        let name = format!("{stamp}-{who}-{seq}.md");
+        let name = format!("{stamp}-{who}-{seq:03}.md");
         let path = dir.join(&name);
         if path.exists() {
             continue;
@@ -197,6 +197,37 @@ pub fn read(place: &Place, agent: &str, name: &str) -> Result<Filed> {
         name: name.to_string(),
         msg: Message::parse(&text)?,
     })
+}
+
+/// Kinds a running turn takes at its tool boundaries: words meant for
+/// the turn under way (`steer`), and the kernel's "something finished"
+/// (`wake`). Requests, briefs, and notes wait for the next turn.
+pub fn is_steer_kind(kind: &str) -> bool {
+    matches!(kind, "steer" | "wake")
+}
+
+/// Whether a steer waits: a batch of tool calls stops taking new calls
+/// so the model reads it sooner.
+pub fn has_steer(place: &Place, agent: &str) -> bool {
+    list(place, agent)
+        .iter()
+        .any(|f| is_steer_kind(&f.msg.kind))
+}
+
+/// The messages a running turn reads now, oldest first, taken out of the
+/// inbox. A file the turn never reaches (it ends first) stays and starts
+/// the next turn, so nothing said mid-turn is lost to timing.
+pub fn take_steers(place: &Place, agent: &str) -> Vec<Message> {
+    let mut out = Vec::new();
+    for filed in list(place, agent) {
+        if !is_steer_kind(&filed.msg.kind) {
+            continue;
+        }
+        if std::fs::remove_file(&filed.path).is_ok() {
+            out.push(filed.msg);
+        }
+    }
+    out
 }
 
 /// Rewrite a message in place (its `wake`, say). Whole or absent.
@@ -307,4 +338,41 @@ fn slug(from: &str) -> String {
         })
         .collect();
     s.trim_matches('-').chars().take(24).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_boundary_takes_every_waiting_steer_in_order() {
+        let dir = std::env::temp_dir().join(format!("arbos-inbox-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let place = Place::new(&dir);
+        std::fs::create_dir_all(place.agent_dir("root")).unwrap();
+        for i in 0..25 {
+            let mut m = Message::new("user", "steer", format!("STEER-{i:02}"));
+            m.sent = rfc3339(1_789_000_000_000 + i);
+            deliver(&place, "root", &m).unwrap();
+        }
+        let mut note = Message::new("agent:peer", "message", "a note, not a steer");
+        note.wake = false;
+        deliver(&place, "root", &note).unwrap();
+        let all: Vec<String> = take_steers(&place, "root")
+            .into_iter()
+            .map(|m| m.body)
+            .collect();
+        assert_eq!(all.len(), 25);
+        assert_eq!(all.first().map(String::as_str), Some("STEER-00"));
+        assert_eq!(all.last().map(String::as_str), Some("STEER-24"));
+        assert!(all.windows(2).all(|w| w[0] < w[1]), "oldest first");
+        assert!(take_steers(&place, "root").is_empty());
+        assert!(!has_steer(&place, "root"));
+        assert_eq!(
+            list(&place, "root").len(),
+            1,
+            "the note stays for the next turn"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

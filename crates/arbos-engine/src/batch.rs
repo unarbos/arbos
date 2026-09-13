@@ -263,7 +263,7 @@ pub async fn run(
         }
 
         let stopped = control.is_stopped() || aborted;
-        let steered = control.steer_pending();
+        let steered = arbos_core::inbox::has_steer(&cx.place, cx.agent.id.as_str());
         let running = slots
             .iter()
             .filter(|s| matches!(s.state, State::Running))

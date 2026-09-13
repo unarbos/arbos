@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use arbos_core::{
-    Event, EventKind, Place, PlaceLock, TranscriptTail, Usage, Wake, WakeKind, append_event,
-    bootstrap, files::Layout, list_agents, load_agent, load_transcript, needs_serve, write_focus,
+    Event, EventKind, Place, PlaceLock, TranscriptTail, Usage, Wake, append_event, bootstrap,
+    files::Layout, inbox, list_agents, load_agent, load_transcript, needs_serve, write_focus,
 };
 use arbos_engine::{Host, JobsRoot, Registry};
 use base64::Engine;
@@ -343,14 +343,10 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 plan::finish_turn(&hooks, &clock, &id);
                 // The record of this turn is a commit in .arbos/.
                 crate::snapshot::commit_later(&place, turn_commit_message(&place, &id));
-                // Said to a running agent, but its turn ended before the
-                // next tool boundary: each one becomes a turn of its own.
-                if let Some(control) = control {
-                    let left = control.take_steers();
-                    if !left.is_empty() {
-                        hooks.requeue_steers(&id, left);
-                    }
-                }
+                // A steer the turn never reached is still a file in the
+                // inbox; the next scan starts a turn for it.
+                drop(control);
+                hooks.kick();
                 hooks.broadcast(Frame::Turn {
                     agent: id.clone(),
                     state: "idle".into(),
@@ -461,14 +457,13 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                             job.meta.command.replace('\n', " "),
                             job.journal().display()
                         );
-                        let _ = append_event(
-                            &Layout::new(&place, agent.id.as_str()).transcript(),
-                            &Event::new(EventKind::Notice { text: text.clone(), failed: false }),
-                        );
-                        if !sched.has_job(agent.id.as_str()) && !agent.paused {
-                            let mut w = Wake::new(agent.id.as_str(), WakeKind::Job, Some(text));
-                            w.node = None;
-                            let _ = wake_tx.send(w);
+                        // One inbox file: a running turn reads it at its
+                        // next tool boundary; an idle agent wakes on it.
+                        let msg = inbox::Message::new("kernel", "wake", text);
+                        if let Err(e) = inbox::deliver(&place, agent.id.as_str(), &msg) {
+                            klog::warn("job_notice_failed", Some(agent.id.as_str()), format!("{e:#}"));
+                        } else {
+                            hooks.kick();
                         }
                     }
                     let path = Layout::new(&place, agent.id.as_str()).transcript();
@@ -605,8 +600,16 @@ fn handle_frame(
                 }
                 return;
             }
+            // A steer is an inbox file of kind `steer`: the running turn
+            // takes it at its next tool boundary; if the turn ends first,
+            // the file starts the next turn. Nothing lives in memory.
             if steer && sched.has_job(&agent) {
-                sched.steer(&agent, text);
+                let mut msg = inbox::Message::new("user", "steer", text.clone());
+                msg.attachments = attachments.clone();
+                match inbox::deliver(place, &agent, &msg) {
+                    Ok(_) => hooks.broadcast(hooks.plan_frame(&agent)),
+                    Err(e) => refuse(hooks, Some(&agent), format!("steer: {e:#}")),
+                }
                 return;
             }
             // A child on another machine: the words go to its kernel.

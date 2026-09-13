@@ -78,6 +78,7 @@ pub fn reclaim(hooks: &KernelHooks) {
         let id = agent.id.as_str();
         let layout = hooks.layout(id);
         let _ = node::compact_nodes(&layout.plan_jsonl());
+        migrate_inbox_nodes(hooks, id, now);
         let continued = needs_serve(&hooks.place, id);
         let _g = hooks.plan_lock.lock().unwrap();
         let nodes = hooks.plan_nodes(id);
@@ -117,6 +118,53 @@ pub fn reclaim(hooks: &KernelHooks) {
         } else {
             let _ = hooks.plan_render(agent.id.as_str());
         }
+    }
+}
+
+/// Kernels before Phase 2 kept messages as plan nodes ("inbox nodes").
+/// Each pending one becomes an inbox file with the same words and
+/// sender, and the node closes as cancelled with a note saying where it
+/// went, so nothing waiting is lost across the upgrade and no node ever
+/// fires as a message again.
+fn migrate_inbox_nodes(hooks: &KernelHooks, agent: &str, now: i64) {
+    let _g = hooks.plan_lock.lock().unwrap();
+    let nodes = hooks.plan_nodes(agent);
+    let layout = hooks.layout(agent);
+    let mut moved = 0;
+    for mut n in nodes.clone() {
+        if n.status != Status::Pending || !node::is_inbox(&nodes, &n) {
+            continue;
+        }
+        let (from, kind) = match n.origin.as_str() {
+            o if o.starts_with("spawn:") => (format!("agent:{}", &o["spawn:".len()..]), "brief"),
+            "" | "user" => ("user".to_string(), "request"),
+            o => (o.to_string(), "request"),
+        };
+        let mut msg = inbox::Message::new(from, kind, n.goal.clone());
+        msg.hops = n.hops;
+        msg.attachments = n.attachments.clone();
+        msg.sent = inbox::rfc3339(if n.created_ms > 0 { n.created_ms } else { now });
+        match inbox::deliver(&hooks.place, agent, &msg) {
+            Ok(name) => {
+                n.status = Status::Cancelled;
+                n.outcome = format!("moved to inbox/{name} (messages are files now)");
+                n.updated_ms = now;
+                let _ = node::save_node(&layout.plan_jsonl(), &n);
+                moved += 1;
+            }
+            Err(e) => crate::klog::warn(
+                "inbox_migrate_failed",
+                Some(agent),
+                format!("node #{}: {e:#}", n.id),
+            ),
+        }
+    }
+    if moved > 0 {
+        crate::klog::info(
+            "inbox_migrated",
+            Some(agent),
+            format!("{moved} message node(s) became inbox files"),
+        );
     }
 }
 
@@ -472,30 +520,9 @@ fn wake_for(
     reason: WakeReason,
     detail: &str,
 ) -> Wake {
-    let inbox = n.parent == 0 && reason == WakeReason::Ready;
-    let (kind, text) = match n.origin.as_str() {
-        "user" if inbox => (WakeKind::User, Some(n.goal.clone())),
-        // The Say event is already on the transcript.
-        o if o.starts_with("agent:") && inbox => (WakeKind::Say, None),
-        // A spawn brief: the child's mission, said in full.
-        o if o.starts_with("spawn:") && inbox => {
-            let parent = &o["spawn:".len()..];
-            (
-                WakeKind::Plan,
-                Some(format!(
-                    "You were spawned by agent {parent} for this mission:\n\n{}\n\nDo it now. If it has several steps, decompose it with plan add under node #{} and work them. Standing work (\"every N\", \"keep doing\") is a plan node with when.every, never a loop held open. Report results to your parent with say to={parent} (mode request when you need an answer from it). Your own folder is .arbos/agents/{}/.{}",
-                    n.goal,
-                    n.id,
-                    agent.id,
-                    worktree_note(place, agent)
-                )),
-            )
-        }
-        // The kernel wrote the goal as the prompt itself (a failed
-        // command, a condition that held).
-        "kernel" if inbox => (WakeKind::Plan, Some(n.goal.clone())),
-        _ => (WakeKind::Plan, Some(wake_prompt(n, reason, detail))),
-    };
+    // A node is a goal; messages are inbox files (`wake_from_message`).
+    let _ = place;
+    let (kind, text) = (WakeKind::Plan, Some(wake_prompt(n, reason, detail)));
     Wake {
         agent: agent.id.clone(),
         kind,

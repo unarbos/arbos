@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::{
     batch::BatchCfg,
     compact,
-    control::{Steer, TurnControl},
+    control::TurnControl,
     host::Host,
     prompt::{skill_names, skip_tools},
     provider::{Interrupted, Provider},
@@ -352,19 +352,28 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             return end(None, Some(&control.stop_reason()));
         }
         // Every steer that arrived since the last boundary, in order, in
-        // one write. One per step lost the rest when they came faster than
-        // the model stepped (qa-014). A user's words are a User line; an
-        // agent's (`say mode=steer`) a Say line from it.
-        let steers = control.take_steers();
+        // one write: the inbox files of kind `steer` (a user's words while
+        // the turn runs, a peer's `say mode=steer`) and `wake` (the kernel:
+        // a job finished). One file per message, so none is lost when they
+        // come faster than the model steps (qa-014), and one a kernel
+        // crash leaves behind starts the next turn instead.
+        let steers = arbos_core::inbox::take_steers(&place, agent.id.as_str());
         if !steers.is_empty() {
             let batch: Vec<Event> = steers
                 .into_iter()
-                .map(|steer| match steer {
-                    Steer::User(text) => Event::new(EventKind::User {
-                        text,
-                        attachments: vec![],
+                .map(|msg| match msg.from.as_str() {
+                    "kernel" => Event::new(EventKind::Notice {
+                        text: msg.body,
+                        failed: false,
                     }),
-                    Steer::Say { from, text } => Event::new(EventKind::Say { from, text }),
+                    from if from.starts_with("agent:") => Event::new(EventKind::Say {
+                        from: from["agent:".len()..].to_string(),
+                        text: msg.body,
+                    }),
+                    _ => Event::new(EventKind::User {
+                        text: msg.body,
+                        attachments: msg.attachments,
+                    }),
                 })
                 .collect();
             append_events(&transcript, &batch)?;
