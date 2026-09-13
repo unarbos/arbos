@@ -580,7 +580,11 @@ impl Cydonia {
             &composer,
             window,
             |this, _, event: &ComposerEvent, window, cx| match event {
-                ComposerEvent::Submit(text) => this.submit(text.clone(), cx),
+                ComposerEvent::Submit(text) => {
+                    // A new prompt while a reply is being read: the reply stops.
+                    crate::voice_ws::interrupt();
+                    this.submit(text.clone(), cx)
+                }
                 ComposerEvent::Force(text) => this.force_turn(text.clone(), cx),
                 // Escape in the composer with no picker open: a menu, if one
                 // is up, goes first; only then does it mean "stop the turn".
@@ -588,6 +592,7 @@ impl Cydonia {
                     if this.menu.is_some() {
                         this.dismiss_menu(cx);
                     } else {
+                        crate::voice_ws::interrupt();
                         this.cancel_turn(cx);
                     }
                 }
@@ -1175,6 +1180,15 @@ impl Cydonia {
             let _ = this.update(cx, |this, cx| {
                 if this.voice_gen != stamp {
                     return;
+                }
+                let spoken = matches!(&text, Ok(t) if !t.trim().is_empty());
+                if spoken && crate::voice_ws::configured() {
+                    // The answer to a dictated prompt is read aloud.
+                    if let Some(id) = this.workspace.read(cx).active_id() {
+                        this.workspace.update(cx, |workspace, cx| {
+                            workspace.with_session(id, cx, |chat| chat.voice_reply = true);
+                        });
+                    }
                 }
                 this.composer.update(cx, |composer, cx| {
                     composer.set_voice(VoiceState::Idle, cx);

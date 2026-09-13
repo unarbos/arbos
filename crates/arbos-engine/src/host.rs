@@ -21,6 +21,11 @@ pub struct HostConfig {
     pub window_tokens_max: u64,
     pub search_url: Option<String>,
     pub search_key: Option<String>,
+    /// Self-hosted speech server for the desktop's voice client
+    /// (`ws://` / `wss://`); the kernel only carries the setting.
+    pub voice_url: Option<String>,
+    pub voice_token: Option<String>,
+    pub voice_token_env: Option<String>,
     /// Inception Mercury: instant | low | medium | high. Empty = omit.
     pub reasoning_effort: Option<String>,
     /// `max_tokens` on every call: the model's own completion limit from the
@@ -78,6 +83,9 @@ impl Default for HostConfig {
             window_tokens_max: 400_000,
             search_url: None,
             search_key: None,
+            voice_url: None,
+            voice_token: None,
+            voice_token_env: None,
             reasoning_effort: None,
             max_output_tokens: 32_000,
             max_parallel_tools: 8,

@@ -294,6 +294,8 @@ pub struct ChatSession {
     pub permission: Option<PermissionPrompt>,
     pub questions: Option<AskPrompt>,
     pub commands: Vec<Command>,
+    /// The prompt in flight was dictated: voice the answer when it lands.
+    pub voice_reply: bool,
     /// Leftover ACP mode state. The kernel has no session modes; the
     /// composer chip is a model picker (`set_model`).
     pub modes: Option<SessionModeState>,
@@ -422,6 +424,7 @@ impl ChatSession {
             permission: None,
             questions: None,
             commands: Vec::new(),
+            voice_reply: false,
             modes: None,
             config: Vec::new(),
             model: None,
@@ -479,6 +482,7 @@ impl ChatSession {
             permission: None,
             questions: None,
             commands: Vec::new(),
+            voice_reply: false,
             modes: None,
             config: Vec::new(),
             model: None,
@@ -536,6 +540,7 @@ impl ChatSession {
             permission: None,
             questions: None,
             commands: Vec::new(),
+            voice_reply: false,
             modes: None,
             config: Vec::new(),
             model: None,
@@ -1347,6 +1352,7 @@ impl ChatSession {
             Event::Citations(sources) => self.bind_sources(sources),
             Event::Permission(request, reply) => self.open_permission(request, reply),
             Event::TurnDone(result) => {
+                self.voice_answer();
                 if let Some(prompt) = self.permission.take() {
                     self.dismiss_permission(prompt, false);
                 }
@@ -1709,6 +1715,25 @@ impl ChatSession {
         };
         for source in sources {
             write_source(text, &source.url, &source.title);
+        }
+    }
+
+    /// A dictated prompt's turn just ended: read the answer aloud through
+    /// the speech server. Once per turn; nothing when voice is not set up.
+    fn voice_answer(&mut self) {
+        if !std::mem::take(&mut self.voice_reply) || !crate::voice_ws::configured() {
+            return;
+        }
+        let Some(ChatItem::Agent(text)) = self
+            .items
+            .iter()
+            .rev()
+            .find(|item| matches!(item, ChatItem::Agent(_)))
+        else {
+            return;
+        };
+        if let Err(e) = crate::voice_ws::speak(text) {
+            self.notice(true, &format!("voice reply failed: {e:#}"));
         }
     }
 
