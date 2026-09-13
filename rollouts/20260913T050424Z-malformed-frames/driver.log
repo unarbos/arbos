@@ -1,0 +1,8 @@
+1789275864485 kernel started pid 1865364
+1789275866638 BREAK focus-unvalidated: focus file now holds '../../../../etc/passwd'; any attach client can write an arbitrary path there
+1789275866654 kernel stopped with code 0
+1789275866654 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789275866654 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789275866654 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789275866654 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789275866657 bugs: seen qa-004-focus-frame-writes-any-path.md, seen qa-005-answer-for-unknown-agent-creates-ghost-folder.md, seen qa-001-no-key-turn-left-unended.md, seen qa-007-sigint-during-turn-behaves-like-crash.md, seen qa-007-sigint-during-turn-behaves-like-crash.md

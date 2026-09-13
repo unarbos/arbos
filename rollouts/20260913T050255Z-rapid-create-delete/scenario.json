@@ -1,0 +1,7 @@
+{
+  "name": "rapid-create-delete",
+  "doc": "Create and delete chats fast while the kernel runs, delete root and recreate it as the desktop does, then prompt root. Live frames must still flow.",
+  "tags": [
+    "adversarial"
+  ]
+}

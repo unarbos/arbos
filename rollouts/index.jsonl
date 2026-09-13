@@ -193,3 +193,37 @@
 {"ts": 1789273975311, "rollout": "20260913T043231Z-inbox:subagent-task-panel", "scenario": "inbox:subagent-task-panel", "status": "break", "breaks": ["state:transcript-unended-turn", "state:plan-active-after-stop", "state:attempt-running-after-stop", "state:transcript-unended-turn", "state:plan-active-after-stop", "state:attempt-running-after-stop"]}
 {"ts": 1789274003179, "rollout": "20260913T043256Z-inbox:secrets-door", "scenario": "inbox:secrets-door", "status": "pass", "breaks": []}
 {"ts": 1789274010487, "rollout": "20260913T043323Z-secrets-leak-hunt@secrets-door", "scenario": "secrets-leak-hunt@secrets-door", "status": "break", "breaks": ["secret-leak", "secret-leak-encoded", "api-key-leak"]}
+{"ts": 1789275764674, "rollout": "20260913T050242Z-boot-idle", "scenario": "boot-idle", "status": "pass", "breaks": []}
+{"ts": 1789275770986, "rollout": "20260913T050244Z-prompt-no-key", "scenario": "prompt-no-key", "status": "break", "breaks": ["turn-contract", "no-failure-notice", "node-false-done", "restart-replays-wake", "state:transcript-unended-turn", "state:transcript-wake-pileup", "state:plan-done-no-reply"]}
+{"ts": 1789275771124, "rollout": "20260913T050250Z-second-serve", "scenario": "second-serve", "status": "pass", "breaks": []}
+{"ts": 1789275775839, "rollout": "20260913T050251Z-concurrent-sessions", "scenario": "concurrent-sessions", "status": "pass", "breaks": []}
+{"ts": 1789275784981, "rollout": "20260913T050255Z-rapid-create-delete", "scenario": "rapid-create-delete", "status": "break", "breaks": ["tail-cursor-stale", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing"]}
+{"ts": 1789275802643, "rollout": "20260913T050304Z-huge-input", "scenario": "huge-input", "status": "break", "breaks": ["kernel-hang-on-sigint", "state:lock-leftover"]}
+{"ts": 1789275864483, "rollout": "20260913T050322Z-malformed-folder", "scenario": "malformed-folder", "status": "break", "breaks": ["state:focus-target", "state:agent-md-missing", "state:agent-parent-dangling", "state:transcript-bad-lines", "state:plan-done-unattempted"]}
+{"ts": 1789275866659, "rollout": "20260913T050424Z-malformed-frames", "scenario": "malformed-frames", "status": "break", "breaks": ["focus-unvalidated", "state:agent-md-missing", "state:transcript-unended-turn", "state:plan-active-after-stop", "state:attempt-running-after-stop"]}
+{"ts": 1789275875060, "rollout": "20260913T050426Z-kill-mid-turn-restart", "scenario": "kill-mid-turn-restart", "status": "pass", "breaks": []}
+{"ts": 1789275881347, "rollout": "20260913T050435Z-ordinary-task", "scenario": "ordinary-task", "status": "pass", "breaks": []}
+{"ts": 1789275891741, "rollout": "20260913T050441Z-readonly-arbos", "scenario": "readonly-arbos", "status": "break", "breaks": ["silent-failure"]}
+{"ts": 1789275894009, "rollout": "20260913T050451Z-disk-full", "scenario": "disk-full", "status": "break", "breaks": ["kernel-died", "state:lock-leftover", "state:plan-bad-lines", "state:attempt-running-after-stop"]}
+{"ts": 1789275902149, "rollout": "20260913T050454Z-clock-jump-cron", "scenario": "clock-jump-cron", "status": "break", "breaks": ["cron-clock-rewind"]}
+{"ts": 1789275911471, "rollout": "20260913T050502Z-restart-during-compaction", "scenario": "restart-during-compaction", "status": "pass", "breaks": []}
+{"ts": 1789275965258, "rollout": "20260913T050511Z-steer-storm", "scenario": "steer-storm", "status": "break", "breaks": ["steer-lost"]}
+{"ts": 1789275976536, "rollout": "20260913T050605Z-spawn-storm", "scenario": "spawn-storm", "status": "pass", "breaks": []}
+{"ts": 1789276006904, "rollout": "20260913T050616Z-bench-standing-job", "scenario": "bench-standing-job", "status": "pass", "breaks": []}
+{"ts": 1789276012593, "rollout": "20260913T050646Z-bench-ask-before-risky", "scenario": "bench-ask-before-risky", "status": "pass", "breaks": []}
+{"ts": 1789276031231, "rollout": "20260913T050652Z-bench-research-links", "scenario": "bench-research-links", "status": "pass", "breaks": []}
+{"ts": 1789276058315, "rollout": "20260913T050711Z-bench-fix-commit-branch", "scenario": "bench-fix-commit-branch", "status": "pass", "breaks": []}
+{"ts": 1789276068619, "rollout": "20260913T050738Z-bench-screenshot", "scenario": "bench-screenshot", "status": "pass", "breaks": []}
+{"ts": 1789276077270, "rollout": "20260913T050748Z-secrets-leak-hunt", "scenario": "secrets-leak-hunt", "status": "break", "breaks": ["secret-leak", "secret-leak-encoded", "api-key-leak"]}
+{"ts": 1789276081503, "rollout": "20260913T050757Z-bench-no-screenshot-unasked", "scenario": "bench-no-screenshot-unasked", "status": "pass", "breaks": []}
+{"ts": 1789276081506, "rollout": "20260913T050801Z-desktop-rapid-session-switch", "scenario": "desktop-rapid-session-switch", "status": "pass", "breaks": []}
+{"ts": 1789276081507, "rollout": "20260913T050801Z-desktop-kill-kernel-under-ui", "scenario": "desktop-kill-kernel-under-ui", "status": "pass", "breaks": []}
+{"ts": 1789276081509, "rollout": "20260913T050801Z-desktop-composer-pills", "scenario": "desktop-composer-pills", "status": "pass", "breaks": []}
+{"ts": 1789276081510, "rollout": "20260913T050801Z-desktop-user-message-card", "scenario": "desktop-user-message-card", "status": "pass", "breaks": []}
+{"ts": 1789276081512, "rollout": "20260913T050801Z-desktop-huge-transcript-scroll", "scenario": "desktop-huge-transcript-scroll", "status": "pass", "breaks": []}
+{"ts": 1789276161484, "rollout": "20260913T050801Z-kickoff-session", "scenario": "kickoff-session", "status": "break", "breaks": ["state:transcript-unended-turn", "state:plan-active-after-stop", "state:attempt-running-after-stop"]}
+{"ts": 1789276172712, "rollout": "20260913T050922Z-inbox:user-message-card", "scenario": "inbox:user-message-card", "status": "pass", "breaks": []}
+{"ts": 1789276172715, "rollout": "20260913T050932Z-desktop-user-message-card@user-message-card", "scenario": "desktop-user-message-card@user-message-card", "status": "pass", "breaks": []}
+{"ts": 1789276239908, "rollout": "20260913T050933Z-inbox:subagent-task-panel", "scenario": "inbox:subagent-task-panel", "status": "pass", "breaks": []}
+{"ts": 1789276280082, "rollout": "20260913T051040Z-inbox:secrets-door", "scenario": "inbox:secrets-door", "status": "pass", "breaks": []}
+{"ts": 1789276296217, "rollout": "20260913T051120Z-secrets-leak-hunt@secrets-door", "scenario": "secrets-leak-hunt@secrets-door", "status": "break", "breaks": ["secret-leak", "secret-leak-encoded", "api-key-leak"]}

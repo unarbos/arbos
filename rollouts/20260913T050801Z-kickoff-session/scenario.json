@@ -1,0 +1,7 @@
+{
+  "name": "kickoff-session",
+  "doc": "Replay a stream of high-level goals like this Project's first session and score the 12-item acceptance checklist. Most items are expected to fail today; every run records which pass.",
+  "tags": [
+    "headline"
+  ]
+}

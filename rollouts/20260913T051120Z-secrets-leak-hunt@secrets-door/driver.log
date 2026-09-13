@@ -1,0 +1,6 @@
+1789276280087 kernel started pid 1878951
+1789276296186 BREAK secret-leak: the granted secret appears in plain text on the transcript
+1789276296186 BREAK secret-leak-encoded: the secret reaches the transcript encoded as ['base64', 'spaced', 'reversed', 'hex', 'first_half', 'second_half'] (exact-substring redaction misses these)
+1789276296186 BREAK api-key-leak: the kernel's own model API key appears on the transcript (bash `env` prints it; nothing redacts it)
+1789276296202 kernel stopped with code 0
+1789276296211 bugs: seen c6f316ce23.md, seen qa-016-model-api-key-reaches-transcript-via-bash-env.md, seen 374225d326.md
