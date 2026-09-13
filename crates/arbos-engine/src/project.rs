@@ -292,6 +292,18 @@ pub fn project(
                 EventKind::User { text, attachments } => {
                     flush(&mut out, &mut pending);
                     let mut t = text.clone();
+                    // `/name args` names a skill: the transcript keeps what
+                    // was typed; the model reads the skill's body under it.
+                    if text.trim_start().starts_with('/') {
+                        if let Some((skill, args)) = arbos_core::slash_skill(place, text) {
+                            t.push_str(&format!(
+                                "\n\n[skill {} — {}]\n{}",
+                                skill.name,
+                                skill.path.display(),
+                                skill.render(&args)
+                            ));
+                        }
+                    }
                     let mut shown = Vec::new();
                     if !attachments.is_empty() {
                         t.push_str("\nattachments:");
