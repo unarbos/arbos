@@ -315,7 +315,10 @@ pub fn attach(args: Args, all_agents: bool) -> Result<i32> {
                 .await
                 .with_context(|| format!("connect {addr}"))?;
             let (r, _w) = stream.into_split();
-            eprintln!("attached to {} at {addr}; Ctrl-C to stop", place.path.display());
+            eprintln!(
+                "attached to {} at {addr}; Ctrl-C to stop",
+                place.path.display()
+            );
             tokio::spawn(async move {
                 let mut lines = BufReader::new(r).lines();
                 while let Ok(Some(l)) = lines.next_line().await {

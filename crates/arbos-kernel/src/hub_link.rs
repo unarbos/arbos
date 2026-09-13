@@ -21,8 +21,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::access::{Identity, Role};
@@ -199,7 +199,11 @@ pub fn start(
             match session(&place, &hooks, &frames_in, &cfg, &project).await {
                 Ok(()) => {
                     attempt = 0;
-                    klog::warn("hub_lost", None, format!("{}: socket closed; reconnecting", cfg.url));
+                    klog::warn(
+                        "hub_lost",
+                        None,
+                        format!("{}: socket closed; reconnecting", cfg.url),
+                    );
                 }
                 Err(e) => {
                     klog::warn(
