@@ -130,7 +130,9 @@ impl Carrier {
         let (in_tx, rx) = mpsc::unbounded_channel::<Frame>();
         tokio::spawn(async move {
             while let Some(f) = out_rx.recv().await {
-                let Ok(s) = serde_json::to_string(&f) else { continue };
+                let Ok(s) = serde_json::to_string(&f) else {
+                    continue;
+                };
                 if w.write_all(format!("{s}\n").as_bytes()).await.is_err() {
                     break;
                 }
@@ -155,7 +157,9 @@ impl Carrier {
         let (in_tx, rx) = mpsc::unbounded_channel::<Frame>();
         tokio::spawn(async move {
             while let Some(f) = out_rx.recv().await {
-                let Ok(s) = serde_json::to_string(&f) else { continue };
+                let Ok(s) = serde_json::to_string(&f) else {
+                    continue;
+                };
                 if sink.send(Message::Text(s.into())).await.is_err() {
                     break;
                 }
@@ -245,8 +249,8 @@ impl RemoteHub {
                     let outcome = async {
                         let cfg = hub_link::config_from_env()?
                             .context("no hub configured (~/.config/arbos/hub.toml)")?;
-                        let ws = hub_link::attach(&cfg, &record.machine, Some(&record.project))
-                            .await?;
+                        let ws =
+                            hub_link::attach(&cfg, &record.machine, Some(&record.project)).await?;
                         attach(
                             Arc::clone(&hooks),
                             record.clone(),
@@ -415,7 +419,13 @@ fn project_name(place: &Place) -> String {
         .to_string()
 }
 
-fn first_prompt(parent: &Agent, brief: &str, remote_path: &str, machine: &str, how: &str) -> String {
+fn first_prompt(
+    parent: &Agent,
+    brief: &str,
+    remote_path: &str,
+    machine: &str,
+    how: &str,
+) -> String {
     format!(
         "You were spawned by agent {} on another machine for this mission:\n\n{brief}\n\nYou work in {remote_path} on {machine}, {how}. Do it now; report results in your final reply — it is delivered to your parent as a message from you. If you change files, commit them on a branch and name it in the report.",
         parent.id
@@ -581,7 +591,12 @@ async fn spawn_hub(
         .await?;
         let answer = tokio::time::timeout(CLAIM_READY, hub_link::next_text(&mut ws))
             .await
-            .with_context(|| format!("no answer to the claim of {} within {CLAIM_READY:?}", info.name))?
+            .with_context(|| {
+                format!(
+                    "no answer to the claim of {} within {CLAIM_READY:?}",
+                    info.name
+                )
+            })?
             .with_context(|| format!("the hub closed the claim of {}", info.name))?;
         match serde_json::from_str::<HubFrame>(&answer) {
             Ok(HubFrame::Claimed {
@@ -765,9 +780,10 @@ async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::Unbounded
                     let m = machine.clone();
                     let path = link.record.path.clone();
                     let from = mirrored;
-                    let fetched =
-                        tokio::task::spawn_blocking(move || remote_transcript_tail(&m, &path, from))
-                            .await;
+                    let fetched = tokio::task::spawn_blocking(move || {
+                        remote_transcript_tail(&m, &path, from)
+                    })
+                    .await;
                     match fetched {
                         Ok(Ok(events)) if !events.is_empty() => {
                             mirrored += events.len();

@@ -1,0 +1,4 @@
+kind = "shell"
+cmd = "echo shell-tick >> ticks.txt"
+every = "1d"
+prompt = "tick ran"

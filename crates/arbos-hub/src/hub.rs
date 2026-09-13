@@ -196,21 +196,17 @@ impl Hub {
             );
         };
         match project {
-            Some(p) => entry
-                .kernels
-                .get(p)
-                .cloned()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "{machine} has no kernel serving {p:?} (live: {}){}",
-                        list(entry.kernels.keys()),
-                        if entry.worker.is_some() {
-                            "; it has a worker, so a claim can start one"
-                        } else {
-                            ""
-                        }
-                    )
-                }),
+            Some(p) => entry.kernels.get(p).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{machine} has no kernel serving {p:?} (live: {}){}",
+                    list(entry.kernels.keys()),
+                    if entry.worker.is_some() {
+                        "; it has a worker, so a claim can start one"
+                    } else {
+                        ""
+                    }
+                )
+            }),
             None => match entry.kernels.len() {
                 1 => Ok(entry.kernels.values().next().unwrap().clone()),
                 0 => bail!(
@@ -495,7 +491,13 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
 
 // ── /attach ─────────────────────────────────────────────────────────────
 
-pub async fn attach(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str, project: Option<&str>) {
+pub async fn attach(
+    hub: Arc<Hub>,
+    mut ws: Ws,
+    who: Identity,
+    machine: &str,
+    project: Option<&str>,
+) {
     let kernel = match hub.kernel(machine, project) {
         Ok(k) => k,
         Err(e) => {
@@ -615,7 +617,10 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
     let (tx, rx) = oneshot::channel();
     hub.inner.lock().unwrap().claims.insert(id.clone(), tx);
     let from = if from.is_empty() { name.clone() } else { from };
-    eprintln!("hub: {name} claims {} for {project} (isolate={isolate}) id {id}", worker.machine);
+    eprintln!(
+        "hub: {name} claims {} for {project} (isolate={isolate}) id {id}",
+        worker.machine
+    );
     if !worker.send(HubFrame::Claim {
         id: id.clone(),
         project: project.clone(),

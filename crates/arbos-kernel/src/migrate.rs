@@ -100,14 +100,15 @@ fn load_old(path: &Path) -> Vec<OldNode> {
 }
 
 /// A summary line per agent migrated, for the log.
-pub fn run(place: &Place) -> Vec<String> {
+pub fn run(hooks: &crate::hooks::KernelHooks) -> Vec<String> {
+    let place = &hooks.place;
     let mut report = Vec::new();
     for agent in list_agents(place).unwrap_or_default() {
         let id = agent.id.as_str();
         let layout = arbos_core::Layout::new(place, id);
         let plan = layout.plan_jsonl();
         if plan.exists()
-            && let Some(line) = migrate_plan(place, id, &plan)
+            && let Some(line) = migrate_plan(hooks, id, &plan)
         {
             report.push(line);
         }
@@ -148,8 +149,10 @@ fn is_inbox_node(n: &OldNode, all: &[OldNode]) -> bool {
         && !all.iter().any(|k| k.parent == n.id)
 }
 
-fn migrate_plan(place: &Place, agent: &str, path: &Path) -> Option<String> {
+fn migrate_plan(hooks: &crate::hooks::KernelHooks, agent: &str, path: &Path) -> Option<String> {
+    let place = &hooks.place;
     let nodes = load_old(path);
+    let mut n_asks = 0;
     let mut n_notes = 0;
     let mut n_subs = 0;
     let mut n_inbox = 0;
@@ -160,6 +163,33 @@ fn migrate_plan(place: &Place, agent: &str, path: &Path) -> Option<String> {
         let open = matches!(n.status.as_str(), "pending" | "active" | "blocked");
         if !open {
             n_dropped += 1;
+            continue;
+        }
+        // An open question for the user parks as a waiting file with its
+        // ask line on the transcript, so the card appears and the answer
+        // arrives as a message (#106). A checklist line would never be
+        // put to anyone (qa-028).
+        if matches!(n.do_, OldDo::Ask) {
+            let call_id = format!("migrated-{}", n.id);
+            match hooks.ask(&arbos_core::AgentId::new(agent), &n.goal, &[], &call_id) {
+                Ok(_) => {
+                    let _ = arbos_core::append_event(
+                        &hooks.layout(agent).transcript(),
+                        &arbos_core::Event::new(arbos_core::EventKind::Notice {
+                            text: format!(
+                                "A question from the old plan (node #{}) is waiting for your answer above.",
+                                n.id
+                            ),
+                            failed: false,
+                        }),
+                    );
+                    n_asks += 1;
+                }
+                Err(e) => {
+                    crate::klog::warn("migrate_ask", Some(agent), format!("node #{}: {e:#}", n.id));
+                    n_dropped += 1;
+                }
+            }
             continue;
         }
         let scheduled = n.when.every_ms.is_some() || n.when.after_ms.is_some();
@@ -297,7 +327,7 @@ fn migrate_plan(place: &Place, agent: &str, path: &Path) -> Option<String> {
     }
     let _ = std::fs::rename(path, path.with_extension("jsonl.migrated"));
     Some(format!(
-        "{agent}: {} node(s) → {n_notes} notes line(s), {n_subs} subscription(s), {n_inbox} inbox file(s); {n_dropped} closed node(s) dropped",
+        "{agent}: {} node(s) → {n_notes} notes line(s), {n_subs} subscription(s), {n_inbox} inbox file(s), {n_asks} parked question(s); {n_dropped} closed node(s) dropped",
         nodes.len()
     ))
 }
@@ -374,6 +404,12 @@ mod tests {
         p
     }
 
+    fn hooks(p: &Place) -> std::sync::Arc<crate::hooks::KernelHooks> {
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (kick_tx, _kick_rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::hooks::KernelHooks::new(p.clone(), wake_tx, kick_tx)
+    }
+
     #[test]
     fn nodes_become_notes_subscriptions_and_inbox_files() {
         let p = place("nodes");
@@ -389,10 +425,23 @@ mod tests {
             ),
             r#"{"id":5,"goal":"remind me to stretch","when":{"after_ms":9999999999999},"status":"pending"}"#,
             r#"{"id":6,"goal":"hello from the phone","status":"pending","origin":"user","when":{"wake":true}}"#,
+            r#"{"id":7,"goal":"Which colour, teal or red?","do":{"kind":"ask"},"status":"pending","origin":"user"}"#,
         ];
         std::fs::write(&plan, lines.join("\n") + "\n").unwrap();
-        let report = run(&p);
+        let h = hooks(&p);
+        let report = run(&h);
         assert_eq!(report.len(), 1, "{report:?}");
+        // The open ask is parked, not a checklist line (qa-028).
+        let asks = arbos_core::waiting::asks(&p, "root");
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        assert_eq!(asks[0].question, "Which colour, teal or red?");
+        assert_eq!(asks[0].id, "migrated-7");
+        let transcript =
+            std::fs::read_to_string(p.agent_dir("root").join("transcript.jsonl")).unwrap();
+        assert!(
+            transcript.contains("\"kind\":\"ask\"") && transcript.contains("migrated-7"),
+            "{transcript}"
+        );
         assert!(!plan.exists() && plan.with_extension("jsonl.migrated").exists());
         let n = notes::load(&p, "root");
         let items = n.items();
@@ -415,8 +464,9 @@ mod tests {
         let inbox = inbox::list(&p, "root");
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].msg.body, "hello from the phone");
+        assert!(!n.render().contains("teal"), "{}", n.render());
         // Second run: nothing to do.
-        assert!(run(&p).is_empty());
+        assert!(run(&h).is_empty());
     }
 
     #[test]
@@ -427,7 +477,7 @@ mod tests {
             r#"{"next_id":2,"subscriptions":[{"id":1,"agent":"root","repo":"unarbos/arbos","pr":58,"note":"tell me when merged","created_ms":0}]}"#,
         )
         .unwrap();
-        let report = run(&p);
+        let report = run(&hooks(&p));
         assert_eq!(report.len(), 1);
         let subs = subscription::list(&p, "root");
         assert_eq!(subs.len(), 1);
