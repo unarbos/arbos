@@ -201,7 +201,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
                 // Said to a running agent, but its turn ended before the
                 // next tool boundary: each one becomes a turn of its own.
                 if let Some(control) = control {
-                    let left = control.drain_steers();
+                    let left = control.take_steers();
                     if !left.is_empty() {
                         hooks.requeue_steers(&id, left);
                     }

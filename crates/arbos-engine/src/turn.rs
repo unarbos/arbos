@@ -235,15 +235,23 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         if control.is_stopped() {
             return end(None, Some("stop"));
         }
-        if let Some(steer) = control.take_steer() {
-            let kind = match steer {
-                Steer::User(text) => EventKind::User {
-                    text,
-                    attachments: vec![],
-                },
-                Steer::Say { from, text } => EventKind::Say { from, text },
-            };
-            append_event(&transcript, &Event::new(kind))?;
+        // Every steer that arrived since the last boundary, in order, in
+        // one write. One per step lost the rest when they came faster than
+        // the model stepped (qa-014). A user's words are a User line; an
+        // agent's (`say mode=steer`) a Say line from it.
+        let steers = control.take_steers();
+        if !steers.is_empty() {
+            let batch: Vec<Event> = steers
+                .into_iter()
+                .map(|steer| match steer {
+                    Steer::User(text) => Event::new(EventKind::User {
+                        text,
+                        attachments: vec![],
+                    }),
+                    Steer::Say { from, text } => Event::new(EventKind::Say { from, text }),
+                })
+                .collect();
+            append_events(&transcript, &batch)?;
             events = load_transcript(&transcript)?;
         }
 

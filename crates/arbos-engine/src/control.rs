@@ -63,14 +63,12 @@ impl TurnControl {
         !self.0.steer.lock().unwrap().is_empty()
     }
 
-    pub fn take_steer(&self) -> Option<Steer> {
-        self.0.steer.lock().unwrap().pop_front()
-    }
-
-    /// Everything still queued. The kernel calls this when the turn has
-    /// ended, so a steer that missed the last boundary is re-queued as a
-    /// turn instead of vanishing.
-    pub fn drain_steers(&self) -> Vec<Steer> {
+    /// Every steer waiting, oldest first. A turn boundary takes them all:
+    /// one per step lost the rest when steers arrived faster than steps
+    /// (qa-014). The kernel calls it too when the turn has ended, so a
+    /// steer that missed the last boundary is re-queued as a turn instead
+    /// of vanishing.
+    pub fn take_steers(&self) -> Vec<Steer> {
         self.0.steer.lock().unwrap().drain(..).collect()
     }
 
@@ -81,5 +79,32 @@ impl TurnControl {
 
     pub fn take_compact(&self) -> bool {
         self.0.compact.swap(false, Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_boundary_takes_every_waiting_steer_in_order() {
+        let c = TurnControl::new();
+        for i in 0..25 {
+            c.steer(format!("STEER-{i:02}"));
+        }
+        let all: Vec<String> = c
+            .take_steers()
+            .into_iter()
+            .map(|s| match s {
+                Steer::User(text) => text,
+                Steer::Say { text, .. } => text,
+            })
+            .collect();
+        assert_eq!(all.len(), 25);
+        assert_eq!(all.first().map(String::as_str), Some("STEER-00"));
+        assert_eq!(all.last().map(String::as_str), Some("STEER-24"));
+        assert!(all.windows(2).all(|w| w[0] < w[1]), "oldest first");
+        assert!(c.take_steers().is_empty());
+        assert!(!c.steer_pending());
     }
 }
