@@ -2167,9 +2167,16 @@ fn pump(
                     .unwrap_or_else(|| "auto".into());
                 chat.modes = Some(crate::agent::acp::Session::modes(&current));
                 chat.config = Vec::new();
-                // A model picked while offline reaches the kernel now.
-                if let Some(model) = chat.model.clone() {
-                    session.set_model(&model);
+                // The kernel remembers the agent's model in agent.md. That
+                // is the truth on attach; a model picked while offline is
+                // pushed only when the agent has none of its own yet.
+                let kept = (chat.host.is_none())
+                    .then(|| crate::kernel::agent_model(&arbos_core::Place::new(&chat.cwd), &session.session_id))
+                    .flatten();
+                match (kept, chat.model.clone()) {
+                    (Some(kept), _) => chat.model = Some(kept),
+                    (None, Some(model)) => session.set_model(&model),
+                    (None, None) => {}
                 }
                 chat.connection = Connection::Live(Box::new(session));
             });
