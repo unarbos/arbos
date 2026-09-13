@@ -1127,8 +1127,13 @@ fn surface_json(surface: &Surface) -> Value {
         Bind::Browser { id, url, shot } => {
             (json!({ "browser": id }), Some(url.clone()), shot.is_some())
         }
-        Bind::Process { id, log } => (
-            json!({ "process": id, "log": log.display().to_string() }),
+        Bind::Process { id, log, live, done } => (
+            json!({
+                "process": id,
+                "log": log.display().to_string(),
+                "live_bytes": live.len(),
+                "done": done.map(|code| json!(code)),
+            }),
             None,
             false,
         ),

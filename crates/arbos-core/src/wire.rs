@@ -98,6 +98,19 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         text: String,
     },
+    /// New output from a detached job, as it arrives. `delta` is what was
+    /// appended to the journal since the last frame (capped; a skip marker
+    /// says when bytes were dropped). The last frame has `running: false`
+    /// and the exit code, `None` when the process was killed.
+    Job {
+        agent: String,
+        id: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        delta: String,
+        running: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit: Option<i32>,
+    },
     /// Open or close a desktop panel. The Mac app docks a terminal as a
     /// child of `owner` on the left of the chat.
     Board {

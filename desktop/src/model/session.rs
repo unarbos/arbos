@@ -1413,7 +1413,8 @@ impl ChatSession {
             | Event::ChildSession { .. }
             | Event::Open { .. }
             | Event::Hide { .. }
-            | Event::Browser { .. } => {}
+            | Event::Browser { .. }
+            | Event::Job { .. } => {}
         }
     }
 
@@ -1990,7 +1991,8 @@ fn pump(
                             // Kernel rows come and go in order; keep it.
                             event @ (Event::Open { .. }
                             | Event::Hide { .. }
-                            | Event::Browser { .. }) => surfaces.push(event),
+                            | Event::Browser { .. }
+                            | Event::Job { .. }) => surfaces.push(event),
                             Event::ChildSession { call_id, session } => {
                                 link_child(&mut chat.items, &call_id, &session);
                                 chat.flush();
@@ -2018,6 +2020,12 @@ fn pump(
                             url,
                             screenshot,
                         } => workspace.browser_moved(id, page, url, screenshot, cx),
+                        Event::Job {
+                            id: job,
+                            delta,
+                            running,
+                            exit,
+                        } => workspace.job_output(id, job, delta, running, exit, cx),
                         _ => {}
                     }
                 }

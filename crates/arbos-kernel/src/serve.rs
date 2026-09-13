@@ -146,6 +146,10 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
     let mut tick = interval(Duration::from_secs(5));
     let mut tail = interval(Duration::from_millis(200));
     let mut tails: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // How far each detached job's journal has been streamed (`agent/jN` →
+    // bytes, and whether its final frame went out).
+    let mut offsets: std::collections::HashMap<String, (u64, bool)> =
+        std::collections::HashMap::new();
     // Detached jobs the desktop has been told about, as `agent/jN`. The
     // row opens once, and closes when the job finishes.
     let mut announced: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -245,8 +249,18 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
                             url: Some(job.journal().display().to_string()),
                         });
                     }
+                    for job in jobs.list() {
+                        if !job.detached() {
+                            continue;
+                        }
+                        let key = format!("{}/{}", agent.id, job.id);
+                        if let Some(frame) = job_delta(&mut offsets, &key, &agent.id, &job) {
+                            hooks.broadcast(frame);
+                        }
+                    }
                     for job in jobs.sweep() {
                         announced.remove(&format!("{}/{}", agent.id, job.id));
+                        offsets.remove(&format!("{}/{}", agent.id, job.id));
                         hooks.broadcast(Frame::Board {
                             owner: agent.id.to_string(),
                             action: "close".into(),
@@ -444,6 +458,66 @@ fn tree_frame(place: &Place) -> Frame {
     Frame::Tree {
         tree: tree_nodes(place),
     }
+}
+
+/// Bytes streamed per tick at most. A chatty job still shows its latest
+/// lines; the rest stays in the journal file.
+const JOB_DELTA_CAP: u64 = 16 * 1024;
+
+/// The journal bytes appended since the last frame, and the job's state, as
+/// one `Frame::Job`. `None` when nothing changed, and never again after the
+/// final frame. The first look streams from the start of the journal (a job
+/// has usually just detached), capped like every tick.
+fn job_delta(
+    offsets: &mut std::collections::HashMap<String, (u64, bool)>,
+    key: &str,
+    agent: &arbos_core::AgentId,
+    job: &arbos_engine::Job,
+) -> Option<Frame> {
+    use std::io::{Read, Seek, SeekFrom};
+    let size = job.journal_bytes;
+    let running = job.running();
+    let (seen, finished) = *offsets.entry(key.to_string()).or_insert((0, false));
+    if finished {
+        return None;
+    }
+    let mut delta = String::new();
+    if size > seen {
+        let mut start = seen;
+        let mut skipped = 0;
+        if size - seen > JOB_DELTA_CAP {
+            skipped = size - seen - JOB_DELTA_CAP;
+            start = size - JOB_DELTA_CAP;
+        }
+        if let Ok(mut f) = std::fs::File::open(job.journal()) {
+            if f.seek(SeekFrom::Start(start)).is_ok() {
+                let mut buf = Vec::with_capacity((size - start) as usize);
+                let _ = f.take(size - start).read_to_end(&mut buf);
+                if skipped > 0 {
+                    delta.push_str(&format!("[… {skipped} bytes skipped]\n"));
+                }
+                delta.push_str(&String::from_utf8_lossy(&buf));
+            }
+        }
+        offsets.insert(key.to_string(), (size, false));
+    }
+    if delta.is_empty() && running {
+        return None;
+    }
+    if !running {
+        offsets.insert(key.to_string(), (size.max(seen), true));
+    }
+    let exit = match job.status {
+        arbos_engine::JobStatus::Exited(code) => Some(code),
+        arbos_engine::JobStatus::Running | arbos_engine::JobStatus::Killed => None,
+    };
+    Some(Frame::Job {
+        agent: agent.to_string(),
+        id: job.id.clone(),
+        delta,
+        running,
+        exit,
+    })
 }
 
 fn tree_nodes(place: &Place) -> Vec<TreeNode> {
