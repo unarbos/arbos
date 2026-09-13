@@ -1,0 +1,37 @@
+# The default call policy: the speech model's own voice is off. The caller hears the narrator's
+# "On it." when the words reach the main agent, then the highlight; a wrong or rambling model
+# answer is never heard. A drill-down answer is spoken by the narrator too.
+title = "Model voice off: narrator acks, highlights, and reads detail"
+gateway_args = ["--call-model-voice", "off"]
+
+[[steps]]
+say = "Send an agent to check the build."
+model = { ack = "I cannot send agents or check builds, I can only answer general questions." }
+[steps.kernel]
+reply = "I sent the agent check-build to run the build and report back."
+[steps.kernel.spawn]
+name = "check-build"
+done_after = 2.0
+last_words = "The build passes on main; one warning about an unused import in engine.rs."
+
+[[steps]]
+wait_spoken = "check build is done"
+
+[[steps]]
+say = "What was the warning exactly?"
+model = { tool = "more_detail" }
+
+[[steps]]
+wait_spoken = "unused import"
+
+[[steps]]
+wait_quiet = 1.0
+
+[expect]
+spoken_contains = ["On it.", "I sent the agent check-build", "check build is done", "unused import in engine.rs"]
+spoken_not_contains = ["I cannot send agents", "general questions"]
+narrated_contains = ["On it.", "From the record"]
+tool_result_contains = { more_detail = "unused import" }
+kernel_user_not = ["What was the warning"]
+inbox = [{ channel = "voice", kind = "request" }]
+audio_bytes_min = 20000

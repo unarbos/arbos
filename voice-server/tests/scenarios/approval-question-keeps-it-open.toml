@@ -1,0 +1,34 @@
+# "Sure, but what does that command do exactly?" is a question, not consent. The approval stays
+# open (nothing is allowed on the strength of "sure"), the caller then denies it by name.
+title = "Approval: a question that starts with 'sure' is not consent"
+
+[[steps]]
+say = "Clean the build directory."
+model = { ack = "On it." }
+[steps.kernel]
+approval = "bash: rm -rf target && cargo build"
+reply = "Cleaned the build directory and rebuilt: 0 warnings."
+reply_denied = "I did not run the command; the build directory is untouched."
+
+[[steps]]
+wait_spoken = "wants to run bash"
+
+[[steps]]
+say = "Sure, but what does that command do exactly?"
+model = { quiet = true }
+
+[[steps]]
+pause = 2.0
+
+[[steps]]
+say = "No, deny it."
+model = { quiet = true }
+
+[[steps]]
+wait_spoken = "did not run the command"
+
+[expect]
+spoken_contains = ["Denied.", "did not run the command"]
+spoken_not_contains = ["Allowed.", "Cleaned the build directory"]
+approvals = [false]
+kernel_user_not = ["No, deny it"]
