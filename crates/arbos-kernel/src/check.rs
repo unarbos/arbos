@@ -1,7 +1,8 @@
 //! `arbos-kernel check <place>`: lint `.arbos/`. Parses every agent's
 //! `agent.md`, `plan.jsonl`, `attempts.jsonl`, `transcript.jsonl`,
-//! `checkpoints.jsonl`, the place's `focus`, `access.toml`, `secrets.toml`,
-//! and `kernel.json`, and says what is wrong and where. Exit 1 on any
+//! `checkpoints.jsonl`, the place's `focus`, `notes.md` (the status page's
+//! shape), `access.toml`, `secrets.toml`, and `kernel.json`, and says what
+//! is wrong and where. Exit 1 on any
 //! error; warnings alone exit 0. For a hand that edited the folder, and
 //! for the fixture runner before it starts a kernel on an authored state.
 
@@ -307,6 +308,27 @@ pub fn check(place: &Place) -> Result<Report> {
         if let Err(e) = arbos_core::files::validate_focus(place, &raw) {
             r.error(".arbos/focus", None, format!("{e:#}"));
         }
+    }
+
+    // The project page keeps the coordinator protocol's shape (checkbox
+    // items led by a link, tldr and completed caps). Warnings: a page that
+    // drifts still serves, and the lint says where. `check_notes` below
+    // covers what the plan tool's parser can read.
+    let notes = arbos_core::store::notes_path(place);
+    if let Ok(text) = std::fs::read_to_string(&notes) {
+        for p in arbos_core::store::lint_notes(&text) {
+            r.warn(rel(&notes), Some(p.line), p.what);
+        }
+    }
+    // GOALS.md: a real file here is the pre-store layout; bootstrap moves
+    // it into docs/project-context.md at the next start.
+    let goals = arbos_core::store::goals_alias_path(place);
+    if std::fs::symlink_metadata(&goals).is_ok_and(|m| m.is_file()) {
+        r.warn(
+            rel(&goals),
+            None,
+            "old layout: the context file now lives at docs/project-context.md (bootstrap moves it and leaves this as a symlink)",
+        );
     }
 
     // access.toml, secrets.toml: parse. access.toml also gets the lint a

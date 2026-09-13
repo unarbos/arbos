@@ -26,8 +26,19 @@ const AGENT_FILES: &[&str] = &[
     "checkpoints.jsonl",
     "instructions.md",
 ];
-/// At the place's root, relative to `.arbos/`.
-const PLACE_FILES: &[&str] = &["focus", "user.md", "memory.md", "kernel.json"];
+/// At the place's root, relative to `.arbos/`. The project store's
+/// status page and context file are here so a window redraws "Project"
+/// when root rewrites them.
+const PLACE_FILES: &[&str] = &[
+    "focus",
+    "user.md",
+    "memory.md",
+    "kernel.json",
+    "project.toml",
+    "notes.md",
+    "archived.md",
+    "docs/project-context.md",
+];
 
 /// What was seen last time: path → (size, mtime millis).
 #[derive(Default)]
@@ -95,15 +106,19 @@ fn frame_path(f: &Frame) -> &str {
 }
 
 fn stat_into(path: &Path, rel: &str, into: &mut HashMap<String, (u64, i64)>) {
-    if let Ok(meta) = std::fs::metadata(path)
-        && meta.is_file()
-    {
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        into.insert(rel.to_string(), (meta.len(), mtime));
+    if let Some(seen) = stat(path) {
+        into.insert(rel.to_string(), seen);
     }
+}
+
+/// A file's (size, mtime millis), or None when it is not a file.
+pub fn stat(path: &Path) -> Option<(u64, i64)> {
+    let meta = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Some((meta.len(), mtime))
 }

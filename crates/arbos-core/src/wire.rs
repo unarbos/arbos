@@ -95,7 +95,9 @@ pub enum Frame {
     /// Only a fixed set is watched: each agent's `agent.md`, `plan.jsonl`,
     /// `plan.md`, `transcript.jsonl`, `feedback.jsonl`, `checkpoints.jsonl`,
     /// `instructions.md`, and the place's `focus`, `user.md`, `memory.md`,
-    /// `kernel.json`.
+    /// `kernel.json`, `project.toml`, `notes.md`, `archived.md`,
+    /// `docs/project-context.md`. `notes.md` is also announced the moment
+    /// a turn that changed it ends.
     Changed {
         path: String,
         kind: String,
