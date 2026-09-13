@@ -46,6 +46,7 @@ pub const ALL_TOOLS: &[&str] = &[
     "terminal",
     "screenshot",
     "secret",
+    "subscribe",
 ];
 
 /// One agent folder. Fields live in `agent.md`.
@@ -225,6 +226,7 @@ impl Agent {
                         | "say"
                         | "screenshot"
                         | "secret"
+                        | "subscribe"
                 )
             });
         }
@@ -251,6 +253,11 @@ impl Agent {
         // Keys into the shell's environment: goes with the shell. Old
         // agent.md files predate the tool.
         if tool == "secret" && self.allowlist.iter().any(|t| t == "bash") {
+            return true;
+        }
+        // Following a pull request is standing work, like a plan node.
+        // Old agent.md files predate the tool.
+        if tool == "subscribe" && self.allowlist.iter().any(|t| t == "plan") {
             return true;
         }
         // Visible shell. Old agent.md files list bash only.

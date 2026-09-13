@@ -98,6 +98,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
         .with(tools::Browser(Arc::clone(&hooks)))
         .with(crate::screenshot::Screenshot)
         .with(crate::secret_tool::Secret)
+        .with(crate::github::Subscribe(Arc::clone(&hooks)))
         .with(tools::Terminal {
             hooks: Arc::clone(&hooks),
             ptys: Arc::clone(&ptys),
@@ -139,6 +140,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
     }
 
     doors::spawn_telegram_if_configured(Arc::clone(&hooks));
+    crate::github::spawn_poller(Arc::clone(&hooks));
 
     // A dead kernel's half-run nodes go back to pending. Then continue
     // anyone whose last turn never ended.

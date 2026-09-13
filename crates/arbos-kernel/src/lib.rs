@@ -2,6 +2,7 @@ pub mod attach;
 pub mod browser;
 pub mod cli;
 pub mod doors;
+pub mod github;
 pub mod grep;
 pub mod hooks;
 pub mod klog;
