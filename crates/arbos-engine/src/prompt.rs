@@ -39,9 +39,14 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
         .filter(|n| !n.is_empty())
         .unwrap_or("workspace");
     let skills = if skills.is_empty() {
-        "(none — add SKILL.md under .arbos/skills or AGENTS.md skills)".into()
+        "(none — add <name>/SKILL.md under .arbos/skills)".into()
     } else {
-        skills.join(", ")
+        let mut list = String::new();
+        for line in skills {
+            list.push_str("\n  ");
+            list.push_str(line);
+        }
+        list
     };
     let agents_md = first_agents_md(place);
     let git = crate::tools::git_guard::GitRules::load(place.path()).prompt_line();
@@ -55,7 +60,7 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
         format!("Kind: {}\n", agent.kind)
     };
     format!(
-        "You: {id}\nName: {name}\n{kind}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\nProject: {project}\nCwd: {cwd}\nFocus: {focus}\nSkills (read SKILL.md for the body): {skills}\n{git}\n{machines}\n{kinds}{instructions}{agents}",
+        "You: {id}\nName: {name}\n{kind}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\nProject: {project}\nCwd: {cwd}\nFocus: {focus}\nSkills (the user or you invoke one as /name <args>: its SKILL.md body then arrives with the message; read the file for more): {skills}\n{git}\n{machines}\n{kinds}{instructions}{agents}",
         id = agent.id,
         name = agent.name,
         parent = agent.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),
@@ -186,36 +191,13 @@ pub fn skip_tools(text: &str) -> bool {
     )
 }
 
+/// One roster line per skill: `name — description`. Names only when a
+/// skill has no description.
 pub fn skill_names(place: &Place) -> Vec<String> {
-    let mut names = Vec::new();
-    for dir in [
-        place.path.join(".arbos").join("skills"),
-        place.path.join(".agents").join("skills"),
-        place.path.join("skills"),
-    ] {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.join("SKILL.md").is_file() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    names.push(name.to_string());
-                }
-            } else if path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md") {
-                if let Some(name) = path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|n| n.to_str())
-                {
-                    names.push(name.to_string());
-                }
-            }
-        }
-    }
-    names.sort();
-    names.dedup();
-    names
+    arbos_core::load_skills(place)
+        .iter()
+        .map(arbos_core::Skill::roster_line)
+        .collect()
 }
 
 fn first_agents_md(place: &Place) -> String {
