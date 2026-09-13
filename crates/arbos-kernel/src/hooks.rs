@@ -443,6 +443,14 @@ impl NewNode {
     }
 }
 
+/// `kind` spellings that mean "no custom definition".
+pub fn is_no_kind(kind: &str) -> bool {
+    matches!(
+        kind.trim().to_ascii_lowercase().as_str(),
+        "default" | "none" | "null" | "auto" | "standard" | "generic" | "-"
+    )
+}
+
 impl KernelHooks {
     pub fn layout(&self, agent: &str) -> Layout {
         Layout::new(&self.place, agent)
@@ -909,8 +917,13 @@ impl KernelHooks {
         kind: Option<&str>,
     ) -> Result<(AgentId, Option<Worktree>)> {
         // A definition fills in what the call left out; the call's own
-        // model wins, the def's readonly cannot be switched off.
-        let def = match kind.map(str::trim).filter(|k| !k.is_empty()) {
+        // model wins, the def's readonly cannot be switched off. Models fill
+        // every optional field: `kind: "default"` (or none/null/auto) is not
+        // a request for a definition, it is the built-in child (QA qa-019).
+        let kind = kind
+            .map(str::trim)
+            .filter(|k| !k.is_empty() && !is_no_kind(k));
+        let def = match kind {
             None => None,
             Some(k) => Some(arbos_core::find_def(&self.place, k).ok_or_else(|| {
                 let known: Vec<String> = arbos_core::load_defs(&self.place)
