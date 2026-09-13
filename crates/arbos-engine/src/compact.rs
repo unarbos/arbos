@@ -393,6 +393,9 @@ pub struct Managed {
     pub raw: u64,
     /// Calibrated estimate of what `messages` will cost.
     pub estimated: u64,
+    /// Calibrated estimate of the system prompt alone (the messages before
+    /// the conversation): what every call pays before any history.
+    pub system: u64,
 }
 
 /// The working set as projected right now.
@@ -515,6 +518,7 @@ pub async fn manage(
                     cx.hooks.emit(&notice);
                 }
                 return Ok(Managed {
+                    system: scaled(w.proj.base_tokens, calib),
                     messages: w.proj.messages,
                     raw: w.raw,
                     estimated: w.used,
@@ -552,6 +556,7 @@ pub async fn manage(
                             failed: false,
                         }));
                         return Ok(Managed {
+                            system: scaled(w.proj.base_tokens, calib),
                             messages: w.proj.messages,
                             raw: w.raw,
                             estimated: w.used,

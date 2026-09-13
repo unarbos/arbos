@@ -41,17 +41,12 @@ impl Tool for Screenshot {
     fn schema(&self) -> Value {
         typed_schema(
             "screenshot",
-            "Capture the machine's screen (or the frontmost window) as a PNG. The image is attached below for you to look at and saved under this agent's images/ for the user. For a web page use browser screenshot instead.",
+            "Capture the screen or frontmost window; the image is shown to you and the user. Web pages: browser screenshot.",
             &[
-                (
-                    "target",
-                    "screen (default) or window (the frontmost / focused window).",
-                    false,
-                    "string",
-                ),
+                ("target", "screen (default) or window.", false, "string"),
                 (
                     "display",
-                    "Display index, 1-based, when there are several (macOS). Default: the main one.",
+                    "1-based display index (macOS).",
                     false,
                     "integer",
                 ),

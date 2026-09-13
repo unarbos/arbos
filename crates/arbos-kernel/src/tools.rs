@@ -61,88 +61,59 @@ impl Tool for Spawn {
     fn schema(&self) -> Value {
         typed_schema(
             "spawn",
-            "Start a child agent (a worker) with a kickoff brief. Give the brief as the six template fields — read_first, task, do, rules, output, report — and a short imperative name; the kernel renders them into the child's first message. Pass content that already exists as a path (.arbos/docs/…, .arbos/internal/…), never restated. `brief` is the raw alternative when the template does not fit. The child owns its own plan and schedule: do not add plan nodes of your own that mirror its job. Its reports arrive here as messages from it, and the kernel sends you a [done] message when its turn ends. isolate=worktree gives it a git worktree of this repository (.arbos/worktrees/<id>, branch arbos/<id>, cut from HEAD) so it can edit, build, and commit without touching your checkout — use it for any child that changes code while you or another child also do. kind picks a custom agent definition (see Kinds in your prompt): its model, tools, and standing instructions apply to the child.",
+            "Start a worker with a kickoff: name + task, read_first, do, rules, output, report (or a raw brief). Pass existing content as paths. Its reports and a [done] arrive here as messages. isolate=worktree for a worker that edits code beside another. kind = an agent definition; host = another machine.",
             &[
                 (
                     "name",
-                    "The worker's name: a short imperative label, about five words (\"Run SWE-bench through Arbos harness\"). It becomes the child's id and its row in the panel.",
+                    "Short imperative label, ~5 words; becomes the id.",
                     false,
                     "string",
                 ),
                 (
                     "task",
-                    "One paragraph in the user's words: what the worker is to achieve. Required unless `brief` is given.",
+                    "What to achieve, in the user's words (or give brief).",
                     false,
                     "string",
                 ),
                 (
                     "read_first",
-                    "Paths in the project store the worker reads before anything else. Default: .arbos/docs/project-context.md, then .arbos/notes.md.",
+                    "Paths to read first (default: project-context.md, notes.md).",
                     false,
                     "string",
                 ),
-                (
-                    "do",
-                    "Numbered steps, each concrete, one per line.",
-                    false,
-                    "string",
-                ),
+                ("do", "Numbered steps.", false, "string"),
                 (
                     "rules",
-                    "Repo and base branch, no merging, no extra docs, secrets via secret by name, redaction. A default covers the usual.",
+                    "Repo/base branch, no merging; a default covers the usual.",
                     false,
                     "string",
                 ),
                 (
                     "output",
-                    "Exact file paths the worker writes, under .arbos/docs/, .arbos/internal/, or .arbos/media/<topic>/. It verifies each exists before reporting.",
+                    "Exact output paths under .arbos/docs|internal|media.",
                     false,
                     "string",
                 ),
-                (
-                    "report",
-                    "What to say back, kept short: outcome, links, open questions.",
-                    false,
-                    "string",
-                ),
+                ("report", "What to report back.", false, "string"),
                 (
                     "brief",
-                    "Raw brief text, used as-is when the template fields are not given.",
+                    "Raw brief when the fields do not fit.",
                     false,
                     "string",
                 ),
-                (
-                    "kind",
-                    "Name of an agent definition from .arbos/agents-defs/ (Kinds in your prompt).",
-                    false,
-                    "string",
-                ),
-                (
-                    "model",
-                    "inherit or a model id. Beats the kind's model.",
-                    false,
-                    "string",
-                ),
-                ("readonly", "If true, no writes.", false, "boolean"),
-                ("cwd", "Child cwd. Overrides isolate.", false, "string"),
+                ("kind", "An agent definition name (Kinds).", false, "string"),
                 ("isolate", "none (default) or worktree.", false, "string"),
                 (
                     "host",
-                    "A machine name from ~/.config/arbos/machines.toml (ssh; the child runs in its own synced copy of this project) or from the hub roster in .arbos/machines/ (a machine with a worker; the child runs in a worktree of that machine's own checkout of this project). See Machines in your prompt. It reports back here.",
+                    "A machine name (Machines): the child runs there.",
                     false,
                     "string",
                 ),
                 (
                     "wait",
-                    "true: block until the child's first report (its say to you, or its first turn's last words) and return it as this result. Use it for a quick sub-task whose answer you need before going on; leave it off for parallel workers.",
+                    "Block until its first report and return it (quick sub-tasks only).",
                     false,
                     "boolean",
-                ),
-                (
-                    "wait_secs",
-                    "With wait: how long to wait before returning \"still working\" (default 600). The child keeps going; its report then arrives as a message.",
-                    false,
-                    "integer",
                 ),
             ],
         )
@@ -286,18 +257,10 @@ impl Tool for Say {
     fn schema(&self) -> Value {
         simple_schema(
             "say",
-            "Send a message to someone outside this conversation: another agent (by id or name — see <<peers>>) or the user. To an agent it lands in their transcript as a message from you. mode note (default) waits for their next turn; mode request queues a turn for them and their reply arrives here as a message; mode steer reaches an agent that is running now — your words land in its current turn at its next tool step, so it changes course without restarting (if it is idle, a turn starts). Use steer to add a constraint, redirect, or stop a worker mid-task. To 'user' it is a durable notice in this chat. Then end your turn; never read another agent's transcript to see whether they answered.",
+            "Message another agent (id or name, see <<peers>>) or the user. mode note waits for their next turn; request queues a turn and their reply arrives here; steer lands in a running turn at its next tool step (redirect or stop a worker). Then end your turn.",
             &[
-                (
-                    "to",
-                    "Agent id, agent name, 'user', or an agent on another machine of the hub as <machine>/<agent> (or <machine>/<project>/<agent>; see Hub machines in your prompt).",
-                    true,
-                ),
-                (
-                    "text",
-                    "The message. Short and self-contained: the recipient sees only this.",
-                    true,
-                ),
+                ("to", "Agent id or name, user, or <machine>/<agent>.", true),
+                ("text", "The message; the recipient sees only this.", true),
                 ("mode", "note (default), request, or steer.", false),
             ],
         )
@@ -358,22 +321,21 @@ impl Tool for PlanTool {
             "type": "function",
             "function": {
                 "name": "plan",
-                "description": "Your checklist, kept in your notes.md (root: the project page .arbos/notes.md). One call writes it: {\"op\":\"set\",\"items\":[{\"section\":\"Profile\",\"text\":\"[time the sort](bench.py) — not started\"},\"count comparisons\"]}. items may also be a markdown checklist string (\"## Phase\\n- [ ] item\") or nested goals ({\"goal\":\"…\",\"children\":[…]}: a parent with children becomes a ## section). op:add appends one item (text); op:check marks item n done with a readout (done:false reopens); op:update rewrites item n's text; op:remove drops item n; op:show prints it. Items read `[label](target) — status readout`, rewritten fresh on every touch. It schedules nothing: anything timed or event-driven is a subscription (subscribe). Survives restarts and compaction; trust it over conversation memory.",
+                "description": "Your checklist (notes.md). set items:[\"plain\", {\"section\":\"Phase\",\"text\":\"[label](target) — readout\"}] replaces it (a markdown checklist string works too); add text; check n readout [target]; update n text; remove n; show. Schedules nothing.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "op": {"type": "string", "enum": ["set", "add", "check", "update", "remove", "show"]},
                         "items": {
                             "type": "array",
-                            "description": "set: the whole list, in order. A string, or {section, text} to start a ## section.",
-                            "items": {"anyOf": [{"type": "string"}, {"type": "object", "properties": {"section": {"type": "string"}, "text": {"type": "string"}}, "required": ["text"]}]}
+                            "description": "set: strings or {section, text}.",
+                            "items": {}
                         },
-                        "section": {"type": "string", "description": "add: the ## section to append under (created when new)."},
-                        "text": {"type": "string", "description": "add/update: the item text, `[label](target) — readout`."},
-                        "n": {"type": "integer", "description": "check/update/remove: the item number from show."},
-                        "done": {"type": "boolean", "description": "check: false to reopen (default true)."},
-                        "readout": {"type": "string", "description": "check: the fresh status readout written after the dash. The <tldr> bullet with the same [label] is rewritten too."},
-                        "target": {"type": "string", "description": "check: move the item's link to the deliverable (a PR URL, docs/x.md) now that it exists."}
+                        "section": {"type": "string", "description": "add."},
+                        "text": {"type": "string", "description": "add/update."},
+                        "n": {"type": "integer", "description": "check/update/remove."},
+                        "readout": {"type": "string", "description": "check: fresh status."},
+                        "target": {"type": "string", "description": "check: the deliverable link."}
                     },
                     "required": ["op"]
                 }
@@ -524,24 +486,22 @@ impl Tool for SubscribeTool {
             "type": "function",
             "function": {
                 "name": "subscribe",
-                "description": "The only clock. op:add creates a standing request to be woken: kind timer (every or after, with prompt), shell (cmd on every; wakes you only on failure — with deliver_to user and notify \"…{output}\" the output goes to the user after each run, no model turn), github_pr / github_ci (repo, pr: woken with a [github] message when the PR or its checks change), inbox (path, every: woken when new files land in a folder). op:list shows yours; op:remove id ends one; op:pause / op:resume id. A firing arrives as a message from subscription:N. Never sleep or poll in bash instead.",
+                "description": "The only clock; a firing arrives as a message from subscription:N. add kind: timer (every|after, prompt); shell (cmd, every: no model turn, wakes you on failure; deliver_to user + notify \"…{output}\" sends the reading to the user); github_pr|github_ci (repo, pr); inbox (path, every). list; remove|pause|resume id.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "op": {"type": "string", "enum": ["add", "list", "remove", "pause", "resume"]},
-                        "id": {"type": "integer", "description": "remove/pause/resume: the subscription id from list."},
+                        "id": {"type": "integer", "description": "remove/pause/resume."},
                         "kind": {"type": "string", "enum": ["timer", "shell", "github_pr", "github_ci", "inbox"]},
-                        "prompt": {"type": "string", "description": "What you are told when it fires (timer, shell, inbox); the note appended to a github message."},
-                        "every": {"type": "string", "description": "Period, e.g. \"1h\", \"10m\" (min 30s). Recurring."},
-                        "after": {"type": "string", "description": "One-shot: fire once this long from now, e.g. \"30m\"."},
-                        "at": {"type": "string", "description": "Wall clock (UTC) the due moment aligns to: \"09:00\" daily, \":15\" each hour."},
-                        "cmd": {"type": "string", "description": "shell: the command the kernel runs as a job."},
-                        "deliver_to": {"type": "string", "enum": ["agent", "user", "none"], "description": "shell: user sends the output to the user with no model turn; none is a quiet chore (nothing on success). Failures always wake you. Default agent."},
-                        "notify": {"type": "string", "description": "shell + deliver_to user: the line sent, must contain {output}."},
-                        "repo": {"type": "string", "description": "github_*: owner/name."},
-                        "pr": {"type": "integer", "description": "github_*: pull request number."},
-                        "path": {"type": "string", "description": "inbox: the folder to watch (relative to the place or absolute)."},
-                        "expires": {"type": "string", "description": "RFC 3339 instant after which it is removed."}
+                        "prompt": {"type": "string", "description": "what you are told."},
+                        "every": {"type": "string", "description": "e.g. 1h, 10m."},
+                        "after": {"type": "string", "description": "once, e.g. 30m."},
+                        "cmd": {"type": "string", "description": "shell command."},
+                        "deliver_to": {"type": "string", "enum": ["agent", "user", "none"], "description": "shell: default agent."},
+                        "notify": {"type": "string", "description": "deliver_to user: line with {output}."},
+                        "repo": {"type": "string", "description": "owner/name."},
+                        "pr": {"type": "integer", "description": "PR number."},
+                        "path": {"type": "string", "description": "inbox: folder."}
                     },
                     "required": ["op"]
                 }
@@ -648,13 +608,8 @@ impl Tool for Ask {
             "ask",
             "Ask the user a question.",
             &[
-                ("question", "Question.", true, "string"),
-                (
-                    "options",
-                    "Optional choices the user can pick from.",
-                    false,
-                    "array",
-                ),
+                ("question", "", true, "string"),
+                ("options", "Choices.", false, "array"),
             ],
         )
     }
@@ -687,15 +642,8 @@ impl Tool for Terminal {
     fn schema(&self) -> Value {
         simple_schema(
             "terminal",
-            "Open an interactive terminal attached to this chat. The user sees it as a sub-terminal on the left of the chat. action 'open' starts a new shell (optional cwd) and returns its id. Use this when the user asks for a terminal in Arbos — not bash 'open -a Terminal' and not another editor's terminal.",
-            &[
-                ("action", "open.", true),
-                (
-                    "cwd",
-                    "Directory the new shell starts in (default: working directory).",
-                    false,
-                ),
-            ],
+            "Open a shell the user sees as a sub-terminal of this chat (never Terminal.app or an editor's terminal).",
+            &[("action", "open", true), ("cwd", "Start directory.", false)],
         )
     }
     fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
@@ -749,7 +697,7 @@ impl Tool for Browser {
     fn schema(&self) -> Value {
         simple_schema(
             "browser",
-            "Navigate, click, type, or screenshot a page. The user sees the page as a browser row under this chat; close removes it. Use screenshot whenever the user asks to see a page or a result: the image is shown to the user and to you.",
+            "Drive a page the user sees under this chat; screenshot shows the image to both of you.",
             &[
                 (
                     "action",

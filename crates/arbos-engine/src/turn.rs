@@ -342,6 +342,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // Identical read-only calls since the last write.
     let mut repeats: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut hidden_seen = 0usize;
+    let mut first_step = true;
     loop {
         if gone() {
             eprintln!(
@@ -396,6 +397,14 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 }
                 Err(e) => return Err(e),
             };
+        if first_step {
+            first_step = false;
+            hooks.prompt_size(crate::tools::PromptSize {
+                system: managed.system,
+                tools: scaled_tools(tool_tokens, calib),
+                conversation: managed.estimated.saturating_sub(managed.system),
+            });
+        }
         // After a fold or compaction the earlier answers are gone from the
         // model's view; asking again is the right move, not a repeat.
         let hidden = events
@@ -680,4 +689,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         append_events(&transcript, &results)?;
         events = load_transcript(&transcript)?;
     }
+}
+
+/// The tool schemas at the provider's rate, like the messages.
+fn scaled_tools(tokens: u64, calib: f64) -> u64 {
+    (tokens as f64 * calib).round() as u64
 }

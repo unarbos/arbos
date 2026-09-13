@@ -455,12 +455,12 @@ pub fn roster_line(place: &Place) -> Option<String> {
         return None;
     }
     Some(format!(
-        "Hub machines (see .arbos/machines/): {}. spawn host=<name> runs a child on a machine marked worker, through the hub; say to=<name>/<agent> messages an agent on that machine.",
+        "Hub machines (spawn host=<name>, say to=<name>/<agent>; details in .arbos/machines/): {}",
         machines
             .iter()
-            .map(MachineInfo::describe)
+            .map(|m| m.name.as_str())
             .collect::<Vec<_>>()
-            .join("; ")
+            .join(", ")
     ))
 }
 
@@ -519,11 +519,12 @@ mod tests {
         };
         write_roster(&place, "wss://hub", &[m.clone()]).unwrap();
         assert_eq!(read_roster(&place), vec![m]);
-        assert!(
-            roster_line(&place)
-                .unwrap()
-                .contains("arboslife (worker; checkouts: demo; linux, gpu)")
-        );
+        // Prompt-size pass (2026-09-13): the roster in the prompt carries
+        // names only; the details stay in .arbos/machines/ for `read`.
+        let line = roster_line(&place).unwrap();
+        assert!(line.contains("arboslife"), "{line}");
+        assert!(line.contains(".arbos/machines/"), "{line}");
+        assert!(!line.contains("checkouts"), "{line}");
         write_roster(&place, "wss://hub", &[]).unwrap();
         assert!(read_roster(&place).is_empty());
         let _ = std::fs::remove_dir_all(&dir);

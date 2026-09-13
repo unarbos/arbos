@@ -80,6 +80,11 @@ fn main() -> Result<()> {
             let code = arbos_kernel::check::run(arbos_kernel::check::Args::parse(args)?)?;
             std::process::exit(code);
         }
+        "prompt" => {
+            let code =
+                arbos_kernel::prompt_size::run(arbos_kernel::prompt_size::Args::parse(args)?)?;
+            std::process::exit(code);
+        }
         "rollout" => {
             let code = arbos_kernel::rollout::run(arbos_kernel::rollout::Args::parse(args)?)?;
             std::process::exit(code);

@@ -45,7 +45,8 @@ fn tiny_model_server() -> u16 {
                         if head.starts_with("GET") || have >= content_length {
                             let (body, ctype) = if head.starts_with("GET") {
                                 (
-                                    r#"{"data":[{"id":"mock","context_length":128000}]}"#.to_string(),
+                                    r#"{"data":[{"id":"mock","context_length":128000}]}"#
+                                        .to_string(),
                                     "application/json",
                                 )
                             } else {

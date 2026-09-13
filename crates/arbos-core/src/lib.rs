@@ -18,6 +18,7 @@ pub mod notes;
 mod page;
 mod place;
 pub mod project;
+pub mod protocol;
 pub mod prs;
 pub mod skills;
 pub mod store;
