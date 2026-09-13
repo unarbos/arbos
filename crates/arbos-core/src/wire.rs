@@ -101,6 +101,14 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Kernel → client, every few seconds while a model call has produced
+    /// nothing yet: the call is alive and has run `secs` seconds. A
+    /// thinking model can be silent for a minute; without this the turn
+    /// looks dead. Never on the transcript.
+    Working {
+        agent: String,
+        secs: u64,
+    },
     /// Live text as the model streams it, one frame per chunk. The whole
     /// step arrives later as an `event` with a `seq` (the transcript line).
     AssistantDelta {

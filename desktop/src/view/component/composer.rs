@@ -1938,7 +1938,7 @@ impl Composer {
                     "composer-force",
                     icons::media::SKIP_NEXT,
                     true,
-                    "Force",
+                    "Interrupt now: stop the running turn and send this",
                     theme,
                     cx,
                     |composer, cx| composer.force(cx),

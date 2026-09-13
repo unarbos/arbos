@@ -86,6 +86,7 @@ pub async fn model_step(s: StepCx<'_>, messages: &[ChatMessage], tools: &[Value]
                 reasoning_details: None,
             })),
             Delta::Thinking(text) => hooks.emit(&Event::new(EventKind::Thinking { text })),
+            Delta::Waiting(for_) => hooks.working(for_.as_secs()),
             Delta::Call(call) => {
                 let _ = tx.send(Msg::Call(call));
             }

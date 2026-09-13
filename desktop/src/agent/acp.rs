@@ -56,6 +56,9 @@ pub enum Event {
     /// with a `seq`). Authoritative: it replaces whatever the deltas of
     /// that step built, so the reply never shows twice.
     AssistantFinal(String),
+    /// The model call is alive and has been silent for this many seconds
+    /// (`working` frame). Live only.
+    Working(u64),
     /// The kernel paused the turn for a tool the user must allow.
     NeedApproval {
         request_id: String,
@@ -412,6 +415,9 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             vec![Event::Update(SessionUpdate::AgentMessageChunk(text_chunk(
                 text,
             )))]
+        }
+        Frame::Working { agent: id, secs } if id == agent || agent.is_empty() => {
+            vec![Event::Working(secs)]
         }
         Frame::ThinkingDelta { agent: id, text } if id == agent || agent.is_empty() => {
             vec![Event::Update(SessionUpdate::AgentThoughtChunk(text_chunk(

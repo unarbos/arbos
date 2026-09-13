@@ -386,6 +386,10 @@ pub struct ChatSession {
     /// `draft` was set by the model (a follow-up taken back, a rewind) and
     /// the composer, which otherwise owns the text while bound, must take it.
     pub draft_pushed: bool,
+    /// The kernel's last `working` heartbeat: seconds the model call had
+    /// been silent, and when it was heard. Cleared by any real progress.
+    /// Runtime only.
+    pub working: Option<(u64, Instant)>,
     /// The agent's own name for the session, from `SessionInfoUpdate`.
     pub title: String,
     /// The name you typed, which the agent never overwrites. Two fields rather
@@ -510,6 +514,7 @@ impl ChatSession {
             thought_at: None,
             streaming_agent: None,
             draft_pushed: false,
+            working: None,
             title: String::new(),
             name: None,
             updated: SystemTime::now(),
@@ -571,6 +576,7 @@ impl ChatSession {
             thought_at: None,
             streaming_agent: None,
             draft_pushed: false,
+            working: None,
             title: record.title,
             name: record.name,
             updated,
@@ -632,6 +638,7 @@ impl ChatSession {
             thought_at: None,
             streaming_agent: None,
             draft_pushed: false,
+            working: None,
             title,
             name,
             updated,
@@ -817,11 +824,21 @@ impl ChatSession {
     /// A token or a tool arrived: the kernel is mid-turn here. Inside
     /// `TAIL_LAG` of the last `Turn idle` it is the tail catching up.
     fn turn_alive(&mut self) {
+        // Real progress: the model is no longer just thinking in silence.
+        self.working = None;
         if self.turn_ended.is_some_and(|at| at.elapsed() < TAIL_LAG) {
             return;
         }
         self.turn_ended = None;
         self.turn_open = true;
+    }
+
+    /// "Thinking for Ns": the heartbeat's count plus the time since it was
+    /// heard, so the label ticks between heartbeats. None when the model
+    /// is producing.
+    pub fn thinking_for(&self) -> Option<Duration> {
+        let (secs, at) = self.working?;
+        Some(Duration::from_secs(secs) + at.elapsed())
     }
 
     /// The last turn ended less than `DELEGATE_GRACE` ago: a child between
@@ -1577,7 +1594,13 @@ impl ChatSession {
             }
             Event::Citations(sources) => self.bind_sources(sources),
             Event::Permission(request, reply) => self.open_permission(request, reply),
+            Event::Working(secs) => {
+                self.working = Some((secs, Instant::now()));
+                self.turn_open = true;
+                self.turn_ended = None;
+            }
             Event::TurnDone(result) => {
+                self.working = None;
                 self.stamp_worked();
                 self.voice_answer();
                 if let Some(prompt) = self.permission.take() {

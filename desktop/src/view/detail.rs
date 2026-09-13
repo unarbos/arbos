@@ -2493,7 +2493,14 @@ impl Arbos {
                                 .text_style(TextStyle::Callout)
                                 .text_color(theme.text_faint)
                                 .group_hover(group.clone(), |el| el.text_color(theme.text))
-                                .child("Force")
+                                .child("Interrupt now")
+                                .tooltip(|window, cx| {
+                                    bezel::ui::tooltip::Tooltip::text(
+                                        "Stop the running turn and send this now",
+                                        window,
+                                        cx,
+                                    )
+                                })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.composer.update(cx, |composer, cx| {
                                         composer.force(cx);
