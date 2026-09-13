@@ -125,6 +125,7 @@ class Run:
         self.interrupted_at: float | None = None
         self.waiters: dict[str, asyncio.Future] = {}
         self.line = ""
+        self.text_line = ""
         self.player = Player(args.play)
         self.metrics: dict[str, float] = {}
 
@@ -166,6 +167,16 @@ class Run:
         elif kind == "speech.started":
             self.player.flush()
             self.log(f"<- {kind}")
+        elif kind == "text.delta":
+            self.text_line += msg.get("text", "")
+            if self.waiters.get("text.delta"):
+                self.log(f"<- text.delta (streaming)")
+        elif kind == "agent.event":
+            text = (msg.get("text") or "").replace("\n", " ")
+            if msg.get("kind") != "assistant":
+                self.log(f"<- agent.event {msg.get('agent')} {msg.get('kind')}: {text[:100]}")
+        elif kind in ("agent.turn", "agent.tree"):
+            pass
         else:
             self.log(f"<- {kind} {msg if msg else ''}")
         self._resolve(kind, msg)
@@ -184,8 +195,12 @@ async def main() -> None:
     ap.add_argument("--reply", action="store_true", help="expect the server to answer on its own (server ran with --reply)")
     ap.add_argument("--barge-in", metavar="WAV", default=None, help="second utterance to stream over the reply")
     ap.add_argument("--play", action="store_true", help="play the reply through the speakers (needs sounddevice)")
+    ap.add_argument("--text", default=None, help="also send this on the text channel (text.input) and time the streamed answer")
+    ap.add_argument("--agent-wav", default=None,
+                    help="third utterance that asks for work ('send an agent to ...'); waits for tool.call and agent.done")
     ap.add_argument("--out", default="out", help="directory for reply WAVs and metrics.json")
     ap.add_argument("--timeout", type=float, default=60.0)
+    ap.add_argument("--agent-timeout", type=float, default=240.0, help="how long to wait for agent.done")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -263,6 +278,49 @@ async def main() -> None:
         else:
             t_done, _ = await asyncio.wait_for(done, args.timeout)
             run.metrics["reply.done_ms"] = (t_done - (t_final if args.reply else t_speak)) * 1000
+
+        # 4. text channel
+        if args.text:
+            first = run.wait("text.delta")
+            done = run.wait("text.done")
+            t_text = time.monotonic()
+            await ws.send(json.dumps({"type": "text.input", "text": args.text}))
+            run.log(f"-> text.input: {args.text!r}")
+            t_first, _ = await asyncio.wait_for(first, args.timeout)
+            t_done, done_msg = await asyncio.wait_for(done, args.agent_timeout)
+            run.metrics["text.first_token_ms"] = (t_first - t_text) * 1000
+            run.metrics["text.done_ms"] = (t_done - t_text) * 1000
+            run.metrics["text.answer"] = done_msg.get("text", "")[:200]
+            run.log(f"<- text answer: {done_msg.get('text', '')[:200]!r}")
+
+        # 5. acting: ask for work by voice, expect a tool call and, later, the agent's report
+        if args.agent_wav:
+            await asyncio.sleep(1.0)
+            third = load_wav(args.agent_wav)
+            final3 = run.wait("transcript.final")
+            call = run.wait("tool.call")
+            result = run.wait("tool.result")
+            agent_done = run.wait("agent.done")
+            run.first_audio_at = None
+            first_audio = run.wait("audio.first")
+            run.log(f"-> streaming {args.agent_wav} (asks for an agent)")
+            mic.play(third, "q3")
+            t_final3, final3_msg = await asyncio.wait_for(final3, args.timeout)
+            run.metrics["act.transcript"] = final3_msg.get("text", "")
+            t_call, call_msg = await asyncio.wait_for(call, args.timeout)
+            run.metrics["act.tool_call_ms"] = (t_call - mic.marks["q3.speech_end"]) * 1000
+            run.metrics["act.tool"] = f"{call_msg.get('name')}({json.dumps(call_msg.get('arguments'))[:120]})"
+            t_result, result_msg = await asyncio.wait_for(result, args.timeout)
+            run.metrics["act.tool_result_ms"] = (t_result - t_call) * 1000
+            run.metrics["act.tool_output"] = str(result_msg.get("output", ""))[:200]
+            t_audio3, _ = await asyncio.wait_for(first_audio, args.timeout)
+            run.metrics["act.first_audio_ms"] = (t_audio3 - mic.marks["q3.speech_end"]) * 1000
+            t_agent, agent_msg = await asyncio.wait_for(agent_done, args.agent_timeout)
+            run.metrics["act.agent_done_s"] = (t_agent - t_call)
+            run.metrics["act.agent"] = agent_msg.get("agent", "")
+            run.metrics["act.report"] = str(agent_msg.get("text", ""))[:200]
+            run.log("waiting for the spoken report to finish")
+            await asyncio.sleep(6.0)
 
         run.metrics["reply.audio_seconds"] = len(run.audio) / 2 / RATE
         await ws.send(json.dumps({"type": "session.end"}))

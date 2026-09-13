@@ -33,7 +33,7 @@ fi
 cf -X PUT "$API/accounts/$CLOUDFLARE_ACCOUNT_ID/cfd_tunnel/$TUNNEL_ID/configurations" --data "{
   \"config\": {\"ingress\": [
     {\"hostname\": \"$HOSTNAME\", \"service\": \"http://127.0.0.1:$PORT\",
-     \"originRequest\": {\"noTLSVerify\": true, \"connectTimeout\": \"30s\"}},
+     \"originRequest\": {\"noTLSVerify\": true, \"connectTimeout\": 30}},
     {\"service\": \"http_status:404\"}
   ]}}" | jqr "'ingress set'" >&2
 

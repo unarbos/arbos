@@ -12,7 +12,19 @@ ASR_RATE = 16_000
 SESSION_START = "session.start"
 SPEAK = "speak"
 INTERRUPT = "interrupt"
+TEXT_INPUT = "text.input"
+TEXT_CANCEL = "text.cancel"
 SESSION_END = "session.end"
+
+# server -> client, text channel and agent bridge
+TEXT_DELTA = "text.delta"
+TEXT_DONE = "text.done"
+TOOL_CALL = "tool.call"
+TOOL_RESULT = "tool.result"
+AGENT_EVENT = "agent.event"
+AGENT_TURN = "agent.turn"
+AGENT_TREE = "agent.tree"
+AGENT_DONE = "agent.done"
 
 # server -> client
 SESSION_READY = "session.ready"
@@ -42,12 +54,18 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
           "voice": "af_heart"  TTS voice for this session (default from --voice)
           "reply": "none" | "openrouter"  who answers the user (default from --reply)
     <binary>                       microphone audio
+          "instructions": "..."  system prompt for the speech model (duplex engine)
+          "agents": true|false  mirror kernel events (agent.*) to this client (default on when a kernel is attached)
+    <binary>                       microphone audio
     {"type":"speak","text":"..."}  voice this text; requests queue in order
     {"type":"interrupt"}           drop the current reply and everything queued
+    {"type":"text.input","text":"..."}   TEXT CHANNEL: a typed turn; answered with text.delta* + text.done
+    {"type":"text.cancel"}         stop the running text turn
     {"type":"session.end"}         close
 
   server -> client
-    {"type":"session.ready","rate":24000,"asr":"...","tts":"...","reply":"none"}
+    {"type":"session.ready","rate":24000,"engine":"duplex"|"pipeline","asr":"...","tts":"...",
+     "reply":"...","text":"...","tools":["send_agent","agent_status","ask_arbos"],"kernel":true}
     {"type":"speech.started"}      server VAD heard the user start talking. If a
                                    reply was playing it is cancelled at the same
                                    moment (barge-in) and response.done follows.
@@ -68,16 +86,44 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
                                    ended because of interrupt or barge-in.
     {"type":"error","message":"..."}
 
-  Turn shape
-    speech-only (default):  audio -> speech.started -> transcript.delta* ->
+    text channel
+    {"type":"text.delta","text":"..."}   streamed answer to text.input
+    {"type":"text.done","text":"<whole answer>","cancelled":false}
+
+    agent bridge (only when the server is attached to an Arbos kernel)
+    {"type":"tool.call","name":"send_agent","arguments":{"task":"..."}}   the voice model acted
+    {"type":"tool.result","name":"send_agent","output":"..."}
+    {"type":"agent.done","agent":"<id>","text":"<report>"}   a dispatched agent finished; the report
+                                   is also spoken (gateway voice) as a normal reply turn
+    {"type":"agent.event","agent":"root","kind":"assistant"|"say"|"user"|"tool"|"notice","text":"..."}
+                                   mirror of the kernel's transcript so the app can show the main chat
+    {"type":"agent.turn","agent":"root","state":"running"|"idle"}
+    {"type":"agent.tree","agents":[{"id","name","parent"}]}
+
+  Engines
+    duplex (default when the model is up): NVIDIA NemotronLabs VoiceChat 11B, one full-duplex
+        speech-to-speech model. No turn-taking: it listens while it talks, yields when the
+        user cuts in, and calls the Arbos tools mid-conversation. Events above are produced by
+        the model. "speak" is voiced by the gateway TTS (the model cannot be told what to say).
+    pipeline (fallback, any GPU or CPU): Silero VAD -> faster-whisper -> optional reply hop
+        (OpenRouter with the same tools, or the kernel) -> Kokoro. Explicit turns; barge-in is
+        server-side cancellation on speech.started.
+
+  Turn shape (pipeline)
+    speech-only (--reply none):  audio -> speech.started -> transcript.delta* ->
         speech.stopped -> transcript.final. The client sends the text to the
         Arbos kernel and returns the reply with "speak" -> <binary>* -> response.done.
-    server reply (--reply openrouter):  ... -> transcript.final -> response.started
+    server reply (--reply openrouter|kernel):  ... -> transcript.final -> response.started
         -> (response.transcript, <binary>*)* -> response.done.
 
+  Acting ("send an agent to ...")
+    The voice model calls send_agent(task). The gateway asks the kernel's main agent to spawn
+    a sub-agent (kernel attach protocol, `user` frame) and returns at once. When the sub-agent
+    goes idle, its last `say` is sent as agent.done and spoken. agent_status and ask_arbos
+    answer synchronously (ask_arbos waits up to 45 s for the main agent).
+
   Barge-in
-    The server cancels its own output the moment it hears the user. Audio already
-    sent cannot be recalled, so the client must flush its playback queue on
+    Audio already sent cannot be recalled, so the client must flush its playback queue on
     speech.started (the iOS client does). The client may also send "interrupt".
 
   Health   GET /healthz -> 200 "ok" (no auth)

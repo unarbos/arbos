@@ -14,8 +14,10 @@ from urllib.parse import parse_qs, urlsplit
 from websockets.asyncio.server import ServerConnection, serve
 
 from . import protocol as P
+from .base import SessionDefaults, Tuning
+from .duplex import DuplexSession
 from .engines import Engines
-from .session import Session, SessionDefaults, Tuning
+from .pipeline import PipelineSession
 
 log = logging.getLogger("voice.server")
 
@@ -33,6 +35,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     net.add_argument("--token", default=os.environ.get("VOICE_TOKEN", ""),
                      help="shared secret; clients pass ?token= or Authorization: Bearer. Empty = no auth (env VOICE_TOKEN)")
 
+    engine = parser.add_argument_group("engine")
+    engine.add_argument("--engine", default="auto", choices=["auto", "duplex", "pipeline"],
+                        help="duplex: NemotronLabs VoiceChat via --duplex-url; pipeline: VAD+ASR+TTS; auto: duplex if healthy")
+    engine.add_argument("--duplex-url", default=os.environ.get("VOICE_DUPLEX_URL", "ws://127.0.0.1:9000/v1/realtime"),
+                        help="NemotronLabs VoiceChat container realtime endpoint")
+    engine.add_argument("--instructions", default=None, help="system prompt for the duplex model (text or @file)")
+
+    kernel = parser.add_argument_group("Arbos kernel (enables the agent tools and the text channel)")
+    kernel.add_argument("--kernel", default=os.environ.get("VOICE_KERNEL_URL"), help="tcp://127.0.0.1:PORT of `arbos-kernel serve`")
+    kernel.add_argument("--kernel-place", default=os.environ.get("VOICE_KERNEL_PLACE"), help="place dir; reads .arbos/kernel.json")
+    kernel.add_argument("--no-auto-approve", action="store_true", help="do not auto-approve the kernel's 'allow ...' asks")
+
     models = parser.add_argument_group("models")
     models.add_argument("--model-dir", default=os.environ.get("VOICE_MODEL_DIR", "models"),
                         help="holds silero_vad.onnx, kokoro-v1.0.onnx, voices-v1.0.bin (see deploy/run.sh)")
@@ -48,10 +62,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     models.add_argument("--voice", default="af_heart", help="default Kokoro voice (session.start may override)")
     models.add_argument("--speed", type=float, default=1.0)
 
-    reply = parser.add_argument_group("reply hop (who answers the user)")
-    reply.add_argument("--reply", default="none", choices=["none", "openrouter"],
-                       help="none: speech only, the client sends replies with 'speak'. openrouter: the server answers via OpenRouter (env OPENROUTER_API_KEY)")
-    reply.add_argument("--reply-model", default="openai/gpt-4o-mini", help="OpenRouter model id")
+    reply = parser.add_argument_group("reply hop (answers pipeline voice turns and the text channel)")
+    reply.add_argument("--reply", default="none", choices=["none", "openrouter", "kernel"],
+                       help="none: speech only, the client sends replies with 'speak'. openrouter: OpenRouter model with the Arbos tools "
+                            "(env OPENROUTER_API_KEY). kernel: the kernel's main agent answers")
+    reply.add_argument("--reply-model", default="openai/gpt-4.1-mini", help="OpenRouter model id")
 
     turn = parser.add_argument_group("turn taking (ms)")
     turn.add_argument("--end-silence-ms", type=int, default=600, help="silence that ends an utterance")
@@ -74,6 +89,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.compute_type = "float16" if args.device == "cuda" else "int8"
     if args.language == "auto":
         args.language = None
+    if args.instructions and args.instructions.startswith("@"):
+        with open(args.instructions[1:], encoding="utf-8") as fh:
+            args.instructions = fh.read()
     return args
 
 
@@ -105,11 +123,12 @@ def make_process_request(token: str):
 
 
 async def serve_forever(args: argparse.Namespace) -> None:
-    engines = Engines.load(args)
-    await engines.warm_up(args.voice)
+    engines = await Engines.load(args)
     if args.voice not in engines.tts.voices:
         raise SystemExit(f"unknown voice {args.voice!r}; have: {', '.join(engines.tts.voices)}")
-    defaults = SessionDefaults(language=args.language, voice=args.voice, speed=args.speed, reply=args.reply)
+    await engines.warm_up(args.voice)
+    defaults = SessionDefaults(language=args.language, voice=args.voice, speed=args.speed, reply=args.reply,
+                               instructions=args.instructions)
     tuning = Tuning(
         start_threshold=args.vad_threshold,
         end_threshold=max(0.1, args.vad_threshold - 0.15),
@@ -120,8 +139,10 @@ async def serve_forever(args: argparse.Namespace) -> None:
         max_lead_ms=args.max_lead_ms,
     )
 
+    session_class = DuplexSession if engines.engine == "duplex" else PipelineSession
+
     async def handler(ws: ServerConnection) -> None:
-        await Session(ws=ws, engines=engines, defaults=defaults, tuning=tuning).run()
+        await session_class(ws, engines, defaults, tuning).run()
 
     stop = asyncio.get_running_loop().create_future()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -132,8 +153,8 @@ async def serve_forever(args: argparse.Namespace) -> None:
         process_request=make_process_request(args.token),
         max_size=4 * 1024 * 1024, ping_interval=20, ping_timeout=20, compression=None,
     ):
-        log.info("listening on ws://%s:%d/ws  auth=%s  reply=%s", args.host, args.port,
-                 "token" if args.token else "OFF", args.reply)
+        log.info("listening on ws://%s:%d/ws  engine=%s  auth=%s  reply=%s", args.host, args.port,
+                 engines.engine, "token" if args.token else "OFF", args.reply)
         await stop
 
 
