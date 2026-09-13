@@ -223,7 +223,13 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
                             } else {
                                 limit.min(HISTORY_MAX)
                             };
-                            replay(&place_for_history, &agent, Some(since), limit, &out_for_history);
+                            replay(
+                                &place_for_history,
+                                &agent,
+                                Some(since),
+                                limit,
+                                &out_for_history,
+                            );
                         }
                         other => {
                             if tx.send(other).is_err() {

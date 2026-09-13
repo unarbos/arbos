@@ -81,6 +81,9 @@ pub struct KernelHooks {
     /// Pending allow/deny questions by agent: the tool asked about, and
     /// the receiver. One at a time per agent (approvals are interactive).
     pub approves: Mutex<HashMap<String, (String, oneshot::Sender<bool>)>>,
+    /// Parents blocked in `spawn wait=true`, by child id: the child's first
+    /// report (or the end of its first turn) resolves them.
+    pub waits: Mutex<HashMap<String, (String, oneshot::Sender<String>)>>,
     pub browsers: BrowserHub,
     /// Serialises plan file writes. One kernel per place holds the lock, so
     /// this is the whole claim story.
@@ -123,6 +126,7 @@ impl KernelHooks {
             kick,
             frames: Mutex::new(Vec::new()),
             asks: Mutex::new(HashMap::new()),
+            waits: Mutex::new(HashMap::new()),
             approves: Mutex::new(HashMap::new()),
             browsers: BrowserHub::new(),
             plan_lock: Mutex::new(()),
@@ -188,6 +192,40 @@ impl KernelHooks {
 
     pub fn turn_ended(&self, agent: &str) {
         self.running.lock().unwrap().remove(agent);
+        // A child whose turn ended without a report: its last words, or its
+        // failure, are what the waiting parent gets.
+        if let Some((_, tx)) = self.waits.lock().unwrap().remove(agent) {
+            let events =
+                arbos_core::load_transcript(&self.layout(agent).transcript()).unwrap_or_default();
+            let text = events
+                .iter()
+                .rev()
+                .find_map(|e| match &e.kind {
+                    EventKind::Assistant { text, .. } if !text.trim().is_empty() => {
+                        Some(text.clone())
+                    }
+                    EventKind::Notice { text, failed: true } => {
+                        Some(format!("(the child failed) {text}"))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| "(the child's turn ended without a report)".into());
+            let _ = tx.send(text);
+        }
+    }
+
+    /// Register a parent waiting on `child`'s first report.
+    pub fn wait_for(&self, parent: &str, child: &str) -> oneshot::Receiver<String> {
+        let (tx, rx) = oneshot::channel();
+        self.waits
+            .lock()
+            .unwrap()
+            .insert(child.to_string(), (parent.to_string(), tx));
+        rx
+    }
+
+    pub fn stop_waiting(&self, child: &str) {
+        self.waits.lock().unwrap().remove(child);
     }
 
     /// Put `steer` into `agent`'s live turn. False when no turn is running,
@@ -1103,6 +1141,28 @@ impl KernelHooks {
             return Ok(format!(
                 "Sent to {label} as a steer: it is running now and reads this at its next tool boundary, in the same turn. Its reply, if any, arrives here as a message from it."
             ));
+        }
+        // A parent blocked in spawn wait=true gets this as the tool result.
+        let waiting_parent = self
+            .waits
+            .lock()
+            .unwrap()
+            .get(from.as_str())
+            .is_some_and(|(parent, _)| parent == tid);
+        if waiting_parent && let Some((_, tx)) = self.waits.lock().unwrap().remove(from.as_str()) {
+            if tx.send(text.to_string()).is_ok() {
+                append_event(
+                    &self.layout(tid).transcript(),
+                    &Event::new(EventKind::Say {
+                        from: from.to_string(),
+                        text: text.to_string(),
+                    }),
+                )?;
+                return Ok(format!(
+                    "Delivered to {} ({tid}) as the result of the spawn call it is waiting on; no turn needed.",
+                    target.name
+                ));
+            }
         }
         append_event(
             &self.layout(tid).transcript(),
