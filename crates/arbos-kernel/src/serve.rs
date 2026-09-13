@@ -421,6 +421,10 @@ fn handle_frame(
             // A steer goes into the live turn at its next tool boundary.
             // Everything else is a node: it fires now if the agent is idle,
             // else after the current turn — and survives a restart either way.
+            if text.trim().is_empty() && attachments.is_empty() {
+                eprintln!("inbox {agent}: empty prompt");
+                return;
+            }
             if steer && sched.has_job(&agent) {
                 sched.steer(&agent, text);
                 return;

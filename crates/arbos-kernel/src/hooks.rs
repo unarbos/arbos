@@ -542,6 +542,11 @@ impl KernelHooks {
         if !self.place.agent_dir(agent).exists() {
             bail!("no agent {agent}");
         }
+        // Nothing to say and nothing attached is not a message; storing it
+        // would fire a model turn on an empty prompt (QA bug qa-008).
+        if n.goal.trim().is_empty() && n.attachments.is_empty() {
+            bail!("empty prompt");
+        }
         let _g = self.plan_lock.lock().unwrap();
         let nodes = self.plan_nodes(agent);
         n.id = node::next_node_id(&nodes);
