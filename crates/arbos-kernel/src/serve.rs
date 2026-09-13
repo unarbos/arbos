@@ -503,7 +503,11 @@ fn handle_frame(
         if !arbos_core::agent_exists(place, &agent) {
             // Answered and logged, not just printed: the client that named
             // a missing agent is the one that needs to hear it (#14 + #24).
-            refuse(hooks, Some(&agent), format!("no agent {agent:?} in this place"));
+            refuse(
+                hooks,
+                Some(&agent),
+                format!("no agent {agent:?} in this place"),
+            );
             return;
         }
     }
@@ -1052,6 +1056,13 @@ async fn serve_client(
                                 limit,
                                 &out_for_history,
                             );
+                        }
+                        // Files under .arbos/, answered here too; a slow
+                        // disk stalls this client alone.
+                        f @ (Frame::Read { .. } | Frame::Tail { .. } | Frame::List { .. }) => {
+                            if let Some(reply) = crate::files::handle(&place_for_history, f) {
+                                let _ = out_for_history.send(reply);
+                            }
                         }
                         other => {
                             if tx.send(other).is_err() {

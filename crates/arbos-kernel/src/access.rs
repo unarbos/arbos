@@ -23,7 +23,7 @@
 //! this socket and presents the verified identity; the roles stay.
 //!
 //! Roles: `owner` and `writer` may send every frame; `reader` may only ask
-//! for history. Fail closed: a non-loopback bind with no client tokens
+//! for history and read files under `.arbos/` (`read`, `tail`, `list`). Fail closed: a non-loopback bind with no client tokens
 //! refuses to start.
 
 use std::net::{IpAddr, SocketAddr};
@@ -63,7 +63,14 @@ impl Role {
     pub fn allows(self, frame: &Frame) -> bool {
         match self {
             Role::Owner | Role::Writer => true,
-            Role::Reader => matches!(frame, Frame::History { .. } | Frame::Auth { .. }),
+            Role::Reader => matches!(
+                frame,
+                Frame::History { .. }
+                    | Frame::Auth { .. }
+                    | Frame::Read { .. }
+                    | Frame::Tail { .. }
+                    | Frame::List { .. }
+            ),
         }
     }
 }
