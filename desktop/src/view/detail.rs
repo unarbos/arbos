@@ -953,6 +953,20 @@ impl Arbos {
         } else {
             words
         };
+        // The microphone, so a silent call is not a mystery: which device it
+        // reads and how loud, or why it is not running, in red.
+        let mic_error = status.mic_error.clone();
+        let mic_line = match &mic_error {
+            Some(e) => {
+                let e: String = e.split_whitespace().collect::<Vec<_>>().join(" ");
+                let e: String = if e.chars().count() > 70 { e.chars().take(70).collect::<String>() + "…" } else { e };
+                format!("mic: {e}")
+            }
+            None if !status.mic_device.is_empty() => {
+                format!("mic: {} · {}%", status.mic_device, (status.level * 100.0).round() as u32)
+            }
+            None => String::new(),
+        };
         let muted = status.muted;
         let mute = theme
             .ghost("call-mute")
@@ -1016,6 +1030,17 @@ impl Arbos {
                             .truncate()
                             .text_color(theme.text_faint)
                             .child(SharedString::from(words)),
+                    )
+                })
+                .when(!mic_line.is_empty(), |row| {
+                    row.child(
+                        div()
+                            .id("call-mic")
+                            .flex_none()
+                            .max_w(px(260.))
+                            .truncate()
+                            .text_color(if mic_error.is_some() { theme.danger } else { theme.text_faint })
+                            .child(SharedString::from(mic_line)),
                     )
                 })
                 .child(mute)
