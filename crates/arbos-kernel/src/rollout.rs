@@ -117,7 +117,7 @@ pub fn export(place_path: &Path, agent: &str, out: Option<&Path>) -> Result<Path
     for (from, to) in [
         (layout.agent_md(), "agent.md"),
         (layout.transcript(), "transcript.jsonl"),
-        (layout.plan_jsonl(), "plan.jsonl"),
+        (layout.dir.join("notes.md"), "notes.md"),
         (layout.instructions(), "instructions.md"),
         (layout.dir.join("feedback.jsonl"), "feedback.jsonl"),
     ] {

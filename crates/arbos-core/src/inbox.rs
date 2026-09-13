@@ -26,6 +26,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::Place;
 
+/// Reply budget for agent-to-agent chains (`say`): how many requests may
+/// chain from one message before they fall back to notes.
+pub const DEFAULT_HOPS: u8 = 3;
+
 /// A `message` is read at the next turn; a `request` wants a turn now; a
 /// `brief` is a spawned child's mission; a `wake` carries no words.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -81,11 +81,7 @@ impl Scheduler {
         crate::klog::info(
             "turn_start",
             Some(&id),
-            format!(
-                "wake={} node={}",
-                wake.kind.as_str(),
-                wake.node.map(|n| n.to_string()).unwrap_or_default()
-            ),
+            format!("wake={}", wake.kind.as_str()),
         );
         self.in_flight
             .lock()

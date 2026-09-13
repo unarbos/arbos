@@ -14,9 +14,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use arbos_core::{NodeStatus, list_agents, node};
+use arbos_core::{list_agents, subscription};
 
-use crate::{hooks::KernelHooks, plan};
+use crate::hooks::KernelHooks;
 
 pub const UNTIL_IDLE_ENV: &str = "ARBOS_UNTIL_IDLE";
 pub const HORIZON_ENV: &str = "ARBOS_HORIZON";
@@ -54,7 +54,7 @@ impl UntilIdle {
         }
         let horizon_ms = std::env::var(HORIZON_ENV)
             .ok()
-            .and_then(|h| node::parse_duration_ms(&h))
+            .and_then(|h| subscription::parse_duration_ms(&h))
             .map(|ms| ms as i64)
             .unwrap_or(DEFAULT_HORIZON_MS);
         Some(Self {
@@ -69,11 +69,11 @@ impl UntilIdle {
     }
 
     /// One check, once a second. `Some(code)` when it is time to exit.
-    pub fn poll(&mut self, hooks: &Arc<KernelHooks>, clock: &Arc<plan::Clock>) -> Option<i32> {
+    pub fn poll(&mut self, hooks: &Arc<KernelHooks>) -> Option<i32> {
         if self.started.elapsed().as_millis() < MIN_UPTIME_MS {
             return None;
         }
-        match verdict(hooks, clock, self.horizon_ms) {
+        match verdict(hooks, self.horizon_ms) {
             Verdict::Busy(_) => {
                 self.quiet = 0;
                 None
@@ -91,35 +91,35 @@ impl UntilIdle {
 }
 
 /// What the kernel is up to right now, as `--until-idle` sees it.
-pub fn verdict(hooks: &Arc<KernelHooks>, clock: &Arc<plan::Clock>, horizon_ms: i64) -> Verdict {
+pub fn verdict(hooks: &Arc<KernelHooks>, horizon_ms: i64) -> Verdict {
     let running: Vec<String> = hooks.running.lock().unwrap().iter().cloned().collect();
     if !running.is_empty() {
         return Verdict::Busy(format!("turns running: {}", running.join(", ")));
     }
-    if clock.busy() {
-        return Verdict::Busy("plan nodes in flight".into());
+    if crate::subs::busy() {
+        return Verdict::Busy("subscription runs in flight".into());
     }
     let now = arbos_core::now_ms();
     for agent in list_agents(&hooks.place).unwrap_or_default() {
         if agent.paused {
             continue;
         }
-        let nodes = hooks.plan_nodes(agent.id.as_str());
-        let fire = node::fireable(&nodes, now);
-        if !fire.mech.is_empty() || !fire.conds.is_empty() || !fire.wakes.is_empty() {
-            return Verdict::Busy(format!("{}: a node is ready to fire", agent.id));
+        let id = agent.id.as_str();
+        if arbos_core::inbox::list(&hooks.place, id)
+            .iter()
+            .any(|f| f.msg.wake)
+        {
+            return Verdict::Busy(format!("{id}: a message waits for a turn"));
         }
-        if let Some(n) = nodes.iter().find(|n| {
-            n.status == NodeStatus::Pending && {
-                let due = n.due_at();
-                due > now && due <= now + horizon_ms
-            }
-        }) {
+        if let Some(sub) = subscription::list(&hooks.place, id)
+            .into_iter()
+            .find(|s| !s.paused && s.next_due_ms().is_some_and(|due| due <= now + horizon_ms))
+        {
+            let due = sub.next_due_ms().unwrap_or(now);
             return Verdict::Busy(format!(
-                "{}: node #{} due in {}s",
-                agent.id,
-                n.id,
-                (n.due_at() - now) / 1000
+                "{id}: subscription #{} due in {}s",
+                sub.id,
+                (due - now).max(0) / 1000
             ));
         }
     }

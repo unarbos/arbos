@@ -14,7 +14,7 @@ use base64::Engine;
 use serde_json::Value;
 use std::{path::PathBuf, sync::Arc};
 
-use crate::hooks::{Isolate, KernelHooks, NewNode, SayMode};
+use crate::hooks::{Isolate, KernelHooks, SayMode};
 use crate::pty::PtyHub;
 
 /// The one browser page an agent has. The desktop keys its row on this.
@@ -282,47 +282,21 @@ impl Tool for PlanTool {
             "type": "function",
             "function": {
                 "name": "plan",
-                "description": "Maintain your durable plan: the tree of goals you hold. op:add appends nodes under a parent (0 = new roots), each a when × do pair; op:update moves one node (active, done, failed, blocked, cancelled, pending — or no status on a recurring node to record one recurrence); op:show renders it. Survives restarts and compaction; trust it over conversation memory.",
+                "description": "Your checklist, kept in your notes.md. op:set replaces the whole list; op:add appends one item; op:check marks item n done (or undone with done:false) with a fresh one-line readout; op:update rewrites item n's text; op:remove drops item n; op:show prints it. Items read `[label](target) — status readout`, rewritten fresh on every touch. It schedules nothing: anything timed or event-driven is a subscription (subscribe). Survives restarts and compaction; trust it over conversation memory.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "op": {"type": "string", "enum": ["add", "update", "show"]},
-                        "parent": {"type": "integer", "description": "add: parent node id. 0 starts a new plan: the first node becomes the mission root and the rest its children, in order."},
-                        "nodes": {
+                        "op": {"type": "string", "enum": ["set", "add", "check", "update", "remove", "show"]},
+                        "items": {
                             "type": "array",
-                            "description": "add: nodes to append, in execution order.",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "goal": {"type": "string", "description": "What done looks like, stated so it can be checked. For an ask, the question."},
-                                    "check": {"type": "string", "description": "How to verify it (a command, a test, a criterion)."},
-                                    "when": {
-                                        "type": "object",
-                                        "description": "When it becomes runnable. Omit for ready (after earlier siblings).",
-                                        "properties": {
-                                            "after": {"type": "string", "description": "Defer by a duration from now, e.g. \"30m\". One-shot."},
-                                            "every": {"type": "string", "description": "Recur on this period, e.g. \"1h\". Never terminates; cancel it when done. Min 30s."},
-                                            "wake": {"type": "boolean", "description": "Fire a turn of you the moment this node is ready (earlier siblings finished). The callback. Agent nodes only."},
-                                            "condition": {"type": "string", "description": "A shell predicate (exit 0 = holds) checked every poll period; do fires only when it holds. Needs every. Agent or notify do."}
-                                        }
-                                    },
-                                    "do": {
-                                        "type": "object",
-                                        "description": "What discharges it. Omit for a turn of you.",
-                                        "properties": {
-                                            "shell": {"type": "string", "description": "A command the kernel runs as a job — no model turn. Exit 0 = done; otherwise you are woken with the log tail. Its output alone goes nowhere: add notify to deliver it."},
-                                            "notify": {"type": "string", "description": "A message the kernel delivers to whoever asked (the user, or the agent that spawned you) — no model turn. With shell: sent after each successful run, with {output} replaced by the command's output (e.g. shell:\"curl -s …/spot | jq -r .data.amount\", notify:\"BTC: ${output}\"). This is how a scheduled reading reaches the user with no model turn."},
-                                            "ask": {"type": "boolean", "description": "A question only the user can answer; parks until they do."}
-                                        }
-                                    },
-                                    "par": {"type": "boolean", "description": "Run beside the previous node instead of after it."}
-                                },
-                                "required": ["goal"]
-                            }
+                            "description": "set: the whole list, in order. A string, or {section, text} to start a ## section.",
+                            "items": {"anyOf": [{"type": "string"}, {"type": "object", "properties": {"section": {"type": "string"}, "text": {"type": "string"}}, "required": ["text"]}]}
                         },
-                        "node": {"type": "integer", "description": "update: target node id."},
-                        "status": {"type": "string", "description": "update: active, done, failed, blocked, cancelled, or pending. Omit on a recurring node to record a recurrence."},
-                        "outcome": {"type": "string", "description": "update: what happened or was learned — required for done, failed, blocked."}
+                        "section": {"type": "string", "description": "add: the ## section to append under (created when new)."},
+                        "text": {"type": "string", "description": "add/update: the item text, `[label](target) — readout`."},
+                        "n": {"type": "integer", "description": "check/update/remove: the item number from show."},
+                        "done": {"type": "boolean", "description": "check: false to reopen (default true)."},
+                        "readout": {"type": "string", "description": "check: the fresh status readout written after the dash."}
                     },
                     "required": ["op"]
                 }
@@ -337,51 +311,191 @@ impl Tool for PlanTool {
         Box::pin(async move {
             let agent = cx.agent.id.as_str();
             let op = req(&args, "op")?;
+            let mut notes = hooks.notes(agent);
+            let n = || -> Result<usize> {
+                args.get("n")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("plan {op}: n (the item number from show) is required")
+                    })
+            };
             let ack = match op {
+                "set" => {
+                    let items = arbos_core::notes::items_from_json(
+                        args.get("items")
+                            .ok_or_else(|| anyhow::anyhow!("plan set: items is required"))?,
+                    )?;
+                    notes.set(&items);
+                    hooks.save_notes(agent, &notes)?;
+                    format!("Set {} item(s).", items.len())
+                }
                 "add" => {
-                    let parent = args.get("parent").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let specs: Vec<NewNode> = args
-                        .get("nodes")
-                        .and_then(|v| v.as_array())
-                        .map(|xs| {
-                            xs.iter()
-                                .map(NewNode::from_json)
-                                .collect::<Result<Vec<_>>>()
-                        })
-                        .transpose()?
-                        .unwrap_or_default();
-                    let ids = hooks.plan_add(agent, parent, &specs, "")?;
+                    let text = req(&args, "text")?;
+                    let k = notes.add(opt_str(&args, "section").unwrap_or(""), text);
+                    hooks.save_notes(agent, &notes)?;
+                    format!("Added item {k}.")
+                }
+                "check" => {
+                    let k = n()?;
+                    let done = args.get("done").and_then(|v| v.as_bool()).unwrap_or(true);
+                    let item = notes.check(k, done, opt_str(&args, "readout"))?;
+                    hooks.save_notes(agent, &notes)?;
                     format!(
-                        "Added {}.",
-                        ids.iter()
-                            .map(|i| format!("#{i}"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        "{} {}: {}. Items are renumbered after a check (done ones sink); use the numbers in this list.",
+                        if done { "Checked" } else { "Reopened" },
+                        k,
+                        item.text
                     )
                 }
                 "update" => {
-                    let node = args
-                        .get("node")
-                        .and_then(|v| v.as_u64())
-                        .ok_or_else(|| anyhow::anyhow!("plan update: node is required"))?;
-                    let status =
-                        match opt_str(&args, "status") {
-                            None => None,
-                            Some(s) => Some(arbos_core::NodeStatus::parse(s).ok_or_else(|| {
-                                anyhow::anyhow!("plan update: unknown status {s:?}")
-                            })?),
-                        };
-                    let outcome = opt_str(&args, "outcome").unwrap_or("");
-                    hooks.plan_update(agent, node, status, outcome, "self")?
+                    let k = n()?;
+                    notes.update(k, req(&args, "text")?)?;
+                    hooks.save_notes(agent, &notes)?;
+                    format!("Updated item {k}.")
+                }
+                "remove" => {
+                    let k = n()?;
+                    let item = notes.remove(k)?;
+                    hooks.save_notes(agent, &notes)?;
+                    format!("Removed: {}", item.text)
                 }
                 "show" => String::new(),
-                other => anyhow::bail!("plan: unknown op {other:?} (use add, update, or show)"),
+                other => anyhow::bail!(
+                    "plan: unknown op {other:?} (set, add, check, update, remove, show)"
+                ),
             };
-            let forest = hooks.plan_render(agent);
+            let shown = hooks.notes(agent).show();
             Ok(ToolOut::text(if ack.is_empty() {
-                forest
+                shown
             } else {
-                format!("{ack}\n\n{forest}")
+                format!("{ack}\n\n{shown}")
+            }))
+        })
+    }
+}
+
+pub struct SubscribeTool(pub Arc<KernelHooks>);
+
+impl Tool for SubscribeTool {
+    fn name(&self) -> &'static str {
+        "subscribe"
+    }
+    fn schema(&self) -> Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "subscribe",
+                "description": "The only clock. op:add creates a standing request to be woken: kind timer (every or after, with prompt), shell (cmd on every; wakes you only on failure — with deliver_to user and notify \"…{output}\" the output goes to the user after each run, no model turn), github_pr / github_ci (repo, pr: woken with a [github] message when the PR or its checks change), inbox (path, every: woken when new files land in a folder). op:list shows yours; op:remove id ends one; op:pause / op:resume id. A firing arrives as a message from subscription:N. Never sleep or poll in bash instead.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "op": {"type": "string", "enum": ["add", "list", "remove", "pause", "resume"]},
+                        "id": {"type": "integer", "description": "remove/pause/resume: the subscription id from list."},
+                        "kind": {"type": "string", "enum": ["timer", "shell", "github_pr", "github_ci", "inbox"]},
+                        "prompt": {"type": "string", "description": "What you are told when it fires (timer, shell, inbox); the note appended to a github message."},
+                        "every": {"type": "string", "description": "Period, e.g. \"1h\", \"10m\" (min 30s). Recurring."},
+                        "after": {"type": "string", "description": "One-shot: fire once this long from now, e.g. \"30m\"."},
+                        "at": {"type": "string", "description": "Wall clock (UTC) the due moment aligns to: \"09:00\" daily, \":15\" each hour."},
+                        "cmd": {"type": "string", "description": "shell: the command the kernel runs as a job."},
+                        "deliver_to": {"type": "string", "enum": ["agent", "user"], "description": "shell: user sends the output to the user with no model turn (failures still wake you). Default agent."},
+                        "notify": {"type": "string", "description": "shell + deliver_to user: the line sent, must contain {output}."},
+                        "repo": {"type": "string", "description": "github_*: owner/name."},
+                        "pr": {"type": "integer", "description": "github_*: pull request number."},
+                        "path": {"type": "string", "description": "inbox: the folder to watch (relative to the place or absolute)."},
+                        "expires": {"type": "string", "description": "RFC 3339 instant after which it is removed."}
+                    },
+                    "required": ["op"]
+                }
+            }
+        })
+    }
+    fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
+        Ok(Plan::access(Access::none()))
+    }
+    fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
+        let hooks = Arc::clone(&self.0);
+        Box::pin(async move {
+            let agent = cx.agent.id.as_str();
+            let op = opt_str(&args, "op").unwrap_or("add");
+            let id = || -> Result<u32> {
+                args.get("id")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32)
+                    .ok_or_else(|| anyhow::anyhow!("subscribe {op}: id is required (see list)"))
+            };
+            let text = match op {
+                "add" => {
+                    let kind = opt_str(&args, "kind").unwrap_or("timer").to_string();
+                    let sub = arbos_core::subscription::Subscription {
+                        id: 0,
+                        kind,
+                        prompt: opt_str(&args, "prompt").unwrap_or("").to_string(),
+                        every: opt_str(&args, "every").map(str::to_string),
+                        at: opt_str(&args, "at").map(str::to_string),
+                        once: false,
+                        cmd: opt_str(&args, "cmd").map(str::to_string),
+                        path: opt_str(&args, "path").map(str::to_string),
+                        repo: opt_str(&args, "repo").map(str::to_string),
+                        pr: args.get("pr").and_then(|v| v.as_u64()).filter(|n| *n > 0),
+                        deliver_to: opt_str(&args, "deliver_to").unwrap_or("agent").to_string(),
+                        notify: opt_str(&args, "notify").map(str::to_string),
+                        expires: opt_str(&args, "expires").map(str::to_string),
+                        paused: false,
+                        created: String::new(),
+                        next_due: None,
+                        last_fired: None,
+                        last: String::new(),
+                        error: None,
+                        seen: None,
+                    };
+                    let sub = hooks.subscribe(agent, sub, opt_str(&args, "after"))?;
+                    format!(
+                        "Subscribed #{} ({} · {}). It fires as a message from subscription:{}; end the turn — you are woken when it does.",
+                        sub.id,
+                        sub.kind,
+                        sub.when_line(),
+                        sub.id
+                    )
+                }
+                "remove" => {
+                    let k = id()?;
+                    if hooks.unsubscribe(agent, k)? {
+                        format!("Removed subscription #{k}.")
+                    } else {
+                        format!("No subscription #{k}.")
+                    }
+                }
+                "pause" | "resume" => {
+                    let k = id()?;
+                    hooks.plan_op(agent, crate::plan::SUB_ID_BIT | u64::from(k), op, "")?;
+                    format!("Subscription #{k} {op}d.")
+                }
+                "list" => String::new(),
+                other => anyhow::bail!(
+                    "subscribe: unknown op {other:?} (add, list, remove, pause, resume)"
+                ),
+            };
+            let subs = arbos_core::subscription::list(&hooks.place, agent);
+            let listing = if subs.is_empty() {
+                "(no subscriptions)".to_string()
+            } else {
+                subs.iter()
+                    .map(|s| {
+                        let mut line =
+                            format!("#{} {} — {} · {}", s.id, s.kind, s.label(), s.when_line());
+                        if !s.last.is_empty() {
+                            line.push_str(&format!(" · last: {}", s.last));
+                        }
+                        line
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            Ok(ToolOut::text(if text.is_empty() {
+                listing
+            } else {
+                format!("{text}\n\n{listing}")
             }))
         })
     }

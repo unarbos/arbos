@@ -126,7 +126,6 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         crate::hooks::Caps::from_config(&host.config),
     );
     let sched = Scheduler::sharing(Arc::clone(&hooks.in_flight));
-    let clock = plan::Clock::new();
     let ptys = Arc::new(PtyHub::new());
     let (pty_tx, mut pty_rx) = mpsc::unbounded_channel::<Frame>();
     ptys.bind(place.path.clone(), pty_tx);
@@ -138,7 +137,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         .with(tools::Browser(Arc::clone(&hooks)))
         .with(crate::screenshot::Screenshot)
         .with(crate::secret_tool::Secret)
-        .with(crate::github::Subscribe(Arc::clone(&hooks)))
+        .with(crate::tools::SubscribeTool(Arc::clone(&hooks)))
         .with(crate::record::Record::default())
         .with(tools::Terminal {
             hooks: Arc::clone(&hooks),
@@ -198,7 +197,6 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     }
 
     doors::spawn_telegram_if_configured(Arc::clone(&hooks));
-    crate::github::spawn_poller(Arc::clone(&hooks));
     // `--hub`: register outbound so clients and other kernels reach this
     // one by machine name, with no port open here.
     match crate::hub_link::config_from_env() {
@@ -224,6 +222,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
 
     // A dead kernel's half-run nodes go back to pending. Then continue
     // anyone whose last turn never ended.
+    for line in crate::migrate::run(&place) {
+        crate::klog::info("migrated", None, line);
+    }
     plan::reclaim(&hooks);
     for agent in list_agents(&place)? {
         if !agent.paused && needs_serve(&place, agent.id.as_str()) {
@@ -309,17 +310,16 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let mut announced: std::collections::HashSet<String> = std::collections::HashSet::new();
     println!("arbos-kernel serve {} at {}", place.path.display(), addr);
 
-    // Start one turn. The wake came from the plan (claimed) or from the
+    // Start one turn. The wake came from a claimed inbox file or from the
     // kernel's own housekeeping (`Serve`, `Compact`).
     let start = |wake: Wake| {
         let paused = load_agent(&place, &wake.agent).is_ok_and(|a| a.paused);
         if paused || sched.has_job(wake.agent.as_str()) {
             // Housekeeping on a busy agent: compact is requested in-turn by
-            // handle_frame; serve is moot. A plan wake that lands here lost
-            // a race; its node goes back to pending.
-            if wake.node.is_some() {
-                plan::abandon(&hooks, &clock, wake.agent.as_str());
-            }
+            // handle_frame; serve is moot. A claimed message that lands
+            // here lost a race with a turn already running; the words are
+            // in turns/tNNNN/cause.md and the agent reads them next turn
+            // through the transcript.
             return;
         }
         let id = wake.agent.to_string();
@@ -354,14 +354,14 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             Some(()) = kick_rx.recv() => {
                 // Coalesce a burst of kicks into one scan.
                 while kick_rx.try_recv().is_ok() {}
-                for wake in plan::scan(&hooks, &clock) {
+                for wake in plan::scan(&hooks) {
                     start(wake);
                 }
             }
             Some(id) = done_rx.recv() => {
                 let control = sched.in_flight.lock().unwrap().remove(&id);
                 hooks.turn_ended(&id);
-                plan::finish_turn(&hooks, &clock, &id);
+                plan::finish_turn(&hooks, &id);
                 // The record of this turn is a commit in .arbos/.
                 crate::snapshot::commit_later(&place, turn_commit_message(&place, &id));
                 // A steer the turn never reached is still a file in the
@@ -409,7 +409,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 }
             }
             _ = idle_tick.tick(), if until_idle.is_some() => {
-                if let Some(code) = until_idle.as_mut().and_then(|u| u.poll(&hooks, &clock)) {
+                if let Some(code) = until_idle.as_mut().and_then(|u| u.poll(&hooks)) {
                     let why = if code == idle::EXIT_IDLE { "idle" } else { "waiting on a question" };
                     println!("arbos-kernel stopping: {why} (--until-idle)");
                     klog::info("kernel_stop", None, format!("until_idle:{why}"));
@@ -503,13 +503,13 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             _ = sigint.recv() => {
                 println!("arbos-kernel stopping");
                 klog::info("kernel_stop", None, "signal");
-                stop_turns(&sched, &hooks, &clock, &mut done_rx).await;
+                stop_turns(&sched, &hooks, &mut done_rx).await;
                 break;
             }
             _ = sigterm.recv() => {
                 println!("arbos-kernel stopping");
                 klog::info("kernel_stop", None, "signal");
-                stop_turns(&sched, &hooks, &clock, &mut done_rx).await;
+                stop_turns(&sched, &hooks, &mut done_rx).await;
                 break;
             }
         }
@@ -524,7 +524,6 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
 async fn stop_turns(
     sched: &Scheduler,
     hooks: &KernelHooks,
-    clock: &plan::Clock,
     done_rx: &mut mpsc::UnboundedReceiver<String>,
 ) {
     let mut pending: std::collections::HashSet<String> =
@@ -538,7 +537,7 @@ async fn stop_turns(
             Ok(Some(id)) => {
                 sched.in_flight.lock().unwrap().remove(&id);
                 hooks.turn_ended(&id);
-                plan::finish_turn(hooks, clock, &id);
+                plan::finish_turn(hooks, &id);
                 pending.remove(&id);
             }
             _ => {
@@ -659,11 +658,7 @@ fn handle_frame(
                 }
                 return;
             }
-            let mut n = arbos_core::Node::inbox(text, "user");
-            n.attachments = attachments;
-            n.channel = channel;
-            n.device = device;
-            if let Err(e) = hooks.inbox(&agent, n) {
+            if let Err(e) = hooks.inbox_user(&agent, &text, attachments, &channel, &device) {
                 refuse(hooks, Some(&agent), format!("inbox: {e:#}"));
             }
         }

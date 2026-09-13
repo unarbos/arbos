@@ -2,8 +2,9 @@ use crate::agent::AgentId;
 
 /// Why a turn should run. Idle agents have none.
 ///
-/// Derived from a plan node whose moment came, or made by the kernel for
-/// housekeeping (`Serve`, `Compact`).
+/// Made from an inbox file whose moment came (a prompt, a peer's words, a
+/// subscription firing), or by the kernel for housekeeping (`Serve`,
+/// `Compact`).
 #[derive(Debug, Clone)]
 pub struct Wake {
     pub agent: AgentId,
@@ -12,8 +13,6 @@ pub struct Wake {
     pub attachments: Vec<String>,
     /// Inject into a live job at the next tool boundary.
     pub steer: bool,
-    /// The plan node this turn discharges.
-    pub node: Option<crate::NodeId>,
     /// Reply budget: how many agent-to-agent requests may chain from this
     /// turn before they fall back to notes.
     pub hops: u8,
@@ -57,7 +56,6 @@ impl Wake {
             text,
             attachments: Vec::new(),
             steer: false,
-            node: None,
             hops: 0,
             channel: String::new(),
             device: String::new(),

@@ -18,8 +18,8 @@
 use anyhow::{Context, Result, bail};
 use arbos_core::hub::HubFrame;
 use arbos_core::{
-    Agent, AgentId, Event, EventKind, Layout, Machine, Machines, Mode, Node, Place, append_event,
-    append_events, node::DEFAULT_HOPS, validate_id, wire::Frame,
+    Agent, AgentId, Event, EventKind, Layout, Machine, Machines, Mode, Place, append_event,
+    append_events, validate_id, wire::Frame,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -874,9 +874,12 @@ fn deliver(hooks: &KernelHooks, record: &Record, text: &str) -> Result<()> {
             text: text.to_string(),
         }),
     )?;
-    let mut n = Node::inbox(text, format!("agent:{}", record.agent));
-    n.hops = DEFAULT_HOPS;
-    hooks.inbox(&record.parent, n)?;
+    hooks.inbox(
+        &record.parent,
+        text,
+        &format!("agent:{}", record.agent),
+        Vec::new(),
+    )?;
     Ok(())
 }
 
