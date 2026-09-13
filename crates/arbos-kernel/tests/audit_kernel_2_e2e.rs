@@ -7,6 +7,24 @@ mod common;
 use common::{Attach, start_kernel_replay};
 use std::time::Duration;
 
+/// Poll the transcript until `ok` holds or `timeout` passes. The attach
+/// stream's first `idle` frame can be the agent's state at attach, before
+/// the turn; the file is the truth.
+fn wait_transcript(
+    place: &std::path::Path,
+    timeout: Duration,
+    ok: impl Fn(&[serde_json::Value]) -> bool,
+) -> Vec<serde_json::Value> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let evs = transcript(place);
+        if ok(&evs) || std::time::Instant::now() >= deadline {
+            return evs;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn transcript(place: &std::path::Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(place.join(".arbos/agents/root/transcript.jsonl"))
         .unwrap_or_default()
@@ -52,8 +70,15 @@ fn a_coordinator_that_spawns_and_leaves_the_page_alone_is_nudged() {
             .is_some()
     );
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "get a helper going"}));
-    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
-    let evs = transcript(&k.place);
+    let evs = wait_transcript(&k.place, Duration::from_secs(40), |evs| {
+        evs.iter().any(|e| {
+            e["kind"] == "notice"
+                && e["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("project page not updated")
+        })
+    });
     let nudges: Vec<&serde_json::Value> = evs
         .iter()
         .filter(|e| {
@@ -64,7 +89,9 @@ fn a_coordinator_that_spawns_and_leaves_the_page_alone_is_nudged() {
                     .starts_with("project page not updated")
         })
         .collect();
-    assert_eq!(nudges.len(), 1, "{evs:#?}");
+    // One per turn that dispatched or received work and left the page
+    // alone: the spawn turn, and the done turn if it has run by now.
+    assert!((1..=2).contains(&nudges.len()), "{evs:#?}");
     // The notice sits after the spawn turn's completion line, before
     // whatever comes next: the next turn's model reads it first.
     let done_ix = evs
@@ -101,14 +128,26 @@ fn grep_scope_history_reads_other_agents_transcripts() {
             .is_some()
     );
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "get the codeword"}));
-    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
-    std::thread::sleep(Duration::from_secs(2));
+    wait_transcript(&k.place, Duration::from_secs(40), |evs| {
+        evs.iter().filter(|e| e["kind"] == "turn_complete").count() >= 1
+    });
+    // The helper's own turn must be on disk before the second prompt.
+    let helper = k.place.join(".arbos/agents/helper/transcript.jsonl");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline
+        && !std::fs::read_to_string(&helper)
+            .unwrap_or_default()
+            .contains("turn_complete")
+    {
+        std::thread::sleep(Duration::from_millis(200));
+    }
     a.send(
         serde_json::json!({"type": "user", "agent": "root", "text": "what did the helper say?"}),
     );
-    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
-    std::thread::sleep(Duration::from_millis(500));
-    let evs = transcript(&k.place);
+    let evs = wait_transcript(&k.place, Duration::from_secs(40), |evs| {
+        evs.iter()
+            .any(|e| e["kind"] == "tool" && e["name"] == "grep")
+    });
     let grep = evs
         .iter()
         .find(|e| e["kind"] == "tool" && e["name"] == "grep")
