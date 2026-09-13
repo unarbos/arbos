@@ -4,6 +4,7 @@
 #   voice    deploy/run.sh --kernel-place ... $VOICE_ARGS        (the gateway, port 8765)
 #   tunnel   cloudflared named tunnel (tunnel.token) or a quick *.trycloudflare.com tunnel
 #   nim      NemotronLabs VoiceChat container (if nim/ holds the Triton model repo)
+#   supervisor  deploy/supervise.sh: restarts what dies, publishes the public URL (VOICE_SUPERVISE=0 to skip)
 #
 #   VOICE_HOME=/root/arbos-voice deploy/stack.sh up|down|status|logs
 #
@@ -52,16 +53,17 @@ case "${1:-status}" in
     if [ ! -s "$VOICE_HOME/tunnel.token" ] || [ "${VOICE_QUICK_TUNNEL:-0}" = "1" ]; then
       start quick "$VOICE_HOME/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:$PORT"
     fi
+    [ "${VOICE_SUPERVISE:-1}" = "1" ] && start supervisor "$SRC/deploy/supervise.sh"
     ;;
   down)
-    for s in quick tunnel voice kernel; do tm kill-session -t "=$s" 2>/dev/null && echo "$s: stopped" || true; done
+    for s in supervisor quick tunnel voice kernel; do tm kill-session -t "=$s" 2>/dev/null && echo "$s: stopped" || true; done
     [ "${2:-}" = "--nim" ] && { docker stop nemotron-labs-voicechat 2>/dev/null; tm kill-session -t "=nim" 2>/dev/null; echo "nim: stopped"; } || true
     ;;
   status)
     tm ls 2>/dev/null || echo "nothing running"
     curl -s -o /dev/null -w "gateway /healthz: %{http_code}\n" "http://127.0.0.1:$PORT/healthz" || true
     curl -s "http://127.0.0.1:9000/v1/realtime/health" 2>/dev/null | head -c 200 || true; echo
-    grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$VOICE_HOME/logs/quick.log" 2>/dev/null | tail -1 || true
+    [ -f "$VOICE_HOME/public-url.txt" ] && echo "public url: $(cat "$VOICE_HOME/public-url.txt")"
     ;;
   logs)
     tail -n "${2:-30}" "$VOICE_HOME"/logs/{voice,kernel,tunnel,quick}.log 2>/dev/null

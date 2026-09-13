@@ -3,7 +3,7 @@
 plays the reply audio, measures latency, and (optionally) barges in over the reply.
 
     python client.py ws://127.0.0.1:8765/ws?token=SECRET --wav q.wav --speak "Hi there."
-    python client.py wss://voice.arbos.life/ws?token=SECRET --wav q.wav --reply --barge-in q2.wav
+    python client.py wss://voice-api.arbos.life/ws?token=SECRET --wav q.wav --reply --barge-in q2.wav
 """
 
 from __future__ import annotations

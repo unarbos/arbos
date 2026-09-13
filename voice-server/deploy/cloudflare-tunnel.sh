@@ -3,14 +3,14 @@
 # hostname at it, and print the connector token to $VOICE_HOME/tunnel.token.
 #
 #   CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... \
-#   deploy/cloudflare-tunnel.sh voice.arbos.life [tunnel-name] [local-port]
+#   deploy/cloudflare-tunnel.sh voice-api.arbos.life [tunnel-name] [local-port]
 #
 # Then, on the machine that runs the server (cloudflared binary lands in $VOICE_HOME/bin):
 #   $VOICE_HOME/bin/cloudflared tunnel run --token "$(cat $VOICE_HOME/tunnel.token)"
 # Idempotent: re-running updates the ingress and DNS record in place.
 set -euo pipefail
 : "${CLOUDFLARE_API_TOKEN:?}" "${CLOUDFLARE_ACCOUNT_ID:?}"
-HOSTNAME="${1:?hostname, e.g. voice.arbos.life}"
+HOSTNAME="${1:?hostname, e.g. voice-api.arbos.life}"
 NAME="${2:-arbos-voice}"
 PORT="${3:-8765}"
 VOICE_HOME="${VOICE_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
