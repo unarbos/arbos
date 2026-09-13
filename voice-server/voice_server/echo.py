@@ -12,20 +12,25 @@ marker from the app tightens the thresholds while it plays audio.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import numpy as np
 
 from .audio import Resampler
 
+log = logging.getLogger("voice.echo")
+
 GATE_RATE = 8_000  # correlation runs at 8 kHz: cheap, and speech energy lives below 4 kHz
 REF_SECONDS = 3.0  # how far back we look for our own voice (covers up to ~1.5 s of client lead)
 TAIL_S = 0.6  # keep gating this long after the last reply frame (playout drains)
+FLOOR_RMS = 0.01  # -40 dBFS: quieter frames are never "the user talking over us"
 
 
 class EchoGate:
-    def __init__(self, rate: int):
+    def __init__(self, rate: int, margin: float = 1.6):
         self.rate = rate
+        self.margin = margin  # user must be this many times louder than the predicted echo to pass
         self.ref = np.zeros(int(REF_SECONDS * GATE_RATE), dtype=np.float32)
         self.ref_pos = 0
         self.ref_filled = 0
@@ -98,18 +103,23 @@ class EchoGate:
         # how much is left: a person talking over us leaves most of their energy behind.
         seg = self._segment(lag, x8.size)
         seg_rms = float(np.sqrt(np.mean(seg * seg))) + 1e-6
-        if corr > 0.6:  # clean echo: learn the path gain (fast at first, then slowly)
+        if corr > 0.75:  # clean echo: learn the path gain (fast at first, then slowly)
             observed = in_rms / seg_rms
             self.gain = observed if self.gain_samples < 4 else 0.85 * self.gain + 0.15 * observed
             self.gain_samples += 1
-        residual = x8 - self.gain * seg
-        residual_rms = float(np.sqrt(np.mean(residual * residual)))
         predicted_echo = self.gain * seg_rms
-        margin = 0.55 if self.client_speaking else 0.7
-        double_talk = self.gain_samples >= 4 and residual_rms > margin * predicted_echo and corr < 0.8
-        if double_talk and self.double_talk_streak >= 1:  # two frames in a row, not one glitch
+        # A person on top of the echo adds energy the echo path cannot explain, and pulls the
+        # correlation down. Both must hold, and the frame must not be near-silent.
+        margin = self.margin * (0.85 if self.client_speaking else 1.0)
+        double_talk = (
+            self.gain_samples >= 4 and in_rms > FLOOR_RMS and in_rms > margin * predicted_echo and corr < 0.87
+        )
+        strong = double_talk and in_rms > 2.5 * predicted_echo
+        if strong or (double_talk and self.double_talk_streak >= 1):  # one clear frame, or two in a row
             self.stats["passed_over_echo"] += 1
-            self.user_until = now + 0.4  # keep the door open through the next few frames
+            self.user_until = now + 0.6  # keep the door open through the next few words
+            log.debug("pass corr=%.2f in=%.4f pred=%.4f gain=%.2f lag=%d strong=%s",
+                      corr, in_rms, predicted_echo, self.gain, lag, strong)
             return pcm_f32, False
         self.double_talk_streak = self.double_talk_streak + 1 if double_talk else 0
         self.stats["echo"] += 1

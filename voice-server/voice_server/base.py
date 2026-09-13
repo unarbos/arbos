@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import protocol as P
-from .audio import float_to_pcm16, pcm16_to_float, resample_whole
+from .audio import Normalizer, float_to_pcm16, pcm16_to_float, resample_whole
 from .echo import EchoGate
 from .engines import Engines
 from .tools import ToolRunner
@@ -35,6 +35,9 @@ class Tuning:
     out_frame_ms: int = 100
     max_lead_ms: int = 1500  # how far ahead of real-time playback we send reply audio
     echo_gate: bool = True  # silence uplink frames that are our own reply coming back through the mic
+    echo_margin: float = 1.6  # the user must be this much louder than the predicted echo to count as talking over us
+    normalize: bool = True  # peak-follow reply audio toward out_target_dbfs with a soft limiter
+    out_target_dbfs: float = -3.0
 
 
 @dataclass
@@ -71,7 +74,8 @@ class BaseSession:
         self.tools.on_call = self._on_tool_call
         self.tools.on_result = self._on_tool_result
         self.mirror_agents = engines.kernel is not None
-        self.echo = EchoGate(self.rate) if tuning.echo_gate else None
+        self.echo = EchoGate(self.rate, tuning.echo_margin) if tuning.echo_gate else None
+        self.normalizers: dict[str, Normalizer] = {}
 
     # ------------------------------------------------------------------ hooks for engines
 
@@ -145,9 +149,20 @@ class BaseSession:
     def _emit_for_gen(self, gen: int, msg_type: str, **fields) -> None:
         self.out.put_nowait((gen, json.dumps({"type": msg_type, **fields})))
 
-    def _emit_audio(self, gen: int, pcm: bytes, ahead_s: float = 0.0) -> None:
-        if self.echo is not None and gen == self.gen:
-            self.echo.remember(pcm16_to_float(pcm), ahead_s)
+    def _emit_audio(self, gen: int, pcm: bytes, ahead_s: float = 0.0, source: str = "tts") -> None:
+        """Every reply frame leaves through here: level normalisation (one gain state per
+        source, so the quiet duplex model and the loud TTS do not pump each other), then the
+        echo reference (post-gain, so the gate matches what the speaker actually plays)."""
+        if self.tuning.normalize or self.echo is not None:
+            samples = pcm16_to_float(pcm)
+            if self.tuning.normalize:
+                norm = self.normalizers.get(source)
+                if norm is None:
+                    norm = self.normalizers[source] = Normalizer(self.rate, self.tuning.out_target_dbfs)
+                samples = norm.process(samples)
+                pcm = float_to_pcm16(samples)
+            if self.echo is not None and gen == self.gen:
+                self.echo.remember(samples, ahead_s)
         self.out.put_nowait((gen, pcm))
 
     def _send_ready(self) -> None:
@@ -216,7 +231,8 @@ class BaseSession:
         elif rate != self.rate:
             self.rate = rate
             if self.echo is not None:
-                self.echo = EchoGate(rate)
+                self.echo = EchoGate(rate, self.tuning.echo_margin)
+            self.normalizers.clear()
         if "language" in msg:
             self.language = msg["language"] or None
         voice = msg.get("voice")
