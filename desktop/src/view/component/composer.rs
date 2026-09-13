@@ -301,6 +301,48 @@ fn slash_entries(commands: &[Command]) -> Vec<SlashEntry> {
 /// Rank a model against a search query. Every whitespace token must appear
 /// in the visible name or the catalog id (case-insensitive). Prefix of the
 /// name ranks first, then any other hit.
+/// Most provider chips the picker shows before the current model's own.
+const MODEL_PROVIDER_CHIPS: usize = 7;
+
+/// The vendor part of an OpenRouter-style id: `openai/gpt-4.1` → `openai`.
+/// An id with no slash (OpenAI's own host) reads as `openai`.
+fn model_provider(id: &str) -> &str {
+    match id.split_once('/') {
+        Some((vendor, _)) => vendor,
+        None => "openai",
+    }
+}
+
+/// How a vendor prefix is spelled on a chip.
+fn vendor_label(vendor: &str) -> String {
+    match vendor {
+        "openai" => "OpenAI".into(),
+        "anthropic" => "Anthropic".into(),
+        "google" => "Google".into(),
+        "meta-llama" => "Meta".into(),
+        "mistralai" => "Mistral".into(),
+        "x-ai" => "xAI".into(),
+        "deepseek" => "DeepSeek".into(),
+        "qwen" => "Qwen".into(),
+        "inception" => "Inception".into(),
+        "cohere" => "Cohere".into(),
+        "perplexity" => "Perplexity".into(),
+        "amazon" => "Amazon".into(),
+        "microsoft" => "Microsoft".into(),
+        "nvidia" => "NVIDIA".into(),
+        "moonshotai" => "Moonshot".into(),
+        "z-ai" => "Z.ai".into(),
+        "minimax" => "MiniMax".into(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        }
+    }
+}
+
 fn model_rank(query: &str, option: &SwitchOption) -> Option<usize> {
     let query = query.trim().to_lowercase();
     let haystack = format!("{} {}", option.name, option.id).to_lowercase();
@@ -408,6 +450,11 @@ pub struct Composer {
     voice_at: usize,
     /// A lost connection can be woken by an empty send.
     reconnect: bool,
+    /// Provider filter for the model picker: the vendor prefix of the id
+    /// (`openai/…` → `openai`). None: every provider.
+    model_provider: Option<String>,
+    /// Vision-only filter for the model picker.
+    model_vision_only: bool,
     /// A model for the next send only: the user took "switch to <vision
     /// model> for this turn" because the tray holds an image the current
     /// model cannot see. Cleared on send and when the images go.
@@ -483,6 +530,8 @@ impl Composer {
             model_active: 0,
             model_pointer: None,
             turn_model: None,
+            model_provider: None,
+            model_vision_only: false,
             attachments: AttachmentDrafts::default(),
             chat_links: Vec::new(),
             voice: VoiceState::Idle,
@@ -1318,14 +1367,139 @@ impl Composer {
             self.model_active = 0;
             return;
         };
+        let provider = self.model_provider.clone();
+        let vision_only = self.model_vision_only;
         let mut ranked: Vec<(usize, usize)> = switch
             .options
             .iter()
             .enumerate()
+            .filter(|(_, option)| {
+                provider
+                    .as_deref()
+                    .is_none_or(|p| model_provider(&option.id) == p)
+            })
+            .filter(|(_, option)| !vision_only || option.vision == Some(true))
             .filter_map(|(ix, option)| model_rank(query, option).map(|rank| (rank, ix)))
             .collect();
         ranked.sort_by_key(|&(rank, ix)| (rank, ix));
         self.model_hits = ranked.into_iter().map(|(_, ix)| ix).collect();
+    }
+
+    /// Provider chips under the search line: All, the vendors the catalog
+    /// has (most models first, the current model's vendor always shown),
+    /// and Vision. One click narrows the list; the search still applies.
+    fn provider_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let switch = self.model_switch()?;
+        if switch.options.len() < 8 {
+            return None;
+        }
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for option in &switch.options {
+            *counts.entry(model_provider(&option.id).to_string()).or_default() += 1;
+        }
+        let current_vendor = switch
+            .current
+            .as_ref()
+            .map(|c| model_provider(c).to_string());
+        let mut vendors: Vec<(String, usize)> = counts.into_iter().collect();
+        vendors.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut shown: Vec<String> = vendors
+            .iter()
+            .take(MODEL_PROVIDER_CHIPS)
+            .map(|(v, _)| v.clone())
+            .collect();
+        if let Some(v) = &current_vendor
+            && !shown.contains(v)
+            && vendors.iter().any(|(x, _)| x == v)
+        {
+            shown.push(v.clone());
+        }
+        if let Some(v) = &self.model_provider
+            && !shown.contains(v)
+        {
+            shown.push(v.clone());
+        }
+        let has_vision = switch.options.iter().any(|o| o.vision == Some(true));
+        let chip = |id: SharedString, label: SharedString, on: bool, theme: &Theme| {
+            div()
+                .id(id)
+                .px(px(7.))
+                .py(px(2.))
+                .rounded(px(9.))
+                .cursor_pointer()
+                .text_style(TextStyle::Caption)
+                .text_color(if on { theme.text } else { theme.text_muted })
+                .bg(if on {
+                    theme.element_active
+                } else {
+                    theme.element_hover
+                })
+                .hover(|b| b.bg(theme.element_active))
+                .child(label)
+        };
+        let mut row = div()
+            .id("composer-model-providers")
+            .w_full()
+            .px(px(10.))
+            .pb(px(6.))
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap(px(4.))
+            .child(
+                chip(
+                    "composer-model-provider-all".into(),
+                    "All".into(),
+                    self.model_provider.is_none() && !self.model_vision_only,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.model_provider = None;
+                    this.model_vision_only = false;
+                    this.refilter_models(cx);
+                })),
+            );
+        for vendor in shown {
+            let on = self.model_provider.as_deref() == Some(vendor.as_str());
+            let id: SharedString = format!("composer-model-provider-{vendor}").into();
+            let picked = vendor.clone();
+            row = row.child(
+                chip(id, vendor_label(&vendor).into(), on, theme).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.model_provider = if this.model_provider.as_deref() == Some(picked.as_str()) {
+                            None
+                        } else {
+                            Some(picked.clone())
+                        };
+                        this.refilter_models(cx);
+                    },
+                )),
+            );
+        }
+        if has_vision {
+            row = row.child(
+                chip(
+                    "composer-model-provider-vision".into(),
+                    "Vision".into(),
+                    self.model_vision_only,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.model_vision_only = !this.model_vision_only;
+                    this.refilter_models(cx);
+                })),
+            );
+        }
+        Some(row.into_any_element())
+    }
+
+    fn refilter_models(&mut self, cx: &mut Context<Self>) {
+        let query = self.model_query.clone();
+        self.rebuild_model_hits(&query);
+        self.model_active = 0;
+        self.model_pointer = None;
+        self.scroll.scroll_to_item(0);
+        cx.notify();
     }
 
     fn highlight_current_model(&mut self) {
@@ -1577,6 +1751,7 @@ impl Composer {
                 theme,
                 self.model_search.clone().into_any_element(),
             ))
+            .children(self.provider_chips(theme, cx))
             .child(list)
             .child(popover::divider())
             .child(self.usage_row(theme))
