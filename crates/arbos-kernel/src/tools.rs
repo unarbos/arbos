@@ -85,6 +85,18 @@ impl Tool for Spawn {
                     false,
                     "string",
                 ),
+                (
+                    "wait",
+                    "true: block until the child's first report (its say to you, or its first turn's last words) and return it as this result. Use it for a quick sub-task whose answer you need before going on; leave it off for parallel workers.",
+                    false,
+                    "boolean",
+                ),
+                (
+                    "wait_secs",
+                    "With wait: how long to wait before returning \"still working\" (default 600). The child keeps going; its report then arrives as a message.",
+                    false,
+                    "integer",
+                ),
             ],
         )
     }
@@ -98,6 +110,12 @@ impl Tool for Spawn {
             let model = opt_str(&args, "model");
             let readonly = opt_bool(&args, "readonly").unwrap_or(false);
             let cwd = opt_str(&args, "cwd").map(PathBuf::from);
+            let wait = opt_bool(&args, "wait").unwrap_or(false);
+            let wait_secs = args
+                .get("wait_secs")
+                .and_then(Value::as_u64)
+                .unwrap_or(600)
+                .clamp(1, 6 * 3600);
             if let Some(host) = opt_str(&args, "host") {
                 let (id, where_) = crate::remote::spawn_remote(
                     Arc::clone(&hooks),
@@ -124,8 +142,9 @@ impl Tool for Spawn {
             let agent = cx.agent.clone();
             let brief_owned = brief.to_string();
             let model_owned = model.map(str::to_string);
+            let spawner = Arc::clone(&hooks);
             let (id, worktree) = tokio::task::spawn_blocking(move || {
-                hooks.spawn_isolated(
+                spawner.spawn_isolated(
                     &agent,
                     &brief_owned,
                     model_owned.as_deref(),
@@ -152,6 +171,26 @@ impl Tool for Spawn {
                     w.removal()
                 ));
                 paths.push(w.path.display().to_string());
+            }
+            if wait {
+                let rx = hooks.wait_for(cx.agent.id.as_str(), id.as_str());
+                let report = tokio::select! {
+                    r = rx => r.ok(),
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(wait_secs)) => None,
+                    _ = cx.cancel.cancelled() => {
+                        hooks.stop_waiting(id.as_str());
+                        anyhow::bail!("interrupted while waiting for {id}; it keeps working")
+                    }
+                };
+                match report {
+                    Some(text) => body = format!("{id} reports:\n{text}"),
+                    None => {
+                        hooks.stop_waiting(id.as_str());
+                        body.push_str(&format!(
+                            "\n{id} is still working after {wait_secs}s; its report will arrive here as a message from it."
+                        ));
+                    }
+                }
             }
             Ok(ToolOut {
                 body,
