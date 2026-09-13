@@ -11,7 +11,7 @@ use crate::{
     view::{
         component::{composer, composer::SessionDrag, menu::Menu, surface as board, transcript},
         root::{self, Cydonia, NewSession, Pane},
-        sidebar::{self, Renaming},
+        sidebar::Renaming,
     },
 };
 use bezel::{
@@ -710,13 +710,8 @@ impl Cydonia {
         let place = workspace.active_project().map(|project| project.name());
         let name_field = naming.then(|| self.header_name_field(window, cx));
         // Folded, the sidebar's traffic lights and fold button sit on this
-        // column's left edge; the title starts after them — derived from
-        // where the cluster is and how wide it is, not a fixed figure.
-        let lead = if self.sidebar_open {
-            14.
-        } else {
-            sidebar::cluster_left(window) + sidebar::CLUSTER_WIDTH + 14.
-        };
+        // column's left edge; the title starts after them.
+        let lead = if self.sidebar_open { 14. } else { 92. };
         div()
             .id("chat-header")
             .flex_none()

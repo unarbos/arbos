@@ -297,18 +297,6 @@ const CLUSTER_PAD: f32 = 2.;
 /// The floating cluster's height, half of which is the pill's radius: a ghost
 /// button's box — a 14pt glyph in 4pt of padding — inside that inset.
 const CLUSTER_HEIGHT: f32 = 14. + 2. * 4. + 2. * CLUSTER_PAD;
-/// One square toggle: the fold cluster is as wide as it is tall.
-pub(crate) const CLUSTER_WIDTH: f32 = CLUSTER_HEIGHT;
-
-/// Where the fold cluster's left edge sits: clear of the traffic lights,
-/// or at the header inset when full screen takes the lights away.
-pub(crate) fn cluster_left(window: &Window) -> f32 {
-    if window.is_fullscreen() || window.is_simple_fullscreen() {
-        root::HEADER_INSET
-    } else {
-        root::TOOLBAR_INSET
-    }
-}
 
 /// A row's name. Agents use body; children use caption so the step down
 /// the tree is a size you can see, not only an indent.
@@ -497,7 +485,13 @@ impl Cydonia {
             .top(px((root::HEADER_HEIGHT - CLUSTER_HEIGHT) / 2.))
             // Full screen takes the lights away, and the room they needed
             // would be left as a hole. Simple fullscreen is the same chrome.
-            .left(px(cluster_left(window)))
+            .left(px(
+                if window.is_fullscreen() || window.is_simple_fullscreen() {
+                    root::HEADER_INSET
+                } else {
+                    root::TOOLBAR_INSET
+                },
+            ))
             .h(px(CLUSTER_HEIGHT))
             // A pill, where the group's own corner is cut for a row of square
             // buttons. Before the glass, which reads the corners off the box.
