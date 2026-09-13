@@ -338,6 +338,7 @@ fn finish_screenshot(reply: Value, request: &Value) -> Value {
 /// `screencapture -l` grabs one window by its AppKit number, without its
 /// shadow (`-o`) and without the camera sound (`-x`). It needs the Screen
 /// Recording permission; macOS asks once, for whichever app launched us.
+#[cfg(target_os = "macos")]
 fn capture_window(window_id: i64, path: &std::path::Path) -> Result<()> {
     if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)
@@ -355,6 +356,52 @@ fn capture_window(window_id: i64, path: &std::path::Path) -> Result<()> {
     }
     if std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0) == 0 {
         bail!("screencapture wrote nothing; is Screen Recording allowed?");
+    }
+    Ok(())
+}
+
+/// X11 (a test rig under Xvfb, a Linux desktop): grab the whole display
+/// with ImageMagick's `import`, else `xwd` piped through `convert`. The
+/// window is the only thing on an Xvfb screen, so the root is the window;
+/// on a real desktop the caller crops if it must. `window_id` is unused.
+#[cfg(not(target_os = "macos"))]
+fn capture_window(_window_id: i64, path: &std::path::Path) -> Result<()> {
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("create screenshot folder {}", dir.display()))?;
+    }
+    let display =
+        std::env::var("DISPLAY").context("DISPLAY is not set; no X display to capture")?;
+    let via_import = std::process::Command::new("import")
+        .args(["-display", &display, "-window", "root"])
+        .arg(path)
+        .status();
+    let ok = match via_import {
+        Ok(status) if status.success() => true,
+        _ => {
+            let xwd = std::process::Command::new("xwd")
+                .args(["-root", "-silent", "-display", &display])
+                .output()
+                .context("run import or xwd (install imagemagick or x11-apps)")?;
+            if !xwd.status.success() {
+                bail!("xwd exited with {}", xwd.status);
+            }
+            let mut convert = std::process::Command::new("convert")
+                .arg("xwd:-")
+                .arg(path)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .context("run convert (install imagemagick)")?;
+            convert
+                .stdin
+                .take()
+                .context("convert stdin")?
+                .write_all(&xwd.stdout)?;
+            convert.wait()?.success()
+        }
+    };
+    if !ok || std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0) == 0 {
+        bail!("capture of {display} wrote nothing");
     }
     Ok(())
 }
@@ -696,7 +743,7 @@ fn act(
             window.activate_window();
             let size = window.bounds().size;
             let window_id = ns_window_number(f32::from(size.width), f32::from(size.height))
-                .context("find the AppKit window")?;
+                .context("find the window to capture")?;
             // Activation is a request the OS may refuse while the user is
             // busy in another app; raising the window without activating
             // is always allowed and is enough for the capture.
@@ -1226,7 +1273,8 @@ fn order_front_regardless(window_id: i64) {
 #[cfg(not(target_os = "macos"))]
 fn order_front_regardless(_window_id: i64) {}
 
+/// No AppKit here: the capture path grabs the X display, so any id will do.
 #[cfg(not(target_os = "macos"))]
 fn ns_window_number(_width: f32, _height: f32) -> Option<i64> {
-    None
+    Some(0)
 }
