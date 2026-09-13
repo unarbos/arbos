@@ -5,6 +5,7 @@
 //! The tree is the directory. The log is JSONL.
 
 mod agent;
+pub mod agent_def;
 pub mod chattitle;
 mod event;
 pub mod files;
@@ -17,6 +18,7 @@ pub mod wire;
 
 pub use agent::validate_id;
 pub use agent::{ALL_TOOLS, Agent, AgentId, Mode};
+pub use agent_def::{AgentDef, find_def, load_defs};
 pub use event::{Event, EventKind, ToolRec, Usage};
 pub use files::{
     Layout, ROOT_ID, append_event, append_events, bootstrap, create_chat, list_agents, load_agent,

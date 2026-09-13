@@ -116,6 +116,9 @@ pub struct Agent {
     pub readonly: bool,
     pub cwd: Option<PathBuf>,
     pub mode: Mode,
+    /// The definition this agent was spawned from (`spawn kind=<name>`),
+    /// or empty. Its body lives in the agent folder as `instructions.md`.
+    pub kind: String,
 }
 
 impl Agent {
@@ -131,6 +134,7 @@ impl Agent {
             readonly: false,
             cwd: None,
             mode: Mode::Auto,
+            kind: String::new(),
         }
     }
 
@@ -166,7 +170,7 @@ impl Agent {
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         format!(
-            "name: {}\ntitle: {}\nparent: {}\npaused: {}\nmodel: {}\nallowlist: {}\nreadonly: {}\ncwd: {}\nmode: {}\n",
+            "name: {}\ntitle: {}\nparent: {}\npaused: {}\nmodel: {}\nallowlist: {}\nreadonly: {}\ncwd: {}\nmode: {}\nkind: {}\n",
             self.name,
             self.title,
             parent,
@@ -175,7 +179,8 @@ impl Agent {
             self.allowlist.join(", "),
             self.readonly,
             cwd,
-            self.mode.as_str()
+            self.mode.as_str(),
+            self.kind
         )
     }
 
@@ -225,6 +230,7 @@ impl Agent {
                         Some(PathBuf::from(value))
                     }
                 }
+                "kind" => agent.kind = value.to_string(),
                 _ => {}
             }
         }

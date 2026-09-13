@@ -61,10 +61,21 @@ impl Tool for Spawn {
     fn schema(&self) -> Value {
         typed_schema(
             "spawn",
-            "Start a child agent with a brief. The child owns its own plan and schedule: do not add plan nodes of your own that mirror its job. Its reports arrive here as messages from it.",
+            "Start a child agent with a brief. The child owns its own plan and schedule: do not add plan nodes of your own that mirror its job. Its reports arrive here as messages from it. kind picks a custom agent definition (see Kinds in your prompt): its model, tools, and standing instructions apply to the child.",
             &[
                 ("brief", "What the child should do.", true, "string"),
-                ("model", "inherit or a model id.", false, "string"),
+                (
+                    "kind",
+                    "Name of an agent definition from .arbos/agents-defs/ (Kinds in your prompt).",
+                    false,
+                    "string",
+                ),
+                (
+                    "model",
+                    "inherit or a model id. Beats the kind's model.",
+                    false,
+                    "string",
+                ),
                 ("readonly", "If true, no writes.", false, "boolean"),
                 ("cwd", "Child cwd.", false, "string"),
             ],
@@ -80,9 +91,14 @@ impl Tool for Spawn {
             let model = opt_str(&args, "model");
             let readonly = opt_bool(&args, "readonly").unwrap_or(false);
             let cwd = opt_str(&args, "cwd").map(PathBuf::from);
-            let id = hooks.spawn(&cx.agent, brief, model, None, readonly, cwd)?;
+            let kind = opt_str(&args, "kind");
+            let id = hooks.spawn(&cx.agent, brief, model, None, readonly, cwd, kind)?;
+            let body = match kind {
+                Some(k) => format!("spawned {id} (kind {k}): {brief}"),
+                None => format!("spawned {id}: {brief}"),
+            };
             Ok(ToolOut {
-                body: format!("spawned {id}: {brief}"),
+                body,
                 paths: vec![format!(".arbos/agents/{id}")],
                 child: Some(id.to_string()),
                 images: vec![],

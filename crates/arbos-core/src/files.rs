@@ -66,6 +66,12 @@ impl Layout {
     pub fn wake_file(&self) -> PathBuf {
         self.dir.join("wake")
     }
+
+    /// Standing instructions for this agent, shown in every instance
+    /// prompt. Written at spawn from a definition's body; hand-editable.
+    pub fn instructions(&self) -> PathBuf {
+        self.dir.join("instructions.md")
+    }
 }
 
 /// Create `.arbos/` and the root agent if they are missing.

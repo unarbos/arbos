@@ -40,8 +40,13 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
         skills.join(", ")
     };
     let agents_md = first_agents_md(place);
+    let kind = if agent.kind.is_empty() {
+        String::new()
+    } else {
+        format!("Kind: {}\n", agent.kind)
+    };
     format!(
-        "You: {id}\nName: {name}\nParent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\nProject: {project}\nCwd: {cwd}\nFocus: {focus}\nSkills (read SKILL.md for the body): {skills}\n{agents}",
+        "You: {id}\nName: {name}\n{kind}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\nProject: {project}\nCwd: {cwd}\nFocus: {focus}\nSkills (read SKILL.md for the body): {skills}\n{kinds}{instructions}{agents}",
         id = agent.id,
         name = agent.name,
         parent = agent.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),
@@ -50,8 +55,43 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
         allow = agent.allowlist.join(", "),
         ro = agent.readonly,
         mode = agent.mode.describe(),
+        kinds = kinds_segment(place, agent),
+        instructions = instructions_segment(place, agent),
         agents = agents_md,
     )
+}
+
+/// The agent definitions a parent can spawn: `spawn kind=<name>`. Empty
+/// when there are none, or when this agent cannot spawn anyway.
+fn kinds_segment(place: &Place, agent: &Agent) -> String {
+    if !agent.allowlist.iter().any(|t| t == "spawn") {
+        return String::new();
+    }
+    let defs = arbos_core::load_defs(place);
+    if defs.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("Kinds (spawn kind=<name>; .arbos/agents-defs/):\n");
+    for d in defs {
+        out.push_str("  ");
+        out.push_str(&d.roster_line());
+        out.push('\n');
+    }
+    out
+}
+
+/// `instructions.md` in the agent folder: the standing brief a definition
+/// gave this agent at spawn. Clipped like AGENTS.md; the file stays whole.
+fn instructions_segment(place: &Place, agent: &Agent) -> String {
+    let path = arbos_core::Layout::new(place, agent.id.as_str()).instructions();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return String::new();
+    };
+    if text.trim().is_empty() {
+        return String::new();
+    }
+    let brief = crate::evict::evict_head(&text, &format!("{}:1", path.display()));
+    format!("\nInstructions (yours, from your kind):\n{brief}\n")
 }
 
 /// The live plan and the roster of agents here. Its own system message so
@@ -75,6 +115,9 @@ pub fn plan_segment(place: &Place, agent: &Agent) -> Option<String> {
             let mut line = format!("say to={}", a.id);
             if !a.name.is_empty() && a.name != a.id.as_str() {
                 line.push_str(&format!(" — {}", node::clip(&a.name, 60)));
+            }
+            if !a.kind.is_empty() {
+                line.push_str(&format!(" [{}]", a.kind));
             }
             if a.paused {
                 line.push_str(" (paused)");

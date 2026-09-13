@@ -677,7 +677,39 @@ impl KernelHooks {
         allowlist: Option<Vec<String>>,
         readonly: bool,
         cwd: Option<PathBuf>,
+        kind: Option<&str>,
     ) -> Result<AgentId> {
+        // A definition fills in what the call left out; the call's own
+        // model wins, the def's readonly cannot be switched off.
+        let def = match kind.map(str::trim).filter(|k| !k.is_empty()) {
+            None => None,
+            Some(k) => Some(arbos_core::find_def(&self.place, k).ok_or_else(|| {
+                let known: Vec<String> = arbos_core::load_defs(&self.place)
+                    .into_iter()
+                    .map(|d| d.name)
+                    .collect();
+                if known.is_empty() {
+                    anyhow::anyhow!(
+                        "spawn: no agent definition named {k:?}; none exist here (add .arbos/agents-defs/<name>.md)"
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "spawn: no agent definition named {k:?}. Kinds here: {}",
+                        known.join(", ")
+                    )
+                }
+            })?),
+        };
+        let model = model.or(def
+            .as_ref()
+            .map(|d| d.model.as_str())
+            .filter(|m| !m.is_empty()));
+        let allowlist = allowlist.or(def
+            .as_ref()
+            .filter(|d| !d.allowlist.is_empty())
+            .map(|d| d.allowlist.clone()));
+        let readonly = readonly || def.as_ref().is_some_and(|d| d.readonly);
+        let cwd = cwd.or(def.as_ref().and_then(|d| d.cwd.clone()));
         // One spawn at a time: the model runs parallel tool calls, and the
         // cap and the id check both read the agents folder, so without the
         // lock ten calls all see zero children and all pass.
@@ -709,10 +741,16 @@ impl KernelHooks {
         }
         child.readonly = readonly;
         child.cwd = cwd;
+        if let Some(d) = &def {
+            child.kind = d.name.clone();
+        }
         child.restrict_allowlist(parent);
         child.save(&self.place.agent_dir(&id))?;
         let layout = Layout::new(&self.place, &id);
         std::fs::create_dir_all(layout.jobs())?;
+        if let Some(d) = def.as_ref().filter(|d| !d.body.is_empty()) {
+            std::fs::write(layout.instructions(), format!("{}\n", d.body))?;
+        }
         // The brief is the child's first node: its mission root. It fires
         // a turn now with the mission spelled out; the child decomposes
         // under it with plan add and reports back with say.
