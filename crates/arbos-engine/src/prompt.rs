@@ -73,6 +73,12 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
     } else {
         format!("Kind: {}\n", agent.kind)
     };
+    let role = match agent.role.as_deref() {
+        Some(role) => format!(
+            "Role: {role} — you coordinate. You read, plan, spawn workers, steer them with say, and ask the user; you do not edit files or run commands yourself (those tools are not yours). One worker per workstream; a one-line fix is still a spawn. Keep GOALS.md and your plan current.\n"
+        ),
+        None => String::new(),
+    };
     let memory = memory_segments(place);
     let sandbox = match crate::sandbox::for_agent(place, agent) {
         Some(sb) => format!("Sandbox: {}\n", sb.describe()),
@@ -80,7 +86,7 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
     };
     let environment = crate::envprobe::line(Path::new(&cwd));
     format!(
-        "You: {id}\nName: {name}\n{kind}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\n{sandbox}Project: {project}\nCwd: {cwd}\nEnvironment: {environment}\nFocus: {focus}\nSkills (the user or you invoke one as /name <args>: its SKILL.md body then arrives with the message; read the file for more): {skills}\n{git}\n{machines}\n{kinds}{instructions}{agents}{memory}",
+        "You: {id}\nName: {name}\n{kind}{role}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\n{sandbox}Project: {project}\nCwd: {cwd}\nEnvironment: {environment}\nFocus: {focus}\nSkills (the user or you invoke one as /name <args>: its SKILL.md body then arrives with the message; read the file for more): {skills}\n{git}\n{machines}\n{kinds}{instructions}{agents}{memory}",
         id = agent.id,
         name = agent.name,
         parent = agent.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),

@@ -92,7 +92,10 @@ impl Scheduler {
             .unwrap()
             .insert(id.clone(), control.clone());
         tokio::spawn(async move {
-            let agent = match load_agent(&place, &wake.agent) {
+            let agent = match load_agent(&place, &wake.agent).map(|mut a| {
+                arbos_core::project::apply_role(&place, &mut a);
+                a
+            }) {
                 Ok(a) => a,
                 Err(e) => {
                     crate::klog::error("load_agent", Some(&id), format!("{e:#}"));

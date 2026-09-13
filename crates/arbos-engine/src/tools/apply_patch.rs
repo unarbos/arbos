@@ -46,7 +46,7 @@ impl Tool for ApplyPatch {
         }
         let resolved = paths
             .iter()
-            .map(|p| cx.resolve(p))
+            .map(|p| cx.resolve_write(p))
             .collect::<Result<Vec<_>>>()?;
         Ok(ToolPlan::access(Access::writes(resolved)))
     }

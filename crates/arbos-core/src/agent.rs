@@ -119,6 +119,9 @@ pub struct Agent {
     pub model: String,
     pub allowlist: Vec<String>,
     pub readonly: bool,
+    /// Set for this turn only by `project::apply_role`; never written to
+    /// agent.md. `Some("coordinator")`: the main chat of a coordinator place.
+    pub role: Option<String>,
     pub cwd: Option<PathBuf>,
     /// `machine:path` when this agent is a stand-in for a kernel on another
     /// machine: its turns run there; this folder mirrors them.
@@ -140,6 +143,7 @@ impl Agent {
             model: "inherit".into(),
             allowlist: ALL_TOOLS.iter().map(|s| (*s).to_string()).collect(),
             readonly: false,
+            role: None,
             cwd: None,
             remote: None,
             mode: Mode::Auto,

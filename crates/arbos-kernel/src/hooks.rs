@@ -124,6 +124,12 @@ pub struct KernelHooks {
     /// Parents blocked in `spawn wait=true`, by child id: the child's first
     /// report (or the end of its first turn) resolves them.
     pub waits: Mutex<HashMap<String, (String, oneshot::Sender<String>)>>,
+    /// Children whose turn end already reached a parent blocked in `wait`:
+    /// no `done` message for that turn (it would say the same thing twice).
+    pub waited: Mutex<HashSet<String>>,
+    /// Transcript length when each running turn began, for the `done`
+    /// message's summary of what the turn said.
+    pub turn_lo: Mutex<HashMap<String, u64>>,
     pub browsers: BrowserHub,
     /// Serialises plan file writes. One kernel per place holds the lock, so
     /// this is the whole claim story.
@@ -184,6 +190,8 @@ impl KernelHooks {
             issued: Mutex::new(HashSet::new()),
             approve_seq: std::sync::atomic::AtomicU64::new(1),
             waits: Mutex::new(HashMap::new()),
+            waited: Mutex::new(HashSet::new()),
+            turn_lo: Mutex::new(HashMap::new()),
             approves: Mutex::new(HashMap::new()),
             browsers: BrowserHub::new(),
             plan_lock: Mutex::new(()),
@@ -246,6 +254,8 @@ impl KernelHooks {
     pub fn turn_started(&self, agent: &str) {
         self.running.lock().unwrap().insert(agent.to_string());
         self.sent.lock().unwrap().remove(agent);
+        let lo = count_lines(&self.layout(agent).transcript());
+        self.turn_lo.lock().unwrap().insert(agent.to_string(), lo);
     }
 
     pub fn turn_ended(&self, agent: &str) {
@@ -253,6 +263,7 @@ impl KernelHooks {
         // A child whose turn ended without a report: its last words, or its
         // failure, are what the waiting parent gets.
         if let Some((_, tx)) = self.waits.lock().unwrap().remove(agent) {
+            self.waited.lock().unwrap().insert(agent.to_string());
             let events =
                 arbos_core::load_transcript(&self.layout(agent).transcript()).unwrap_or_default();
             let text = events
@@ -1157,6 +1168,10 @@ impl KernelHooks {
             (Some(_), Isolate::Worktree) | (_, Isolate::None) => None,
             (None, Isolate::Worktree) => Some(worktree::create(self.place.path(), &id)?),
         };
+        // The parent's list as saved, not as narrowed for this turn: a
+        // coordinator's children are the ones that edit.
+        let saved_parent =
+            arbos_core::load_agent(&self.place, &parent.id).unwrap_or_else(|_| parent.clone());
         let mut child = Agent::root(&id);
         child.name = brief.chars().take(48).collect();
         child.parent = Some(parent.id.clone());
@@ -1164,14 +1179,14 @@ impl KernelHooks {
         if let Some(list) = allowlist {
             child.allowlist = list;
         } else {
-            child.allowlist = parent.allowlist.clone();
+            child.allowlist = saved_parent.allowlist.clone();
         }
         child.readonly = readonly;
         child.cwd = cwd.or_else(|| worktree.as_ref().map(|w| w.path.clone()));
         if let Some(d) = &def {
             child.kind = d.name.clone();
         }
-        child.restrict_allowlist(parent);
+        child.restrict_allowlist(&saved_parent);
         child.save(&self.place.agent_dir(&id))?;
         let layout = Layout::new(&self.place, &id);
         std::fs::create_dir_all(layout.jobs())?;
@@ -1588,4 +1603,21 @@ pub fn inbox_id(name: &str) -> NodeId {
 
 pub fn is_inbox_id(id: NodeId) -> bool {
     id & (1u64 << 40) != 0
+}
+
+/// Lines in a file, cheaply (no parse): the transcript's event count.
+fn count_lines(path: &std::path::Path) -> u64 {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return 0;
+    };
+    let mut buf = [0u8; 64 * 1024];
+    let mut n = 0u64;
+    while let Ok(read) = f.read(&mut buf) {
+        if read == 0 {
+            break;
+        }
+        n += buf[..read].iter().filter(|b| **b == b'\n').count() as u64;
+    }
+    n
 }
