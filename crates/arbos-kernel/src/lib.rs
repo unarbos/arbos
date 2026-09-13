@@ -5,6 +5,7 @@ pub mod doors;
 pub mod github;
 pub mod grep;
 pub mod hooks;
+pub mod idle;
 pub mod klog;
 pub mod mcp;
 pub mod plan;

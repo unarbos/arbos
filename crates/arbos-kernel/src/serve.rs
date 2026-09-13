@@ -18,7 +18,7 @@ use crate::{
     doors,
     grep::PlaceGrep,
     hooks::KernelHooks,
-    klog, plan,
+    idle, klog, plan,
     pty::PtyHub,
     sched::Scheduler,
     tools,
@@ -34,7 +34,7 @@ struct KernelJson {
     log: String,
 }
 
-pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
+pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let place = Place::new(
         std::fs::canonicalize(place_path.into())
             .unwrap_or_else(|_| std::env::current_dir().unwrap()),
@@ -253,6 +253,32 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut tick = interval(Duration::from_secs(5));
     let mut tail = interval(Duration::from_millis(200));
+    // `--until-idle`: a check a second; the loop ends with its code.
+    let mut until_idle = idle::UntilIdle::from_env();
+    let mut idle_tick = interval(Duration::from_secs(1));
+    let mut exit_code = 0;
+    if let Some(u) = &until_idle {
+        klog::info(
+            "until_idle",
+            None,
+            format!(
+                "horizon={}s now={}",
+                u.horizon_ms() / 1000,
+                arbos_core::now_ms()
+            ),
+        );
+    }
+    if arbos_core::clock_offset_ms() != 0 {
+        klog::info(
+            "clock_shift",
+            None,
+            format!(
+                "offset_ms={} now={}",
+                arbos_core::clock_offset_ms(),
+                arbos_core::now_ms()
+            ),
+        );
+    }
     // One incremental reader per agent. Each poll reads only what was
     // appended since the last one.
     let mut tails: std::collections::HashMap<String, TranscriptTail> =
@@ -343,6 +369,15 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
             _ = tick.tick() => {
                 hooks.kick();
                 hooks.broadcast(tree_frame(&place));
+            }
+            _ = idle_tick.tick(), if until_idle.is_some() => {
+                if let Some(code) = until_idle.as_mut().and_then(|u| u.poll(&hooks, &clock)) {
+                    let why = if code == idle::EXIT_IDLE { "idle" } else { "waiting on a question" };
+                    println!("arbos-kernel stopping: {why} (--until-idle)");
+                    klog::info("kernel_stop", None, format!("until_idle:{why}"));
+                    exit_code = code;
+                    break;
+                }
             }
             _ = tail.tick() => {
                 let agents = list_agents(&place).unwrap_or_default();
@@ -442,7 +477,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
             }
         }
     }
-    Ok(())
+    Ok(exit_code)
 }
 
 /// A graceful stop ends every running turn the way the stop button does:
@@ -517,7 +552,11 @@ fn handle_frame(
         if !arbos_core::agent_exists(place, &agent) {
             // Answered and logged, not just printed: the client that named
             // a missing agent is the one that needs to hear it (#14 + #24).
-            refuse(hooks, Some(&agent), format!("no agent {agent:?} in this place"));
+            refuse(
+                hooks,
+                Some(&agent),
+                format!("no agent {agent:?} in this place"),
+            );
             return;
         }
     }
