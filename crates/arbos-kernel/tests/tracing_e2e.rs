@@ -45,7 +45,7 @@ fn tiny_model_server() -> u16 {
                         if head.starts_with("GET") || have >= content_length {
                             let (body, ctype) = if head.starts_with("GET") {
                                 (
-                                    r#"{"data":[{"id":"mock","context_length":8000}]}"#.to_string(),
+                                    r#"{"data":[{"id":"mock","context_length":128000}]}"#.to_string(),
                                     "application/json",
                                 )
                             } else {
@@ -89,7 +89,7 @@ fn has(lines: &[serde_json::Value], event: &str, agent: Option<&str>) -> Option<
 fn the_kernel_log_traces_and_kernel_json_tell_a_rollout_what_happened() {
     let port = tiny_model_server();
     let config = format!(
-        "api_base = \"http://127.0.0.1:{port}/v1\"\napi_key = \"test-key\"\nmodel = \"mock\"\nwindow_tokens = 8000\ntrace = true\n"
+        "api_base = \"http://127.0.0.1:{port}/v1\"\napi_key = \"test-key\"\nmodel = \"mock\"\nwindow_tokens = 0\ntrace = true\n"
     );
     let mut k = start_kernel_with("tracing", &config);
     let mut a = Attach::connect(&k.url);
