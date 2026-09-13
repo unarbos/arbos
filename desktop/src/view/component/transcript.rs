@@ -2696,7 +2696,11 @@ fn zone(
             _ => div().into_any_element(),
         });
     }
-    if let Some(answer) = turn_answer(&chat.items, turn) {
+    // Copy, fork, thumbs and "2m ago" belong to a finished turn. While
+    // the turn still runs — a long model call with nothing streaming, a
+    // job in flight — an interim reply already has words, and the footer
+    // under them read as "done" next to a live Stop button.
+    if !running && let Some(answer) = turn_answer(&chat.items, turn) {
         has_tail = true;
         // Always shown, faint, as Cursor's are: copy, then fork.
         tail = tail.child(turn_footer(chat, first, answer, &theme, cx));
