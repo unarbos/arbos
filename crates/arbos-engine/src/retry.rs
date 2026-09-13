@@ -172,6 +172,11 @@ impl Models {
         &self.list[self.current]
     }
 
+    /// The primary and every fallback, in order.
+    pub fn all(&self) -> &[String] {
+        &self.list
+    }
+
     pub fn has_next(&self) -> bool {
         self.current + 1 < self.list.len()
     }

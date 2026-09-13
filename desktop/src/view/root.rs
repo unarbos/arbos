@@ -71,6 +71,14 @@ actions!(
     ]
 );
 
+/// Attach files to the composer without the system's file dialog: what a
+/// drop does, as an action, so the driver (and a keymap) can do it too.
+#[derive(Clone, PartialEq, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
+#[action(namespace = arbos)]
+pub struct AttachPaths {
+    pub paths: Vec<String>,
+}
+
 /// Claimed on the window's rest focus so Delete/Backspace archive the
 /// highlighted chat when no field is in front.
 const WINDOW_CONTEXT: &str = "ArbosWindow";
@@ -1015,6 +1023,19 @@ impl Arbos {
         self.open_settings(Section::General, cx);
     }
 
+    pub(crate) fn attach_paths_action(
+        &mut self,
+        action: &AttachPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let paths: Vec<std::path::PathBuf> =
+            action.paths.iter().map(std::path::PathBuf::from).collect();
+        self.composer.update(cx, |composer, cx| {
+            composer.accept_paths(paths, window, cx);
+        });
+    }
+
     pub(crate) fn toggle_panel_action(
         &mut self,
         _: &TogglePanel,
@@ -1312,7 +1333,8 @@ impl Arbos {
                 // A duplex server answered the words itself (and may have
                 // sent them to its own kernel): the transcript goes into the
                 // composer for the record, but is neither sent nor read back.
-                let server_answers = crate::voice_ws::configured() && crate::voice_ws::server_answers();
+                let server_answers =
+                    crate::voice_ws::configured() && crate::voice_ws::server_answers();
                 if spoken && crate::voice_ws::configured() && !server_answers {
                     // The answer to a dictated prompt is read aloud.
                     if let Some(id) = this.workspace.read(cx).active_id() {

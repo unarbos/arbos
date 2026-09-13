@@ -63,6 +63,13 @@ pub enum Event {
     /// The agent spoke between turns: a callback fired, or background work
     /// finished. Not a turn, and not a failure.
     Aside(String),
+    /// An attached image the turn's model could not see was described in
+    /// words by `model`. Belongs to the user card that carried the image.
+    ImageDescribed {
+        path: String,
+        model: String,
+        text: String,
+    },
     /// The kernel refused or failed something this window asked for
     /// (`error` frame): shown as a failed notice, kept on the pane.
     Refused(String),
@@ -324,6 +331,7 @@ impl Session {
                 .collect(),
             channel: String::new(),
             device: String::new(),
+            model: content.model.clone().unwrap_or_default(),
         })
     }
 
@@ -699,6 +707,9 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
             vec![Event::TurnDone(Err(Error::internal_error().data(text)))]
         }
         EventKind::Notice { text, .. } => vec![Event::Aside(text)],
+        EventKind::ImageDescribed { path, model, text } => {
+            vec![Event::ImageDescribed { path, model, text }]
+        }
         // The turn was cut short; the pane says by whom (the fold line
         // picks the same text up).
         EventKind::Interrupted { detail } => vec![Event::Aside(
@@ -923,8 +934,19 @@ pub(crate) fn tool_title(name: &str, hint: Option<&str>) -> String {
     };
     let keep_full = matches!(
         name,
-        "bash" | "run" | "exec" | "grep" | "find" | "tgrep" | "glob" | "plan" | "subscribe" | "say"
-            | "ask" | "spawn" | "remember"
+        "bash"
+            | "run"
+            | "exec"
+            | "grep"
+            | "find"
+            | "tgrep"
+            | "glob"
+            | "plan"
+            | "subscribe"
+            | "say"
+            | "ask"
+            | "spawn"
+            | "remember"
     );
     let shown = if keep_full {
         hint
@@ -994,17 +1016,30 @@ pub(crate) fn tool_hint(name: &str, paths: &[String], args: Option<&Value>) -> O
 /// `plan set · 12 items`, `plan check 3`, `subscribe add timer every 1h`,
 /// `say to=root`, `ask "which name…"`, `spawn "brief…"`.
 fn kernel_tool_hint(name: &str, o: &Value) -> Option<String> {
-    let s = |k: &str| o.get(k).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+    let s = |k: &str| {
+        o.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
     let count = |k: &str| o.get(k).and_then(Value::as_array).map(|a| a.len());
     let head = |t: &str| {
         let line = t.lines().next().unwrap_or("");
         let cut: String = line.chars().take(40).collect();
-        if cut.chars().count() < line.chars().count() { format!("{cut}…") } else { cut }
+        if cut.chars().count() < line.chars().count() {
+            format!("{cut}…")
+        } else {
+            cut
+        }
     };
     match name {
         "plan" => {
-            let op = s("op").or_else(|| s("action")).unwrap_or(if o.get("items").is_some() { "set" } else { "" });
-            let n = ["items", "goals", "nodes", "steps", "tasks"].iter().find_map(|k| count(k));
+            let op = s("op")
+                .or_else(|| s("action"))
+                .unwrap_or(if o.get("items").is_some() { "set" } else { "" });
+            let n = ["items", "goals", "nodes", "steps", "tasks"]
+                .iter()
+                .find_map(|k| count(k));
             let mut out = op.to_string();
             if let Some(n) = n {
                 out.push_str(&format!(" · {n} item{}", if n == 1 { "" } else { "s" }));
@@ -1034,7 +1069,9 @@ fn kernel_tool_hint(name: &str, o: &Value) -> Option<String> {
         "say" => s("to").map(|to| format!("to={to}")),
         "ask" => s("question").map(|q| format!("\"{}\"", head(q))),
         "spawn" => s("brief").map(|b| format!("\"{}\"", head(b))),
-        "remember" => s("fact").or_else(|| s("text")).map(|f| format!("\"{}\"", head(f))),
+        "remember" => s("fact")
+            .or_else(|| s("text"))
+            .map(|f| format!("\"{}\"", head(f))),
         _ => None,
     }
 }

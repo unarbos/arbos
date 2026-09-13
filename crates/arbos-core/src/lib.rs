@@ -14,6 +14,7 @@ pub mod hub;
 pub mod inbox;
 mod lock;
 pub mod machines;
+pub mod models;
 pub mod notes;
 mod page;
 mod place;

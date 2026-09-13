@@ -244,6 +244,12 @@ pub enum Frame {
         channel: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         device: String,
+        /// Run this turn on `model` instead of the agent's own; the next
+        /// turn is back on the agent's. For "switch to <vision model> for
+        /// this turn" when the composer holds an image the model cannot
+        /// see. Empty or absent: the agent's model.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        model: String,
     },
     Pause {
         agent: String,

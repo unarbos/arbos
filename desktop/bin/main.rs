@@ -1,12 +1,6 @@
 //! Arbos desktop — Arbos look, Rust kernel (`arbos-kernel serve`).
 
 use anyhow::Result;
-use bezel::{
-    gpui::App,
-    gpui_platform,
-    theme::{self, Tint, appearance},
-    ui::{self, focus, input},
-};
 use arbos_desktop::{
     assets, memory,
     model::{settings, state, workspace},
@@ -15,6 +9,12 @@ use arbos_desktop::{
         component::{composer, opener, tab_sheet},
         menubar, root,
     },
+};
+use bezel::{
+    gpui::App,
+    gpui_platform,
+    theme::{self, Tint, appearance},
+    ui::{self, focus, input},
 };
 
 fn main() -> Result<()> {
@@ -40,7 +40,8 @@ fn main() -> Result<()> {
         // ⌘W of the chat window used to leave Settings holding a dead
         // Workspace. Drop those leftovers before a new one is made.
         for window in cx.windows() {
-            if let Some(handle) = window.downcast::<arbos_desktop::view::settings::SettingsWindow>() {
+            if let Some(handle) = window.downcast::<arbos_desktop::view::settings::SettingsWindow>()
+            {
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             }
         }

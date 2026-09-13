@@ -281,6 +281,7 @@ dependencies = [
  "objc",
  "rusqlite",
  "rustls",
+ "schemars",
  "serde",
  "serde_json",
  "tokio",

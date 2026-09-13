@@ -61,6 +61,7 @@ notify = "8"
 # hand to the user, so it cannot depend on whichever sqlite3 a machine ships.
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
+schemars = "1.0"
 # An archived transcript is an array of tagged enum variants, which is the one
 # shape `toml` cannot round-trip.
 serde_json = "1"

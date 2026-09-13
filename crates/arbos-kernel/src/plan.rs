@@ -240,6 +240,7 @@ fn wake_from_message(
         hops: msg.hops,
         channel: msg.channel.clone(),
         device: msg.device.clone(),
+        model: msg.model.clone(),
     })
 }
 

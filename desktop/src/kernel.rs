@@ -399,6 +399,18 @@ pub const BUILTIN_COMMANDS: &[(&str, &str)] = &[
 pub struct ModelOption {
     pub id: String,
     pub name: String,
+    /// Whether the host lists image input for it (OpenRouter
+    /// `architecture.input_modalities`). None: the host did not say; the
+    /// name is the guess (`arbos_core::models::looks_vision`).
+    pub vision: Option<bool>,
+}
+
+impl ModelOption {
+    /// Takes image input, by the host's word or, failing that, by name.
+    pub fn sees_images(&self) -> bool {
+        self.vision
+            .unwrap_or_else(|| arbos_core::models::looks_vision(&self.id))
+    }
 }
 
 /// The composer's model list, plus the kernel's current selection.
@@ -461,6 +473,7 @@ fn fetch_gateway_models(base: &str) -> ModelsCatalog {
         .map(|row| ModelOption {
             name: model_display_name(&row.id),
             id: row.id,
+            vision: None,
         })
         .collect();
     models.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
@@ -605,6 +618,11 @@ fn fetch_host_models() -> Option<ModelsCatalog> {
         .filter(UpstreamModel::usable)
         .map(|row| ModelOption {
             name: model_display_name(&row.id),
+            vision: row
+                .architecture
+                .as_ref()
+                .filter(|a| !a.input_modalities.is_empty())
+                .map(|a| a.input_modalities.iter().any(|m| m == "image")),
             id: row.id,
         })
         .collect();
@@ -1581,6 +1599,14 @@ struct UpstreamModel {
     /// OpenRouter lists what each model accepts. Absent on other hosts.
     #[serde(default)]
     supported_parameters: Vec<String>,
+    #[serde(default)]
+    architecture: Option<UpstreamArchitecture>,
+}
+
+#[derive(Deserialize, Default)]
+struct UpstreamArchitecture {
+    #[serde(default)]
+    input_modalities: Vec<String>,
 }
 
 impl UpstreamModel {
@@ -2143,7 +2169,10 @@ fn wait_other(workspace: &Path, deadline: Instant) -> Result<WebInfo> {
 }
 
 fn kernel_log_tail(workspace: &Path) -> String {
-    let path = workspace.join(".arbos").join("runtime").join("kernel.out.log");
+    let path = workspace
+        .join(".arbos")
+        .join("runtime")
+        .join("kernel.out.log");
     let Ok(body) = std::fs::read_to_string(path) else {
         return String::new();
     };
@@ -2607,7 +2636,9 @@ fn wait_remote_json(host: &str, path: &Path) -> Result<WebInfo> {
     while Instant::now() < deadline {
         let out = ssh_run(
             host,
-            &format!("cat {dir}/.arbos/runtime/kernel.json 2>/dev/null || cat {dir}/.arbos/kernel.json 2>/dev/null"),
+            &format!(
+                "cat {dir}/.arbos/runtime/kernel.json 2>/dev/null || cat {dir}/.arbos/kernel.json 2>/dev/null"
+            ),
         )?;
         if out.status == 0
             && let Ok(info) = serde_json::from_str::<WebInfo>(&out.stdout)

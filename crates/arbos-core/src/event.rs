@@ -102,6 +102,16 @@ pub enum EventKind {
         #[serde(default)]
         failed: bool,
     },
+    /// An attached image the selected model could not see, described in
+    /// words by `model` (a vision-capable one) so the turn went on with the
+    /// user's picture in text. `path` is the attachment as the `user` or
+    /// `tool` line names it. Projections show `text` in place of the
+    /// pixels; clients draw it inside the message card, never as a line.
+    ImageDescribed {
+        path: String,
+        model: String,
+        text: String,
+    },
     /// Older transcripts hid everything before this line. No longer written;
     /// `compact::visible` treats one as a compaction of lines `1..seq-1`
     /// with a fixed summary, so those logs still project the same way.

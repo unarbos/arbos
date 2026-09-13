@@ -189,6 +189,10 @@ pub struct HostConfig {
     pub stream_idle_ms: u64,
     /// Model that writes compaction summaries. Empty = the turn's model.
     pub compact_model: String,
+    /// Vision-capable model that describes an attached image in words when
+    /// the turn's model cannot see it. Empty = the first vision-capable
+    /// fallback, else a cheap OpenRouter vision model.
+    pub vision_model: String,
     /// The summariser model's window when smaller than `window_tokens`.
     /// 0 = same as the turn's window.
     pub compact_window_tokens: u64,
@@ -247,6 +251,7 @@ impl Default for HostConfig {
             max_server_delay_ms: 60_000,
             stream_idle_ms: 120_000,
             compact_model: String::new(),
+            vision_model: String::new(),
             compact_window_tokens: 0,
             // Folding at half the window made models re-read what had
             // just been hidden; with the prefix cached, a fuller window is

@@ -129,6 +129,7 @@ pub fn run(args: Args) -> Result<i32> {
             attachments: vec![],
             channel: String::new(),
             device: String::new(),
+            model: String::new(),
         };
         w.write_all(format!("{}\n", serde_json::to_string(&frame)?).as_bytes())
             .await?;
@@ -550,6 +551,9 @@ fn print_event(event: &Event, json: bool) {
             println!("  ? {question} {}", options.join(" / "))
         }
         EventKind::Interrupted { detail } => println!("  [interrupted] {detail}"),
+        EventKind::ImageDescribed { path, model, .. } => {
+            println!("  [image {path} described by {model}]")
+        }
         EventKind::TurnComplete { usage } => {
             if let Some(u) = usage {
                 eprintln!(

@@ -189,12 +189,7 @@ fn browser_body(theme: &Theme, url: &str, shot: Option<Arc<Image>>) -> AnyElemen
 /// The tail of a job's journal, and how it ended if it has. The kernel's
 /// streamed output wins when any has arrived (it is the only source on a
 /// remote place); the file is read for kernels that do not stream.
-fn process_body(
-    theme: &Theme,
-    log: &Path,
-    live: &str,
-    done: Option<Option<i32>>,
-) -> AnyElement {
+fn process_body(theme: &Theme, log: &Path, live: &str, done: Option<Option<i32>>) -> AnyElement {
     let streamed = !live.is_empty() || done.is_some();
     let tail = if streamed {
         let lines: Vec<&str> = live.lines().collect();

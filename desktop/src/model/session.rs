@@ -12,7 +12,7 @@
 use crate::{
     agent::acp::{self, Event, Launch, Reply, Session},
     model::{
-        attachment::{MessageImage, Prompt, UserMessage},
+        attachment::{DescribedImage, MessageImage, Prompt, UserMessage},
         place::Place,
         record::{self, Record},
         settings,
@@ -1836,6 +1836,20 @@ impl ChatSession {
             }
             Event::Aside(text) => {
                 self.notice(false, &text);
+                self.flush();
+            }
+            Event::ImageDescribed { path, model, text } => {
+                // Inside the card that carried the image: the last user
+                // message, which is this turn's. Never a transcript line.
+                if let Some(ChatItem::User(message)) = self
+                    .items
+                    .iter_mut()
+                    .rev()
+                    .find(|item| matches!(item, ChatItem::User(_)))
+                    && !message.described.iter().any(|d| d.path == path)
+                {
+                    message.described.push(DescribedImage { path, model, text });
+                }
                 self.flush();
             }
             Event::Refused(detail) => {

@@ -266,6 +266,7 @@ impl Arbos {
             .on_action(cx.listener(Self::open_project_action))
             .on_action(cx.listener(Self::new_tab_action))
             .on_action(cx.listener(Self::open_settings_action))
+            .on_action(cx.listener(Self::attach_paths_action))
             .on_action(cx.listener(Self::show_chat))
             .on_action(cx.listener(Self::show_project))
             .on_action(cx.listener(Self::zoom_in_action))

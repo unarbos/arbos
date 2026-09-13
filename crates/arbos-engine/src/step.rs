@@ -52,9 +52,19 @@ pub struct StepCx<'a> {
     pub batch_cfg: BatchCfg,
     pub transcript: &'a Path,
     pub window: u64,
+    /// `vision_model` from config: who describes images the turn's model
+    /// cannot see. Empty: a vision-capable fallback, else the default.
+    pub vision_model: &'a str,
+    /// Whether the provider's model list says the turn's model takes image
+    /// input. None: the list does not say; the first call tells.
+    pub sees_images: Option<bool>,
 }
 
-pub async fn model_step(s: StepCx<'_>, messages: &[ChatMessage], tools: &[Value]) -> Result<Step> {
+pub async fn model_step(
+    mut s: StepCx<'_>,
+    messages: &[ChatMessage],
+    tools: &[Value],
+) -> Result<Step> {
     let mut attempt: u32 = 0;
     // Set once the model has said it cannot read images: the turn goes on
     // with the pictures replaced by a note, on the same model.
@@ -63,6 +73,17 @@ pub async fn model_step(s: StepCx<'_>, messages: &[ChatMessage], tools: &[Value]
     // (Gemini: "corrupted thought signature"): the same model, once more,
     // with every earlier `reasoning_details` left out.
     let mut no_reasoning: Option<Vec<ChatMessage>> = None;
+    // A model known not to see (the provider's list says so, or it refused
+    // images earlier this process) gets the pictures in words up front,
+    // rather than a call that is bound to fail.
+    let has_images = messages.iter().any(|m| !m.images.is_empty());
+    if has_images
+        && (s.sees_images == Some(false) || crate::describe::is_text_only(s.models.current()))
+    {
+        let model = s.models.current().to_string();
+        let hooks = std::sync::Arc::clone(&s.cx.hooks);
+        text_only = Some(describe_or_strip(&mut s, &model, messages, hooks.as_ref()).await);
+    }
     loop {
         attempt += 1;
         s.provider.model = s.models.current().to_string();
@@ -134,20 +155,16 @@ pub async fn model_step(s: StepCx<'_>, messages: &[ChatMessage], tools: &[Value]
         let model = s.models.current().to_string();
         // A text-only model given a screenshot: the provider rejects the whole
         // request (OpenRouter: 404 "No endpoints found that support image
-        // input"). Dropping the images and saying so beats failing the turn
-        // or leaving the user's chosen model for one that can see.
+        // input"). A vision model puts the pictures into words and the turn
+        // goes on with the user's chosen model; the images are never dropped
+        // silently, and the user's model choice stands.
         if text_only.is_none()
             && rejects_images(pe)
             && messages.iter().any(|m| !m.images.is_empty())
         {
-            let stripped = strip_images(messages);
-            hooks.emit(&Event::new(EventKind::Notice {
-                text: format!(
-                    "{model} does not accept image input; sending this turn without the attached image(s)."
-                ),
-                failed: false,
-            }));
-            text_only = Some(stripped);
+            crate::describe::remember_text_only(&model);
+            let hooks = std::sync::Arc::clone(&s.cx.hooks);
+            text_only = Some(describe_or_strip(&mut s, &model, messages, hooks.as_ref()).await);
             attempt = 0;
             continue;
         }
@@ -258,6 +275,59 @@ fn strip_reasoning(messages: &[ChatMessage]) -> Vec<ChatMessage> {
         .collect()
 }
 
+/// The conversation for a model that cannot see: every image described by
+/// a vision model, recorded on the transcript as `image_described` lines
+/// (the window draws them inside the message card). When no model can
+/// describe them, the old fallback: images stripped, one notice saying
+/// which model could not see and why the description failed.
+async fn describe_or_strip(
+    s: &mut StepCx<'_>,
+    model: &str,
+    messages: &[ChatMessage],
+    hooks: &dyn crate::tools::Hooks,
+) -> Vec<ChatMessage> {
+    let images = crate::describe::images_in(messages);
+    let listed = if s.provider.replay.is_some() {
+        Vec::new()
+    } else {
+        crate::provider::vision_models(&s.provider.base, &s.provider.key).await
+    };
+    let vision =
+        crate::describe::vision_model(s.vision_model, s.models, model, &s.provider.base, &listed);
+    let context = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user" && !m.images.is_empty())
+        .and_then(|m| m.content.clone())
+        .unwrap_or_default();
+    let mut describer = s.provider.clone();
+    describer.model = vision.clone();
+    describer.reasoning_effort = None;
+    describer.trace_purpose = "describe".to_string();
+    match crate::describe::describe(&describer, &images, &context).await {
+        Ok(texts) => {
+            let described: Vec<(String, String)> =
+                images.iter().map(|(p, _)| p.clone()).zip(texts).collect();
+            for ev in crate::describe::events(&described, &vision) {
+                if let Err(e) = append_event(s.transcript, &ev) {
+                    eprintln!("image_described: {e:#}");
+                }
+                hooks.emit(&ev);
+            }
+            crate::describe::with_descriptions(messages, &described, &vision)
+        }
+        Err(e) => {
+            hooks.emit(&Event::new(EventKind::Notice {
+                text: format!(
+                    "{model} does not accept image input, and {vision} could not describe the attached image(s) ({e:#}); sending this turn without them."
+                ),
+                failed: false,
+            }));
+            strip_images(messages)
+        }
+    }
+}
+
 fn rejects_images(e: &ProviderError) -> bool {
     let m = e.message.to_ascii_lowercase();
     matches!(e.status, Some(400) | Some(404) | Some(422))
@@ -362,6 +432,7 @@ mod tests {
         m.images.push(ImagePart {
             mime: "image/png".into(),
             b64: "AAAA".into(),
+            path: String::new(),
         });
         let out = strip_images(&[ChatMessage::plain("system", Some("s".into())), m]);
         assert_eq!(out[0].content.as_deref(), Some("s"));
