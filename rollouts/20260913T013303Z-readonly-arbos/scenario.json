@@ -1,0 +1,8 @@
+{
+  "name": "readonly-arbos",
+  "doc": "The agent folder becomes read-only (permissions, a mounted snapshot). A prompt must fail loudly, not vanish; the kernel must survive and recover once writable.",
+  "tags": [
+    "adversarial",
+    "environment"
+  ]
+}

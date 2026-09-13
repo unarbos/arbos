@@ -1,0 +1,9 @@
+Walking /tmp/arbos-qa-malformed-frames-tyhj_q5n/place...
+Found 7 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (294 trigrams, 7 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-malformed-frames-tyhj_q5n/home/.cache/arbos/tgrep/bd8a1cf0362f1eb9
+inbox does-not-exist: no agent does-not-exist
+inbox ../../etc: no agent ../../etc
+plan op run root#424242: no node #424242
+plan op explode root#1: unknown plan op explode

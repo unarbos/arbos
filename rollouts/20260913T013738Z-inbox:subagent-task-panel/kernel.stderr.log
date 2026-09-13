@@ -1,0 +1,11 @@
+Walking /tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place...
+Found 7 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (300 trigrams, 7 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/home/.cache/arbos/tgrep/ad2e28b01a168df9
+tools root: 3 calls, wall 13ms, sum 15ms, speedup 1.2x
+tools root: 3 calls, wall 0ms, sum 0ms, speedup 1.0x
+tools root: 8 calls, wall 21ms, sum 61ms, speedup 2.9x
+tools testtenchildrenspawnings: 10 calls, wall 153ms, sum 105ms, speedup 0.7x
+tools spawnachildagentundertes: 2 calls, wall 4ms, sum 6ms, speedup 1.5x
+tools testtenchildrenspawnings: 2 calls, wall 10ms, sum 0ms, speedup 0.0x

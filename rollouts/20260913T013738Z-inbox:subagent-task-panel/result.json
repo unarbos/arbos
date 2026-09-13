@@ -1,0 +1,77 @@
+{
+  "scenario": "inbox:subagent-task-panel",
+  "doc": "From inbox note 2026-09-13-subagent-task-panel.md: exercise feature 'subagent-task-panel' and run every detector. Needs a kernel built from branch cursor/subagent-task-panel-b027.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "state:transcript-unended-turn",
+      "detail": "wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start",
+      "where": "/tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place/.arbos/agents/childagent4fortestingspa/transcript.jsonl"
+    },
+    {
+      "rule": "state:plan-active-after-stop",
+      "detail": "node #1 is active with no kernel; reclaim() should settle it on next start",
+      "where": "/tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place/.arbos/agents/childagent4fortestingspa/plan.jsonl"
+    },
+    {
+      "rule": "state:attempt-running-after-stop",
+      "detail": "attempt a1 never ended",
+      "where": "/tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place/.arbos/agents/childagent4fortestingspa/attempts.jsonl"
+    },
+    {
+      "rule": "state:transcript-unended-turn",
+      "detail": "wake at line 24 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start",
+      "where": "/tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place/.arbos/agents/root/transcript.jsonl"
+    },
+    {
+      "rule": "state:plan-active-after-stop",
+      "detail": "node #2 is active with no kernel; reclaim() should settle it on next start",
+      "where": "/tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place/.arbos/agents/root/plan.jsonl"
+    },
+    {
+      "rule": "state:attempt-running-after-stop",
+      "detail": "attempt a2 never ended",
+      "where": "/tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place/.arbos/agents/root/attempts.jsonl"
+    },
+    {
+      "rule": "state:transcript-unended-turn",
+      "detail": "wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start",
+      "where": "/tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place/.arbos/agents/testchildrenamebehaviora/transcript.jsonl"
+    },
+    {
+      "rule": "state:plan-active-after-stop",
+      "detail": "node #1 is active with no kernel; reclaim() should settle it on next start",
+      "where": "/tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place/.arbos/agents/testchildrenamebehaviora/plan.jsonl"
+    },
+    {
+      "rule": "state:attempt-running-after-stop",
+      "detail": "attempt a1 never ended",
+      "where": "/tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place/.arbos/agents/testchildrenamebehaviora/attempts.jsonl"
+    },
+    {
+      "rule": "state:transcript-unended-turn",
+      "detail": "wake at line 31 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start",
+      "where": "/tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place/.arbos/agents/testtenchildrenspawnings/transcript.jsonl"
+    },
+    {
+      "rule": "state:plan-active-after-stop",
+      "detail": "node #4 is active with no kernel; reclaim() should settle it on next start",
+      "where": "/tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place/.arbos/agents/testtenchildrenspawnings/plan.jsonl"
+    },
+    {
+      "rule": "state:attempt-running-after-stop",
+      "detail": "attempt a4 never ended",
+      "where": "/tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place/.arbos/agents/testtenchildrenspawnings/attempts.jsonl"
+    }
+  ],
+  "notes": {
+    "feature": "subagent-task-panel",
+    "inbox_note": "/home/const/arbos-qa/loop/inbox/2026-09-13-subagent-task-panel.md"
+  },
+  "duration_s": 29.8,
+  "place": "/tmp/arbos-qa-inbox:subagent-task-panel-t6skmdpu/place",
+  "with_model": true,
+  "kernel": "/home/const/arbos-qa/target-inbox/release/arbos-kernel",
+  "rollout": "/home/const/arbos-qa/loop/rollouts/20260913T013738Z-inbox:subagent-task-panel",
+  "usd": 0.10407
+}

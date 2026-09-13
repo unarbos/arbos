@@ -1,0 +1,11 @@
+Walking /tmp/arbos-qa-kickoff-session-6qab3gom/place...
+Found 7 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (294 trigrams, 7 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-kickoff-session-6qab3gom/home/.cache/arbos/tgrep/715a4956ebfa607b
+tools root: 2 calls, wall 1ms, sum 2ms, speedup 2.0x
+tools root: 2 calls, wall 7ms, sum 7ms, speedup 1.0x
+tools root: 2 calls, wall 7ms, sum 6ms, speedup 0.9x
+tools root: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+tools draftdesignmdforfile-sys: 2 calls, wall 16ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 202ms, sum 6ms, speedup 0.0x

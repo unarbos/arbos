@@ -1,0 +1,8 @@
+{
+  "name": "inbox:subagent-task-panel",
+  "doc": "From inbox note 2026-09-13-subagent-task-panel.md: exercise feature 'subagent-task-panel' and run every detector. Needs a kernel built from branch cursor/subagent-task-panel-b027.",
+  "tags": [
+    "inbox",
+    "subagent-task-panel"
+  ]
+}
