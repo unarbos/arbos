@@ -947,14 +947,39 @@ fn from_block(
         .into_any_element()
 }
 
-/// The parent's view of its sub-agents, one line each: Cursor's bold count
-/// and verb, then the task's title. Working ones shimmer; finished ones
-/// carry a check and stay, faint, so what was delegated is still on the
-/// page. Click opens the sub-agent's chat.
-fn children_lines(chat: &ChatSession, theme: &Theme, cx: &mut Context<Workspace>) -> AnyElement {
+/// The kernel ids of the sub-agents a turn's body spawned — the `spawn`
+/// calls in `body` and the child each one made.
+fn spawned_in(items: &[ChatItem], body: Range<usize>) -> Vec<String> {
+    items[body]
+        .iter()
+        .filter_map(|item| match item {
+            ChatItem::Tool {
+                child_session: Some(child),
+                ..
+            } => Some(child.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The parent's view of the sub-agents one turn spawned, one line each:
+/// Cursor's bold count and verb, then the task's title. Working ones
+/// shimmer; finished ones carry a check and stay, faint, so what was
+/// delegated is still on the page — under the turn that delegated it,
+/// and nowhere else. Click opens the sub-agent's chat.
+fn children_lines(
+    chat: &ChatSession,
+    spawned: &[String],
+    theme: &Theme,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
     use crate::model::session::ChildState;
-    let working = chat
+    let children: Vec<_> = chat
         .children
+        .iter()
+        .filter(|c| c.kernel_id.as_deref().is_some_and(|id| spawned.iter().any(|s| s == id)))
+        .collect();
+    let working = children
         .iter()
         .filter(|c| c.state == ChildState::Working)
         .count();
@@ -962,8 +987,7 @@ fn children_lines(chat: &ChatSession, theme: &Theme, cx: &mut Context<Workspace>
         .live_since
         .and_then(|at| at.elapsed().ok())
         .unwrap_or_default();
-    let rows: Vec<AnyElement> = chat
-        .children
+    let rows: Vec<AnyElement> = children
         .iter()
         .map(|child| {
             let id = child.id;
@@ -1040,16 +1064,16 @@ fn children_lines(chat: &ChatSession, theme: &Theme, cx: &mut Context<Workspace>
         .flex()
         .flex_col()
         .gap(px(2.))
-        .when(chat.children.len() > 1, |el| {
+        .when(children.len() > 1, |el| {
             el.child(
                 div()
                     .px(px(4.))
                     .text_style(TextStyle::Caption)
                     .text_color(theme.text_faint)
                     .child(SharedString::from(if working > 0 {
-                        format!("{working} of {} sub-agents working", chat.children.len())
+                        format!("{working} of {} sub-agents working", children.len())
                     } else {
-                        format!("{} sub-agents", chat.children.len())
+                        format!("{} sub-agents", children.len())
                     })),
             )
         })
@@ -2347,7 +2371,7 @@ pub fn render(chat: &ChatSession, window: &mut Window, cx: &mut Context<Workspac
                 .w_full()
                 .max_w(px(column))
                 .self_center()
-                .child(zone(chat, turn, running, position == last, window, cx))
+                .child(zone(chat, turn, running, window, cx))
                 .into_any_element(),
         );
     }
@@ -2604,7 +2628,6 @@ fn zone(
     chat: &ChatSession,
     turn: &Turn,
     running: bool,
-    last: bool,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
@@ -2684,10 +2707,11 @@ fn zone(
         }
     }
     // Cursor's sub-agent lines under the status: "1 Working  <task>" per
-    // live child, and a check for each one that finished. On the latest
-    // turn only; the task rail keeps the whole list.
-    if last && !chat.children.is_empty() {
-        zone = zone.child(children_lines(chat, &theme, cx));
+    // live child, and a check for each one that finished. Under the turn
+    // that spawned them, once; the panel keeps the whole tree.
+    let spawned = spawned_in(&chat.items, body.clone());
+    if !spawned.is_empty() && !chat.children.is_empty() {
+        zone = zone.child(children_lines(chat, &spawned, &theme, cx));
     }
     // Screenshots and clips the work produced stay in view when the work
     // folds: they are what the user asked to see.
@@ -3122,7 +3146,7 @@ fn fold_row(
 }
 
 /// A clock every live shimmer shares, so rows sweep together.
-fn live_phase() -> Duration {
+pub(crate) fn live_phase() -> Duration {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     START.get_or_init(Instant::now).elapsed()
 }

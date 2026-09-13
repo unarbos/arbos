@@ -58,11 +58,14 @@ impl Arbos {
             .iter()
             .enumerate()
             .map(|(ix, project)| {
+                // Any agent in the project, the main chat or a sub-agent
+                // the kernel drives: a kernel child has no flight of its
+                // own to time, so a busy one still counts at zero.
                 let working = project
                     .sessions
                     .iter()
                     .filter(|chat| !chat.closed && chat.busy())
-                    .filter_map(|chat| chat.elapsed())
+                    .map(|chat| chat.elapsed().unwrap_or_else(transcript::live_phase))
                     .max();
                 let asking = project
                     .sessions

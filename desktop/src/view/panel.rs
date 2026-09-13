@@ -146,7 +146,9 @@ impl Arbos {
                     state: chat.child_state(),
                     main: n == 0,
                     archived: chat.closed,
-                    since: chat.elapsed().unwrap_or_default(),
+                    // A kernel child has no flight to time; the shared clock
+                    // keeps its spinner turning.
+                    since: chat.elapsed().unwrap_or_else(transcript::live_phase),
                 })
             })
             .collect();
