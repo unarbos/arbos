@@ -1,0 +1,30 @@
+# Default call policy (auto): small talk is answered by the speech model in its own voice and never
+# reaches the main agent; a work request goes to the agent, the model's own answer to it is cut,
+# and the narrator speaks "On it." and the result.
+title = "Auto model voice: small talk in the model's voice, work narrated"
+gateway_args = ["--call-model-voice", "auto"]
+
+[[steps]]
+say = "Hello, can you hear me?"
+model = { ack = "Yes, I can hear you loud and clear." }
+
+[[steps]]
+wait_spoken = "loud and clear"
+
+[[steps]]
+say = "Send an agent to check the build."
+model = { ack = "I cannot check builds, I can only answer general questions." }
+kernel = { reply = "I sent the agent check-build to run the build." }
+
+[[steps]]
+wait_spoken = "check-build to run the build"
+
+[[steps]]
+wait_quiet = 1.0
+
+[expect]
+spoken_contains = ["Yes, I can hear you loud and clear.", "On it.", "I sent the agent check-build"]
+spoken_not_contains = ["I cannot check builds"]
+user_frames = 1
+kernel_user_not = ["can you hear me"]
+inbox = [{ channel = "voice", kind = "request", device = "desktop" }]

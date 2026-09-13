@@ -123,6 +123,7 @@ async def main_async(name: str) -> int:
         call = state["call"]
         check(call["active"] and call["phase"] in ("listening", "ready"), f"call is live and listening ({call['phase']})")
         check(bool(call.get("mic_device")) and not call.get("mic_error"), f"the strip names the mic and reports no mic error (mic={call.get('mic_device')!r}, error={call.get('mic_error')!r})")
+        speaker_seen = {"name": ""}
         await asyncio.sleep(0.8)
         screenshot(display, OUT / "02-in-call.png")
 
@@ -162,6 +163,13 @@ async def main_async(name: str) -> int:
         check(len([n for n in voice_lines if "call started" not in n]) >= 1, f"chat has narrator lines as `voice ·` notices ({len(voice_lines)})")
         check(bool((state.get("call") or {}).get("last_said")), "state.call.last_said holds the narrator's last line")
         check(spoken_raw.exists() and spoken_raw.stat().st_size > 20000, f"reply audio reached the speaker ({spoken_raw.stat().st_size if spoken_raw.exists() else 0} bytes)")
+        # Downlink: the app requested and played the audio itself (a speaker was opened, the byte
+        # counter moved) and told the gateway when it was playing (client.speaking around playback).
+        call = state.get("call") or {}
+        check(bool(call.get("speaker_device")), f"the strip names the speaker ({call.get('speaker_device')!r})")
+        check(int(call.get("played_bytes") or 0) > 20000, f"the app counted reply audio it played ({call.get('played_bytes')} bytes)")
+        glog = (OUT / "gateway.log").read_text(errors="replace")
+        check("client.speaking True" in glog and "client.speaking False" in glog, "the gateway received client.speaking true and false around playback")
         users = [i for i in (chat["items"] if chat else []) if i.get("kind") == "user"]
         spoken_items = [u for u in users if any(step.get("say", "") and step["say"] in u.get("text", "") for step in steps)]
         check(bool(spoken_items), f"the caller's spoken words appear in the chat as user cards ({len(users)} user cards)")

@@ -228,13 +228,20 @@ class DuplexSession(BaseSession):
             self._close_response()
 
     def _cut_model_voice(self, now: float, *, opening: bool) -> bool:
-        """Call mode with model voice `ack`: is this burst more than a short acknowledgement?"""
+        """Call mode: is this burst of the speech model's own voice one the caller should not hear?
+        `full`: never. `off`: always. `ack`: anything but a short acknowledgement right after the
+        caller. `auto`: an answer to small talk passes whole; a burst after a work request (which
+        the main agent got, and the narrator speaks for) or unprompted chatter is cut."""
         if not self.call_mode or self.model_voice == "full":
             return False
         if self.model_voice == "off":
             return True
+        since_user = now - self.user_stopped_at if self.user_stopped_at else 1e9
+        if self.model_voice == "auto":
+            if opening:
+                return since_user > ACK_WINDOW_S or not self.last_conversational
+            return not self.last_conversational and self.response_opened_at is not None and now - self.response_opened_at > ACK_MAX_S
         if opening:
-            since_user = now - self.user_stopped_at if self.user_stopped_at else 1e9
             return since_user > ACK_WINDOW_S
         return self.response_opened_at is not None and now - self.response_opened_at > ACK_MAX_S
 

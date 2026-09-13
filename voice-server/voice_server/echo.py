@@ -24,8 +24,12 @@ TAIL_S = 0.6  # keep gating this long after the last reply frame (playout drains
 
 
 class EchoGate:
-    def __init__(self, rate: int):
+    def __init__(self, rate: int, margin: float = 0.7):
         self.rate = rate
+        # How much louder than the predicted echo the uplink must be to count as the user talking
+        # over us. Lower = more barge-in gets through (and more echo); a bare speakerphone with
+        # no AEC wants it higher.
+        self.margin = margin
         self.ref = np.zeros(int(REF_SECONDS * GATE_RATE), dtype=np.float32)
         self.ref_pos = 0
         self.ref_filled = 0
@@ -105,7 +109,7 @@ class EchoGate:
         residual = x8 - self.gain * seg
         residual_rms = float(np.sqrt(np.mean(residual * residual)))
         predicted_echo = self.gain * seg_rms
-        margin = 0.55 if self.client_speaking else 0.7
+        margin = max(0.2, self.margin - 0.15) if self.client_speaking else self.margin
         double_talk = self.gain_samples >= 4 and residual_rms > margin * predicted_echo and corr < 0.8
         if double_talk and self.double_talk_streak >= 1:  # two frames in a row, not one glitch
             self.stats["passed_over_echo"] += 1

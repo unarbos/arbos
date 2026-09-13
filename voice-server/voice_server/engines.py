@@ -92,7 +92,7 @@ class Engines:
     async def warm_up(self, voice: str) -> None:
         """First calls are slow (kernel selection, lazy loads). Pay that before the first caller."""
         t0 = time.monotonic()
-        if self.engine == "pipeline":
+        if self.asr.name not in ("none", "mock"):  # dictation uses it on either engine
             self.asr.transcribe(np.zeros(ASR_RATE, dtype=np.float32), partial=False, language="en")
         async for _ in self.tts.stream("Ready.", voice, 1.0):
             pass

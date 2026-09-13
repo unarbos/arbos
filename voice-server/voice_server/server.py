@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -64,8 +65,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     models.add_argument("--model-dir", default=os.environ.get("VOICE_MODEL_DIR", "models"),
                         help="holds silero_vad.onnx, kokoro-v1.0.onnx, voices-v1.0.bin (see deploy/run.sh)")
     models.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
-    models.add_argument("--asr", default="faster-whisper", choices=["faster-whisper", "none"],
-                        help="none: no recogniser (duplex engine only; the speech model transcribes)")
+    models.add_argument("--asr", default="faster-whisper", choices=["faster-whisper", "none", "mock"],
+                        help="none: no recogniser (duplex engine only; the speech model transcribes). "
+                             "mock: scripted lines from $VOICE_MOCK_ASR_SCRIPT (test harness)")
     models.add_argument("--asr-model", default=None,
                         help="faster-whisper model name or CTranslate2 dir (default: large-v3-turbo on cuda, small.en on cpu)")
     models.add_argument("--compute-type", default=None, help="CTranslate2 compute type (default: float16 on cuda, int8 on cpu)")
@@ -82,11 +84,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                        help="none: speech only, the client sends replies with 'speak'. openrouter: OpenRouter model with the Arbos tools "
                             "(env OPENROUTER_API_KEY). kernel: the kernel's main agent answers")
     reply.add_argument("--reply-model", default="openai/gpt-4.1-mini", help="OpenRouter model id")
-    reply.add_argument("--call-model-voice", default=os.environ.get("VOICE_CALL_MODEL_VOICE", "off"),
-                       choices=["off", "ack", "full"],
+    reply.add_argument("--call-model-voice", default=os.environ.get("VOICE_CALL_MODEL_VOICE", "auto"),
+                       choices=["auto", "off", "ack", "full"],
                        help="call mode, duplex engine: how much of the speech model's own voice the caller hears. "
-                            "off (default): none; the narrator says 'On it.' and speaks every result. ack: short "
-                            "acknowledgements right after the caller speaks. full: everything the model says")
+                            "auto (default): its answers to small talk and general questions, in its own voice, like "
+                            "the phone; work requests go to the main agent and the narrator speaks 'On it.' and the "
+                            "results. off: narrator only. ack: short acknowledgements only. full: everything")
     reply.add_argument("--escalations-log",
                        default=os.environ.get("VOICE_ESCALATIONS_LOG")
                        or (os.path.join(os.environ["VOICE_HOME"], "logs", "call-mode-escalations.jsonl") if os.environ.get("VOICE_HOME") else ""),
@@ -111,6 +114,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     turn.add_argument("--max-lead-ms", type=int, default=1500,
                       help="reply audio is sent at most this far ahead of real-time playback (small = fast interrupt)")
     turn.add_argument("--no-echo-gate", action="store_true", help="do not silence uplink frames that match our own reply audio")
+    turn.add_argument("--echo-margin", type=float, default=float(os.environ.get("VOICE_ECHO_MARGIN", "0.7")),
+                      help="echo gate: how much louder than the predicted echo the mic must be to pass as the user talking over "
+                           "us (0.7). A speakerphone with no echo cancellation (a Mac playing through its speakers) wants 0.9-1.2")
 
     parser.add_argument("--print-protocol", action="store_true", help="print the wire protocol and exit")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -175,12 +181,25 @@ async def serve_forever(args: argparse.Namespace) -> None:
         partial_interval_ms=args.partial_interval_ms,
         max_lead_ms=args.max_lead_ms,
         echo_gate=not args.no_echo_gate,
+        echo_margin=args.echo_margin,
     )
 
     session_class = DuplexSession if engines.engine == "duplex" else PipelineSession
 
     async def handler(ws: ServerConnection) -> None:
-        await session_class(ws, engines, defaults, tuning).run()
+        # Dictation (`session.start {mode: "dictation"}`) is the ASR pipeline whatever the engine:
+        # partials as the words come, a final on release, no reply, no speech model. The first
+        # frame decides; it is handed to the session so nothing is lost.
+        first = await ws.recv()
+        klass = session_class
+        if isinstance(first, str) and '"dictation"' in first:
+            try:
+                msg = json.loads(first)
+            except json.JSONDecodeError:
+                msg = {}
+            if msg.get("type") == P.SESSION_START and msg.get("mode") == "dictation":
+                klass = PipelineSession
+        await klass(ws, engines, defaults, tuning).run(first=first)
 
     stop = asyncio.get_running_loop().create_future()
     for sig in (signal.SIGINT, signal.SIGTERM):

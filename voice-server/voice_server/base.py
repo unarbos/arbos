@@ -15,7 +15,7 @@ from .audio import float_to_pcm16, pcm16_to_float, resample_whole
 from .echo import EchoGate
 from .engines import Engines
 from .kernel import KernelClient, hub_attach_url
-from .narrator import Narrator, openrouter_key
+from .narrator import Narrator, is_conversational, openrouter_key
 from .tools import CALL_TOOLS, TOOLS, ToolRunner
 
 log = logging.getLogger("voice.session")
@@ -37,6 +37,7 @@ class Tuning:
     out_frame_ms: int = 100
     max_lead_ms: int = 1500  # how far ahead of real-time playback we send reply audio
     echo_gate: bool = True  # silence uplink frames that are our own reply coming back through the mic
+    echo_margin: float = 0.7  # EchoGate.margin: speakerphones without AEC want more
 
 
 @dataclass
@@ -57,8 +58,9 @@ class SessionDefaults:
     # growing the drill-down phrase list). Empty = off.
     escalations_log: str = ""
     # Call mode, duplex engine: how much of the speech model's own voice the caller hears.
-    # `ack` = short acknowledgements right after the caller speaks; `full` = everything; `off` = none.
-    model_voice: str = "off"
+    # `auto` = its answers to small talk and general questions (the phone's feel), while work
+    # requests are narrated; `ack` = short acknowledgements only; `full` = everything; `off` = none.
+    model_voice: str = "auto"
 
 
 class BaseSession:
@@ -85,7 +87,7 @@ class BaseSession:
         self.tools.on_call = self._on_tool_call
         self.tools.on_result = self._on_tool_result
         self.mirror_agents = engines.kernel is not None
-        self.echo = EchoGate(self.rate) if tuning.echo_gate else None
+        self.echo = EchoGate(self.rate, tuning.echo_margin) if tuning.echo_gate else None
         # Call mode: the caller talks to a project's main agent; the narrator speaks highlights.
         self.call_mode = False
         self.channel = "voice"  # what the caller's utterances are filed as in the inbox
@@ -94,6 +96,8 @@ class BaseSession:
         self.screen = "on your screen"
         self.narrator: Narrator | None = None
         self.call_kernel: KernelClient | None = None  # a per-call attach through the hub, when the call names one
+        self.dictation = False  # ASR only: words to the client, no reply, no agent, no asks
+        self.last_conversational = False  # the last utterance was small talk (auto model voice lets it through)
         self.user_talking = False
 
     # ------------------------------------------------------------------ hooks for engines
@@ -106,7 +110,7 @@ class BaseSession:
     def _ensure_asker(self) -> None:
         """Outside call mode a kernel still asks questions and for approvals. Nobody auto-fills
         them: a narrator that speaks only asks and approvals takes the caller's yes or no."""
-        if self.narrator is not None or self.engines.kernel is None:
+        if self.narrator is not None or self.engines.kernel is None or self.dictation:
             return
         self.narrator = Narrator(
             self.engines.kernel,
@@ -148,6 +152,7 @@ class BaseSession:
         self.user_talking = False
         if not text.strip() or self.narrator is None:
             return
+        self.last_conversational = is_conversational(text)
         if self.call_mode:
             self.narrator.user_said_later(text, channel=self.channel)
         elif self.narrator.pending_ask is not None:
@@ -203,6 +208,7 @@ class BaseSession:
             model_highlights=self.defaults.model_highlights,
             approval_timeout=self.defaults.approval_timeout,
             escalations_log=self.defaults.escalations_log,
+            conversation_to_model=self.defaults.model_voice == "auto",
         )
         self.tools.narrator = self.narrator
         self.tools.schemas = CALL_TOOLS
@@ -234,21 +240,22 @@ class BaseSession:
 
     # ------------------------------------------------------------------ lifecycle
 
-    async def run(self) -> None:
+    async def run(self, first: str | bytes | None = None) -> None:
         sender = asyncio.create_task(self._sender(), name=f"send-{self.sid}")
         log.info("[%s] connected (%s)", self.sid, self.engine)
-        if self.mirror_agents and self.engines.kernel:
-            self.engines.kernel.listeners.append(self._mirror)
         try:
             await self.on_open()
-            self._ensure_asker()
-            async for message in self.ws:
-                if isinstance(message, (bytes, bytearray)):
-                    if not self.ready_sent:
-                        self._send_ready()
-                    await self.on_audio(self._gate_uplink(bytes(message)))
-                elif await self._on_control(message):
-                    break
+            stop = False
+            if first is not None:
+                stop = await self._take(first)
+            if not self.dictation:
+                if self.mirror_agents and self.engines.kernel:
+                    self.engines.kernel.listeners.append(self._mirror)
+                self._ensure_asker()
+            if not stop:
+                async for message in self.ws:
+                    if await self._take(message):
+                        break
         finally:
             if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
                 self.engines.kernel.listeners.remove(self._mirror)
@@ -269,6 +276,15 @@ class BaseSession:
             if self.echo:
                 log.info("[%s] echo gate: %s", self.sid, self.echo.stats)
             log.info("[%s] closed", self.sid)
+
+    async def _take(self, message: str | bytes) -> bool:
+        """One frame from the client. True when the session should end."""
+        if isinstance(message, (bytes, bytearray)):
+            if not self.ready_sent:
+                self._send_ready()
+            await self.on_audio(self._gate_uplink(bytes(message)))
+            return False
+        return await self._on_control(message)
 
     def _gate_uplink(self, data: bytes) -> bytes:
         """Silence frames that are our own reply coming back through the mic."""
@@ -311,7 +327,7 @@ class BaseSession:
             tools=[t["name"] for t in self.tools_available()],
             kernel=bool((self.call_kernel or self.engines.kernel) and (self.call_kernel or self.engines.kernel).connected),
             voice=self.voice,
-            mode="call" if self.call_mode else "voice",
+            mode="call" if self.call_mode else ("dictation" if self.dictation else "voice"),
             narrator=self.narrator is not None,
             channel=self.channel,
             device=self.device,
@@ -360,6 +376,7 @@ class BaseSession:
             if self.text_task and not self.text_task.done():
                 self.text_task.cancel()
         elif kind == P.CLIENT_SPEAKING:
+            log.debug("[%s] client.speaking %s", self.sid, bool(msg.get("speaking", False)))
             if self.echo is not None:
                 self.echo.client_speaking = bool(msg.get("speaking", False))
         elif kind == P.SESSION_END:
@@ -376,7 +393,7 @@ class BaseSession:
         elif rate != self.rate:
             self.rate = rate
             if self.echo is not None:
-                self.echo = EchoGate(rate)
+                self.echo = EchoGate(rate, self.tuning.echo_margin)
         if "language" in msg:
             self.language = msg["language"] or None
         voice = msg.get("voice")
@@ -410,6 +427,11 @@ class BaseSession:
             self.call_mode = True
         elif mode == "voice":
             self.call_mode = False
+        elif mode == "dictation":
+            self.dictation = True
+            self.call_mode = False
+            self.reply_kind = "none"
+            self.mirror_agents = False
 
     # ------------------------------------------------------------------ gateway TTS (Kokoro)
 
