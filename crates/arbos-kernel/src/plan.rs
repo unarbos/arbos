@@ -527,12 +527,29 @@ async fn run_job(hooks: &KernelHooks, agent: &Agent, cmd: &str) -> (Option<Strin
         },
         Err(_) => -1,
     };
-    let out = std::fs::read_to_string(job.journal()).unwrap_or_default();
+    let out = journal_tail(&job.journal(), 256 * 1024);
     let mut tail = node::tail(&out);
     if timed_out {
         tail = format!("timed out after {}s\n{tail}", CMD_TIMEOUT.as_secs());
     }
     (Some(id), code, tail)
+}
+
+/// The last `max` bytes of a job's journal. Never the whole file: a
+/// runaway job's log is capped only by the leash's poll.
+fn journal_tail(path: &std::path::Path, max: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = size.saturating_sub(max);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::with_capacity((size - start) as usize);
+    let _ = f.take(size - start).read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 fn close(

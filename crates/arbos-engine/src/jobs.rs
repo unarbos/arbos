@@ -29,6 +29,10 @@ use tokio::process::{Child, Command};
 
 /// Only this much of a journal is ever loaded for one read.
 pub const JOURNAL_WINDOW: u64 = 4 * 1024 * 1024;
+/// `out.log` is cut back to empty (with a notice line) when it passes this
+/// (qa-025: a `yes` job wrote 8.7 GB in an hour). `ARBOS_JOB_LOG_CAP` in
+/// bytes overrides it.
+pub const JOURNAL_CAP: u64 = 64 * 1024 * 1024;
 /// Finished job folders older than this are pruned at the next spawn.
 pub const JOB_TTL: Duration = Duration::from_secs(48 * 3600);
 
@@ -56,9 +60,13 @@ pub struct Job {
     pub dir: PathBuf,
     pub meta: Meta,
     pub status: Status,
-    /// mtime of the exit file. Only for `Exited`.
+    /// mtime of the exit (or killed) file. Not for `Running`.
     pub ended_ms: Option<i64>,
     pub journal_bytes: u64,
+    /// Why a `Killed` job ended, when whoever killed it said (the kernel's
+    /// kill, the leash when the kernel was gone). None: a signal from
+    /// outside, or the machine.
+    pub killed_why: Option<String>,
 }
 
 impl Job {
@@ -84,7 +92,18 @@ impl Job {
                 ),
                 None => format!("exited with code {code}"),
             },
-            Status::Killed => "killed (no exit recorded)".into(),
+            Status::Killed => {
+                let after = self
+                    .ended_ms
+                    .map(|end| format!(" after {}", human_secs(end - self.meta.started_ms)))
+                    .unwrap_or_default();
+                match &self.killed_why {
+                    Some(why) => format!("{why}{after}"),
+                    None => {
+                        format!("killed by a signal from outside the kernel{after} (no exit code)")
+                    }
+                }
+            }
             Status::Running => format!(
                 "running for {} (pid {})",
                 human_secs(arbos_core::now_ms() - self.meta.started_ms),
@@ -165,6 +184,7 @@ impl JobsRoot {
                 vec!["-c".to_string(), script.clone()],
             ),
         };
+        let (program, args) = leashed(&dir, program, args);
         let mut cmd = Command::new(program);
         cmd.args(args)
             .current_dir(cwd)
@@ -198,6 +218,7 @@ impl JobsRoot {
             status: Status::Running,
             ended_ms: None,
             journal_bytes: 0,
+            killed_why: None,
         };
         Ok((job, child))
     }
@@ -233,6 +254,9 @@ impl JobsRoot {
             return (String::new(), 0);
         };
         let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+        // A log cut back by the cap is shorter than what was already
+        // shown: start over from its new beginning.
+        let offset = if offset > size { 0 } else { offset };
         if size <= offset {
             return (String::new(), 0);
         }
@@ -242,8 +266,13 @@ impl JobsRoot {
             skipped = size - start - JOURNAL_WINDOW;
             start = size - JOURNAL_WINDOW;
         }
+        // Only up to the size just measured: a job writing faster than
+        // this reads (`yes` does 500 MB/s) would otherwise be read to
+        // whatever EOF it reaches, and that took a kernel down at 14 GB.
         let mut buf = Vec::with_capacity((size - start) as usize);
-        if f.seek(SeekFrom::Start(start)).is_err() || f.read_to_end(&mut buf).is_err() {
+        if f.seek(SeekFrom::Start(start)).is_err()
+            || f.by_ref().take(size - start).read_to_end(&mut buf).is_err()
+        {
             return (String::new(), 0);
         }
         let _ = fs::write(&seen_path, format!("{}\n", start + buf.len() as u64));
@@ -273,6 +302,9 @@ impl JobsRoot {
         if !job.running() {
             return false;
         }
+        // Said before the signal, so a reader that comes between never
+        // sees "no exit recorded" (qa-024).
+        let _ = fs::write(job.dir.join("killed"), "killed by the kernel\n");
         crate::tools::kill_job(job.meta.pid);
         true
     }
@@ -354,22 +386,89 @@ fn load_dir(dir: &Path) -> Result<Job> {
                 status: Status::Exited(code),
                 ended_ms,
                 journal_bytes,
+                killed_why: None,
             });
         }
     }
-    let status = if pid_alive(meta.pid) {
+    let killed_path = dir.join("killed");
+    let killed_why = fs::read_to_string(&killed_path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let status = if killed_why.is_none() && pid_alive(meta.pid) {
         Status::Running
     } else {
         Status::Killed
     };
+    let ended_ms = (status == Status::Killed)
+        .then(|| mtime_ms(&killed_path))
+        .flatten();
     Ok(Job {
         id,
         dir: dir.to_path_buf(),
         meta,
         status,
-        ended_ms: None,
+        ended_ms,
         journal_bytes,
+        killed_why,
     })
+}
+
+fn mtime_ms(path: &Path) -> Option<i64> {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+}
+
+/// The job wrapped in a shell that ends it when the kernel is gone and
+/// keeps its log under the cap. A job outliving its kernel had nobody to
+/// read it and no one to stop it (qa-025: `yes` at 100% CPU for an hour,
+/// 8.7 GB of out.log). `$PPID` is the kernel; the leash is the process
+/// group the kernel's kill signals. When the kernel dies the leash writes
+/// `killed` and kills the group, itself included (`kill -9 -PGID`: dash
+/// rejects the `--` form). `$1` is the job folder.
+/// The log is cut back when it passes the cap; a job that refills it past
+/// the cap on the very next look is writing faster than anyone reads and
+/// is ended as runaway (a poll cannot hard-cap a writer doing 500 MB/s).
+fn leashed(dir: &Path, program: String, args: Vec<String>) -> (String, Vec<String>) {
+    const LEASH: &str = r#"D=$1; shift; K=$PPID; C=${ARBOS_JOB_LOG_CAP:-67108864}; R=0
+"$@" & F=$!
+trap 'kill -TERM "$F" 2>/dev/null' INT TERM
+while kill -0 "$F" 2>/dev/null; do
+  if ! kill -0 "$K" 2>/dev/null; then
+    echo "killed: the kernel exited and the job was ended with it" > "$D/killed"
+    kill -9 "$F" 2>/dev/null
+    kill -9 -$$ 2>/dev/null
+    exit 137
+  fi
+  S=$(wc -c < "$D/out.log" 2>/dev/null || echo 0)
+  if [ "${S:-0}" -gt "$C" ]; then
+    if [ "$R" = 1 ]; then
+      echo "killed: runaway output (over $C bytes twice in a row after the log was cut back)" > "$D/killed"
+      kill -9 "$F" 2>/dev/null
+      kill -9 -$$ 2>/dev/null
+      exit 137
+    fi
+    R=1
+    : > "$D/out.log"
+    echo "[arbos: out.log passed $C bytes; older output dropped]" >> "$D/out.log"
+  else
+    R=0
+  fi
+  sleep 0.25
+done
+wait "$F""#;
+    let mut all = vec![
+        "-c".to_string(),
+        LEASH.to_string(),
+        "job-leash".to_string(),
+        dir.display().to_string(),
+        program,
+    ];
+    all.extend(args);
+    ("sh".to_string(), all)
 }
 
 fn job_num(id: &str) -> i64 {
@@ -406,4 +505,61 @@ pub(crate) fn job_shell() -> &'static str {
 
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("arbos-jobs-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// qa-024: a job the kernel killed says so, with the time it ran.
+    #[tokio::test]
+    async fn a_killed_job_says_who_and_after_how_long() {
+        let root = JobsRoot::new(scratch("killed"));
+        let (job, mut child) = root
+            .spawn("sleep 30", &root.dir().to_path_buf(), None, None)
+            .unwrap();
+        assert!(job.running());
+        assert!(root.kill(&job));
+        let _ = child.wait().await;
+        let again = root.load(&job.id).unwrap();
+        assert_eq!(again.status, Status::Killed);
+        let line = again.status_line();
+        assert!(line.starts_with("killed by the kernel after"), "{line}");
+        assert!(!line.contains("no exit recorded"), "{line}");
+    }
+
+    /// qa-025: the log is cut back at the cap, and a reader whose cursor is
+    /// past the new end starts over instead of seeing nothing for ever.
+    #[test]
+    fn a_cut_back_log_is_read_from_its_new_start() {
+        let root = JobsRoot::new(scratch("cut"));
+        fs::create_dir_all(root.dir().join("j1")).unwrap();
+        let meta = Meta {
+            command: "x".into(),
+            cwd: root.dir().to_path_buf(),
+            pid: 0,
+            started_ms: 0,
+            timeout_ms: None,
+        };
+        fs::write(
+            root.dir().join("j1/meta.json"),
+            serde_json::to_vec(&meta).unwrap(),
+        )
+        .unwrap();
+        fs::write(root.dir().join("j1/out.log"), "a".repeat(100)).unwrap();
+        fs::write(root.dir().join("j1/exit"), "0\n").unwrap();
+        let job = root.load("j1").unwrap();
+        let (first, _) = root.read_new(&job);
+        assert_eq!(first.len(), 100);
+        fs::write(root.dir().join("j1/out.log"), "[cut]\nbb").unwrap();
+        let (after, _) = root.read_new(&job);
+        assert_eq!(after, "[cut]\nbb");
+    }
 }
