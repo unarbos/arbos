@@ -64,6 +64,18 @@ impl PlanCx<'_> {
         crate::tools::fs::confine(self.root, self.cwd, path)
     }
 
+    /// `resolve` for a tool that will write there. GOALS.md belongs to the
+    /// main chat: a child's write is refused here, before it runs.
+    pub fn resolve_write(&self, path: &str) -> Result<PathBuf> {
+        let resolved = self.resolve(path)?;
+        if arbos_core::goals::is_goals_path(self.root, &resolved)
+            && !arbos_core::goals::may_write(self.agent)
+        {
+            anyhow::bail!("{}", arbos_core::goals::REFUSAL);
+        }
+        Ok(resolved)
+    }
+
     /// Lexical resolution with no confinement: for `bash`, whose command can
     /// `cd` anywhere regardless, so gating its `cwd` argument would only
     /// mislead.
@@ -376,5 +388,35 @@ impl View {
 
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod goals_guard_tests {
+    use super::*;
+
+    #[test]
+    fn a_child_may_not_write_goals_md_but_root_may() {
+        let dir = std::env::temp_dir().join(format!("arbos-goals-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".arbos")).unwrap();
+        std::fs::write(dir.join(".arbos/GOALS.md"), "# g\n").unwrap();
+        let root = arbos_core::Agent::root("root");
+        let mut child = arbos_core::Agent::root("kid");
+        child.parent = Some(arbos_core::AgentId::new("root"));
+        let for_root = PlanCx {
+            root: &dir,
+            cwd: &dir,
+            agent: &root,
+        };
+        assert!(for_root.resolve_write(".arbos/GOALS.md").is_ok());
+        let for_child = PlanCx {
+            root: &dir,
+            cwd: &dir,
+            agent: &child,
+        };
+        let err = for_child.resolve_write(".arbos/GOALS.md").unwrap_err();
+        assert!(err.to_string().contains("owned by the main chat"), "{err}");
+        assert!(for_child.resolve_write("main.py").is_ok());
     }
 }

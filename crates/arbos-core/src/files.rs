@@ -203,7 +203,19 @@ pub fn bootstrap(place: &Place) -> Result<Agent> {
     if !place.user_md().exists() {
         std::fs::write(place.user_md(), "")?;
     }
+    let _ = crate::goals::ensure(place);
     let root = Layout::new(place, ROOT_ID);
+    if !root.agent_md().exists() {
+        // A place that has never had a root is new: it starts in Cursor's
+        // shape, with the main chat as a coordinator. An old place keeps
+        // its behaviour until someone writes the line.
+        let name = place
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project");
+        let _ = crate::project::write_for_new_place(place, name);
+    }
     let agent = if root.agent_md().exists() {
         let mut agent = Agent::load(&root.dir)?;
         if agent.cwd.is_none() {

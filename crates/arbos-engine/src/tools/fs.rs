@@ -242,7 +242,7 @@ impl Tool for Write {
     }
     fn plan(&self, cx: &PlanCx, args: &Value) -> Result<Plan> {
         Ok(Plan::access(Access::write_path(
-            &cx.resolve(req(args, "path")?)?,
+            &cx.resolve_write(req(args, "path")?)?,
         )))
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
@@ -296,7 +296,7 @@ impl Tool for Edit {
     }
     fn plan(&self, cx: &PlanCx, args: &Value) -> Result<Plan> {
         Ok(Plan::access(Access::write_path(
-            &cx.resolve(req(args, "path")?)?,
+            &cx.resolve_write(req(args, "path")?)?,
         )))
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {

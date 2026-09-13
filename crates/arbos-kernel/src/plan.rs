@@ -592,9 +592,51 @@ pub fn abandon(hooks: &KernelHooks, clock: &Clock, agent: &str) {
     }
 }
 
+/// Cursor's completion notification, on disk: when a child's turn ends the
+/// kernel writes a `kind = "done"` inbox file to its parent with the turn's
+/// last words (or how it failed) and where the transcript is. The child no
+/// longer has to remember to `say`. Skipped when the parent was blocked in
+/// `spawn wait=true` for this turn: it already got the words as the tool
+/// result.
+fn notify_parent_done(hooks: &KernelHooks, agent: &str) {
+    let Ok(child) = arbos_core::load_agent(&hooks.place, &arbos_core::AgentId::new(agent)) else {
+        return;
+    };
+    let Some(parent) = child.parent.as_ref() else {
+        return;
+    };
+    if hooks.waited.lock().unwrap().remove(agent) {
+        return;
+    }
+    if !arbos_core::agent_exists(&hooks.place, parent.as_str()) {
+        return;
+    }
+    let lo = hooks.turn_lo.lock().unwrap().remove(agent).unwrap_or(0);
+    let events = load_transcript(&hooks.layout(agent).transcript()).unwrap_or_default();
+    let (outcome, ok) = turn_outcome(&events, lo);
+    let status = if ok { "ended" } else { "ended badly" };
+    let body = format!(
+        "Turn {status}. Last words: {outcome}\n(transcript: .arbos/agents/{agent}/transcript.jsonl)"
+    );
+    let msg = inbox::Message {
+        from: format!("agent:{agent}"),
+        kind: "done".into(),
+        wake: true,
+        hops: 0,
+        body,
+        ..inbox::Message::default()
+    };
+    if let Err(e) = inbox::deliver(&hooks.place, parent.as_str(), &msg) {
+        crate::klog::warn("done_notice_failed", Some(agent), format!("{e:#}"));
+    } else {
+        hooks.plan_changed(parent.as_str());
+    }
+}
+
 /// The turn the clock started for `agent` ended. Close its node and attempt
 /// from what the transcript says, unless the model already moved the node.
 pub fn finish_turn(hooks: &KernelHooks, clock: &Clock, agent: &str) {
+    notify_parent_done(hooks, agent);
     let Some(meta) = clock.turns.lock().unwrap().remove(agent) else {
         // Not a plan node's turn: an inbox message's. Its record is the
         // turn folder; close it.
