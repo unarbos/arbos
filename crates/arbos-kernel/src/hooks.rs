@@ -1369,14 +1369,20 @@ impl KernelHooks {
         let Some(pending) = pending else {
             return Err(format!("no question is pending for {agent}"));
         };
-        if given.is_empty() || !self.issued.lock().unwrap().contains(given) {
-            // An old client, or one guessing: only safe when there is
-            // exactly one question it could mean.
+        // Blind: no id, or the agent id (what the desktop's approve sent
+        // before asks had ids). Only safe when there is exactly one
+        // question it could mean.
+        if given.is_empty() || given == agent {
             if pending_total == 1 {
                 return Ok(());
             }
             return Err(format!(
-                "answer without a known ask id while {pending_total} questions are pending; send id {pending:?}"
+                "answer without an ask id while {pending_total} questions are pending; send id {pending:?}"
+            ));
+        }
+        if !self.issued.lock().unwrap().contains(given) {
+            return Err(format!(
+                "answer names ask {given:?}, which this kernel never issued; the pending question is {pending:?}"
             ));
         }
         if given != pending {
