@@ -58,9 +58,11 @@ bundle:
 	@# Gatekeeper refuses a bundle nothing has signed. The hardened runtime and
 	@# the timestamp are what notarization will not proceed without; ad-hoc keeps
 	@# the first and drops the second rather than failing, so both stay here
-	@# unconditionally. No entitlements: agents are spawned, not loaded, and
-	@# nothing here is sandboxed.
-	codesign --force --options runtime --timestamp --sign "$(SIGN)" $(APP)
+	@# unconditionally. The one entitlement is the microphone: under the
+	@# hardened runtime tccd refuses even to ask without it (bundle/
+	@# entitlements.plist). Agents are spawned, not loaded, and nothing here is
+	@# sandboxed, so nothing else is declared.
+	codesign --force --options runtime --timestamp --entitlements bundle/entitlements.plist --sign "$(SIGN)" $(APP)
 	@echo "built $(APP) $(VERSION)"
 
 dmg: bundle
