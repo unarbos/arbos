@@ -346,6 +346,11 @@ pub struct TextField {
     /// unconditionally would snap the view back to it on the very next frame,
     /// so scrolling away to read would be impossible.
     follow_caret: bool,
+    /// ARBOS PATCH: paint every character as `*` — a key or password field.
+    /// One `*` per byte of the character, so the shaped text keeps the byte
+    /// offsets the caret and selection are measured in. Copy still yields the
+    /// real text.
+    masked: bool,
 }
 
 impl EventEmitter<FieldEvent> for TextField {}
@@ -379,6 +384,7 @@ impl TextField {
             caret_on: true,
             blink: None,
             follow_caret: false,
+            masked: false,
         }
     }
 
@@ -421,6 +427,23 @@ impl TextField {
     ///         .with_key_context(COMPOSER)
     /// });
     /// ```
+    /// ARBOS PATCH: see [`TextField::masked`].
+    pub fn with_masked(mut self, masked: bool) -> Self {
+        self.masked = masked;
+        self
+    }
+
+    pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
+        if self.masked != masked {
+            self.masked = masked;
+            cx.notify();
+        }
+    }
+
+    pub fn is_masked(&self) -> bool {
+        self.masked
+    }
+
     pub fn with_key_context(mut self, context: impl Into<SharedString>) -> Self {
         self.key_context = Some(context.into());
         self
@@ -1141,6 +1164,13 @@ pub fn word_at(text: &str, offset: usize) -> (usize, usize) {
 fn display_text(field: &TextField) -> (SharedString, bool) {
     if field.content.is_empty() {
         (field.placeholder.clone(), true)
+    } else if field.masked {
+        let stars: String = field
+            .content
+            .chars()
+            .map(|c| if c == '\n' { "\n".to_string() } else { "*".repeat(c.len_utf8()) })
+            .collect();
+        (stars.into(), false)
     } else {
         (field.content.clone(), false)
     }

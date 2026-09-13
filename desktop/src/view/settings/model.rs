@@ -2,9 +2,9 @@
 //! model a chat uses when it says `inherit`.
 //!
 //! It edits the same `~/.config/arbos/config.toml` that `arbos-kernel setup`
-//! writes, so the two never disagree. The key comes in from the clipboard
-//! and goes straight to the file: this window has nothing that can show it,
-//! only where it came from.
+//! writes, so the two never disagree. The key is typed into a masked field
+//! (or pasted from the clipboard) and goes straight to the file: this window
+//! never shows it back, only where it came from.
 
 use crate::{
     kernel::{self, HostSummary},
@@ -12,10 +12,16 @@ use crate::{
 };
 use arbos_core::host::{KeySource, ProviderKind};
 use bezel::{
-    gpui::{AnyElement, ClipboardItem, Context, div, prelude::*, px},
+    gpui::{AnyElement, ClipboardItem, Context, Entity, div, prelude::*, px},
     theme::{TextStyle, Theme, Typeset},
-    ui::widgets::{ButtonStyle, Buttons, Content, Scaffolding, Status},
+    ui::{
+        input::{FieldEvent, TextField},
+        widgets::{ButtonStyle, Buttons, Content, Scaffolding, Status},
+    },
 };
+
+/// Model chips shown under the search field at most.
+const MODEL_MATCHES: usize = 12;
 
 /// What the section holds between draws. `summary` is re-read after every
 /// save; `pending` is a key check on the background executor.
@@ -24,6 +30,12 @@ pub(super) struct HostPanel {
     pub pending: bool,
     /// The last thing that happened, for the strip under the key row.
     pub note: Option<Note>,
+    /// Typed key entry, masked. Cleared once saved.
+    pub key_field: Entity<TextField>,
+    /// The custom base URL, for the Custom provider.
+    pub base_field: Entity<TextField>,
+    /// Live filter over the provider's model catalog.
+    pub model_search: Entity<TextField>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -33,11 +45,36 @@ pub(super) enum Note {
 }
 
 impl HostPanel {
-    pub fn new() -> Self {
+    pub fn new(cx: &mut Context<SettingsWindow>) -> Self {
+        let summary = kernel::host_summary();
+        let key_field = cx.new(|cx| {
+            TextField::new(cx)
+                .with_masked(true)
+                .with_placeholder("Type or paste the key")
+        });
+        let base_field = cx.new(|cx| {
+            let mut f = TextField::new(cx).with_placeholder("https://host/v1");
+            if summary.provider == ProviderKind::Custom && !summary.base.starts_with('(') {
+                f.set_content(summary.base.clone(), cx);
+            }
+            f
+        });
+        let model_search = cx.new(|cx| TextField::new(cx).with_placeholder("Search models"));
+        for field in [&key_field, &base_field, &model_search] {
+            cx.subscribe(field, |_this: &mut SettingsWindow, _, event: &FieldEvent, cx| {
+                if *event == FieldEvent::Changed {
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         Self {
-            summary: kernel::host_summary(),
+            summary,
             pending: false,
             note: None,
+            key_field,
+            base_field,
+            model_search,
         }
     }
 
@@ -65,6 +102,10 @@ impl SettingsWindow {
                 theme
                     .group_box()
                     .child(self.provider_row(cx))
+                    .children(
+                        (self.host.summary.provider == ProviderKind::Custom)
+                            .then(|| self.base_row(cx)),
+                    )
                     .child(self.key_row(cx))
                     .child(self.model_row(cx)),
             )
@@ -199,6 +240,18 @@ impl SettingsWindow {
                     .flex_row()
                     .items_center()
                     .gap(px(8.))
+                    .child(
+                        div()
+                            .id("key-field")
+                            .w(px(220.))
+                            .child(self.host.key_field.clone()),
+                    )
+                    .child(
+                        theme
+                            .button("Save key", ButtonStyle::Ghost, None)
+                            .id("key-save")
+                            .on_click(cx.listener(|this, _, _, cx| this.save_typed_key(cx))),
+                    )
                     .when(saved, |row| {
                         row.child(
                             theme
@@ -231,16 +284,85 @@ impl SettingsWindow {
             )
     }
 
+    /// The Custom provider's base URL, typed.
+    fn base_row(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = Theme::of(cx).clone();
+        theme
+            .card_row(false)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(theme.row_title("Base URL"))
+                    .child(
+                        div()
+                            .mt(px(4.))
+                            .text_style(TextStyle::Subheadline)
+                            .text_color(theme.text_muted)
+                            .child("An OpenAI-compatible endpoint, up to and including /v1."),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .id("base-field")
+                            .w(px(280.))
+                            .child(self.host.base_field.clone()),
+                    )
+                    .child(
+                        theme
+                            .button("Save", ButtonStyle::Ghost, None)
+                            .id("base-save")
+                            .on_click(cx.listener(|this, _, _, cx| this.save_base(cx))),
+                    ),
+            )
+    }
+
     fn model_row(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = Theme::of(cx).clone();
         let summary = &self.host.summary;
         let current = summary.model.clone();
-        let picks: Vec<String> = summary
-            .provider
-            .suggested_models()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let query = self
+            .host
+            .model_search
+            .read(cx)
+            .content()
+            .trim()
+            .to_ascii_lowercase();
+        let catalog = self.workspace.read(cx).models.clone();
+        let picks: Vec<String> = if query.is_empty() {
+            summary
+                .provider
+                .suggested_models()
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            // The live catalog first (what the provider will accept), the
+            // suggestions as a fallback when the catalog is empty.
+            let mut pool: Vec<String> = catalog.models.iter().map(|m| m.id.clone()).collect();
+            if pool.is_empty() {
+                pool = summary.provider.suggested_models().iter().map(|s| s.to_string()).collect();
+            }
+            pool.retain(|id| {
+                id.to_ascii_lowercase().contains(&query)
+                    || kernel::model_display_name(id).to_ascii_lowercase().contains(&query)
+            });
+            pool.truncate(MODEL_MATCHES);
+            pool
+        };
+        let no_match = !query.is_empty() && picks.is_empty();
+        let typed_model = (!query.is_empty()).then(|| {
+            self.host.model_search.read(cx).content().trim().to_string()
+        });
         theme.card_row(false).child(
             div()
                 .flex_1()
@@ -257,6 +379,38 @@ impl SettingsWindow {
                             "{current} — what a chat uses until /model picks another."
                         )),
                 )
+                .child(
+                    div()
+                        .id("model-search")
+                        .mt(px(10.))
+                        .w(px(320.))
+                        .child(self.host.model_search.clone()),
+                )
+                .when(no_match, |col| {
+                    let typed = typed_model.clone().unwrap_or_default();
+                    col.child(
+                        div()
+                            .mt(px(6.))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_style(TextStyle::Caption)
+                                    .text_color(theme.text_faint)
+                                    .child(format!("No catalog match for \"{typed}\".")),
+                            )
+                            .child(
+                                theme
+                                    .button("Use it anyway", ButtonStyle::Ghost, None)
+                                    .id("model-use-typed")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_model(&typed, cx);
+                                    })),
+                            ),
+                    )
+                })
                 .when(!picks.is_empty(), |col| {
                     col.child(
                         div()
@@ -373,10 +527,40 @@ impl SettingsWindow {
     /// Take the key off the clipboard, check it with the provider, save it.
     /// The text never reaches an element: a bad paste is named by shape
     /// ("that was 3 lines"), not by content.
-    fn paste_key(&mut self, cx: &mut Context<Self>) {
-        if self.host.pending {
+    /// The Custom provider's typed base URL, saved to config.toml.
+    fn save_base(&mut self, cx: &mut Context<Self>) {
+        let base = self.host.base_field.read(cx).content().trim().to_string();
+        match kernel::save_host_base(&base) {
+            Ok(summary) => {
+                self.host.summary = summary;
+                self.host.note = Some(Note::Ok(if base.is_empty() {
+                    "Base URL cleared; the provider's default is used.".into()
+                } else {
+                    format!("Base URL saved: {base}.")
+                }));
+            }
+            Err(e) => self.host.note = Some(Note::Problem(format!("Not saved: {e:#}."))),
+        }
+        cx.notify();
+    }
+
+    /// The key typed into the masked field: checked with the provider, then
+    /// saved; the field is cleared either way so the key is not kept in the
+    /// window.
+    fn save_typed_key(&mut self, cx: &mut Context<Self>) {
+        let key = self.host.key_field.read(cx).content().trim().to_string();
+        if key.is_empty() {
+            self.host.note = Some(Note::Problem(
+                "Type or paste the key into the field first, then press Save key.".into(),
+            ));
+            cx.notify();
             return;
         }
+        self.host.key_field.update(cx, |field, cx| field.clear(cx));
+        self.take_key(key, cx);
+    }
+
+    fn paste_key(&mut self, cx: &mut Context<Self>) {
         let text = cx
             .read_from_clipboard()
             .as_ref()
@@ -390,9 +574,17 @@ impl SettingsWindow {
             cx.notify();
             return;
         }
+        self.take_key(key, cx);
+    }
+
+    /// Check `key` with the provider off the main thread, then save it.
+    fn take_key(&mut self, key: String, cx: &mut Context<Self>) {
+        if self.host.pending {
+            return;
+        }
         if key.lines().count() > 1 || key.contains(' ') {
             self.host.note = Some(Note::Problem(format!(
-                "The clipboard holds {} lines with spaces; a key is one word. Copy just the key.",
+                "That is {} lines with spaces; a key is one word.",
                 key.lines().count()
             )));
             cx.notify();

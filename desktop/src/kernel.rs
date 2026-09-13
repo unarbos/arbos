@@ -695,6 +695,19 @@ pub fn save_host_key(key: &str) -> Result<HostSummary> {
     Ok(host_summary())
 }
 
+/// Set the base URL requests go to. Empty = the provider's default (a
+/// custom provider needs one). The trailing slash is dropped.
+pub fn save_host_base(base: &str) -> Result<HostSummary> {
+    let mut host = Host::peek()?;
+    let base = base.trim().trim_end_matches('/');
+    if !base.is_empty() && !(base.starts_with("http://") || base.starts_with("https://")) {
+        anyhow::bail!("the base URL must start with http:// or https://");
+    }
+    host.config.api_base = base.to_string();
+    host.save()?;
+    Ok(host_summary())
+}
+
 /// Set the model turns use by default. Empty = the provider's default.
 pub fn save_host_model(model: &str) -> Result<HostSummary> {
     let mut host = Host::peek()?;
