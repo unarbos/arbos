@@ -1,0 +1,11 @@
+.venv/
+.uv-cache/
+.uv-python/
+.cache/
+bin/
+hf/
+logs/
+models/
+out/
+*.token
+__pycache__/

@@ -1,0 +1,155 @@
+"""WebSocket server: auth on the handshake, one Session per connection, /healthz."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import os
+import signal
+import sys
+from http import HTTPStatus
+from urllib.parse import parse_qs, urlsplit
+
+from websockets.asyncio.server import ServerConnection, serve
+
+from . import protocol as P
+from .engines import Engines
+from .session import Session, SessionDefaults, Tuning
+
+log = logging.getLogger("voice.server")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="voice-server",
+        description="Self-hosted full-duplex speech server for Arbos (open-source ASR + TTS over one WebSocket).",
+        epilog=P.PROTOCOL_TEXT,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    net = parser.add_argument_group("network")
+    net.add_argument("--host", default="127.0.0.1")
+    net.add_argument("--port", type=int, default=8765)
+    net.add_argument("--token", default=os.environ.get("VOICE_TOKEN", ""),
+                     help="shared secret; clients pass ?token= or Authorization: Bearer. Empty = no auth (env VOICE_TOKEN)")
+
+    models = parser.add_argument_group("models")
+    models.add_argument("--model-dir", default=os.environ.get("VOICE_MODEL_DIR", "models"),
+                        help="holds silero_vad.onnx, kokoro-v1.0.onnx, voices-v1.0.bin (see deploy/run.sh)")
+    models.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    models.add_argument("--asr", default="faster-whisper", choices=["faster-whisper"])
+    models.add_argument("--asr-model", default=None,
+                        help="faster-whisper model name or CTranslate2 dir (default: large-v3-turbo on cuda, small.en on cpu)")
+    models.add_argument("--compute-type", default=None, help="CTranslate2 compute type (default: float16 on cuda, int8 on cpu)")
+    models.add_argument("--beam-size", type=int, default=3, help="beam for the final transcript; partials use 1")
+    models.add_argument("--threads", type=int, default=max(2, min(8, (os.cpu_count() or 4) // 2)), help="CPU threads for ASR")
+    models.add_argument("--language", default="en", help="ASR language hint; 'auto' to detect per utterance")
+    models.add_argument("--tts", default="kokoro", choices=["kokoro"])
+    models.add_argument("--voice", default="af_heart", help="default Kokoro voice (session.start may override)")
+    models.add_argument("--speed", type=float, default=1.0)
+
+    reply = parser.add_argument_group("reply hop (who answers the user)")
+    reply.add_argument("--reply", default="none", choices=["none", "openrouter"],
+                       help="none: speech only, the client sends replies with 'speak'. openrouter: the server answers via OpenRouter (env OPENROUTER_API_KEY)")
+    reply.add_argument("--reply-model", default="openai/gpt-4o-mini", help="OpenRouter model id")
+
+    turn = parser.add_argument_group("turn taking (ms)")
+    turn.add_argument("--end-silence-ms", type=int, default=600, help="silence that ends an utterance")
+    turn.add_argument("--min-speech-ms", type=int, default=96, help="speech before speech.started")
+    turn.add_argument("--barge-in-min-ms", type=int, default=256, help="speech before barge-in while the server is talking")
+    turn.add_argument("--partial-interval-ms", type=int, default=700, help="how often transcript.delta is attempted")
+    turn.add_argument("--vad-threshold", type=float, default=0.5)
+    turn.add_argument("--max-lead-ms", type=int, default=1500,
+                      help="reply audio is sent at most this far ahead of real-time playback (small = fast interrupt)")
+
+    parser.add_argument("--print-protocol", action="store_true", help="print the wire protocol and exit")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args(argv)
+
+    if args.device == "auto":
+        args.device = "cuda" if _cuda_available() else "cpu"
+    if args.asr_model is None:
+        args.asr_model = "large-v3-turbo" if args.device == "cuda" else "small.en"
+    if args.compute_type is None:
+        args.compute_type = "float16" if args.device == "cuda" else "int8"
+    if args.language == "auto":
+        args.language = None
+    return args
+
+
+def _cuda_available() -> bool:
+    try:
+        import ctranslate2
+
+        return ctranslate2.get_cuda_device_count() > 0
+    except Exception:
+        return False
+
+
+def make_process_request(token: str):
+    def process_request(connection: ServerConnection, request):
+        parts = urlsplit(request.path)
+        if parts.path == "/healthz":
+            return connection.respond(HTTPStatus.OK, "ok\n")
+        if not token:
+            return None
+        query = parse_qs(parts.query).get("token", [""])[0]
+        header = request.headers.get("Authorization", "")
+        bearer = header[7:] if header.lower().startswith("bearer ") else ""
+        if query == token or bearer == token:
+            return None
+        log.warning("rejected connection from %s: bad token", connection.remote_address)
+        return connection.respond(HTTPStatus.UNAUTHORIZED, "unauthorized\n")
+
+    return process_request
+
+
+async def serve_forever(args: argparse.Namespace) -> None:
+    engines = Engines.load(args)
+    await engines.warm_up(args.voice)
+    if args.voice not in engines.tts.voices:
+        raise SystemExit(f"unknown voice {args.voice!r}; have: {', '.join(engines.tts.voices)}")
+    defaults = SessionDefaults(language=args.language, voice=args.voice, speed=args.speed, reply=args.reply)
+    tuning = Tuning(
+        start_threshold=args.vad_threshold,
+        end_threshold=max(0.1, args.vad_threshold - 0.15),
+        min_speech_ms=args.min_speech_ms,
+        barge_in_min_ms=args.barge_in_min_ms,
+        end_silence_ms=args.end_silence_ms,
+        partial_interval_ms=args.partial_interval_ms,
+        max_lead_ms=args.max_lead_ms,
+    )
+
+    async def handler(ws: ServerConnection) -> None:
+        await Session(ws=ws, engines=engines, defaults=defaults, tuning=tuning).run()
+
+    stop = asyncio.get_running_loop().create_future()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        asyncio.get_running_loop().add_signal_handler(sig, lambda: stop.done() or stop.set_result(None))
+
+    async with serve(
+        handler, args.host, args.port,
+        process_request=make_process_request(args.token),
+        max_size=4 * 1024 * 1024, ping_interval=20, ping_timeout=20, compression=None,
+    ):
+        log.info("listening on ws://%s:%d/ws  auth=%s  reply=%s", args.host, args.port,
+                 "token" if args.token else "OFF", args.reply)
+        await stop
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    if args.print_protocol:
+        print(P.PROTOCOL_TEXT)
+        return
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname).1s %(name)s %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+    )
+    for noisy in ("httpx", "httpcore", "huggingface_hub", "faster_whisper", "websockets"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    if not args.token:
+        log.warning("no --token / VOICE_TOKEN: anyone who can reach the port can use the server")
+    asyncio.run(serve_forever(args))
