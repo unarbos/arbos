@@ -35,6 +35,24 @@ const FINAL_WAIT: Duration = Duration::from_millis(2_000);
 pub struct VoiceCfg {
     pub url: String,
     pub token: Option<String>,
+    /// Show what the server's own agent does (`agent.*`, `tool.*` frames)
+    /// as notices in the chat. `voice_mirror = false` turns it off.
+    pub mirror: bool,
+    /// Who answers on the server side: `none` (this window's kernel
+    /// answers dictation; `/voice` has nobody to talk to), `kernel` (the
+    /// server's own kernel agent), or `openrouter` (its model with the
+    /// Arbos tools). `voice_reply` in config.toml; default `none`.
+    pub reply: String,
+}
+
+/// One thing the speech server's agent did, for the chat to show.
+#[derive(Debug, Clone)]
+pub struct Mirror {
+    /// `agent.event`, `agent.done`, `agent.turn`, `tool.call`,
+    /// `tool.result`, `text.done`, …
+    pub kind: String,
+    pub agent: String,
+    pub text: String,
 }
 
 /// What the client is doing, for the composer's status row.
@@ -73,12 +91,29 @@ pub struct Peek {
     /// `session.ready.engine`: `duplex` answers on its own; `pipeline`
     /// (or an older server that says nothing) leaves replies to us.
     pub engine: String,
+    /// Whether the server has a kernel behind it (`session.ready.kernel`).
+    pub kernel: bool,
+    /// `session.ready.reply`: who answers dictation on the server (`none`
+    /// = nobody there; this window's kernel does).
+    pub reply_backend: String,
+    /// `session.ready.text`: who answers the text channel (`none` = nobody).
+    pub text_backend: String,
 }
+
+/// Mirror lines kept when nobody drains them (a closed window).
+const MIRROR_CAP: usize = 200;
 
 #[derive(Default)]
 struct Shared {
     phase: Option<Phase>,
     engine: String,
+    kernel: bool,
+    reply_backend: String,
+    text_backend: String,
+    /// The server's agent activity, oldest first, until the UI takes it.
+    mirror: Vec<Mirror>,
+    /// A `text.input` turn's reply as it streams.
+    text_reply: String,
     finals: Vec<String>,
     partial: String,
     /// Set when the server closed the take (`transcript.final`).
@@ -95,6 +130,7 @@ enum Cmd {
     MicStart,
     MicStop,
     Speak(String),
+    Text(String),
     Interrupt,
     End,
 }
@@ -135,14 +171,56 @@ pub fn status() -> Peek {
         reply: s.reply.clone(),
         error: s.error.clone(),
         engine: s.engine.clone(),
+        kernel: s.kernel,
+        reply_backend: s.reply_backend.clone(),
+        text_backend: s.text_backend.clone(),
     }
+}
+
+/// Take what the server's agent did since the last call.
+pub fn drain_mirror() -> Vec<Mirror> {
+    let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
+    let Some(session) = hold.as_ref() else {
+        return Vec::new();
+    };
+    let mut s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
+    std::mem::take(&mut s.mirror)
+}
+
+/// Send words to the server's own model over its text channel (`/voice
+/// <text>` in the composer): it answers aloud and, when it has a kernel,
+/// may hand the task to it. Connects when needed. Not a kernel prompt.
+pub fn text_input(text: &str) -> Result<()> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(());
+    }
+    let cfg = crate::kernel::voice_config().ok_or_else(|| anyhow!("no voice_url in config"))?;
+    ensure_session(&cfg)?;
+    let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
+    let session = hold.as_ref().ok_or_else(|| anyhow!("voice session closed"))?;
+    {
+        let mut s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
+        if s.text_backend == "none" {
+            bail!(
+                "the speech server has nobody to answer text (session.ready.text = none); set voice_reply = \"kernel\" or \"openrouter\" in config.toml"
+            );
+        }
+        s.text_reply.clear();
+        s.reply.clear();
+    }
+    session
+        .tx
+        .send(Cmd::Text(text.to_string()))
+        .map_err(|_| anyhow!("voice session closed"))
 }
 
 /// Whether the connected server answers by itself (`engine: duplex`). A
 /// dictated prompt must then not be sent to the kernel too, and the
 /// kernel's answer must not be `speak`-ed: the user would hear two replies.
 pub fn server_answers() -> bool {
-    status().engine == "duplex"
+    let p = status();
+    p.engine == "duplex" || (!p.reply_backend.is_empty() && p.reply_backend != "none")
 }
 
 /// Bytes of reply audio handed to the player so far, and interrupts sent.
@@ -385,8 +463,8 @@ async fn run(
         "format": { "type": "audio/pcm", "rate": RATE },
         // Replies are ours to drive (`speak`) when the engine leaves them
         // to the client; the agent mirror is off — this window has the chat.
-        "reply": "none",
-        "agents": false
+        "reply": if cfg.reply.is_empty() { "none" } else { cfg.reply.as_str() },
+        "agents": cfg.mirror
     })))
     .await?;
 
@@ -426,6 +504,10 @@ async fn run(
                         }
                         speaking = true;
                         sink.send(text_frame(json!({ "type": "speak", "text": text }))).await?;
+                    }
+                    Cmd::Text(text) => {
+                        sink.send(text_frame(json!({ "type": "text.input", "text": text })))
+                            .await?;
                     }
                     Cmd::Interrupt => {
                         if let Some(p) = player.take() {
@@ -490,6 +572,9 @@ async fn run(
                         match kind {
                             "session.ready" => {
                                 s.engine = field("engine");
+                                s.kernel = v.get("kernel").and_then(Value::as_bool).unwrap_or(false);
+                                s.reply_backend = field("reply");
+                                s.text_backend = field("text");
                                 if s.phase == Some(Phase::Connecting) {
                                     s.phase = Some(Phase::Ready);
                                 }
@@ -543,6 +628,52 @@ async fn run(
                                     s.phase = Some(if mic.is_some() { Phase::Listening } else { Phase::Ready });
                                 }
                             }
+                            // The text channel: the reply streams into the
+                            // status row like a spoken one, and lands in the
+                            // chat whole when done.
+                            "text.delta" => {
+                                let t = field("text");
+                                s.text_reply.push_str(&t);
+                                s.reply.push_str(&t);
+                            }
+                            "text.done" => {
+                                let whole = field("text");
+                                let text = if whole.is_empty() { std::mem::take(&mut s.text_reply) } else { whole };
+                                s.text_reply.clear();
+                                let cancelled = v.get("cancelled").and_then(Value::as_bool).unwrap_or(false);
+                                push_mirror(&mut s, Mirror {
+                                    kind: "text.done".into(),
+                                    agent: String::new(),
+                                    text: if cancelled { format!("{text} (cancelled)") } else { text },
+                                });
+                            }
+                            // The server's agent, mirrored: what it says, what
+                            // it runs, when it is done. `agent.tree` is not
+                            // shown (this window has its own tree).
+                            "agent.event" => {
+                                let kind = field("kind");
+                                let from = field("from");
+                                let text = field("text");
+                                if kind == "assistant" && text.trim().is_empty() {
+                                    // Per-token deltas for the root; the
+                                    // whole answer arrives as agent.done.
+                                } else if kind != "assistant" {
+                                    let text = if from.is_empty() { text } else { format!("{from}: {text}") };
+                                    push_mirror(&mut s, Mirror { kind: format!("agent.event/{kind}"), agent: field("agent"), text });
+                                }
+                            }
+                            "agent.done" => push_mirror(&mut s, Mirror { kind: "agent.done".into(), agent: field("agent"), text: field("text") }),
+                            "agent.turn" => push_mirror(&mut s, Mirror { kind: "agent.turn".into(), agent: field("agent"), text: field("state") }),
+                            "tool.call" => {
+                                let args = v.get("arguments").map(|a| a.to_string()).unwrap_or_default();
+                                let args: String = args.chars().take(120).collect();
+                                push_mirror(&mut s, Mirror { kind: "tool.call".into(), agent: String::new(), text: format!("{} {args}", field("name")) });
+                            }
+                            "tool.result" => {
+                                let out: String = field("output").chars().take(200).collect();
+                                push_mirror(&mut s, Mirror { kind: "tool.result".into(), agent: String::new(), text: format!("{} → {out}", field("name")) });
+                            }
+                            "agent.tree" => {}
                             "error" => {
                                 let m = field("message");
                                 s.error = Some(if m.is_empty() { "voice server error".into() } else { m });
@@ -814,4 +945,12 @@ fn player_command() -> Result<Command> {
     bail!(
         "no playback program found: install pipewire (pw-play), pulseaudio-utils (paplay), alsa-utils (aplay), sox (play) or ffmpeg (ffplay)"
     )
+}
+
+/// Queue a mirror line, dropping the oldest past the cap.
+fn push_mirror(s: &mut Shared, m: Mirror) {
+    if s.mirror.len() >= MIRROR_CAP {
+        s.mirror.remove(0);
+    }
+    s.mirror.push(m);
 }

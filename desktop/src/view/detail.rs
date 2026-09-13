@@ -316,7 +316,8 @@ impl Arbos {
 
     /// `/compact`, `/undo`, `/stop`, `/model <id>`, `/mode <id>`, `/pause`,
     /// `/resume`, `/fork`: the kernel's own verbs, sent as frames rather
-    /// than as a prompt. True when the text was one of them.
+    /// than as a prompt; `/voice <words>` goes to the speech server. True
+    /// when the text was one of them.
     fn builtin_command(&mut self, id: u64, text: &str, cx: &mut Context<Self>) -> bool {
         let Some(rest) = text.trim().strip_prefix('/') else {
             return false;
@@ -365,6 +366,24 @@ impl Arbos {
             "fork" => {
                 self.workspace
                     .update(cx, |workspace, cx| workspace.fork_session(id, cx));
+                true
+            }
+            // `/voice <words>`: to the speech server's own model over its
+            // text channel, not to this chat's agent. It answers aloud; the
+            // answer and what its agent does come back as notices.
+            "voice" if !arg.is_empty() => {
+                let sent = crate::voice_ws::text_input(arg);
+                let line = match &sent {
+                    Ok(()) => format!("voice ← {arg}"),
+                    Err(e) => format!("voice failed: {e:#}"),
+                };
+                let failed = sent.is_err();
+                self.workspace.update(cx, |workspace, cx| {
+                    workspace.with_session(id, cx, |chat| chat.notice(failed, &line));
+                });
+                if !failed {
+                    self.start_voice_mirror(cx);
+                }
                 true
             }
             _ => false,
