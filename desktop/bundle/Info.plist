@@ -5,22 +5,22 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Cydonia</string>
+	<string>Arbos</string>
 	<key>CFBundleExecutable</key>
-	<string>cydonia</string>
-	<!-- Names Resources/cydonia.icns. The extension is implied; adding it
+	<string>arbos</string>
+	<!-- Names Resources/arbos.icns. The extension is implied; adding it
 	     is accepted, leaving the file out is not — the app falls back to the
 	     generic executable icon. -->
 	<key>CFBundleIconFile</key>
-	<string>cydonia</string>
+	<string>arbos</string>
 	<key>CFBundleIdentifier</key>
-	<string>app.cydonia</string>
+	<string>com.unarbos.arbos</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<!-- The app menu's title, which is why it is lowercase: it replaces the
 	     one `set_menus` builds in bin/main.rs. -->
 	<key>CFBundleName</key>
-	<string>cydonia</string>
+	<string>arbos</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

@@ -219,6 +219,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbos-desktop"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "arbos-core",
+ "base64 0.22.1",
+ "bezel",
+ "bezel-editor",
+ "bezel-gpui",
+ "bezel-markdown",
+ "bezel-syntax",
+ "bezel-terminal",
+ "block",
+ "cacp",
+ "cacp-agents",
+ "dirs 6.0.0",
+ "futures",
+ "image",
+ "js-sys",
+ "lru",
+ "notify",
+ "objc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
+ "ureq",
+]
+
+[[package]]
 name = "arg_enum_proc_macro"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1956,39 +1989,6 @@ name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
-
-[[package]]
-name = "cydonia"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "arbos-core",
- "base64 0.22.1",
- "bezel",
- "bezel-editor",
- "bezel-gpui",
- "bezel-markdown",
- "bezel-syntax",
- "bezel-terminal",
- "block",
- "cacp",
- "cacp-agents",
- "dirs 6.0.0",
- "futures",
- "image",
- "js-sys",
- "lru",
- "notify",
- "objc",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "toml 0.8.23",
- "toml_edit 0.22.27",
- "ureq",
-]
 
 [[package]]
 name = "data-encoding"

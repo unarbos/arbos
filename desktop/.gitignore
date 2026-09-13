@@ -2,7 +2,8 @@
 .env
 .env.*
 .claude/worktrees
-/assets
+/assets/*
+!/assets/icon.png
 /target
 /todos
 __pycache__/

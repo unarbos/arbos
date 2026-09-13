@@ -1,22 +1,29 @@
 [workspace]
 
 [package]
-name = "cydonia"
-description = "Arbos desktop shell: Cydonia look, Rust arbos-kernel backend"
+name = "arbos-desktop"
+description = "Arbos desktop: chat with agents over the Rust arbos-kernel"
 version = "0.1.1"
 edition = "2024"
 # The floor the edition itself sets. Nothing here reaches past it on purpose.
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/crabtalk/cydonia"
-homepage = "https://cydonia.sh"
+repository = "https://github.com/unarbos/arbos"
+homepage = "https://github.com/unarbos/arbos"
 keywords = ["acp", "agents", "desktop", "gpui", "workspace"]
 categories = ["gui", "development-tools"]
 # What a `cargo install` needs and nothing else. The default is every tracked
 # file, which would ship the website and the bundling plumbing to anyone who
-# installs the binary. `assets/` is absent by design — the logo is downloaded,
-# never committed, and `mark()` already holds the case where it is missing.
-include = ["/src", "/bin", "/build.rs", "/README.md", "/LICENSE"]
+# installs the binary. `assets/icon.png` rides along so `mark()` has a
+# picture under `cargo run` too.
+include = ["/src", "/bin", "/build.rs", "/README.md", "/LICENSE", "/assets/icon.png"]
+
+# The library keeps its old crate name for now: every `use cydonia::…` in
+# the bins and the driver, and the `cydonia::` action namespaces, stay put
+# until the code-identifier rename (a separate change).
+[lib]
+name = "cydonia"
+path = "src/lib.rs"
 
 [[bin]]
 name = "arbos-desktop"
@@ -79,6 +86,12 @@ arbos-core = { path = "../crates/arbos-core" }
 # Lockfile pin: getrandom's js-sys ^0.3.77 otherwise picks 0.3.81
 # (wasm-bindgen =0.2.104) and clashes with bezel's wasm-bindgen ^0.2.120.
 js-sys = "0.3.104"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# bezel's `platform` feature turns on `font-kit` and nothing else, and
+# gpui_platform on Linux panics at startup unless a window backend is enabled.
+# Naming the crate here unifies these features into bezel's own copy of it.
+gpui_platform = { version = "0.3.9", package = "bezel-gpui-platform", features = ["x11", "wayland"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Collection behavior and the transparent titlebar — AppKit, not gpui.
