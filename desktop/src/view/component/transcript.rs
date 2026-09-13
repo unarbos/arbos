@@ -652,9 +652,12 @@ fn artifacts_row(
         .flex_row()
         .flex_wrap()
         .gap(px(8.))
-        .children(files.iter().enumerate().map(|(n, file)| {
-            artifact_card(id, ix, n, file, theme, cx)
-        }))
+        .children(
+            files
+                .iter()
+                .enumerate()
+                .map(|(n, file)| artifact_card(id, ix, n, file, theme, cx)),
+        )
         .into_any_element()
 }
 
@@ -673,7 +676,9 @@ fn artifact_card(
         .as_ref()
         .map(|thumb| {
             let (tw, th) = thumb.display_size();
-            let scale = (ARTIFACT_W / tw.max(1.)).min(ARTIFACT_H / th.max(1.)).min(1.);
+            let scale = (ARTIFACT_W / tw.max(1.))
+                .min(ARTIFACT_H / th.max(1.))
+                .min(1.);
             (tw * scale, th * scale)
         })
         .unwrap_or((ARTIFACT_W, 72.));
@@ -820,6 +825,9 @@ fn user_prompt(
                 .when(message.has_attachments(), |el| {
                     el.child(user_attachments(message, theme))
                 })
+                .when(!message.described.is_empty(), |el| {
+                    el.child(described_note(message, theme))
+                })
                 .when_some(slash, |el, cmd| {
                     el.child(
                         div()
@@ -909,6 +917,58 @@ fn user_attachments(message: &UserMessage, theme: &Theme) -> AnyElement {
             )
             .into_any_element()
         }))
+        .into_any_element()
+}
+
+/// The turn's model could not see the attached image(s); another model
+/// put them into words. A paperclip and a dim caption inside the card —
+/// hover for which model and what it said. Never a line of the transcript.
+fn described_note(message: &UserMessage, theme: &Theme) -> AnyElement {
+    let n = message.described.len();
+    let model = message
+        .described
+        .first()
+        .map(|d| d.model.clone())
+        .unwrap_or_default();
+    let caption: SharedString = if n == 1 {
+        format!("image described by {model}").into()
+    } else {
+        format!("{n} images described by {model}").into()
+    };
+    let tip: SharedString = message
+        .described
+        .iter()
+        .map(|d| {
+            let name = std::path::Path::new(&d.path)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(d.path.as_str());
+            format!(
+                "{name} — described by {}:\n{}",
+                d.model,
+                shorten(d.text.trim(), 400)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .into();
+    div()
+        .id("described-images")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.))
+        .text_style(TextStyle::Caption)
+        .text_color(theme.text_faint)
+        .cursor_default()
+        .tooltip(move |window, cx| Tooltip::text(tip.clone(), window, cx))
+        .child(
+            icons::icon(icons::files::PAPERCLIP)
+                .size(px(11.))
+                .text_color(theme.text_faint)
+                .into_any_element(),
+        )
+        .child(caption)
         .into_any_element()
 }
 
@@ -2727,7 +2787,10 @@ fn zone(
                     _ => None,
                 });
             let line = match secs {
-                Some(s) if s > 0 => format!("{text} · after {}", since(Duration::from_secs(u64::from(s)))),
+                Some(s) if s > 0 => format!(
+                    "{text} · after {}",
+                    since(Duration::from_secs(u64::from(s)))
+                ),
                 _ => text.clone(),
             };
             tail = tail.child(notice(chat, ix, &line, *failed, &theme, cx));
@@ -2898,12 +2961,11 @@ fn turn_footer(
             .active(|el| el.bg(theme.element_active))
             .tooltip(move |window, cx| Tooltip::text(tip, window, cx))
             .on_click(cx.listener(move |this, _, _, cx| this.vote_turn(id, turn, value, cx)))
-            .child(
-                svg()
-                    .path(path)
-                    .size(px(12.))
-                    .text_color(if lit { theme.accent } else { theme.text_faint }),
-            )
+            .child(svg().path(path).size(px(12.)).text_color(if lit {
+                theme.accent
+            } else {
+                theme.text_faint
+            }))
     };
     let row = row
         .child(thumb(true, cx))
@@ -3010,12 +3072,15 @@ fn work_header(
 /// turn ended that way: "Stopped by you" or "Interrupted: …".
 fn interrupt_label_of(items: &[ChatItem], first: usize) -> Option<String> {
     let turn = turns(items).into_iter().find(|t| t.range.start == first)?;
-    items[turn.range.clone()].iter().rev().find_map(|item| match item {
-        ChatItem::Notice { text, .. } if crate::model::session::is_interrupt_notice(text) => {
-            Some(text.clone())
-        }
-        _ => None,
-    })
+    items[turn.range.clone()]
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            ChatItem::Notice { text, .. } if crate::model::session::is_interrupt_notice(text) => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
 }
 
 /// One run of tool calls as Cursor shows it: `Editing foo.rs, explored 7

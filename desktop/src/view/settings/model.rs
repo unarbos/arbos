@@ -61,11 +61,14 @@ impl HostPanel {
         });
         let model_search = cx.new(|cx| TextField::new(cx).with_placeholder("Search models"));
         for field in [&key_field, &base_field, &model_search] {
-            cx.subscribe(field, |_this: &mut SettingsWindow, _, event: &FieldEvent, cx| {
-                if *event == FieldEvent::Changed {
-                    cx.notify();
-                }
-            })
+            cx.subscribe(
+                field,
+                |_this: &mut SettingsWindow, _, event: &FieldEvent, cx| {
+                    if *event == FieldEvent::Changed {
+                        cx.notify();
+                    }
+                },
+            )
             .detach();
         }
         Self {
@@ -200,7 +203,10 @@ impl SettingsWindow {
             .and_then(|chat| chat.kernel_provider.clone())
             .map(|k| {
                 if k.key {
-                    format!("The kernel of the open chat answers with {} ({}); key from {}.", k.provider, k.model, k.source)
+                    format!(
+                        "The kernel of the open chat answers with {} ({}); key from {}.",
+                        k.provider, k.model, k.source
+                    )
                 } else {
                     format!("The kernel of the open chat has no key for {}.", k.provider)
                 }
@@ -350,19 +356,25 @@ impl SettingsWindow {
             // suggestions as a fallback when the catalog is empty.
             let mut pool: Vec<String> = catalog.models.iter().map(|m| m.id.clone()).collect();
             if pool.is_empty() {
-                pool = summary.provider.suggested_models().iter().map(|s| s.to_string()).collect();
+                pool = summary
+                    .provider
+                    .suggested_models()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
             }
             pool.retain(|id| {
                 id.to_ascii_lowercase().contains(&query)
-                    || kernel::model_display_name(id).to_ascii_lowercase().contains(&query)
+                    || kernel::model_display_name(id)
+                        .to_ascii_lowercase()
+                        .contains(&query)
             });
             pool.truncate(MODEL_MATCHES);
             pool
         };
         let no_match = !query.is_empty() && picks.is_empty();
-        let typed_model = (!query.is_empty()).then(|| {
-            self.host.model_search.read(cx).content().trim().to_string()
-        });
+        let typed_model = (!query.is_empty())
+            .then(|| self.host.model_search.read(cx).content().trim().to_string());
         theme.card_row(false).child(
             div()
                 .flex_1()

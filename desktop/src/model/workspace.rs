@@ -1508,7 +1508,10 @@ impl Workspace {
             return;
         }
         if chat.reconnect_attempt >= Self::RECONNECT_TRIES {
-            chat.notice(true, "connection lost; retries stopped — send a message or press Reconnect to try again");
+            chat.notice(
+                true,
+                "connection lost; retries stopped — send a message or press Reconnect to try again",
+            );
             chat.flush();
             return;
         }

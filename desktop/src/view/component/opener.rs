@@ -798,12 +798,14 @@ impl Render for Opener {
                     cx.notify();
                 }),
             )
-            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<PanelDrag>, _, cx| {
-                if let Some((from, shift)) = this.grip {
-                    this.shift = shift + (event.event.position - from);
-                    cx.notify();
-                }
-            }))
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<PanelDrag>, _, cx| {
+                    if let Some((from, shift)) = this.grip {
+                        this.shift = shift + (event.event.position - from);
+                        cx.notify();
+                    }
+                }),
+            )
             .child(
                 div()
                     .w(px(WIDTH))

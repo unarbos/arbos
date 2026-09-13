@@ -114,6 +114,8 @@ pub enum SwitchId {
 pub struct SwitchOption {
     pub id: SharedString,
     pub name: SharedString,
+    /// For a model: whether it takes image input. None for other switches.
+    pub vision: Option<bool>,
 }
 
 /// One switchable thing the session offers: the agent's mode, or a config
@@ -407,6 +409,10 @@ pub struct Composer {
     voice_at: usize,
     /// A lost connection can be woken by an empty send.
     reconnect: bool,
+    /// A model for the next send only: the user took "switch to <vision
+    /// model> for this turn" because the tray holds an image the current
+    /// model cannot see. Cleared on send and when the images go.
+    turn_model: Option<SharedString>,
     /// Hint shown when the field is empty. Cursor keeps "Send follow-up"
     /// visible on an empty focused composer; the caret sits at the start.
     hint: SharedString,
@@ -477,6 +483,7 @@ impl Composer {
             model_hits: Vec::new(),
             model_active: 0,
             model_pointer: None,
+            turn_model: None,
             attachments: AttachmentDrafts::default(),
             chat_links: Vec::new(),
             voice: VoiceState::Idle,
@@ -990,10 +997,11 @@ impl Composer {
             cx.emit(ComposerEvent::Submit(Prompt::default()));
             return;
         }
-        let prompt = Prompt::compose(
+        let mut prompt = Prompt::compose(
             &join_chat_links(&self.chat_links, &content),
             std::mem::take(&mut self.attachments.get_mut(id).items),
         );
+        prompt.model = self.turn_model.take().map(|m| m.to_string());
         self.field.update(cx, |field, cx| field.clear(cx));
         self.attachments.get_mut(id).error = None;
         self.chat_links.clear();
@@ -1025,10 +1033,11 @@ impl Composer {
         let prompt = if empty {
             Prompt::default()
         } else {
-            let prompt = Prompt::compose(
+            let mut prompt = Prompt::compose(
                 &join_chat_links(&self.chat_links, &content),
                 std::mem::take(&mut self.attachments.get_mut(id).items),
             );
+            prompt.model = self.turn_model.take().map(|m| m.to_string());
             self.field.update(cx, |field, cx| field.clear(cx));
             self.attachments.get_mut(id).error = None;
             self.chat_links.clear();
@@ -1365,15 +1374,18 @@ impl Composer {
     /// with a chevron, at the right end of the pill. Falls back to the agent
     /// mark when no model catalog has landed.
     fn chip(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let label: Option<SharedString> = self.model_switch().and_then(|switch| {
-            let current = switch.current.as_ref()?;
-            switch
-                .options
-                .iter()
-                .find(|option| &option.id == current)
-                .map(|option| option.name.clone())
-                .or_else(|| Some(current.clone()))
-        });
+        let label: Option<SharedString> = match &self.turn_model {
+            Some(id) => Some(format!("{} · this turn", self.model_name(id)).into()),
+            None => self.model_switch().and_then(|switch| {
+                let current = switch.current.as_ref()?;
+                switch
+                    .options
+                    .iter()
+                    .find(|option| &option.id == current)
+                    .map(|option| option.name.clone())
+                    .or_else(|| Some(current.clone()))
+            }),
+        };
         let tip = if self.reconnect { "Reconnect" } else { "Model" };
         div()
             .id("composer-model")
@@ -1485,6 +1497,9 @@ impl Composer {
                             composer.close_menu(cx);
                             window.focus(&composer.field.read(cx).focus_handle(cx), cx);
                             if let Some(switch_id) = switch_id.clone() {
+                                if switch_id == SwitchId::Model {
+                                    composer.turn_model = None;
+                                }
                                 cx.emit(ComposerEvent::Switch(switch_id, id.clone()));
                             }
                             cx.notify();
@@ -1497,6 +1512,15 @@ impl Composer {
                                 .text_color(theme.text)
                                 .child(name),
                         )
+                        .when(option.vision == Some(true), |row| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_style(TextStyle::Caption)
+                                    .text_color(theme.text_faint)
+                                    .child("vision"),
+                            )
+                        })
                         .when(picked, |row| {
                             row.child(div().flex_none().text_color(theme.text_muted).child("✓"))
                         })
@@ -1707,7 +1731,11 @@ impl Composer {
             .text_style(TextStyle::Body)
             .text_color(theme.text_muted)
             .tooltip(move |window, cx| {
-                Tooltip::text(format!("last turn {last}; this chat since it was opened"), window, cx)
+                Tooltip::text(
+                    format!("last turn {last}; this chat since it was opened"),
+                    window,
+                    cx,
+                )
             })
             .child(div().flex_1().min_w_0().child("Cost"))
             .child(
@@ -1775,6 +1803,108 @@ impl Composer {
     /// Chat links and files waiting on the card. One chip each, with an ✕.
     /// Nothing when the tray is empty — the row must not occupy space as a
     /// blank band.
+    /// The catalog's display name for a model id, or the id.
+    fn model_name(&self, id: &SharedString) -> SharedString {
+        self.model_switch()
+            .and_then(|switch| switch.options.iter().find(|o| &o.id == id))
+            .map(|o| o.name.clone())
+            .unwrap_or_else(|| id.clone())
+    }
+
+    /// Whether the tray holds an image right now.
+    fn has_image_attached(&self) -> bool {
+        self.attachments
+            .get(self.bound)
+            .is_some_and(|tray| tray.items.iter().any(|a| a.is_image()))
+    }
+
+    /// The current model, when the catalog says it takes no image input
+    /// (by the host's word or, failing that, by name).
+    fn current_model_blind(&self) -> bool {
+        let Some(switch) = self.model_switch() else {
+            return false;
+        };
+        let Some(current) = switch.current.as_ref() else {
+            return false;
+        };
+        match switch.options.iter().find(|o| &o.id == current) {
+            Some(option) => option.vision == Some(false),
+            None => !arbos_core::models::looks_vision(current),
+        }
+    }
+
+    /// A vision model to offer for one turn: the first preferred one the
+    /// catalog has, else the first the catalog marks as seeing.
+    fn vision_offer(&self) -> Option<SwitchOption> {
+        let switch = self.model_switch()?;
+        let current = switch.current.as_ref();
+        let seeing: Vec<&SwitchOption> = switch
+            .options
+            .iter()
+            .filter(|o| o.vision == Some(true) && Some(&o.id) != current)
+            .collect();
+        arbos_core::models::VISION_PREFERRED
+            .iter()
+            .find_map(|want| seeing.iter().find(|o| o.id.as_ref() == *want))
+            .or_else(|| seeing.first())
+            .map(|o| (*o).clone())
+    }
+
+    /// "switch to <vision model> for this turn": shown above the tray
+    /// while an image is attached and the current model cannot see it.
+    fn vision_offer_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.turn_model.is_some() || !self.has_image_attached() || !self.current_model_blind() {
+            return None;
+        }
+        let offer = self.vision_offer()?;
+        let current = self
+            .model_switch()
+            .and_then(|s| s.current.clone())
+            .map(|c| self.model_name(&c))
+            .unwrap_or_else(|| "this model".into());
+        let id = offer.id.clone();
+        Some(
+            div()
+                .id("composer-vision-offer")
+                .w_full()
+                .mb(px(6.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_muted)
+                .child(
+                    icons::icon(icons::files::PAPERCLIP)
+                        .size(px(11.))
+                        .text_color(theme.text_faint),
+                )
+                .child(SharedString::from(format!(
+                    "{current} does not take images; they will be described in words."
+                )))
+                .child(
+                    div()
+                        .id("composer-vision-switch")
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded(px(5.))
+                        .cursor_pointer()
+                        .text_color(theme.text)
+                        .bg(theme.element_hover)
+                        .hover(|b| b.bg(theme.element_active))
+                        .on_click(cx.listener(move |composer, _, _, cx| {
+                            composer.turn_model = Some(id.clone());
+                            cx.notify();
+                        }))
+                        .child(SharedString::from(format!(
+                            "Switch to {} for this turn",
+                            offer.name
+                        ))),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn chips(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         if self
             .attachments
@@ -1791,6 +1921,7 @@ impl Composer {
             .flex_row()
             .flex_wrap()
             .gap(px(6.))
+            .children(self.vision_offer_row(theme, cx))
             .children(self.chat_links.iter().enumerate().map(|(ix, chip)| {
                 let title = chip.title.clone();
                 self.tray_chip(
@@ -2242,6 +2373,10 @@ impl Focusable for Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The one-turn model rides with the image that asked for it.
+        if self.turn_model.is_some() && !self.has_image_attached() {
+            self.turn_model = None;
+        }
         if !self.watching_focus {
             self.watching_focus = true;
             let handle = self.field.read(cx).focus_handle(cx);

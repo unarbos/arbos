@@ -321,7 +321,7 @@ async fn describe_or_strip(
                 text: format!(
                     "{model} does not accept image input, and {vision} could not describe the attached image(s) ({e:#}); sending this turn without them."
                 ),
-                failed: true,
+                failed: false,
             }));
             strip_images(messages)
         }

@@ -19,7 +19,7 @@
 //! for, and why a greyed item's shortcut still reaches the keymap underneath.
 
 use crate::view::root::{
-    CloseProject, Arbos, NewSession, NextEntry, OpenProject, OpenSettings, PrevEntry,
+    Arbos, CloseProject, NewSession, NextEntry, OpenProject, OpenSettings, PrevEntry,
     ToggleSidebar, ZoomIn, ZoomOut, ZoomReset,
 };
 use bezel::{

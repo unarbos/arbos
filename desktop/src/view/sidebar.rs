@@ -10,7 +10,7 @@ use crate::{
             menu::{self, Menu},
             surface as board, transcript,
         },
-        root::{self, CommitName, Arbos, DismissName, NewSession, OpenProject, Pane},
+        root::{self, Arbos, CommitName, DismissName, NewSession, OpenProject, Pane},
         settings::Section,
     },
 };

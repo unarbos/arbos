@@ -202,7 +202,9 @@ pub fn text_input(text: &str) -> Result<()> {
     let cfg = crate::kernel::voice_config().ok_or_else(|| anyhow!("no voice_url in config"))?;
     ensure_session(&cfg)?;
     let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
-    let session = hold.as_ref().ok_or_else(|| anyhow!("voice session closed"))?;
+    let session = hold
+        .as_ref()
+        .ok_or_else(|| anyhow!("voice session closed"))?;
     {
         let mut s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
         if s.text_backend == "none" {
@@ -244,7 +246,9 @@ pub fn start() -> Result<()> {
     let cfg = crate::kernel::voice_config().ok_or_else(|| anyhow!("no voice_url in config"))?;
     ensure_session(&cfg)?;
     let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
-    let session = hold.as_ref().ok_or_else(|| anyhow!("voice session closed"))?;
+    let session = hold
+        .as_ref()
+        .ok_or_else(|| anyhow!("voice session closed"))?;
     {
         let mut s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
         s.finals.clear();
@@ -322,7 +326,9 @@ pub fn speak(text: &str) -> Result<()> {
     let cfg = crate::kernel::voice_config().ok_or_else(|| anyhow!("no voice_url in config"))?;
     ensure_session(&cfg)?;
     let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
-    let session = hold.as_ref().ok_or_else(|| anyhow!("voice session closed"))?;
+    let session = hold
+        .as_ref()
+        .ok_or_else(|| anyhow!("voice session closed"))?;
     {
         let mut s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
         s.reply.clear();
@@ -372,7 +378,10 @@ fn ensure_session(cfg: &VoiceCfg) -> Result<()> {
         }
     }
     if !(cfg.url.starts_with("ws://") || cfg.url.starts_with("wss://")) {
-        bail!("voice_url must start with ws:// or wss://, not {:?}", cfg.url);
+        bail!(
+            "voice_url must start with ws:// or wss://, not {:?}",
+            cfg.url
+        );
     }
     let shared = Arc::new(Mutex::new(Shared {
         phase: Some(Phase::Connecting),
@@ -407,7 +416,10 @@ fn ensure_session(cfg: &VoiceCfg) -> Result<()> {
         }
         Err(_) => {
             shutdown();
-            bail!("voice server {} did not answer in {CONNECT_TIMEOUT:?}", cfg.url)
+            bail!(
+                "voice server {} did not answer in {CONNECT_TIMEOUT:?}",
+                cfg.url
+            )
         }
     }
 }
@@ -443,11 +455,8 @@ async fn run(
                 .map_err(|_| anyhow!("voice_token has characters a header cannot carry"))?,
         );
     }
-    let connected = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        tokio_tungstenite::connect_async(request),
-    )
-    .await;
+    let connected =
+        tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request)).await;
     let (ws, _) = match connected {
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => {
@@ -738,7 +747,10 @@ impl Mic {
             .spawn()
             .map_err(|e| anyhow!("start {}: {e}", cmd.get_program().to_string_lossy()))?;
         shared.lock().unwrap().mic_device = device;
-        let mut out = child.stdout.take().ok_or_else(|| anyhow!("mic has no stdout"))?;
+        let mut out = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("mic has no stdout"))?;
         std::thread::Builder::new()
             .name("arbos-mic".into())
             .spawn(move || {
@@ -923,7 +935,9 @@ fn mic_command() -> Result<Command> {
     }
     if which("arecord") {
         let mut c = Command::new("arecord");
-        c.args(["-q", "-f", "S16_LE", "-r", &rate, "-c", "1", "-t", "raw", "-"]);
+        c.args([
+            "-q", "-f", "S16_LE", "-r", &rate, "-c", "1", "-t", "raw", "-",
+        ]);
         return Ok(c);
     }
     if which("rec") {
@@ -933,7 +947,9 @@ fn mic_command() -> Result<Command> {
         ]);
         return Ok(c);
     }
-    if cfg!(target_os = "macos") && let Some(ffmpeg) = find_program("ffmpeg") {
+    if cfg!(target_os = "macos")
+        && let Some(ffmpeg) = find_program("ffmpeg")
+    {
         let device = default_input_device().unwrap_or_else(|| "0".to_string());
         let mut c = Command::new(ffmpeg);
         c.args([
@@ -986,7 +1002,9 @@ fn player_command() -> Result<Command> {
     }
     if which("aplay") {
         let mut c = Command::new("aplay");
-        c.args(["-q", "-f", "S16_LE", "-r", &rate, "-c", "1", "-t", "raw", "-"]);
+        c.args([
+            "-q", "-f", "S16_LE", "-r", &rate, "-c", "1", "-t", "raw", "-",
+        ]);
         return Ok(c);
     }
     if which("play") {

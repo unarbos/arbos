@@ -38,37 +38,7 @@ pub fn is_text_only(model: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether a model id reads as a vision model by name alone: for hosts
-/// whose `/models` says nothing about modalities.
-pub fn looks_vision(model: &str) -> bool {
-    let m = model.to_ascii_lowercase();
-    let m = m.rsplit('/').next().unwrap_or(&m);
-    if m.contains("vision") {
-        return true;
-    }
-    let text_only_hint = m.contains("mercury")
-        || m.contains("embed")
-        || m.contains("whisper")
-        || m.contains("tts")
-        || m.contains("instruct-text");
-    if text_only_hint {
-        return false;
-    }
-    m.starts_with("gpt-4o")
-        || m.starts_with("gpt-4.1")
-        || m.starts_with("gpt-5")
-        || m.starts_with("o3")
-        || m.starts_with("o4")
-        || m.starts_with("chatgpt")
-        || m.starts_with("claude")
-        || m.starts_with("gemini")
-        || m.starts_with("pixtral")
-        || m.contains("qwen") && m.contains("vl")
-        || m.contains("llama-3.2") && m.contains("90b")
-        || m.contains("llama-4")
-        || m.starts_with("grok-2-vision")
-        || m.starts_with("grok-4")
-}
+pub use arbos_core::models::looks_vision;
 
 /// The model that describes images for `current`: `configured` when set;
 /// else the first fallback the provider lists as taking images (`listed`);

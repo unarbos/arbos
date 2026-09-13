@@ -85,6 +85,7 @@ fn switches(chat: Option<&ChatSession>, catalog: &kernel::ModelsCatalog) -> Vec<
                 .map(|mode| composer::SwitchOption {
                     id: mode.id.to_string().into(),
                     name: mode.name.clone().into(),
+                    vision: None,
                 })
                 .collect(),
         });
@@ -109,6 +110,7 @@ fn switches(chat: Option<&ChatSession>, catalog: &kernel::ModelsCatalog) -> Vec<
                     .map(|model| composer::SwitchOption {
                         id: model.id.clone().into(),
                         name: model.name.clone().into(),
+                        vision: Some(model.sees_images()),
                     })
                     .collect(),
             },
@@ -163,6 +165,7 @@ fn select_options(options: &SessionConfigSelectOptions) -> Vec<composer::SwitchO
         composer::SwitchOption {
             id: option.value.to_string().into(),
             name: option.name.clone().into(),
+            vision: None,
         }
     }
     match options {
@@ -982,7 +985,9 @@ impl Arbos {
         {
             match (&chat.connection, chat.reconnect_at) {
                 (Connection::Lost, Some(at)) => {
-                    let left = at.saturating_duration_since(std::time::Instant::now()).as_secs();
+                    let left = at
+                        .saturating_duration_since(std::time::Instant::now())
+                        .as_secs();
                     machine = format!(
                         "{machine} · reconnecting, try {} in {left}s",
                         chat.reconnect_attempt
@@ -993,10 +998,7 @@ impl Arbos {
                     machine = format!("{machine} · connection lost");
                 }
                 (Connection::Connecting, _) if chat.reconnect_attempt > 0 => {
-                    machine = format!(
-                        "{machine} · reconnecting, try {}…",
-                        chat.reconnect_attempt
-                    );
+                    machine = format!("{machine} · reconnecting, try {}…", chat.reconnect_attempt);
                 }
                 _ => {}
             }
@@ -1084,7 +1086,11 @@ impl Arbos {
         };
         let reply = (!status.reply.is_empty()).then(|| {
             // One line: the reply is markdown with breaks; the row is a strip.
-            let mut r = status.reply.split_whitespace().collect::<Vec<_>>().join(" ");
+            let mut r = status
+                .reply
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             if r.chars().count() > 60 {
                 r = r.chars().take(60).collect::<String>() + "…";
             }
@@ -1645,7 +1651,11 @@ impl Arbos {
             other => other,
         }
         .to_string();
-        let button = |key: &'static str, text: String, tip: &'static str, remember: bool, cx: &mut Context<Self>| {
+        let button = |key: &'static str,
+                      text: String,
+                      tip: &'static str,
+                      remember: bool,
+                      cx: &mut Context<Self>| {
             theme
                 .ghost(SharedString::from(format!("{key}-{id}")))
                 .flex_none()
@@ -1998,29 +2008,32 @@ impl Arbos {
             let node = n.id;
             let text = n.goal.clone();
             let group = SharedString::from(format!("followup-{id}-{node}"));
-            let control = |key: &str,
-                           label: &'static str,
-                           tip: &'static str,
-                           cx: &mut Context<Self>,
-                           act: fn(&mut Self, u64, u64, String, &mut Context<Self>)| {
-                let text = text.clone();
-                div()
-                    .id(SharedString::from(format!("followup-{key}-{id}-{node}")))
-                    .flex_none()
-                    .cursor_pointer()
-                    .px(px(4.))
-                    .rounded(px(4.))
-                    .text_style(TextStyle::Caption)
-                    .text_color(theme.text_faint)
-                    .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-                    .tooltip(move |window, cx| {
-                        bezel::ui::tooltip::Tooltip::text(tip, window, cx)
-                    })
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        act(this, id, node, text.clone(), cx)
-                    }))
-            };
+            let control =
+                |key: &str,
+                 label: &'static str,
+                 tip: &'static str,
+                 cx: &mut Context<Self>,
+                 act: fn(&mut Self, u64, u64, String, &mut Context<Self>)| {
+                    let text = text.clone();
+                    div()
+                        .id(SharedString::from(format!("followup-{key}-{id}-{node}")))
+                        .flex_none()
+                        .cursor_pointer()
+                        .px(px(4.))
+                        .rounded(px(4.))
+                        .text_style(TextStyle::Caption)
+                        .text_color(theme.text_faint)
+                        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+                        .tooltip(move |window, cx| {
+                            bezel::ui::tooltip::Tooltip::text(tip, window, cx)
+                        })
+                        .child(label)
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                act(this, id, node, text.clone(), cx)
+                            }),
+                        )
+                };
             div()
                 .group(group)
                 .flex()

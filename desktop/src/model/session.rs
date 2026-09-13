@@ -12,7 +12,7 @@
 use crate::{
     agent::acp::{self, Event, Launch, Reply, Session},
     model::{
-        attachment::{MessageImage, Prompt, UserMessage},
+        attachment::{DescribedImage, MessageImage, Prompt, UserMessage},
         place::Place,
         record::{self, Record},
         settings,
@@ -1702,8 +1702,7 @@ impl ChatSession {
                     // it now is.
                     _ => {
                         if let Some(sid) = &self.agent_session
-                            && let Some(replay) =
-                                crate::kernel::session_history(&self.place(), sid)
+                            && let Some(replay) = crate::kernel::session_history(&self.place(), sid)
                         {
                             self.items = replay.items;
                         }
@@ -1713,7 +1712,9 @@ impl ChatSession {
                 self.streaming_agent = None;
                 self.questions = None;
                 let what = match restored {
-                    Some(r) => format!("rewound: {dropped} transcript lines cut; project back to {r}"),
+                    Some(r) => {
+                        format!("rewound: {dropped} transcript lines cut; project back to {r}")
+                    }
                     None => format!("rewound: {dropped} transcript lines cut; files untouched"),
                 };
                 self.notice(false, &what);
@@ -1742,7 +1743,11 @@ impl ChatSession {
                         true,
                         &format!(
                             "The arbos-kernel {where_}{} {what}. {fix}",
-                            if kernel.is_empty() { String::new() } else { format!(" ({kernel})") }
+                            if kernel.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({kernel})")
+                            }
                         ),
                     );
                     self.close();
@@ -1776,6 +1781,20 @@ impl ChatSession {
             }
             Event::Aside(text) => {
                 self.notice(false, &text);
+                self.flush();
+            }
+            Event::ImageDescribed { path, model, text } => {
+                // Inside the card that carried the image: the last user
+                // message, which is this turn's. Never a transcript line.
+                if let Some(ChatItem::User(message)) = self
+                    .items
+                    .iter_mut()
+                    .rev()
+                    .find(|item| matches!(item, ChatItem::User(_)))
+                    && !message.described.iter().any(|d| d.path == path)
+                {
+                    message.described.push(DescribedImage { path, model, text });
+                }
                 self.flush();
             }
             Event::Refused(detail) => {
@@ -2407,8 +2426,7 @@ fn same_question(open: &AskPrompt, title: &str, questions: &[AskQuestion]) -> bo
         a.prompt == b.prompt
             && a.allow_multiple == b.allow_multiple
             && a.options.len() == b.options.len()
-            && a
-                .options
+            && a.options
                 .iter()
                 .zip(&b.options)
                 .all(|(x, y)| x.id == y.id && x.label == y.label)
@@ -2517,7 +2535,12 @@ fn pump(
                 // is the truth on attach; a model picked while offline is
                 // pushed only when the agent has none of its own yet.
                 let kept = (chat.host.is_none())
-                    .then(|| crate::kernel::agent_model(&arbos_core::Place::new(&chat.cwd), &session.session_id))
+                    .then(|| {
+                        crate::kernel::agent_model(
+                            &arbos_core::Place::new(&chat.cwd),
+                            &session.session_id,
+                        )
+                    })
                     .flatten();
                 match (kept, chat.model.clone()) {
                     (Some(kept), _) => chat.model = Some(kept),
@@ -2708,10 +2731,7 @@ pub fn interrupt_label(detail: &str) -> String {
     let lower = d.to_ascii_lowercase();
     // The kernel says where the stop landed ("stop during model call",
     // "stop during compaction"); the user does not need to know.
-    if lower.is_empty()
-        || lower == "user"
-        || lower.starts_with("stop")
-    {
+    if lower.is_empty() || lower == "user" || lower.starts_with("stop") {
         return STOPPED_BY_YOU.to_owned();
     }
     match lower.as_str() {

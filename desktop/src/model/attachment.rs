@@ -283,6 +283,19 @@ pub struct UserMessage {
     /// The user's thumbs on this turn's answer: 1 up, -1 down.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<i8>,
+    /// Attached images the turn's model could not see, put into words by
+    /// another model (the kernel's `image_described` lines). Drawn as a
+    /// paperclip inside this card, never as a line of the transcript.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub described: Vec<DescribedImage>,
+}
+
+/// One image described for a model that takes no image input.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescribedImage {
+    pub path: String,
+    pub model: String,
+    pub text: String,
 }
 
 impl UserMessage {
@@ -345,6 +358,7 @@ impl From<StoredMessage> for UserMessage {
                 worked_secs: None,
                 sent_at: None,
                 feedback: None,
+                described: Vec::new(),
             },
             StoredMessage::Images {
                 text,
@@ -357,6 +371,7 @@ impl From<StoredMessage> for UserMessage {
                 worked_secs: None,
                 sent_at: None,
                 feedback: None,
+                described: Vec::new(),
             },
         };
         out.lift_files();
@@ -373,6 +388,7 @@ impl From<String> for UserMessage {
             worked_secs: None,
             sent_at: Some(arbos_core::now_ms()),
             feedback: None,
+            described: Vec::new(),
         };
         message.lift_files();
         message
@@ -421,6 +437,9 @@ impl AttachmentDrafts {
 pub struct Prompt {
     pub text: String,
     pub attachments: Vec<Attachment>,
+    /// A model for this one turn ("switch to <vision model> for this
+    /// turn"). None: the agent's own.
+    pub model: Option<String>,
 }
 
 impl From<String> for Prompt {
@@ -428,6 +447,7 @@ impl From<String> for Prompt {
         Self {
             text,
             attachments: Vec::new(),
+            model: None,
         }
     }
 }
@@ -454,6 +474,7 @@ impl Prompt {
                 .collect::<Vec<_>>()
                 .join("\n\n"),
             attachments,
+            model: None,
         }
     }
 
@@ -465,15 +486,20 @@ impl Prompt {
     pub fn join(parts: impl IntoIterator<Item = Self>) -> Self {
         let mut text = Vec::new();
         let mut attachments = Vec::new();
+        let mut model = None;
         for part in parts {
             if !part.text.trim().is_empty() {
                 text.push(part.text);
             }
             attachments.extend(part.attachments);
+            if part.model.is_some() {
+                model = part.model;
+            }
         }
         Self {
             text: text.join("\n\n"),
             attachments,
+            model,
         }
     }
 

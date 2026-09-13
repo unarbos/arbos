@@ -1231,7 +1231,8 @@ impl Arbos {
                 // A duplex server answered the words itself (and may have
                 // sent them to its own kernel): the transcript goes into the
                 // composer for the record, but is neither sent nor read back.
-                let server_answers = crate::voice_ws::configured() && crate::voice_ws::server_answers();
+                let server_answers =
+                    crate::voice_ws::configured() && crate::voice_ws::server_answers();
                 if spoken && crate::voice_ws::configured() && !server_answers {
                     // The answer to a dictated prompt is read aloud.
                     if let Some(id) = this.workspace.read(cx).active_id() {
