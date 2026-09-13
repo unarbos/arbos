@@ -1440,9 +1440,24 @@ impl ChatSession {
     }
 
     /// Drop the `ix`th waiting prompt — a steer taken back before the turn in
-    /// flight got to it.
+    /// flight got to it. `ix` counts as [`Self::waiting`] does.
     pub fn unqueue(&mut self, ix: usize) {
-        self.queue.remove(ix);
+        let ix = ix + self.wired_head();
+        if ix < self.queue.len() {
+            self.queue.remove(ix);
+        }
+    }
+
+    /// Prompts the strip should show as waiting. A prompt sent before the
+    /// connection was up already sits in the transcript as the turn's
+    /// message (`land_turn`) and only waits on the wire; showing it in the
+    /// strip too made one message read as both queued and sent.
+    pub fn waiting(&self) -> impl Iterator<Item = &Prompt> {
+        self.queue.iter().skip(self.wired_head())
+    }
+
+    fn wired_head(&self) -> usize {
+        usize::from(self.pending_wire && !self.queue.is_empty())
     }
 
     pub fn set_live(&mut self, live: Vec<crate::kernel::LiveWork>) -> bool {

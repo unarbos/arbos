@@ -2271,13 +2271,14 @@ impl Arbos {
     fn queue(&self, cx: &Context<Self>) -> Option<impl IntoElement + use<>> {
         let theme = Theme::of(cx).clone();
         let chat = self.workspace.read(cx).active_session()?;
-        if chat.queue.is_empty() {
+        let waiting: Vec<_> = chat.waiting().collect();
+        if waiting.is_empty() {
             return None;
         }
         let id = chat.id;
         let busy = chat.busy();
         Some(div().flex().flex_col().w_full().gap(px(6.)).children(
-            chat.queue.iter().enumerate().map(|(ix, text)| {
+            waiting.into_iter().enumerate().map(|(ix, text)| {
                 // An svg paints in its own `text_color` and inherits none,
                 // so the ✕ takes the bubble's group to light with it.
                 let group = SharedString::from(format!("steer-{ix}"));
