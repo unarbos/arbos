@@ -104,18 +104,35 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
             hooks: Arc::clone(&hooks),
             ptys: Arc::clone(&ptys),
         });
-    // MCP: every tool the env-configured server offers joins the registry
-    // as `mcp__<name>`, callable like any builtin.
-    if let Some(server) = doors::McpServer::from_env() {
-        let server = Arc::new(server);
-        match server.tools() {
+    // MCP: every tool of every configured server (`.arbos/mcp.toml`,
+    // `.cursor/mcp.json`, `~/.config/arbos/mcp.toml`, `ARBOS_MCP_CMD`)
+    // joins the registry as `mcp__<server>__<tool>`, callable like any
+    // builtin. A server that fails to answer is skipped, not fatal.
+    // Discovery talks to processes and HTTP endpoints (blocking clients),
+    // so it runs off the async thread.
+    let discovered = {
+        let place = place.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::mcp::load_servers(&place)
+                .into_iter()
+                .map(|server| {
+                    let specs = server.tools();
+                    (Arc::new(server), specs)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default()
+    };
+    for (server, specs) in discovered {
+        match specs {
             Ok(specs) => {
                 klog::info(
                     "mcp",
                     None,
                     format!(
                         "{} offers {}",
-                        server.cmd,
+                        server.name,
                         specs
                             .iter()
                             .map(|s| s.name.as_str())
@@ -127,7 +144,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
                     registry = registry.with(tools::McpTool::new(Arc::clone(&server), spec));
                 }
             }
-            Err(err) => klog::error("mcp", None, format!("{err:#}")),
+            Err(err) => klog::error("mcp", None, format!("{}: {err:#}", server.name)),
         }
     }
     let registry = Arc::new(registry);

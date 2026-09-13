@@ -525,21 +525,23 @@ impl Tool for Browser {
     }
 }
 
-/// One tool of a stdio MCP server, offered to the model as `mcp__<name>`.
-/// The call runs on the blocking pool: the server is spawned per request.
+/// One tool of an MCP server, offered to the model as
+/// `mcp__<server>__<tool>`. The call runs on the blocking pool: a stdio
+/// server is spawned per request, an HTTP one is posted to.
 pub struct McpTool {
     name: &'static str,
     remote: String,
     description: String,
     input_schema: Value,
-    server: Arc<crate::doors::McpServer>,
+    server: Arc<crate::mcp::Server>,
 }
 
 impl McpTool {
     /// Prefix every name so it can never shadow a builtin, and give the
     /// `Tool` trait the `'static` name it wants (one leak per tool, once).
-    pub fn new(server: Arc<crate::doors::McpServer>, spec: crate::doors::McpToolSpec) -> Self {
-        let name: &'static str = Box::leak(format!("mcp__{}", spec.name).into_boxed_str());
+    pub fn new(server: Arc<crate::mcp::Server>, spec: crate::mcp::ToolSpec) -> Self {
+        let name: &'static str =
+            Box::leak(crate::mcp::tool_name(&server.name, &spec.name).into_boxed_str());
         Self {
             name,
             remote: spec.name,
@@ -559,7 +561,7 @@ impl Tool for McpTool {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": format!("MCP tool `{}`: {}", self.remote, self.description),
+                "description": format!("MCP tool `{}` on server {}: {}", self.remote, self.server.name, self.description),
                 "parameters": self.input_schema,
             }
         })

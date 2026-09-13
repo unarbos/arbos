@@ -6,6 +6,7 @@ pub mod github;
 pub mod grep;
 pub mod hooks;
 pub mod klog;
+pub mod mcp;
 pub mod plan;
 pub mod pty;
 pub mod remote;
