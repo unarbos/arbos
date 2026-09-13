@@ -188,13 +188,13 @@ pub fn is_store_path(place_root: &Path, candidate: &Path) -> bool {
     )
 }
 
-/// Only a top-level agent (the main chat) writes the root-owned files.
-/// A child proposes.
+/// Only root (the main chat) writes the root-owned files. Everyone else,
+/// a child or a second top-level chat, proposes.
 pub fn may_write(agent: &Agent) -> bool {
-    agent.parent.is_none()
+    agent.id.as_str() == crate::ROOT_ID
 }
 
-pub const REFUSAL: &str = "notes.md, docs/project-context.md, and archived.md are owned by the main chat (root); propose the change with `say to=root`";
+pub const REFUSAL: &str = ".arbos/notes.md (the project page), docs/project-context.md, and archived.md are owned by the main chat (root); keep your own checklist with the plan tool and propose the change with `say to=root`";
 
 /// Why a coordinator's write outside the store is refused.
 pub const COORDINATOR_REFUSAL: &str = "as coordinator you write only the project store (.arbos/notes.md, docs/, internal/, media/, archived.md); code and other files are a worker's job — spawn one";
