@@ -208,6 +208,13 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         hooks: Arc::clone(&hooks),
         bash_wait_ms: host.config.bash_wait_ms,
         hops: wake.hops,
+        web: Arc::new(crate::tool::WebCfg {
+            search_url: host.config.search_url.clone(),
+            search_key: host.config.search_key.clone(),
+            api_base: host.config.api_base.clone(),
+            api_key: host.api_key(),
+            model: host.config.search_model.clone(),
+        }),
     };
 
     let end = |usage: Option<Usage>, interrupted: Option<&str>| -> Result<()> {
