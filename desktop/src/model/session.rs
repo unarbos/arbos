@@ -380,6 +380,9 @@ pub struct ChatSession {
     flight: Option<Flight>,
     /// When the current thought started streaming. Runtime only.
     thought_at: Option<SystemTime>,
+    /// The `Agent` item the current step's deltas are building, until the
+    /// step's recorded line replaces it. Runtime only.
+    streaming_agent: Option<usize>,
     /// The agent's own name for the session, from `SessionInfoUpdate`.
     pub title: String,
     /// The name you typed, which the agent never overwrites. Two fields rather
@@ -502,6 +505,7 @@ impl ChatSession {
             usage: None,
             flight: None,
             thought_at: None,
+            streaming_agent: None,
             title: String::new(),
             name: None,
             updated: SystemTime::now(),
@@ -561,6 +565,7 @@ impl ChatSession {
             usage: None,
             flight: None,
             thought_at: None,
+            streaming_agent: None,
             title: record.title,
             name: record.name,
             updated,
@@ -620,6 +625,7 @@ impl ChatSession {
             usage: None,
             flight: None,
             thought_at: None,
+            streaming_agent: None,
             title,
             name,
             updated,
@@ -1487,6 +1493,31 @@ impl ChatSession {
                 });
                 self.flush();
             }
+            Event::AssistantFinal(text) => {
+                self.finish_thinking();
+                let text = text.trim_matches('\n').to_string();
+                // The deltas of this step built an item: the recorded line is
+                // the same words, whole. Replace, never append.
+                if let Some(ix) = self.streaming_agent.take() {
+                    if let Some(ChatItem::Agent(body)) = self.items.get_mut(ix) {
+                        if !text.is_empty() {
+                            *body = text;
+                        }
+                        self.flush();
+                        return;
+                    }
+                }
+                // No deltas seen (an older kernel, a replay): the line stands
+                // on its own, once.
+                if text.is_empty() {
+                    return;
+                }
+                let dup = matches!(self.items.last(), Some(ChatItem::Agent(body)) if body.trim() == text.trim());
+                if !dup {
+                    self.items.push(ChatItem::Agent(text));
+                }
+                self.flush();
+            }
             Event::Aside(text) => {
                 self.notice(false, &text);
                 self.flush();
@@ -1650,8 +1681,10 @@ impl ChatSession {
                 let text = content_text(&chunk.content);
                 if let Some(ChatItem::Agent(body)) = self.items.last_mut() {
                     merge_stream_text(body, &text);
+                    self.streaming_agent = Some(self.items.len() - 1);
                 } else if !text.is_empty() {
                     self.items.push(ChatItem::Agent(text));
+                    self.streaming_agent = Some(self.items.len() - 1);
                 }
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {

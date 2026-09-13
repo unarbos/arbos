@@ -52,6 +52,10 @@ pub enum Event {
     /// The agent spoke between turns: a callback fired, or background work
     /// finished. Not a turn, and not a failure.
     Aside(String),
+    /// A whole assistant step as the transcript recorded it (an `event`
+    /// with a `seq`). Authoritative: it replaces whatever the deltas of
+    /// that step built, so the reply never shows twice.
+    AssistantFinal(String),
     /// The kernel paused the turn for a tool the user must allow.
     NeedApproval {
         request_id: String,
@@ -519,7 +523,12 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
 
 fn kernel_event(event: arbos_core::Event) -> Vec<Event> {
     use arbos_core::EventKind;
+    let recorded = event.seq > 0;
     match event.kind {
+        // A transcript line (tailed or replayed) is the step's final text;
+        // a live emit without a seq is a delta (older kernels send those
+        // as events too).
+        EventKind::Assistant { text, .. } if recorded => vec![Event::AssistantFinal(text)],
         EventKind::Assistant { text, .. } => {
             vec![Event::Update(SessionUpdate::AgentMessageChunk(text_chunk(
                 text,
