@@ -103,6 +103,8 @@ pub struct Peek {
     pub level: f32,
     /// The input device the mic process reads, once it is running.
     pub mic_device: String,
+    /// Why the mic is not running, when it failed to start or died.
+    pub mic_error: Option<String>,
     /// What the reply audio is saying, when the server tells us.
     pub reply: String,
     pub error: Option<String>,
@@ -146,6 +148,7 @@ struct Shared {
     reply: String,
     level: f32,
     mic_device: String,
+    mic_error: Option<String>,
     error: Option<String>,
     /// Bytes of reply audio played, for the tests.
     played: u64,
@@ -200,6 +203,7 @@ pub fn status() -> Peek {
         phase: s.phase,
         level: s.level,
         mic_device: s.mic_device.clone(),
+        mic_error: s.mic_error.clone(),
         reply: s.reply.clone(),
         error: s.error.clone(),
         engine: s.engine.clone(),
@@ -228,6 +232,9 @@ pub fn in_call() -> bool {
 /// gateway answers `session.ready` or the connect times out.
 pub fn call_start(project: &str) -> Result<()> {
     let cfg = crate::kernel::voice_config().ok_or_else(|| anyhow!("no voice_url in config"))?;
+    // No microphone program means a call that streams silence and hears
+    // nothing back: refuse now, with the install hint, not after connecting.
+    mic_command().map_err(|e| anyhow!("no microphone for the call: {e}"))?;
     let kind = SessionKind::Call {
         project: project.to_string(),
     };
@@ -613,10 +620,14 @@ async fn run(
                     Cmd::MicStart => {
                         if mic.is_none() {
                             match Mic::spawn(mic_tx.clone(), Arc::clone(&shared)) {
-                                Ok(m) => mic = Some(m),
+                                Ok(m) => {
+                                    mic = Some(m);
+                                    shared.lock().unwrap_or_else(|p| p.into_inner()).mic_error = None;
+                                }
                                 Err(e) => {
                                     let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
                                     s.error = Some(format!("microphone: {e:#}"));
+                                    s.mic_error = Some(format!("{e:#}"));
                                     s.phase = Some(Phase::Ready);
                                 }
                             }
@@ -945,6 +956,13 @@ impl Mic {
                 if filled > 0 {
                     let _ = tx.send(buf[..filled].to_vec());
                 }
+                // The program ended on its own: the device is gone or busy.
+                // The strip shows it instead of a level that never moves.
+                let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
+                if s.mic_error.is_none() && s.phase.is_some_and(|p| p != Phase::Off) {
+                    s.mic_error = Some("the microphone program stopped".into());
+                }
+                s.level = 0.0;
             })
             .map_err(|e| anyhow!("mic thread: {e}"))?;
         Ok(Self::Process(child))
