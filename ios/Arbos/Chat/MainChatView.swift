@@ -9,6 +9,7 @@ struct MainChatView: View {
     var focusComposer = false
 
     @State private var draft = ""
+    @State private var showTargets = false
     @FocusState private var composing: Bool
 
     var body: some View {
@@ -19,16 +20,37 @@ struct MainChatView: View {
         }
         .background(Color(red: 0.06, green: 0.06, blue: 0.07).ignoresSafeArea())
         .preferredColorScheme(.dark)
-        .onAppear { composing = focusComposer }
+        .onAppear {
+            composing = focusComposer
+            #if DEBUG
+            if UserDefaults.standard.bool(forKey: "previewPicker") { showTargets = true }
+            #endif
+        }
         .task { await chat.connect() }
+        .sheet(isPresented: $showTargets) {
+            TargetPickerView()
+                .presentationDetents([.medium, .large])
+        }
     }
 
+    /// The title is a button: tap it to pick another machine or project.
     private var header: some View {
         HStack(spacing: 8) {
-            Text(chat.agentName)
-                .font(.system(.headline, design: .rounded))
-                .foregroundStyle(.white.opacity(0.9))
-            Text(chat.mode.tag)
+            Button {
+                showTargets = true
+            } label: {
+                HStack(spacing: 4) {
+                    Text(chat.title)
+                        .font(.system(.headline, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
+            .buttonStyle(.plain)
+            Text(headerTag)
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(.white.opacity(0.5))
                 .padding(.horizontal, 7)
@@ -42,6 +64,12 @@ struct MainChatView: View {
         .padding(.horizontal, 20)
         .padding(.top, 18)
         .padding(.bottom, 10)
+    }
+
+    /// `live · 1.7s`: where the chat comes from, and send → first token.
+    private var headerTag: String {
+        guard let latency = chat.lastFirstToken else { return chat.mode.tag }
+        return chat.mode.tag + String(format: " · %.1fs", latency)
     }
 
     private var transcript: some View {

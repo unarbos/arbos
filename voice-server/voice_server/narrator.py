@@ -68,6 +68,37 @@ _DRILL = re.compile(
     r"(?:and |so )?(?:which|what) (?:sentence|text|words|line|command|file|error|test)s? (?:did|was|were|is) (?:it|that)\b)",
     re.I,
 )
+# Small talk and general questions the speech model may answer in its own voice: nothing here
+# asks for work or touches the project. Anything else goes to the main agent (nothing is lost).
+_PROJECT_WORDS = re.compile(
+    r"\b(agent|agents|project|repo|repository|file|files|folder|code|test|tests|build|ci|pr|pull request|commit|branch|"
+    r"deploy|release|bug|error|log|logs|server|kernel|readme|docs?|function|class|script|run|fix|write|send|spawn|check|"
+    r"update|delete|create|open|investigate|look at|find|search|change|refactor|install|migrate|merge|rebase|lint|format)\b",
+    re.I,
+)
+_SMALL_TALK = re.compile(
+    r"^\W*(hi|hello|hey|good (?:morning|afternoon|evening)|thanks?(?: you)?|thank you|cheers|bye|goodbye|see you|"
+    r"how are you|how's it going|are you there|can you hear me|hello\?|never mind|okay|ok|alright|got it|cool|nice|great|"
+    r"who are you|what are you|what can you do|tell me a joke|what time is it|what day is it|what'?s the date|"
+    r"say (?:hello|hi)|repeat after me)\b",
+    re.I,
+)
+_GENERAL_QUESTION = re.compile(r"^\W*(what|who|when|where|how (?:many|much|far|old|tall|long)|is|are|does|do|did|can|could|would|will)\b", re.I)
+
+
+def is_conversational(text: str) -> bool:
+    """Small talk or a general-knowledge question, not about the project and not asking for work."""
+    t = text.strip()
+    if not t:
+        return False
+    if _SMALL_TALK.search(t):
+        return True
+    words = t.split()
+    if len(words) <= 3 and not _PROJECT_WORDS.search(t):
+        return True
+    return bool(_GENERAL_QUESTION.match(t)) and not _PROJECT_WORDS.search(t) and len(words) <= 14
+
+
 _NO = re.compile(r"^\W*(no|nope|nah|deny|denied|don'?t|do not|stop|cancel|negative|refuse|not now|never)\b", re.I)
 
 
@@ -209,6 +240,7 @@ class Narrator:
         approval_timeout: float = 45.0,
         drilldown_by_phrase: bool = True,
         escalations_log: str = "",
+        conversation_to_model: bool = False,
     ):
         self.kernel = kernel
         self.speak = speak  # voices one line with the gateway TTS; returns when it has been said
@@ -225,6 +257,9 @@ class Narrator:
         # Questions that went to the main agent although something had just been said: the phrase
         # list is grown from this file (one JSON object per line).
         self.escalations_log = escalations_log
+        # `--call-model-voice auto`: small talk stays with the speech model (its own voice answers);
+        # everything else goes to the main agent and the narrator speaks for it.
+        self.conversation_to_model = conversation_to_model
         self.approval_timeout = approval_timeout
         self._ask_timer: asyncio.TimerHandle | None = None
         self.approvals: list[tuple[str, bool, str]] = []  # (id, allowed, by: voice | timeout | card)
@@ -302,6 +337,9 @@ class Narrator:
             # The words ask about what was just said: the record answers, not the agent.
             self.summary.append(f"voice (drill-down): {text}")
             asyncio.get_running_loop().create_task(self.more_detail(text))
+            return
+        if self.conversation_to_model and is_conversational(text):
+            self.summary.append(f"voice (to the speech model): {text}")
             return
         self._cancel_pending()
         self._pending = (text, channel)

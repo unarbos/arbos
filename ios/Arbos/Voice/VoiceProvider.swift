@@ -29,9 +29,10 @@ enum VoiceProvider: String, CaseIterable, Identifiable {
     }
 
     /// What the idle screen says while this provider cannot place a call.
-    var unconfiguredLabel: String {
+    @MainActor
+    func unconfiguredLabel(_ settings: AppSettings) -> String {
         switch self {
-        case .selfHosted: return "no server set"
+        case .selfHosted: return settings.selfHostedURL.isEmpty ? "no server set" : "no token set"
         case .openAIRealtime: return "no key set"
         }
     }
@@ -39,7 +40,7 @@ enum VoiceProvider: String, CaseIterable, Identifiable {
     @MainActor
     func isConfigured(_ settings: AppSettings) -> Bool {
         switch self {
-        case .selfHosted: return !settings.selfHostedURL.isEmpty
+        case .selfHosted: return !settings.selfHostedURL.isEmpty && !settings.voiceToken.isEmpty
         case .openAIRealtime: return !settings.openAIKey.isEmpty
         }
     }
@@ -48,7 +49,7 @@ enum VoiceProvider: String, CaseIterable, Identifiable {
     func makeSession(_ settings: AppSettings) -> VoiceSession {
         switch self {
         case .selfHosted:
-            return SelfHostedVoiceSession(serverURL: settings.selfHostedURL)
+            return SelfHostedVoiceSession(serverURL: settings.selfHostedURL, token: settings.voiceToken)
         case .openAIRealtime:
             return OpenAIRealtimeSession(
                 apiKey: settings.openAIKey,

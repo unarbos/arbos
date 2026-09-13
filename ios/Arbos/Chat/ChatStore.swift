@@ -7,15 +7,18 @@ final class ChatStore: ObservableObject {
     enum Mode: Equatable {
         case offline
         case connecting
+        /// Through the speech server: text channel + kernel mirror.
+        case server
+        /// Straight to the kernel's attach port.
         case live
-        /// No kernel reachable; a scripted stand-in is answering.
+        /// Nothing reachable; a scripted stand-in is answering.
         case mock
 
         var tag: String {
             switch self {
             case .offline: return "offline"
             case .connecting: return "connecting"
-            case .live: return "live"
+            case .server, .live: return "live"
             case .mock: return "demo"
             }
         }
@@ -25,37 +28,75 @@ final class ChatStore: ObservableObject {
     @Published private(set) var items: [ChatItem] = []
     @Published private(set) var busy = false
     @Published private(set) var agents: [KernelAgent] = []
+    /// Send → first token of the last typed turn.
+    @Published private(set) var lastFirstToken: TimeInterval?
 
-    /// Fires with each finished agent message. The call speaks it.
+    /// Fires with each finished agent message. The call speaks it when the
+    /// server does not.
     var onAgentMessage: ((String) -> Void)?
 
     private let settings: AppSettings
+    private let link: VoiceLink
     private var source: ChatSource?
     private var pump: Task<Void, Never>?
+    private var sentAt: Date?
 
-    init(settings: AppSettings) {
+    init(settings: AppSettings, link: VoiceLink) {
         self.settings = settings
+        self.link = link
     }
 
     var agentName: String {
-        agents.first { $0.parent == nil }?.name ?? "main"
+        let root = agents.first { $0.parent == nil }
+        guard let name = root?.name, name != "root" else { return "main" }
+        return name
     }
 
-    /// Attach to the kernel if Settings names one and it answers; else run
-    /// the scripted chat so the screen is still real. Safe to call again.
+    /// The kernel itself first (it replays history and streams tokens),
+    /// then the speech server's mirror, then the scripted chat so the
+    /// screen is still real. If the configured kernel host is down, the
+    /// published endpoint file is consulted once. Safe to call again.
     func connect() async {
         guard mode == .offline else { return }
         mode = .connecting
-        if let endpoint = settings.kernelEndpoint {
-            let live = LiveKernelChat(endpoint: endpoint)
-            if (try? await live.start()) != nil {
-                adopt(live, mode: .live)
+        if let endpoint = settings.chatEndpoint {
+            if await attachKernel(endpoint) { return }
+            if let directory = await EndpointDirectory.fetch() {
+                if let fresh = directory.kernelURL, fresh != settings.kernelURL { settings.kernelURL = fresh }
+                if let hub = directory.hubURL, hub != settings.hubURL { settings.hubURL = hub }
+                if let moved = settings.chatEndpoint, moved != endpoint, await attachKernel(moved) { return }
+            }
+        } else if case .hub = settings.kernelTarget {
+            // The hub target is gone or unconfigured: fall back to the pod.
+            settings.kernelTarget = .pod
+            if let endpoint = settings.chatEndpoint, await attachKernel(endpoint) { return }
+        }
+        if settings.provider == .selfHosted, settings.isConfigured {
+            let server = VoiceServerChat(link: link)
+            if (try? await server.start()) != nil {
+                adopt(server, mode: .server)
                 return
             }
+            server.stop()
         }
         let mock = MockKernelChat()
         try? await mock.start()
         adopt(mock, mode: .mock)
+    }
+
+    private func attachKernel(_ endpoint: ArbosKernelClient.Endpoint) async -> Bool {
+        let live = LiveKernelChat(endpoint: endpoint)
+        // Frames start arriving during attach; the pump must be running
+        // before the history replay lands.
+        adopt(live, mode: .connecting)
+        if (try? await live.start()) != nil {
+            mode = .live
+            return true
+        }
+        live.stop()
+        pump?.cancel()
+        source = nil
+        return false
     }
 
     func disconnect() {
@@ -71,7 +112,24 @@ final class ChatStore: ObservableObject {
     func reconnect() async {
         disconnect()
         items.removeAll()
+        agents.removeAll()
+        lastFirstToken = nil
         await connect()
+    }
+
+    /// Open another kernel: the pod, or a machine/project on the hub.
+    func switchTarget(_ target: KernelTarget) async {
+        guard target != settings.kernelTarget || mode != .live else { return }
+        settings.kernelTarget = target
+        await reconnect()
+    }
+
+    /// What the header calls the chat: the machine/project, then the
+    /// root agent's name when the kernel gave it one.
+    var title: String {
+        let target = settings.kernelTarget.label
+        let agent = agentName
+        return agent == "main" ? target : "\(target) · \(agent)"
     }
 
     func send(_ text: String) {
@@ -81,6 +139,7 @@ final class ChatStore: ObservableObject {
         // tool boundary; otherwise this starts one.
         let steer = busy
         busy = true
+        sentAt = Date()
         Task {
             do {
                 try await source.send(text: trimmed, steer: steer)
@@ -94,6 +153,7 @@ final class ChatStore: ObservableObject {
     // MARK: - Private
 
     private func adopt(_ source: ChatSource, mode: Mode) {
+        pump?.cancel()
         self.source = source
         self.mode = mode
         pump = Task { [weak self] in
@@ -112,6 +172,10 @@ final class ChatStore: ObservableObject {
             closeOpenAgentMessage()
             items.append(item)
         case .agentDelta(let delta):
+            if let sentAt {
+                lastFirstToken = Date().timeIntervalSince(sentAt)
+                self.sentAt = nil
+            }
             if let index = items.indices.last, case .agent(let text, streaming: true) = items[index].kind {
                 items[index].kind = .agent(text + delta, streaming: true)
             } else {
@@ -119,6 +183,17 @@ final class ChatStore: ObservableObject {
             }
         case .agentDone:
             closeOpenAgentMessage()
+        case .agentReplace(let text):
+            // `turn idle` usually closed (and announced) the streamed
+            // message already; only announce here if it is still open.
+            if let index = items.lastIndex(where: { if case .agent = $0.kind { return true } else { return false } }) {
+                let wasOpen = items[index].isStreamingAgent
+                items[index].kind = .agent(text, streaming: false)
+                if wasOpen, !text.isEmpty { onAgentMessage?(text) }
+            } else {
+                items.append(ChatItem(.agent(text, streaming: false)))
+                if !text.isEmpty { onAgentMessage?(text) }
+            }
         case .turn(let running):
             busy = running
             if !running { closeOpenAgentMessage() }

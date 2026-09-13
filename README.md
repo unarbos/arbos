@@ -12,24 +12,31 @@ Arbos is an open-source agent coordinator whose state lives on the file system. 
 
 ## Install
 
+The Mac app is the quick path. The rest is optional: build from source, put Arbos on your iPhone, run your own voice server, or lend a machine to the mesh. The same steps, with more detail, are at [arbos.life/install](https://arbos.life/install/).
+
 ### macOS (desktop)
 
-1. Download `Arbos-<version>-<arch>.dmg` from [Releases](https://github.com/unarbos/arbos/releases).
-2. Open it and drag **Arbos** to Applications, then `open -a Arbos`.
-3. On first call or dictation, grant **Microphone** when macOS asks (System Settings › Privacy & Security › Microphone).
+1. Download `Arbos-<version>-<arch>.dmg` for your Mac (`arm64` for Apple silicon, `x86_64` for Intel) from [Releases](https://github.com/unarbos/arbos/releases). macOS 11 or newer.
+2. Open the DMG and drag **Arbos** into Applications.
+3. Open Arbos. The build is not notarized yet, so macOS may say it cannot verify the developer: right-click the app and choose **Open**, or go to System Settings › Privacy & Security and click **Open Anyway**. Once.
+4. **Microphone**: the first time you dictate or start a call, macOS asks; click Allow. Settings › Permissions shows the state and has a **Test the microphone** row.
+5. **Model key**: Settings › Model, paste an OpenRouter key, pick a model (see [Configure](#configure)).
+6. Press ⌘T and choose a folder. That folder is now a project with its own agent. Type, or hold **fn** to speak.
 
-The desktop starts one `arbos-kernel` per open project and looks for the binary at `~/.cargo/bin/arbos-kernel`, then on `PATH`, or at `ARBOS_KERNEL_BIN`. Install the kernel with `cargo install --path crates/arbos-kernel` (see below) or download a kernel build from the release.
+The desktop starts one `arbos-kernel` per open project. It looks for the binary at `~/.cargo/bin/arbos-kernel`, then on `PATH`, or at `ARBOS_KERNEL_BIN=/path/to/arbos-kernel`. Until a Mac kernel build is attached to the release, install it from source (next section).
 
 ### From source (macOS, Linux)
 
-Rust **nightly** is required; `rust-toolchain.toml` selects it, so `rustup` picks it up on first build.
+Rust **nightly**; `rust-toolchain.toml` selects it, so `rustup` picks it up on first build. On macOS, the Xcode command line tools.
 
 ```bash
-git clone https://github.com/unarbos/arbos && cd arbos
-cargo build -p arbos-kernel --release        # target/release/arbos-kernel
-cargo install --path crates/arbos-kernel     # puts it in ~/.cargo/bin, where the desktop looks
-cd desktop && cargo build --release          # desktop/target/release/arbos-desktop
+git clone https://github.com/unarbos/arbos.git && cd arbos
+cargo install --path crates/arbos-kernel     # the kernel: runs the agents; lands in ~/.cargo/bin
+cd desktop && cargo install --path .         # the desktop app; finds arbos-kernel in ~/.cargo/bin
+arbos-desktop
 ```
+
+`cargo build --release -p arbos-kernel` and `cd desktop && cargo build --release` build without installing. On macOS, `cd desktop && make bundle` produces `Arbos.app` and `make dmg` the disk image (ad-hoc signed unless `.env.release` names a certificate).
 
 Linux packages for the desktop (Debian/Ubuntu names):
 
@@ -40,40 +47,54 @@ sudo apt install pkg-config clang cmake libssl-dev libasound2-dev libxkbcommon-d
   libudev-dev libdbus-1-dev
 ```
 
-On macOS, `cd desktop && make bundle` produces `Arbos.app`; `make dmg` produces the disk image (ad-hoc signed unless `.env.release` names a certificate).
-
 ### iPhone
 
-The app is in `ios/` (`Arbos.xcodeproj`, iOS 17+). Open it in Xcode, set your team under **Signing & Capabilities** (signing is automatic; bundle id `com.unarbos.arbos.ios`), and run on a device. The app talks to a kernel and a voice server over WebSocket; enter their URLs and tokens in the app's Settings.
+One long full-duplex call with your project, plus the main chat one swipe up. Not on the App Store yet: build it with Xcode and install it on your own phone.
+
+1. Xcode 16 or newer, an iPhone on iOS 17 or newer, and a free Apple developer team for signing.
+2. Open `ios/Arbos.xcodeproj`. Under **Signing & Capabilities**, pick your team (bundle id `com.unarbos.arbos.ios`).
+3. Endpoints and tokens live in `ios/Arbos/Secrets.plist` (gitignored): `voiceServerURL`, `voiceToken`, `kernelURL`, `kernelToken`, `hubURL`, `hubToken`. `ios/scripts/gen-secrets.sh` writes it from a 1Password vault; write it by hand if you keep them elsewhere. The app's Settings override it.
+4. Select your phone and press Run, or from a shell:
+
+```bash
+cd ios && ./scripts/gen-secrets.sh
+xcodebuild -scheme Arbos -destination 'platform=iOS,id=<device-id>' -allowProvisioningUpdates build
+```
+
+On first launch iOS asks for the microphone; allow it. The kernel picker lists the machines on your hub; pick one and the call starts.
 
 ### Voice server
 
-`voice-server/` is the self-hosted speech gateway: voice activity detection, speech to text, text to speech, and the call-mode narrator, over one WebSocket. Python 3.11+, managed with `uv`.
+Speech runs on a server you control (`voice-server/`, Python 3.11+, `uv`). One WebSocket per call: raw audio both ways, a text channel, the tools that let the voice model dispatch agents, and the call-mode narrator. Two engines behind one protocol:
+
+- **duplex**: one full-duplex speech-to-speech model (NVIDIA NemotronLabs VoiceChat). A GPU with about 24 GB. No turn-taking, natural interruption.
+- **pipeline**: Silero VAD → faster-whisper → the model → Kokoro TTS. Any GPU, or a CPU.
 
 ```bash
 cd voice-server
-VOICE_TOKEN=choose-a-token deploy/run.sh --engine pipeline --reply kernel --kernel-place /path/to/project
+VOICE_HOME=$PWD VOICE_TOKEN=<a long random string> deploy/run.sh            # --engine duplex|pipeline (default: auto)
 ```
 
-- **GPU** (CUDA): `deploy/run.sh` installs the CUDA wheels and, with `--engine duplex`, fronts a full-duplex speech model (NVIDIA NemotronLabs VoiceChat) for continuous, interruptible conversation.
-- **CPU**: `--engine pipeline` runs Silero VAD + faster-whisper + Kokoro. Slower first word, no GPU needed.
-- `deploy/stack.sh up` runs the server, a kernel, and a Cloudflare tunnel together; `deploy/fetch-models.sh` pre-downloads the model files.
+`run.sh` installs `uv`, makes a virtual environment, fetches the models, and starts the server on port 8765. Nothing is written outside `VOICE_HOME`. `deploy/stack.sh up` runs the server, a kernel, and a Cloudflare tunnel together (`deploy/cloudflare-tunnel.sh` alone fronts the server). Then tell the desktop where it is, in the same file as the model key, and put the same values into the phone's `Secrets.plist`:
 
-Point the desktop at it with `voice_url` (and `voice_token`) in `~/.config/arbos/config.toml`.
+```toml
+# ~/.config/arbos/config.toml
+voice_url = "wss://voice.example.com/ws"
+voice_token_env = "VOICE_TOKEN"        # or voice_token = "..."
+```
 
 ### Mesh (many machines)
 
-One `arbos-hub` at a public address; every kernel and worker connects **outbound** to it, so no machine needs an open port.
+Any machine running the Arbos worker can be used by any of your other Arbos instances: a cloud agent can build iOS on your Mac, your laptop can run a long job on a server. The worker connects **outbound** to a hub, so no ports need opening.
+
+On the machine you want to offer, with `arbos-kernel` built and a model key in `~/arbos-hub/config/arbos/config.toml`:
 
 ```bash
-cargo build --release -p arbos-hub
-arbos-hub --config hub-server.toml                        # see deploy/hub/hub-server.example.toml
-arbos-kernel worker --dir ~/arbos-hub/projects --machine mac --cap xcode   # offer this machine
-arbos-kernel serve /path/to/project --hub wss://hub.example --machine laptop  # register a kernel
-arbos-kernel attach --hub mac/<project>                   # follow a kernel elsewhere, by name
+ARBOS_HUB=wss://hub.example ARBOS_HUB_TOKEN=<token> \
+  ~/arbos-hub/bin/arbos-kernel worker --dir ~/arbos-hub/projects --machine <name>
 ```
 
-Agents then use `spawn host=<machine>` and `say to=<machine>/<project>/<agent>`. Tokens and URL live in `~/.config/arbos/hub.toml` (`deploy/hub/hub.example.toml`).
+Add `--cap xcode --cap ios` on a Mac with Xcode so agents can find it. Clone the repositories the mesh may work on into `~/arbos-hub/projects/<name>`. `deploy/hub/worker.sh` wraps the same command in a restart loop; `deploy/hub/hub-run.sh` runs your own hub (`arbos-hub`, config in `deploy/hub/hub-server.example.toml`). Kernels register with `arbos-kernel serve <project> --hub <url> --machine <name>`, or from `~/.config/arbos/hub.toml` (`deploy/hub/hub.example.toml`). Agents then use `spawn host=<machine>` and `say to=<machine>/<project>/<agent>`; `arbos-kernel attach --hub <machine>/<project>` follows a kernel elsewhere by name.
 
 ## Configure
 

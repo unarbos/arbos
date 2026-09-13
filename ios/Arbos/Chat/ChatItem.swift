@@ -36,6 +36,9 @@ enum ChatUpdate {
     case agentDelta(String)
     /// Close the open agent message.
     case agentDone
+    /// The kernel's final text for the message just streamed. Replaces what
+    /// the deltas built, so the same words do not show twice.
+    case agentReplace(String)
     case turn(running: Bool)
     case agents([KernelAgent])
     case dropped(String)
@@ -43,6 +46,7 @@ enum ChatUpdate {
 
 /// Where the main chat comes from: the live kernel, or a scripted stand-in
 /// while no kernel is reachable.
+@MainActor
 protocol ChatSource: AnyObject {
     var updates: AsyncStream<ChatUpdate> { get }
     func start() async throws

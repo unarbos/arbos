@@ -10,9 +10,8 @@ struct TranscriptView: View {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 14) {
                     ForEach(Array(lines.enumerated()), id: \.element.id) { index, line in
-                        Text(line.text)
-                            .font(line.speaker == .user ? .title3 : .callout)
-                            .fontWeight(line.speaker == .user ? .medium : .regular)
+                        Text(line.speaker == .system ? "↳ \(line.text)" : line.text)
+                            .font(font(for: line))
                             .foregroundStyle(color(for: line, at: index))
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .id(line.id)
@@ -42,12 +41,21 @@ struct TranscriptView: View {
         }
     }
 
+    private func font(for line: TranscriptLine) -> Font {
+        switch line.speaker {
+        case .user: return .title3.weight(.medium)
+        case .arbos: return .callout
+        case .system: return .system(.footnote, design: .monospaced)
+        }
+    }
+
     private func color(for line: TranscriptLine, at index: Int) -> Color {
         let age = Double(lines.count - 1 - index)
         let fade = max(0.35, 1 - age * 0.2)
         switch line.speaker {
         case .user: return Color.white.opacity(fade)
         case .arbos: return Color.white.opacity(0.55 * fade)
+        case .system: return Color(red: 0.55, green: 0.64, blue: 0.98).opacity(0.7 * fade)
         }
     }
 }

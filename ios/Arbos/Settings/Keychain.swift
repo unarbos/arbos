@@ -31,15 +31,15 @@ enum Keychain {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
-        let attributes: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-        ]
-        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if status == errSecItemNotFound {
-            var insert = query
-            insert.merge(attributes) { _, new in new }
-            SecItemAdd(insert as CFDictionary, nil)
+        // Replace, not update: an update with a changed accessibility class
+        // fails, and a fresh add is the same cost.
+        SecItemDelete(query as CFDictionary)
+        var insert = query
+        insert[kSecValueData as String] = data
+        insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        let status = SecItemAdd(insert as CFDictionary, nil)
+        if status != errSecSuccess {
+            NSLog("Keychain add failed for %@: %d", account, status)
         }
     }
 
