@@ -1,6 +1,8 @@
 https://inline-voice-occupations-ultram.trycloudflare.com
 # Arbos voice server public URL (Cloudflare quick tunnel; changes when the tunnel restarts).
 # WebSocket: wss://inline-voice-occupations-ultram.trycloudflare.com/ws?token=<VOICE_TOKEN from 1Password item jmldktl7rrc4rw4sm2akej4qne>
-# Health: https://inline-voice-occupations-ultram.trycloudflare.com/healthz   Updated: 2026-09-13T08:06:02Z by deploy/supervise.sh on 4dfc3db57c5f
+# Health: https://inline-voice-occupations-ultram.trycloudflare.com/healthz   Updated: 2026-09-13T14:19:44Z by deploy/supervise.sh on 4dfc3db57c5f
 kernel: wss://live-got-person-permits.trycloudflare.com/?token=<ARBOS_PHONE_TOKEN from 1Password item 'Arbos - phone kernel token'>
 # Phone kernel (arbos-kernel serve --bind, token auth, WebSocket). Stable name once DNS exists: wss://kernel-api.arbos.life
+hub: wss://trainers-ticket-town-cdt.trycloudflare.com
+# Mesh hub on the same host (from /root/arbos-hub/public-url.txt).
