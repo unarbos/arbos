@@ -3,8 +3,9 @@
 //! lock that keeps two kernels off one folder.
 
 use arbos_core::{
-    Do, Event, EventKind, Node, NodeStatus, Place, PlaceLock, TranscriptTail, Usage, When, agent_exists, append_event, bootstrap, create_chat, list_agents, load_transcript,
-    node::can_transition,
+    Do, Event, EventKind, Node, NodeStatus, Place, PlaceLock, TranscriptTail, Usage, When,
+    agent_exists, append_event, bootstrap, create_chat, list_agents, load_transcript,
+    node::{can_transition, load_nodes, save_node},
     read_focus, validate_focus,
     wire::{Frame, TreeNode},
     write_focus,
@@ -275,6 +276,85 @@ fn node_serialises_with_snake_case_do_kinds() {
     }
     assert_eq!(NodeStatus::parse("Canceled"), Some(NodeStatus::Cancelled));
     assert_eq!(NodeStatus::parse("nope"), None);
+}
+
+/// qa-012: a write that fails part-way (disk full, `ulimit -f`, quota)
+/// must not leave the head of a line behind, or the next good append is
+/// glued to it and both are lost to every reader.
+#[test]
+fn a_failed_append_leaves_no_partial_line() {
+    unsafe {
+        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+    }
+    let dir = tmp("partial");
+    let transcript = dir.join("transcript.jsonl");
+    let plan = dir.join("plan.jsonl");
+    append_event(
+        &transcript,
+        &Event::new(EventKind::User {
+            text: "one".into(),
+            attachments: vec![],
+        }),
+    )
+    .unwrap();
+    let mut node = Node::new("first");
+    node.id = 1;
+    save_node(&plan, &node).unwrap();
+    let t_len = std::fs::metadata(&transcript).unwrap().len();
+    let p_len = std::fs::metadata(&plan).unwrap().len();
+
+    // Cap files at 4 KB for this process, then try to append 16 KB.
+    let limit = libc::rlimit {
+        rlim_cur: 4096,
+        rlim_max: libc::RLIM_INFINITY,
+    };
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) }, 0);
+    let big = "x".repeat(16 * 1024);
+    let r1 = append_event(
+        &transcript,
+        &Event::new(EventKind::User {
+            text: big.clone(),
+            attachments: vec![],
+        }),
+    );
+    let mut huge = Node::new(big);
+    huge.id = 2;
+    let r2 = save_node(&plan, &huge);
+    let restore = libc::rlimit {
+        rlim_cur: libc::RLIM_INFINITY,
+        rlim_max: libc::RLIM_INFINITY,
+    };
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &restore) }, 0);
+
+    assert!(
+        r1.is_err() && r2.is_err(),
+        "the oversized appends must fail, not kill the process"
+    );
+    assert_eq!(
+        std::fs::metadata(&transcript).unwrap().len(),
+        t_len,
+        "transcript cut back to its last complete line"
+    );
+    assert_eq!(
+        std::fs::metadata(&plan).unwrap().len(),
+        p_len,
+        "plan cut back to its last complete line"
+    );
+
+    // The next good append lands on its own line and every reader sees it.
+    append_event(
+        &transcript,
+        &Event::new(EventKind::TurnComplete { usage: None }),
+    )
+    .unwrap();
+    let events = load_transcript(&transcript).unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].seq, 2);
+    let mut second = Node::new("second");
+    second.id = 2;
+    save_node(&plan, &second).unwrap();
+    assert_eq!(load_nodes(&plan).unwrap().len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

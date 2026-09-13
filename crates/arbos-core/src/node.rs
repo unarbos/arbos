@@ -300,10 +300,14 @@ fn append_line<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     buf.push(b'\n');
     let mut file = OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(path)
         .with_context(|| format!("open {}", path.display()))?;
-    file.write_all(&buf)?;
+    if let Err(e) = file.write_all(&buf) {
+        crate::files::drop_partial_line(&mut file, buf.len());
+        return Err(e).with_context(|| format!("append {}", path.display()));
+    }
     file.sync_data()?;
     Ok(())
 }

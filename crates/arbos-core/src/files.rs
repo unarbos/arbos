@@ -193,12 +193,43 @@ pub fn append_events(path: &Path, events: &[Event]) -> Result<usize> {
     }
     let mut file = OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(path)
         .with_context(|| format!("open {}", path.display()))?;
-    file.write_all(&buf)?;
+    if let Err(e) = file.write_all(&buf) {
+        drop_partial_line(&mut file, buf.len());
+        return Err(e).with_context(|| format!("append {}", path.display()));
+    }
     file.sync_data()?;
     Ok(events.len())
+}
+
+/// A write that failed part-way (disk full, size limit) leaves the head of
+/// a line with no newline. Every reader skips it, but it also swallows the
+/// next successful append into one damaged line. Cut the file back to the
+/// last complete line. `wrote_at_most` bounds how far back to look.
+pub fn drop_partial_line(file: &mut File, wrote_at_most: usize) {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return;
+    };
+    let look = (wrote_at_most as u64 + 1).min(len);
+    if look == 0 || file.seek(SeekFrom::Start(len - look)).is_err() {
+        return;
+    }
+    let mut tail = vec![0u8; look as usize];
+    if file.read_exact(&mut tail).is_err() {
+        return;
+    }
+    if tail.last() == Some(&b'\n') {
+        return;
+    }
+    let keep = match tail.iter().rposition(|b| *b == b'\n') {
+        Some(i) => len - look + i as u64 + 1,
+        None => len - look,
+    };
+    let _ = file.set_len(keep);
 }
 
 /// Every parseable event, each stamped with its 1-based physical line.
