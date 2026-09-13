@@ -515,7 +515,9 @@ fn handle_frame(
     };
     if let Some(agent) = names {
         if !arbos_core::agent_exists(place, &agent) {
-            eprintln!("frame for unknown agent {agent:?} refused");
+            // Answered and logged, not just printed: the client that named
+            // a missing agent is the one that needs to hear it (#14 + #24).
+            refuse(hooks, Some(&agent), format!("no agent {agent:?} in this place"));
             return;
         }
     }
