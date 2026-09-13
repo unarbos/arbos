@@ -4330,6 +4330,7 @@ mod selection_tests {
             ChatItem::User(UserMessage {
                 text: String::new(),
                 images: vec![image.clone(), image],
+                described: Vec::new(),
                 files: Vec::new(),
                 worked_secs: None,
                 channel: String::new(),
