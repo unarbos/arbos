@@ -120,19 +120,22 @@ final class CallViewModel: ObservableObject {
     }
 
     private func connect() async {
-        guard await AVAudioApplication.requestRecordPermission() else {
-            phase = .failed("Microphone access is off.")
-            return
+        var captureMic = true
+        #if DEBUG
+        captureMic = !DebugInjector.isRequested()
+        #endif
+        if captureMic {
+            guard await AVAudioApplication.requestRecordPermission() else {
+                phase = .failed("Microphone access is off.")
+                return
+            }
         }
+        let connectStarted = Date()
         subscription = link.subscribe { [weak self] event in self?.handle(event) }
         audio.onPlaybackDrained = { [weak self] in
             Task { @MainActor in self?.playbackDrained() }
         }
         do {
-            var captureMic = true
-            #if DEBUG
-            captureMic = UserDefaults.standard.string(forKey: "injectWav") == nil
-            #endif
             try audio.start(captureMic: captureMic)
             try await link.connect()
         } catch {
@@ -144,10 +147,11 @@ final class CallViewModel: ObservableObject {
         audio.onCapture = link.audioSink()
         startedAt = Date()
         phase = .listening
+        metric("connect", since: connectStarted, detail: server.engine)
         await joinChat()
         updateNote()
         #if DEBUG
-        injectWavIfAsked()
+        startInjectionIfAsked()
         #endif
     }
 
@@ -202,11 +206,13 @@ final class CallViewModel: ObservableObject {
             server = info
             if phase == .connecting { phase = .listening }
         case .userSpeechStarted:
+            print("event speech.started playing=\(audio.isPlaying) phase=\(phase.label)")
             // Barge-in: whatever Arbos was saying stops now.
             if audio.isPlaying || phase == .speaking {
                 audio.stopPlayback()
                 link.interrupt()
                 responseDone = true
+                metric("barge_in_speech_started", since: bargeStartedAt)
             }
             speechEndedAt = nil
             phase = .listening
@@ -216,6 +222,7 @@ final class CallViewModel: ObservableObject {
         case .userTranscript(let text, let final):
             appendUserTranscript(text, final: final)
             if final {
+                print("transcript: \(text)")
                 if text.trimmingCharacters(in: .whitespaces).isEmpty {
                     settle()
                 } else if !server.answersItself {
@@ -232,13 +239,20 @@ final class CallViewModel: ObservableObject {
                 replyLatency = Date().timeIntervalSince(speechEndedAt)
                 self.speechEndedAt = nil
                 updateNote()
+                metric("reply_first_audio", since: speechEndedAt)
+                #if DEBUG
+                scheduleBargeIn()
+                #endif
             }
             responseDone = false
             phase = .speaking
             audio.play(pcm16: pcm)
         case .assistantTranscript(let delta):
+            print("reply: \(delta)")
             append(delta, to: .arbos)
-        case .responseDone:
+        case .responseDone(let interrupted):
+            print("event response.done interrupted=\(interrupted) playing=\(audio.isPlaying)")
+            if interrupted { metric("barge_in_response_done", since: bargeStartedAt) }
             responseDone = true
             settle()
         case .toolCall(let name, let summary):
@@ -327,10 +341,27 @@ final class CallViewModel: ObservableObject {
         phase = .failed(message)
     }
 
+    /// One line on the console per measured hop, for scripted runs.
+    private func metric(_ name: String, since start: Date?, detail: String = "") {
+        #if DEBUG
+        guard let start else { return }
+        let ms = Int(Date().timeIntervalSince(start) * 1000)
+        print("metric \(name) \(ms)ms \(detail)".trimmingCharacters(in: .whitespaces))
+        #endif
+    }
+
+    private func trace(_ line: @autoclosure () -> String) {
+        #if DEBUG
+        print(line())
+        #endif
+    }
+
+    private var bargeStartedAt: Date?
+
     private func teardown() {
         #if DEBUG
-        injectTask?.cancel()
-        injectTask = nil
+        injector?.stop()
+        injector = nil
         #endif
         link.unsubscribe(subscription)
         subscription = nil
@@ -369,39 +400,36 @@ final class CallViewModel: ObservableObject {
         }
     }
 
-    /// `-injectWav /path/to/24k-mono-pcm16.wav` plays a file into the
-    /// session as if it were the microphone, paced in real time. The
-    /// simulator has no usable mic; this is how a round trip is tested.
-    private func injectWavIfAsked() {
-        guard let path = UserDefaults.standard.string(forKey: "injectWav"),
-              let data = FileManager.default.contents(atPath: path) else { return }
-        let pcm = Self.pcmPayload(of: data)
-        let sink = link.audioSink()
-        let frame = Int(AudioEngine.sampleRate) * 2 / 25   // 40 ms
-        injectTask = Task.detached {
+    private var injector: DebugInjector?
+    private var bargeClip: Data?
+
+    /// `-injectWav` replaces the microphone with a clip (see
+    /// `DebugInjector`); `-bargeWav` fires a second clip 1.5 s into the
+    /// reply to exercise barge-in.
+    private func startInjectionIfAsked() {
+        guard DebugInjector.isRequested() else { return }
+        let injector = DebugInjector(sink: link.audioSink())
+        self.injector = injector
+        bargeClip = DebugInjector.clip(named: "bargeWav")
+        injector.start()
+        Task {
             try? await Task.sleep(for: .milliseconds(800))
-            var offset = 0
-            while offset < pcm.count, !Task.isCancelled {
-                let end = min(offset + frame, pcm.count)
-                sink(pcm.subdata(in: offset..<end))
-                offset = end
-                try? await Task.sleep(for: .milliseconds(40))
-            }
-            // Then silence for the rest of the call: a full-duplex model
-            // only advances while audio keeps arriving, like a real mic.
-            let silence = Data(count: frame)
-            while !Task.isCancelled {
-                sink(silence)
-                try? await Task.sleep(for: .milliseconds(40))
-            }
+            if let clip = DebugInjector.clip(named: "injectWav") { injector.play(clip) }
         }
     }
 
-    private var injectTask: Task<Void, Never>?
-
-    private static func pcmPayload(of wav: Data) -> Data {
-        guard let range = wav.range(of: Data("data".utf8)), range.upperBound + 4 <= wav.count else { return wav }
-        return wav.subdata(in: (range.upperBound + 4)..<wav.count)
+    private func scheduleBargeIn() {
+        guard let clip = bargeClip, let injector else { return }
+        bargeClip = nil
+        Task {
+            try? await Task.sleep(for: .milliseconds(1500))
+            guard phase == .speaking else {
+                print("metric barge_in_skipped reply already over")
+                return
+            }
+            bargeStartedAt = Date()
+            injector.play(clip)
+        }
     }
     #endif
 }
