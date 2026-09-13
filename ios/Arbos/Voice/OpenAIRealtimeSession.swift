@@ -57,6 +57,26 @@ final class OpenAIRealtimeSession: VoiceSession {
 
     func speak(_ text: String) {}
 
+    /// A typed turn as a conversation item; the reply comes back as speech.
+    func sendText(_ text: String) {
+        guard !closed, !text.isEmpty else { return }
+        socket?.send(json: [
+            "type": "conversation.item.create",
+            "item": [
+                "type": "message",
+                "role": "user",
+                "content": [["type": "input_text", "text": text]],
+            ],
+        ])
+        socket?.send(json: ["type": "response.create"])
+    }
+
+    func cancelText() {
+        interrupt()
+    }
+
+    func setSpeaking(_ speaking: Bool) {}
+
     func interrupt() {
         // Server VAD already cancelled the reply on `speech_started`; this
         // covers a manual interrupt where it did not.
@@ -111,7 +131,10 @@ final class OpenAIRealtimeSession: VoiceSession {
         switch type {
         case "session.created":
             configureSession()
-            sink.emit(.connected)
+            var info = VoiceServerInfo()
+            info.engine = "openai-realtime"
+            info.reply = model
+            sink.emit(.connected(info))
         case "input_audio_buffer.speech_started":
             sink.emit(.userSpeechStarted)
         case "input_audio_buffer.speech_stopped":
@@ -129,7 +152,9 @@ final class OpenAIRealtimeSession: VoiceSession {
         case "response.output_audio_transcript.delta", "response.audio_transcript.delta":
             sink.emit(.assistantTranscript(delta: object["delta"] as? String ?? ""))
         case "response.done":
-            sink.emit(.responseDone)
+            sink.emit(.responseDone(interrupted: false))
+        case "response.cancelled":
+            sink.emit(.responseDone(interrupted: true))
         case "error":
             let detail = object["error"] as? [String: Any]
             sink.emit(.error(detail?["message"] as? String ?? "Realtime error"))

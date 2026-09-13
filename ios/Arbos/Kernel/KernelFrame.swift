@@ -87,6 +87,8 @@ struct KernelToolRecord: Equatable {
         let subject: String
         if let first = paths.first, !first.isEmpty {
             subject = (first as NSString).lastPathComponent
+        } else if let path = args?["path"] as? String ?? args?["file"] as? String ?? args?["dir"] as? String {
+            subject = (path as NSString).lastPathComponent
         } else if let command = args?["command"] as? String ?? args?["cmd"] as? String {
             subject = command
         } else if let brief = args?["brief"] as? String {
@@ -106,11 +108,18 @@ struct KernelToolRecord: Equatable {
 /// `Frame` in `crates/arbos-core/src/wire.rs`: one JSON object per line,
 /// tagged by `type` in snake_case.
 enum KernelFrame {
-    /// First thing the kernel sends on attach: the agent tree and which
-    /// agent the desktop last focused.
+    /// First frame from a 0.2 kernel over WebSocket.
+    case hello(focus: String, kernel: String)
+    /// The agent tree and which agent the desktop last focused.
     case snapshot(focus: String, agents: [KernelAgent])
     case tree([KernelAgent])
+    /// One line of the transcript as it was before we attached.
+    case replayed(agent: String, event: KernelEvent)
+    /// Replay is over; what follows is live.
+    case historyEnd(agent: String)
     case event(agent: String, event: KernelEvent)
+    /// One streamed token of the reply being written.
+    case assistantDelta(agent: String, text: String)
     /// `running` or `idle`.
     case turn(agent: String, state: String)
     case ask(agent: String, question: String, options: [String])
@@ -119,6 +128,23 @@ enum KernelFrame {
     init?(json object: [String: Any]) {
         guard let type = object["type"] as? String else { return nil }
         switch type {
+        case "hello":
+            self = .hello(
+                focus: object["focus"] as? String ?? "root",
+                kernel: object["kernel"] as? String ?? ""
+            )
+        case "replayed":
+            self = .replayed(
+                agent: object["agent"] as? String ?? "",
+                event: KernelEvent(json: object["event"] as? [String: Any] ?? [:])
+            )
+        case "history_end":
+            self = .historyEnd(agent: object["agent"] as? String ?? "")
+        case "assistant_delta":
+            self = .assistantDelta(
+                agent: object["agent"] as? String ?? "",
+                text: object["text"] as? String ?? ""
+            )
         case "snapshot":
             self = .snapshot(
                 focus: object["focus"] as? String ?? "",

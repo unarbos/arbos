@@ -4,6 +4,9 @@ struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
     @State private var keyDraft = ""
+    @State private var tokenDraft = ""
+    @State private var kernelTokenDraft = ""
+    @State private var hubTokenDraft = ""
 
     var body: some View {
         NavigationStack {
@@ -18,10 +21,13 @@ struct SettingsView: View {
                     }
                     switch settings.provider {
                     case .selfHosted:
-                        TextField("wss://host:port/voice", text: $settings.selfHostedURL)
+                        TextField("wss://host/ws", text: $settings.selfHostedURL)
                             .keyboardType(.URL)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
+                        SecureField(tokenPlaceholder, text: $tokenDraft)
+                            .textContentType(.password)
+                            .autocorrectionDisabled()
                     case .openAIRealtime:
                         SecureField(keyPlaceholder, text: $keyDraft)
                             .textContentType(.password)
@@ -36,15 +42,30 @@ struct SettingsView: View {
                     Text(voiceFooter)
                 }
                 Section {
-                    TextField("Host", text: $settings.kernelHost)
+                    TextField("wss://host/", text: $settings.kernelURL)
+                        .keyboardType(.URL)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
-                    TextField("Port", value: $settings.kernelPort, format: .number)
-                        .keyboardType(.numberPad)
+                    SecureField(kernelTokenPlaceholder, text: $kernelTokenDraft)
+                        .textContentType(.password)
+                        .autocorrectionDisabled()
                 } header: {
                     Text("Arbos kernel")
                 } footer: {
-                    Text("The attach port from .arbos/kernel.json, reachable from this phone. Replies come from here.")
+                    Text("The main chat: history and streaming replies come from here. The voice server talks to the same kernel.")
+                }
+                Section {
+                    TextField("wss://hub-host", text: $settings.hubURL)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    SecureField(hubTokenPlaceholder, text: $hubTokenDraft)
+                        .textContentType(.password)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("Mesh hub")
+                } footer: {
+                    Text("Lists Jacob's other machines; the chat title opens the picker.")
                 }
             }
             .navigationTitle("Settings")
@@ -53,6 +74,9 @@ struct SettingsView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
                         if !keyDraft.isEmpty { settings.saveOpenAIKey(keyDraft) }
+                        if !tokenDraft.isEmpty { settings.saveVoiceToken(tokenDraft) }
+                        if !kernelTokenDraft.isEmpty { settings.saveKernelToken(kernelTokenDraft) }
+                        if !hubTokenDraft.isEmpty { settings.saveHubToken(hubTokenDraft) }
                         dismiss()
                     }
                 }
@@ -62,12 +86,24 @@ struct SettingsView: View {
 
     private var voiceFooter: String {
         switch settings.provider {
-        case .selfHosted: return "Our speech server: hears you, reads replies aloud."
+        case .selfHosted: return "Our speech server. Token stored in the Keychain; it rides in the URL as ?token=."
         case .openAIRealtime: return "Stored in the Keychain. Replies come from the model, not the kernel."
         }
     }
 
     private var keyPlaceholder: String {
         settings.openAIKey.isEmpty ? "OpenAI API key" : "API key saved · paste to replace"
+    }
+
+    private var tokenPlaceholder: String {
+        settings.voiceToken.isEmpty ? "Server token" : "Token saved · paste to replace"
+    }
+
+    private var kernelTokenPlaceholder: String {
+        settings.kernelToken.isEmpty ? "Kernel token" : "Token saved · paste to replace"
+    }
+
+    private var hubTokenPlaceholder: String {
+        settings.hubToken.isEmpty ? "Hub client token" : "Token saved · paste to replace"
     }
 }

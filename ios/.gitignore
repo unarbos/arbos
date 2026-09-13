@@ -2,3 +2,4 @@ xcuserdata/
 *.xcuserstate
 DerivedData/
 .artifacts/
+Arbos/Secrets.plist
