@@ -1734,6 +1734,8 @@ fn keep_macos_glass(_window: &Window) {}
 fn call_line(m: &crate::voice_ws::Mirror) -> Option<String> {
     let text: String = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
     match m.kind.as_str() {
+        // "On it." is heard, not read: the caller's own line is the record.
+        "narrator.say/ack" => None,
         "narrator.say/report" => Some(format!("voice · {text}")),
         "narrator.say/ask" => Some(format!("voice · asked: {text}")),
         "narrator.say/error" => Some(format!("voice · {text}")),
