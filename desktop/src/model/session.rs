@@ -346,6 +346,9 @@ pub struct ChatSession {
     /// Sub-agents and scheduled firings in flight for this chat. Runtime
     /// only — the kernel is the record.
     pub live: Vec<crate::kernel::LiveWork>,
+    /// This chat's sub-agents as the transcript and the task rail show
+    /// them. Runtime only: the workspace refreshes it before each draw.
+    pub children: Vec<ChildSummary>,
     /// When `live` last became non-empty, for the braille tick.
     pub live_since: Option<SystemTime>,
     /// When each running tool call began, by call id, so its finished
@@ -435,6 +438,7 @@ impl ChatSession {
             parent: None,
             parent_kernel: None,
             delegate_number: None,
+            children: Vec::new(),
             file: None,
             rank: 0,
             closed: false,
@@ -492,6 +496,7 @@ impl ChatSession {
             parent: None,
             parent_kernel: record.parent,
             delegate_number: record.delegate_number,
+            children: Vec::new(),
             file: Some(file),
             rank: record.rank,
             closed: record.closed,
@@ -549,6 +554,7 @@ impl ChatSession {
             parent: None,
             parent_kernel: None,
             delegate_number: None,
+            children: Vec::new(),
             file: None,
             rank: 0,
             closed: false,
@@ -906,7 +912,72 @@ impl ChatSession {
     pub fn is_delegate(&self) -> bool {
         self.parent.is_some() || self.parent_kernel.is_some()
     }
+}
 
+/// What a sub-agent is up to, as the parent's transcript and the task rail
+/// say it. Derived from the child's own session state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildState {
+    /// A turn is running.
+    Working,
+    /// Parked on a question for the user.
+    Asking,
+    /// Idle between turns; may be woken again.
+    Waiting,
+    /// Its last turn ended and nothing has run since.
+    Done,
+}
+
+/// One sub-agent, as its parent shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildSummary {
+    pub id: u64,
+    /// The kernel's agent id, which `say` lines name.
+    pub kernel_id: Option<String>,
+    pub title: String,
+    pub state: ChildState,
+}
+
+impl ChatSession {
+    /// The state a parent shows for this chat.
+    pub fn child_state(&self) -> ChildState {
+        if self.busy() {
+            ChildState::Working
+        } else if self.answering.is_some() || self.plan_open().any(|n| n.do_kind == "ask") {
+            ChildState::Asking
+        } else if self.closed || self.turn_ended.is_some() {
+            ChildState::Done
+        } else {
+            ChildState::Waiting
+        }
+    }
+
+    /// The title a `say` line's `who` resolves to: a sub-agent's title
+    /// when `who` is one of this chat's children, else `who` itself with
+    /// the ` → user` tail kept.
+    pub fn who_label(&self, who: &str) -> String {
+        let (head, tail) = match who.split_once(" → ") {
+            Some((h, t)) => (h.trim(), Some(t.trim())),
+            None => (who.trim(), None),
+        };
+        let name = if self.agent_session.as_deref() == Some(head) {
+            // The agent's own notice to the user, filed on its chat.
+            self.label()
+        } else {
+            self.children
+                .iter()
+                .find(|c| c.kernel_id.as_deref() == Some(head))
+                .map(|c| c.title.clone())
+                .unwrap_or_else(|| head.to_string())
+        };
+        match tail {
+            Some(t) => format!("{name} → {t}"),
+            None => name,
+        }
+    }
+}
+
+impl ChatSession {
     /// Explicit names override the delegate identity or the agent's title.
     pub fn label(&self) -> String {
         if let Some(name) = self
