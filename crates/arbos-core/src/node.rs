@@ -483,7 +483,12 @@ pub fn ready(n: &Node, gated: bool, now_ms: i64) -> bool {
         return false;
     }
     if n.recurring() {
-        return n.when.next_due_ms.is_some_and(|t| now_ms >= t);
+        return n.when.next_due_ms.is_some_and(|t| {
+            // Due, or scheduled further out than one period: the clock moved
+            // back (or the file was edited) and that instant is unreachable
+            // on the current clock. Firing now re-arms it from now (qa-013).
+            now_ms >= t || t - now_ms > n.when.every_ms.unwrap_or(0) as i64
+        });
     }
     true
 }

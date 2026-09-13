@@ -5,7 +5,7 @@
 use arbos_core::{
     Do, Event, EventKind, Node, NodeStatus, Place, PlaceLock, TranscriptTail, Usage, When,
     agent_exists, append_event, bootstrap, create_chat, list_agents, load_transcript,
-    node::{can_transition, load_nodes, save_node},
+    node::{can_transition, load_nodes, ready, save_node},
     read_focus, validate_focus,
     wire::{Frame, TreeNode},
     write_focus,
@@ -527,6 +527,44 @@ fn agent_exists_agrees_with_list_agents() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// qa-013: after a clock rewind a recurring node's next_due can sit days
+/// ahead. It must not go silent for that long: anything further out than
+/// one period is unreachable on the current clock and counts as due.
+#[test]
+fn a_recurring_node_scheduled_past_one_period_is_due_now() {
+    let now = 1_000_000_000_000i64;
+    let every = 30_000u64;
+    let mut n = Node::new("tick");
+    n.when = When {
+        every_ms: Some(every),
+        next_due_ms: Some(now + 10 * 86_400_000),
+        ..When::default()
+    };
+    assert!(
+        ready(&n, false, now),
+        "ten days ahead on a 30s period is a rewound clock"
+    );
+    n.when.next_due_ms = Some(now + every as i64);
+    assert!(
+        !ready(&n, false, now),
+        "exactly one period ahead is a normal schedule"
+    );
+    n.when.next_due_ms = Some(now + 5_000);
+    assert!(!ready(&n, false, now), "a few seconds ahead waits");
+    n.when.next_due_ms = Some(now - 10 * 86_400_000);
+    assert!(
+        ready(&n, false, now),
+        "ten days overdue fires (once; claim re-arms from now)"
+    );
+    // A one-shot deferral far ahead is what the user asked for.
+    let mut once = Node::new("remind");
+    once.when = When {
+        after_ms: Some(now + 10 * 86_400_000),
+        ..When::default()
+    };
+    assert!(!ready(&once, false, now));
 }
 
 #[test]
