@@ -396,6 +396,14 @@ pub struct ChatSession {
     /// A "Rewind here" was sent for the turn whose prompt is this item;
     /// the kernel's `rewound` cuts the pane there. Runtime only.
     rewind_to: Option<usize>,
+    /// Automatic reconnects to a remote kernel since the last good
+    /// connection, and when the next one fires. Runtime only.
+    pub reconnect_attempt: u32,
+    pub reconnect_at: Option<Instant>,
+    /// The connection generation the pending timer was armed for; a Send
+    /// or Stop meanwhile starts a new generation, and its failure must arm
+    /// a new timer rather than defer to the stale one.
+    pub reconnect_gen: u64,
     /// The agent's own name for the session, from `SessionInfoUpdate`.
     pub title: String,
     /// The name you typed, which the agent never overwrites. Two fields rather
@@ -453,7 +461,7 @@ pub struct ChatSession {
     probed_at: Option<Instant>,
     /// Which attach attempt owns `_pump`. A newer resume must not let an
     /// older socket's EOF mark this chat lost.
-    attach_gen: u64,
+    pub(crate) attach_gen: u64,
     _pump: Task<()>,
 }
 
@@ -523,6 +531,9 @@ impl ChatSession {
             working: None,
             provider_missing: None,
             rewind_to: None,
+            reconnect_attempt: 0,
+            reconnect_at: None,
+            reconnect_gen: 0,
             title: String::new(),
             name: None,
             updated: SystemTime::now(),
@@ -587,6 +598,9 @@ impl ChatSession {
             working: None,
             provider_missing: None,
             rewind_to: None,
+            reconnect_attempt: 0,
+            reconnect_at: None,
+            reconnect_gen: 0,
             title: record.title,
             name: record.name,
             updated,
@@ -651,6 +665,9 @@ impl ChatSession {
             working: None,
             provider_missing: None,
             rewind_to: None,
+            reconnect_attempt: 0,
+            reconnect_at: None,
+            reconnect_gen: 0,
             title,
             name,
             updated,
@@ -1654,6 +1671,36 @@ impl ChatSession {
                 self.notice(false, &what);
                 self.flush();
             }
+            Event::Handshake { protocol, kernel } => {
+                let ok = protocol.is_some_and(|p| p >= crate::kernel::PROTOCOL);
+                if !ok {
+                    let where_ = match &self.host {
+                        Some(h) => format!("on {h}"),
+                        None => "for this folder".into(),
+                    };
+                    let what = match protocol {
+                        Some(p) => format!(
+                            "speaks attach protocol {p}; this window needs {}",
+                            crate::kernel::PROTOCOL
+                        ),
+                        None => "predates the attach handshake".into(),
+                    };
+                    let fix = if self.host.is_some() {
+                        "Stop it there and reopen this place: the window puts its own arbos-kernel binary on the machine when none is running."
+                    } else {
+                        "Stop it and reopen this folder so the window starts its own."
+                    };
+                    self.notice(
+                        true,
+                        &format!(
+                            "The arbos-kernel {where_}{} {what}. {fix}",
+                            if kernel.is_empty() { String::new() } else { format!(" ({kernel})") }
+                        ),
+                    );
+                    self.close();
+                    self.flush();
+                }
+            }
             Event::AssistantFinal(text) => {
                 self.finish_thinking();
                 let text = text.trim_matches('\n').to_string();
@@ -2370,8 +2417,17 @@ fn pump(
                             return;
                         }
                         chat.connection = Connection::Lost;
-                        chat.notice(true, &format!("connection failed: {e:#}"));
+                        // The first failure is news; the retries are not.
+                        if chat.reconnect_attempt == 0 {
+                            chat.notice(true, &format!("connection failed: {e:#}"));
+                        }
                     });
+                    let retry = workspace.session(id).is_some_and(|chat| {
+                        chat.attach_gen == attach_gen && chat.host.is_some() && !chat.closed
+                    });
+                    if retry {
+                        workspace.schedule_reconnect(id, cx);
+                    }
                 });
                 return;
             }
@@ -2508,6 +2564,17 @@ fn pump(
                 if chat.idle() && chat.resumable() {
                     chat.resume(cx);
                 }
+            }
+            // A remote place that dropped and was not resumed at once
+            // comes back on its own, with backoff.
+            let lost_remote = workspace.session(id).is_some_and(|chat| {
+                chat.attach_gen == attach_gen
+                    && chat.host.is_some()
+                    && !chat.closed
+                    && matches!(chat.connection, Connection::Lost)
+            });
+            if lost_remote {
+                workspace.schedule_reconnect(id, cx);
             }
             cx.notify();
         });

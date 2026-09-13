@@ -29,6 +29,12 @@ pub struct Machine {
     pub note: String,
     /// Reserved for the hub route: `wss://host/p/<id>`.
     pub hub: Option<String>,
+    /// Build `arbos-kernel` from source on that machine when no binary of
+    /// this machine's architecture can be copied over. Needs cargo and a C
+    /// compiler there. Off by default: the window refuses and says where
+    /// to put a binary instead.
+    #[serde(default)]
+    pub build: bool,
 }
 
 impl Default for Machine {
@@ -43,6 +49,7 @@ impl Default for Machine {
             tags: Vec::new(),
             note: String::new(),
             hub: None,
+            build: false,
         }
     }
 }

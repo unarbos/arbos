@@ -91,6 +91,15 @@ fn main() -> Result<()> {
             let code = arbos_kernel::rewind::run(arbos_kernel::rewind::Args::parse(args)?)?;
             std::process::exit(code);
         }
+        "--version" | "-V" | "version" => {
+            println!(
+                "arbos-kernel {} {} protocol {}",
+                arbos_kernel::klog::version(),
+                arbos_kernel::klog::git_sha(),
+                arbos_kernel::serve::PROTOCOL
+            );
+            Ok(())
+        }
         "help" | "-h" | "--help" => {
             println!(
                 "arbos-kernel serve [place] [--provider replay --replies FILE] [--bind HOST:PORT] [--until-idle] [--horizon 1h] [--now 2026-09-13T09:00:00Z]   (off loopback: tokens in <place>/.arbos/access.toml, [[client]] name/token|token_env/role)"

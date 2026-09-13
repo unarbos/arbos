@@ -76,6 +76,12 @@ pub enum Event {
         dropped: u64,
         restored: Option<String>,
     },
+    /// The first frame of a connection: the kernel's protocol (`hello`),
+    /// or `None` when the kernel predates the handshake.
+    Handshake {
+        protocol: Option<u32>,
+        kernel: String,
+    },
     /// The kernel paused the turn for a tool the user must allow.
     NeedApproval {
         request_id: String,
@@ -236,8 +242,30 @@ impl Session {
         let agent = session_id.clone();
         let reader = runtime().spawn(async move {
             let mut lines = BufReader::new(reader).lines();
+            // The first frame tells what kernel this is: `hello` with a
+            // protocol number, or — from a build older than that — anything
+            // else. The window refuses to drive a kernel it cannot trust.
+            let mut first = true;
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Ok(frame) = serde_json::from_str::<Frame>(&line) {
+                    if first {
+                        first = false;
+                        let hand = match &frame {
+                            Frame::Hello {
+                                protocol, kernel, ..
+                            } => Event::Handshake {
+                                protocol: Some(*protocol),
+                                kernel: kernel.clone(),
+                            },
+                            _ => Event::Handshake {
+                                protocol: None,
+                                kernel: String::new(),
+                            },
+                        };
+                        if tx.send(hand).is_err() {
+                            return;
+                        }
+                    }
                     for ev in frame_events(&agent, frame) {
                         if tx.send(ev).is_err() {
                             return;

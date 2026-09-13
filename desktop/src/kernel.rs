@@ -34,7 +34,50 @@ pub struct WebInfo {
 
 const READY_WAIT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(200);
+/// Where `arbos-kernel` lives on a host that `machines.toml` does not
+/// describe. A described machine says itself (`kernel`, default
+/// `<dir>/bin/arbos-kernel`).
 const REMOTE_BIN: &str = "$HOME/.cargo/bin/arbos-kernel";
+
+/// The attach protocol this window speaks; a kernel that says less is
+/// refused (`arbos_kernel::serve::PROTOCOL` on the other side).
+pub const PROTOCOL: u32 = 1;
+
+/// One ssh host as this window reaches it: the ssh target, the kernel
+/// binary's path there, the config home its kernels read, and whether a
+/// source build is allowed when no binary can be copied. From
+/// `~/.config/arbos/machines.toml` when the host is a machine there (by
+/// name or by `ssh` target) — the same fields `spawn host=` uses — else the
+/// old defaults.
+#[derive(Debug, Clone)]
+pub struct RemoteTarget {
+    pub ssh: String,
+    pub bin: String,
+    pub config_home: Option<String>,
+    pub build: bool,
+    pub name: String,
+}
+
+pub fn remote_target(host: &str) -> RemoteTarget {
+    if let Ok(machines) = arbos_core::Machines::load()
+        && let Some(m) = machines.get(host)
+    {
+        return RemoteTarget {
+            ssh: m.target().to_string(),
+            bin: m.kernel_path(),
+            config_home: Some(m.config_home()),
+            build: m.build,
+            name: m.name.clone(),
+        };
+    }
+    RemoteTarget {
+        ssh: host.to_string(),
+        bin: REMOTE_BIN.to_string(),
+        config_home: None,
+        build: false,
+        name: host.to_string(),
+    }
+}
 const REMOTE_PORTS: (u16, u16) = (20000, 32000);
 
 #[cfg(test)]
@@ -2030,6 +2073,8 @@ fn arbos_bin() -> Result<PathBuf> {
 struct Probe {
     arch: String,
     has_bin: bool,
+    /// The remote kernel's `--version` line, when it is one of ours.
+    version: Option<String>,
     running: Option<WebInfo>,
 }
 
@@ -2062,14 +2107,24 @@ fn attach_remote_cached(key: &str, create: impl FnOnce() -> Result<Tunnel>) -> R
     Ok(info)
 }
 
-fn open_remote_tunnel(host: &str, path: &Path) -> Result<Tunnel> {
-    let mut probe = ssh_probe(host, path)?;
-    if !probe.has_bin {
-        ssh_install_kernel(host, path, &probe.arch)?;
-        probe = ssh_probe(host, path)?;
+fn open_remote_tunnel(host_name: &str, path: &Path) -> Result<Tunnel> {
+    let target = remote_target(host_name);
+    let host = target.ssh.as_str();
+    let mut probe = ssh_probe(&target, path)?;
+    // No binary, or one that is not this window's version and no kernel
+    // running from it: put ours there (same machine type), so a place never
+    // runs a kernel older than the window that opens it.
+    let stale = probe.has_bin
+        && probe.running.is_none()
+        && probe.version.as_deref() != Some(local_kernel_version().as_str());
+    if !probe.has_bin || stale {
+        ssh_install_kernel(&target, &probe.arch, stale)?;
+        probe = ssh_probe(&target, path)?;
         if !probe.has_bin {
             return Err(anyhow!(
-                "could not install arbos-kernel on {host} (~/.cargo/bin/arbos-kernel)"
+                "could not install arbos-kernel on {} ({})",
+                target.name,
+                target.bin
             ));
         }
     }
@@ -2078,7 +2133,7 @@ fn open_remote_tunnel(host: &str, path: &Path) -> Result<Tunnel> {
         port_of(&info.url).ok_or_else(|| anyhow!("arbos on {host} announced no port"))?
     } else {
         let port = random_port();
-        ssh_launch(host, path)?;
+        ssh_launch(&target, path)?;
         let info = wait_remote_json(host, path)?;
         port_of(&info.url).unwrap_or(port)
     };
@@ -2127,15 +2182,16 @@ if [ -f "$f" ]; then pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$f"); if [ -n "
     serde_json::from_str(text).ok()
 }
 
-fn ssh_probe(host: &str, path: &Path) -> Result<Probe> {
+fn ssh_probe(target: &RemoteTarget, path: &Path) -> Result<Probe> {
+    let host = target.ssh.as_str();
     let dir = shell_path(&path.to_string_lossy());
     let script = format!(
         r#"os=$(uname -s | tr A-Z a-z); a=$(uname -m); case "$a" in x86_64|amd64) a=amd64;; aarch64|arm64) a=arm64;; esac; echo "$os-$a"
-if [ -x "{bin}" ]; then sha=$(sha256sum "{bin}" 2>/dev/null | cut -d" " -f1); ver=$("{bin}" --version 2>/dev/null || echo -); else sha=-; ver=-; fi
-echo "$sha"; echo "$ver"
+if [ -x "{bin}" ]; then sha=$(sha256sum "{bin}" 2>/dev/null | cut -d" " -f1); ver=$("{bin}" --version 2>/dev/null | head -n1 || echo -); else sha=-; ver=-; fi
+echo "$sha"; echo "${{ver:--}}"
 f={dir}/.arbos/kernel.json
 if [ -f "$f" ]; then pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$f"); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then cat "$f"; fi; fi"#,
-        bin = REMOTE_BIN,
+        bin = target.bin,
         dir = dir,
     );
     let out = ssh_run(host, &script)?;
@@ -2148,22 +2204,58 @@ if [ -f "$f" ]; then pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$f"); if [ -n "
     }
     let arch = lines[0].to_string();
     let has_bin = lines[1] != "-";
+    // `arbos-kernel --version` prints `arbos-kernel 0.2.0 <sha> protocol 1`;
+    // an older kernel answers with an unknown-command error, which is as
+    // good as "not ours".
+    let version = has_bin
+        .then(|| lines[2].to_string())
+        .filter(|v| v.starts_with("arbos-kernel "));
     let running = (lines.len() >= 4)
         .then(|| serde_json::from_str::<WebInfo>(&lines[3..].join("\n")).ok())
         .flatten();
     Ok(Probe {
         arch,
         has_bin,
+        version,
         running,
     })
 }
 
-/// Put `arbos-kernel` on the host at `~/.cargo/bin`. Same machine type:
-/// copy ours. Different type: send the source and build there.
-fn ssh_install_kernel(host: &str, _path: &Path, remote_arch: &str) -> Result<()> {
+/// What this window's own kernel says for `--version`, so a remote copy
+/// can be compared to it by the same string.
+fn local_kernel_version() -> String {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            arbos_bin()
+                .ok()
+                .and_then(|bin| Command::new(bin).arg("--version").output().ok())
+                .map(|out| {
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                })
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
+/// Put `arbos-kernel` on the host at the target's path. Same machine
+/// type: copy this window's binary (also over a stale one). Different
+/// type: build from source only when the machine allows it in
+/// `machines.toml` (`build = true`); otherwise say where a binary must go.
+fn ssh_install_kernel(target: &RemoteTarget, remote_arch: &str, replacing: bool) -> Result<()> {
+    let host = target.ssh.as_str();
+    let bin_dir = parent_of(&target.bin);
     let mkdir = ssh_run(
         host,
-        r#"umask 077 && mkdir -p "$HOME/.cargo/bin" "$HOME/.cache/arbos""#,
+        &format!(
+            r#"umask 077 && mkdir -p "{bin_dir}" "$HOME/.cache/arbos""#,
+            bin_dir = bin_dir
+        ),
     )?;
     if mkdir.status != 0 {
         return Err(anyhow!("mkdir on {host}: {}", mkdir.problem()));
@@ -2172,17 +2264,53 @@ fn ssh_install_kernel(host: &str, _path: &Path, remote_arch: &str) -> Result<()>
     if local_os_arch() == remote_arch {
         let bin = arbos_bin().context("local arbos-kernel")?;
         if bin.is_file() {
-            ssh_put(host, &bin, ".cargo/bin/arbos-kernel")?;
-            let chmod = ssh_run(host, r#"chmod +x "$HOME/.cargo/bin/arbos-kernel""#)?;
-            if chmod.status == 0 {
+            // Into a temp name first, then moved: a kernel that is being
+            // executed must not be overwritten in place.
+            let tmp = format!("{}.new", target.bin);
+            ssh_put(host, &bin, &tmp)?;
+            let swap = ssh_run(
+                host,
+                &format!(
+                    r#"chmod +x "{tmp}" && mv -f "{tmp}" "{bin}""#,
+                    tmp = tmp,
+                    bin = target.bin
+                ),
+            )?;
+            if swap.status == 0 {
                 return Ok(());
             }
+            return Err(anyhow!(
+                "could not place arbos-kernel at {} on {}: {}",
+                target.bin,
+                target.name,
+                swap.problem()
+            ));
         }
+    }
+    if replacing {
+        // A stale kernel of another architecture: leave it, say so.
+        return Err(anyhow!(
+            "arbos-kernel on {name} ({bin}) is not this window's version and cannot be replaced from here ({here} vs {there}); update it there, or set build = true for {name} in machines.toml",
+            name = target.name,
+            bin = target.bin,
+            here = local_os_arch(),
+            there = remote_arch
+        ));
+    }
+    if !target.build {
+        return Err(anyhow!(
+            "no arbos-kernel on {name} and this window is {here}, the machine {there}: put an arbos-kernel built for it at {bin}, or set build = true for {name} in ~/.config/arbos/machines.toml to build from source there (needs cargo and a C compiler)",
+            name = target.name,
+            bin = target.bin,
+            here = local_os_arch(),
+            there = remote_arch
+        ));
     }
 
     ssh_sync_kernel_src(host)?;
 
-    let script = r#"set -e
+    let script = format!(
+        r#"set -e
 if ! command -v cargo >/dev/null 2>&1; then
   if [ ! -x "$HOME/.cargo/bin/cargo" ]; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
@@ -2190,14 +2318,28 @@ if ! command -v cargo >/dev/null 2>&1; then
   . "$HOME/.cargo/env"
 fi
 cd "$HOME/.cache/arbos/src"
-cargo install --path crates/arbos-kernel --root "$HOME/.cargo" --force
-test -x "$HOME/.cargo/bin/arbos-kernel"
-"#;
+cargo build --release -p arbos-kernel
+mkdir -p "{bin_dir}"
+cp target/release/arbos-kernel "{bin}"
+test -x "{bin}"
+"#,
+        bin_dir = bin_dir,
+        bin = target.bin
+    );
     let out = ssh_run(host, &script)?;
     if out.status != 0 {
-        return Err(anyhow!("install arbos-kernel on {host}: {}", out.problem()));
+        return Err(anyhow!("build arbos-kernel on {host}: {}", out.problem()));
     }
     Ok(())
+}
+
+/// The directory part of a remote path, kept as the shell will expand it.
+fn parent_of(path: &str) -> String {
+    match path.rfind('/') {
+        Some(0) => "/".to_string(),
+        Some(ix) => path[..ix].to_string(),
+        None => ".".to_string(),
+    }
 }
 
 fn ssh_sync_kernel_src(host: &str) -> Result<()> {
@@ -2302,12 +2444,20 @@ fn local_os_arch() -> String {
     format!("{os}-{arch}")
 }
 
-fn ssh_launch(host: &str, path: &Path) -> Result<()> {
+fn ssh_launch(target: &RemoteTarget, path: &Path) -> Result<()> {
+    let host = target.ssh.as_str();
     let dir = shell_path(&path.to_string_lossy());
+    // A machine from machines.toml keeps its kernels' config inside its
+    // own directory (`<dir>/config`), the way `spawn host=` does.
+    let env = match &target.config_home {
+        Some(home) => format!("XDG_CONFIG_HOME={} ", shell_path(home)),
+        None => String::new(),
+    };
     let launch = format!(
-        "cd {dir} && exec {bin} serve {dir}",
+        "cd {dir} && {env}exec {bin} serve {dir}",
         dir = dir,
-        bin = REMOTE_BIN,
+        env = env,
+        bin = target.bin,
     );
     let inner = launch.replace('\'', "'\\''");
     let script = format!(
