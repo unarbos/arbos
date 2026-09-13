@@ -8,7 +8,7 @@
 use anyhow::{Result, bail};
 use arbos_core::{
     Agent, AgentId, Event, EventKind, NodeId, Place, Wake, append_event, files::Layout, inbox,
-    list_agents, notes, subscription, validate_id, waiting,
+    list_agents, notes, store, subscription, validate_id, waiting,
 };
 use arbos_engine::TurnControl;
 use serde_json::Value;
@@ -125,6 +125,9 @@ pub struct KernelHooks {
     /// Transcript length when each running turn began, for the `done`
     /// message's summary of what the turn said.
     pub turn_lo: Mutex<HashMap<String, u64>>,
+    /// `notes.md`'s (size, mtime) when each top-level turn began: the
+    /// status page's `changed` frame goes out the moment the turn ends.
+    notes_at_start: Mutex<HashMap<String, Option<(u64, i64)>>>,
     pub browsers: BrowserHub,
     /// Serialises plan file writes. One kernel per place holds the lock, so
     /// this is the whole claim story.
@@ -175,6 +178,7 @@ impl KernelHooks {
             waits: Mutex::new(HashMap::new()),
             waited: Mutex::new(HashSet::new()),
             turn_lo: Mutex::new(HashMap::new()),
+            notes_at_start: Mutex::new(HashMap::new()),
             approves: Mutex::new(HashMap::new()),
             browsers: BrowserHub::new(),
             plan_lock: Mutex::new(()),
@@ -238,10 +242,33 @@ impl KernelHooks {
         self.sent.lock().unwrap().remove(agent);
         let lo = count_lines(&self.layout(agent).transcript());
         self.turn_lo.lock().unwrap().insert(agent.to_string(), lo);
+        self.notes_at_start.lock().unwrap().insert(
+            agent.to_string(),
+            crate::watch::stat(&store::notes_path(&self.place)),
+        );
     }
 
     pub fn turn_ended(&self, agent: &str) {
         self.running.lock().unwrap().remove(agent);
+        // The status page moved during this turn: tell every window now,
+        // not at the watch's next second. Root is the only writer, so a
+        // change seen at a child's turn end is root's, and still worth
+        // one frame.
+        let before = self.notes_at_start.lock().unwrap().remove(agent).flatten();
+        let notes = store::notes_path(&self.place);
+        let after = crate::watch::stat(&notes);
+        if before != after {
+            let kind = match (before, after) {
+                (None, Some(_)) => "created",
+                (Some(_), None) => "removed",
+                _ => "modified",
+            };
+            self.broadcast(Frame::Changed {
+                path: store::NOTES.to_string(),
+                kind: kind.into(),
+                size: after.map(|(size, _)| size).unwrap_or(0),
+            });
+        }
         // A child whose turn ended without a report: its last words, or its
         // failure, are what the waiting parent gets.
         if let Some((_, tx)) = self.waits.lock().unwrap().remove(agent) {
@@ -651,6 +678,27 @@ impl KernelHooks {
         isolate: Isolate,
         kind: Option<&str>,
     ) -> Result<(AgentId, Option<Worktree>)> {
+        self.spawn_named(
+            parent, None, brief, model, allowlist, readonly, cwd, isolate, kind,
+        )
+    }
+
+    /// `spawn_isolated` with the worker's name given (the coordinator
+    /// protocol's short imperative label). The name makes the child's id
+    /// and its row; without one both come from the brief's first words.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_named(
+        &self,
+        parent: &Agent,
+        name: Option<&str>,
+        brief: &str,
+        model: Option<&str>,
+        allowlist: Option<Vec<String>>,
+        readonly: bool,
+        cwd: Option<PathBuf>,
+        isolate: Isolate,
+        kind: Option<&str>,
+    ) -> Result<(AgentId, Option<Worktree>)> {
         // A definition fills in what the call left out; the call's own
         // model wins, the def's readonly cannot be switched off. Models fill
         // every optional field: `kind: "default"` (or none/null/auto) is not
@@ -716,9 +764,10 @@ impl KernelHooks {
                 self.caps.children
             );
         }
-        // Two children with the same brief get distinct ids (`-2`, `-3`, …)
+        // Two children with the same name get distinct ids (`-2`, `-3`, …)
         // rather than the second one failing.
-        let base = slug(brief);
+        let label = name.map(str::trim).filter(|n| !n.is_empty());
+        let base = slug(label.unwrap_or(brief));
         let mut id = base.clone();
         let mut n = 1;
         while self.place.agent_dir(&id).exists() {
@@ -737,7 +786,7 @@ impl KernelHooks {
         let saved_parent =
             arbos_core::load_agent(&self.place, &parent.id).unwrap_or_else(|_| parent.clone());
         let mut child = Agent::root(&id);
-        child.name = brief.chars().take(48).collect();
+        child.name = label.unwrap_or(brief).chars().take(48).collect();
         child.parent = Some(parent.id.clone());
         child.model = model.unwrap_or("inherit").to_string();
         if let Some(list) = allowlist {

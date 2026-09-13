@@ -61,9 +61,56 @@ impl Tool for Spawn {
     fn schema(&self) -> Value {
         typed_schema(
             "spawn",
-            "Start a child agent with a brief. The child owns its own plan and schedule: do not add plan nodes of your own that mirror its job. Its reports arrive here as messages from it. isolate=worktree gives it a git worktree of this repository (.arbos/worktrees/<id>, branch arbos/<id>, cut from HEAD) so it can edit, build, and commit without touching your checkout — use it for any child that changes code while you or another child also do. kind picks a custom agent definition (see Kinds in your prompt): its model, tools, and standing instructions apply to the child.",
+            "Start a child agent (a worker) with a kickoff brief. Give the brief as the six template fields — read_first, task, do, rules, output, report — and a short imperative name; the kernel renders them into the child's first message. Pass content that already exists as a path (.arbos/docs/…, .arbos/internal/…), never restated. `brief` is the raw alternative when the template does not fit. The child owns its own plan and schedule: do not add plan nodes of your own that mirror its job. Its reports arrive here as messages from it, and the kernel sends you a [done] message when its turn ends. isolate=worktree gives it a git worktree of this repository (.arbos/worktrees/<id>, branch arbos/<id>, cut from HEAD) so it can edit, build, and commit without touching your checkout — use it for any child that changes code while you or another child also do. kind picks a custom agent definition (see Kinds in your prompt): its model, tools, and standing instructions apply to the child.",
             &[
-                ("brief", "What the child should do.", true, "string"),
+                (
+                    "name",
+                    "The worker's name: a short imperative label, about five words (\"Run SWE-bench through Arbos harness\"). It becomes the child's id and its row in the panel.",
+                    false,
+                    "string",
+                ),
+                (
+                    "task",
+                    "One paragraph in the user's words: what the worker is to achieve. Required unless `brief` is given.",
+                    false,
+                    "string",
+                ),
+                (
+                    "read_first",
+                    "Paths in the project store the worker reads before anything else. Default: .arbos/docs/project-context.md, then .arbos/notes.md.",
+                    false,
+                    "string",
+                ),
+                (
+                    "do",
+                    "Numbered steps, each concrete, one per line.",
+                    false,
+                    "string",
+                ),
+                (
+                    "rules",
+                    "Repo and base branch, no merging, no extra docs, secrets via secret by name, redaction. A default covers the usual.",
+                    false,
+                    "string",
+                ),
+                (
+                    "output",
+                    "Exact file paths the worker writes, under .arbos/docs/, .arbos/internal/, or .arbos/media/<topic>/. It verifies each exists before reporting.",
+                    false,
+                    "string",
+                ),
+                (
+                    "report",
+                    "What to say back, kept short: outcome, links, open questions.",
+                    false,
+                    "string",
+                ),
+                (
+                    "brief",
+                    "Raw brief text, used as-is when the template fields are not given.",
+                    false,
+                    "string",
+                ),
                 (
                     "kind",
                     "Name of an agent definition from .arbos/agents-defs/ (Kinds in your prompt).",
@@ -106,7 +153,27 @@ impl Tool for Spawn {
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         let hooks = Arc::clone(&self.0);
         Box::pin(async move {
-            let brief = req(&args, "brief")?;
+            let name = opt_str(&args, "name")
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            // The template wins when a task is given; a raw brief is the
+            // fallback. Neither is an error the model can act on.
+            let rendered = match (opt_str(&args, "task"), opt_str(&args, "brief")) {
+                (Some(task), _) => arbos_core::store::Kickoff {
+                    read_first: opt_str(&args, "read_first"),
+                    task,
+                    do_: opt_str(&args, "do"),
+                    rules: opt_str(&args, "rules"),
+                    output: opt_str(&args, "output"),
+                    report: opt_str(&args, "report"),
+                }
+                .render(),
+                (None, Some(brief)) => brief.to_string(),
+                (None, None) => {
+                    anyhow::bail!("spawn: give `task` (with the template fields) or a raw `brief`")
+                }
+            };
+            let brief = rendered.as_str();
             let model = opt_str(&args, "model");
             let readonly = opt_bool(&args, "readonly").unwrap_or(false);
             let cwd = opt_str(&args, "cwd").map(PathBuf::from);
@@ -142,11 +209,13 @@ impl Tool for Spawn {
             // git runs on the blocking pool: a large checkout takes seconds.
             let agent = cx.agent.clone();
             let brief_owned = brief.to_string();
+            let name_owned = name.map(str::to_string);
             let model_owned = model.map(str::to_string);
             let spawner = Arc::clone(&hooks);
             let (id, worktree) = tokio::task::spawn_blocking(move || {
-                spawner.spawn_isolated(
+                spawner.spawn_named(
                     &agent,
+                    name_owned.as_deref(),
                     &brief_owned,
                     model_owned.as_deref(),
                     None,
@@ -158,9 +227,13 @@ impl Tool for Spawn {
             })
             .await
             .map_err(|e| anyhow::anyhow!("spawn task: {e}"))??;
+            let shown = match name {
+                Some(n) => format!("{n}\n{brief}"),
+                None => brief.to_string(),
+            };
             let mut body = match kind {
-                Some(k) => format!("spawned {id} (kind {k}): {brief}"),
-                None => format!("spawned {id}: {brief}"),
+                Some(k) => format!("spawned {id} (kind {k}): {shown}"),
+                None => format!("spawned {id}: {shown}"),
             };
             let mut paths = vec![format!(".arbos/agents/{id}")];
             if let Some(w) = &worktree {
