@@ -101,6 +101,8 @@ pub struct Peek {
     pub phase: Option<Phase>,
     /// Microphone loudness 0..1 (RMS of the last chunk).
     pub level: f32,
+    /// The input device the mic process reads, once it is running.
+    pub mic_device: String,
     /// What the reply audio is saying, when the server tells us.
     pub reply: String,
     pub error: Option<String>,
@@ -143,6 +145,7 @@ struct Shared {
     take_done: bool,
     reply: String,
     level: f32,
+    mic_device: String,
     error: Option<String>,
     /// Bytes of reply audio played, for the tests.
     played: u64,
@@ -196,6 +199,7 @@ pub fn status() -> Peek {
         text,
         phase: s.phase,
         level: s.level,
+        mic_device: s.mic_device.clone(),
         reply: s.reply.clone(),
         error: s.error.clone(),
         engine: s.engine.clone(),
@@ -889,12 +893,30 @@ impl Mic {
         shared: Arc<Mutex<Shared>>,
     ) -> Result<Self> {
         let mut cmd = mic_command()?;
+        // What the strip shows as `mic: …`: the device when we chose one,
+        // else the program's name.
+        let device = {
+            let args: Vec<String> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            args.iter()
+                .find(|a| a.starts_with(':') && a.len() > 1)
+                .map(|a| a[1..].to_string())
+                .unwrap_or_else(|| {
+                    std::path::Path::new(cmd.get_program())
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                })
+        };
         let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| anyhow!("start {}: {e}", cmd.get_program().to_string_lossy()))?;
+        shared.lock().unwrap().mic_device = device;
         let mut out = child.stdout.take().ok_or_else(|| anyhow!("mic has no stdout"))?;
         std::thread::Builder::new()
             .name("arbos-mic".into())
@@ -1370,13 +1392,63 @@ fn rms(pcm: &[u8]) -> f32 {
 }
 
 fn which(program: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths)
-                .map(|d| d.join(program))
-                .any(|f| f.is_file())
+    find_program(program).is_some()
+}
+
+/// Where `program` is. A window launched from the Dock or `open` gets
+/// macOS's minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), which has no
+/// Homebrew in it, so the usual install prefixes are searched as well.
+fn find_program(program: &str) -> Option<std::path::PathBuf> {
+    let from_path = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|d| d.join(program))
+            .find(|f| f.is_file())
+    });
+    from_path.or_else(|| {
+        ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"]
+            .iter()
+            .map(|d| std::path::Path::new(d).join(program))
+            .find(|f| f.is_file())
+    })
+}
+
+/// The system's default input device, by the name AVFoundation lists it
+/// under. `ARBOS_VOICE_MIC_DEVICE` names one by hand. None: let ffmpeg
+/// take audio device 0 — which on a Mac with virtual devices (RØDE
+/// Connect, BlackHole) is often not a microphone at all.
+#[cfg(target_os = "macos")]
+fn default_input_device() -> Option<String> {
+    if let Ok(name) = std::env::var("ARBOS_VOICE_MIC_DEVICE") {
+        let name = name.trim().to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    let out = Command::new("/usr/sbin/system_profiler")
+        .args(["SPAudioDataType", "-json"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    v.get("SPAudioDataType")?
+        .as_array()?
+        .iter()
+        .filter_map(|g| g.get("_items")?.as_array())
+        .flatten()
+        .find(|it| {
+            it.get("coreaudio_default_audio_input_device")
+                .and_then(Value::as_str)
+                == Some("spaudio_yes")
         })
-        .unwrap_or(false)
+        .and_then(|it| it.get("_name")?.as_str().map(str::to_string))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_input_device() -> Option<String> {
+    std::env::var("ARBOS_VOICE_MIC_DEVICE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
 }
 
 fn sh(cmd: &str) -> Command {
@@ -1429,8 +1501,9 @@ fn mic_command() -> Result<Command> {
         ]);
         return Ok(c);
     }
-    if cfg!(target_os = "macos") && which("ffmpeg") {
-        let mut c = Command::new("ffmpeg");
+    if cfg!(target_os = "macos") && let Some(ffmpeg) = find_program("ffmpeg") {
+        let device = default_input_device().unwrap_or_else(|| "0".to_string());
+        let mut c = Command::new(ffmpeg);
         c.args([
             "-hide_banner",
             "-loglevel",
@@ -1438,7 +1511,7 @@ fn mic_command() -> Result<Command> {
             "-f",
             "avfoundation",
             "-i",
-            ":0",
+            &format!(":{device}"),
             "-ac",
             "1",
             "-ar",
