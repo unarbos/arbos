@@ -276,6 +276,13 @@ pub struct UserMessage {
     /// replay from the transcript's timestamps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worked_secs: Option<u32>,
+    /// Unix millis when the prompt was sent (or, on replay, the transcript
+    /// line's time). The relative time under the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<i64>,
+    /// The user's thumbs on this turn's answer: 1 up, -1 down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<i8>,
 }
 
 impl UserMessage {
@@ -336,6 +343,8 @@ impl From<StoredMessage> for UserMessage {
                 images: Vec::new(),
                 files: Vec::new(),
                 worked_secs: None,
+                sent_at: None,
+                feedback: None,
             },
             StoredMessage::Images {
                 text,
@@ -346,6 +355,8 @@ impl From<StoredMessage> for UserMessage {
                 images,
                 files,
                 worked_secs: None,
+                sent_at: None,
+                feedback: None,
             },
         };
         out.lift_files();
@@ -360,6 +371,8 @@ impl From<String> for UserMessage {
             images: Vec::new(),
             files: Vec::new(),
             worked_secs: None,
+            sent_at: Some(arbos_core::now_ms()),
+            feedback: None,
         };
         message.lift_files();
         message
