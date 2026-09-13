@@ -11,8 +11,8 @@ use crate::{
     },
     view::{
         component::{composer, composer::SessionDrag, menu::Menu, surface as board, transcript},
+        naming::Renaming,
         root::{self, Arbos, NewSession, Pane},
-        sidebar::{self, Renaming},
     },
 };
 use bezel::{
@@ -597,10 +597,6 @@ impl Arbos {
             .child(body);
         let context_row = show_composer.then(|| self.context_row(&theme, cx));
 
-        let context_panel = show_composer
-            .then(|| self.context_panel(&theme, cx))
-            .flatten()
-            .filter(|_| f32::from(window.viewport_size().width) >= CONTEXT_PANEL_MIN_WINDOW);
         div()
             .flex_1()
             .min_w_0()
@@ -652,18 +648,11 @@ impl Arbos {
                     })
                     .when(empty_chat, |column| {
                         column.child(div().flex_grow(1.).flex_basis(px(0.)))
-                    })
-                    // Out of flow, so folding the sidebar away costs the pane nothing:
-                    // the controls float on the column rather than taking a row off it.
-                    .when(!self.sidebar_open, |column| {
-                        column.child(self.fold_cluster(window, cx))
                     }),
             )
-            .children(context_panel)
     }
 }
 
-/// Width of the context rail on the chat's right.
 /// Frame rate of the voice status bars while listening or speaking.
 const VOICE_FPS: f32 = 20.0;
 
@@ -673,184 +662,10 @@ fn voice_phase() -> Duration {
     START.get_or_init(std::time::Instant::now).elapsed()
 }
 
-const CONTEXT_PANEL_WIDTH: f32 = 200.;
-/// Below this window width the rail is left out; the transcript comes first.
-const CONTEXT_PANEL_MIN_WINDOW: f32 = 1000.;
-
 impl Arbos {
-    /// Cursor's context rail: "On ‹branch›" at the top, then one row per
-    /// thing the chat has open — a browser page, a terminal, a job — each a
-    /// click from view. Left out on a narrow window.
-    fn context_panel(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let workspace = self.workspace.read(cx);
-        let project = workspace.active_project()?;
-        let chat = workspace.active_session()?;
-        let mut surfaces: Vec<_> = project
-            .surfaces
-            .iter()
-            .filter(|surface| surface.owner == Some(chat.id))
-            .collect();
-        surfaces.sort_by_key(|surface| std::cmp::Reverse(surface.touched));
-        let tasks = workspace.child_summaries(chat.id);
-        // Cursor's rail carries standing Browser/Terminal/Files verbs; here a
-        // surface exists only once the agent opens one, so an empty rail
-        // would be dead space. It appears with the first surface or the
-        // first sub-agent.
-        if surfaces.is_empty() && tasks.is_empty() {
-            return None;
-        }
-        let focused_child = project.focused_agent();
-        let since = chat
-            .live_since
-            .and_then(|at| at.elapsed().ok())
-            .unwrap_or_default();
-        let focus = project.focus.and_then(|focus| focus.surface);
-        let place_path = (project.place().host.is_none()).then(|| project.place().path.clone());
-        let on = place_path
-            .as_deref()
-            .and_then(|path| self.branch_of(path))
-            .unwrap_or_else(|| project.name());
-        let rows: Vec<AnyElement> = surfaces
-            .iter()
-            .map(|surface| {
-                let id = surface.id;
-                let selected = focus == Some(id);
-                div()
-                    .id(("context-surface", id.0))
-                    .h(px(26.))
-                    .px(px(8.))
-                    .rounded(px(5.))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.))
-                    .cursor_pointer()
-                    .text_style(TextStyle::Caption)
-                    .text_color(if selected {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .when(selected, |el| el.bg(theme.element_active))
-                    .when(!selected, |el| el.hover(|el| el.bg(theme.element_hover)))
-                    .child(
-                        icons::icon(board::glyph(&surface.board_kind))
-                            .size(px(12.))
-                            .flex_none()
-                            .text_color(theme.text_muted),
-                    )
-                    .child(div().min_w_0().truncate().child(surface.title.clone()))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_surface(id, cx)))
-                    .into_any_element()
-            })
-            .collect();
-        let working = tasks
-            .iter()
-            .filter(|t| t.state == session::ChildState::Working)
-            .count();
-        let task_rows: Vec<AnyElement> = tasks
-            .iter()
-            .map(|task| {
-                let id = task.id;
-                let selected = focused_child == Some(id);
-                let glyph: AnyElement = match task.state {
-                    session::ChildState::Working => {
-                        transcript::spinner(since, theme.text_muted, cx)
-                    }
-                    session::ChildState::Asking => icons::icon(icons::system::CHAT_ROUND_LINE)
-                        .size(px(12.))
-                        .text_color(theme.accent)
-                        .into_any_element(),
-                    session::ChildState::Waiting => div()
-                        .size(px(9.))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(theme.text_faint)
-                        .into_any_element(),
-                    session::ChildState::Done => icons::icon(icons::status::CHECK)
-                        .size(px(12.))
-                        .text_color(theme.success)
-                        .into_any_element(),
-                };
-                div()
-                    .id(("context-task", id))
-                    .h(px(26.))
-                    .px(px(8.))
-                    .rounded(px(5.))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.))
-                    .cursor_pointer()
-                    .text_style(TextStyle::Caption)
-                    .text_color(match task.state {
-                        session::ChildState::Done if !selected => theme.text_faint,
-                        _ if selected => theme.text,
-                        _ => theme.text_muted,
-                    })
-                    .when(selected, |el| el.bg(theme.element_active))
-                    .when(!selected, |el| el.hover(|el| el.bg(theme.element_hover)))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(12.))
-                            .flex()
-                            .justify_center()
-                            .child(glyph),
-                    )
-                    .child(div().min_w_0().truncate().child(task.title.clone()))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_session(id, cx)))
-                    .into_any_element()
-            })
-            .collect();
-        let tasks_head = (!tasks.is_empty()).then(|| {
-            div()
-                .h(px(22.))
-                .px(px(8.))
-                .mt(px(6.))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_style(TextStyle::Caption)
-                .text_color(theme.text_faint)
-                .child("Tasks")
-                .child(div().flex_1())
-                .child(SharedString::from(if working > 0 {
-                    format!("{working} working")
-                } else {
-                    format!("{}", tasks.len())
-                }))
-        });
-        Some(
-            div()
-                .id("context-panel")
-                .flex_none()
-                .w(px(CONTEXT_PANEL_WIDTH))
-                .h_full()
-                .pt(px(root::HEADER_HEIGHT + 8.))
-                .px(px(10.))
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .h(px(22.))
-                        .px(px(8.))
-                        .flex()
-                        .items_center()
-                        .text_style(TextStyle::Caption)
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(format!("On {on}"))),
-                )
-                .children(rows)
-                .children(tasks_head)
-                .children(task_rows)
-                .into_any_element(),
-        )
-    }
-
-    /// Cursor's chat header: the title and the place on the left, the chat's
-    /// menu on the right, on one slim line the transcript scrolls under.
+    /// Cursor's chat header: the chat's place in the tree on the left — its
+    /// parents as crumbs, then its title — the chat's menu and the panel
+    /// toggle on the right, on one slim line the transcript scrolls under.
     fn chat_header(
         &self,
         theme: &Theme,
@@ -865,28 +680,52 @@ impl Arbos {
         let closed = chat.closed;
         let title = workspace.display_label(id);
         let naming = self.renaming == Some(Renaming::Session(id)) && self.rename_in_header;
-        let place = workspace.active_project().map(|project| project.name());
+        // A sub-agent in front is shown under its parents, Cursor's way:
+        // `Main › Review edge cases`, each crumb a click back up the tree.
+        let crumbs: Vec<(u64, String)> = workspace
+            .active_project()
+            .map(|project| {
+                let mut path = project.path_to(id);
+                path.pop();
+                path.into_iter()
+                    .map(|up| (up, workspace.display_label(up)))
+                    .collect()
+            })
+            .unwrap_or_default();
         let name_field = naming.then(|| self.header_name_field(window, cx));
-        // Folded, the sidebar's traffic lights and fold button sit on this
-        // column's left edge; the title starts after them. The cluster
-        // begins at TOOLBAR_INSET and is CLUSTER_WIDTH wide, so a fixed
-        // 92pt put the button over the title's first letters.
-        let lead = if self.sidebar_open {
-            14.
-        } else {
-            root::TOOLBAR_INSET + sidebar::CLUSTER_WIDTH + 10.
-        };
         div()
             .id("chat-header")
             .flex_none()
             .h(px(root::HEADER_HEIGHT))
             .w_full()
-            .pl(px(lead))
+            .pl(px(14.))
             .pr(px(10.))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.))
+            .gap(px(6.))
+            .children(crumbs.into_iter().flat_map(|(up, label)| {
+                [
+                    div()
+                        .id(("chat-header-crumb", up))
+                        .flex_none()
+                        .max_w(px(180.))
+                        .truncate()
+                        .text_style(TextStyle::Body)
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover(|el| el.text_color(theme.text))
+                        .child(SharedString::from(label))
+                        .on_click(cx.listener(move |this, _, _, cx| this.select_session(up, cx)))
+                        .into_any_element(),
+                    div()
+                        .flex_none()
+                        .text_style(TextStyle::Body)
+                        .text_color(theme.text_faint)
+                        .child("›")
+                        .into_any_element(),
+                ]
+            }))
             .child(if naming {
                 div()
                     .id(("chat-header-title-name", id))
@@ -912,35 +751,23 @@ impl Arbos {
                         }
                     }))
             })
-            .children(place.map(|name| {
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.))
-                    .text_style(TextStyle::Caption)
-                    .text_color(theme.text_faint)
-                    .child(
-                        icons::icon(icons::files::FOLDER)
-                            .size(px(11.))
-                            .text_color(theme.text_faint)
-                            .into_any_element(),
-                    )
-                    .child(div().max_w(px(200.)).truncate().child(name))
-            }))
             .child(div().flex_1())
             .child(
-                div()
-                    .id(("chat-header-menu", id))
-                    .relative()
-                    .flex_none()
-                    .size(px(24.))
-                    .rounded(px(5.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|el| el.bg(theme.element_hover))
+                self.menu_press(
+                    div()
+                        .id(("chat-header-menu", id))
+                        .relative()
+                        .flex_none()
+                        .size(px(24.))
+                        .rounded(px(5.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|el| el.bg(theme.element_hover)),
+                    Menu::Session(id),
+                    cx,
+                )
                     .tooltip(|window, cx| Tooltip::text("Chat actions", window, cx))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_menu_at_header(Menu::Session(id), cx)
@@ -956,6 +783,7 @@ impl Arbos {
                         None
                     }),
             )
+            .child(self.panel_toggle(cx))
             .into_any_element()
     }
 
@@ -1131,7 +959,7 @@ impl Arbos {
 
     /// The checked-out branch of a local place, read once and kept; a
     /// checkout elsewhere shows up the next time the window opens the place.
-    fn branch_of(&self, path: &std::path::Path) -> Option<String> {
+    pub(crate) fn branch_of(&self, path: &std::path::Path) -> Option<String> {
         if let Some((known, branch)) = self.branch_cache.borrow().as_ref()
             && known == path
         {

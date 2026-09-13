@@ -19,8 +19,8 @@
 //! for, and why a greyed item's shortcut still reaches the keymap underneath.
 
 use crate::view::root::{
-    CloseProject, Arbos, NewSession, NextEntry, OpenProject, OpenSettings, PrevEntry,
-    ToggleSidebar, ZoomIn, ZoomOut, ZoomReset,
+    Arbos, CloseProject, NewSession, NewTab, NextEntry, NextTab, OpenProject, OpenSettings,
+    PrevEntry, PrevTab, TogglePanel, ZoomIn, ZoomOut, ZoomReset,
 };
 use bezel::{
     gpui::{
@@ -50,7 +50,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
-        KeyBinding::new("cmd-w", CloseWindow, None),
+        // ⌘W is the tab's — see `root::init`; the window closes on the
+        // browser's chord for it.
+        KeyBinding::new("cmd-shift-w", CloseWindow, None),
         KeyBinding::new("cmd-m", Minimize, None),
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
     ]);
@@ -145,10 +147,11 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Quit Arbos", Quit),
         ]),
         Menu::new("File").items([
-            MenuItem::action("New Session", NewSession),
+            MenuItem::action("New Tab", NewTab),
+            MenuItem::action("New Sub-chat", NewSession),
             MenuItem::separator(),
             MenuItem::action("Open Project…", OpenProject),
-            MenuItem::action("Close Project", CloseProject),
+            MenuItem::action("Close Tab", CloseProject),
             MenuItem::separator(),
             MenuItem::action("Close Window", CloseWindow),
         ]),
@@ -171,13 +174,16 @@ fn menus() -> Vec<Menu> {
             MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
         ]),
         Menu::new("View").items([
-            MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            MenuItem::action("Toggle Panel", TogglePanel),
             MenuItem::separator(),
-            // Drawn ⌥⌘→ and ⌥⌘←, which is why those are bound first: the
+            // Drawn ⇧⌘] and ⇧⌘[, which is why those are bound first: the
             // `ctrl-tab` pair these also answer to is a chord gpui cannot
             // hand macOS, and an item that named it would teach ⌃T.
-            MenuItem::action("Next Entry", NextEntry),
-            MenuItem::action("Previous Entry", PrevEntry),
+            MenuItem::action("Next Tab", NextTab),
+            MenuItem::action("Previous Tab", PrevTab),
+            MenuItem::separator(),
+            MenuItem::action("Next Agent", NextEntry),
+            MenuItem::action("Previous Agent", PrevEntry),
             MenuItem::separator(),
             MenuItem::action("Actual Size", ZoomReset),
             MenuItem::action("Zoom In", ZoomIn),
@@ -246,8 +252,9 @@ impl Arbos {
         let project = workspace.active.is_some();
         let entries = self.showing(cx).is_some();
 
-        root.on_action(cx.listener(Self::toggle_sidebar_action))
+        root.on_action(cx.listener(Self::toggle_panel_action))
             .on_action(cx.listener(Self::open_project_action))
+            .on_action(cx.listener(Self::new_tab_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::show_chat))
             .on_action(cx.listener(Self::zoom_in_action))
@@ -256,6 +263,8 @@ impl Arbos {
             .when(project, |root| {
                 root.on_action(cx.listener(Self::close_project_action))
                     .on_action(cx.listener(Self::new_session_action))
+                    .on_action(cx.listener(Self::next_tab))
+                    .on_action(cx.listener(Self::prev_tab))
             })
             .when(entries, |root| {
                 root.on_action(cx.listener(Self::next_entry))

@@ -1,5 +1,5 @@
 //! Root view: the window's grid, the state the chrome owns, and the frame
-//! the sidebar and the chat column are hung in.
+//! the tab bar, the chat column and the right-hand panel are hung in.
 
 use crate::{
     kernel,
@@ -16,17 +16,16 @@ use crate::{
             meter,
             opener::{Opener, OpenerEvent},
         },
+        naming::Renaming,
         settings::{self, Section, SettingsWindow},
-        sidebar::{Renaming, Row, SessionDrop},
     },
 };
 use anyhow::Result;
 use bezel::{
     gpui::{
-        self, AnyElement, App, Axis, Bounds, Context, DragMoveEvent, Empty, Entity, FocusHandle,
-        Focusable as _, Hsla, KeyBinding, PathPromptOptions, Render, Task, TitlebarOptions,
-        UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowOptions, actions, div,
-        point, prelude::*, px, size,
+        self, AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable as _, Hsla,
+        KeyBinding, PathPromptOptions, Render, Task, TitlebarOptions, Window, WindowBounds,
+        WindowHandle, WindowOptions, actions, div, point, prelude::*, px, size,
     },
     motion::{Fade, Painter},
     theme::{Material, TextStyle, Theme, Typeset, appearance},
@@ -36,7 +35,7 @@ use bezel::{
         input::{FieldEvent, TextField},
         menu::Cursor,
         stats::Stats,
-        widgets::{ButtonStyle, Buttons, Content, Layout, SPLIT_HANDLE_HIT, SplitDrag, SplitStyle},
+        widgets::{ButtonStyle, Buttons, Content},
     },
 };
 use std::time::Duration;
@@ -44,10 +43,13 @@ actions!(
     arbos,
     [
         NewSession,
+        NewTab,
         OpenProject,
         CloseProject,
+        NextTab,
+        PrevTab,
         OpenSettings,
-        ToggleSidebar,
+        TogglePanel,
         ShowChat,
         CommitName,
         DismissName,
@@ -85,18 +87,11 @@ fn name_field_entity(heading: bool, cx: &mut Context<Arbos>) -> Entity<TextField
     })
 }
 
-/// Cursor's Agents sidebar measures 267pt at a 1728pt window.
-const SIDEBAR_WIDTH: f32 = 260.;
-const SIDEBAR_WIDTH_MIN: f32 = 180.;
-const SIDEBAR_WIDTH_MAX: f32 = 420.;
-
-/// The sidebar's gutter: a row's outer margin, and the padding inside it.
-pub(crate) const SIDEBAR_GUTTER: f32 = 8.;
-
 /// How thick each column's material sits. Nothing paints beneath them, so these
-/// are absolute and independent: the sidebar is chrome and holds no long-form
-/// text, the panel is the column whose text has to win against the desktop.
-const SIDEBAR_MATERIAL: Material = Material::Thick;
+/// are absolute and independent: the tab bar and the panel are chrome and hold
+/// no long-form text, the chat is the column whose text has to win against
+/// the desktop.
+const CHROME_MATERIAL: Material = Material::Thick;
 const CONTENT_MATERIAL: Material = Material::UltraThick;
 
 /// The header strip's height, measured off `../desktop`: between Cursor's 34
@@ -138,11 +133,12 @@ pub(crate) const COMPOSER_HIT: f32 = 28.;
 /// How far the floating composer stands off the column's bottom edge.
 pub(crate) const COMPOSER_BOTTOM: f32 = 12.;
 
-/// The sidebar's fill. Opaque, it takes the chrome tone: the light palette's
-/// `surface` is the grey the content plane's white sits inside, and falling
-/// back to the panel would leave the two columns one flat sheet.
-pub(crate) fn sidebar_bg(theme: &Theme) -> Hsla {
-    material(theme, SIDEBAR_MATERIAL).unwrap_or(theme.surface)
+/// The chrome's fill — the tab bar and the panel. Opaque, it takes the
+/// chrome tone: the light palette's `surface` is the grey the content
+/// plane's white sits inside, and falling back to the panel would leave
+/// the columns one flat sheet.
+pub(crate) fn chrome_bg(theme: &Theme) -> Hsla {
+    material(theme, CHROME_MATERIAL).unwrap_or(theme.surface)
 }
 
 /// The content column's fill.
@@ -192,15 +188,32 @@ pub(crate) const TOOLBAR_INSET: f32 = if cfg!(target_os = "macos") {
 pub fn init(cx: &mut App) {
     crate::view::terminal::init(cx);
     cx.bind_keys([
+        // A sub-chat under the project's main chat. The project has one
+        // main chat, so this never makes a second root.
         KeyBinding::new("cmd-n", NewSession, None),
+        // A tab is a project; both chords open the same machine-then-folder
+        // picker. ⌘T is the browser's word for it, ⌘O the Mac's.
+        KeyBinding::new("cmd-t", NewTab, None),
         KeyBinding::new("cmd-o", OpenProject, None),
+        // ⌘W closes the tab in front, as in a browser; the window itself
+        // closes on ⇧⌘W — see `menubar`.
+        KeyBinding::new("cmd-w", CloseProject, None),
+        // Browser tab cycling. `[` and `]` first, which is how macOS names
+        // the keys and what the menu draws; the braces are the same keys
+        // with shift held, as Linux reports them.
+        KeyBinding::new("cmd-shift-]", NextTab, None),
+        KeyBinding::new("cmd-shift-[", PrevTab, None),
+        KeyBinding::new("cmd-shift-}", NextTab, None),
+        KeyBinding::new("cmd-shift-{", PrevTab, None),
+        KeyBinding::new("ctrl-tab", NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", PrevTab, None),
         // What macOS binds Preferences to in every other app.
         KeyBinding::new("cmd-,", OpenSettings, None),
-        // What every app with a sidebar binds it to. It is claimed app-wide:
-        // the menu item carries it, so AppKit takes the chord before the
-        // window is offered it, and the editor's own `cmd-b` — bold — is not
-        // reached while this one is on the bar.
-        KeyBinding::new("cmd-b", ToggleSidebar, None),
+        // What every app with a side panel binds it to. It is claimed
+        // app-wide: the menu item carries it, so AppKit takes the chord
+        // before the window is offered it, and the editor's own `cmd-b` —
+        // bold — is not reached while this one is on the bar.
+        KeyBinding::new("cmd-b", TogglePanel, None),
         KeyBinding::new("cmd-1", ShowChat, None),
         // What a browser binds its zoom to. `cmd-=` first so the menu
         // draws ⌘= like Safari; `cmd-+` is the same key with shift held.
@@ -208,18 +221,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-+", ZoomIn, None),
         KeyBinding::new("cmd--", ZoomOut, None),
         KeyBinding::new("cmd-0", ZoomReset, None),
-        // Bound ahead of the `tab` pair below because the menu draws the first
-        // chord a command was given, and `tab` is the one it cannot draw: gpui
-        // has no macOS key equivalent for it, so AppKit is handed the word
-        // where the API takes one character and shows ⌃T. These are what the
-        // View menu carries.
-        KeyBinding::new("alt-cmd-right", NextEntry, None),
-        KeyBinding::new("alt-cmd-left", PrevEntry, None),
-        // What a browser binds its tabs to. Global, because the point is to
-        // move between documents without taking the hand out of the editor —
-        // where `tab` itself is indent.
-        KeyBinding::new("ctrl-tab", NextEntry, None),
-        KeyBinding::new("ctrl-shift-tab", PrevEntry, None),
+        // Step between the agents the panel lists. These are what the View
+        // menu carries; the bare arrows below answer where no field has them.
+        KeyBinding::new("alt-cmd-down", NextEntry, None),
+        KeyBinding::new("alt-cmd-up", PrevEntry, None),
         // Claimed app-wide and answered last: an editor and a field bind copy
         // on their own contexts, which gpui dispatches from the focus outward,
         // so this only runs where nothing else wanted it — which is exactly
@@ -452,12 +457,12 @@ fn stepped(at: Option<usize>, len: usize, step: isize) -> Option<usize> {
     Some(next as usize)
 }
 
-/// The root view. It owns no app state — only the chrome's own: how wide the
-/// sidebar is, which pane is showing, and whichever card is being written.
+/// The root view. It owns no app state — only the chrome's own: whether the
+/// panel is out, which pane is showing, and whichever name is being typed.
 pub struct Arbos {
     pub(crate) workspace: Entity<Workspace>,
     /// The open session menu was opened from the chat header's `⋯`, so it
-    /// anchors there rather than at the sidebar row.
+    /// anchors there rather than at a panel row.
     pub(crate) menu_at_header: bool,
     /// The git branch of the last local place looked at, for the row under
     /// the composer. `(place path, branch or none)`.
@@ -465,8 +470,8 @@ pub struct Arbos {
     pub(crate) terminals:
         std::collections::HashMap<String, Entity<crate::view::terminal::TerminalPane>>,
     active_terminal: Option<String>,
-    pub(crate) sidebar_open: bool,
-    pub(crate) sidebar_width: f32,
+    /// Whether the right-hand panel is out. ⌘B folds it away.
+    pub(crate) panel_open: bool,
     pub(crate) composer: Entity<Composer>,
     pub(crate) opener: Entity<Opener>,
     settings_window: Option<WindowHandle<SettingsWindow>>,
@@ -482,7 +487,7 @@ pub struct Arbos {
     /// What the name field is attached to, and the field itself.
     pub(crate) renaming: Option<Renaming>,
     /// True when the empty-chat title is being edited, so the field lives
-    /// there — not also in the sidebar row, which would move and restyle it.
+    /// there — not also on a panel row, which would move and restyle it.
     pub(crate) rename_heading: bool,
     /// True when the chat header's title is being edited: the field sits on
     /// the header line, Body-sized, and nowhere else.
@@ -493,9 +498,6 @@ pub struct Arbos {
     pub(crate) name_field: Entity<TextField>,
     meter: Entity<Stats>,
     meter_at: Floating,
-    /// The rail's scroll. A step taken from the keyboard has to bring its
-    /// landing into view; the list does not scroll itself.
-    pub(crate) rail: UniformListScrollHandle,
     /// Where the focus rests when no field holds it — a board, a table and a
     /// transcript have none — so the bindings below always have a path here.
     focus: FocusHandle,
@@ -517,16 +519,6 @@ pub struct Arbos {
     /// Native Fn monitor. Lives with the window so Drop removes it.
     #[cfg(target_os = "macos")]
     _fn_monitor: Option<crate::view::fn_key::Monitor>,
-    /// Where a dragged project will land: `0` is the top, `len` is after
-    /// the last. `None` when nothing is being carried.
-    pub(crate) drop_slot: Option<usize>,
-    /// Where a dragged chat will land among its siblings. `None` when
-    /// no chat is being carried, or the pointer has left the list.
-    pub(crate) session_drop: Option<SessionDrop>,
-    /// Which project heading the pointer is on, and whether it is the
-    /// pinned copy. The chevron and `+` mount only then — an invisible
-    /// control would still steal the click.
-    pub(crate) hovering_head: Option<(usize, bool)>,
     /// Debounced write of the composer line so a kill still has it.
     pub(crate) draft_flush: Task<()>,
 }
@@ -631,7 +623,7 @@ impl Arbos {
         // The kernel opened a terminal, browser, or process under the chat,
         // or closed the one in front. Which pane shows is the window's to
         // decide, so the model asks and this answers — the same switch a
-        // click on the sidebar row makes.
+        // click on a panel row makes.
         cx.subscribe_in(
             &workspace,
             window,
@@ -648,8 +640,7 @@ impl Arbos {
             workspace,
             terminals: Default::default(),
             active_terminal: None,
-            sidebar_open: true,
-            sidebar_width: SIDEBAR_WIDTH,
+            panel_open: true,
             composer,
             opener,
             settings_window: None,
@@ -664,7 +655,6 @@ impl Arbos {
             branch_cache: std::cell::RefCell::new(None),
             menu_at_header: false,
             name_field,
-            rail: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
             voice_gen: 0,
             voice_place: None,
@@ -674,9 +664,6 @@ impl Arbos {
             plan_folded: false,
             #[cfg(target_os = "macos")]
             _fn_monitor: None,
-            drop_slot: None,
-            session_drop: None,
-            hovering_head: None,
             draft_flush: Task::ready(()),
         };
         let field = this.composer.read(cx).text_field();
@@ -767,6 +754,8 @@ impl Arbos {
         self.name_field = name_field_entity(heading, cx);
     }
 
+    /// ⌘N: a sub-chat under the project's main chat. It shows in the panel
+    /// with the sub-agents; the main chat stays the one root.
     pub(crate) fn new_session_action(
         &mut self,
         _: &NewSession,
@@ -775,11 +764,37 @@ impl Arbos {
     ) {
         self.show_pane(Pane::Chat, cx);
         self.workspace.update(cx, |workspace, cx| {
-            if let Some(entry) = workspace.preferred_agent() {
-                workspace.new_session(entry, None, cx);
-            }
+            workspace.new_child_session(cx);
         });
         self.focus_composer_after_create(window, cx);
+    }
+
+    /// ⌘T: a new tab, which is a project — pick the machine, then the
+    /// folder. Same picker as ⌘O.
+    pub(crate) fn new_tab_action(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_project_action(&OpenProject, window, cx);
+    }
+
+    pub(crate) fn next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(1, cx);
+    }
+
+    pub(crate) fn prev_tab(&mut self, _: &PrevTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(-1, cx);
+    }
+
+    /// Step to the neighbouring tab, wrapping at either end as a browser
+    /// does.
+    fn cycle_tab(&mut self, step: isize, cx: &mut Context<Self>) {
+        let (at, len) = {
+            let workspace = self.workspace.read(cx);
+            (workspace.active, workspace.projects.len())
+        };
+        let (Some(at), true) = (at, len > 1) else {
+            return;
+        };
+        let next = (at as isize + step).rem_euclid(len as isize) as usize;
+        self.select_project(next, cx);
     }
 
     /// Copy what the transcript has selected. Bound app-wide and reached only
@@ -813,7 +828,7 @@ impl Arbos {
     }
 
     /// Archive an open chat, or kernel-delete an archived one. Always the
-    /// highlighted sidebar row — not whichever session last held the caret.
+    /// highlighted panel row — not whichever session last held the caret.
     fn delete_highlighted(&mut self, cx: &mut Context<Self>) {
         if self.renaming.is_some() {
             return;
@@ -856,49 +871,30 @@ impl Arbos {
         self.cycle_entry(-1, window, cx);
     }
 
-    /// Step to the next chat or board the sidebar draws, top to bottom
-    /// across every project. Headings, `+`, and the archive toggle are
-    /// skipped. The ends stay put — first visible chat, Up does nothing;
-    /// last visible chat, Down does nothing.
-    fn cycle_entry(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+    /// Step to the next agent the panel lists, top to bottom through the
+    /// project in front: the main chat, then each sub-agent under it. The
+    /// ends stay put — on the first, Up does nothing; on the last, Down
+    /// does nothing.
+    fn cycle_entry(&mut self, step: isize, _window: &mut Window, cx: &mut Context<Self>) {
         if self.renaming.is_some() {
             return;
         }
         // Nothing on screen is nothing to step from: the launch view is not an
         // entry, and its neighbour is not another one.
-        let Some(pane) = self.showing(cx) else {
+        if self.showing(cx).is_none() {
             return;
-        };
-        let workspace = self.workspace.read(cx);
-        let Some(project) = workspace.active else {
-            return;
-        };
-        let Some(open) = workspace.projects.get(project) else {
-            return;
-        };
-        let showing = match pane {
-            Pane::Chat => open.focused_agent().map(|id| Row::Session {
-                project,
-                id,
-                nested: open.session(id).is_some_and(|chat| !open.is_root(chat)),
-            }),
-            Pane::Surface => open
-                .focus
-                .and_then(|focus| focus.surface.map(|id| Row::Surface { project, id })),
-        };
-        // Same order as drawn. A project with no chats is skipped because
-        // it contributes no Session or Surface rows.
-        let list: Vec<Row> = self
-            .rows(cx)
-            .into_iter()
-            .filter(|row| matches!(row, Row::Session { .. } | Row::Surface { .. }))
-            .collect();
-        let at = showing.and_then(|row| list.iter().position(|entry| *entry == row));
+        }
+        let showing = self
+            .workspace
+            .read(cx)
+            .active_project()
+            .and_then(|project| project.focused_agent());
+        let list: Vec<u64> = self.agent_rows(cx).into_iter().map(|row| row.id).collect();
+        let at = showing.and_then(|id| list.iter().position(|entry| *entry == id));
         let Some(landing) = stepped(at, list.len(), step).map(|ix| list[ix]) else {
             return;
         };
-        self.open_row(landing, window, cx);
-        self.reveal(landing, cx);
+        self.select_session(landing, cx);
     }
 
     /// Leaving a project is the moment a half-written card has to be filed:
@@ -955,18 +951,14 @@ impl Arbos {
         self.open_settings(Section::General, cx);
     }
 
-    pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
-        cx.notify();
-    }
-
-    pub(crate) fn toggle_sidebar_action(
+    pub(crate) fn toggle_panel_action(
         &mut self,
-        _: &ToggleSidebar,
+        _: &TogglePanel,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toggle_sidebar(cx);
+        self.panel_open = !self.panel_open;
+        cx.notify();
     }
 
     /// Step the UI font size by `by` points. Every other size is a ratio of
@@ -1006,8 +998,8 @@ impl Arbos {
         cx.notify();
     }
 
-    /// The menu's Close Project. The sidebar names a project by the row it was
-    /// pressed on; the menu bar has only the one in front.
+    /// ⌘W and the menu's Close Tab: the tab in front. A tab's own close
+    /// mark names its tab; the chord has only the one in front.
     pub(crate) fn close_project_action(
         &mut self,
         _: &CloseProject,
@@ -1312,7 +1304,7 @@ impl Arbos {
     /// asked for. They part when what it points at is gone — deleted, switched
     /// off, or in a project that has none open — and whatever the project does
     /// have stands in, so a launch lands on the entry it was left on rather
-    /// than on an empty conversation. The sidebar reads this, not the request:
+    /// than on an empty conversation. The panel reads this, not the request:
     /// a row lit for a pane nobody can see is the second selection the eye
     /// finds.
     ///
@@ -1351,20 +1343,20 @@ impl Arbos {
         theme
             .empty_state(
                 icons::files::FOLDER,
-                "No project open",
-                "A folder on this Mac, or host:folder over ssh.",
+                "No tab open",
+                "A tab is a folder on this Mac, or host:folder over ssh.",
             )
             .flex_1()
             .child(
                 theme
                     .button(
-                        "Open project…",
+                        "New tab…",
                         ButtonStyle::Prominent,
                         Some(Fade::new(painter, "open-project-empty")),
                     )
                     .id("open-project-empty")
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_project_action(&OpenProject, window, cx);
+                        this.new_tab_action(&NewTab, window, cx);
                     })),
             )
             .into_any_element()
@@ -1379,7 +1371,7 @@ impl Render for Arbos {
             .size_full()
             .relative()
             .flex()
-            .flex_row()
+            .flex_col()
             .font_family(theme.font_sans.clone())
             .text_color(theme.text)
             .text_style(TextStyle::Body)
@@ -1393,32 +1385,23 @@ impl Render for Arbos {
             // Everything the menu bar names, and only under the conditions
             // that keep its items honest.
             .map(|root| self.commands(root, cx))
-            .on_drag_move(
-                cx.listener(|this, event: &DragMoveEvent<SplitDrag>, _, cx| {
-                    this.sidebar_width = f32::from(event.event.position.x)
-                        .clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
-                    cx.notify();
-                }),
-            )
             // An action reaches the handlers above only through the focused
             // element's ancestors. Sized at nothing, so the pane that does hold
             // a field keeps its focus through a click anywhere else.
             .child(div().key_context(WINDOW_CONTEXT).track_focus(&self.focus))
-            .when(self.sidebar_open, |root| root.child(self.sidebar(cx)))
-            .child(self.detail(window, cx))
-            // Rides on the seam between the sidebar and the detail column
-            // rather than sitting in flow, so neither gives up a column.
-            .when(self.sidebar_open, |root| {
-                root.child(
-                    theme
-                        .split_handle(Axis::Horizontal, SplitStyle::Line { dragging: false })
-                        .id("sidebar-split")
-                        .absolute()
-                        .top_0()
-                        .left(px(self.sidebar_width - SPLIT_HANDLE_HIT / 2.))
-                        .on_drag(SplitDrag, |_, _, _, cx| cx.new(|_| Empty)),
-                )
-            })
+            // The strip of tabs across the top, then the chat column with
+            // the panel on its right.
+            .child(self.tab_bar(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .child(self.detail(window, cx))
+                    .children(self.panel(window, cx)),
+            )
             .children(
                 self.workspace
                     .read(cx)

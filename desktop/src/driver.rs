@@ -1043,7 +1043,6 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
                 "path": project.path.display().to_string(),
                 "host": project.host,
                 "active": workspace.active == Some(ix),
-                "expanded": project.expanded,
                 "archive_open": project.archive_open,
                 "focus": project.focus.map(|focus| json!({
                     "agent": focus.agent,
@@ -1057,8 +1056,7 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
     json!({
         "pane": pane_name(Some(this.pane)),
         "showing": pane_name(this.showing(cx)),
-        "sidebar_open": this.sidebar_open,
-        "sidebar_width": this.sidebar_width,
+        "panel_open": this.panel_open,
         "text_size": workspace.text_size,
         "settings_open": cx.windows().iter().any(|w| w.downcast::<SettingsWindow>().is_some()),
         "opener_open": this.opener.read(cx).open,

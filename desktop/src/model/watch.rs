@@ -143,10 +143,32 @@ fn ours(dir: &Path, path: &Path) -> bool {
     };
     let head = head.as_os_str().to_string_lossy();
     match head.as_ref() {
-        "skills" | "prompts" => true,
+        "skills" | "prompts" | "hooks" | "archive" => true,
+        // The goals and notes the panel shows, whatever their case.
+        _ if head.eq_ignore_ascii_case("goals.md") || head.eq_ignore_ascii_case("notes.md") => {
+            true
+        }
+        "agents" => agent_knock(rest),
         "desktop" => desktop_knock(rest),
         _ => false,
     }
+}
+
+/// Under `agents/`, only what the panel reads: an agent folder coming or
+/// going, and its `plan.md` or `agent.md`. Transcripts and job logs are
+/// written on every token and every line, and a watch on those would
+/// knock all through a turn.
+fn agent_knock(rest: &Path) -> bool {
+    let mut comps = rest.components();
+    comps.next();
+    let Some(_agent) = comps.next() else {
+        return true;
+    };
+    let Some(file) = comps.next() else {
+        return true;
+    };
+    let file = file.as_os_str().to_string_lossy();
+    comps.next().is_none() && matches!(file.as_ref(), "plan.md" | "agent.md")
 }
 
 fn desktop_knock(rest: &Path) -> bool {
@@ -192,12 +214,18 @@ mod tests {
             "/p/.arbos/desktop/boards/1.toml",
             "/p/.arbos/desktop/data.db",
             "/p/.arbos/desktop/data.db-wal",
+            "/p/.arbos/GOALS.md",
+            "/p/.arbos/notes.md",
+            "/p/.arbos/agents/root",
+            "/p/.arbos/agents/root/plan.md",
         ] {
             assert!(ours(dir, Path::new(path)), "{path} should knock");
         }
         for path in [
             "/p/.arbos/desktop/data.db-shm",
             "/p/.arbos/desktop/sessions/1.json",
+            "/p/.arbos/agents/root/transcript.jsonl",
+            "/p/.arbos/agents/root/jobs/j1/out.log",
             "/p/.arbos/sessions.db",
             "/p/.arbos/sessions.db-wal",
             "/p/.arbos/web.json",

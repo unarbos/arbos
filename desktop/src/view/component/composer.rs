@@ -163,11 +163,10 @@ struct ChatChip {
     markdown: String,
 }
 
-/// A sidebar session on its way to another row or the composer. Dropped on
-/// a sibling it reorders; dropped on the composer it becomes a chip.
+/// A panel agent on its way to the composer, where it lands as a chip
+/// carrying the chat's link.
 #[derive(Clone)]
 pub(crate) struct SessionDrag {
-    pub id: u64,
     pub markdown: SharedString,
 }
 

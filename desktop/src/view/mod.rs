@@ -7,10 +7,12 @@ pub mod detail;
 #[cfg(target_os = "macos")]
 mod fn_key;
 pub mod menubar;
+pub mod naming;
 pub mod palette;
+pub mod panel;
 pub mod root;
 pub mod settings;
-pub mod sidebar;
+pub mod tabs;
 pub mod terminal;
 
 use bezel::{

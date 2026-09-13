@@ -11,6 +11,7 @@ use crate::{
         board::Board,
         place::Place,
         session::ChatSession,
+        store_view::StoreView,
         surface::{Bind, Child, Focus, Surface, SurfaceId, SurfaceKind},
         watch::Watch,
         workspace::Workspace,
@@ -64,12 +65,12 @@ pub struct Project {
     /// The open table's window of rows, read when it is opened rather than
     /// while it is drawn — a query per frame is a query too many.
     pub page: Option<Page>,
-    /// Whether the sidebar shows what is under this project's heading.
-    pub expanded: bool,
-    /// Whether the sidebar lists archived chats under this heading.
-    /// Off by default: what was put away is not what you came back for.
-    /// The header toggle is the only control; there is no Archived row.
+    /// Whether archived chats are listed. Off by default: what was put
+    /// away is not what you came back for.
     pub archive_open: bool,
+    /// What the right-hand panel shows of `.arbos/`: goals, notes, and
+    /// what the store holds. Read on open and on every watch knock.
+    pub store_view: StoreView,
     /// The watch on this project's `.arbos/`, once it is up. Held here so
     /// closing the project drops it, which is what takes the watch down.
     pub watch: Option<Watch>,
@@ -89,6 +90,11 @@ impl Project {
     pub fn open(place: Place) -> Self {
         // Chat only. Boards, articles and tables have no pane; scanning them
         // on open can fail a folder that is otherwise fine to talk in.
+        let store_view = if place.host.is_some() {
+            StoreView::default()
+        } else {
+            StoreView::read(&place.path)
+        };
         Self {
             boards: Vec::new(),
             articles: Vec::new(),
@@ -104,8 +110,8 @@ impl Project {
             tables: Vec::new(),
             table: None,
             page: None,
-            expanded: true,
             archive_open: false,
+            store_view,
             watch: None,
             nickname: None,
             dismissed: HashSet::new(),
@@ -121,9 +127,22 @@ impl Project {
     /// being read in. Everything else is drawn off the model each frame and
     /// nobody keeps a handle on it, so a re-read that only changed those has
     /// nothing to announce — and announcing it would drop the edit somebody has
-    /// open over the echo of their own save.
+    /// open over the echo of their own save. The panel's store view is one of
+    /// those: re-read here, drawn from the model on the next frame.
     pub fn reload(&mut self, _cx: &mut Context<Workspace>) -> bool {
+        if !self.is_remote() {
+            self.store_view = StoreView::read(&self.path);
+        }
         false
+    }
+
+    /// The project's main chat: the open root that sits first by rank. One
+    /// per project; what the column shows when no sub-agent is in front.
+    pub fn main_session(&self) -> Option<u64> {
+        self.roots()
+            .filter(|chat| !chat.closed)
+            .min_by_key(|chat| (chat.rank, chat.id))
+            .map(|chat| chat.id)
     }
 
     /// Re-read what tables exist. The store is the list — nothing here keeps a

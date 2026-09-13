@@ -15,8 +15,6 @@ type Act = Box<dyn Fn(&mut Arbos, &mut Window, &mut Context<Arbos>)>;
 /// closes the rest by construction.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Menu {
-    /// A project heading: what to do to the project.
-    Project(usize),
     /// A chat row: copy, fork, archive, delete.
     Session(u64),
 }
@@ -46,7 +44,7 @@ impl Arbos {
     }
 
     /// The same menu, opened from the chat header: it anchors under the
-    /// header's `⋯` instead of beside the sidebar row.
+    /// header's `⋯` instead of beside the panel row.
     pub(crate) fn toggle_menu_at_header(&mut self, menu: Menu, cx: &mut Context<Self>) {
         self.toggle_menu(menu, cx);
         self.menu_at_header = self.menu.is_some();
@@ -73,7 +71,7 @@ impl Arbos {
         }))
     }
 
-    /// The card every sidebar menu hangs in, dismissed by a press outside it —
+    /// The card every menu hangs in, dismissed by a press outside it —
     /// which the card reports itself, since with a panel open only the tree
     /// knows which presses landed on none of it.
     pub(crate) fn menu_card(

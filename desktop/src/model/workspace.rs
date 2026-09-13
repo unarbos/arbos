@@ -138,12 +138,23 @@ impl Workspace {
             .iter()
             .filter_map(|raw| Place::parse(raw))
             .collect();
-        let projects: Vec<Project> = state
+        let mut projects: Vec<Project> = state
             .projects
             .into_iter()
             .filter_map(|raw| Place::parse(&raw).map(Project::open))
             .collect();
-        let active = (!projects.is_empty()).then_some(state.active);
+        // The home tab: `~/.arbos`, the folder the app lands on. First in
+        // the strip and in front at every launch; the tabs that were open
+        // last time follow it, each with its state where it was left.
+        let home = Self::home_place().filter(|home| std::fs::create_dir_all(&home.path).is_ok());
+        let active = match home {
+            Some(home) => {
+                projects.retain(|project| project.place() != home);
+                projects.insert(0, Project::open(home));
+                Some(0)
+            }
+            None => (!projects.is_empty()).then(|| state.active.min(projects.len() - 1)),
+        };
         let restore: Vec<usize> = (0..projects.len()).collect();
         let mut this = Self {
             settings,
@@ -178,6 +189,8 @@ impl Workspace {
             this.apply_dismissed(ix);
         }
         this.open_last_entry(cx);
+        // Only where there is no home to land on — a machine with no home
+        // directory — does the launch fall back to where it was started.
         if this.projects.is_empty()
             && let Ok(cwd) = std::env::current_dir()
         {
@@ -517,6 +530,27 @@ impl Workspace {
 
     // ── projects ─────────────────────────────────────────────────────
 
+    /// The home tab's place: `~/.arbos` on this machine. `None` only where
+    /// there is no home directory to put it in.
+    pub fn home_place() -> Option<Place> {
+        dirs::home_dir().map(|home| Place::local(home.join(".arbos")))
+    }
+
+    /// Whether this project is the home tab.
+    pub fn is_home(project: &Project) -> bool {
+        Self::home_place().is_some_and(|home| home == project.place())
+    }
+
+    /// The tab's label: "Home" for the home tab, else the name the project
+    /// carries — a nickname, or its folder.
+    pub fn tab_label(project: &Project) -> String {
+        if Self::is_home(project) {
+            "Home".into()
+        } else {
+            project.name()
+        }
+    }
+
     /// A project just added starts talking to an agent; one already on the
     /// rail is only brought forward.
     pub fn open_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -685,12 +719,13 @@ impl Workspace {
         if let Some(project) = self.projects.get_mut(ix)
             && project.focus.is_none()
         {
-            if let Some(id) = project
-                .sessions
-                .iter()
-                .find(|chat| !chat.closed)
-                .map(|chat| chat.id)
-            {
+            if let Some(id) = project.main_session().or_else(|| {
+                project
+                    .sessions
+                    .iter()
+                    .find(|chat| !chat.closed)
+                    .map(|chat| chat.id)
+            }) {
                 project.focus_on(id);
             }
         }
@@ -867,13 +902,53 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<u64> {
         let ix = self.active_ix()?;
+        self.new_session_in(ix, entry, seed, cx)
+    }
+
+    /// Open a root chat in the project at `ix`, whichever is in front. The
+    /// launch merge makes a project's main chat this way.
+    fn new_session_in(
+        &mut self,
+        ix: usize,
+        entry: settings::Agent,
+        seed: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
+        let place = self.projects.get(ix)?.place();
         let id = self.next_id;
         self.next_id += 1;
-        let mut chat = ChatSession::connect(id, entry, self.projects[ix].place(), seed, cx);
+        let mut chat = ChatSession::connect(id, entry, place, seed, cx);
         let project = &mut self.projects[ix];
         chat.rank = project.front_rank(None);
         project.sessions.push(chat);
         project.focus_on(id);
+        self.push_snapshot(ix);
+        cx.notify();
+        Some(id)
+    }
+
+    /// Open a chat nested under the active project's main chat — a side
+    /// thread of the person's own, listed with the sub-agents in the panel.
+    /// The project has one main chat; ⌘N does not make a second.
+    pub fn new_child_session(&mut self, cx: &mut Context<Self>) -> Option<u64> {
+        let ix = self.active_ix()?;
+        let Some(parent) = self.projects[ix].main_session() else {
+            return self.new_session_in(ix, settings::kernel_agent(), None, cx);
+        };
+        let parent_kernel = self.projects[ix]
+            .session(parent)
+            .and_then(|chat| chat.agent_session.clone());
+        let id = self.next_id;
+        self.next_id += 1;
+        let place = self.projects[ix].place();
+        let mut chat = ChatSession::connect(id, settings::kernel_agent(), place, None, cx);
+        chat.parent = Some(parent);
+        chat.parent_kernel = parent_kernel;
+        let project = &mut self.projects[ix];
+        chat.rank = project.front_rank(Some(parent));
+        project.sessions.push(chat);
+        project.focus_on(id);
+        self.number_delegates(ix);
         self.push_snapshot(ix);
         cx.notify();
         Some(id)
@@ -1305,12 +1380,22 @@ impl Workspace {
             self.drop_foreign_sessions(ix, &kernel_ids);
         }
         self.resolve_parents(ix);
+        // A project whose chats all came from the kernel has had nothing to
+        // focus until now. The main chat is what the column shows.
+        if self.projects[ix].focus.is_none()
+            && let Some(main) = self.projects[ix].main_session()
+        {
+            self.projects[ix].focus_on(main);
+        }
         if launch {
             let empty_focus = self.projects[ix]
                 .active_session()
                 .is_none_or(|chat| chat.items.is_empty());
-            if self.projects[ix].sessions.is_empty() {
-                self.new_session(settings::kernel_agent(), None, cx);
+            // Every project has one main chat. A folder opened for the
+            // first time, or one whose chats were all archived, gets it
+            // here — once the kernel has said what it already holds.
+            if self.projects[ix].main_session().is_none() {
+                self.new_session_in(ix, settings::kernel_agent(), None, cx);
             } else if empty_focus
                 && let Some(id) = self.projects[ix]
                     .sessions

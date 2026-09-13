@@ -14,6 +14,7 @@ pub mod record;
 pub mod session;
 pub mod settings;
 pub mod state;
+pub mod store_view;
 pub mod surface;
 pub mod watch;
 pub mod workspace;
