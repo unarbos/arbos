@@ -1,6 +1,6 @@
 # qa-010: without a configured search provider, the `search` tool is blocked by the engine and reports the block as a normal result
 
-status: confirmed (environment gap; not fixed)
+status: pr-open — https://github.com/unarbos/arbos/pull/22 (branch `cursor/fix-qa-010-search-block-de28` -> `rust`)
 severity: low-medium (research tasks fail on a fresh install; the agent has no way to tell "blocked" from "no results")
 scenario: bench-research-links (benchmark item 4)
 rollout: /cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/qa/rollouts/20260913T001642Z-bench-research-links

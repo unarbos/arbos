@@ -1,0 +1,7 @@
+1789261834530 kernel started pid 1723545
+1789261919612 kickoff checklist: 9/12 pass
+1789261919628 kernel stopped with code 0
+1789261919630 BREAK state:transcript-unended-turn: wake at line 72 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789261919630 BREAK state:plan-active-after-stop: node #10 is active with no kernel; reclaim() should settle it on next start
+1789261919630 BREAK state:attempt-running-after-stop: attempt a10 never ended
+1789261919658 bugs: seen qa-007-sigint-during-turn-behaves-like-crash.md, seen qa-007-sigint-during-turn-behaves-like-crash.md, seen qa-007-sigint-during-turn-behaves-like-crash.md

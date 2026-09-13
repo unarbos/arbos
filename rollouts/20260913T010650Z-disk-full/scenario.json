@@ -1,0 +1,8 @@
+{
+  "name": "disk-full",
+  "doc": "Writes start failing mid-run (simulated with a 256 KB file-size limit on the kernel process). The kernel must report the failure and stay up, not die on SIGXFSZ or corrupt a line.",
+  "tags": [
+    "adversarial",
+    "environment"
+  ]
+}

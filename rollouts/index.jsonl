@@ -55,3 +55,25 @@
 {"ts": 1789259677860, "rollout": "20260913T003408Z-inbox:subagent-task-panel", "scenario": "inbox:subagent-task-panel", "status": "pass", "breaks": []}
 {"ts": 1789259696700, "rollout": "20260913T003449Z-inbox:git-guard", "scenario": "inbox:git-guard", "status": "pass", "breaks": []}
 {"ts": 1789259751249, "rollout": "20260913T003507Z-inbox:worktree-cwd-confinement", "scenario": "inbox:worktree-cwd-confinement", "status": "break", "breaks": ["state:transcript-unended-turn", "state:plan-active-after-stop", "state:attempt-running-after-stop"]}
+{"ts": 1789261484156, "rollout": "20260913T010442Z-boot-idle", "scenario": "boot-idle", "status": "pass", "breaks": []}
+{"ts": 1789261490466, "rollout": "20260913T010444Z-prompt-no-key", "scenario": "prompt-no-key", "status": "break", "breaks": ["turn-contract", "no-failure-notice", "node-false-done", "restart-replays-wake", "state:transcript-unended-turn", "state:transcript-wake-pileup", "state:plan-done-no-reply"]}
+{"ts": 1789261490604, "rollout": "20260913T010450Z-second-serve", "scenario": "second-serve", "status": "pass", "breaks": []}
+{"ts": 1789261494853, "rollout": "20260913T010450Z-concurrent-sessions", "scenario": "concurrent-sessions", "status": "pass", "breaks": []}
+{"ts": 1789261507393, "rollout": "20260913T010454Z-rapid-create-delete", "scenario": "rapid-create-delete", "status": "break", "breaks": ["tail-cursor-stale", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing"]}
+{"ts": 1789261514779, "rollout": "20260913T010507Z-huge-input", "scenario": "huge-input", "status": "pass", "breaks": []}
+{"ts": 1789261585434, "rollout": "20260913T010514Z-malformed-folder", "scenario": "malformed-folder", "status": "break", "breaks": ["state:focus-target", "state:agent-md-missing", "state:agent-parent-dangling", "state:transcript-bad-lines", "state:plan-done-unattempted"]}
+{"ts": 1789261587612, "rollout": "20260913T010625Z-malformed-frames", "scenario": "malformed-frames", "status": "break", "breaks": ["focus-unvalidated", "state:agent-md-missing", "state:transcript-unended-turn", "state:plan-active-after-stop", "state:attempt-running-after-stop"]}
+{"ts": 1789261594472, "rollout": "20260913T010627Z-kill-mid-turn-restart", "scenario": "kill-mid-turn-restart", "status": "pass", "breaks": []}
+{"ts": 1789261600915, "rollout": "20260913T010634Z-ordinary-task", "scenario": "ordinary-task", "status": "pass", "breaks": []}
+{"ts": 1789261610868, "rollout": "20260913T010640Z-readonly-arbos", "scenario": "readonly-arbos", "status": "break", "breaks": ["silent-failure"]}
+{"ts": 1789261613136, "rollout": "20260913T010650Z-disk-full", "scenario": "disk-full", "status": "break", "breaks": ["kernel-died", "state:lock-leftover", "state:plan-bad-lines", "state:attempt-running-after-stop"]}
+{"ts": 1789261621276, "rollout": "20260913T010653Z-clock-jump-cron", "scenario": "clock-jump-cron", "status": "break", "breaks": ["cron-clock-rewind"]}
+{"ts": 1789261632758, "rollout": "20260913T010701Z-restart-during-compaction", "scenario": "restart-during-compaction", "status": "pass", "breaks": []}
+{"ts": 1789261701708, "rollout": "20260913T010712Z-steer-storm", "scenario": "steer-storm", "status": "break", "breaks": ["steer-lost"]}
+{"ts": 1789261767154, "rollout": "20260913T010821Z-spawn-storm", "scenario": "spawn-storm", "status": "pass", "breaks": []}
+{"ts": 1789261786998, "rollout": "20260913T010927Z-bench-standing-job", "scenario": "bench-standing-job", "status": "pass", "breaks": []}
+{"ts": 1789261791886, "rollout": "20260913T010947Z-bench-ask-before-risky", "scenario": "bench-ask-before-risky", "status": "pass", "breaks": []}
+{"ts": 1789261801494, "rollout": "20260913T010951Z-bench-research-links", "scenario": "bench-research-links", "status": "break", "breaks": ["wrong-output", "wrong-output"]}
+{"ts": 1789261826527, "rollout": "20260913T011001Z-bench-fix-commit-branch", "scenario": "bench-fix-commit-branch", "status": "pass", "breaks": []}
+{"ts": 1789261834527, "rollout": "20260913T011026Z-bench-screenshot", "scenario": "bench-screenshot", "status": "pass", "breaks": []}
+{"ts": 1789261919670, "rollout": "20260913T011034Z-kickoff-session", "scenario": "kickoff-session", "status": "break", "breaks": ["state:transcript-unended-turn", "state:plan-active-after-stop", "state:attempt-running-after-stop"]}

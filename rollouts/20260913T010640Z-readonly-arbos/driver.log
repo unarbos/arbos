@@ -1,0 +1,5 @@
+1789261600918 kernel started pid 1718264
+1789261609042 timeout waiting for any reaction after 8s
+1789261609042 BREAK silent-failure: a prompt to a read-only agent folder produced no turn, error, or event frame: the message vanished
+1789261610864 kernel stopped with code 0
+1789261610866 bugs: seen qa-011-readonly-agent-folder-swallows-prompt.md

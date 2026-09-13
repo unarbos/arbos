@@ -1,6 +1,6 @@
 # qa-005: an `answer` or `approve` frame for an unknown agent creates a ghost agent folder
 
-status: confirmed
+status: pr-open — https://github.com/unarbos/arbos/pull/24 (branch `cursor/fix-qa-005-006-agent-exists-de28` -> `rust`)
 severity: low (junk folders; but `list_agents` skips them silently, so nobody sees the junk)
 scenario: malformed-frames
 rollout: /cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/qa/rollouts/20260912T223723Z-malformed-frames

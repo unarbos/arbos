@@ -1,0 +1,14 @@
+1789261494856 kernel started pid 1715812
+1789261507362 BREAK tail-cursor-stale: root was deleted and recreated; its new transcript has 12 lines but the attach stream broadcast 0 wake/user event frames (serve.rs keeps a per-agent line cursor that never resets)
+1789261507377 kernel stopped with code 0
+1789261507378 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789261507378 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789261507378 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789261507378 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789261507378 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789261507378 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789261507378 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789261507378 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789261507378 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789261507378 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789261507387 bugs: seen qa-002-live-events-stop-after-agent-recreate.md, seen qa-005-answer-for-unknown-agent-creates-ghost-folder.md, seen qa-005-answer-for-unknown-agent-creates-ghost-folder.md, seen qa-005-answer-for-unknown-agent-creates-ghost-folder.md, seen qa-005-answer-for-unknown-agent-creates-ghost-folder.md, seen qa-005-answer-for-unknown-agent-creates-ghost-folder.md, seen qa-005-answer-for-unknown-agent-creates-ghost-folder.md, seen qa-005-answer-for-unknown-agent-creates-ghost-folder.md, seen qa-005-answer-for-unknown-agent-creates-ghost-folder.md, seen qa-005-answer-for-unknown-agent-creates-ghost-folder.md, seen qa-005-answer-for-unknown-agent-creates-ghost-folder.md
