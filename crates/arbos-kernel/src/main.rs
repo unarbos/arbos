@@ -64,6 +64,10 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        "check" => {
+            let code = arbos_kernel::check::run(arbos_kernel::check::Args::parse(args)?)?;
+            std::process::exit(code);
+        }
         "rollout" => {
             let code = arbos_kernel::rollout::run(arbos_kernel::rollout::Args::parse(args)?)?;
             std::process::exit(code);
@@ -87,15 +91,44 @@ fn main() -> Result<()> {
             let code = arbos_kernel::cli::attach(parsed, all)?;
             std::process::exit(code);
         }
+        "log" => {
+            let mut n = 20usize;
+            let mut place = None;
+            let mut it = args;
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "-n" => n = it.next().and_then(|v| v.parse().ok()).unwrap_or(20),
+                    other => place = Some(other.to_string()),
+                }
+            }
+            let place = arbos_core::Place::new(
+                std::fs::canonicalize(place.unwrap_or_else(|| ".".into()))
+                    .unwrap_or_else(|_| std::env::current_dir().unwrap()),
+            );
+            for line in arbos_kernel::snapshot::log(&place, n)? {
+                println!("{line}");
+            }
+            Ok(())
+        }
         "rewind" => {
             let code = arbos_kernel::rewind::run(arbos_kernel::rewind::Args::parse(args)?)?;
             std::process::exit(code);
+        }
+        "--version" | "-V" | "version" => {
+            println!(
+                "arbos-kernel {} {} protocol {}",
+                arbos_kernel::klog::version(),
+                arbos_kernel::klog::git_sha(),
+                arbos_kernel::serve::PROTOCOL
+            );
+            Ok(())
         }
         "help" | "-h" | "--help" => {
             println!(
                 "arbos-kernel serve [place] [--provider replay --replies FILE] [--bind HOST:PORT] [--until-idle] [--horizon 1h] [--now 2026-09-13T09:00:00Z]   (off loopback: tokens in <place>/.arbos/access.toml, [[client]] name/token|token_env/role)"
             );
             println!("{}", arbos_kernel::rollout::USAGE);
+            println!("{}", arbos_kernel::check::USAGE);
             println!("{}", arbos_kernel::setup::USAGE);
             println!("{}", arbos_kernel::cli::USAGE);
             println!("{}", arbos_kernel::rewind::USAGE);

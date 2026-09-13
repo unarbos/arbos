@@ -162,7 +162,7 @@ async fn stream_turn(
                 Err(_) if started && idle && deadline.is_none_or(|d| Instant::now() < d) => {
                     eprintln!(
                         "run: the turn ended without completing; see {}",
-                        place.path.join(".arbos").join("kernel.log").display()
+                        place.runtime_dir().join("kernel.log").display()
                     );
                     return Ok(EXIT_FAILED_TURN);
                 }
@@ -354,7 +354,7 @@ fn kernel_addr(place: &Place, may_spawn: bool) -> Result<String> {
         std::thread::sleep(Duration::from_millis(100));
     }
     bail!(
-        "started a kernel for {} but it wrote no live {} within {:?}; see .arbos/kernel.log",
+        "started a kernel for {} but it wrote no live {} within {:?}; see .arbos/runtime/kernel.log",
         place.path.display(),
         place.kernel_json().display(),
         READY_WAIT
@@ -363,7 +363,7 @@ fn kernel_addr(place: &Place, may_spawn: bool) -> Result<String> {
 
 /// `host:port` from kernel.json when its pid is alive and the port answers.
 fn live_addr(place: &Place) -> Option<String> {
-    let text = std::fs::read_to_string(place.kernel_json()).ok()?;
+    let text = std::fs::read_to_string(place.kernel_json_read()).ok()?;
     let info: KernelJson = serde_json::from_str(&text).ok()?;
     if !pid_alive(info.pid) {
         return None;
@@ -392,12 +392,13 @@ fn pid_alive(pid: u32) -> bool {
     }
 }
 
-/// `arbos-kernel serve <place>` in its own process group, logging to
-/// `.arbos/kernel.log`, so it outlives this command and its terminal.
+/// `arbos-kernel serve <place>` in its own process group, its stdout and
+/// stderr in `.arbos/runtime/kernel.out.log`, so it outlives this command
+/// and its terminal.
 fn spawn_kernel(place: &Place) -> Result<()> {
-    let dir = place.path.join(".arbos");
+    let dir = place.runtime_dir();
     std::fs::create_dir_all(&dir)?;
-    let log = std::fs::File::create(dir.join("kernel.log"))?;
+    let log = std::fs::File::create(dir.join("kernel.out.log"))?;
     let err = log.try_clone()?;
     let me = std::env::current_exe().context("locate arbos-kernel")?;
     let mut cmd = Command::new(me);

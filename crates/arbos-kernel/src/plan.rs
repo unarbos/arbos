@@ -153,12 +153,19 @@ pub fn scan(hooks: &Arc<KernelHooks>, clock: &Arc<Clock>) -> Vec<Wake> {
             let clock = Arc::clone(clock);
             let agent = agent.clone();
             tokio::spawn(async move {
+                let node_id = n.id;
+                let goal: String = n.goal.chars().take(80).collect();
                 if n.gated() {
                     run_condition(&hooks, &agent, n, attempt).await;
                 } else {
                     run_mechanical(&hooks, &agent, n, attempt).await;
                 }
                 clock.mech.lock().unwrap().remove(&key);
+                // A cron or shell node that ran without a turn is a commit too.
+                crate::snapshot::commit_later(
+                    &hooks.place,
+                    format!("{} node #{node_id}: {goal}", agent.id.as_str()),
+                );
                 hooks.kick();
             });
         }

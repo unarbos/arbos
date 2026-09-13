@@ -75,9 +75,131 @@ impl Layout {
 }
 
 /// Create `.arbos/` and the root agent if they are missing.
+/// What `.arbos/.gitignore` must hold: the process facts and the bulky
+/// derived files. Everything else in `.arbos/` is the record and is
+/// committed.
+pub const ARBOS_GITIGNORE: &str =
+    "# Process facts and caches: a running kernel, not the project. Never committed.
+runtime/
+# Where kernels before the runtime/ split kept the same facts.
+kernel.json
+lock
+focus
+checkpoint
+kernel.log
+web.json
+index-scratch-*
+agent.lock
+kernel.stdout.log
+kernel.out.log
+# The Go-era session store and the desktop's own cache of chat records:
+# large, churning, and derived from the transcripts that are committed.
+sessions.db
+sessions.db-*
+desktop/
+# Provider traces and job output: large, derived, and re-creatable.
+agents/*/trace/
+agents/*/jobs/*/out.log
+agents/*/results/
+# Children's checkouts are the project's own history, not this one's.
+worktrees/
+";
+
+/// Make `.arbos/` its own git repository (nested, not a submodule: the
+/// project ignores the folder) so every turn can be a commit and a rewind
+/// is a checkout. Quiet when git is missing; the kernel runs without it.
+/// Also keeps the project from ever tracking `.arbos/` by way of
+/// `.git/info/exclude`, which is local and never committed.
+pub fn init_arbos_repo(place: &Place) -> Result<bool> {
+    let arbos = place.arbos();
+    std::fs::create_dir_all(&arbos)?;
+    let ignore = arbos.join(".gitignore");
+    let have = std::fs::read_to_string(&ignore).unwrap_or_default();
+    if have != ARBOS_GITIGNORE {
+        // Keep a hand's extra lines; make sure ours are present.
+        let mut merged = String::new();
+        for line in ARBOS_GITIGNORE.lines() {
+            if !have.lines().any(|l| l.trim() == line.trim()) {
+                merged.push_str(line);
+                merged.push('\n');
+            }
+        }
+        let text = if have.trim().is_empty() {
+            ARBOS_GITIGNORE.to_string()
+        } else if merged.is_empty() {
+            have.clone()
+        } else {
+            format!("{}\n{merged}", have.trim_end())
+        };
+        if text != have {
+            std::fs::write(&ignore, text)?;
+        }
+    }
+    if place.arbos_repo().exists() {
+        return Ok(false);
+    }
+    let init = std::process::Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(&arbos)
+        .stdin(std::process::Stdio::null())
+        .output();
+    let ok = match init {
+        Ok(out) if out.status.success() => true,
+        // An old git without `-b`: try again without it.
+        Ok(_) => std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&arbos)
+            .stdin(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+    if !ok {
+        return Ok(false);
+    }
+    // The project must never track the nested repository as a gitlink.
+    // `.git/info/exclude` is the local, uncommitted ignore list.
+    if place.path.join(".git").exists() {
+        let ignored = std::process::Command::new("git")
+            .args(["check-ignore", "-q", ".arbos"])
+            .current_dir(&place.path)
+            .stdin(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(true);
+        if !ignored {
+            let exclude = place.path.join(".git").join("info").join("exclude");
+            let _ = std::fs::create_dir_all(exclude.parent().unwrap());
+            let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
+            if !text
+                .lines()
+                .any(|l| l.trim() == ".arbos/" || l.trim() == ".arbos")
+            {
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(".arbos/\n");
+                let _ = std::fs::write(&exclude, text);
+            }
+        }
+    }
+    Ok(true)
+}
+
 pub fn bootstrap(place: &Place) -> Result<Agent> {
     std::fs::create_dir_all(place.agents_dir())?;
     std::fs::create_dir_all(place.archive_dir())?;
+    std::fs::create_dir_all(place.runtime_dir())?;
+    // Old kernels left these at the root; the record moves to runtime/.
+    for name in ["focus", "checkpoint"] {
+        let old = place.arbos().join(name);
+        let new = place.runtime_dir().join(name);
+        if old.exists() && !new.exists() {
+            let _ = std::fs::rename(&old, &new);
+        }
+    }
+    let _ = init_arbos_repo(place);
     if !place.user_md().exists() {
         std::fs::write(place.user_md(), "")?;
     }
