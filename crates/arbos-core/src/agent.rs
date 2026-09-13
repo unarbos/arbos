@@ -133,6 +133,19 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// Where this agent works, absolute: its own `cwd` resolved against
+    /// the place (a spawn may have written `./toy-repo`), else the place.
+    /// A relative cwd handed to a shell was applied twice — once by the
+    /// process, once by the `cd` in the script — and every command failed
+    /// with "no such directory".
+    pub fn work_dir(&self, place: &std::path::Path) -> std::path::PathBuf {
+        match &self.cwd {
+            Some(c) if c.is_absolute() => c.clone(),
+            Some(c) => place.join(c),
+            None => place.to_path_buf(),
+        }
+    }
+
     pub fn root(id: impl Into<String>) -> Self {
         Self {
             id: AgentId::new(id),

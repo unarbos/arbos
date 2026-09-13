@@ -340,7 +340,8 @@ pub fn resolve(cwd: &Path, path: &str) -> PathBuf {
 /// the place gets through. The returned path is the lexical one, so error
 /// messages and cites keep the spelling the model used.
 pub fn confine(root: &Path, cwd: &Path, path: &str) -> Result<PathBuf> {
-    let candidate = normalize(&resolve(cwd, path));
+    let path = store_alias(root, cwd, path);
+    let candidate = normalize(&resolve(cwd, &path));
     let root_real = realize(&normalize(root));
     let real = realize(&candidate);
     if !real.starts_with(&root_real) {
@@ -351,6 +352,40 @@ pub fn confine(root: &Path, cwd: &Path, path: &str) -> Result<PathBuf> {
         );
     }
     Ok(candidate)
+}
+
+/// The project store is spoken of as `docs/`, `internal/`, `media/`,
+/// `archived.md`, and `project-context.md` (the contract, the briefs, the
+/// refusal texts all say so), while it lives under `.arbos/`. A relative
+/// path that starts with one of those names, when nothing by that name
+/// exists where the agent stands but the store has it, means the store.
+/// So `write docs/research.md` lands in `.arbos/docs/`, and a coordinator's
+/// `edit docs/project-context.md` is the file the contract named, not a
+/// refused write outside the store.
+fn store_alias(root: &Path, cwd: &Path, path: &str) -> String {
+    let trimmed = path.trim().trim_start_matches("./");
+    if trimmed.is_empty() || Path::new(trimmed).is_absolute() || trimmed.starts_with(".arbos") {
+        return path.to_string();
+    }
+    let mut parts = trimmed.splitn(2, '/');
+    let head = parts.next().unwrap_or("");
+    let rest = parts.next();
+    let store_rel = match (head, rest) {
+        ("docs" | "internal" | "media", _) => trimmed.to_string(),
+        ("archived.md", None) => trimmed.to_string(),
+        ("project-context.md", None) => format!("docs/{trimmed}"),
+        _ => return path.to_string(),
+    };
+    if cwd.join(head).exists() {
+        return path.to_string();
+    }
+    let store = root.join(".arbos");
+    let target = store.join(&store_rel);
+    let dir_exists = target.parent().is_some_and(|d| d.exists());
+    if target.exists() || dir_exists {
+        return target.display().to_string();
+    }
+    path.to_string()
 }
 
 /// Fold `.` and `..` without touching the disk.
@@ -795,4 +830,66 @@ pub fn grep_walk(cwd: &Path, pattern: &str, glob: Option<&str>) -> Result<Vec<Gr
         }
     }
     Ok(hits)
+}
+
+#[cfg(test)]
+mod store_alias_tests {
+    use super::*;
+
+    fn place() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".arbos/docs")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".arbos/internal")).unwrap();
+        std::fs::write(dir.path().join(".arbos/docs/project-context.md"), "# ctx").unwrap();
+        dir
+    }
+
+    #[test]
+    fn docs_and_context_paths_mean_the_store_when_nothing_else_has_them() {
+        let d = place();
+        let root = d.path();
+        let store = root.join(".arbos");
+        assert_eq!(
+            confine(root, root, "docs/research.md").unwrap(),
+            store.join("docs/research.md")
+        );
+        assert_eq!(
+            confine(root, root, "./docs/project-context.md").unwrap(),
+            store.join("docs/project-context.md")
+        );
+        assert_eq!(
+            confine(root, root, "project-context.md").unwrap(),
+            store.join("docs/project-context.md")
+        );
+        assert_eq!(
+            confine(root, root, "internal/notes-for-qa.md").unwrap(),
+            store.join("internal/notes-for-qa.md")
+        );
+        // Already spelled with the store: unchanged.
+        assert_eq!(
+            confine(root, root, ".arbos/docs/x.md").unwrap(),
+            store.join("docs/x.md")
+        );
+    }
+
+    #[test]
+    fn a_real_docs_folder_at_the_place_wins() {
+        let d = place();
+        let root = d.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        assert_eq!(
+            confine(root, root, "docs/readme.md").unwrap(),
+            root.join("docs/readme.md")
+        );
+        // Other names never alias.
+        assert_eq!(
+            confine(root, root, "src/main.rs").unwrap(),
+            root.join("src/main.rs")
+        );
+        // No media/ in the store yet and none at the place: no alias.
+        assert_eq!(
+            confine(root, root, "media/x.png").unwrap(),
+            root.join("media/x.png")
+        );
+    }
 }

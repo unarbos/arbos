@@ -130,7 +130,7 @@ pub async fn turn(
 ) -> Result<()> {
     let cmd = command_for(&place, &agent)
         .ok_or_else(|| anyhow!("no acp command for kind {}", agent.kind))?;
-    let cwd = agent.cwd.clone().unwrap_or_else(|| place.path.clone());
+    let cwd = agent.work_dir(&place.path);
     let transcript = place.agent_dir(agent.id.as_str()).join("transcript.jsonl");
     let agent_id = agent.id.to_string();
 

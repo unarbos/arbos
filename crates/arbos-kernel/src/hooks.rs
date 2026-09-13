@@ -840,7 +840,17 @@ impl KernelHooks {
             child.allowlist = saved_parent.allowlist.clone();
         }
         child.readonly = readonly;
-        child.cwd = cwd.or_else(|| worktree.as_ref().map(|w| w.path.clone()));
+        // Stored absolute: a relative `cwd` from the spawn call is meant
+        // against the parent's own directory.
+        child.cwd = cwd
+            .map(|c| {
+                if c.is_absolute() {
+                    c
+                } else {
+                    saved_parent.work_dir(self.place.path()).join(c)
+                }
+            })
+            .or_else(|| worktree.as_ref().map(|w| w.path.clone()));
         if let Some(d) = &def {
             child.kind = d.name.clone();
         }
