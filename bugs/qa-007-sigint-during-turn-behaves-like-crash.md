@@ -4,7 +4,7 @@ status: pr-open — https://github.com/unarbos/arbos/pull/12 (branch `cursor/fix
 severity: low-medium (recovery exists via `reclaim`, but a "stopped" agent silently resumes on next start, and the transcript has no record of the stop)
 scenario: kickoff-session (kernel stopped while goal 10 was still running); reproducible with any model turn + SIGINT
 rollout: /cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/qa/rollouts/ (first kickoff attempt, superseded; see kickoff-history.jsonl for the current run)
-fingerprints: bcb2294131 d4f73e35a3 fb5b128a4e
+fingerprints: bcb2294131 d4f73e35a3 fb5b128a4e 4b597d58b0 f2866e6a9f
 
 ## Repro
 
@@ -23,3 +23,7 @@ Findings: `transcript-unended-turn`, `plan-active-after-stop`, `attempt-running-
 ## Suspected location
 
 `crates/arbos-kernel/src/serve.rs:290-293`: the `ctrl_c` branch only `break`s. `Scheduler` (`sched.rs:34-38`) has `stop(id)` but it is not called on shutdown; the runtime drop then cancels the turn tasks mid-write.
+
+## Also seen
+
+- ArbosLife cycle 2026-09-12T23:45Z, scenario `malformed-frames` with a model key: the empty `user` frame (`text: ""`) started a real model turn, and SIGINT at the end of the scenario left node #1 active and attempt a1 open (fingerprints 4b597d58b0, f2866e6a9f). The empty prompt itself is qa-008.

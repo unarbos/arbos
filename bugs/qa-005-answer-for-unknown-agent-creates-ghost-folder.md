@@ -4,7 +4,7 @@ status: confirmed
 severity: low (junk folders; but `list_agents` skips them silently, so nobody sees the junk)
 scenario: malformed-frames
 rollout: /cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/qa/rollouts/20260912T223723Z-malformed-frames
-fingerprints: e6102ae107
+fingerprints: e6102ae107 a2776c674a
 
 ## Repro
 
@@ -26,3 +26,7 @@ The frame is rejected (no such agent) and nothing is written.
 ## Fix idea
 
 Check `place.agent_dir(&agent).join("agent.md").exists()` in `handle_frame` before any write, and return an error frame (see design gap 1).
+
+## Also seen
+
+- ArbosLife cycle 2026-09-12T23:45Z, scenario `rapid-create-delete` with a model key: a chat deleted while its turn ran came back as a folder with a transcript and no `agent.md` (fingerprint a2776c674a). Same cause: `append_events` recreates the folder for any writer, here the turn itself.

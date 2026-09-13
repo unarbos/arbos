@@ -11,3 +11,14 @@
 {"ts": 1789256839051, "rollout": "20260912T234709Z-kill-mid-turn-restart", "scenario": "kill-mid-turn-restart", "status": "pass", "breaks": []}
 {"ts": 1789256849454, "rollout": "20260912T234719Z-ordinary-task", "scenario": "ordinary-task", "status": "pass", "breaks": []}
 {"ts": 1789256976818, "rollout": "20260912T234729Z-kickoff-session", "scenario": "kickoff-session", "status": "break", "breaks": ["state:transcript-unended-turn", "state:plan-active-after-stop", "state:attempt-running-after-stop"]}
+{"ts": 1789257704944, "rollout": "20260913T000142Z-boot-idle", "scenario": "boot-idle", "status": "pass", "breaks": []}
+{"ts": 1789257711253, "rollout": "20260913T000144Z-prompt-no-key", "scenario": "prompt-no-key", "status": "break", "breaks": ["turn-contract", "no-failure-notice", "node-false-done", "restart-replays-wake", "state:transcript-unended-turn", "state:transcript-wake-pileup", "state:plan-done-no-reply"]}
+{"ts": 1789257711423, "rollout": "20260913T000151Z-second-serve", "scenario": "second-serve", "status": "pass", "breaks": []}
+{"ts": 1789257716878, "rollout": "20260913T000151Z-concurrent-sessions", "scenario": "concurrent-sessions", "status": "pass", "breaks": []}
+{"ts": 1789257730773, "rollout": "20260913T000156Z-rapid-create-delete", "scenario": "rapid-create-delete", "status": "break", "breaks": ["tail-cursor-stale", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing", "state:agent-md-missing"]}
+{"ts": 1789257739278, "rollout": "20260913T000210Z-huge-input", "scenario": "huge-input", "status": "pass", "breaks": []}
+{"ts": 1789257803699, "rollout": "20260913T000219Z-malformed-folder", "scenario": "malformed-folder", "status": "break", "breaks": ["state:focus-target", "state:agent-md-missing", "state:agent-parent-dangling", "state:transcript-bad-lines", "state:plan-done-unattempted"]}
+{"ts": 1789257805875, "rollout": "20260913T000323Z-malformed-frames", "scenario": "malformed-frames", "status": "break", "breaks": ["focus-unvalidated", "state:agent-md-missing", "state:transcript-unended-turn", "state:plan-active-after-stop", "state:attempt-running-after-stop"]}
+{"ts": 1789257812978, "rollout": "20260913T000325Z-kill-mid-turn-restart", "scenario": "kill-mid-turn-restart", "status": "pass", "breaks": []}
+{"ts": 1789257820524, "rollout": "20260913T000332Z-ordinary-task", "scenario": "ordinary-task", "status": "pass", "breaks": []}
+{"ts": 1789257912642, "rollout": "20260913T000340Z-kickoff-session", "scenario": "kickoff-session", "status": "break", "breaks": ["state:transcript-unended-turn", "state:plan-active-after-stop", "state:attempt-running-after-stop", "state:transcript-unended-turn", "state:plan-active-after-stop", "state:attempt-running-after-stop"]}

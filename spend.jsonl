@@ -9,3 +9,14 @@
 {"ts": 1789256839049, "scenario": "kill-mid-turn-restart", "model": "openai/gpt-4.1-mini", "prompt_tokens": 9518, "completion_tokens": 106, "usd": 0.00398}
 {"ts": 1789256849451, "scenario": "ordinary-task", "model": "openai/gpt-4.1-mini", "prompt_tokens": 9467, "completion_tokens": 165, "usd": 0.00405}
 {"ts": 1789256976801, "scenario": "kickoff-session", "model": "openai/gpt-4.1-mini", "prompt_tokens": 333822, "completion_tokens": 6834, "usd": 0.14446}
+{"ts": 1789257704942, "scenario": "boot-idle", "model": "openai/gpt-4.1-mini", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789257711249, "scenario": "prompt-no-key", "model": "openai/gpt-4.1-mini", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789257711421, "scenario": "second-serve", "model": "openai/gpt-4.1-mini", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789257716867, "scenario": "concurrent-sessions", "model": "openai/gpt-4.1-mini", "prompt_tokens": 25248, "completion_tokens": 32, "usd": 0.01015}
+{"ts": 1789257730765, "scenario": "rapid-create-delete", "model": "openai/gpt-4.1-mini", "prompt_tokens": 31053, "completion_tokens": 258, "usd": 0.01283}
+{"ts": 1789257739236, "scenario": "huge-input", "model": "openai/gpt-4.1-mini", "prompt_tokens": 11900, "completion_tokens": 455, "usd": 0.00549}
+{"ts": 1789257803695, "scenario": "malformed-folder", "model": "openai/gpt-4.1-mini", "prompt_tokens": 9205, "completion_tokens": 55, "usd": 0.00377}
+{"ts": 1789257805872, "scenario": "malformed-frames", "model": "openai/gpt-4.1-mini", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789257812976, "scenario": "kill-mid-turn-restart", "model": "openai/gpt-4.1-mini", "prompt_tokens": 9523, "completion_tokens": 101, "usd": 0.00397}
+{"ts": 1789257820521, "scenario": "ordinary-task", "model": "openai/gpt-4.1-mini", "prompt_tokens": 9479, "completion_tokens": 170, "usd": 0.00406}
+{"ts": 1789257912623, "scenario": "kickoff-session", "model": "openai/gpt-4.1-mini", "prompt_tokens": 385067, "completion_tokens": 3994, "usd": 0.16042}
