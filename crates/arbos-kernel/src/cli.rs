@@ -211,7 +211,8 @@ async fn stream_turn(
                 agent,
                 question,
                 options,
-            } if agent == args.agent && started => match answer(&agent, &question, &options)? {
+                id,
+            } if agent == args.agent && started => match answer(&agent, &question, &options, id)? {
                 Some(reply) => {
                     w.write_all(format!("{}\n", serde_json::to_string(&reply)?).as_bytes())
                         .await?;
@@ -256,6 +257,8 @@ pub fn answer_cmd(args: Args, allow: Option<bool>, follow: bool) -> Result<i32> 
             None => Frame::Answer {
                 agent: args.agent.clone(),
                 text: text.clone(),
+                // Sent blind: accepted only while exactly one question is pending.
+                id: None,
             },
         };
         w.write_all(format!("{}\n", serde_json::to_string(&frame)?).as_bytes())
@@ -313,6 +316,7 @@ pub fn attach(args: Args, all_agents: bool) -> Result<i32> {
                     agent,
                     question,
                     options,
+                    ..
                 } if all_agents || agent == args.agent => {
                     if args.json {
                         println!(
@@ -414,7 +418,12 @@ fn spawn_kernel(place: &Place) -> Result<()> {
 }
 
 /// Ask the person at the terminal. None when there is no terminal.
-fn answer(agent: &str, question: &str, options: &[String]) -> Result<Option<Frame>> {
+fn answer(
+    agent: &str,
+    question: &str,
+    options: &[String],
+    id: Option<String>,
+) -> Result<Option<Frame>> {
     if !std::io::stdin().is_terminal() {
         return Ok(None);
     }
@@ -435,7 +444,7 @@ fn answer(agent: &str, question: &str, options: &[String]) -> Result<Option<Fram
     Ok(Some(if approval {
         Frame::Approve {
             agent: agent.to_string(),
-            call_id: String::new(),
+            call_id: id.clone().unwrap_or_default(),
             allow: matches!(
                 text.to_ascii_lowercase().as_str(),
                 "y" | "yes" | "allow" | "a"
@@ -445,6 +454,7 @@ fn answer(agent: &str, question: &str, options: &[String]) -> Result<Option<Fram
         Frame::Answer {
             agent: agent.to_string(),
             text,
+            id,
         }
     }))
 }

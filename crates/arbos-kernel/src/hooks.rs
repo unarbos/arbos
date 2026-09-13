@@ -77,10 +77,16 @@ pub struct KernelHooks {
     /// "Scan the plans now." Sent after every plan write.
     pub kick: mpsc::UnboundedSender<()>,
     pub frames: Mutex<Vec<mpsc::UnboundedSender<Frame>>>,
-    pub asks: Mutex<HashMap<String, oneshot::Sender<String>>>,
+    /// Pending questions by agent: the ask's id and the receiver.
+    pub asks: Mutex<HashMap<String, (String, oneshot::Sender<String>)>>,
+    /// Every ask/approve id this kernel issued. An answer that names one of
+    /// these but not the pending one is late or a duplicate and is refused;
+    /// an id the kernel never issued is an old client's guess (qa-021).
+    pub issued: Mutex<HashSet<String>>,
+    approve_seq: std::sync::atomic::AtomicU64,
     /// Pending allow/deny questions by agent: the tool asked about, and
     /// the receiver. One at a time per agent (approvals are interactive).
-    pub approves: Mutex<HashMap<String, (String, oneshot::Sender<bool>)>>,
+    pub approves: Mutex<HashMap<String, (String, String, oneshot::Sender<bool>)>>,
     /// Parents blocked in `spawn wait=true`, by child id: the child's first
     /// report (or the end of its first turn) resolves them.
     pub waits: Mutex<HashMap<String, (String, oneshot::Sender<String>)>>,
@@ -126,6 +132,8 @@ impl KernelHooks {
             kick,
             frames: Mutex::new(Vec::new()),
             asks: Mutex::new(HashMap::new()),
+            issued: Mutex::new(HashSet::new()),
+            approve_seq: std::sync::atomic::AtomicU64::new(1),
             waits: Mutex::new(HashMap::new()),
             approves: Mutex::new(HashMap::new()),
             browsers: BrowserHub::new(),
@@ -1296,21 +1304,34 @@ impl KernelHooks {
         agent: &AgentId,
         question: &str,
         options: &[String],
+        call_id: &str,
     ) -> Result<oneshot::Receiver<String>> {
         let (tx, rx) = oneshot::channel();
-        self.asks.lock().unwrap().insert(agent.to_string(), tx);
+        let id = if call_id.is_empty() {
+            format!("ask-{}", arbos_core::now_ms())
+        } else {
+            call_id.to_string()
+        };
+        self.issued.lock().unwrap().insert(id.clone());
+        self.asks
+            .lock()
+            .unwrap()
+            .insert(agent.to_string(), (id.clone(), tx));
+        // The same id on the transcript line, so a client that sees the live
+        // frame and then the line knows they are one question.
         append_event(
             &Layout::new(&self.place, agent.as_str()).transcript(),
             &Event::new(EventKind::Ask {
                 question: question.to_string(),
                 options: options.to_vec(),
-                call_id: None,
+                call_id: Some(id.clone()),
             }),
         )?;
         self.broadcast(Frame::Ask {
             agent: agent.to_string(),
             question: question.to_string(),
             options: options.to_vec(),
+            id: Some(id),
         });
         Ok(rx)
     }
@@ -1318,16 +1339,52 @@ impl KernelHooks {
     /// Post an allow/deny prompt. The receiver resolves when the user answers.
     pub fn approve(&self, agent: &AgentId, tool: &str, command: &str) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
+        let n = self
+            .approve_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let id = format!("approve-{n}");
+        self.issued.lock().unwrap().insert(id.clone());
         self.approves
             .lock()
             .unwrap()
-            .insert(agent.to_string(), (tool.to_string(), tx));
+            .insert(agent.to_string(), (tool.to_string(), id.clone(), tx));
         self.broadcast(Frame::Ask {
             agent: agent.to_string(),
             question: format!("allow {tool}: {command}"),
             options: vec!["allow".into(), "deny".into()],
+            id: Some(id),
         });
         rx
+    }
+
+    /// Whether an answer may resolve `agent`'s pending question. `given` is
+    /// the id the client sent (empty = none). Ok(pending id) or the reason.
+    pub fn answer_allowed(
+        &self,
+        agent: &str,
+        given: &str,
+        pending: Option<&str>,
+        pending_total: usize,
+    ) -> std::result::Result<(), String> {
+        let Some(pending) = pending else {
+            return Err(format!("no question is pending for {agent}"));
+        };
+        if given.is_empty() || !self.issued.lock().unwrap().contains(given) {
+            // An old client, or one guessing: only safe when there is
+            // exactly one question it could mean.
+            if pending_total == 1 {
+                return Ok(());
+            }
+            return Err(format!(
+                "answer without a known ask id while {pending_total} questions are pending; send id {pending:?}"
+            ));
+        }
+        if given != pending {
+            return Err(format!(
+                "answer names ask {given:?} but the pending question is {pending:?}; a late or duplicate answer resolves nothing"
+            ));
+        }
+        Ok(())
     }
 
     pub fn browser(&self, agent: &AgentId, action: &str, args: &Value) -> Result<BrowserOut> {

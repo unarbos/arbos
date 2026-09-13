@@ -503,7 +503,11 @@ fn handle_frame(
         if !arbos_core::agent_exists(place, &agent) {
             // Answered and logged, not just printed: the client that named
             // a missing agent is the one that needs to hear it (#14 + #24).
-            refuse(hooks, Some(&agent), format!("no agent {agent:?} in this place"));
+            refuse(
+                hooks,
+                Some(&agent),
+                format!("no agent {agent:?} in this place"),
+            );
             return;
         }
     }
@@ -588,12 +592,24 @@ fn handle_frame(
                 let _ = wakes.send(Wake::compact(&agent));
             }
         }
-        Frame::Answer { agent, text } => {
+        Frame::Answer { agent, text, id } => {
+            // Only the question this answer names may resolve; a late or
+            // duplicate answer (the same ask arriving twice through the live
+            // frame and the transcript tail, qa-021) is refused, not applied.
+            let verdict = {
+                let asks = hooks.asks.lock().unwrap();
+                let pending = asks.get(&agent).map(|(id, _)| id.as_str());
+                hooks.answer_allowed(&agent, id.as_deref().unwrap_or(""), pending, asks.len())
+            };
+            if let Err(why) = verdict {
+                refuse(hooks, Some(&agent), format!("answer refused: {why}"));
+                return;
+            }
             let _ = append_event(
                 &Layout::new(place, &agent).transcript(),
                 &Event::new(EventKind::Answer { text: text.clone() }),
             );
-            if let Some(tx) = hooks.asks.lock().unwrap().remove(&agent) {
+            if let Some((_, tx)) = hooks.asks.lock().unwrap().remove(&agent) {
                 let _ = tx.send(text);
             }
         }
@@ -602,12 +618,25 @@ fn handle_frame(
             call_id,
             allow,
         } => {
+            let verdict = {
+                let approves = hooks.approves.lock().unwrap();
+                let pending = approves.get(&agent).map(|(_, id, _)| id.as_str());
+                hooks.answer_allowed(&agent, &call_id, pending, approves.len())
+            };
+            if let Err(why) = verdict {
+                refuse(hooks, Some(&agent), format!("approval refused: {why}"));
+                return;
+            }
             let pending = hooks.approves.lock().unwrap().remove(&agent);
             let tool = pending
                 .as_ref()
-                .map(|(tool, _)| tool.clone())
+                .map(|(tool, _, _)| tool.clone())
                 .unwrap_or_else(|| "bash".into());
-            if let Some((_, tx)) = pending {
+            let call_id = pending
+                .as_ref()
+                .map(|(_, id, _)| id.clone())
+                .unwrap_or(call_id);
+            if let Some((_, _, tx)) = pending {
                 let _ = tx.send(allow);
             }
             // The decision is part of the record: the transcript shows what

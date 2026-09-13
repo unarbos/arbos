@@ -71,6 +71,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                 agent: "root".into(),
                 question: "q".into(),
                 options: vec!["a".into(), "b".into()],
+                id: Some("call_1".into()),
             },
             "ask",
         ),
@@ -137,6 +138,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
             Frame::Answer {
                 agent: "root".into(),
                 text: "teal".into(),
+                id: Some("call_1".into()),
             },
             "answer",
         ),
