@@ -25,6 +25,7 @@ glob = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 uuid = { version = "1", features = ["v4"] }
 which = "7"
+toml = "0.8"
 # Chrome DevTools Protocol for the browser tool: plain ws:// to a local
 # headless Chrome, so no TLS feature is needed.
 tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }

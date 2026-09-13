@@ -67,6 +67,12 @@ impl Tool for Spawn {
                 ("model", "inherit or a model id.", false, "string"),
                 ("readonly", "If true, no writes.", false, "boolean"),
                 ("cwd", "Child cwd.", false, "string"),
+                (
+                    "host",
+                    "A machine name from ~/.config/arbos/machines.toml (see Machines in your prompt): the child runs there, in its own synced copy of this project, and reports back here.",
+                    false,
+                    "string",
+                ),
             ],
         )
     }
@@ -80,6 +86,22 @@ impl Tool for Spawn {
             let model = opt_str(&args, "model");
             let readonly = opt_bool(&args, "readonly").unwrap_or(false);
             let cwd = opt_str(&args, "cwd").map(PathBuf::from);
+            if let Some(host) = opt_str(&args, "host") {
+                let (id, where_) = crate::remote::spawn_remote(
+                    Arc::clone(&hooks),
+                    cx.agent.clone(),
+                    brief.to_string(),
+                    host.to_string(),
+                )
+                .await?;
+                return Ok(ToolOut {
+                    body: format!("spawned {id} {where_}: {brief}"),
+                    paths: vec![format!(".arbos/agents/{id}")],
+                    child: Some(id.to_string()),
+                    images: vec![],
+                    diff: None,
+                });
+            }
             let id = hooks.spawn(&cx.agent, brief, model, None, readonly, cwd)?;
             Ok(ToolOut {
                 body: format!("spawned {id}: {brief}"),

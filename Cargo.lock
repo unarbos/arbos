@@ -37,6 +37,7 @@ dependencies = [
  "fs4",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -75,6 +76,7 @@ dependencies = [
  "serde_json",
  "tgrep-core",
  "tokio",
+ "toml",
  "tungstenite",
  "uuid",
  "which",
