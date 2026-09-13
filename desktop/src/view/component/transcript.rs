@@ -49,6 +49,10 @@ const CARD_PAD_X: f32 = 12.;
 const CARD_PAD_Y: f32 = 6.;
 const CARD_RADIUS: f32 = 8.;
 const PROMPT_PAD_Y: f32 = 10.;
+/// The user's card: Cursor's ~10 px corners, and no wider than most of the
+/// reading column so the answer under it reads as a reply.
+const PROMPT_RADIUS: f32 = 10.;
+const PROMPT_MAX_WIDTH: f32 = (root::CHAT_MAX_WIDTH - 2. * root::CHAT_GUTTER) * 0.82;
 /// Web diff/terminal: `text-[11.5px] leading-[1.5]`.
 const MONO_SIZE: f32 = 11.5;
 const MONO_LEAD: f32 = 17.;
@@ -630,16 +634,23 @@ fn user_prompt(
     let id = chat.id;
     let prompt = message.to_prompt();
     let (slash, body) = split_slash(&message.text);
-    div()
-        .id(SharedString::from(format!("prompt-{id}-{ix}")))
-        .group("prompt")
-        .w_full()
-        .ml(px(-root::COMPOSER_PAD_X))
-        .mr(px(-root::COMPOSER_PAD_X))
+    let group = SharedString::from(format!("prompt-{id}-{ix}"));
+    // Cursor's user bubble: a card on the right, raised off the page with
+    // a soft shadow, no wider than most of the column, the text dark. The
+    // edit pencil sits at its bottom-right and shows when the pointer is
+    // over the card.
+    let card = div()
+        .id(group.clone())
+        .group(group.clone())
+        .max_w(px(PROMPT_MAX_WIDTH))
         .px(px(root::COMPOSER_PAD_X))
         .py(px(PROMPT_PAD_Y))
-        .rounded(px(Theme::surface_radius()))
-        .bg(ink(0.05))
+        .rounded(px(PROMPT_RADIUS))
+        // The card plane: white in light, one step up in dark.
+        .bg(theme.surface_card)
+        .border_1()
+        .border_color(theme.border.opacity(0.7))
+        .shadow_sm()
         .flex()
         .flex_row()
         .items_end()
@@ -677,13 +688,16 @@ fn user_prompt(
                 .flex_none()
                 .size(px(24.))
                 .mt(px(-2.))
+                .mr(px(-6.))
                 .rounded(px(4.))
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                // Always shown, faint, at the card's bottom-right — where
-                // Cursor keeps its restore arrow.
+                // Hidden until the pointer is over the card, then faint at
+                // its bottom-right — where Cursor keeps its restore arrow.
+                .invisible()
+                .group_hover(group, |el| el.visible())
                 .hover(|el| el.bg(theme.element_hover))
                 .tooltip(move |window, cx| Tooltip::text("Edit and resubmit from here", window, cx))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -697,7 +711,13 @@ fn user_prompt(
                         .size(px(12.))
                         .text_color(theme.text_faint),
                 ),
-        )
+        );
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .justify_end()
+        .child(card)
         .into_any_element()
 }
 
