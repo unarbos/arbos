@@ -187,7 +187,7 @@ impl Arbos {
         // Standing work: the `subscriptions/` files when the store has
         // them (the Cursor-model kernel); else what attached chats report
         // in their plan (an older kernel, or a remote place).
-        let standing: Vec<StandingLine> = if store.standing.is_empty() {
+        let standing: Vec<StandingLine> = if !store.standing_known {
             project
                 .sessions
                 .iter()
