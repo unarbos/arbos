@@ -57,6 +57,16 @@ pub struct RootConfig {
     /// Absent: the main chat has every tool, as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Move a finished worker's folder to `.arbos/archive/agents/<id>/`
+    /// once its parent has read its done message. Off by default: a
+    /// window showing that worker must know to look in the archive first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archive_children: bool,
+}
+
+/// Where finished workers go when `archive_children` is on.
+pub fn archive_agents_dir(place: &Place) -> PathBuf {
+    place.arbos().join("archive").join("agents")
 }
 
 pub fn path(place: &Place) -> PathBuf {
@@ -93,6 +103,7 @@ pub fn write_for_new_place(place: &Place, name: &str) -> Result<()> {
         name: Some(name.to_string()),
         root: RootConfig {
             role: Some(COORDINATOR.into()),
+            archive_children: false,
         },
     };
     save(place, &cfg)

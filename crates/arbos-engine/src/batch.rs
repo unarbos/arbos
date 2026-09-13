@@ -263,7 +263,11 @@ pub async fn run(
         }
 
         let stopped = control.is_stopped() || aborted;
-        let steered = arbos_core::inbox::has_steer(&cx.place, cx.agent.id.as_str());
+        // A steer waits for the tool boundary; the calls the model already
+        // decided on run (Cursor's rule, and the multitasking audit: a
+        // steer before a batch skipped the user's own spawn by 30 s). Only
+        // a steer that says stop cancels what has not started.
+        let steered = arbos_core::inbox::has_stop_steer(&cx.place, cx.agent.id.as_str());
         let running = slots
             .iter()
             .filter(|s| matches!(s.state, State::Running))
@@ -281,10 +285,11 @@ pub async fn run(
                 }
             }
         } else if steered && running == 0 {
-            // pi's rule: the user's new instruction lands within one tool.
+            // The user said stop: nothing more starts; the words land at
+            // the boundary and the turn takes it from there.
             for s in &mut slots {
                 if !s.is_done() {
-                    s.state = State::Done(Outcome::Skipped("skipped: user steered".into()));
+                    s.state = State::Done(Outcome::Skipped("skipped: user said stop".into()));
                 }
             }
         } else if !steered {
