@@ -102,13 +102,14 @@ impl Outcome {
         } else {
             (body, error)
         };
+        let result_size = body.len() as u64;
         Event::new(EventKind::Tool(ToolRec {
             name: call.name.clone(),
             call_id: call.id.clone(),
             paths,
             started,
             ended,
-            result_size: Some(body.len() as u64),
+            result_size: Some(result_size),
             error,
             body: Some(body),
             args: Some(call.arguments.clone()),
@@ -136,6 +137,55 @@ pub(crate) fn summarise_call(_name: &str, args: &serde_json::Value) -> String {
     } else {
         cut
     }
+}
+
+/// Longest tool body kept on a transcript line. The transcript is the
+/// full-body store, but one 100 MB line makes every reader (the kernel's
+/// tail, the desktop, compaction) parse 100 MB per tick. Over the cap the
+/// body goes to a side file the model can `read` in pieces.
+pub const BODY_CAP: usize = 1024 * 1024;
+const BODY_HEAD: usize = 64 * 1024;
+
+/// Spill an oversized body to `<agent dir>/results/<call_id>.txt` and put a
+/// head plus the cite on the transcript line instead.
+pub fn cap_body(cx: &RunCx, call_id: &str, body: String) -> String {
+    if body.len() <= BODY_CAP {
+        return body;
+    }
+    let dir = arbos_core::Layout::new(&cx.place, cx.agent.id.as_str())
+        .dir
+        .join("results");
+    let safe: String = call_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let path = dir.join(format!("{safe}.txt"));
+    let spilled = std::fs::create_dir_all(&dir)
+        .and_then(|_| std::fs::write(&path, &body))
+        .is_ok();
+    let cut = body
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|&i| i <= BODY_HEAD)
+        .last()
+        .unwrap_or(0);
+    let mut head = body[..cut].to_string();
+    head.push_str(&format!(
+        "\n[… {} MB more{}]",
+        body.len() / (1024 * 1024),
+        if spilled {
+            format!(" in {}; read it in pieces", path.display())
+        } else {
+            String::new()
+        }
+    ));
+    head
 }
 
 enum State {
@@ -393,7 +443,14 @@ async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Resu
         }
     }
     let args = prepared.args.clone();
-    let result = prepared.tool.run(cx.clone(), prepared.args).await;
+    let result = prepared
+        .tool
+        .run(cx.clone(), prepared.args)
+        .await
+        .map(|mut out| {
+            out.body = cap_body(cx, &call.id, std::mem::take(&mut out.body));
+            out
+        });
     let (body, error, paths) = match &result {
         Ok(out) => (out.body.clone(), None, out.paths.clone()),
         Err(e) => (String::new(), Some(e.to_string()), Vec::new()),
