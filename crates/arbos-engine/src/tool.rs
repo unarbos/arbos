@@ -64,14 +64,22 @@ impl PlanCx<'_> {
         crate::tools::fs::confine(self.root, self.cwd, path)
     }
 
-    /// `resolve` for a tool that will write there. GOALS.md belongs to the
-    /// main chat: a child's write is refused here, before it runs.
+    /// `resolve` for a tool that will write there. `notes.md`,
+    /// `docs/project-context.md`, and `archived.md` belong to the main
+    /// chat: a child's write is refused here, before it runs. A
+    /// coordinator writes the project store and nothing else — code is a
+    /// worker's job.
     pub fn resolve_write(&self, path: &str) -> Result<PathBuf> {
         let resolved = self.resolve(path)?;
-        if arbos_core::goals::is_goals_path(self.root, &resolved)
-            && !arbos_core::goals::may_write(self.agent)
+        if arbos_core::store::is_root_owned(self.root, &resolved)
+            && !arbos_core::store::may_write(self.agent)
         {
-            anyhow::bail!("{}", arbos_core::goals::REFUSAL);
+            anyhow::bail!("{}", arbos_core::store::REFUSAL);
+        }
+        if self.agent.role.as_deref() == Some(arbos_core::project::COORDINATOR)
+            && !arbos_core::store::is_store_path(self.root, &resolved)
+        {
+            anyhow::bail!("{}", arbos_core::store::COORDINATOR_REFUSAL);
         }
         if arbos_core::notes::is_project_page(self.root, &resolved)
             && self.agent.id.as_str() != arbos_core::ROOT_ID
@@ -412,15 +420,15 @@ impl View {
 }
 
 #[cfg(test)]
-mod goals_guard_tests {
+mod store_guard_tests {
     use super::*;
 
     #[test]
-    fn a_child_may_not_write_goals_md_but_root_may() {
-        let dir = std::env::temp_dir().join(format!("arbos-goals-guard-{}", std::process::id()));
+    fn a_child_may_not_write_the_status_page_but_root_may() {
+        let dir = std::env::temp_dir().join(format!("arbos-store-guard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".arbos")).unwrap();
-        std::fs::write(dir.join(".arbos/GOALS.md"), "# g\n").unwrap();
+        arbos_core::store::ensure(&arbos_core::Place::new(dir.clone())).unwrap();
         let root = arbos_core::Agent::root("root");
         let mut child = arbos_core::Agent::root("kid");
         child.parent = Some(arbos_core::AgentId::new("root"));
@@ -429,18 +437,64 @@ mod goals_guard_tests {
             cwd: &dir,
             agent: &root,
         };
+        assert!(for_root.resolve_write(".arbos/notes.md").is_ok());
         assert!(for_root.resolve_write(".arbos/GOALS.md").is_ok());
+        assert!(for_root.resolve_write("main.py").is_ok());
         let for_child = PlanCx {
             root: &dir,
             cwd: &dir,
             agent: &child,
         };
-        let err = for_child.resolve_write(".arbos/GOALS.md").unwrap_err();
-        assert!(err.to_string().contains("owned by the main chat"), "{err}");
+        for owned in [
+            ".arbos/notes.md",
+            ".arbos/GOALS.md",
+            ".arbos/docs/project-context.md",
+            ".arbos/archived.md",
+        ] {
+            let err = for_child.resolve_write(owned).unwrap_err();
+            assert!(
+                err.to_string().contains("owned by the main chat"),
+                "{owned}: {err}"
+            );
+        }
+        assert!(for_child.resolve_write(".arbos/docs/design.md").is_ok());
         assert!(for_child.resolve_write("main.py").is_ok());
         std::fs::write(dir.join(".arbos/notes.md"), "# notes\n").unwrap();
         assert!(for_root.resolve_write(".arbos/notes.md").is_ok());
         let err = for_child.resolve_write(".arbos/notes.md").unwrap_err();
         assert!(err.to_string().contains("project page"), "{err}");
+    }
+
+    #[test]
+    fn a_coordinator_writes_only_the_store() {
+        let dir = std::env::temp_dir().join(format!("arbos-coord-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".arbos")).unwrap();
+        arbos_core::store::ensure(&arbos_core::Place::new(dir.clone())).unwrap();
+        let mut root = arbos_core::Agent::root("root");
+        root.role = Some(arbos_core::project::COORDINATOR.into());
+        let cx = PlanCx {
+            root: &dir,
+            cwd: &dir,
+            agent: &root,
+        };
+        for ok in [
+            ".arbos/notes.md",
+            ".arbos/docs/project-context.md",
+            ".arbos/docs/design.md",
+            ".arbos/internal/qa/2026-09-13.md",
+            ".arbos/media/layout/a.png",
+            ".arbos/archived.md",
+        ] {
+            assert!(cx.resolve_write(ok).is_ok(), "{ok}");
+        }
+        for no in [
+            "main.py",
+            ".arbos/agents/root/plan.md",
+            ".arbos/project.toml",
+        ] {
+            let err = cx.resolve_write(no).unwrap_err();
+            assert!(err.to_string().contains("as coordinator"), "{no}: {err}");
+        }
     }
 }

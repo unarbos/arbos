@@ -249,10 +249,11 @@ pub fn project(
         base_tokens: 0,
     };
     out.push(None, system(CONTRACT.to_string()));
-    // The place's goals come first, before anything about this agent: the
-    // standing brief every agent reads (GOALS.md, root-owned).
-    if let Some(goals) = arbos_core::goals::prompt_segment(place) {
-        out.push(None, system(goals));
+    // The project context comes first, before anything about this agent:
+    // the standing brief every agent reads (docs/project-context.md,
+    // root-owned).
+    if let Some(context) = arbos_core::store::prompt_segment(place) {
+        out.push(None, system(context));
     }
     out.push(None, system(instance_prompt(place, agent, skills)));
     if let Some(seg) = crate::prompt::plan_segment(place, agent) {

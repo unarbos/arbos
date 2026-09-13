@@ -16,7 +16,10 @@ use crate::{Agent, Place};
 pub const COORDINATOR: &str = "coordinator";
 
 /// What a coordinator keeps of the tool set: everything that reads,
-/// delegates, or talks; nothing that writes a file or runs a command.
+/// delegates, or talks, and `write`/`edit` for the project store only
+/// (`notes.md`, `docs/`, `internal/`, `media/`, `archived.md`; the write
+/// guard in `arbos_engine::PlanCx::resolve_write` refuses the rest).
+/// Nothing that runs a command.
 pub const COORDINATOR_TOOLS: &[&str] = &[
     "ls",
     "read",
@@ -24,6 +27,8 @@ pub const COORDINATOR_TOOLS: &[&str] = &[
     "grep",
     "search",
     "fetch",
+    "write",
+    "edit",
     "spawn",
     "say",
     "ask",
@@ -148,7 +153,11 @@ mod tests {
         apply_role(&p, &mut root);
         assert_eq!(root.role.as_deref(), Some("coordinator"));
         assert!(root.may("spawn") && root.may("read") && root.may("say"));
-        assert!(!root.may("edit") && !root.may("bash") && !root.may("write"));
+        // The coordinator protocol (2026-09-13): root writes notes.md and
+        // docs/project-context.md itself, so write and edit stay; the
+        // write guard confines them to the store. Commands never.
+        assert!(root.may("edit") && root.may("write"));
+        assert!(!root.may("bash") && !root.may("terminal") && !root.may("undo"));
         assert!(!root.to_md().contains("coordinator"));
         let mut child = Agent::root("child");
         child.parent = Some(crate::AgentId::new("root"));

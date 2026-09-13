@@ -203,7 +203,7 @@ pub fn bootstrap(place: &Place) -> Result<Agent> {
     if !place.user_md().exists() {
         std::fs::write(place.user_md(), "")?;
     }
-    let _ = crate::goals::ensure(place);
+    let _ = crate::store::ensure(place);
     let root = Layout::new(place, ROOT_ID);
     if !root.agent_md().exists() {
         // A place that has never had a root is new: it starts in Cursor's
