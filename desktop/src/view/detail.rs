@@ -5,7 +5,7 @@ use crate::{
     kernel,
     model::{
         attachment::Prompt,
-        session::{ChatSession, Choice, Connection, PlanNode},
+        session::{self, ChatSession, Choice, Connection, PlanNode},
         settings,
     },
     view::{
@@ -624,12 +624,19 @@ impl Cydonia {
             .filter(|surface| surface.owner == Some(chat.id))
             .collect();
         surfaces.sort_by_key(|surface| std::cmp::Reverse(surface.touched));
+        let tasks = workspace.child_summaries(chat.id);
         // Cursor's rail carries standing Browser/Terminal/Files verbs; here a
         // surface exists only once the agent opens one, so an empty rail
-        // would be dead space. It appears with the first surface.
-        if surfaces.is_empty() {
+        // would be dead space. It appears with the first surface or the
+        // first sub-agent.
+        if surfaces.is_empty() && tasks.is_empty() {
             return None;
         }
+        let focused_child = project.focused_agent();
+        let since = chat
+            .live_since
+            .and_then(|at| at.elapsed().ok())
+            .unwrap_or_default();
         let focus = project.focus.and_then(|focus| focus.surface);
         let place_path = (project.place().host.is_none()).then(|| project.place().path.clone());
         let on = place_path
@@ -670,6 +677,83 @@ impl Cydonia {
                     .into_any_element()
             })
             .collect();
+        let working = tasks
+            .iter()
+            .filter(|t| t.state == session::ChildState::Working)
+            .count();
+        let task_rows: Vec<AnyElement> = tasks
+            .iter()
+            .map(|task| {
+                let id = task.id;
+                let selected = focused_child == Some(id);
+                let glyph: AnyElement = match task.state {
+                    session::ChildState::Working => {
+                        transcript::spinner(since, theme.text_muted, cx)
+                    }
+                    session::ChildState::Asking => icons::icon(icons::system::CHAT_ROUND_LINE)
+                        .size(px(12.))
+                        .text_color(theme.accent)
+                        .into_any_element(),
+                    session::ChildState::Waiting => div()
+                        .size(px(9.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.text_faint)
+                        .into_any_element(),
+                    session::ChildState::Done => icons::icon(icons::status::CHECK)
+                        .size(px(12.))
+                        .text_color(theme.success)
+                        .into_any_element(),
+                };
+                div()
+                    .id(("context-task", id))
+                    .h(px(26.))
+                    .px(px(8.))
+                    .rounded(px(5.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .text_style(TextStyle::Caption)
+                    .text_color(match task.state {
+                        session::ChildState::Done if !selected => theme.text_faint,
+                        _ if selected => theme.text,
+                        _ => theme.text_muted,
+                    })
+                    .when(selected, |el| el.bg(theme.element_active))
+                    .when(!selected, |el| el.hover(|el| el.bg(theme.element_hover)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(12.))
+                            .flex()
+                            .justify_center()
+                            .child(glyph),
+                    )
+                    .child(div().min_w_0().truncate().child(task.title.clone()))
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_session(id, cx)))
+                    .into_any_element()
+            })
+            .collect();
+        let tasks_head = (!tasks.is_empty()).then(|| {
+            div()
+                .h(px(22.))
+                .px(px(8.))
+                .mt(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child("Tasks")
+                .child(div().flex_1())
+                .child(SharedString::from(if working > 0 {
+                    format!("{working} working")
+                } else {
+                    format!("{}", tasks.len())
+                }))
+        });
         Some(
             div()
                 .id("context-panel")
@@ -692,13 +776,20 @@ impl Cydonia {
                         .child(SharedString::from(format!("On {on}"))),
                 )
                 .children(rows)
+                .children(tasks_head)
+                .children(task_rows)
                 .into_any_element(),
         )
     }
 
     /// Cursor's chat header: the title and the place on the left, the chat's
     /// menu on the right, on one slim line the transcript scrolls under.
-    fn chat_header(&self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn chat_header(
+        &self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let workspace = self.workspace.read(cx);
         let Some(chat) = workspace.active_session() else {
             return div().into_any_element();
@@ -1106,11 +1197,13 @@ impl Cydonia {
             // A tool-list panic must not skip the composer sibling. The
             // transcript is inline in this render; catch it here.
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.workspace
-                    .update(cx, |workspace, cx| match workspace.session(id) {
+                self.workspace.update(cx, |workspace, cx| {
+                    workspace.refresh_children(id);
+                    match workspace.session(id) {
                         Some(chat) => transcript::render(chat, window, cx),
                         None => div().flex_1().into_any_element(),
-                    })
+                    }
+                })
             })) {
                 Ok(el) => el,
                 Err(_) => div()

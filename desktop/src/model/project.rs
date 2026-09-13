@@ -301,19 +301,15 @@ impl Project {
         kids
     }
 
-    /// A child agent stays on the tree while there is something to see:
-    /// a turn running, work the kernel still holds for it (a standing job,
-    /// a scheduled node, a question, a failure), a turn that ended a moment
-    /// ago, or you looking at it (or through it). Done and unwatched means
-    /// off the list; its folder stays, and it comes back if it works again.
+    /// A child agent stays on the tree until it is archived: Cursor keeps
+    /// a finished task on the list with a check, and so does the parent's
+    /// transcript here — the record of what was delegated is part of the
+    /// story. An archived child shows only while you look at it.
     fn live_child(&self, chat: &ChatSession, focus: Option<Focus>) -> bool {
         if chat.closed {
             return focus.is_some_and(|focus| focus.agent == chat.id);
         }
-        if chat.busy() || chat.recently_ended() || chat.plan_open().next().is_some() {
-            return true;
-        }
-        focus.is_some_and(|focus| focus.agent == chat.id || self.ancestor_of(chat.id, focus.agent))
+        true
     }
 
     /// A terminal, process, or panel stays until someone closes it, and so

@@ -756,7 +756,8 @@ fn from_block(
             div()
                 .text_style(TextStyle::Caption)
                 .text_color(theme.text_faint)
-                .child(SharedString::from(who.to_owned())),
+                // A sub-agent's title, not its folder id.
+                .child(SharedString::from(chat.who_label(who))),
         )
         .child(
             div()
@@ -765,6 +766,116 @@ fn from_block(
                 .child(prose(chat, ix, text, window, cx)),
         )
         .children(message_images(images))
+        .into_any_element()
+}
+
+/// The parent's view of its sub-agents, one line each: Cursor's bold count
+/// and verb, then the task's title. Working ones shimmer; finished ones
+/// carry a check and stay, faint, so what was delegated is still on the
+/// page. Click opens the sub-agent's chat.
+fn children_lines(chat: &ChatSession, theme: &Theme, cx: &mut Context<Workspace>) -> AnyElement {
+    use crate::model::session::ChildState;
+    let working = chat
+        .children
+        .iter()
+        .filter(|c| c.state == ChildState::Working)
+        .count();
+    let since = chat
+        .live_since
+        .and_then(|at| at.elapsed().ok())
+        .unwrap_or_default();
+    let rows: Vec<AnyElement> = chat
+        .children
+        .iter()
+        .map(|child| {
+            let id = child.id;
+            let (glyph, verb, tone): (AnyElement, &str, Hsla) = match child.state {
+                ChildState::Working => {
+                    (spinner(since, theme.text_muted, cx), "Working", theme.text)
+                }
+                ChildState::Asking => (
+                    icons::icon(icons::system::CHAT_ROUND_LINE)
+                        .size(px(12.))
+                        .text_color(theme.accent)
+                        .into_any_element(),
+                    "Asking",
+                    theme.text_muted,
+                ),
+                ChildState::Waiting => (
+                    div()
+                        .size(px(9.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.text_faint)
+                        .into_any_element(),
+                    "Waiting",
+                    theme.text_muted,
+                ),
+                ChildState::Done => (
+                    icons::icon(icons::status::CHECK)
+                        .size(px(12.))
+                        .text_color(theme.success)
+                        .into_any_element(),
+                    "Done",
+                    theme.text_faint,
+                ),
+            };
+            let label = format!("{verb}  {}", child.title);
+            div()
+                .id(("child-line", id))
+                .self_start()
+                .max_w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(ROW_GAP))
+                .py(px(2.))
+                .px(px(4.))
+                .rounded(px(Theme::control_radius()))
+                .cursor_pointer()
+                .hover(|el| el.bg(theme.element_hover))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(14.))
+                        .flex()
+                        .justify_center()
+                        .child(glyph),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_style(TextStyle::Callout)
+                        .text_color(tone)
+                        .child(if child.state == ChildState::Working {
+                            shimmer_label(label, live_phase(), theme, cx)
+                        } else {
+                            spaced_label(label, tone, theme)
+                        }),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.select_session(id, cx)))
+                .into_any_element()
+        })
+        .collect();
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .when(chat.children.len() > 1, |el| {
+            el.child(
+                div()
+                    .px(px(4.))
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(if working > 0 {
+                        format!("{working} of {} sub-agents working", chat.children.len())
+                    } else {
+                        format!("{} sub-agents", chat.children.len())
+                    })),
+            )
+        })
+        .children(rows)
         .into_any_element()
 }
 
@@ -2028,7 +2139,7 @@ pub fn render(chat: &ChatSession, window: &mut Window, cx: &mut Context<Workspac
                 .w_full()
                 .max_w(px(column))
                 .self_center()
-                .child(zone(chat, turn, running, window, cx))
+                .child(zone(chat, turn, running, position == last, window, cx))
                 .into_any_element(),
         );
     }
@@ -2285,6 +2396,7 @@ fn zone(
     chat: &ChatSession,
     turn: &Turn,
     running: bool,
+    last: bool,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
@@ -2360,6 +2472,12 @@ fn zone(
         if !kids.is_empty() {
             zone = zone.child(div().flex().flex_col().gap(px(ITEM_GAP)).children(kids));
         }
+    }
+    // Cursor's sub-agent lines under the status: "1 Working  <task>" per
+    // live child, and a check for each one that finished. On the latest
+    // turn only; the task rail keeps the whole list.
+    if last && !chat.children.is_empty() {
+        zone = zone.child(children_lines(chat, &theme, cx));
     }
     // ChatView `group/msg`: copy sits on the answer, hidden until
     // the pointer is over that answer. Retry lives on error cards only.

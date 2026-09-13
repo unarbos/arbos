@@ -2296,7 +2296,15 @@ impl Workspace {
         if self.reap_delegates(ix, cx) {
             cx.notify();
         }
-        if ended && delegate {
+        // Only a Go delegate (a one-shot run) leaves the tree when its
+        // turn ends. A rust-kernel child is an agent folder with a plan of
+        // its own: it stays, marked done, until archived — the parent's
+        // transcript and the task rail keep pointing at it.
+        let one_shot = self.projects[ix]
+            .session(id)
+            .and_then(|chat| chat.agent_session.as_deref().map(kernel::go_kernel_id))
+            .unwrap_or(false);
+        if ended && delegate && one_shot {
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
                     .timer(session::DELEGATE_GRACE + Duration::from_millis(100))
@@ -2308,6 +2316,45 @@ impl Workspace {
                 });
             })
             .detach();
+        }
+    }
+
+    /// This chat's direct sub-agents, in tree order, as the transcript and
+    /// the task rail show them. Finished ones stay: the record of what was
+    /// delegated is part of the parent's story.
+    pub fn child_summaries(&self, id: u64) -> Vec<session::ChildSummary> {
+        let Some(ix) = self.project_of(id) else {
+            return Vec::new();
+        };
+        let project = &self.projects[ix];
+        let mut kids: Vec<&ChatSession> = project
+            .sessions
+            .iter()
+            .filter(|chat| chat.parent == Some(id))
+            .collect();
+        kids.sort_by(|a, b| {
+            a.delegate_number
+                .cmp(&b.delegate_number)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        kids.into_iter()
+            .map(|chat| session::ChildSummary {
+                id: chat.id,
+                kernel_id: chat.agent_session.clone(),
+                title: self.display_label(chat.id),
+                state: chat.child_state(),
+            })
+            .collect()
+    }
+
+    /// Put the current child summaries on `id` so the transcript can draw
+    /// them without reaching into other sessions. Cheap; call before a draw.
+    pub fn refresh_children(&mut self, id: u64) {
+        let kids = self.child_summaries(id);
+        if let Some(chat) = self.session_mut(id)
+            && chat.children != kids
+        {
+            chat.children = kids;
         }
     }
 
