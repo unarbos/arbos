@@ -8,6 +8,7 @@ import Foundation
 /// fresh attach starts empty and fills as the agent works. Text arrives
 /// one `assistant` event per model step, not token by token; each step
 /// lands as one delta.
+@MainActor
 final class LiveKernelChat: ChatSource {
     private let client: ArbosKernelClient
     private let endpoint: ArbosKernelClient.Endpoint

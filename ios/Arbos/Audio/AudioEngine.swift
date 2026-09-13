@@ -33,19 +33,22 @@ final class AudioEngine {
         return scheduled > 0
     }
 
-    func start() throws {
+    /// `captureMic: false` runs playback only (a test feeds audio itself).
+    func start(captureMic: Bool = true) throws {
         try configureSession()
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: playFormat)
 
-        let input = engine.inputNode
-        let inputFormat = input.outputFormat(forBus: 0)
-        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-            throw AudioEngineError.noInput
-        }
-        converter = AVAudioConverter(from: inputFormat, to: wireFormat)
-        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            self?.capture(buffer)
+        if captureMic {
+            let input = engine.inputNode
+            let inputFormat = input.outputFormat(forBus: 0)
+            guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
+                throw AudioEngineError.noInput
+            }
+            converter = AVAudioConverter(from: inputFormat, to: wireFormat)
+            input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
+                self?.capture(buffer)
+            }
         }
         engine.prepare()
         try engine.start()
@@ -56,7 +59,10 @@ final class AudioEngine {
     func stop() {
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
-        engine.inputNode.removeTap(onBus: 0)
+        if converter != nil {
+            engine.inputNode.removeTap(onBus: 0)
+            converter = nil
+        }
         player.stop()
         engine.stop()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)

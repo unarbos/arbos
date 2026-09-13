@@ -28,7 +28,7 @@ struct MainChatView: View {
             Text(chat.agentName)
                 .font(.system(.headline, design: .rounded))
                 .foregroundStyle(.white.opacity(0.9))
-            Text(chat.mode.tag)
+            Text(headerTag)
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(.white.opacity(0.5))
                 .padding(.horizontal, 7)
@@ -42,6 +42,12 @@ struct MainChatView: View {
         .padding(.horizontal, 20)
         .padding(.top, 18)
         .padding(.bottom, 10)
+    }
+
+    /// `live · 1.7s`: where the chat comes from, and send → first token.
+    private var headerTag: String {
+        guard let latency = chat.lastFirstToken else { return chat.mode.tag }
+        return chat.mode.tag + String(format: " · %.1fs", latency)
     }
 
     private var transcript: some View {

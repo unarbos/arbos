@@ -6,6 +6,8 @@ struct TranscriptLine: Identifiable, Equatable {
     enum Speaker: Equatable {
         case user
         case arbos
+        /// A tool call or a sub-agent report: one thin line.
+        case system
     }
 
     let id = UUID()
@@ -13,9 +15,13 @@ struct TranscriptLine: Identifiable, Equatable {
     var text: String
 }
 
-/// The call, end to end: mic → speech server → transcript → kernel →
-/// reply text → speech server → speaker. One state machine drives the
-/// screen.
+/// The call, end to end: mic → speech server → (reply) → speaker. One
+/// state machine drives the screen.
+///
+/// Two server shapes. `duplex`: one speech model listens, answers, and
+/// calls Arbos tools by itself; the app plays audio and shows text.
+/// `pipeline` with no reply hop: the app sends each final transcript to
+/// the main chat (kernel) and hands the reply back with `speak`.
 @MainActor
 final class CallViewModel: ObservableObject {
     enum Phase: Equatable {
@@ -50,27 +56,29 @@ final class CallViewModel: ObservableObject {
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var lines: [TranscriptLine] = []
     @Published private(set) var startedAt: Date?
-    /// Short status under the label: "kernel offline" and the like.
+    /// Short status under the label: engine, latency, "kernel offline".
     @Published private(set) var note: String?
 
     private let settings: AppSettings
-    /// The main chat: where transcripts go and replies come from. Shared
-    /// with the chat sheet, so typed and spoken turns land in one place.
     private let chat: ChatStore
+    private let link: VoiceLink
     private let audio = AudioEngine()
-    private var session: VoiceSession?
-    private var eventTask: Task<Void, Never>?
+    private var subscription: UUID?
     private var busyWatch: AnyCancellable?
+    private var server = VoiceServerInfo()
     /// The speech side finished sending the reply; playback may still be
     /// draining.
     private var responseDone = true
-    /// The kernel is mid-turn on our behalf.
+    /// The kernel is mid-turn on our behalf (pipeline shape only).
     private var kernelBusy = false
     private var openUtterance = false
+    private var speechEndedAt: Date?
+    private var replyLatency: TimeInterval?
 
-    init(settings: AppSettings, chat: ChatStore) {
+    init(settings: AppSettings, chat: ChatStore, link: VoiceLink) {
         self.settings = settings
         self.chat = chat
+        self.link = link
         refreshIdle()
         #if DEBUG
         applyPreviewPhase()
@@ -96,6 +104,7 @@ final class CallViewModel: ObservableObject {
         responseDone = true
         kernelBusy = false
         openUtterance = false
+        replyLatency = nil
         Task { await connect() }
     }
 
@@ -107,7 +116,7 @@ final class CallViewModel: ObservableObject {
     // MARK: - Connect
 
     private var idlePhase: Phase {
-        settings.isConfigured ? .idle : .unconfigured(settings.provider.unconfiguredLabel)
+        settings.isConfigured ? .idle : .unconfigured(settings.provider.unconfiguredLabel(settings))
     }
 
     private func connect() async {
@@ -115,33 +124,38 @@ final class CallViewModel: ObservableObject {
             phase = .failed("Microphone access is off.")
             return
         }
-        let session = settings.provider.makeSession(settings)
-        self.session = session
-        audio.onCapture = { [weak session] frame in session?.send(audio: frame) }
+        subscription = link.subscribe { [weak self] event in self?.handle(event) }
         audio.onPlaybackDrained = { [weak self] in
             Task { @MainActor in self?.playbackDrained() }
         }
         do {
-            try audio.start()
-            try await session.connect()
+            var captureMic = true
+            #if DEBUG
+            captureMic = UserDefaults.standard.string(forKey: "injectWav") == nil
+            #endif
+            try audio.start(captureMic: captureMic)
+            try await link.connect()
         } catch {
             fail(error.localizedDescription)
             return
         }
+        guard phase.inCall else { return }
+        if let info = link.info { server = info }
+        audio.onCapture = link.audioSink()
         startedAt = Date()
-        eventTask = Task { [weak self] in
-            for await event in session.events {
-                guard let self, !Task.isCancelled else { return }
-                self.handle(event)
-            }
-        }
+        phase = .listening
         await joinChat()
+        updateNote()
+        #if DEBUG
+        injectWavIfAsked()
+        #endif
     }
 
-    /// Replies come from the main chat. A live kernel is best; the scripted
-    /// stand-in still lets the loop run end to end.
+    /// The main chat mirrors the kernel. Only in the pipeline shape does
+    /// the app route transcripts through it and speak what comes back.
     private func joinChat() async {
         await chat.connect()
+        guard !server.answersItself else { return }
         chat.onAgentMessage = { [weak self] text in self?.speak(text) }
         busyWatch = chat.$busy.sink { [weak self] running in
             guard let self else { return }
@@ -152,11 +166,22 @@ final class CallViewModel: ObservableObject {
                 self.settle()
             }
         }
-        switch chat.mode {
-        case .live: note = nil
-        case .mock: note = "no kernel · demo chat answers"
-        case .offline, .connecting: note = "kernel offline"
+    }
+
+    private func updateNote() {
+        var parts: [String] = []
+        if !server.engine.isEmpty { parts.append(server.engine) }
+        if server.answersItself {
+            if server.kernel { parts.append("kernel tools") }
+        } else {
+            switch chat.mode {
+            case .server, .live: break
+            case .mock: parts.append("demo chat answers")
+            case .offline, .connecting: parts.append("kernel offline")
+            }
         }
+        if let replyLatency { parts.append(String(format: "reply %.1fs", replyLatency)) }
+        note = parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private func speak(_ text: String) {
@@ -165,32 +190,49 @@ final class CallViewModel: ObservableObject {
         trimLines()
         responseDone = false
         phase = .thinking
-        session?.speak(text)
+        link.speak(text)
     }
 
     // MARK: - Speech events
 
     private func handle(_ event: VoiceEvent) {
+        guard phase.inCall else { return }
         switch event {
-        case .connected:
-            phase = .listening
+        case .connected(let info):
+            server = info
+            if phase == .connecting { phase = .listening }
         case .userSpeechStarted:
             // Barge-in: whatever Arbos was saying stops now.
             if audio.isPlaying || phase == .speaking {
                 audio.stopPlayback()
-                session?.interrupt()
+                link.interrupt()
                 responseDone = true
             }
+            speechEndedAt = nil
             phase = .listening
         case .userSpeechEnded:
-            phase = .thinking
+            speechEndedAt = Date()
+            if server.answersItself { phase = .thinking }
         case .userTranscript(let text, let final):
             appendUserTranscript(text, final: final)
-            if final { forwardToKernel(text) }
+            if final {
+                if text.trimmingCharacters(in: .whitespaces).isEmpty {
+                    settle()
+                } else if !server.answersItself {
+                    forwardToKernel(text)
+                } else {
+                    phase = .thinking
+                }
+            }
         case .thinking:
             responseDone = false
             if phase != .speaking { phase = .thinking }
         case .assistantAudio(let pcm):
+            if let speechEndedAt {
+                replyLatency = Date().timeIntervalSince(speechEndedAt)
+                self.speechEndedAt = nil
+                updateNote()
+            }
             responseDone = false
             phase = .speaking
             audio.play(pcm16: pcm)
@@ -199,10 +241,16 @@ final class CallViewModel: ObservableObject {
         case .responseDone:
             responseDone = true
             settle()
+        case .toolCall(let name, let summary):
+            appendSystem("\(name)\(summary.isEmpty ? "" : " · \(summary)")")
+        case .agentDone(_, let text):
+            appendSystem(text)
         case .error(let message):
             fail(message)
         case .closed:
-            if phase.inCall { fail("Connection closed.") }
+            fail("Connection closed.")
+        case .textDelta, .textDone, .toolResult, .agentEvent, .agentTurn, .agentTree:
+            break
         }
     }
 
@@ -216,10 +264,10 @@ final class CallViewModel: ObservableObject {
         phase = .listening
     }
 
-    // MARK: - Kernel
+    // MARK: - Kernel (pipeline shape)
 
     private func forwardToKernel(_ text: String) {
-        guard !text.trimmingCharacters(in: .whitespaces).isEmpty, chat.mode != .offline else { return }
+        guard chat.mode != .offline else { return }
         kernelBusy = true
         phase = .thinking
         chat.send(text)
@@ -227,12 +275,12 @@ final class CallViewModel: ObservableObject {
 
     // MARK: - Transcript
 
-    /// Transcription deltas come mid-utterance; `final` replaces the whole
+    /// Deltas are increments to the open line; `final` replaces the whole
     /// line with the server's cleaned-up text and closes it.
     private func appendUserTranscript(_ text: String, final: Bool) {
         if final {
             if let index = lines.indices.last, lines[index].speaker == .user, openUtterance {
-                lines[index].text = text
+                if text.isEmpty { lines.remove(at: index) } else { lines[index].text = text }
             } else if !text.isEmpty {
                 lines.append(TranscriptLine(speaker: .user, text: text))
             }
@@ -251,10 +299,20 @@ final class CallViewModel: ObservableObject {
         guard !delta.isEmpty else { return }
         if let index = lines.indices.last, lines[index].speaker == speaker,
            speaker == .arbos || openUtterance {
-            lines[index].text += delta
+            let current = lines[index].text
+            // Sentence-sized chunks arrive without a joining space.
+            let needsSpace = !current.isEmpty && !(current.last?.isWhitespace ?? true)
+                && !(delta.first?.isWhitespace ?? true) && !(delta.first?.isPunctuation ?? false)
+            lines[index].text = current + (needsSpace ? " " : "") + delta
         } else {
             lines.append(TranscriptLine(speaker: speaker, text: delta))
         }
+        trimLines()
+    }
+
+    private func appendSystem(_ text: String) {
+        guard !text.isEmpty else { return }
+        lines.append(TranscriptLine(speaker: .system, text: text))
         trimLines()
     }
 
@@ -270,20 +328,24 @@ final class CallViewModel: ObservableObject {
     }
 
     private func teardown() {
-        eventTask?.cancel()
-        eventTask = nil
+        #if DEBUG
+        injectTask?.cancel()
+        injectTask = nil
+        #endif
+        link.unsubscribe(subscription)
+        subscription = nil
         busyWatch = nil
         chat.onAgentMessage = nil
-        session?.close()
-        session = nil
+        audio.onCapture = nil
         audio.stop()
+        link.disconnect()
         startedAt = nil
         kernelBusy = false
+        speechEndedAt = nil
     }
 
     #if DEBUG
-    /// `xcrun simctl launch booted com.unarbos.arbos.ios -previewPhase listening`
-    /// shows a screen state without a server, for design review.
+    /// `-previewPhase listening` shows a screen state without a server.
     private func applyPreviewPhase() {
         guard let raw = UserDefaults.standard.string(forKey: "previewPhase") else { return }
         switch raw {
@@ -305,6 +367,41 @@ final class CallViewModel: ObservableObject {
         default:
             break
         }
+    }
+
+    /// `-injectWav /path/to/24k-mono-pcm16.wav` plays a file into the
+    /// session as if it were the microphone, paced in real time. The
+    /// simulator has no usable mic; this is how a round trip is tested.
+    private func injectWavIfAsked() {
+        guard let path = UserDefaults.standard.string(forKey: "injectWav"),
+              let data = FileManager.default.contents(atPath: path) else { return }
+        let pcm = Self.pcmPayload(of: data)
+        let sink = link.audioSink()
+        let frame = Int(AudioEngine.sampleRate) * 2 / 25   // 40 ms
+        injectTask = Task.detached {
+            try? await Task.sleep(for: .milliseconds(800))
+            var offset = 0
+            while offset < pcm.count, !Task.isCancelled {
+                let end = min(offset + frame, pcm.count)
+                sink(pcm.subdata(in: offset..<end))
+                offset = end
+                try? await Task.sleep(for: .milliseconds(40))
+            }
+            // Then silence for the rest of the call: a full-duplex model
+            // only advances while audio keeps arriving, like a real mic.
+            let silence = Data(count: frame)
+            while !Task.isCancelled {
+                sink(silence)
+                try? await Task.sleep(for: .milliseconds(40))
+            }
+        }
+    }
+
+    private var injectTask: Task<Void, Never>?
+
+    private static func pcmPayload(of wav: Data) -> Data {
+        guard let range = wav.range(of: Data("data".utf8)), range.upperBound + 4 <= wav.count else { return wav }
+        return wav.subdata(in: (range.upperBound + 4)..<wav.count)
     }
     #endif
 }

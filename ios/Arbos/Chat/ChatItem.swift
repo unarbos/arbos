@@ -43,6 +43,7 @@ enum ChatUpdate {
 
 /// Where the main chat comes from: the live kernel, or a scripted stand-in
 /// while no kernel is reachable.
+@MainActor
 protocol ChatSource: AnyObject {
     var updates: AsyncStream<ChatUpdate> { get }
     func start() async throws

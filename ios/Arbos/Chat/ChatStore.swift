@@ -7,15 +7,18 @@ final class ChatStore: ObservableObject {
     enum Mode: Equatable {
         case offline
         case connecting
+        /// Through the speech server: text channel + kernel mirror.
+        case server
+        /// Straight to the kernel's attach port.
         case live
-        /// No kernel reachable; a scripted stand-in is answering.
+        /// Nothing reachable; a scripted stand-in is answering.
         case mock
 
         var tag: String {
             switch self {
             case .offline: return "offline"
             case .connecting: return "connecting"
-            case .live: return "live"
+            case .server, .live: return "live"
             case .mock: return "demo"
             }
         }
@@ -25,27 +28,44 @@ final class ChatStore: ObservableObject {
     @Published private(set) var items: [ChatItem] = []
     @Published private(set) var busy = false
     @Published private(set) var agents: [KernelAgent] = []
+    /// Send → first token of the last typed turn.
+    @Published private(set) var lastFirstToken: TimeInterval?
 
-    /// Fires with each finished agent message. The call speaks it.
+    /// Fires with each finished agent message. The call speaks it when the
+    /// server does not.
     var onAgentMessage: ((String) -> Void)?
 
     private let settings: AppSettings
+    private let link: VoiceLink
     private var source: ChatSource?
     private var pump: Task<Void, Never>?
+    private var sentAt: Date?
 
-    init(settings: AppSettings) {
+    init(settings: AppSettings, link: VoiceLink) {
         self.settings = settings
+        self.link = link
     }
 
     var agentName: String {
-        agents.first { $0.parent == nil }?.name ?? "main"
+        let root = agents.first { $0.parent == nil }
+        guard let name = root?.name, name != "root" else { return "main" }
+        return name
     }
 
-    /// Attach to the kernel if Settings names one and it answers; else run
-    /// the scripted chat so the screen is still real. Safe to call again.
+    /// Speech server first (it carries the kernel's chat and the text
+    /// channel), then a direct kernel, then the scripted chat so the screen
+    /// is still real. Safe to call again.
     func connect() async {
         guard mode == .offline else { return }
         mode = .connecting
+        if settings.provider == .selfHosted, settings.isConfigured {
+            let server = VoiceServerChat(link: link)
+            if (try? await server.start()) != nil {
+                adopt(server, mode: .server)
+                return
+            }
+            server.stop()
+        }
         if let endpoint = settings.kernelEndpoint {
             let live = LiveKernelChat(endpoint: endpoint)
             if (try? await live.start()) != nil {
@@ -81,6 +101,7 @@ final class ChatStore: ObservableObject {
         // tool boundary; otherwise this starts one.
         let steer = busy
         busy = true
+        sentAt = Date()
         Task {
             do {
                 try await source.send(text: trimmed, steer: steer)
@@ -112,6 +133,10 @@ final class ChatStore: ObservableObject {
             closeOpenAgentMessage()
             items.append(item)
         case .agentDelta(let delta):
+            if let sentAt {
+                lastFirstToken = Date().timeIntervalSince(sentAt)
+                self.sentAt = nil
+            }
             if let index = items.indices.last, case .agent(let text, streaming: true) = items[index].kind {
                 items[index].kind = .agent(text + delta, streaming: true)
             } else {

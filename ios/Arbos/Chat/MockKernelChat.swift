@@ -3,6 +3,7 @@ import Foundation
 /// A scripted main chat for when no kernel is reachable. Same `ChatUpdate`
 /// stream as the live source, so the screen cannot tell them apart. Replies
 /// stream one word at a time.
+@MainActor
 final class MockKernelChat: ChatSource {
     private var stream: AsyncStream<ChatUpdate>.Continuation?
     private var reply: Task<Void, Never>?

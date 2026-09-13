@@ -27,26 +27,61 @@ protocol VoiceSession: AnyObject {
     /// turn closes with `.responseDone`.
     func speak(_ text: String)
 
+    /// A typed turn. The answer streams back as `.textDelta` then `.textDone`.
+    func sendText(_ text: String)
+    func cancelText()
+
     /// The user started talking over the reply. Drop the rest of it.
     func interrupt()
 
     func close()
 }
 
+/// What the server said about itself in `session.ready`.
+struct VoiceServerInfo: Equatable {
+    /// `duplex` (one speech-to-speech model that answers on its own) or
+    /// `pipeline` (ASR → optional reply hop → TTS).
+    var engine: String = ""
+    /// Who answers spoken turns: `none` means the app must.
+    var reply: String = ""
+    var tools: [String] = []
+    /// The server is attached to an Arbos kernel and mirrors its chat.
+    var kernel = false
+    var text = ""
+
+    /// True when the server produces the spoken reply itself, so the app
+    /// must not forward transcripts to the kernel (that would answer twice).
+    var answersItself: Bool {
+        engine == "duplex" || (!reply.isEmpty && reply != "none")
+    }
+}
+
 enum VoiceEvent {
-    case connected
+    case connected(VoiceServerInfo)
     /// Server voice-activity detection heard the user start speaking.
     case userSpeechStarted
     case userSpeechEnded
-    /// Text of what the user said, arriving in pieces. `final` closes the
-    /// utterance.
+    /// Text of what the user said. A non-final `text` is an increment to
+    /// append; a final one replaces the line (and may be empty).
     case userTranscript(text: String, final: Bool)
     /// The provider itself is producing a reply; no audio yet.
     case thinking
     /// One chunk of speech to play.
     case assistantAudio(Data)
     case assistantTranscript(delta: String)
-    case responseDone
+    case responseDone(interrupted: Bool)
+    /// Text channel.
+    case textDelta(String)
+    case textDone(text: String, cancelled: Bool)
+    /// Agent bridge: the voice model acted.
+    case toolCall(name: String, summary: String)
+    case toolResult(name: String, output: String)
+    /// A dispatched sub-agent finished; the server speaks `text` itself.
+    case agentDone(agent: String, text: String)
+    /// Mirror of the kernel's main chat.
+    case agentEvent(agent: String, kind: String, text: String, from: String?)
+    case agentTurn(agent: String, running: Bool)
+    case agentTree([KernelAgent])
     case error(String)
     case closed
 }
@@ -54,12 +89,14 @@ enum VoiceEvent {
 enum VoiceSessionError: LocalizedError {
     case missingAPIKey
     case missingServer
+    case missingToken
     case badURL(String)
 
     var errorDescription: String? {
         switch self {
         case .missingAPIKey: return "No API key set."
         case .missingServer: return "No voice server set."
+        case .missingToken: return "No server token set."
         case .badURL(let url): return "Bad URL: \(url)"
         }
     }

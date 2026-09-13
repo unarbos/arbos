@@ -10,8 +10,8 @@ struct CallView: View {
     /// True when the chat was opened by swiping: bring the keyboard up.
     @State private var chatWantsKeyboard = false
 
-    init(settings: AppSettings, chat: ChatStore) {
-        _model = StateObject(wrappedValue: CallViewModel(settings: settings, chat: chat))
+    init(settings: AppSettings, chat: ChatStore, link: VoiceLink) {
+        _model = StateObject(wrappedValue: CallViewModel(settings: settings, chat: chat, link: link))
     }
 
     var body: some View {
@@ -72,10 +72,11 @@ struct CallView: View {
         }
         .onChange(of: settings.openAIKey) { _, _ in model.refreshIdle() }
         .onChange(of: settings.selfHostedURL) { _, _ in model.refreshIdle() }
+        .onChange(of: settings.voiceToken) { _, _ in model.refreshIdle() }
         .onChange(of: settings.provider) { _, _ in model.refreshIdle() }
         .task { await chat.connect() }
         #if DEBUG
-        .task { await previewChatIfAsked() }
+        .task { await previewIfAsked() }
         #endif
     }
 
@@ -174,14 +175,20 @@ struct CallView: View {
     }
 
     #if DEBUG
-    /// `-previewChat 1` opens the chat on launch and sends one message so
-    /// the streaming reply is on screen, for design review.
-    private func previewChatIfAsked() async {
-        guard UserDefaults.standard.bool(forKey: "previewChat") else { return }
+    /// Launch arguments for review and scripted tests:
+    /// `-previewChat 1` opens the chat and sends `-chatText` (or a default);
+    /// `-previewCall 1` starts a call at once (pair with `-injectWav`).
+    private func previewIfAsked() async {
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: "previewCall") {
+            try? await Task.sleep(for: .milliseconds(300))
+            model.startCall()
+        }
+        guard defaults.bool(forKey: "previewChat") else { return }
         try? await Task.sleep(for: .milliseconds(400))
         openChat(keyboard: false)
         try? await Task.sleep(for: .milliseconds(1500))
-        chat.send("What's left before I can merge?")
+        chat.send(defaults.string(forKey: "chatText") ?? "What's left before I can merge?")
     }
     #endif
 }

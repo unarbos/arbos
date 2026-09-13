@@ -4,6 +4,7 @@ struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
     @State private var keyDraft = ""
+    @State private var tokenDraft = ""
 
     var body: some View {
         NavigationStack {
@@ -18,10 +19,13 @@ struct SettingsView: View {
                     }
                     switch settings.provider {
                     case .selfHosted:
-                        TextField("wss://host:port/voice", text: $settings.selfHostedURL)
+                        TextField("wss://host/ws", text: $settings.selfHostedURL)
                             .keyboardType(.URL)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
+                        SecureField(tokenPlaceholder, text: $tokenDraft)
+                            .textContentType(.password)
+                            .autocorrectionDisabled()
                     case .openAIRealtime:
                         SecureField(keyPlaceholder, text: $keyDraft)
                             .textContentType(.password)
@@ -42,9 +46,9 @@ struct SettingsView: View {
                     TextField("Port", value: $settings.kernelPort, format: .number)
                         .keyboardType(.numberPad)
                 } header: {
-                    Text("Arbos kernel")
+                    Text("Arbos kernel (direct)")
                 } footer: {
-                    Text("The attach port from .arbos/kernel.json, reachable from this phone. Replies come from here.")
+                    Text("Only needed without a speech server. The attach port from .arbos/kernel.json, reachable from this phone.")
                 }
             }
             .navigationTitle("Settings")
@@ -53,6 +57,7 @@ struct SettingsView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
                         if !keyDraft.isEmpty { settings.saveOpenAIKey(keyDraft) }
+                        if !tokenDraft.isEmpty { settings.saveVoiceToken(tokenDraft) }
                         dismiss()
                     }
                 }
@@ -62,12 +67,16 @@ struct SettingsView: View {
 
     private var voiceFooter: String {
         switch settings.provider {
-        case .selfHosted: return "Our speech server: hears you, reads replies aloud."
+        case .selfHosted: return "Our speech server. Token stored in the Keychain; it rides in the URL as ?token=."
         case .openAIRealtime: return "Stored in the Keychain. Replies come from the model, not the kernel."
         }
     }
 
     private var keyPlaceholder: String {
         settings.openAIKey.isEmpty ? "OpenAI API key" : "API key saved · paste to replace"
+    }
+
+    private var tokenPlaceholder: String {
+        settings.voiceToken.isEmpty ? "Server token" : "Token saved · paste to replace"
     }
 }
