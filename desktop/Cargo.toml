@@ -95,6 +95,9 @@ gpui_platform = { version = "0.3.9", package = "bezel-gpui-platform", features =
 objc = "0.2"
 # Fn-key monitor: `NSEvent.addLocalMonitor` takes a block.
 block = "0.1"
+# The microphone, in-process over CoreAudio: macOS attributes the capture
+# (and the Privacy › Microphone prompt) to this app, not to a child program.
+cpal = "0.15"
 
 # A dev build's frame time is spent in dependencies — gpui's layout, the text
 # shaper, the markdown parser — and unoptimized they make a long transcript

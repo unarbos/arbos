@@ -5,10 +5,12 @@
 //! control. The server does speech only — the reply text comes from the
 //! kernel and is handed back here with [`speak`].
 //!
-//! Microphone and speaker are external processes (PipeWire, Pulse, ALSA,
-//! sox, ffmpeg — first one found), so this works on Linux and macOS with
-//! no native audio crate. `ARBOS_VOICE_MIC_CMD` / `ARBOS_VOICE_PLAYER_CMD`
-//! replace them (tests feed a file and swallow the output).
+//! On macOS the microphone is CoreAudio in this process (see [`Mic`]), so
+//! the Privacy › Microphone prompt and row are the app's own. Elsewhere the
+//! microphone, and everywhere the speaker, are external processes
+//! (PipeWire, Pulse, ALSA, sox, ffmpeg — first one found).
+//! `ARBOS_VOICE_MIC_CMD` / `ARBOS_VOICE_PLAYER_CMD` replace them (tests
+//! feed a file and swallow the output).
 //!
 //! The composer keeps its push-to-talk shape: [`start`] opens the mic,
 //! [`peek`] gives the words so far, [`stop`] returns the take. The server's
@@ -862,14 +864,42 @@ fn text_frame(v: Value) -> Message {
     Message::Text(Utf8Bytes::from(v.to_string()))
 }
 
-/// The microphone: a process writing raw PCM16 mono 24 kHz to stdout, read
-/// on a thread in 100 ms chunks.
-struct Mic {
-    child: Child,
+/// The microphone.
+///
+/// On macOS it is CoreAudio inside this process ([`native`]): the capture —
+/// and so the Privacy › Microphone prompt and its row — belong to the app,
+/// not to a child program macOS may attribute elsewhere or fail to find.
+/// Elsewhere, or when `ARBOS_VOICE_MIC_CMD` names one, a process writing raw
+/// PCM16 mono 24 kHz to stdout, read on a thread in 100 ms chunks.
+enum Mic {
+    #[cfg(target_os = "macos")]
+    Native(native::Capture),
+    Process(Child),
 }
 
 impl Mic {
     fn spawn(tx: mpsc::UnboundedSender<Vec<u8>>, shared: Arc<Mutex<Shared>>) -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        if std::env::var("ARBOS_VOICE_MIC_CMD")
+            .ok()
+            .is_none_or(|c| c.trim().is_empty())
+        {
+            match native::Capture::start(tx.clone(), Arc::clone(&shared)) {
+                Ok(capture) => return Ok(Self::Native(capture)),
+                Err(e) => {
+                    // A program can still do it; the strip says why the
+                    // native path did not.
+                    eprintln!("voice: native microphone unavailable ({e:#}); trying a program");
+                }
+            }
+        }
+        Self::spawn_process(tx, shared)
+    }
+
+    fn spawn_process(
+        tx: mpsc::UnboundedSender<Vec<u8>>,
+        shared: Arc<Mutex<Shared>>,
+    ) -> Result<Self> {
         let mut cmd = mic_command()?;
         // What the strip shows as `mic: …`: the device when we chose one,
         // else the program's name.
@@ -932,13 +962,297 @@ impl Mic {
                 s.level = 0.0;
             })
             .map_err(|e| anyhow!("mic thread: {e}"))?;
-        Ok(Self { child })
+        Ok(Self::Process(child))
     }
 
-    fn stop(mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+    fn stop(self) {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::Native(capture) => capture.stop(),
+            Self::Process(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
     }
+}
+
+/// The microphone over CoreAudio, in this process.
+///
+/// cpal's stream is not `Send`, so it lives on its own thread: the thread
+/// opens the default input device (or the one `ARBOS_VOICE_MIC_DEVICE`
+/// names), reports the outcome, then sleeps until told to stop. Opening the
+/// device is what makes macOS ask for the microphone the first time, in the
+/// app's name, with `NSMicrophoneUsageDescription` as the reason.
+///
+/// The device's own format (usually 48 kHz, one or two channels, f32) is
+/// mixed to mono and resampled to 24 kHz PCM16 here, in 100 ms chunks like
+/// the program path, so the rest of the session sees no difference.
+#[cfg(target_os = "macos")]
+mod native {
+    use super::{CHUNK, RATE, Shared, rms};
+    use anyhow::{Result, anyhow, bail};
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use std::sync::{Arc, Mutex, mpsc as sync_mpsc};
+    use std::thread::JoinHandle;
+    use tokio::sync::mpsc;
+
+    pub struct Capture {
+        /// Dropping this (or sending on it) ends the thread and the stream.
+        stop: sync_mpsc::Sender<()>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl Capture {
+        pub fn start(tx: mpsc::UnboundedSender<Vec<u8>>, shared: Arc<Mutex<Shared>>) -> Result<Self> {
+            let (stop, stop_rx) = sync_mpsc::channel::<()>();
+            let (ready, ready_rx) = sync_mpsc::channel::<Result<String>>();
+            let thread_shared = Arc::clone(&shared);
+            let thread = std::thread::Builder::new()
+                .name("arbos-mic".into())
+                .spawn(move || {
+                    let stream = match open(tx, thread_shared) {
+                        Ok((stream, name)) => {
+                            let _ = ready.send(Ok(name));
+                            stream
+                        }
+                        Err(e) => {
+                            let _ = ready.send(Err(e));
+                            return;
+                        }
+                    };
+                    // Err means the handle was dropped: stop all the same.
+                    let _ = stop_rx.recv();
+                    drop(stream);
+                })
+                .map_err(|e| anyhow!("mic thread: {e}"))?;
+            let name = ready_rx
+                .recv()
+                .map_err(|_| anyhow!("mic thread ended before opening the device"))??;
+            shared.lock().unwrap_or_else(|p| p.into_inner()).mic_device = name;
+            Ok(Self {
+                stop,
+                thread: Some(thread),
+            })
+        }
+
+        pub fn stop(mut self) {
+            let _ = self.stop.send(());
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn pick_device(host: &cpal::Host) -> Result<cpal::Device> {
+        if let Some(wanted) = std::env::var("ARBOS_VOICE_MIC_DEVICE")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            let mut devices = host
+                .input_devices()
+                .map_err(|e| anyhow!("list input devices: {e}"))?;
+            return devices
+                .find(|d| d.name().is_ok_and(|n| n == wanted))
+                .ok_or_else(|| anyhow!("no input device named {wanted:?}"));
+        }
+        host.default_input_device()
+            .ok_or_else(|| anyhow!("no default input device"))
+    }
+
+    fn open(
+        tx: mpsc::UnboundedSender<Vec<u8>>,
+        shared: Arc<Mutex<Shared>>,
+    ) -> Result<(cpal::Stream, String)> {
+        let host = cpal::default_host();
+        let device = pick_device(&host)?;
+        let name = device.name().unwrap_or_else(|_| "microphone".into());
+        let config = device
+            .default_input_config()
+            .map_err(|e| anyhow!("{name}: no input format: {e}"))?;
+        let mut conv = Converter::new(config.channels() as usize, config.sample_rate().0, tx, Arc::clone(&shared));
+        let on_error = move |e: cpal::StreamError| {
+            let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
+            s.mic_error = Some(format!("microphone stream: {e}"));
+            s.level = 0.0;
+        };
+        let stream_config: cpal::StreamConfig = config.clone().into();
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &stream_config,
+                move |data: &[f32], _| conv.push(data.iter().copied()),
+                on_error,
+                None,
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &stream_config,
+                move |data: &[i16], _| conv.push(data.iter().map(|&v| v as f32 / 32768.0)),
+                on_error,
+                None,
+            ),
+            cpal::SampleFormat::U16 => device.build_input_stream(
+                &stream_config,
+                move |data: &[u16], _| {
+                    conv.push(data.iter().map(|&v| (v as f32 - 32768.0) / 32768.0))
+                },
+                on_error,
+                None,
+            ),
+            other => bail!("{name}: unsupported sample format {other:?}"),
+        }
+        .map_err(|e| anyhow!("{name}: open input stream: {e}"))?;
+        stream
+            .play()
+            .map_err(|e| anyhow!("{name}: start capture: {e}"))?;
+        Ok((stream, name))
+    }
+
+    /// Device frames in, 24 kHz mono PCM16 chunks out.
+    struct Converter {
+        channels: usize,
+        /// Input samples per output sample.
+        step: f64,
+        /// Read position in `mono`, fractional.
+        pos: f64,
+        mono: Vec<f32>,
+        out: Vec<u8>,
+        tx: mpsc::UnboundedSender<Vec<u8>>,
+        shared: Arc<Mutex<Shared>>,
+    }
+
+    impl Converter {
+        fn new(
+            channels: usize,
+            in_rate: u32,
+            tx: mpsc::UnboundedSender<Vec<u8>>,
+            shared: Arc<Mutex<Shared>>,
+        ) -> Self {
+            Self {
+                channels: channels.max(1),
+                step: in_rate as f64 / RATE as f64,
+                pos: 0.0,
+                mono: Vec::new(),
+                out: Vec::new(),
+                tx,
+                shared,
+            }
+        }
+
+        fn push(&mut self, samples: impl Iterator<Item = f32>) {
+            let mut acc = 0f32;
+            let mut n = 0usize;
+            for v in samples {
+                acc += v;
+                n += 1;
+                if n == self.channels {
+                    self.mono.push(acc / self.channels as f32);
+                    acc = 0.0;
+                    n = 0;
+                }
+            }
+            // Linear interpolation: plenty for speech going to a 24 kHz
+            // recogniser, and no filter state to get wrong.
+            while (self.pos as usize) + 1 < self.mono.len() {
+                let i = self.pos as usize;
+                let f = (self.pos - i as f64) as f32;
+                let v = self.mono[i] * (1.0 - f) + self.mono[i + 1] * f;
+                let s = (v.clamp(-1.0, 1.0) * 32767.0) as i16;
+                self.out.extend_from_slice(&s.to_le_bytes());
+                self.pos += self.step;
+            }
+            let consumed = (self.pos as usize).min(self.mono.len());
+            if consumed > 0 {
+                self.mono.drain(..consumed);
+                self.pos -= consumed as f64;
+            }
+            while self.out.len() >= CHUNK {
+                let chunk: Vec<u8> = self.out.drain(..CHUNK).collect();
+                {
+                    let mut s = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+                    s.level = rms(&chunk);
+                }
+                let _ = self.tx.send(chunk);
+            }
+        }
+    }
+}
+
+/// A snapshot of the Settings › Test mic probe.
+#[derive(Debug, Clone, Default)]
+pub struct MicTest {
+    pub device: String,
+    /// Loudness 0..1 of the last 100 ms.
+    pub level: f32,
+    pub error: Option<String>,
+}
+
+/// The Test mic probe: the same capture a take or a call uses, with nobody
+/// listening to the audio — only the level is read. Starting it is also
+/// what makes macOS ask for the microphone the first time.
+struct MicProbe {
+    mic: Option<Mic>,
+    shared: Arc<Mutex<Shared>>,
+    rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    since: Instant,
+}
+
+/// A probe left running is stopped on its own after this.
+const MIC_TEST_FOR: Duration = Duration::from_secs(60);
+
+fn probe() -> &'static Mutex<Option<MicProbe>> {
+    static PROBE: OnceLock<Mutex<Option<MicProbe>>> = OnceLock::new();
+    PROBE.get_or_init(|| Mutex::new(None))
+}
+
+pub fn mic_test_start() {
+    let shared = Arc::new(Mutex::new(Shared {
+        phase: Some(Phase::Listening),
+        ..Shared::default()
+    }));
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mic = match Mic::spawn(tx, Arc::clone(&shared)) {
+        Ok(mic) => Some(mic),
+        Err(e) => {
+            shared.lock().unwrap_or_else(|p| p.into_inner()).mic_error = Some(format!("{e:#}"));
+            None
+        }
+    };
+    let previous = probe().lock().unwrap_or_else(|p| p.into_inner()).replace(MicProbe {
+        mic,
+        shared,
+        rx,
+        since: Instant::now(),
+    });
+    if let Some(p) = previous.and_then(|p| p.mic) {
+        p.stop();
+    }
+}
+
+pub fn mic_test_stop() {
+    let taken = probe().lock().unwrap_or_else(|p| p.into_inner()).take();
+    if let Some(mic) = taken.and_then(|p| p.mic) {
+        mic.stop();
+    }
+}
+
+/// What the probe hears now; None when no test is running.
+pub fn mic_test() -> Option<MicTest> {
+    let mut guard = probe().lock().unwrap_or_else(|p| p.into_inner());
+    let p = guard.as_mut()?;
+    if p.since.elapsed() > MIC_TEST_FOR {
+        drop(guard);
+        mic_test_stop();
+        return None;
+    }
+    // Nobody wants the audio; keep the channel from growing.
+    while p.rx.try_recv().is_ok() {}
+    let s = p.shared.lock().unwrap_or_else(|p| p.into_inner());
+    Some(MicTest {
+        device: s.mic_device.clone(),
+        level: s.level,
+        error: s.mic_error.clone(),
+    })
 }
 
 /// The speaker: a process reading raw PCM16 mono 24 kHz from stdin.
