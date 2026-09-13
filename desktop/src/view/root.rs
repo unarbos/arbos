@@ -509,6 +509,9 @@ pub struct Arbos {
     fn_held: bool,
     /// Stop was asked while start was still in flight. Finish start, then stop.
     voice_want_stop: bool,
+    /// The loop that carries the speech server's agent activity into the
+    /// chat is running.
+    voice_mirror_on: bool,
     /// The plan strip above the composer shows one summary line only.
     pub(crate) plan_folded: bool,
     /// Native Fn monitor. Lives with the window so Drop removes it.
@@ -667,6 +670,7 @@ impl Arbos {
             voice_place: None,
             fn_held: false,
             voice_want_stop: false,
+            voice_mirror_on: false,
             plan_folded: false,
             #[cfg(target_os = "macos")]
             _fn_monitor: None,
@@ -1027,6 +1031,47 @@ impl Arbos {
     }
 
     /// Mic button: start capture, or stop, put the words in the field, and send.
+    /// While a speech-server session is live, what its agent does
+    /// (`agent.*`, `tool.*`, `text.done`) lands in the active chat as
+    /// notices, a few times a second. Ends when the session does.
+    pub(crate) fn start_voice_mirror(&mut self, cx: &mut Context<Self>) {
+        if self.voice_mirror_on || !crate::voice_ws::configured() {
+            return;
+        }
+        self.voice_mirror_on = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(400))
+                    .await;
+                let lines = crate::voice_ws::drain_mirror();
+                let live = crate::voice_ws::status().phase.is_some();
+                let keep = this.update(cx, |this, cx| {
+                    if !lines.is_empty() {
+                        let id = this.workspace.read(cx).active_id();
+                        if let Some(id) = id {
+                            this.workspace.update(cx, |workspace, cx| {
+                                workspace.with_session(id, cx, |chat| {
+                                    for m in &lines {
+                                        chat.notice(false, &mirror_line(m));
+                                    }
+                                });
+                            });
+                        }
+                    }
+                    if !live {
+                        this.voice_mirror_on = false;
+                    }
+                    live
+                });
+                if !matches!(keep, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn toggle_voice(&mut self, cx: &mut Context<Self>) {
         if self.composer.read(cx).is_recording() || self.voice_want_stop {
             self.stop_voice(cx);
@@ -1089,6 +1134,7 @@ impl Arbos {
                             composer.set_voice(VoiceState::Recording, cx);
                         });
                         this.poll_voice(stamp, started_at, cx);
+                        this.start_voice_mirror(cx);
                         if this.voice_want_stop {
                             this.stop_voice(cx);
                         }
@@ -1414,3 +1460,29 @@ fn keep_macos_glass(_window: &Window) {
 
 #[cfg(not(target_os = "macos"))]
 fn keep_macos_glass(_window: &Window) {}
+
+/// One notice line for a mirrored speech-server event: who, what, words.
+fn mirror_line(m: &crate::voice_ws::Mirror) -> String {
+    let who = if m.agent.is_empty() {
+        "voice".to_string()
+    } else {
+        format!("voice · {}", m.agent)
+    };
+    let text: String = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text: String = if text.chars().count() > 240 {
+        text.chars().take(240).collect::<String>() + "…"
+    } else {
+        text
+    };
+    match m.kind.as_str() {
+        "text.done" => format!("{who} answered: {text}"),
+        "agent.done" => format!("{who} finished: {text}"),
+        "agent.turn" => format!("{who} is {text}"),
+        "tool.call" => format!("{who} runs {text}"),
+        "tool.result" => format!("{who} got {text}"),
+        k if k.starts_with("agent.event/") => {
+            format!("{who} {}: {text}", k.trim_start_matches("agent.event/"))
+        }
+        _ => format!("{who}: {text}"),
+    }
+}
