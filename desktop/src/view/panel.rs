@@ -19,8 +19,8 @@ use crate::{
 };
 use bezel::{
     gpui::{
-        AnyElement, App, ClickEvent, Context, Div, Render, SharedString, Stateful, Window, div,
-        prelude::*, px,
+        AnyElement, App, ClickEvent, Context, Div, Hsla, Render, SharedString, Stateful, Window,
+        div, prelude::*, px,
     },
     theme::{TextStyle, Theme, Typeset},
     ui::{icons, popover, tooltip::Tooltip, widgets::Buttons},
@@ -125,6 +125,7 @@ impl Arbos {
         let focused = project.focused_agent();
         let focused_surface = project.focus.and_then(|focus| focus.surface);
         let name = Workspace::tab_label(project);
+        let (glyph, tint) = (project.identity.glyph(), project.identity.hsla());
         let place = project.place();
         let where_ = place.encode();
         let branch = (!place.is_remote())
@@ -200,7 +201,7 @@ impl Arbos {
             .pb(px(SECTION_GAP))
             .flex()
             .flex_col()
-            .child(self.panel_head(&name, &where_, branch.as_deref(), remote, &theme))
+            .child(self.panel_head(&name, &where_, branch.as_deref(), glyph, tint, &theme))
             .child(section_head(
                 "Agents",
                 (working > 0).then(|| format!("{working} working")),
@@ -267,7 +268,8 @@ impl Arbos {
         name: &str,
         where_: &str,
         branch: Option<&str>,
-        remote: bool,
+        glyph: &'static str,
+        tint: Hsla,
         theme: &Theme,
     ) -> AnyElement {
         div()
@@ -285,15 +287,7 @@ impl Arbos {
                     .gap(px(6.))
                     .text_style(TextStyle::Body)
                     .text_color(theme.text)
-                    .child(
-                        icons::icon(if remote {
-                            crate::assets::REMOTE_ICON
-                        } else {
-                            icons::files::FOLDER
-                        })
-                        .size(px(13.))
-                        .text_color(theme.text_muted),
-                    )
+                    .child(icons::icon(glyph).size(px(13.)).text_color(tint))
                     .child(div().min_w_0().truncate().child(SharedString::from(name.to_string()))),
             )
             .child(
@@ -386,14 +380,13 @@ impl Arbos {
             // One click opens the chat; two name it, in the header's field;
             // a secondary click opens its menu.
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                if event.is_secondary() {
-                    this.toggle_menu(Menu::Session(id), cx);
-                    return;
-                }
                 this.select_session(id, cx);
                 if event.click_count() >= 2 {
                     this.rename_header_title(id, window, cx);
                 }
+            }))
+            .on_aux_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_menu(Menu::Session(id), cx);
             }));
         // Dragged onto the composer, the chat lands as a chip carrying its
         // link — the way to hand one agent's thread to another.

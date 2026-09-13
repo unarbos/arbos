@@ -7,13 +7,13 @@ use crate::{
 use bezel::{
     gpui::{
         self, App, Context, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable,
-        Hsla, KeyBinding, MouseButton, Pixels, Point, Render, SharedString, Task, Window, actions,
-        div, prelude::*, px,
+        Hsla, KeyBinding, MouseButton, Pixels, Point, Render, ScrollHandle, SharedString, Task,
+        Window, actions, div, prelude::*, px,
     },
     theme::{Glass, SurfaceStyle, TextStyle, Theme, Typeset},
     ui::{
         icons,
-        input::{FieldEvent, TextField},
+        input::{self, FieldEvent, TextField},
         surface::Surfaced as _,
     },
 };
@@ -28,7 +28,10 @@ const LOCAL_MACHINE: &str = if cfg!(target_os = "macos") {
     "This machine"
 };
 
-actions!(arbos_opener, [Submit, Next, Previous, Dismiss, Complete]);
+actions!(
+    arbos_opener,
+    [Submit, PickHere, Descend, Ascend, Back, Next, Previous, Dismiss, Complete]
+);
 
 const KEY_CONTEXT: &str = "ArbosOpener";
 
@@ -56,10 +59,20 @@ impl DirListing {
 pub fn init(cx: &mut App) {
     crate::view::bind_field_editing(cx, KEY_CONTEXT, false);
     let ctx = Some(KEY_CONTEXT);
+    // Finder's quick-open, on the field: the arrows walk the list and the
+    // tree, Enter steps into the lit folder or opens the one match, ⌘↩
+    // opens the folder you are in. Bound after the field's own editing
+    // chords on this context, so these win the shared keys.
     cx.bind_keys([
         KeyBinding::new("enter", Submit, ctx),
+        KeyBinding::new("cmd-enter", PickHere, ctx),
         KeyBinding::new("down", Next, ctx),
         KeyBinding::new("up", Previous, ctx),
+        KeyBinding::new("ctrl-n", Next, ctx),
+        KeyBinding::new("ctrl-p", Previous, ctx),
+        KeyBinding::new("right", Descend, ctx),
+        KeyBinding::new("left", Ascend, ctx),
+        KeyBinding::new("backspace", Back, ctx),
         KeyBinding::new("escape", Dismiss, ctx),
         KeyBinding::new("tab", Complete, ctx),
     ]);
@@ -102,6 +115,9 @@ pub struct Opener {
     listings: HashMap<(Option<String>, String), DirListing>,
     inflight: HashSet<(Option<String>, String)>,
     debounce: Option<Task<()>>,
+    /// The list's scroll, so a step from the keyboard brings its landing
+    /// into view.
+    scroll: ScrollHandle,
     pub open: bool,
     /// Where the user has dragged the panel to, as an offset from its
     /// centered resting place. Reset each time the opener shows.
@@ -138,6 +154,7 @@ impl Opener {
             listings: HashMap::new(),
             inflight: HashSet::new(),
             debounce: None,
+            scroll: ScrollHandle::new(),
             open: false,
             shift: Point::default(),
             grip: None,
@@ -392,24 +409,109 @@ impl Opener {
             Stage::Folder { host } => {
                 let host = host.clone();
                 let offers = self.offers(cx);
-                let path = match offers.get(self.cursor) {
-                    Some(Offer::Here(path)) => path.clone(),
-                    Some(Offer::Dir(name)) => {
-                        let (dir, _) = split_path(&self.query(cx));
-                        join_dir(&dir, name)
+                let (dir, prefix) = split_path(&self.query(cx));
+                let dirs = offers
+                    .iter()
+                    .filter(|offer| matches!(offer, Offer::Dir(_)))
+                    .count();
+                match offers.get(self.cursor).cloned() {
+                    // The folder you are in, lit at the top of the list.
+                    Some(Offer::Here(path)) => self.start(host, path, cx),
+                    // Typed down to one folder: that is the one you meant.
+                    Some(Offer::Dir(name)) if !prefix.is_empty() && dirs == 1 => {
+                        self.start(host, join_dir(&dir, &name), cx)
                     }
-                    _ => {
+                    // Otherwise Enter walks in, like Right.
+                    Some(Offer::Dir(name)) => self.take(Offer::Dir(name), cx),
+                    Some(Offer::Machine { .. } | Offer::Browse) | None => {
                         let typed = self.query(cx);
-                        if typed.is_empty() {
+                        let path = if typed.is_empty() {
                             "/".into()
                         } else {
                             typed.trim_end_matches('/').to_string()
-                        }
+                        };
+                        self.start(host, path, cx);
                     }
-                };
-                self.start(host, path, cx);
+                }
             }
         }
+    }
+
+    /// ⌘↩: open the folder you are in, whatever is lit.
+    fn pick_here(&mut self, _: &PickHere, _: &mut Window, cx: &mut Context<Self>) {
+        match &self.stage {
+            Stage::Machine => {
+                let offers = self.offers(cx);
+                if let Some(offer) = offers.get(self.cursor).cloned() {
+                    self.take(offer, cx);
+                }
+            }
+            Stage::Folder { host } => {
+                let host = host.clone();
+                let (dir, _) = split_path(&self.query(cx));
+                self.start(host, dir, cx);
+            }
+        }
+    }
+
+    /// →: step into the lit folder, or the lit machine.
+    fn descend(&mut self, _: &Descend, _: &mut Window, cx: &mut Context<Self>) {
+        let offers = self.offers(cx);
+        match offers.get(self.cursor).cloned() {
+            Some(offer @ (Offer::Dir(_) | Offer::Machine { .. })) => self.take(offer, cx),
+            Some(Offer::Here(_) | Offer::Browse) | None => {}
+        }
+    }
+
+    /// ←: up one folder; at the top of the tree, back to the machines.
+    fn ascend(&mut self, _: &Ascend, _: &mut Window, cx: &mut Context<Self>) {
+        self.go_up(cx);
+    }
+
+    /// ⌫ with nothing typed is ←; with text it deletes, as in any field.
+    fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
+        if self.query(cx).is_empty() {
+            self.go_up(cx);
+        } else {
+            window.dispatch_action(Box::new(input::Backspace), cx);
+        }
+    }
+
+    fn go_up(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.stage, Stage::Folder { .. }) {
+            return;
+        }
+        let (dir, _) = split_path(&self.query(cx));
+        let parent = match dir.trim_end_matches('/') {
+            "" | "~" => None,
+            rest => match rest.rfind('/') {
+                Some(0) => Some("/".to_string()),
+                Some(i) => Some(format!("{}/", &rest[..i])),
+                None => None,
+            },
+        };
+        match parent {
+            Some(parent) => {
+                self.field
+                    .update(cx, |field, cx| field.set_content(parent, cx));
+                self.cursor = 0;
+                self.ensure_listing(cx);
+                cx.notify();
+            }
+            // The tree's top: back to picking a machine.
+            None => self.to_machines(cx),
+        }
+    }
+
+    /// Back to the first step, the field cleared for a machine.
+    fn to_machines(&mut self, cx: &mut Context<Self>) {
+        self.stage = Stage::Machine;
+        self.cursor = 0;
+        self.field.update(cx, |field, cx| {
+            field.set_placeholder("machine", cx);
+            field.clear(cx);
+        });
+        cx.notify();
     }
 
     fn complete(&mut self, _: &Complete, _: &mut Window, cx: &mut Context<Self>) {
@@ -459,6 +561,7 @@ impl Opener {
             return;
         }
         self.cursor = (self.cursor + 1) % len;
+        self.scroll.scroll_to_item(self.cursor);
         cx.notify();
     }
 
@@ -468,18 +571,13 @@ impl Opener {
             return;
         }
         self.cursor = self.cursor.checked_sub(1).unwrap_or(len - 1);
+        self.scroll.scroll_to_item(self.cursor);
         cx.notify();
     }
 
     fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.stage, Stage::Folder { .. }) {
-            self.stage = Stage::Machine;
-            self.cursor = 0;
-            self.field.update(cx, |field, cx| {
-                field.set_placeholder("machine", cx);
-                field.clear(cx);
-            });
-            cx.notify();
+            self.to_machines(cx);
             return;
         }
         self.open = false;
@@ -731,7 +829,8 @@ impl Render for Opener {
                 .pt(px(4.))
                 .pb(px(6.))
                 .max_h(px(LIST_MAX))
-                .overflow_y_scroll(),
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll),
             |list, (ix, offer)| {
                 let label = Self::row_label(offer);
                 let offer = offer.clone();
@@ -872,6 +971,10 @@ impl Render for Opener {
                     .surface(&theme, SURFACE),
             )
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::pick_here))
+            .on_action(cx.listener(Self::descend))
+            .on_action(cx.listener(Self::ascend))
+            .on_action(cx.listener(Self::back))
             .on_action(cx.listener(Self::next))
             .on_action(cx.listener(Self::previous))
             .on_action(cx.listener(Self::dismiss))

@@ -692,7 +692,11 @@ impl Arbos {
                     .collect()
             })
             .unwrap_or_default();
-        let name_field = naming.then(|| self.header_name_field(window, cx));
+        // The main chat is what the tab names; its title would say the same
+        // thing twice, so only a sub-agent's title is drawn here, after
+        // the crumbs that lead back to it.
+        let titled = !crumbs.is_empty();
+        let name_field = (naming && titled).then(|| self.header_name_field(window, cx));
         div()
             .id("chat-header")
             .flex_none()
@@ -726,30 +730,37 @@ impl Arbos {
                         .into_any_element(),
                 ]
             }))
-            .child(if naming {
-                div()
-                    .id(("chat-header-title-name", id))
-                    .min_w_0()
-                    .max_w_full()
-                    .text_style(TextStyle::Body)
-                    .text_color(theme.text)
-                    .children(name_field)
-            } else {
-                div()
-                    .id(("chat-header-title", id))
-                    .min_w_0()
-                    .truncate()
-                    .text_style(TextStyle::Body)
-                    .text_color(theme.text)
-                    .cursor_text()
-                    .tooltip(|window, cx| Tooltip::text("Double-click to rename", window, cx))
-                    .child(SharedString::from(title))
-                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                        if event.click_count() >= 2 {
-                            cx.stop_propagation();
-                            this.rename_header_title(id, window, cx);
-                        }
-                    }))
+            .when(titled && naming, |el| {
+                el.child(
+                    div()
+                        .id(("chat-header-title-name", id))
+                        .min_w_0()
+                        .max_w_full()
+                        .text_style(TextStyle::Body)
+                        .text_color(theme.text)
+                        .children(name_field),
+                )
+            })
+            .when(titled && !naming, |el| {
+                el.child(
+                    div()
+                        .id(("chat-header-title", id))
+                        .min_w_0()
+                        .truncate()
+                        .text_style(TextStyle::Body)
+                        .text_color(theme.text)
+                        .cursor_text()
+                        .tooltip(|window, cx| {
+                            Tooltip::text("Double-click to rename", window, cx)
+                        })
+                        .child(SharedString::from(title))
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            if event.click_count() >= 2 {
+                                cx.stop_propagation();
+                                this.rename_header_title(id, window, cx);
+                            }
+                        })),
+                )
             })
             .child(div().flex_1())
             .child(

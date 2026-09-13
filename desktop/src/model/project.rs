@@ -9,6 +9,7 @@ use crate::{
     model::{
         article::Article,
         board::Board,
+        identity::Identity,
         place::Place,
         session::ChatSession,
         store_view::StoreView,
@@ -74,9 +75,11 @@ pub struct Project {
     /// The watch on this project's `.arbos/`, once it is up. Held here so
     /// closing the project drops it, which is what takes the watch down.
     pub watch: Option<Watch>,
-    /// Sidebar title, when the person named it. Empty means the folder's own
-    /// name — see [`Self::name`].
-    pub nickname: Option<String>,
+    /// The tab's face — name, glyph, colour — from `.arbos/project.toml`.
+    pub identity: Identity,
+    /// Whether that file exists. A tab opened on a folder without one is
+    /// offered the sheet to write it.
+    pub identity_saved: bool,
     /// Kernel session ids the user deleted. The activity poll must not mint
     /// them again — that is why trash on a delegate used to do nothing.
     pub dismissed: HashSet<String>,
@@ -95,6 +98,11 @@ impl Project {
         } else {
             StoreView::read(&place.path)
         };
+        let store = root(&place.store());
+        let saved = Identity::load(&store);
+        let identity_saved = saved.is_some();
+        let home = dirs::home_dir().is_some_and(|h| place.host.is_none() && h.join(STORE) == place.path);
+        let identity = saved.unwrap_or_else(|| Identity::defaults(&place, home));
         Self {
             boards: Vec::new(),
             articles: Vec::new(),
@@ -113,7 +121,8 @@ impl Project {
             archive_open: false,
             store_view,
             watch: None,
-            nickname: None,
+            identity,
+            identity_saved,
             dismissed: HashSet::new(),
         }
     }
@@ -133,7 +142,17 @@ impl Project {
         if !self.is_remote() {
             self.store_view = StoreView::read(&self.path);
         }
+        if let Some(identity) = Identity::load(&root(&self.store())) {
+            self.identity = identity;
+            self.identity_saved = true;
+        }
         false
+    }
+
+    /// Put a face on the project and file it with the folder.
+    pub fn set_identity(&mut self, identity: Identity) {
+        self.identity = identity;
+        self.identity_saved = self.identity.save(&root(&self.store())).is_ok();
     }
 
     /// The project's main chat: the open root that sits first by rank. One
@@ -199,13 +218,11 @@ impl Project {
         self.place().store()
     }
 
-    /// The tab's label: a name they typed, or the place title (box name at
-    /// remote home/`/`, otherwise the last folder).
+    /// The tab's label: the name in `project.toml`, or the place title (box
+    /// name at remote home/`/`, otherwise the last folder).
     pub fn name(&self) -> String {
-        self.nickname
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
+        self.identity
+            .label()
             .map(str::to_string)
             .unwrap_or_else(|| self.place().title())
     }

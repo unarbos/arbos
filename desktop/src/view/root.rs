@@ -15,6 +15,7 @@ use crate::{
             menu::Menu,
             meter,
             opener::{Opener, OpenerEvent},
+            tab_sheet::{TabSheet, TabSheetEvent},
         },
         naming::Renaming,
         settings::{self, Section, SettingsWindow},
@@ -235,8 +236,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-v", PasteChat, None),
         KeyBinding::new("delete", DeleteChat, Some(WINDOW_CONTEXT)),
         KeyBinding::new("backspace", DeleteChat, Some(WINDOW_CONTEXT)),
-        KeyBinding::new("up", PrevEntry, None),
-        KeyBinding::new("down", NextEntry, None),
+        // On the window's rest focus only. A binding with no context is
+        // the deepest match gpui knows, so a bare `up` here would beat the
+        // opener's and the sheet's own arrows while their field has the
+        // focus; the composer forwards its arrows itself.
+        KeyBinding::new("up", PrevEntry, Some(WINDOW_CONTEXT)),
+        KeyBinding::new("down", NextEntry, Some(WINDOW_CONTEXT)),
         // A context menu closes on Escape wherever the focus rests; the
         // composer forwards its own Escape here when it has nothing to close.
         KeyBinding::new("escape", DismissMenu, Some(WINDOW_CONTEXT)),
@@ -475,6 +480,8 @@ pub struct Arbos {
     pub(crate) panel_open: bool,
     pub(crate) composer: Entity<Composer>,
     pub(crate) opener: Entity<Opener>,
+    /// The sheet a tab's name, glyph and colour are set in.
+    pub(crate) tab_sheet: Entity<TabSheet>,
     settings_window: Option<WindowHandle<SettingsWindow>>,
     pub(crate) pane: Pane,
     pub(crate) menu: Option<Menu>,
@@ -562,14 +569,29 @@ impl Arbos {
         restore_usable_bounds(window);
         let composer = cx.new(Composer::new);
         let opener = cx.new(Opener::new);
-        cx.subscribe(&opener, |this, _, event: &OpenerEvent, cx| match event {
-            OpenerEvent::Open(place) => {
-                let place = place.clone();
+        let tab_sheet = cx.new(TabSheet::new);
+        cx.subscribe_in(
+            &opener,
+            window,
+            |this, _, event: &OpenerEvent, window, cx| match event {
+                OpenerEvent::Open(place) => {
+                    let place = place.clone();
+                    this.workspace
+                        .update(cx, |workspace, cx| workspace.open_place(place, cx));
+                    this.offer_tab_face(window, cx);
+                }
+                OpenerEvent::Browse => this.browse_local(window, cx),
+                OpenerEvent::Dismiss => {}
+            },
+        )
+        .detach();
+        cx.subscribe(&tab_sheet, |this, _, event: &TabSheetEvent, cx| match event {
+            TabSheetEvent::Keep(ix, identity) => {
+                let (ix, identity) = (*ix, identity.clone());
                 this.workspace
-                    .update(cx, |workspace, cx| workspace.open_place(place, cx));
+                    .update(cx, |workspace, cx| workspace.set_identity(ix, identity, cx));
             }
-            OpenerEvent::Browse => this.browse_local(cx),
-            OpenerEvent::Dismiss => {}
+            TabSheetEvent::Dismiss => {}
         })
         .detach();
         cx.subscribe_in(
@@ -644,6 +666,7 @@ impl Arbos {
             panel_open: true,
             composer,
             opener,
+            tab_sheet,
             settings_window: None,
             pane: Pane::Chat,
             menu: None,
@@ -1279,26 +1302,58 @@ impl Arbos {
         window.focus(&self.opener.read(cx).focus_handle(cx), cx);
     }
 
-    fn browse_local(&mut self, cx: &mut Context<Self>) {
+    fn browse_local(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,
             prompt: None,
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = picked.await else {
                 return;
             };
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.workspace
                     .update(cx, |workspace, cx| workspace.open_project(path, cx));
+                this.offer_tab_face(window, cx);
             });
         })
         .detach();
+    }
+
+    /// A folder opened for the first time has no `project.toml`: offer the
+    /// sheet with the folder's own defaults filled in. A folder that has
+    /// one comes back wearing it, no questions.
+    fn offer_tab_face(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fresh = self
+            .workspace
+            .read(cx)
+            .active_project()
+            .is_some_and(|project| !project.identity_saved);
+        if let (true, Some(ix)) = (fresh, self.workspace.read(cx).active) {
+            self.edit_tab(ix, window, cx);
+        }
+    }
+
+    /// The sheet, on the tab at `ix`: its name, glyph and colour.
+    pub(crate) fn edit_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((identity, fallback)) = self
+            .workspace
+            .read(cx)
+            .projects
+            .get(ix)
+            .map(|project| (project.identity.clone(), project.place().title()))
+        else {
+            return;
+        };
+        self.dismiss_menu(cx);
+        self.tab_sheet
+            .update(cx, |sheet, cx| sheet.show(ix, &identity, fallback, cx));
+        window.focus(&self.tab_sheet.read(cx).focus_handle(cx), cx);
     }
 
     /// Which pane is on screen, as against [`Self::pane`], which is the one
@@ -1410,6 +1465,7 @@ impl Render for Arbos {
                     .then(|| meter::panel("app-meter", &self.meter_at, &self.meter, window)),
             )
             .child(self.opener.clone())
+            .child(self.tab_sheet.clone())
     }
 }
 

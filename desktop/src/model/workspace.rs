@@ -16,6 +16,7 @@ use crate::{
         article::{self, Article},
         attachment::Prompt,
         board::{self, Board},
+        identity::Identity,
         place::Place,
         project::Project,
         record,
@@ -199,14 +200,22 @@ impl Workspace {
         for ix in 0..this.projects.len() {
             this.sync_kernel_sessions(ix, true, cx);
         }
+        // Names typed under the old sidebar lived in state.toml. A folder
+        // that has no project.toml yet takes its name from there, once, and
+        // the file is the record from then on.
         for project in &mut this.projects {
+            if project.identity_saved {
+                continue;
+            }
             if let Some(name) = state
                 .names
                 .get(&project.place().encode())
                 .map(|name| name.trim())
                 .filter(|name| !name.is_empty())
             {
-                project.nickname = Some(name.to_string());
+                let mut identity = project.identity.clone();
+                identity.name = Some(name.to_string());
+                project.set_identity(identity);
             }
         }
         this.load_agent_icons(cx);
@@ -240,14 +249,9 @@ impl Workspace {
             hue: self.tint.hue,
             chroma: self.tint.chroma,
             last: self.last.clone(),
-            names: self
-                .projects
-                .iter()
-                .filter_map(|project| {
-                    let name = project.nickname.as_deref()?.trim();
-                    (!name.is_empty()).then(|| (project.place().encode(), name.to_string()))
-                })
-                .collect(),
+            // Names live in each project's `.arbos/project.toml` now; the
+            // map stays readable for the one-time migration above.
+            names: BTreeMap::new(),
             dismissed: self.dismissed.clone(),
         });
     }
@@ -541,10 +545,10 @@ impl Workspace {
         Self::home_place().is_some_and(|home| home == project.place())
     }
 
-    /// The tab's label: "Home" for the home tab, else the name the project
-    /// carries — a nickname, or its folder.
+    /// The tab's label: "Home" for an unnamed home tab, else the name the
+    /// project carries — from its `project.toml`, or its folder.
     pub fn tab_label(project: &Project) -> String {
-        if Self::is_home(project) {
+        if Self::is_home(project) && project.identity.label().is_none() {
             "Home".into()
         } else {
             project.name()
@@ -1906,17 +1910,14 @@ impl Workspace {
             .or_else(|| self.projects.iter().find_map(by_id))
     }
 
-    /// The name in the sidebar. Empty clears it back to the folder's name.
-    pub fn rename_project(&mut self, key: &str, name: String, cx: &mut Context<Self>) {
-        let name = name.trim().to_string();
-        if let Some(project) = self
-            .projects
-            .iter_mut()
-            .find(|project| project.place().encode() == key)
-        {
-            project.nickname = (!name.is_empty()).then_some(name);
+    /// Put a face on the project at `ix` — name, glyph, colour — and file
+    /// it in the folder's `.arbos/project.toml`. An empty name clears it
+    /// back to the folder's own.
+    pub fn set_identity(&mut self, ix: usize, mut identity: Identity, cx: &mut Context<Self>) {
+        identity.name = identity.label().map(str::to_string);
+        if let Some(project) = self.projects.get_mut(ix) {
+            project.set_identity(identity);
         }
-        self.save();
         cx.notify();
     }
 

@@ -17,6 +17,8 @@ type Act = Box<dyn Fn(&mut Arbos, &mut Window, &mut Context<Arbos>)>;
 pub(crate) enum Menu {
     /// A chat row: copy, fork, archive, delete.
     Session(u64),
+    /// A project tab: edit its face, close it.
+    Tab(usize),
 }
 
 /// One row of a menu, and what picking it does.

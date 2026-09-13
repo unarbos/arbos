@@ -143,7 +143,7 @@ fn ours(dir: &Path, path: &Path) -> bool {
     };
     let head = head.as_os_str().to_string_lossy();
     match head.as_ref() {
-        "skills" | "prompts" | "hooks" | "archive" => true,
+        "skills" | "prompts" | "hooks" | "archive" | "project.toml" => true,
         // The goals and notes the panel shows, whatever their case.
         _ if head.eq_ignore_ascii_case("goals.md") || head.eq_ignore_ascii_case("notes.md") => {
             true

@@ -7,4 +7,5 @@ pub mod menu;
 pub mod meter;
 pub mod opener;
 pub mod surface;
+pub mod tab_sheet;
 pub mod transcript;
