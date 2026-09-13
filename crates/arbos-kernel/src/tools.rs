@@ -14,7 +14,7 @@ use base64::Engine;
 use serde_json::Value;
 use std::{path::PathBuf, sync::Arc};
 
-use crate::hooks::{KernelHooks, NewNode, SayMode};
+use crate::hooks::{Isolate, KernelHooks, NewNode, SayMode};
 use crate::pty::PtyHub;
 
 /// The one browser page an agent has. The desktop keys its row on this.
@@ -61,12 +61,13 @@ impl Tool for Spawn {
     fn schema(&self) -> Value {
         typed_schema(
             "spawn",
-            "Start a child agent with a brief. The child owns its own plan and schedule: do not add plan nodes of your own that mirror its job. Its reports arrive here as messages from it.",
+            "Start a child agent with a brief. The child owns its own plan and schedule: do not add plan nodes of your own that mirror its job. Its reports arrive here as messages from it. isolate=worktree gives it a git worktree of this repository (.arbos/worktrees/<id>, branch arbos/<id>, cut from HEAD) so it can edit, build, and commit without touching your checkout — use it for any child that changes code while you or another child also do.",
             &[
                 ("brief", "What the child should do.", true, "string"),
                 ("model", "inherit or a model id.", false, "string"),
                 ("readonly", "If true, no writes.", false, "boolean"),
-                ("cwd", "Child cwd.", false, "string"),
+                ("cwd", "Child cwd. Overrides isolate.", false, "string"),
+                ("isolate", "none (default) or worktree.", false, "string"),
             ],
         )
     }
@@ -80,10 +81,42 @@ impl Tool for Spawn {
             let model = opt_str(&args, "model");
             let readonly = opt_bool(&args, "readonly").unwrap_or(false);
             let cwd = opt_str(&args, "cwd").map(PathBuf::from);
-            let id = hooks.spawn(&cx.agent, brief, model, None, readonly, cwd)?;
+            let raw = opt_str(&args, "isolate").unwrap_or("none");
+            let isolate = Isolate::parse(raw).ok_or_else(|| {
+                anyhow::anyhow!("spawn: isolate must be none or worktree, not {raw:?}")
+            })?;
+            // git runs on the blocking pool: a large checkout takes seconds.
+            let agent = cx.agent.clone();
+            let brief_owned = brief.to_string();
+            let model_owned = model.map(str::to_string);
+            let (id, worktree) = tokio::task::spawn_blocking(move || {
+                hooks.spawn_isolated(
+                    &agent,
+                    &brief_owned,
+                    model_owned.as_deref(),
+                    None,
+                    readonly,
+                    cwd,
+                    isolate,
+                )
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn task: {e}"))??;
+            let mut body = format!("spawned {id}: {brief}");
+            let mut paths = vec![format!(".arbos/agents/{id}")];
+            if let Some(w) = &worktree {
+                body.push_str(&format!(
+                    "\nIt works in its own worktree {} on branch {} (cut from {}). Your checkout is untouched. When its branch is merged or abandoned, remove it: {}",
+                    w.path.display(),
+                    w.branch,
+                    w.base,
+                    w.removal()
+                ));
+                paths.push(w.path.display().to_string());
+            }
             Ok(ToolOut {
-                body: format!("spawned {id}: {brief}"),
-                paths: vec![format!(".arbos/agents/{id}")],
+                body,
+                paths,
                 child: Some(id.to_string()),
                 images: vec![],
                 diff: None,

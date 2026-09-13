@@ -9,3 +9,4 @@ pub mod sched;
 pub mod serve;
 pub mod setup;
 pub mod tools;
+pub mod worktree;

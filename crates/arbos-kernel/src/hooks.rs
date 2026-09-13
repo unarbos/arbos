@@ -26,6 +26,7 @@ use crate::{
     attach::Frame,
     browser::{BrowserHub, BrowserOut},
     sched::{MAX_CHILDREN, MAX_DEPTH},
+    worktree::{self, Worktree},
 };
 
 /// How a `say` reaches another agent.
@@ -45,6 +46,25 @@ impl SayMode {
             "note" => Some(Self::Note),
             "request" => Some(Self::Request),
             "steer" => Some(Self::Steer),
+            _ => None,
+        }
+    }
+}
+
+/// Where a spawned child works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Isolate {
+    /// The parent's checkout (or the `cwd` it names).
+    None,
+    /// Its own git worktree of the place, on its own branch.
+    Worktree,
+}
+
+impl Isolate {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "none" => Some(Self::None),
+            "worktree" => Some(Self::Worktree),
             _ => None,
         }
     }
@@ -742,6 +762,31 @@ impl KernelHooks {
         readonly: bool,
         cwd: Option<PathBuf>,
     ) -> Result<AgentId> {
+        self.spawn_isolated(
+            parent,
+            brief,
+            model,
+            allowlist,
+            readonly,
+            cwd,
+            Isolate::None,
+        )
+        .map(|(id, _)| id)
+    }
+
+    /// `spawn` with a working directory of the child's own. `Isolate::Worktree`
+    /// cuts a git worktree of the place for it; an explicit `cwd` wins.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_isolated(
+        &self,
+        parent: &Agent,
+        brief: &str,
+        model: Option<&str>,
+        allowlist: Option<Vec<String>>,
+        readonly: bool,
+        cwd: Option<PathBuf>,
+        isolate: Isolate,
+    ) -> Result<(AgentId, Option<Worktree>)> {
         // One spawn at a time: the model runs parallel tool calls, and the
         // cap and the id check both read the agents folder, so without the
         // lock ten calls all see zero children and all pass.
@@ -762,6 +807,12 @@ impl KernelHooks {
             id = format!("{}-{n}", base.chars().take(20).collect::<String>());
         }
         validate_id(&id)?;
+        // The worktree comes first: if git refuses, no agent folder is
+        // left behind for a child that never existed.
+        let worktree = match (&cwd, isolate) {
+            (Some(_), Isolate::Worktree) | (_, Isolate::None) => None,
+            (None, Isolate::Worktree) => Some(worktree::create(self.place.path(), &id)?),
+        };
         let mut child = Agent::root(&id);
         child.name = brief.chars().take(48).collect();
         child.parent = Some(parent.id.clone());
@@ -772,7 +823,7 @@ impl KernelHooks {
             child.allowlist = parent.allowlist.clone();
         }
         child.readonly = readonly;
-        child.cwd = cwd;
+        child.cwd = cwd.or_else(|| worktree.as_ref().map(|w| w.path.clone()));
         child.restrict_allowlist(parent);
         child.save(&self.place.agent_dir(&id))?;
         let layout = Layout::new(&self.place, &id);
@@ -783,7 +834,7 @@ impl KernelHooks {
         let mut n = Node::inbox(brief, format!("spawn:{}", parent.id));
         n.hops = DEFAULT_HOPS;
         self.inbox(&id, n)?;
-        Ok(AgentId::new(id))
+        Ok((AgentId::new(id), worktree))
     }
 
     /// Who `to` means. Exact id, exact name, then a unique substring of a

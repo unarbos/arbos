@@ -168,7 +168,7 @@ pub fn scan(hooks: &Arc<KernelHooks>, clock: &Arc<Clock>) -> Vec<Wake> {
                 lo,
             },
         );
-        wakes.push(wake_for(&agent, &n, reason, ""));
+        wakes.push(wake_for(hooks.place.path(), &agent, &n, reason, ""));
         hooks.broadcast(hooks.plan_frame(id));
     }
     wakes
@@ -213,7 +213,30 @@ fn claim(hooks: &KernelHooks, agent: &str, mut n: Node, now: i64) -> Option<(Nod
     Some((n, attempt))
 }
 
-fn wake_for(agent: &Agent, n: &Node, reason: WakeReason, detail: &str) -> Wake {
+/// The line a spawned child gets when it works in its own worktree: where
+/// it is, which branch, and that the main checkout is not its to edit.
+fn worktree_note(place: &std::path::Path, agent: &Agent) -> String {
+    let Some(cwd) = agent.cwd.as_deref() else {
+        return String::new();
+    };
+    if !crate::worktree::is_worktree(place, cwd) {
+        return String::new();
+    }
+    let branch = crate::worktree::branch_of(cwd).unwrap_or_else(|| "(unknown)".into());
+    format!(
+        " Your working directory is {} — your own git worktree of this repository on branch {branch}, cut from your parent's HEAD; uncommitted edits in the main checkout are not in it. Edit, build, and commit there; report the branch name with your results. The main checkout at {} belongs to your parent: do not edit it.",
+        cwd.display(),
+        place.display()
+    )
+}
+
+fn wake_for(
+    place: &std::path::Path,
+    agent: &Agent,
+    n: &Node,
+    reason: WakeReason,
+    detail: &str,
+) -> Wake {
     let inbox = n.parent == 0 && reason == WakeReason::Ready;
     let (kind, text) = match n.origin.as_str() {
         "user" if inbox => (WakeKind::User, Some(n.goal.clone())),
@@ -225,8 +248,11 @@ fn wake_for(agent: &Agent, n: &Node, reason: WakeReason, detail: &str) -> Wake {
             (
                 WakeKind::Plan,
                 Some(format!(
-                    "You were spawned by agent {parent} for this mission:\n\n{}\n\nDo it now. If it has several steps, decompose it with plan add under node #{} and work them. Standing work (\"every N\", \"keep doing\") is a plan node with when.every, never a loop held open. Report results to your parent with say to={parent} (mode request when you need an answer from it). Your own folder is .arbos/agents/{}/.",
-                    n.goal, n.id, agent.id
+                    "You were spawned by agent {parent} for this mission:\n\n{}\n\nDo it now. If it has several steps, decompose it with plan add under node #{} and work them. Standing work (\"every N\", \"keep doing\") is a plan node with when.every, never a loop held open. Report results to your parent with say to={parent} (mode request when you need an answer from it). Your own folder is .arbos/agents/{}/.{}",
+                    n.goal,
+                    n.id,
+                    agent.id,
+                    worktree_note(place, agent)
                 )),
             )
         }
