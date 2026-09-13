@@ -59,7 +59,9 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
           "instructions": "..."  system prompt for the speech model (duplex engine)
           "agents": true|false  mirror kernel events (agent.*) to this client (default on when a kernel is attached)
           "mode": "call"  CALL MODE (see below): talk to a project's main agent; the narrator speaks highlights
-          "project": "<machine>/<project>"  which project the call is for (hub name; empty = the gateway's kernel)
+          "project": "<machine>/<project>"  which project the call is for. A hub name, when the gateway has --hub:
+                                            the call attaches to that kernel through the hub (session.ready says
+                                            "via":"hub"). Empty, or the gateway's own project: its kernel ("via":"gateway")
           "channel": "voice"  what the caller's utterances are filed as in the agent's inbox (voice | text)
           "device": "desktop"  which client this is (phone | desktop); written beside channel on every message
           "screen": "on your screen"  how the narrator refers to the client's display ("in the chat" on a phone)

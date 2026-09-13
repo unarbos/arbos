@@ -1,4 +1,5 @@
-"""Client for `arbos-kernel serve`: newline-delimited JSON over loopback TCP.
+"""Client for `arbos-kernel serve`: newline-delimited JSON over loopback TCP, or the same frames
+over a WebSocket (a kernel bound with `--bind`, or the hub's `/attach/<machine>/<project>`).
 
 The kernel writes `<place>/.arbos/kernel.json` = {"url": "tcp://127.0.0.1:PORT"}.
 Frames are `Frame` in crates/arbos-core/src/wire.rs. We send `user` turns and
@@ -15,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable
 
+import websockets
+
 log = logging.getLogger("voice.kernel")
 
 Listener = Callable[[dict], Awaitable[None] | None]
@@ -30,15 +33,32 @@ class AgentState:
     started_at: float = field(default_factory=time.monotonic)
 
 
+def hub_attach_url(hub: str, project: str, token: str = "") -> str:
+    """`wss://<hub>/attach/<machine>/<project>?token=…` for a hub name `<machine>/<project>`
+    (`<machine>` alone when the machine runs one kernel)."""
+    base = hub.rstrip("/")
+    if base.startswith("http://"):
+        base = "ws://" + base[len("http://"):]
+    elif base.startswith("https://"):
+        base = "wss://" + base[len("https://"):]
+    url = f"{base}/attach/{project.strip('/')}"
+    return f"{url}?token={token}" if token else url
+
+
 class KernelClient:
-    def __init__(self, url: str | None = None, place: str | None = None, *, auto_approve: bool = True):
+    def __init__(self, url: str | None = None, place: str | None = None, *, auto_approve: bool = True,
+                 token: str = "", name: str = ""):
         if not url and not place:
             raise ValueError("need a kernel url or place")
         self.url = url
         self.place = place
         self.auto_approve = auto_approve
+        self.token = token  # bearer for a WebSocket kernel or hub attach
+        self.name = name or (url or place or "kernel")
         self.reader: asyncio.StreamReader | None = None
         self.writer: asyncio.StreamWriter | None = None
+        self.ws: websockets.ClientConnection | None = None
+        self._closed = False
         self.agents: dict[str, AgentState] = {}
         self.focus = "root"
         self.listeners: list[Listener] = []
@@ -46,6 +66,7 @@ class KernelClient:
         # Answers to `read`/`tail`/`list`, keyed by (reply type, path); one waiter per key.
         self._waiting: dict[tuple[str, str], asyncio.Future] = {}
         self.hello: dict = {}
+        self._first_error: str = ""
 
     # ------------------------------------------------------------------ connection
 
@@ -57,7 +78,32 @@ class KernelClient:
         host, port = url.removeprefix("tcp://").rsplit(":", 1)
         return host, int(port)
 
-    async def connect(self) -> None:
+    @property
+    def over_websocket(self) -> bool:
+        return bool(self.url and self.url.startswith(("ws://", "wss://")))
+
+    async def connect(self, *, hello_timeout: float = 15.0) -> None:
+        if self.over_websocket:
+            headers = {"Authorization": f"Bearer {self.token}"} if self.token and "token=" not in self.url else {}
+            self.ws = await asyncio.wait_for(
+                websockets.connect(self.url, additional_headers=headers, max_size=16 * 1024 * 1024, compression=None),
+                hello_timeout,
+            )
+            self._reader_task = asyncio.create_task(self._ws_read_loop(), name="kernel-ws-read")
+            # The first frame back is `hello` (or the hub's `error` for a bad name).
+            deadline = time.monotonic() + hello_timeout
+            while not self.hello and time.monotonic() < deadline:
+                if self._first_error:
+                    await self.close()
+                    raise RuntimeError(self._first_error)
+                if self._closed:
+                    raise RuntimeError("the kernel closed the connection before hello")
+                await asyncio.sleep(0.05)
+            if not self.hello:
+                await self.close()
+                raise RuntimeError(f"no hello from {self.url.split('?')[0]} in {hello_timeout:.0f}s")
+            log.info("attached to kernel over %s", self.url.split("?")[0])
+            return
         host, port = self._resolve()
         self.reader, self.writer = await asyncio.open_connection(host, port)
         self._reader_task = asyncio.create_task(self._read_loop(), name="kernel-read")
@@ -65,18 +111,72 @@ class KernelClient:
 
     @property
     def connected(self) -> bool:
+        if self.over_websocket:
+            return self.ws is not None and not self._closed
         return self.writer is not None and not self.writer.is_closing()
 
     async def close(self) -> None:
+        self._closed = True
         if self._reader_task:
             self._reader_task.cancel()
         if self.writer:
             self.writer.close()
+        if self.ws is not None:
+            try:
+                await asyncio.wait_for(self.ws.close(), 3)
+            except Exception:
+                pass
+            self.ws = None
 
     def send(self, frame: dict) -> None:
+        if self.over_websocket:
+            if self.ws is None or self._closed:
+                raise RuntimeError("kernel not connected")
+            asyncio.get_running_loop().create_task(self._ws_send(json.dumps(frame)))
+            return
         if not self.writer:
             raise RuntimeError("kernel not connected")
         self.writer.write((json.dumps(frame) + "\n").encode())
+
+    async def _ws_send(self, text: str) -> None:
+        try:
+            if self.ws is not None:
+                await self.ws.send(text)
+        except Exception as exc:
+            log.warning("kernel ws send failed: %s", exc)
+
+    async def _dispatch(self, frame: dict) -> None:
+        self._track(frame)
+        for listener in list(self.listeners):
+            try:
+                result = listener(frame)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                log.exception("kernel listener failed")
+
+    async def _ws_read_loop(self) -> None:
+        assert self.ws
+        try:
+            async for message in self.ws:
+                text = message if isinstance(message, str) else bytes(message).decode(errors="replace")
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        frame = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not self.hello and frame.get("type") == "error":
+                        self._first_error = str(frame.get("detail") or "kernel refused the attach")
+                    await self._dispatch(frame)
+        except Exception as exc:
+            log.warning("kernel ws closed: %s", exc)
+        finally:
+            log.warning("kernel connection closed (%s)", self.name)
+            self._closed = True
+            self.ws = None
 
     async def _read_loop(self) -> None:
         assert self.reader
@@ -89,14 +189,7 @@ class KernelClient:
                     frame = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                self._track(frame)
-                for listener in list(self.listeners):
-                    try:
-                        result = listener(frame)
-                        if asyncio.iscoroutine(result):
-                            await result
-                    except Exception:
-                        log.exception("kernel listener failed")
+                await self._dispatch(frame)
         finally:
             log.warning("kernel connection closed")
             if self.writer:

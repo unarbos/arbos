@@ -35,6 +35,7 @@ import httpx
 from tests import speech
 from tests.client import Caller
 from tests.mock_duplex import MockDuplex, Response, Utterance
+from tests.mock_hub import MockHub
 from tests.mock_kernel import Behaviour, Child, MockKernel
 
 HERE = Path(__file__).resolve().parent
@@ -173,23 +174,45 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
 
     gateway: Gateway | None = None
     caller: Caller | None = None
+    # `hub = { machine, project }`: the scripted kernel sits behind a mock hub under that name;
+    # the gateway's own kernel is a second, unscripted one, so routing through the hub is provable.
+    hub_cfg = sc.get("hub")
+    hub: MockHub | None = None
+    own: MockKernel | None = None
+    extra = [*opts.gateway_args, *sc.get("gateway_args", [])]
+    project = ""
     try:
         duplex_url = await duplex.start()
         kernel_url = opts.kernel or await kernel.start()
+        if hub_cfg:
+            own_place = out / "own-place"
+            own_place.mkdir()
+            own = MockKernel(own_place)
+            own_url = await own.start()
+            hub = MockHub(token="harness-hub")
+            project = f"{hub_cfg['machine']}/{hub_cfg['project']}"
+            hub.kernels[project] = kernel_url
+            hub_url = await hub.start()
+            extra += ["--hub", hub_url, "--hub-token", "harness-hub", "--hub-machine", "gateway-box"]
+            kernel_url = own_url
         if opts.gateway:
             url, token = opts.gateway, opts.token
         else:
-            gateway = Gateway(duplex_url=duplex_url, kernel_url=kernel_url, log=out / "gateway.log",
-                              extra=[*opts.gateway_args, *sc.get("gateway_args", [])])
+            gateway = Gateway(duplex_url=duplex_url, kernel_url=kernel_url, log=out / "gateway.log", extra=extra)
             await gateway.start()
             url, token = gateway.url, TOKEN
-        caller = Caller(url, token=token, screen=sc.get("screen", "on your screen"))
+        caller = Caller(url, token=token, screen=sc.get("screen", "on your screen"), project=project)
         ready = await caller.connect()
         res.checks.append((ready.get("mode") == "call" and ready.get("narrator") is True, f"session.ready says call mode with a narrator ({ready.get('mode')}, narrator={ready.get('narrator')})"))
+        if hub_cfg:
+            res.checks.append((ready.get("via") == "hub" and ready.get("project") == project, f"session.ready says the call is attached through the hub to {project} (via={ready.get('via')}, project={ready.get('project')})"))
         await asyncio.sleep(0.4)  # the speech model's session.update lands
         await run_steps(steps, caller, duplex, kernel, opts)
         await caller.wait_quiet(1.0, timeout=10)
         check(sc.get("expect") or {}, res, caller, duplex, kernel)
+        if hub_cfg and own is not None and hub is not None:
+            res.checks.append((len(own.users) == 0, f"the gateway's own kernel received no user frames ({len(own.users)})"))
+            res.checks.append((project in hub.attaches, f"the hub saw an attach for {project} ({hub.attaches})"))
     except Exception as exc:
         res.error = f"{type(exc).__name__}: {exc}"
         traceback.print_exc()
@@ -203,6 +226,10 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
             gateway.stop()
         await duplex.stop()
         await kernel.stop()
+        if hub:
+            await hub.stop()
+        if own:
+            await own.stop()
         res.inbox = kernel.inbox_files("root")
         (out / "inbox.json").write_text(json.dumps(res.inbox, indent=1))
     res.seconds = time.monotonic() - started

@@ -29,6 +29,24 @@ class Engines:
     engine: str  # "duplex" or "pipeline"
     duplex_url: str
     duplex_name: str
+    hub_url: str = ""
+    hub_token: str = ""
+    hub_machine: str = ""
+    auto_approve: bool = True
+
+    def own_project_names(self) -> set[str]:
+        """How a caller may name this gateway's own kernel: the place folder's name, and
+        `<hub machine>/<name>` when the machine is known."""
+        place = str(getattr(self.kernel, "place", "") or "")
+        names: set[str] = set()
+        if place:
+            leaf = place.rstrip("/").rsplit("/", 1)[-1]
+            names.add(leaf)
+            if self.hub_machine:
+                names.add(f"{self.hub_machine}/{leaf}")
+        if self.hub_machine:
+            names.add(self.hub_machine)
+        return names
 
     @classmethod
     async def load(cls, args) -> "Engines":
@@ -65,7 +83,9 @@ class Engines:
             reply.name if reply else "none", "attached" if kernel else "none",
         )
         return cls(vad=vad, asr=asr, tts=tts, reply=reply, kernel=kernel, engine=engine,
-                   duplex_url=args.duplex_url, duplex_name=duplex_name)
+                   duplex_url=args.duplex_url, duplex_name=duplex_name,
+                   hub_url=(getattr(args, "hub", None) or ""), hub_token=getattr(args, "hub_token", "") or "",
+                   hub_machine=getattr(args, "hub_machine", "") or "", auto_approve=not args.no_auto_approve)
 
     async def warm_up(self, voice: str) -> None:
         """First calls are slow (kernel selection, lazy loads). Pay that before the first caller."""

@@ -14,6 +14,7 @@ from . import protocol as P
 from .audio import float_to_pcm16, pcm16_to_float, resample_whole
 from .echo import EchoGate
 from .engines import Engines
+from .kernel import KernelClient, hub_attach_url
 from .narrator import Narrator, openrouter_key
 from .tools import CALL_TOOLS, TOOLS, ToolRunner
 
@@ -85,6 +86,7 @@ class BaseSession:
         self.project = ""  # `<machine>/<project>` from session.start; empty = the gateway's kernel
         self.screen = "on your screen"
         self.narrator: Narrator | None = None
+        self.call_kernel: KernelClient | None = None  # a per-call attach through the hub, when the call names one
         self.user_talking = False
 
     # ------------------------------------------------------------------ hooks for engines
@@ -133,17 +135,22 @@ class BaseSession:
         await self._speak(text, gen)
         self._emit_for_gen(gen, P.RESPONSE_DONE)
 
-    def _start_call(self) -> None:
-        kernel = self.engines.kernel
+    async def _start_call(self) -> None:
+        if self.narrator is not None:
+            return
+        kernel = await self._kernel_for(self.project)
         if kernel is None:
             self._emit(P.ERROR, message="call mode needs a kernel behind the gateway; staying in plain voice mode")
             self.call_mode = False
             return
-        if self.narrator is not None:
-            return
-        if self.project and not self._project_is_ours(self.project):
-            # Slice 1 serves the gateway's own kernel; a hub attach per call is next.
-            self._emit(P.ERROR, message=f"project {self.project!r} is not this gateway's kernel; using its kernel")
+        if kernel is not self.engines.kernel:
+            # The call's own attach: the tools and the agent mirror follow it.
+            self.call_kernel = kernel
+            self.tools.rebind(kernel)
+            if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
+                self.engines.kernel.listeners.remove(self._mirror)
+            if self.mirror_agents:
+                kernel.listeners.append(self._mirror)
         self.narrator = Narrator(
             kernel,
             speak=self.speak_narration,
@@ -164,11 +171,28 @@ class BaseSession:
         self.narrator.start()
         log.info("[%s] call mode: narrating %s (channel %s)", self.sid, self.project or "the gateway's kernel", self.channel)
 
-    def _project_is_ours(self, project: str) -> bool:
-        kernel = self.engines.kernel
-        place = str(getattr(kernel, "place", "") or "")
-        name = project.rsplit("/", 1)[-1]
-        return bool(place) and place.rstrip("/").rsplit("/", 1)[-1] == name
+    async def _kernel_for(self, project: str) -> KernelClient | None:
+        """The kernel a call is for. Empty, or a name for this gateway's own kernel: that one. A hub
+        name (`<machine>/<project>`) with a hub configured: a fresh attach through the hub, owned
+        by this call. A hub name with no hub: the own kernel, and the caller is told."""
+        own = self.engines.kernel
+        if not project or project in self.engines.own_project_names():
+            return own
+        if "/" not in project and own is not None:
+            return own
+        if not self.engines.hub_url:
+            self._emit(P.ERROR, message=f"project {project!r} names another kernel but the gateway has no --hub; using its own kernel")
+            return own
+        url = hub_attach_url(self.engines.hub_url, project, self.engines.hub_token)
+        client = KernelClient(url=url, auto_approve=self.engines.auto_approve, token=self.engines.hub_token, name=project)
+        try:
+            await client.connect()
+        except Exception as exc:
+            log.warning("[%s] hub attach to %s failed: %s", self.sid, project, exc)
+            self._emit(P.ERROR, message=f"could not reach {project} through the hub ({_ascii_short(exc)}); using the gateway's own kernel")
+            return own
+        log.info("[%s] call attached to %s through the hub", self.sid, project)
+        return client
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -193,6 +217,9 @@ class BaseSession:
                 log.info("[%s] narrator: %s", self.sid, self.narrator.stats)
                 self.narrator.close()
             self.tools.close()
+            if self.call_kernel is not None:
+                await self.call_kernel.close()
+                self.call_kernel = None
             if self.text_task:
                 self.text_task.cancel()
             try:
@@ -242,12 +269,14 @@ class BaseSession:
             reply=reply,
             text=reply if reply != "none" else "none",
             tools=[t["name"] for t in self.tools_available()],
-            kernel=bool(self.engines.kernel and self.engines.kernel.connected),
+            kernel=bool((self.call_kernel or self.engines.kernel) and (self.call_kernel or self.engines.kernel).connected),
             voice=self.voice,
             mode="call" if self.call_mode else "voice",
             narrator=self.narrator is not None,
             channel=self.channel,
             device=self.device,
+            project=(self.call_kernel.name if self.call_kernel else (self.project or "")),
+            via=("hub" if self.call_kernel else "gateway"),
         )
 
     def tools_available(self) -> list[dict]:
@@ -268,6 +297,8 @@ class BaseSession:
 
         if kind == P.SESSION_START:
             self._apply_start(msg)
+            if self.call_mode and self.narrator is None:
+                await self._start_call()
             await self.on_start()
             self._send_ready()
         elif kind == P.SPEAK:
@@ -337,7 +368,6 @@ class BaseSession:
         mode = msg.get("mode")
         if mode == "call":
             self.call_mode = True
-            self._start_call()
         elif mode == "voice":
             self.call_mode = False
 
@@ -447,6 +477,10 @@ class BaseSession:
             self._emit(P.AGENT_TREE, agents=[
                 {"id": n.get("id"), "name": n.get("name"), "parent": n.get("parent")} for n in frame.get("tree", [])
             ])
+
+
+def _ascii_short(exc: BaseException) -> str:
+    return str(exc).encode("ascii", "ignore").decode()[:120]
 
 
 def _speak_name(agent: str) -> str:

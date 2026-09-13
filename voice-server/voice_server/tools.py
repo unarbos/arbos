@@ -114,6 +114,13 @@ class ToolRunner:
         if self.kernel and self._watch_children in self.kernel.listeners:
             self.kernel.listeners.remove(self._watch_children)
 
+    def rebind(self, kernel: KernelClient) -> None:
+        """Run the tools against another kernel (a call's own attach through the hub)."""
+        self.close()
+        self.kernel = kernel
+        self.watching.clear()
+        kernel.listeners.append(self._watch_children)
+
     async def run(self, name: str, args: dict) -> str:
         if self.on_call:
             await self.on_call(name, args)

@@ -46,6 +46,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     kernel.add_argument("--kernel", default=os.environ.get("VOICE_KERNEL_URL"), help="tcp://127.0.0.1:PORT of `arbos-kernel serve`")
     kernel.add_argument("--kernel-place", default=os.environ.get("VOICE_KERNEL_PLACE"), help="place dir; reads .arbos/kernel.json")
     kernel.add_argument("--no-auto-approve", action="store_true", help="do not auto-approve the kernel's 'allow ...' asks")
+    kernel.add_argument("--hub", default=os.environ.get("VOICE_HUB_URL"),
+                        help="arbos-hub URL (ws[s]://host). A call whose session.start.project names <machine>/<project> "
+                             "attaches to that kernel through the hub instead of the gateway's own kernel")
+    kernel.add_argument("--hub-token", default=os.environ.get("VOICE_HUB_TOKEN", ""),
+                        help="the hub client token (env VOICE_HUB_TOKEN); never logged")
+    kernel.add_argument("--hub-machine", default=os.environ.get("VOICE_HUB_MACHINE", ""),
+                        help="this gateway's own machine name on the hub, so <machine>/<its place> means its own kernel")
 
     models = parser.add_argument_group("models")
     models.add_argument("--model-dir", default=os.environ.get("VOICE_MODEL_DIR", "models"),
