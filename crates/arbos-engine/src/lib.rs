@@ -4,6 +4,7 @@ mod access;
 mod batch;
 pub mod compact;
 mod control;
+pub mod envprobe;
 mod evict;
 mod host;
 pub mod image;
