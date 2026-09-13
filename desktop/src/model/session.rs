@@ -310,6 +310,15 @@ impl AskPrompt {
 }
 
 /// Whether the session has a live kernel socket.
+/// The kernel's own account of its provider, from its `provider` frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KernelProvider {
+    pub provider: String,
+    pub model: String,
+    pub key: bool,
+    pub source: String,
+}
+
 pub enum Connection {
     /// No socket: read back from disk, archived, or given up on.
     Idle,
@@ -383,6 +392,12 @@ pub struct ChatSession {
     /// The `Agent` item the current step's deltas are building, until the
     /// step's recorded line replaces it. Runtime only.
     streaming_agent: Option<usize>,
+    /// The last question answered or skipped from this window, and when:
+    /// the transcript tail repeats it, and that repeat is not a new card.
+    answered_ask: Option<(String, Instant)>,
+    /// A Stop was asked from this window (button, stop word, Force):
+    /// the turn ending without an answer is then not a kernel failure.
+    stop_requested: bool,
     /// `draft` was set by the model (a follow-up taken back, a rewind) and
     /// the composer, which otherwise owns the text while bound, must take it.
     pub draft_pushed: bool,
@@ -393,6 +408,10 @@ pub struct ChatSession {
     /// The kernel said it has no model key (`provider {key: false}`): the
     /// provider it wants one for. Cleared when a key arrives. Runtime only.
     pub provider_missing: Option<String>,
+    /// What the kernel serving this chat last said about itself: provider,
+    /// model, whether it holds a key, and where the key came from. Settings
+    /// shows it beside this window's own reading of config.toml (ui-010).
+    pub kernel_provider: Option<KernelProvider>,
     /// A "Rewind here" was sent for the turn whose prompt is this item;
     /// the kernel's `rewound` cuts the pane there. Runtime only.
     rewind_to: Option<usize>,
@@ -527,9 +546,12 @@ impl ChatSession {
             flight: None,
             thought_at: None,
             streaming_agent: None,
+            answered_ask: None,
+            stop_requested: false,
             draft_pushed: false,
             working: None,
             provider_missing: None,
+            kernel_provider: None,
             rewind_to: None,
             reconnect_attempt: 0,
             reconnect_at: None,
@@ -594,9 +616,12 @@ impl ChatSession {
             flight: None,
             thought_at: None,
             streaming_agent: None,
+            answered_ask: None,
+            stop_requested: false,
             draft_pushed: false,
             working: None,
             provider_missing: None,
+            kernel_provider: None,
             rewind_to: None,
             reconnect_attempt: 0,
             reconnect_at: None,
@@ -661,9 +686,12 @@ impl ChatSession {
             flight: None,
             thought_at: None,
             streaming_agent: None,
+            answered_ask: None,
+            stop_requested: false,
             draft_pushed: false,
             working: None,
             provider_missing: None,
+            kernel_provider: None,
             rewind_to: None,
             reconnect_attempt: 0,
             reconnect_at: None,
@@ -1244,6 +1272,8 @@ impl ChatSession {
         self.items.push(ChatItem::User(content.message()));
         self.updated = SystemTime::now();
         self.streaming = true;
+        // A new turn's question is never a tail repeat of the last one.
+        self.answered_ask = None;
         self.take_title_from_first_prompt();
         self.flush();
     }
@@ -1268,6 +1298,7 @@ impl ChatSession {
             && !session.is_closed()
             && session.cancel().is_ok()
         {
+            self.stop_requested = true;
             return;
         }
         self.reap_dead_socket();
@@ -1523,6 +1554,7 @@ impl ChatSession {
         let Some(prompt) = self.questions.take() else {
             return;
         };
+        self.answered_ask = Some((prompt.title.clone(), Instant::now()));
         let (answers, details) = if skipped {
             (Vec::new(), String::new())
         } else {
@@ -1555,6 +1587,16 @@ impl ChatSession {
 
     /// Drop the `ix`th waiting prompt — a steer taken back before the turn in
     /// flight got to it. `ix` counts as [`Self::waiting`] does.
+    /// Take a queued follow-up back into the composer for editing (ui-006).
+    pub fn edit_queued(&mut self, ix: usize) {
+        let ix = ix + self.wired_head();
+        if ix < self.queue.len() {
+            let prompt = self.queue.remove(ix).unwrap_or_default();
+            self.draft = prompt.text;
+            self.draft_pushed = true;
+        }
+    }
+
     pub fn unqueue(&mut self, ix: usize) {
         let ix = ix + self.wired_head();
         if ix < self.queue.len() {
@@ -1624,10 +1666,16 @@ impl ChatSession {
             }
             Event::Provider {
                 provider,
+                model,
                 key,
                 source,
-                ..
             } => {
+                self.kernel_provider = Some(KernelProvider {
+                    provider: provider.clone(),
+                    model,
+                    key,
+                    source: source.clone(),
+                });
                 let was = self.provider_missing.take();
                 if key {
                     if was.is_some() {
@@ -1745,6 +1793,15 @@ impl ChatSession {
                 questions,
             } => {
                 self.turn_alive();
+                // The transcript tail repeats a question the user already
+                // answered or skipped a moment ago: not a new card (ui-004).
+                if self
+                    .answered_ask
+                    .as_ref()
+                    .is_some_and(|(t, at)| *t == title && at.elapsed() < Duration::from_secs(10))
+                {
+                    return;
+                }
                 if let Some(previous) = self.questions.take() {
                     // The same ask reaches the window twice: once as the live
                     // `ask` frame, again as the transcript line the tail
@@ -1786,11 +1843,15 @@ impl ChatSession {
                 self.streaming = false;
                 self.turn_open = false;
                 self.turn_ended = Some(Instant::now());
+                let stopped = std::mem::take(&mut self.stop_requested);
                 match result {
                     Ok(StopReason::EndTurn) => {
                         // Cursor just ends. A lone "done" line is extra.
-                        // Only speak when the kernel never answered at all.
-                        if !self.busy() && ended_on_user(&self.items) {
+                        // Only speak when the kernel never answered at all —
+                        // and not when this window asked it to stop: the
+                        // kernel's own `interrupted` line ("Stopped by you")
+                        // follows on the tail.
+                        if !stopped && !self.busy() && ended_on_user(&self.items) {
                             // Kernel turn failed before any token (missing
                             // agent.md, bad model, no key). Idle used to
                             // clear the thinking row and leave a blank pane.
@@ -2639,8 +2700,16 @@ pub(crate) fn conversation_key(items: &[ChatItem], title: &str) -> Option<String
 /// cause the kernel gave.
 pub fn interrupt_label(detail: &str) -> String {
     let d = detail.trim();
-    match d.to_ascii_lowercase().as_str() {
-        "" | "stop" | "user" | "stopped" | "stopped by user" => STOPPED_BY_YOU.to_owned(),
+    let lower = d.to_ascii_lowercase();
+    // The kernel says where the stop landed ("stop during model call",
+    // "stop during compaction"); the user does not need to know.
+    if lower.is_empty()
+        || lower == "user"
+        || lower.starts_with("stop")
+    {
+        return STOPPED_BY_YOU.to_owned();
+    }
+    match lower.as_str() {
         "force" | "steer" | "follow-up" => "Interrupted for your follow-up".to_owned(),
         _ => format!("Interrupted: {d}"),
     }

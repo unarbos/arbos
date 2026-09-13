@@ -419,6 +419,15 @@ impl Tool for Ask {
                 r = rx => r.ok(),
                 _ = cx.cancel.cancelled() => anyhow::bail!("interrupted while waiting for the user"),
             };
+            // An empty answer is the Skip button: say so, so the model
+            // carries on with a default instead of reporting an empty reply.
+            let answer = answer.map(|a| {
+                if a.trim().is_empty() {
+                    "The user skipped this question without answering. Choose a sensible default yourself, say which you chose, and continue.".to_string()
+                } else {
+                    a
+                }
+            });
             Ok(ToolOut::text(
                 answer.unwrap_or_else(|| "(waiting for user)".into()),
             ))

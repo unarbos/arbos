@@ -149,6 +149,21 @@ impl SettingsWindow {
         };
         let pending = self.host.pending;
         let saved = summary.key == KeySource::Config;
+        // The kernel behind the open chat may read another config (a remote
+        // machine, a key set in memory): say what it has, not only what
+        // this window's file says (ui-010).
+        let kernel_line = self
+            .workspace
+            .read(cx)
+            .active_session()
+            .and_then(|chat| chat.kernel_provider.clone())
+            .map(|k| {
+                if k.key {
+                    format!("The kernel of the open chat answers with {} ({}); key from {}.", k.provider, k.model, k.source)
+                } else {
+                    format!("The kernel of the open chat has no key for {}.", k.provider)
+                }
+            });
         theme
             .card_row(false)
             .child(
@@ -168,7 +183,14 @@ impl SettingsWindow {
                                 theme.text_muted
                             })
                             .child(status),
-                    ),
+                    )
+                    .children(kernel_line.map(|line| {
+                        div()
+                            .mt(px(2.))
+                            .text_style(TextStyle::Subheadline)
+                            .text_color(theme.text_muted)
+                            .child(line)
+                    })),
             )
             .child(
                 div()

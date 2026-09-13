@@ -64,7 +64,7 @@ fn hold() -> &'static Mutex<Option<Rec>> {
 pub fn start() -> Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
-        Err(anyhow!("voice dictation only works on this Mac"))
+        Err(anyhow!("voice dictation is macOS-only for now"))
     }
     #[cfg(target_os = "macos")]
     {

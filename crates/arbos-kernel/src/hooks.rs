@@ -1531,6 +1531,20 @@ impl KernelHooks {
             ));
         }
         if !self.issued.lock().unwrap().contains(given) {
+            // An id this kernel never issued is a client's mistake, not a
+            // late answer to another question. With one question pending
+            // it can only mean that one: take it rather than leave the user
+            // with no card and a stuck turn (ui-004).
+            if pending_total == 1 {
+                crate::klog::warn(
+                    "answer_id_unknown",
+                    Some(agent),
+                    format!(
+                        "answer names ask {given:?} (never issued); taken for the one pending question {pending:?}"
+                    ),
+                );
+                return Ok(());
+            }
             return Err(format!(
                 "answer names ask {given:?}, which this kernel never issued; the pending question is {pending:?}"
             ));
