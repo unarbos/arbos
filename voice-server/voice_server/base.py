@@ -81,6 +81,7 @@ class BaseSession:
         # Call mode: the caller talks to a project's main agent; the narrator speaks highlights.
         self.call_mode = False
         self.channel = "voice"  # what the caller's utterances are filed as in the inbox
+        self.device = ""  # the client on the call: phone | desktop (session.start.device)
         self.project = ""  # `<machine>/<project>` from session.start; empty = the gateway's kernel
         self.screen = "on your screen"
         self.narrator: Narrator | None = None
@@ -148,6 +149,7 @@ class BaseSession:
             speak=self.speak_narration,
             emit=self._emit,
             screen=self.screen,
+            device=self.device,
             model=self.defaults.narrator_model,
             api_key=openrouter_key() if self.defaults.narrator_model else None,
             user_talking=lambda: self.user_talking,
@@ -245,6 +247,7 @@ class BaseSession:
             mode="call" if self.call_mode else "voice",
             narrator=self.narrator is not None,
             channel=self.channel,
+            device=self.device,
         )
 
     def tools_available(self) -> list[dict]:
@@ -327,6 +330,8 @@ class BaseSession:
             self.project = msg["project"].strip()
         if msg.get("channel") in ("voice", "text"):
             self.channel = msg["channel"]
+        if isinstance(msg.get("device"), str):
+            self.device = msg["device"].strip()[:24]
         if isinstance(msg.get("screen"), str) and msg["screen"].strip():
             self.screen = msg["screen"].strip()
         mode = msg.get("mode")

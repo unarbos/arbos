@@ -152,10 +152,14 @@ class MockKernel:
             text = str(frame.get("text", ""))
             # The kernel's rule: a user frame without a channel is a typed line.
             channel = str(frame.get("channel") or "text")
+            device = str(frame.get("device") or "")
             steer = bool(frame.get("steer")) and agent in self.running
-            self._inbox(agent, "user", "steer" if steer else "request", text, channel=channel)
-            self._append(agent, {"kind": "user", "text": text, "attachments": []})
-            self.broadcast({"type": "event", "agent": agent, "event": {"seq": self._lines(agent), "ts": now_ms(), "kind": "user", "text": text}})
+            self._inbox(agent, "user", "steer" if steer else "request", text, channel=channel, device=device)
+            ev = {"kind": "user", "text": text, "attachments": [], "channel": channel}
+            if device:
+                ev["device"] = device
+            self._append(agent, ev)
+            self.broadcast({"type": "event", "agent": agent, "event": {"seq": self._lines(agent), "ts": now_ms(), **ev}})
             if steer:
                 b = self.script[self._turns - 1] if 0 < self._turns <= len(self.script) else Behaviour()
                 if b.steer_reply:
@@ -216,7 +220,7 @@ class MockKernel:
                 end = start + len(chunk)
         return {"type": "chunk", "path": rel, "from": start, "to": end, "size": len(data), "text": chunk.decode(errors="replace")}
 
-    def _inbox(self, agent: str, sender: str, kind: str, body: str, *, channel: str = "", wake: bool = True) -> str:
+    def _inbox(self, agent: str, sender: str, kind: str, body: str, *, channel: str = "", device: str = "", wake: bool = True) -> str:
         """One inbox file, in the kernel's `Message::render` shape (TOML front matter between +++)."""
         d = self.arbos / "agents" / agent / "inbox"
         d.mkdir(parents=True, exist_ok=True)
@@ -230,6 +234,8 @@ class MockKernel:
                  f'sent = "{datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}"']
         if channel:
             front.append(f'channel = "{channel}"')
+        if device:
+            front.append(f'device = "{device}"')
         text = "+++\n" + "\n".join(front) + "\n+++\n" + body.rstrip("\n") + "\n"
         tmp = d / f".{name}.tmp"
         tmp.write_text(text)

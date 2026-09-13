@@ -144,6 +144,7 @@ class Narrator:
         arbos_talking: Callable[[], bool] = lambda: False,
         ack: bool = True,
         speak_details: bool = True,
+        device: str = "",
     ):
         self.kernel = kernel
         self.speak = speak  # voices one line with the gateway TTS; returns when it has been said
@@ -154,6 +155,7 @@ class Narrator:
         self.api_key = api_key
         self.user_talking = user_talking
         self.arbos_talking = arbos_talking
+        self.device = device  # phone | desktop: written beside `channel` on every message
         self.ack = ack  # say ACK when forwarding an utterance (the speech model's own voice is off)
         self.speak_details = speak_details  # voice more_detail answers here (else the speech model reads them)
         self.queue: asyncio.Queue[Line] = asyncio.Queue()
@@ -169,6 +171,7 @@ class Narrator:
         self._flush_gen = 0
         self._pending: tuple[str, str] | None = None
         self._pending_handle: asyncio.TimerHandle | None = None
+        self._late_until = 0.0
         self.stats = {"heard": 0, "skipped": 0, "interrupted": 0, "details": 0}
 
     # ------------------------------------------------------------------ lifecycle
@@ -252,7 +255,7 @@ class Narrator:
             self.kernel.send(frame)
             self.summary.append(f"answered: {text}")
             return
-        self.kernel.send_user(text, self.agent, channel=channel)
+        self.kernel.send_user(text, self.agent, channel=channel, device=self.device)
         self.summary.append(f"{channel}: {text}")
 
     # ------------------------------------------------------------------ the kernel
@@ -262,6 +265,15 @@ class Narrator:
         agent = frame.get("agent")
         if kind == "turn" and agent == self.agent:
             self.turn_running = frame.get("state") == "running"
+            if self.turn_running:
+                # The next turn starts before the last one's flush fired (a typed line right
+                # behind the spoken one): speak the last turn now, then collect the new one. The
+                # last turn's whole text can still trail its `idle` by a moment; for a short
+                # while an assistant event is taken as that turn's, not the new one's.
+                self._flush_gen += 1
+                if self._turn_texts:
+                    self._speak_turn()
+                self._late_until = time.monotonic() + 0.8
             if not self.turn_running:
                 # The whole assistant text can follow `idle` by a moment; gather it, then speak once.
                 self._flush_gen += 1
@@ -280,6 +292,12 @@ class Narrator:
                 # One highlight per turn, from its last words: a turn with tool calls has several
                 # assistant steps and only the last one states the result.
                 squashed = "".join(text.split())
+                if self.turn_running and time.monotonic() < self._late_until and not self._turn_texts:
+                    line = highlight(text, screen=self.screen)  # the previous turn's final words
+                    if line:
+                        self.summary.append(f"arbos: {line}")
+                        self._enqueue(Line("highlight", line, ref=_ref(frame)))
+                    return
                 if not any(squashed == "".join(t.split()) for t, _ in self._turn_texts):
                     self._turn_texts.append((text, _ref(frame)))
                 if not self.turn_running and self._flush_gen:
@@ -314,6 +332,9 @@ class Narrator:
     def _flush_turn(self, gen: int) -> None:
         if gen != self._flush_gen or self.turn_running or not self._turn_texts:
             return
+        self._speak_turn()
+
+    def _speak_turn(self) -> None:
         text, ref = self._turn_texts[-1]
         self._turn_texts.clear()
         line = highlight(text, screen=self.screen)
@@ -413,7 +434,7 @@ class Narrator:
             child_events[child.name] = await self.kernel.transcript_tail(child.name, bytes_=120_000)
         facts = _facts(events, child_events)
         if not facts:
-            self.kernel.send_user(question, self.agent, channel="voice")
+            self.kernel.send_user(question, self.agent, channel="voice", device=self.device)
             return "The record does not say. I have asked the main agent; I will tell you when it answers."
         answer = _extractive(question, facts)
         if self.model and self.api_key:

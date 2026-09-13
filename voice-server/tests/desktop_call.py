@@ -161,12 +161,10 @@ async def main_async(name: str) -> int:
         check(len([n for n in voice_lines if "call started" not in n]) >= 1, f"chat has narrator lines as `voice ·` notices ({len(voice_lines)})")
         check(bool((state.get("call") or {}).get("last_said")), "state.call.last_said holds the narrator's last line")
         check(spoken_raw.exists() and spoken_raw.stat().st_size > 20000, f"reply audio reached the speaker ({spoken_raw.stat().st_size if spoken_raw.exists() else 0} bytes)")
-        users = [i.get("text", "") for i in (chat["items"] if chat else []) if i.get("kind") == "user"]
-        # Informational for now: the desktop draws user lines from the transcript file it reads
-        # itself, and a line another client wrote (the gateway, the phone) does not show up yet.
-        # Tracked as an open question in the call-mode design; not a call-mode failure.
-        shown = any(step.get("say", "") in u for step in steps for u in users if "say" in step)
-        print(f"   note the caller's words {'appear' if shown else 'do not appear'} in the chat as user lines ({len(users)})")
+        users = [i for i in (chat["items"] if chat else []) if i.get("kind") == "user"]
+        spoken_items = [u for u in users if any(step.get("say", "") and step["say"] in u.get("text", "") for step in steps)]
+        check(bool(spoken_items), f"the caller's spoken words appear in the chat as user cards ({len(users)} user cards)")
+        check(all(u.get("channel") == "voice" for u in spoken_items) and bool(spoken_items), "spoken user cards carry channel = voice (the microphone mark)")
 
         await asyncio.to_thread(app.click, "call-mute")
         state = await asyncio.to_thread(app.wait_state, lambda s: (s.get("call") or {}).get("muted") is True, 10, 0.2, "muted")

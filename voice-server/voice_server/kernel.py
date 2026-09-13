@@ -195,9 +195,11 @@ class KernelClient:
 
     # ------------------------------------------------------------------ turns
 
-    def send_user(self, text: str, agent: str = "root", *, channel: str = "", steer: bool | None = None) -> None:
+    def send_user(self, text: str, agent: str = "root", *, channel: str = "", device: str = "",
+                  steer: bool | None = None) -> None:
         """One user message to an agent, and back to whatever else you were doing. `channel` says
-        where the words came from (`voice` | `text`); the kernel writes it into the inbox file.
+        where the words came from (`voice` | `text`) and `device` which client carried them
+        (`phone` | `desktop`); the kernel writes both into the inbox file and the transcript line.
         `steer` defaults to "the agent is running now"."""
         if steer is None:
             state = self.agents.get(agent)
@@ -205,6 +207,8 @@ class KernelClient:
         frame: dict = {"type": "user", "agent": agent, "text": text, "steer": steer, "attachments": []}
         if channel:
             frame["channel"] = channel
+        if device:
+            frame["device"] = device
         self.send(frame)
 
     async def turn(self, text: str, agent: str = "root", *, steer: bool = False, timeout: float = 120.0,

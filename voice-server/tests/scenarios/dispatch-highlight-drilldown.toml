@@ -37,7 +37,7 @@ detail_max_chars = 420
 tool_result_contains = { more_detail = "30 second" }
 tools_offered = ["more_detail", "agent_status"]
 tools_offered_not = ["send_agent"]
-inbox = [{ channel = "voice", kind = "request" }]
+inbox = [{ channel = "voice", kind = "request", device = "desktop" }]
 kernel_user_not = ["Why exactly"]
 done_files = 1
 audio_bytes_min = 20000

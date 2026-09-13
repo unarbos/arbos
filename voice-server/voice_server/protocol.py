@@ -61,6 +61,7 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
           "mode": "call"  CALL MODE (see below): talk to a project's main agent; the narrator speaks highlights
           "project": "<machine>/<project>"  which project the call is for (hub name; empty = the gateway's kernel)
           "channel": "voice"  what the caller's utterances are filed as in the agent's inbox (voice | text)
+          "device": "desktop"  which client this is (phone | desktop); written beside channel on every message
           "screen": "on your screen"  how the narrator refers to the client's display ("in the chat" on a phone)
     <binary>                       microphone audio
     {"type":"speak","text":"..."}  voice this text; requests queue in order

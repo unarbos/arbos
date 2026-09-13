@@ -26,7 +26,7 @@ wait_spoken = "update-readme to rewrite"
 wait_spoken = "update readme is done"
 
 [expect]
-inbox = [{ channel = "voice", kind = "request" }, { channel = "text", kind = "steer" }]
+inbox = [{ channel = "voice", kind = "request", device = "desktop" }, { channel = "text", kind = "steer" }]
 inbox_bodies = ["Send an agent to update the README.", "bump the version to 2.0"]
 text_forwarded = 1
 spoken_contains = ["I sent the agent update-readme", "update readme is done"]

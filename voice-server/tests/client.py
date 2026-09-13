@@ -70,9 +70,10 @@ class Record:
 
 class Caller:
     def __init__(self, url: str, *, token: str, screen: str = "on your screen", mode: str = "call",
-                 channel: str = "voice", project: str = "", keep_audio: bool = False):
+                 channel: str = "voice", project: str = "", keep_audio: bool = False, device: str = "desktop"):
         self.url = url
         self.keep_audio = keep_audio
+        self.device = device
         self.token = token
         self.screen = screen
         self.mode = mode
@@ -93,7 +94,7 @@ class Caller:
     async def connect(self, timeout: float = 15.0) -> dict:
         self._ws = await websockets.connect(f"{self.url}?token={self.token}", max_size=4 * 1024 * 1024, compression=None)
         start = {"type": "session.start", "format": {"type": "audio/pcm", "rate": RATE}, "agents": False,
-                 "mode": self.mode, "channel": self.channel, "screen": self.screen}
+                 "mode": self.mode, "channel": self.channel, "screen": self.screen, "device": self.device}
         if self.project:
             start["project"] = self.project
         await self._ws.send(json.dumps(start))
