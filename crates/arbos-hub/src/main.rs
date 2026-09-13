@@ -20,7 +20,9 @@ fn main() -> Result<()> {
     let mut bind: Option<String> = std::env::var("ARBOS_HUB_BIND").ok();
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--config" | "-c" => config = Some(PathBuf::from(args.next().context("--config needs a file")?)),
+            "--config" | "-c" => {
+                config = Some(PathBuf::from(args.next().context("--config needs a file")?))
+            }
             "--bind" => bind = Some(args.next().context("--bind needs host:port")?),
             "-h" | "--help" => {
                 println!("{USAGE}");

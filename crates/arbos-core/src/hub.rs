@@ -77,14 +77,26 @@ pub enum HubFrame {
         protocol: u32,
     },
     /// Hub → registrant: accepted under this name.
-    Registered { machine: String, id: u64 },
+    Registered {
+        machine: String,
+        id: u64,
+    },
     /// Hub → every registrant, on every change: the machines it knows.
-    Roster { machines: Vec<MachineInfo> },
+    Roster {
+        machines: Vec<MachineInfo>,
+    },
     /// Hub → kernel: a client attached; `chan` names it from now on. `who`
     /// and `role` were verified by the hub.
-    Open { chan: u64, who: String, role: String },
+    Open {
+        chan: u64,
+        who: String,
+        role: String,
+    },
     /// Both ways: one attach frame for channel `chan`.
-    Frame { chan: u64, frame: Frame },
+    Frame {
+        chan: u64,
+        frame: Frame,
+    },
     /// Both ways: channel `chan` is gone.
     Close {
         chan: u64,
@@ -115,7 +127,9 @@ pub enum HubFrame {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         detail: String,
     },
-    Error { detail: String },
+    Error {
+        detail: String,
+    },
     /// A frame this build does not know. Skipped, never fatal.
     #[serde(other)]
     Unknown,
@@ -255,7 +269,12 @@ impl HubConfig {
 
     /// The machine token: `token`, else `token_env`, else `ARBOS_HUB_TOKEN`.
     pub fn token(&self) -> Result<String> {
-        if let Some(t) = self.token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        if let Some(t) = self
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
             return Ok(t.to_string());
         }
         let var = self.token_env.as_deref().unwrap_or(TOKEN_ENV);
@@ -500,7 +519,11 @@ mod tests {
         };
         write_roster(&place, "wss://hub", &[m.clone()]).unwrap();
         assert_eq!(read_roster(&place), vec![m]);
-        assert!(roster_line(&place).unwrap().contains("arboslife (worker; checkouts: demo; linux, gpu)"));
+        assert!(
+            roster_line(&place)
+                .unwrap()
+                .contains("arboslife (worker; checkouts: demo; linux, gpu)")
+        );
         write_roster(&place, "wss://hub", &[]).unwrap();
         assert!(read_roster(&place).is_empty());
         let _ = std::fs::remove_dir_all(&dir);

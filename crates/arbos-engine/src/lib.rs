@@ -9,6 +9,7 @@ mod evict;
 mod host;
 pub mod image;
 mod jobs;
+pub mod pdf;
 pub mod project;
 mod prompt;
 mod provider;

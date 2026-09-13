@@ -439,6 +439,9 @@ pub fn read(
     if image::is_image_path(&file) {
         return read_image(&file);
     }
+    if crate::pdf::is_pdf_path(&file) && file.is_file() {
+        return read_pdf(&file, offset, limit);
+    }
     // Models `read` a folder to see what is in it. Answer the question.
     if file.is_dir() {
         return ls(root, cwd, path);
@@ -515,6 +518,30 @@ fn similar_name(have: &str, want: &str) -> bool {
         v
     }
     hs.contains(&ws) || ws.contains(&hs) || parts(&hs) == parts(&ws)
+}
+
+/// A PDF reads as its text with page markers, numbered lines like any
+/// file (no LINE:HASH: there is nothing to edit). `offset`/`limit` page
+/// through a long one.
+fn read_pdf(file: &Path, offset: Option<u64>, limit: Option<u64>) -> Result<ToolOut> {
+    let (text, pages) = crate::pdf::text(file)?;
+    let lines: Vec<&str> = text.lines().collect();
+    let start = offset.unwrap_or(1).saturating_sub(1) as usize;
+    let take = limit.unwrap_or(lines.len() as u64) as usize;
+    let mut body = format!(
+        "pdf {} — {pages} page(s), {} lines of text{}\n",
+        file.display(),
+        lines.len(),
+        if start > 0 || take < lines.len() {
+            format!(" (lines {}–{})", start + 1, (start + take).min(lines.len()))
+        } else {
+            String::new()
+        }
+    );
+    for (i, line) in lines.iter().skip(start).take(take).enumerate() {
+        body.push_str(&format!("{:>6}|{line}\n", start + i + 1));
+    }
+    Ok(ToolOut::with_paths(body, vec![file.display().to_string()]))
 }
 
 /// The body is one caption line; the pixels go out as an image part when
