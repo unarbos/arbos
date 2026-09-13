@@ -122,6 +122,7 @@ async def main_async(name: str) -> int:
         state = await asyncio.to_thread(app.wait_state, lambda s: (s.get("call") or {}).get("connecting") is False, 30, 0.25, "call connected")
         call = state["call"]
         check(call["active"] and call["phase"] in ("listening", "ready"), f"call is live and listening ({call['phase']})")
+        check(bool(call.get("mic_device")) and not call.get("mic_error"), f"the strip names the mic and reports no mic error (mic={call.get('mic_device')!r}, error={call.get('mic_error')!r})")
         await asyncio.sleep(0.8)
         screenshot(display, OUT / "02-in-call.png")
 
