@@ -144,8 +144,11 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let cwd = agent.cwd.clone().unwrap_or_else(|| place.path.clone());
     {
         let snap = cwd.clone();
+        let agent_dir = layout.dir.clone();
+        let agent_id = agent.id.to_string();
+        let line = events.len() as u64;
         tokio::task::spawn_blocking(move || {
-            let _ = crate::tools::git::snapshot(&snap);
+            let _ = crate::tools::git::snapshot_turn(&snap, &agent_dir, &agent_id, line);
         });
     }
 

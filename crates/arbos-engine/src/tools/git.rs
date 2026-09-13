@@ -42,6 +42,131 @@ impl Tool for Undo {
 
 const TAG: &str = "arbos-checkpoint";
 
+/// One turn's starting point, for `arbos-kernel rewind`: the transcript
+/// line the turn began on, HEAD, and a commit holding the working tree as
+/// it was (`git stash create`; None when the tree was clean). The commit
+/// is kept alive by `refs/arbos/cp/<agent>/<line>`. One JSON line per turn
+/// in `<agent dir>/checkpoints.jsonl`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Checkpoint {
+    pub line: u64,
+    pub ts: i64,
+    pub head: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<String>,
+}
+
+/// Record where a turn starts: the plain HEAD mark `undo` uses, plus a
+/// checkpoint of the working tree for `rewind`. Runs on the blocking pool.
+pub fn snapshot_turn(cwd: &Path, agent_dir: &Path, agent: &str, line: u64) -> Result<()> {
+    snapshot(cwd)?;
+    if !cwd.join(".git").exists() {
+        return Ok(());
+    }
+    let head = git_out(cwd, &["rev-parse", "HEAD"]).unwrap_or_default();
+    if head.is_empty() {
+        return Ok(());
+    }
+    // `stash create` writes the commit and touches nothing else; an empty
+    // answer means the tree matched HEAD.
+    let work = git_out(cwd, &["stash", "create"]).filter(|s| !s.is_empty());
+    if let Some(w) = &work {
+        let safe: String = agent
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let _ = Command::new("git")
+            .args(["update-ref", &format!("refs/arbos/cp/{safe}/{line}"), w])
+            .current_dir(cwd)
+            .status();
+    }
+    let cp = Checkpoint {
+        line,
+        ts: arbos_core::now_ms(),
+        head,
+        work,
+    };
+    let path = agent_dir.join("checkpoints.jsonl");
+    let mut text = serde_json::to_string(&cp)?;
+    text.push('\n');
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(text.as_bytes())?;
+    Ok(())
+}
+
+fn git_out(cwd: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Every checkpoint of an agent, oldest first.
+pub fn checkpoints(agent_dir: &Path) -> Vec<Checkpoint> {
+    std::fs::read_to_string(agent_dir.join("checkpoints.jsonl"))
+        .map(|t| {
+            t.lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Put the working tree back to a checkpoint: HEAD to its commit, tracked
+/// files to the saved tree (or to HEAD when the tree was clean), untracked
+/// files from after it removed — never `.arbos/`.
+pub fn restore(cwd: &Path, cp: &Checkpoint) -> Result<String> {
+    let st = Command::new("git")
+        .args(["reset", "--hard", &cp.head])
+        .current_dir(cwd)
+        .status()?;
+    if !st.success() {
+        anyhow::bail!("git reset --hard {} failed", cp.head);
+    }
+    if let Some(work) = &cp.work {
+        // The stash commit's tree is the working tree as it was; read it
+        // into the index and the tree, then leave the index as HEAD's so
+        // the changes show as unstaged, the way they were.
+        let st = Command::new("git")
+            .args(["read-tree", "-u", "--reset", work])
+            .current_dir(cwd)
+            .status()?;
+        if !st.success() {
+            anyhow::bail!("git read-tree {work} failed");
+        }
+        let _ = Command::new("git")
+            .args(["reset", "-q"])
+            .current_dir(cwd)
+            .status();
+    }
+    let _ = Command::new("git")
+        .args(["clean", "-fd", "-e", ".arbos", "-e", ".arbos/**"])
+        .current_dir(cwd)
+        .status();
+    Ok(match &cp.work {
+        Some(w) => format!(
+            "{} + working tree {}",
+            &cp.head[..cp.head.len().min(12)],
+            &w[..w.len().min(12)]
+        ),
+        None => cp.head[..cp.head.len().min(12)].to_string(),
+    })
+}
+
 pub fn snapshot(cwd: &Path) -> Result<()> {
     if !cwd.join(".git").exists() {
         return Ok(());

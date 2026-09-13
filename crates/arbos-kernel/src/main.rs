@@ -87,6 +87,10 @@ fn main() -> Result<()> {
             let code = arbos_kernel::cli::attach(parsed, all)?;
             std::process::exit(code);
         }
+        "rewind" => {
+            let code = arbos_kernel::rewind::run(arbos_kernel::rewind::Args::parse(args)?)?;
+            std::process::exit(code);
+        }
         "help" | "-h" | "--help" => {
             println!(
                 "arbos-kernel serve [place] [--provider replay --replies FILE] [--bind HOST:PORT] [--until-idle] [--horizon 1h] [--now 2026-09-13T09:00:00Z]   (off loopback: tokens in <place>/.arbos/access.toml, [[client]] name/token|token_env/role)"
@@ -94,6 +98,7 @@ fn main() -> Result<()> {
             println!("{}", arbos_kernel::rollout::USAGE);
             println!("{}", arbos_kernel::setup::USAGE);
             println!("{}", arbos_kernel::cli::USAGE);
+            println!("{}", arbos_kernel::rewind::USAGE);
             Ok(())
         }
         other => bail!("unknown command {other}"),
