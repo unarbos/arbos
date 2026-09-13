@@ -248,6 +248,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     // `--until-idle`: a check a second; the loop ends with its code.
     let mut until_idle = idle::UntilIdle::from_env();
     let mut idle_tick = interval(Duration::from_secs(1));
+    // `changed` frames for attached clients: a stat pass once a second.
+    let mut watch = crate::watch::Watch::default();
+    let mut watch_tick = interval(Duration::from_secs(1));
     let mut exit_code = 0;
     if let Some(u) = &until_idle {
         klog::info(
@@ -372,6 +375,16 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             _ = tick.tick() => {
                 hooks.kick();
                 hooks.broadcast(tree_frame(&place));
+            }
+            _ = watch_tick.tick() => {
+                // Nobody attached: nothing to tell, and no stats to pay for.
+                if hooks.frames.lock().unwrap().is_empty() {
+                    watch = crate::watch::Watch::default();
+                } else {
+                    for frame in watch.poll(&place) {
+                        hooks.broadcast(frame);
+                    }
+                }
             }
             _ = idle_tick.tick(), if until_idle.is_some() => {
                 if let Some(code) = until_idle.as_mut().and_then(|u| u.poll(&hooks, &clock)) {
