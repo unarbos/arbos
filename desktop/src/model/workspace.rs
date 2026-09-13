@@ -1489,6 +1489,59 @@ impl Workspace {
 
     /// Stop the in-flight turn. If the attach socket died, say Stopped
     /// and attach again so the next send works — no kernel jargon.
+    /// How many automatic reconnects a remote place gets before it waits
+    /// for a hand.
+    pub const RECONNECT_TRIES: u32 = 30;
+
+    /// A remote kernel's connection dropped: try again after 2, 4, 8, 16,
+    /// 32, then 60 s, up to [`Self::RECONNECT_TRIES`] times. The row under
+    /// the composer counts down; a Send or Stop meanwhile tries at once.
+    pub fn schedule_reconnect(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(chat) = self.session_mut(id) else {
+            return;
+        };
+        if !matches!(chat.connection, crate::model::session::Connection::Lost) {
+            return;
+        }
+        // A timer already waits for this very connection generation.
+        if chat.reconnect_at.is_some() && chat.reconnect_gen == chat.attach_gen {
+            return;
+        }
+        if chat.reconnect_attempt >= Self::RECONNECT_TRIES {
+            chat.notice(true, "connection lost; retries stopped — send a message or press Reconnect to try again");
+            chat.flush();
+            return;
+        }
+        chat.reconnect_attempt += 1;
+        let attempt = chat.reconnect_attempt;
+        let delay = Duration::from_secs(2u64.saturating_pow(attempt.min(6)).min(60));
+        chat.reconnect_at = Some(std::time::Instant::now() + delay);
+        chat.reconnect_gen = chat.attach_gen;
+        let generation = chat.attach_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |workspace, cx| {
+                let go = workspace.session_mut(id).is_some_and(|chat| {
+                    if chat.attach_gen != generation {
+                        // A newer generation owns the retry now.
+                        return false;
+                    }
+                    chat.reconnect_at = None;
+                    !chat.closed
+                        && matches!(chat.connection, crate::model::session::Connection::Lost)
+                });
+                if go {
+                    if let Some(chat) = workspace.session_mut(id) {
+                        chat.resume(cx);
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub fn cancel(&mut self, id: u64, cx: &mut Context<Self>) {
         let found = self
             .projects
@@ -1977,7 +2030,13 @@ impl Workspace {
     /// conversation back.
     pub fn session_connected(&mut self, id: u64, cx: &mut Context<Self>) {
         self.with_session(id, cx, |chat| {
+            if chat.reconnect_attempt > 0 {
+                chat.notice(false, "reconnected");
+            }
+            chat.reconnect_attempt = 0;
+            chat.reconnect_at = None;
             chat.sync_kernel_history();
+            // Whatever was typed while the connection was down goes now, in order.
             chat.drain();
             chat.flush();
         });

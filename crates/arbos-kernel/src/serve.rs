@@ -763,7 +763,7 @@ fn shutdown_backstop(lock_path: std::path::PathBuf) {
 }
 
 /// What this kernel speaks on the attach socket.
-const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 1;
 /// Transcript lines replayed on attach for the focused agent.
 const ATTACH_TAIL: u32 = 200;
 /// Most lines one `history` request returns.

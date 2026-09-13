@@ -943,10 +943,35 @@ impl Arbos {
         let host = workspace
             .active_project()
             .and_then(|project| project.host.clone());
-        let (glyph, machine) = match host {
+        let (glyph, mut machine) = match host {
             Some(alias) => (icons::devices::CLOUD, alias),
             None => (icons::devices::LAPTOP, "Local".to_owned()),
         };
+        // A remote kernel that dropped: say what the window is doing about it.
+        if let Some(chat) = workspace.active_session()
+            && chat.host.is_some()
+        {
+            match (&chat.connection, chat.reconnect_at) {
+                (Connection::Lost, Some(at)) => {
+                    let left = at.saturating_duration_since(std::time::Instant::now()).as_secs();
+                    machine = format!(
+                        "{machine} · reconnecting, try {} in {left}s",
+                        chat.reconnect_attempt
+                    );
+                    Painter::of(cx).lease(1.0, Duration::from_millis(1100), cx);
+                }
+                (Connection::Lost, None) if chat.reconnect_attempt > 0 => {
+                    machine = format!("{machine} · connection lost");
+                }
+                (Connection::Connecting, _) if chat.reconnect_attempt > 0 => {
+                    machine = format!(
+                        "{machine} · reconnecting, try {}…",
+                        chat.reconnect_attempt
+                    );
+                }
+                _ => {}
+            }
+        }
         div()
             .id("composer-context")
             .flex()
