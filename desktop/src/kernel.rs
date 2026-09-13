@@ -1070,8 +1070,41 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
         .join("transcript.jsonl");
     let text = std::fs::read_to_string(path).ok()?;
     let mut items = Vec::new();
+    // Timestamps give the replay what the live view measures: the turn's
+    // wall time on its prompt, and a thought's seconds as the gap to the
+    // event after it.
+    let mut turn_began: Option<i64> = None;
+    let mut thinking_since: Option<i64> = None;
     for line in text.lines() {
         if let Ok(ev) = serde_json::from_str::<arbos_core::Event>(line) {
+            let thinking = matches!(ev.kind, arbos_core::EventKind::Thinking { .. });
+            if !thinking {
+                if let Some(since) = thinking_since.take() {
+                    if let Some(crate::model::session::ChatItem::Thinking { secs, .. }) =
+                        items.last_mut()
+                    {
+                        *secs = secs_between(since, ev.ts);
+                    }
+                }
+            }
+            match &ev.kind {
+                arbos_core::EventKind::User { .. } => turn_began = Some(ev.ts),
+                arbos_core::EventKind::Thinking { .. } => {
+                    thinking_since.get_or_insert(ev.ts);
+                }
+                arbos_core::EventKind::TurnComplete { .. } => {
+                    if let Some(began) = turn_began.take() {
+                        if let Some(crate::model::session::ChatItem::User(message)) = items
+                            .iter_mut()
+                            .rev()
+                            .find(|item| matches!(item, crate::model::session::ChatItem::User(_)))
+                        {
+                            message.worked_secs = secs_between(began, ev.ts);
+                        }
+                    }
+                }
+                _ => {}
+            }
             if let Some(item) = event_to_item(&ev) {
                 match (&item, items.last_mut()) {
                     (
@@ -1092,6 +1125,15 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
         items,
         ..crate::model::history::Replay::default()
     })
+}
+
+/// Whole seconds from `from` to `to` (unix millis); `None` when either is
+/// missing (older transcripts wrote no timestamps) or the order is wrong.
+fn secs_between(from: i64, to: i64) -> Option<u32> {
+    if from <= 0 || to <= 0 || to < from {
+        return None;
+    }
+    Some(((to - from) / 1000).min(u32::MAX as i64) as u32)
 }
 
 fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatItem> {

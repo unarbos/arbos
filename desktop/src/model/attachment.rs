@@ -260,6 +260,11 @@ pub struct UserMessage {
     pub images: Vec<MessageImage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<MessageFile>,
+    /// Wall seconds the turn this message started took, once it ended:
+    /// the "Worked 21s" figure. Stamped live from the flight clock, or on
+    /// replay from the transcript's timestamps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worked_secs: Option<u32>,
 }
 
 impl UserMessage {
@@ -319,6 +324,7 @@ impl From<StoredMessage> for UserMessage {
                 text,
                 images: Vec::new(),
                 files: Vec::new(),
+                worked_secs: None,
             },
             StoredMessage::Images {
                 text,
@@ -328,6 +334,7 @@ impl From<StoredMessage> for UserMessage {
                 text,
                 images,
                 files,
+                worked_secs: None,
             },
         };
         out.lift_files();
@@ -341,6 +348,7 @@ impl From<String> for UserMessage {
             text,
             images: Vec::new(),
             files: Vec::new(),
+            worked_secs: None,
         };
         message.lift_files();
         message

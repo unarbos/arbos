@@ -652,6 +652,26 @@ impl ChatSession {
         self.flush();
     }
 
+    /// The turn just ended: write its wall time on the prompt that started
+    /// it, for the "Worked 21s" line. Once per turn; a late duplicate end
+    /// leaves the first figure.
+    fn stamp_worked(&mut self) {
+        let Some(elapsed) = self.elapsed() else {
+            return;
+        };
+        let Some(ChatItem::User(message)) = self
+            .items
+            .iter_mut()
+            .rev()
+            .find(|item| matches!(item, ChatItem::User(_)))
+        else {
+            return;
+        };
+        if message.worked_secs.is_none() {
+            message.worked_secs = Some(elapsed.as_secs().min(u32::MAX as u64) as u32);
+        }
+    }
+
     /// How long the turn in flight has been running.
     pub fn elapsed(&self) -> Option<Duration> {
         self.flight?.at.elapsed().ok()
@@ -1347,6 +1367,7 @@ impl ChatSession {
             Event::Citations(sources) => self.bind_sources(sources),
             Event::Permission(request, reply) => self.open_permission(request, reply),
             Event::TurnDone(result) => {
+                self.stamp_worked();
                 if let Some(prompt) = self.permission.take() {
                     self.dismiss_permission(prompt, false);
                 }
