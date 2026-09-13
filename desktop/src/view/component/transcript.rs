@@ -3720,6 +3720,11 @@ const STALE_TAIL_MS: u128 = 1000;
 /// Web WorkingIndicator copy. A fresh prompt is "Planning next moves";
 /// a lull mid-turn is "Working".
 fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<&'static str> {
+    // The kernel says the model is thinking in silence: always show it,
+    // whatever the last item is.
+    if chat.working.is_some() {
+        return Some("Thinking");
+    }
     let last = chat.items.get(turn.range.start..turn.range.end)?.last()?;
     let tool_running = matches!(
         last,
@@ -3767,6 +3772,27 @@ fn heartbeat(
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let since = chat.elapsed().unwrap_or_default();
+    // A silent model call: the braille spinner and "Thinking for 42s",
+    // ticking, so a minute of thought never looks like a dead turn.
+    if let Some(thinking) = chat.thinking_for() {
+        Painter::of(cx).lease(2.0, Duration::from_millis(1100), cx);
+        let text = format!("Thinking for {}", since_short(thinking));
+        return div()
+            .id("thinking-heartbeat")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(ROW_GAP))
+            .py(px(2.))
+            .child(spinner(since, theme.text_muted, cx))
+            .child(
+                div()
+                    .text_style(TextStyle::Callout)
+                    .text_color(theme.text_muted)
+                    .child(shimmer_label(text, since, theme, cx)),
+            )
+            .into_any_element();
+    }
     div()
         .flex()
         .flex_row()
@@ -3780,6 +3806,16 @@ fn heartbeat(
                 .child(shimmer_label(label, since, theme, cx)),
         )
         .into_any_element()
+}
+
+/// `42s`, `1m 05s`: the thinking clock.
+fn since_short(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    }
 }
 
 /// Cursor: `Thinking` while it streams, `Thought 10s` once it is done.

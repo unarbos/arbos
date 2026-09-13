@@ -196,6 +196,13 @@ pub struct ToolCall {
 pub enum Delta {
     Text(String),
     Thinking(String),
+    /// Nothing from the model for a while, but the call is alive: how long
+    /// it has run. Every few seconds during a silent stretch, so a window
+    /// can show "Thinking for 40s" instead of a dead turn. A model that
+    /// thinks for a minute before its first byte (Anthropic via OpenRouter
+    /// delivers the reasoning only after the fact) looks exactly like a
+    /// hung call otherwise.
+    Waiting(Duration),
     /// A tool call whose arguments are complete. Fired as soon as we can
     /// tell, so the executor can start it while the model keeps streaming.
     Call(ToolCall),
@@ -412,6 +419,9 @@ async fn model_entry(base: &str, key: &str, model: &str) -> Option<Value> {
         .cloned()
 }
 
+/// How often a silent model call says it is still there.
+pub const HEARTBEAT: Duration = Duration::from_secs(5);
+
 /// One finished model call.
 #[derive(Debug, Default)]
 pub struct Completion {
@@ -557,42 +567,49 @@ impl Provider {
         trace: &mut Trace,
     ) -> Result<Completion> {
         let t0 = std::time::Instant::now();
+        let call_start = std::time::Instant::now();
         let request = authed(http().post(url), &self.base, &self.key)
             .json(&body)
             .send();
         // The wait for headers is bounded like the wait for each chunk. A
         // provider that queues the request and says nothing held one call
         // for 195 s before its first byte; the connect timeout does not
-        // cover that, and neither did anything else.
-        let mut resp = tokio::select! {
-            r = tokio::time::timeout(self.stream_idle, request) => match r {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    return Err(ProviderError {
-                        kind: FailKind::Transport,
-                        status: None,
-                        message: e.to_string(),
-                        retry_after: None,
-                        should_retry: None,
-                        visible: false,
-                        partial: String::new(),
-                    }
-                    .into());
+        // cover that, and neither did anything else. Every HEARTBEAT of
+        // silence a `Waiting` delta goes out so the wait is visible.
+        let mut request = std::pin::pin!(request);
+        let mut resp = loop {
+            let left = self.stream_idle.saturating_sub(call_start.elapsed());
+            if left.is_zero() {
+                return Err(ProviderError {
+                    kind: FailKind::Idle,
+                    status: None,
+                    message: format!("no response headers for {}s", self.stream_idle.as_secs()),
+                    retry_after: None,
+                    should_retry: None,
+                    visible: false,
+                    partial: String::new(),
                 }
-                Err(_) => {
-                    return Err(ProviderError {
-                        kind: FailKind::Idle,
-                        status: None,
-                        message: format!("no response headers for {}s", self.stream_idle.as_secs()),
-                        retry_after: None,
-                        should_retry: None,
-                        visible: false,
-                        partial: String::new(),
+                .into());
+            }
+            tokio::select! {
+                r = tokio::time::timeout(left.min(HEARTBEAT), &mut request) => match r {
+                    Ok(Ok(r)) => break r,
+                    Ok(Err(e)) => {
+                        return Err(ProviderError {
+                            kind: FailKind::Transport,
+                            status: None,
+                            message: e.to_string(),
+                            retry_after: None,
+                            should_retry: None,
+                            visible: false,
+                            partial: String::new(),
+                        }
+                        .into());
                     }
-                    .into());
-                }
-            },
-            _ = cancel.cancelled() => return Err(Interrupted.into()),
+                    Err(_) => on_delta(Delta::Waiting(call_start.elapsed())),
+                },
+                _ = cancel.cancelled() => return Err(Interrupted.into()),
+            }
         };
         let status = resp.status();
         trace.status = Some(status.as_u16());
@@ -658,15 +675,23 @@ impl Provider {
                     &content,
                 ));
             }
+            // A silent stretch shorter than the idle limit is a heartbeat,
+            // not a failure: the model is thinking, and the window hears so.
             let chunk = tokio::select! {
-                c = tokio::time::timeout(left, resp.chunk()) => match c {
+                c = tokio::time::timeout(left.min(HEARTBEAT), resp.chunk()) => match c {
                     Ok(Ok(c)) => c,
                     Ok(Err(e)) => return Err(fail(FailKind::Transport, e.to_string(), &content)),
-                    Err(_) => return Err(fail(
-                        FailKind::Idle,
-                        format!("no model output for {}s", self.stream_idle.as_secs()),
-                        &content,
-                    )),
+                    Err(_) => {
+                        if last_progress.elapsed() >= self.stream_idle {
+                            return Err(fail(
+                                FailKind::Idle,
+                                format!("no model output for {}s", self.stream_idle.as_secs()),
+                                &content,
+                            ));
+                        }
+                        on_delta(Delta::Waiting(call_start.elapsed()));
+                        continue;
+                    }
                 },
                 _ = cancel.cancelled() => return Err(Interrupted.into()),
             };

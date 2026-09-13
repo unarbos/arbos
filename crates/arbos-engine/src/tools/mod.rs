@@ -51,6 +51,9 @@ pub trait Hooks: Send + Sync {
 
     /// Live event for the window. Not written to transcript.jsonl.
     fn emit(&self, _event: &arbos_core::Event) {}
+    /// The model has been silent for `secs` seconds and the call is still
+    /// open. Live only; never on the transcript.
+    fn working(&self, _secs: u64) {}
 }
 
 /// Every tool the engine ships. Hosts add theirs with [`Registry::with`].

@@ -191,4 +191,11 @@ impl arbos_engine::Hooks for TurnHooks {
         };
         self.inner.broadcast(frame);
     }
+
+    fn working(&self, secs: u64) {
+        self.inner.broadcast(arbos_core::wire::Frame::Working {
+            agent: self.agent.to_string(),
+            secs,
+        });
+    }
 }
