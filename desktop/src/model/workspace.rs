@@ -2066,6 +2066,8 @@ impl Workspace {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| self.job_log(ix, owner, &path)),
                 id: path,
+                live: String::new(),
+                done: None,
             },
             SurfaceKind::Panel => Bind::Path(PathBuf::from(path)),
         };
@@ -2122,6 +2124,48 @@ impl Workspace {
 
     /// The agent's browser page moved, or sent a picture. Creates the row
     /// if the open was missed; never takes the column on its own.
+    /// New output from one of `owner`'s detached jobs. Appended to the
+    /// process row's streamed tail (capped), so the row shows the job as it
+    /// runs — on a remote place too, where the journal file is out of reach.
+    pub fn job_output(
+        &mut self,
+        owner: u64,
+        job: String,
+        delta: String,
+        running: bool,
+        exit: Option<i32>,
+        cx: &mut Context<Self>,
+    ) {
+        const LIVE_CAP: usize = 64 * 1024;
+        let Some(ix) = self.project_of(owner) else {
+            return;
+        };
+        let held = self.projects[ix]
+            .surfaces
+            .iter_mut()
+            .find(|surface| surface.owner == Some(owner) && surface.kernel_id() == Some(&job));
+        let Some(surface) = held else {
+            return;
+        };
+        let Bind::Process { live, done, .. } = &mut surface.bind else {
+            return;
+        };
+        live.push_str(&delta);
+        if live.len() > LIVE_CAP {
+            let cut = live.len() - LIVE_CAP;
+            let at = live
+                .char_indices()
+                .map(|(i, _)| i)
+                .find(|&i| i >= cut)
+                .unwrap_or(cut);
+            live.replace_range(..at, "");
+        }
+        if !running {
+            *done = Some(exit);
+        }
+        cx.notify();
+    }
+
     pub fn browser_moved(
         &mut self,
         owner: u64,

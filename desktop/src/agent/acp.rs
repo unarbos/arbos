@@ -102,6 +102,13 @@ pub enum Event {
         url: String,
         screenshot: Option<String>,
     },
+    /// New output from one of the agent's detached jobs.
+    Job {
+        id: String,
+        delta: String,
+        running: bool,
+        exit: Option<i32>,
+    },
     /// The agent's plan, whole. Arrives on attach and after every change.
     Plan(Vec<arbos_core::wire::PlanNode>),
 }
@@ -473,6 +480,18 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             page,
             url,
             screenshot,
+        }],
+        Frame::Job {
+            agent: id,
+            id: job,
+            delta,
+            running,
+            exit,
+        } if id == agent => vec![Event::Job {
+            id: job,
+            delta,
+            running,
+            exit,
         }],
         _ => Vec::new(),
     }
