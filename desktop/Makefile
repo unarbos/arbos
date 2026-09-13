@@ -10,11 +10,11 @@ VERSION  := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 ARCH     := $(shell uname -m)
 ICON     := assets/icon.png
 ICON_SRC := bundle/icon.png
-APP      := target/bundle/arbos.app
-ICONSET  := target/bundle/arbos.iconset
-DMG      := target/bundle/arbos-$(VERSION)-$(ARCH).dmg
+APP      := target/bundle/Arbos.app
+ICONSET  := target/bundle/Arbos.iconset
+DMG      := target/bundle/Arbos-$(VERSION)-$(ARCH).dmg
 DMGSTAGE := target/bundle/dmg
-DMGRW    := target/bundle/arbos-rw.dmg
+DMGRW    := target/bundle/Arbos-rw.dmg
 DMGMNT   := target/bundle/mnt
 # The ten `.icns` wants. Each is also emitted at @2x, so 512 covers 1024.
 SIZES    := 16 32 128 256 512

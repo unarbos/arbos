@@ -1,5 +1,29 @@
 [
   {
+    "version": "0.2.0",
+    "date": "2026-09-13",
+    "summary": "The first Arbos release: the Rust kernel and the desktop under one name, with every open branch folded in — OpenRouter-first models, permission modes, MCP servers, hooks, memory, skills as slash commands, search with citations, screenshots and recordings, sandboxed bash, remote and worktree children, and a headless CLI.",
+    "new": [
+      "Arbos.app: the desktop is Arbos, not Cydonia, in the bundle, the menu bar, and the code",
+      "OpenRouter-first model backend, `arbos-kernel setup`, and Settings › Model",
+      "Permission modes per agent: auto, ask, plan",
+      "Custom agent definitions (`spawn kind=<name>`), worktree isolation, and children on other machines over SSH",
+      "MCP servers per place, hooks.toml policy, durable memory, and skills as slash commands",
+      "Search with numbered citations across Exa, Brave, Tavily, OpenRouter web, and DuckDuckGo",
+      "Screenshot and screen-recording tools with artifact cards in the transcript",
+      "Sandboxed bash (bubblewrap on Linux, sandbox-exec on macOS) and a secret tool that keeps keys out of the transcript",
+      "Sub-agent status lines, a Tasks rail, Working and PRs pills, cost per turn, and streamed job output",
+      "Headless `arbos-kernel run`, `answer`, and `attach`; a timestamped kernel.log",
+      "Voice over a self-hosted speech server"
+    ],
+    "fixed": [
+      "Folding the sidebar no longer covers the chat title",
+      "The plan strip and the composer share both edges",
+      "A turn with no API key ends the transcript instead of replaying forever",
+      "Graceful stop on Ctrl-C, incremental transcript tailing, and a dozen QA fixes to focus, plans, and writes"
+    ]
+  },
+  {
     "version": "0.1.1",
     "date": "2026-09-09",
     "summary": "The turn in flight carries a name and what it spends, the agent's model and mode move into its menu, and an open project reconciles whatever lands in .arbos.",
