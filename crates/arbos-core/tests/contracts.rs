@@ -3,7 +3,8 @@
 //! lock that keeps two kernels off one folder.
 
 use arbos_core::{
-    Do, Node, NodeStatus, Place, PlaceLock, Usage, When,
+    Do, Node, NodeStatus, Place, PlaceLock, Usage, When, agent_exists, bootstrap, create_chat,
+    list_agents,
     node::can_transition,
     wire::{Frame, TreeNode},
 };
@@ -266,6 +267,39 @@ fn node_serialises_with_snake_case_do_kinds() {
     }
     assert_eq!(NodeStatus::parse("Canceled"), Some(NodeStatus::Cancelled));
     assert_eq!(NodeStatus::parse("nope"), None);
+}
+
+#[test]
+fn agent_exists_agrees_with_list_agents() {
+    // qa-005/qa-006: one rule for "this id is an agent here".
+    let dir = tmp("exists");
+    let place = Place::new(&dir);
+    bootstrap(&place).unwrap();
+    let chat = create_chat(&place).unwrap();
+    std::fs::create_dir_all(place.agent_dir("garbage")).unwrap();
+    std::fs::write(place.agent_dir("garbage").join("agent.md"), b"\xff\xfe").unwrap();
+    std::fs::create_dir_all(place.agent_dir("nomd")).unwrap();
+    let listed: Vec<String> = list_agents(&place)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.id.to_string())
+        .collect();
+    for id in [
+        "root",
+        chat.id.as_str(),
+        "garbage",
+        "nomd",
+        "nobody",
+        "../etc",
+        "",
+    ] {
+        assert_eq!(
+            agent_exists(&place, id),
+            listed.iter().any(|l| l == id),
+            "{id:?}: agent_exists and list_agents must agree"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -421,7 +421,7 @@ impl KernelHooks {
 
     /// A message into `agent`: one root node that fires a turn when ready.
     pub fn inbox(&self, agent: &str, mut n: Node) -> Result<NodeId> {
-        if !self.place.agent_dir(agent).exists() {
+        if !arbos_core::agent_exists(&self.place, agent) {
             bail!("no agent {agent}");
         }
         let _g = self.plan_lock.lock().unwrap();

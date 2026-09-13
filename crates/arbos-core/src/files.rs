@@ -216,6 +216,15 @@ pub fn load_agent(place: &Place, id: &AgentId) -> Result<Agent> {
     Agent::load(&place.agent_dir(id.as_str()))
 }
 
+/// The one rule for "this id is an agent here": the same one `list_agents`
+/// applies (a folder with a parseable `agent.md`). Every path that writes
+/// into an agent folder checks this first, so a prompt to a folder the
+/// kernel does not list cannot be stored and never fire (qa-006), and an
+/// answer for an unknown id cannot mint a ghost folder (qa-005).
+pub fn agent_exists(place: &Place, id: &str) -> bool {
+    crate::validate_id(id).is_ok() && Agent::load(&place.agent_dir(id)).is_ok()
+}
+
 fn touch(path: &Path) -> Result<()> {
     if path.exists() {
         return Ok(());

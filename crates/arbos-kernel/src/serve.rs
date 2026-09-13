@@ -304,6 +304,26 @@ fn handle_frame(
     sched: &Scheduler,
     ptys: &PtyHub,
 ) {
+    // Frames that name an agent must name one the kernel lists. Writing
+    // for an unknown id minted a folder with a transcript and no agent.md.
+    let names = match &frame {
+        Frame::User { agent, .. }
+        | Frame::Pause { agent, .. }
+        | Frame::Stop { agent }
+        | Frame::Compact { agent }
+        | Frame::Answer { agent, .. }
+        | Frame::Approve { agent, .. }
+        | Frame::Undo { agent }
+        | Frame::SetModel { agent, .. }
+        | Frame::PlanOp { agent, .. } => Some(agent.clone()),
+        _ => None,
+    };
+    if let Some(agent) = names {
+        if !arbos_core::agent_exists(place, &agent) {
+            eprintln!("frame for unknown agent {agent:?} refused");
+            return;
+        }
+    }
     match frame {
         Frame::User {
             agent,
