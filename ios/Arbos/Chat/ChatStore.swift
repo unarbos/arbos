@@ -59,12 +59,17 @@ final class ChatStore: ObservableObject {
     func connect() async {
         guard mode == .offline else { return }
         mode = .connecting
-        if let endpoint = settings.kernelEndpoint {
+        if let endpoint = settings.chatEndpoint {
             if await attachKernel(endpoint) { return }
-            if let fresh = await EndpointDirectory.fetch()?.kernelURL, fresh != settings.kernelURL {
-                settings.kernelURL = fresh
-                if let moved = settings.kernelEndpoint, await attachKernel(moved) { return }
+            if let directory = await EndpointDirectory.fetch() {
+                if let fresh = directory.kernelURL, fresh != settings.kernelURL { settings.kernelURL = fresh }
+                if let hub = directory.hubURL, hub != settings.hubURL { settings.hubURL = hub }
+                if let moved = settings.chatEndpoint, moved != endpoint, await attachKernel(moved) { return }
             }
+        } else if case .hub = settings.kernelTarget {
+            // The hub target is gone or unconfigured: fall back to the pod.
+            settings.kernelTarget = .pod
+            if let endpoint = settings.chatEndpoint, await attachKernel(endpoint) { return }
         }
         if settings.provider == .selfHosted, settings.isConfigured {
             let server = VoiceServerChat(link: link)
@@ -107,7 +112,24 @@ final class ChatStore: ObservableObject {
     func reconnect() async {
         disconnect()
         items.removeAll()
+        agents.removeAll()
+        lastFirstToken = nil
         await connect()
+    }
+
+    /// Open another kernel: the pod, or a machine/project on the hub.
+    func switchTarget(_ target: KernelTarget) async {
+        guard target != settings.kernelTarget || mode != .live else { return }
+        settings.kernelTarget = target
+        await reconnect()
+    }
+
+    /// What the header calls the chat: the machine/project, then the
+    /// root agent's name when the kernel gave it one.
+    var title: String {
+        let target = settings.kernelTarget.label
+        let agent = agentName
+        return agent == "main" ? target : "\(target) · \(agent)"
     }
 
     func send(_ text: String) {

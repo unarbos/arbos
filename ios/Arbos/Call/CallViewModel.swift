@@ -135,6 +135,10 @@ final class CallViewModel: ObservableObject {
         audio.onPlaybackDrained = { [weak self] in
             Task { @MainActor in self?.playbackDrained() }
         }
+        audio.onRouteChange = { [weak self] route in
+            self?.route = route
+            self?.updateNote()
+        }
         do {
             try audio.start(captureMic: captureMic)
             try await link.connect()
@@ -145,9 +149,10 @@ final class CallViewModel: ObservableObject {
         guard phase.inCall else { return }
         if let info = link.info { server = info }
         audio.onCapture = link.audioSink()
+        route = audio.outputRoute
         startedAt = Date()
         phase = .listening
-        metric("connect", since: connectStarted, detail: server.engine)
+        metric("connect", since: connectStarted, detail: "\(server.engine) route=\(route)")
         await joinChat()
         updateNote()
         #if DEBUG
@@ -172,9 +177,12 @@ final class CallViewModel: ObservableObject {
         }
     }
 
+    private var route = ""
+
     private func updateNote() {
         var parts: [String] = []
         if !server.engine.isEmpty { parts.append(server.engine) }
+        if !route.isEmpty { parts.append(route) }
         if server.answersItself {
             if server.kernel { parts.append("kernel tools") }
         } else {

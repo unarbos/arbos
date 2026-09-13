@@ -3,10 +3,13 @@ import Foundation
 
 /// Microphone in, model speech out, both as PCM16 mono 24 kHz.
 ///
-/// `.playAndRecord` + `.voiceChat` turns on the system echo canceller, so
-/// the model does not hear itself through the speaker. The `audio`
-/// background mode (Info.plist, set in the project) keeps the engine alive
-/// with the screen locked.
+/// `.playAndRecord` + `.voiceChat` turns on the hardware echo canceller, so
+/// the model mostly does not hear itself through the speaker. On top of
+/// that an energy gate zeroes mic frames while a reply plays unless they
+/// are clearly louder than the echo, so a full-duplex model keeps getting
+/// a continuous stream (silence, not a gap) yet the user can still cut in.
+/// The `audio` background mode keeps the engine alive with the screen
+/// locked.
 final class AudioEngine {
     static let sampleRate: Double = 24_000
 
@@ -15,6 +18,8 @@ final class AudioEngine {
     /// Called (on the audio thread) when every scheduled reply chunk has
     /// been heard.
     var onPlaybackDrained: (() -> Void)?
+    /// Called on the main thread when the output route changes.
+    var onRouteChange: ((String) -> Void)?
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
@@ -26,11 +31,30 @@ final class AudioEngine {
     private let lock = NSLock()
     private var scheduled = 0
     private var generation = 0
+    private var lastPlaybackEnd: Date = .distantPast
     private var observers: [NSObjectProtocol] = []
+
+    // Echo gate state, audio thread only.
+    private var echoFloor: Double = 0
+    private var speechHoldUntil: Date = .distantPast
 
     var isPlaying: Bool {
         lock.lock(); defer { lock.unlock() }
         return scheduled > 0
+    }
+
+    /// Where the reply comes out: `speaker`, `AirPods`, `headphones`, …
+    var outputRoute: String {
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+        guard let port = outputs.first else { return "no output" }
+        switch port.portType {
+        case .builtInSpeaker: return "speaker"
+        case .builtInReceiver: return "earpiece"
+        case .headphones: return "headphones"
+        case .bluetoothHFP, .bluetoothA2DP, .bluetoothLE: return port.portName
+        case .carAudio: return "car"
+        default: return port.portName
+        }
     }
 
     /// `captureMic: false` runs playback only (a test feeds audio itself).
@@ -38,6 +62,7 @@ final class AudioEngine {
         try configureSession()
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: playFormat)
+        engine.mainMixerNode.outputVolume = 1
 
         if captureMic {
             let input = engine.inputNode
@@ -53,7 +78,7 @@ final class AudioEngine {
         engine.prepare()
         try engine.start()
         player.play()
-        observeInterruptions()
+        observeSession()
     }
 
     func stop() {
@@ -96,24 +121,68 @@ final class AudioEngine {
         lock.lock()
         generation += 1
         scheduled = 0
+        lastPlaybackEnd = Date()
         lock.unlock()
         player.stop()
         player.play()
     }
 
-    // MARK: - Private
+    // MARK: - Session
 
     private func configureSession() throws {
         let session = AVAudioSession.sharedInstance()
+        // `.defaultToSpeaker`: a call app is held in front of the face, not
+        // to the ear. Bluetooth (AirPods) still wins when connected.
         try session.setCategory(
             .playAndRecord,
             mode: .voiceChat,
-            options: [.allowBluetoothHFP, .defaultToSpeaker]
+            options: [.defaultToSpeaker, .allowBluetoothHFP]
         )
         try session.setPreferredSampleRate(Self.sampleRate)
         try session.setPreferredIOBufferDuration(0.02)
         try session.setActive(true)
+        routeToSpeakerIfEarpiece()
     }
+
+    /// `.defaultToSpeaker` is honoured on activation, but a route change
+    /// (unplugging headphones) can land the output back on the earpiece.
+    private func routeToSpeakerIfEarpiece() {
+        let session = AVAudioSession.sharedInstance()
+        if session.currentRoute.outputs.contains(where: { $0.portType == .builtInReceiver }) {
+            try? session.overrideOutputAudioPort(.speaker)
+        }
+    }
+
+    private func observeSession() {
+        let center = NotificationCenter.default
+        let session = AVAudioSession.sharedInstance()
+        observers.append(center.addObserver(
+            forName: AVAudioSession.interruptionNotification, object: session, queue: .main
+        ) { [weak self] note in
+            guard let self,
+                  let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let kind = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            switch kind {
+            case .began:
+                self.stopPlayback()
+            case .ended:
+                try? session.setActive(true)
+                try? self.engine.start()
+                self.player.play()
+            @unknown default:
+                break
+            }
+        })
+        observers.append(center.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: session, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.routeToSpeakerIfEarpiece()
+            self.onRouteChange?(self.outputRoute)
+        })
+    }
+
+    // MARK: - Capture
 
     private func capture(_ buffer: AVAudioPCMBuffer) {
         guard let converter, buffer.frameLength > 0 else { return }
@@ -132,8 +201,48 @@ final class AudioEngine {
             return buffer
         }
         guard error == nil, out.frameLength > 0, let channel = out.int16ChannelData?[0] else { return }
-        onCapture?(Data(bytes: channel, count: Int(out.frameLength) * MemoryLayout<Int16>.size))
+        let count = Int(out.frameLength)
+        if shouldMute(channel, count: count) {
+            onCapture?(Data(count: count * MemoryLayout<Int16>.size))
+        } else {
+            onCapture?(Data(bytes: channel, count: count * MemoryLayout<Int16>.size))
+        }
     }
+
+    /// While a reply plays (and for a short tail after), only frames well
+    /// above the running echo level go out; the rest is replaced by
+    /// silence. Once the user is heard, the gate stays open for half a
+    /// second so a sentence is not chopped.
+    private func shouldMute(_ samples: UnsafeMutablePointer<Int16>, count: Int) -> Bool {
+        lock.lock()
+        let playing = scheduled > 0
+        let recentlyPlaying = Date().timeIntervalSince(lastPlaybackEnd) < 0.3
+        lock.unlock()
+        guard playing || recentlyPlaying else {
+            echoFloor *= 0.98
+            return false
+        }
+        var sum: Double = 0
+        for i in 0..<count {
+            let s = Double(samples[i])
+            sum += s * s
+        }
+        let rms = (sum / Double(max(count, 1))).squareRoot()
+        let now = Date()
+        if now < speechHoldUntil { return false }
+        let threshold = max(Self.minSpeechRMS, echoFloor * 2.5)
+        if rms > threshold {
+            speechHoldUntil = now.addingTimeInterval(0.5)
+            return false
+        }
+        // Track the echo we are hearing so a louder reply raises the bar.
+        echoFloor = echoFloor == 0 ? rms : echoFloor * 0.9 + rms * 0.1
+        return true
+    }
+
+    /// About -27 dBFS in Int16 units: quieter than speech at arm's length,
+    /// louder than the residue the canceller leaves behind.
+    private static let minSpeechRMS: Double = 1500
 
     private func consumed(generation: Int) {
         lock.lock()
@@ -143,33 +252,9 @@ final class AudioEngine {
         }
         scheduled = max(0, scheduled - 1)
         let drained = scheduled == 0
+        if drained { lastPlaybackEnd = Date() }
         lock.unlock()
         if drained { onPlaybackDrained?() }
-    }
-
-    /// A phone call or Siri takes the session; restart when it hands back.
-    private func observeInterruptions() {
-        let center = NotificationCenter.default
-        let token = center.addObserver(
-            forName: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance(),
-            queue: .main
-        ) { [weak self] note in
-            guard let self,
-                  let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-                  let kind = AVAudioSession.InterruptionType(rawValue: raw) else { return }
-            switch kind {
-            case .began:
-                self.stopPlayback()
-            case .ended:
-                try? AVAudioSession.sharedInstance().setActive(true)
-                try? self.engine.start()
-                self.player.play()
-            @unknown default:
-                break
-            }
-        }
-        observers.append(token)
     }
 }
 

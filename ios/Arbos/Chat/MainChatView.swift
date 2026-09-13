@@ -9,6 +9,7 @@ struct MainChatView: View {
     var focusComposer = false
 
     @State private var draft = ""
+    @State private var showTargets = false
     @FocusState private var composing: Bool
 
     var body: some View {
@@ -21,13 +22,29 @@ struct MainChatView: View {
         .preferredColorScheme(.dark)
         .onAppear { composing = focusComposer }
         .task { await chat.connect() }
+        .sheet(isPresented: $showTargets) {
+            TargetPickerView()
+                .presentationDetents([.medium, .large])
+        }
     }
 
+    /// The title is a button: tap it to pick another machine or project.
     private var header: some View {
         HStack(spacing: 8) {
-            Text(chat.agentName)
-                .font(.system(.headline, design: .rounded))
-                .foregroundStyle(.white.opacity(0.9))
+            Button {
+                showTargets = true
+            } label: {
+                HStack(spacing: 4) {
+                    Text(chat.title)
+                        .font(.system(.headline, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
+            .buttonStyle(.plain)
             Text(headerTag)
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(.white.opacity(0.5))

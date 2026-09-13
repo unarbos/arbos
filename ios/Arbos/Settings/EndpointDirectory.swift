@@ -12,6 +12,7 @@ struct EndpointDirectory {
 
     var voiceServerURL: String?
     var kernelURL: String?
+    var hubURL: String?
 
     static func fetch() async -> EndpointDirectory? {
         var request = URLRequest(url: url)
@@ -28,9 +29,10 @@ struct EndpointDirectory {
         for raw in text.split(whereSeparator: \.isNewline) {
             let line = raw.trimmingCharacters(in: .whitespaces)
             if line.isEmpty || line.hasPrefix("#") { continue }
-            if let rest = line.split(separator: ":", maxSplits: 1).first, rest == "kernel" {
-                let value = line.dropFirst("kernel:".count).trimmingCharacters(in: .whitespaces)
-                directory.kernelURL = stripToken(value)
+            if line.hasPrefix("kernel:") {
+                directory.kernelURL = stripToken(line.dropFirst("kernel:".count).trimmingCharacters(in: .whitespaces))
+            } else if line.hasPrefix("hub:") {
+                directory.hubURL = stripToken(line.dropFirst("hub:".count).trimmingCharacters(in: .whitespaces))
             } else if directory.voiceServerURL == nil, line.hasPrefix("http") {
                 directory.voiceServerURL = line
                     .replacingOccurrences(of: "https://", with: "wss://")

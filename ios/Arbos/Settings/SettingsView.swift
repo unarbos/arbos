@@ -6,6 +6,7 @@ struct SettingsView: View {
     @State private var keyDraft = ""
     @State private var tokenDraft = ""
     @State private var kernelTokenDraft = ""
+    @State private var hubTokenDraft = ""
 
     var body: some View {
         NavigationStack {
@@ -53,6 +54,19 @@ struct SettingsView: View {
                 } footer: {
                     Text("The main chat: history and streaming replies come from here. The voice server talks to the same kernel.")
                 }
+                Section {
+                    TextField("wss://hub-host", text: $settings.hubURL)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    SecureField(hubTokenPlaceholder, text: $hubTokenDraft)
+                        .textContentType(.password)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("Mesh hub")
+                } footer: {
+                    Text("Lists Jacob's other machines; the chat title opens the picker.")
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -62,6 +76,7 @@ struct SettingsView: View {
                         if !keyDraft.isEmpty { settings.saveOpenAIKey(keyDraft) }
                         if !tokenDraft.isEmpty { settings.saveVoiceToken(tokenDraft) }
                         if !kernelTokenDraft.isEmpty { settings.saveKernelToken(kernelTokenDraft) }
+                        if !hubTokenDraft.isEmpty { settings.saveHubToken(hubTokenDraft) }
                         dismiss()
                     }
                 }
@@ -86,5 +101,9 @@ struct SettingsView: View {
 
     private var kernelTokenPlaceholder: String {
         settings.kernelToken.isEmpty ? "Kernel token" : "Token saved · paste to replace"
+    }
+
+    private var hubTokenPlaceholder: String {
+        settings.hubToken.isEmpty ? "Hub client token" : "Token saved · paste to replace"
     }
 }

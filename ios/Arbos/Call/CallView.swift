@@ -180,6 +180,7 @@ struct CallView: View {
     /// `-previewCall 1` starts a call at once (pair with `-injectWav`).
     private func previewIfAsked() async {
         let defaults = UserDefaults.standard
+        DebugScreenshots.startIfAsked()
         if defaults.bool(forKey: "previewCall") {
             try? await Task.sleep(for: .milliseconds(300))
             model.startCall()
