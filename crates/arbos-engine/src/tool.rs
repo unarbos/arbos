@@ -86,6 +86,11 @@ pub struct RunCx {
     pub bash_wait_ms: u64,
     /// Reply budget this turn was started with. `say` spends it.
     pub hops: u8,
+    /// Search provider from the host config: a URL template with `{q}`
+    /// (empty = the built-in engine) and an optional key sent as a bearer
+    /// token and `X-API-Key`.
+    pub search_url: String,
+    pub search_key: String,
 }
 
 #[derive(Debug)]
