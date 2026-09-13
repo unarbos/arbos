@@ -860,11 +860,14 @@ fn user_prompt(
                         .text_color(theme.text_faint),
                 ),
         );
+    // A column with the card at its end: the card then takes its content's
+    // width up to PROMPT_MAX_WIDTH. As a row item it shrank to its text's
+    // minimum — one letter per line.
     div()
         .w_full()
         .flex()
-        .flex_row()
-        .justify_end()
+        .flex_col()
+        .items_end()
         .child(card)
         .into_any_element()
 }
