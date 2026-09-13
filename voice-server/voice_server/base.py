@@ -302,12 +302,17 @@ class BaseSession:
         if not self.mirror_agents:
             return
         kind = frame.get("type")
-        if kind == "event":
+        if kind == "assistant_delta":
+            if frame.get("agent") == "root" and frame.get("text"):  # only the main agent streams token by token
+                self._emit(P.AGENT_EVENT, agent="root", kind="assistant", text=frame["text"])
+        elif kind == "event":
             event = frame.get("event") or {}
             ek = event.get("kind")
             if ek in ("assistant", "say", "user", "notice", "ask"):
-                if ek == "assistant" and (not event.get("text") or frame.get("agent") != "root"):
-                    return  # only the main agent's own words stream token by token
+                if ek == "assistant":
+                    if not event.get("text") or frame.get("agent") != "root":
+                        return
+                    ek = "assistant_final"  # the whole reply once the turn ends; replaces the streamed deltas
                 self._emit(P.AGENT_EVENT, agent=frame.get("agent"), kind=ek, text=event.get("text"),
                            **({"from": event["from"]} if event.get("from") else {}))
             elif ek == "tool":

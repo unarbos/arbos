@@ -95,8 +95,10 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
     {"type":"tool.result","name":"send_agent","output":"..."}
     {"type":"agent.done","agent":"<id>","text":"<report>"}   a dispatched agent finished; the report
                                    is also spoken (gateway voice) as a normal reply turn
-    {"type":"agent.event","agent":"root","kind":"assistant"|"say"|"user"|"tool"|"notice","text":"..."}
-                                   mirror of the kernel's transcript so the app can show the main chat
+    {"type":"agent.event","agent":"root","kind":"assistant"|"assistant_final"|"say"|"user"|"tool"|"notice","text":"..."}
+                                   mirror of the kernel's transcript so the app can show the main chat;
+                                   "assistant" = streamed increment, "assistant_final" = the whole reply
+                                   once the turn ends (replace the streamed line with it)
     {"type":"agent.turn","agent":"root","state":"running"|"idle"}
     {"type":"agent.tree","agents":[{"id","name","parent"}]}
 

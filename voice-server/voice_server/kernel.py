@@ -118,6 +118,9 @@ class KernelClient:
         elif kind == "turn":
             state = self.agents.setdefault(frame["agent"], AgentState(name=frame["agent"], parent=None))
             state.running = frame.get("state") == "running"
+        elif kind == "assistant_delta":  # kernels >= 0.2 stream text this way
+            state = self.agents.setdefault(frame["agent"], AgentState(name=frame["agent"], parent=None))
+            state.assistant += frame.get("text") or ""
         elif kind == "event":
             event = frame.get("event") or {}
             state = self.agents.setdefault(frame["agent"], AgentState(name=frame["agent"], parent=None))
@@ -126,7 +129,8 @@ class KernelClient:
                 if event.get("from"):  # a child's say is delivered on the parent's stream
                     self.agents.setdefault(event["from"], AgentState(name=event["from"], parent=frame["agent"])).says.append(event["text"])
             elif event.get("kind") == "assistant" and event.get("text"):
-                state.assistant += event["text"]
+                if _squash(event["text"]) not in _squash(state.assistant):
+                    state.assistant += event["text"]
             elif event.get("kind") == "user":
                 state.assistant = ""
         elif kind == "ask" and self.auto_approve and str(frame.get("question", "")).startswith("allow "):
@@ -143,12 +147,15 @@ class KernelClient:
             nonlocal started
             if frame.get("agent") != agent:
                 return
-            if frame.get("type") == "turn":
+            kind = frame.get("type")
+            if kind == "turn":
                 if frame.get("state") == "running":
                     started = True
                 elif started:
                     queue.put_nowait(None)
-            elif frame.get("type") == "event":
+            elif kind == "assistant_delta" and frame.get("text"):
+                queue.put_nowait(frame["text"])
+            elif kind == "event":
                 event = frame.get("event") or {}
                 if event.get("kind") == "assistant" and event.get("text"):
                     queue.put_nowait(event["text"])
@@ -157,22 +164,29 @@ class KernelClient:
 
         self.listeners.append(listener)
         emitted = ""
+        idle = False
         try:
             self.send({"type": "user", "agent": agent, "text": text, "steer": steer, "attachments": []})
             deadline = time.monotonic() + timeout
             while True:
-                remaining = deadline - time.monotonic()
+                # After `turn idle` the kernel may still send the whole assistant text once more
+                # (or, for a turn without deltas, for the first time): wait a moment for it.
+                remaining = 0.4 if idle else deadline - time.monotonic()
                 if remaining <= 0:
                     yield "\n(the agent is still working; I will report when it finishes)"
                     return
                 try:
                     item = await asyncio.wait_for(queue.get(), remaining)
                 except asyncio.TimeoutError:
+                    if idle:
+                        return
                     yield "\n(the agent is still working; I will report when it finishes)"
                     return
                 if item is None:
-                    return
-                if emitted and item.strip() and _squash(emitted).endswith(_squash(item)):
+                    idle = True
+                    continue
+                squashed = _squash(item)
+                if emitted and len(squashed) > 8 and _squash(emitted).endswith(squashed):
                     continue  # the kernel re-sends the full text at the end of a turn
                 emitted += item
                 yield item

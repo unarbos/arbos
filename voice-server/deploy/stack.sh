@@ -5,6 +5,8 @@
 #   tunnel   cloudflared named tunnel (tunnel.token) or a quick *.trycloudflare.com tunnel
 #   nim      NemotronLabs VoiceChat container (if nim/ holds the Triton model repo)
 #   supervisor  deploy/supervise.sh: restarts what dies, publishes the public URL (VOICE_SUPERVISE=0 to skip)
+#   phone    token-guarded kernel for the phone app, as user $PHONE_USER (set PHONE_HOME in env; see below)
+#   kquick   quick tunnel for the phone kernel
 #
 #   VOICE_HOME=/root/arbos-voice deploy/stack.sh up|down|status|logs
 #
@@ -36,7 +38,19 @@ case "${1:-status}" in
         -e NIM_HTTP_API_PORT=9000 -p 127.0.0.1:9000:9000 -v $(readlink -f "$NIM_DIR"):/data/models \
         --entrypoint /s2s/run_s2s_server.sh nvcr.io/nim/nvidia/nemotron-labs-voicechat:latest"
     fi
-    if [ -x "$VOICE_HOME/bin/arbos-kernel" ]; then
+    # Phone kernel: a token-guarded `arbos-kernel serve --bind` run as its own Unix user so a runaway
+    # job can only hurt that user. $PHONE_HOME holds bin/arbos-kernel, env (OPENROUTER_API_KEY,
+    # ARBOS_PHONE_TOKEN), xdg/arbos/config.toml, homedir/, and home/ (the project folder) with
+    # home/.arbos/access.toml ([[client]] name/token_env/role). The voice gateway attaches to it too.
+    if [ -n "${PHONE_HOME:-}" ] && [ -x "$PHONE_HOME/bin/arbos-kernel" ]; then
+      PHONE_PORT="${PHONE_PORT:-7788}"
+      start phone "runuser -u ${PHONE_USER:-arbos-phone} -- bash -c 'set -a; . $PHONE_HOME/env; set +a; \
+        cd $PHONE_HOME/home && XDG_CONFIG_HOME=$PHONE_HOME/xdg HOME=$PHONE_HOME/homedir \
+        exec $PHONE_HOME/bin/arbos-kernel serve $PHONE_HOME/home --bind 127.0.0.1:$PHONE_PORT'"
+      start kquick "$VOICE_HOME/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:$PHONE_PORT"
+      KERNEL_ARGS="--kernel tcp://127.0.0.1:$PHONE_PORT"
+      for _ in $(seq 1 40); do (exec 3<>/dev/tcp/127.0.0.1/$PHONE_PORT) 2>/dev/null && break; sleep 0.5; done
+    elif [ -x "$VOICE_HOME/bin/arbos-kernel" ]; then
       start kernel "cd $VOICE_HOME/kernel/place && XDG_CONFIG_HOME=$VOICE_HOME/kernel/xdg HOME=$VOICE_HOME/kernel/home \
         $VOICE_HOME/bin/arbos-kernel serve $VOICE_HOME/kernel/place"
       KERNEL_ARGS="--kernel-place $VOICE_HOME/kernel/place"
@@ -56,17 +70,18 @@ case "${1:-status}" in
     [ "${VOICE_SUPERVISE:-1}" = "1" ] && start supervisor "$SRC/deploy/supervise.sh"
     ;;
   down)
-    for s in supervisor quick tunnel voice kernel; do tm kill-session -t "=$s" 2>/dev/null && echo "$s: stopped" || true; done
+    for s in supervisor quick kquick tunnel voice kernel phone; do tm kill-session -t "=$s" 2>/dev/null && echo "$s: stopped" || true; done
     [ "${2:-}" = "--nim" ] && { docker stop nemotron-labs-voicechat 2>/dev/null; tm kill-session -t "=nim" 2>/dev/null; echo "nim: stopped"; } || true
     ;;
   status)
     tm ls 2>/dev/null || echo "nothing running"
     curl -s -o /dev/null -w "gateway /healthz: %{http_code}\n" "http://127.0.0.1:$PORT/healthz" || true
     curl -s "http://127.0.0.1:9000/v1/realtime/health" 2>/dev/null | head -c 200 || true; echo
-    [ -f "$VOICE_HOME/public-url.txt" ] && echo "public url: $(cat "$VOICE_HOME/public-url.txt")"
+    [ -f "$VOICE_HOME/public-url.txt" ] && echo "voice public url: $(cat "$VOICE_HOME/public-url.txt")"
+    [ -f "$VOICE_HOME/kernel-url.txt" ] && echo "kernel public url: $(cat "$VOICE_HOME/kernel-url.txt")"
     ;;
   logs)
-    tail -n "${2:-30}" "$VOICE_HOME"/logs/{voice,kernel,tunnel,quick}.log 2>/dev/null
+    tail -n "${2:-30}" "$VOICE_HOME"/logs/{voice,kernel,phone,tunnel,quick,kquick,supervisor}.log 2>/dev/null
     ;;
   *) echo "usage: $0 up|down [--nim]|status|logs [n]"; exit 2 ;;
 esac

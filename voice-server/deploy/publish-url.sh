@@ -3,9 +3,10 @@
 # Writes voice-endpoint.txt on the repo's qa-results branch (the branch the QA loop already
 # syncs into the Project store). Needs ARBOS_GITHUB (GitHub PAT with repo write) in the env.
 #
-#   deploy/publish-url.sh https://xxxx.trycloudflare.com
+#   deploy/publish-url.sh https://xxxx.trycloudflare.com [https://kernel-yyyy.trycloudflare.com]
 set -euo pipefail
 URL="${1:?public url}"
+KURL="${2:-}"
 : "${ARBOS_GITHUB:?ARBOS_GITHUB not set; not publishing}"
 VOICE_HOME="${VOICE_HOME:?}"
 WORK="$VOICE_HOME/qa-results"
@@ -20,6 +21,10 @@ fi
   echo "# Arbos voice server public URL (Cloudflare quick tunnel; changes when the tunnel restarts)."
   echo "# WebSocket: ${URL/https:/wss:}/ws?token=<VOICE_TOKEN from 1Password item jmldktl7rrc4rw4sm2akej4qne>"
   echo "# Health: $URL/healthz   Updated: $(date -u +%FT%TZ) by deploy/supervise.sh on $(hostname)"
+  if [ -n "$KURL" ]; then
+    echo "kernel: ${KURL/https:/wss:}/?token=<ARBOS_PHONE_TOKEN from 1Password item 'Arbos - phone kernel token'>"
+    echo "# Phone kernel (arbos-kernel serve --bind, token auth, WebSocket). Stable name once DNS exists: wss://kernel-api.arbos.life"
+  fi
 } > "$WORK/voice-endpoint.txt"
 git -C "$WORK" add voice-endpoint.txt
 if git -C "$WORK" diff --cached --quiet; then echo "unchanged"; exit 0; fi

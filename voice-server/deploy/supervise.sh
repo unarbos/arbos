@@ -18,8 +18,9 @@ PORT="${VOICE_PORT:-8765}"
 INTERVAL="${SUPERVISE_INTERVAL:-15}"
 log() { echo "$(date -u +%FT%TZ) $*"; }
 
-gateway_fails=0; quick_fails=0; nim_fails=0
+gateway_fails=0; quick_fails=0; nim_fails=0; phone_fails=0; kquick_fails=0; tick=0
 last_url="$(cat "$VOICE_HOME/public-url.txt" 2>/dev/null || true)"
+last_kurl="$(cat "$VOICE_HOME/kernel-url.txt" 2>/dev/null || true)"
 
 current_quick_url() {
   grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$VOICE_HOME/logs/quick.log" 2>/dev/null | tail -1
@@ -63,7 +64,7 @@ while true; do
           echo "$url" > "$VOICE_HOME/public-url.txt"
           last_url="$url"
           log "public url is now $url"
-          [ -x "$SRC/deploy/publish-url.sh" ] && "$SRC/deploy/publish-url.sh" "$url" 2>&1 | sed 's/^/publish: /'
+          [ -x "$SRC/deploy/publish-url.sh" ] && "$SRC/deploy/publish-url.sh" "$url" "$last_kurl" 2>&1 | sed 's/^/publish: /'
         fi
       else
         quick_fails=$((quick_fails + 1))
@@ -71,6 +72,40 @@ while true; do
         if [ "$quick_fails" -ge 3 ]; then
           log "restarting quick tunnel"; : > "$VOICE_HOME/logs/quick.log"
           tmux kill-session -t "=quick" 2>/dev/null; quick_fails=0
+        fi
+      fi
+    fi
+  fi
+
+  # 5. phone kernel (port check; it speaks WebSocket/NDJSON, not HTTP) and its quick tunnel
+  if tmux has-session -t "=phone" 2>/dev/null; then
+    if (exec 3<>/dev/tcp/127.0.0.1/"${PHONE_PORT:-7788}") 2>/dev/null; then
+      phone_fails=0
+    else
+      phone_fails=$((phone_fails + 1))
+      log "phone kernel port closed ($phone_fails)"
+      if [ "$phone_fails" -ge 3 ]; then log "restarting phone kernel"; tmux kill-session -t "=phone" 2>/dev/null; phone_fails=0; fi
+    fi
+  fi
+  tick=$((tick + 1))
+  # every fourth pass: the probe shows up as one refused attach in the kernel log
+  if [ $((tick % 4)) -eq 1 ] && tmux has-session -t "=kquick" 2>/dev/null; then
+    kurl="$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$VOICE_HOME/logs/kquick.log" 2>/dev/null | tail -1)"
+    if [ -n "$kurl" ]; then
+      # Any HTTP answer means the tunnel reaches the pod; the kernel refuses a bare GET but still answers.
+      if curl -s -m 10 -o /dev/null -w '%{http_code}' "$kurl/" | grep -qE '^[1-5]'; then
+        kquick_fails=0
+        if [ "$kurl" != "$last_kurl" ]; then
+          echo "$kurl" > "$VOICE_HOME/kernel-url.txt"; last_kurl="$kurl"
+          log "kernel public url is now $kurl"
+          [ -x "$SRC/deploy/publish-url.sh" ] && "$SRC/deploy/publish-url.sh" "$last_url" "$kurl" 2>&1 | sed 's/^/publish: /'
+        fi
+      else
+        kquick_fails=$((kquick_fails + 1))
+        log "kernel quick tunnel $kurl not answering ($kquick_fails)"
+        if [ "$kquick_fails" -ge 3 ]; then
+          log "restarting kernel quick tunnel"; : > "$VOICE_HOME/logs/kquick.log"
+          tmux kill-session -t "=kquick" 2>/dev/null; kquick_fails=0
         fi
       fi
     fi
