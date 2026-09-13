@@ -109,6 +109,33 @@ pub enum Frame {
         agent: String,
         secs: u64,
     },
+    /// Kernel → client, after `hello` and after every change: which model
+    /// provider this kernel talks to and whether it holds a key for it.
+    /// `source` is where the key comes from — `config`, `env:VAR`,
+    /// `secrets:NAME`, `memory` — or `none`. Never the key itself.
+    Provider {
+        provider: String,
+        model: String,
+        key: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        source: String,
+    },
+    /// Client (owner only) → kernel: use this provider and key from now
+    /// on. The model key belongs to the user, not the machine: a window
+    /// that holds one hands it to a kernel that has none, over the
+    /// connection it already authenticated. `remember` writes it to the
+    /// kernel's `config.toml` (owner-readable); otherwise it lives in the
+    /// kernel's memory and dies with it. Never echoed, never logged.
+    Configure {
+        provider: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        api_base: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        model: String,
+        api_key: String,
+        #[serde(default)]
+        remember: bool,
+    },
     /// Live text as the model streams it, one frame per chunk. The whole
     /// step arrives later as an `event` with a `seq` (the transcript line).
     AssistantDelta {

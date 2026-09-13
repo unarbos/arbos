@@ -59,6 +59,14 @@ pub enum Event {
     /// The model call is alive and has been silent for this many seconds
     /// (`working` frame). Live only.
     Working(u64),
+    /// The kernel's model provider and whether it holds a key (`provider`
+    /// frame). `key: false` is the cue to offer this window's own key.
+    Provider {
+        provider: String,
+        model: String,
+        key: bool,
+        source: String,
+    },
     /// The kernel paused the turn for a tool the user must allow.
     NeedApproval {
         request_id: String,
@@ -324,6 +332,17 @@ impl Session {
             .map_err(|_| anyhow!("attach writer closed"))
     }
 
+    /// Hand the kernel a provider and key (`configure`); owner only.
+    pub fn configure(&self, provider: &str, api_base: &str, model: &str, api_key: &str, remember: bool) {
+        let _ = self.send_frame(&Frame::Configure {
+            provider: provider.to_string(),
+            api_base: api_base.to_string(),
+            model: model.to_string(),
+            api_key: api_key.to_string(),
+            remember,
+        });
+    }
+
     pub fn set_model(&self, model: &str) {
         let _ = self.send_frame(&Frame::SetModel {
             agent: self.session_id.clone(),
@@ -419,6 +438,17 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
         Frame::Working { agent: id, secs } if id == agent || agent.is_empty() => {
             vec![Event::Working(secs)]
         }
+        Frame::Provider {
+            provider,
+            model,
+            key,
+            source,
+        } => vec![Event::Provider {
+            provider,
+            model,
+            key,
+            source,
+        }],
         Frame::ThinkingDelta { agent: id, text } if id == agent || agent.is_empty() => {
             vec![Event::Update(SessionUpdate::AgentThoughtChunk(text_chunk(
                 text,
@@ -473,6 +503,7 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
         Frame::Snapshot { .. }
         | Frame::Tree { .. }
         | Frame::Hello { .. }
+        | Frame::Configure { .. }
         | Frame::Replayed { .. }
         | Frame::HistoryEnd { .. }
         // A newer kernel's frame: nothing to show, nothing to lose.

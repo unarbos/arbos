@@ -313,6 +313,16 @@ impl HostConfig {
         }
     }
 
+    /// This config with `key` written in as the key (and no env lookup):
+    /// what goes onto a remote machine, or into a kernel from a window.
+    /// One shape for both, so the keys match wherever it lands.
+    pub fn with_key(&self, key: &str) -> Self {
+        let mut cfg = self.clone();
+        cfg.api_key = Some(key.trim().to_string());
+        cfg.api_key_env = None;
+        cfg
+    }
+
     /// Reset the provider-shaped fields for `kind` and leave the rest.
     pub fn set_provider(&mut self, kind: ProviderKind) {
         self.provider = Some(kind);
@@ -340,11 +350,33 @@ pub struct Host {
     pub dir: PathBuf,
 }
 
+/// A config handed to this process at run time and not written down
+/// (`configure` with `remember = false`). `Host::load`/`peek` return it
+/// instead of the file while it stands; it dies with the process.
+static OVERRIDE: std::sync::RwLock<Option<HostConfig>> = std::sync::RwLock::new(None);
+
+/// Use `config` for the rest of this process without touching the file.
+pub fn set_override(config: Option<HostConfig>) {
+    *OVERRIDE.write().unwrap_or_else(|p| p.into_inner()) = config;
+}
+
+/// Whether a run-time config stands in for the file.
+pub fn is_overridden() -> bool {
+    override_config().is_some()
+}
+
+fn override_config() -> Option<HostConfig> {
+    OVERRIDE.read().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
 impl Host {
     /// Read the config, or write the defaults on first run. A malformed
     /// file is an error the user sees, not a silent fall back to defaults.
     pub fn load() -> Result<Self> {
         let dir = dirs_config();
+        if let Some(config) = override_config() {
+            return Ok(Self { config, dir });
+        }
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("config.toml");
         let config = if path.exists() {
@@ -368,6 +400,9 @@ impl Host {
     /// defaults. For screens that only look.
     pub fn peek() -> Result<Self> {
         let dir = dirs_config();
+        if let Some(config) = override_config() {
+            return Ok(Self { config, dir });
+        }
         let path = dir.join("config.toml");
         let config = if path.exists() {
             Self::read(&path)?

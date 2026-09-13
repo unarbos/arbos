@@ -203,7 +203,12 @@ pub async fn read_loop(
                 }
             }
             Err(e) => {
-                let head: String = line.chars().take(80).collect();
+                // A broken `configure` line carries a key: never into the log.
+                let head: String = if line.contains("api_key") {
+                    "(a configure frame; not logged)".to_string()
+                } else {
+                    line.chars().take(80).collect()
+                };
                 let detail = format!("not a frame: {e} — {head:?}");
                 crate::klog::warn("frame_rejected", None, &detail);
                 let _ = out.send(Frame::Error {

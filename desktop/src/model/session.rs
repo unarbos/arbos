@@ -390,6 +390,9 @@ pub struct ChatSession {
     /// been silent, and when it was heard. Cleared by any real progress.
     /// Runtime only.
     pub working: Option<(u64, Instant)>,
+    /// The kernel said it has no model key (`provider {key: false}`): the
+    /// provider it wants one for. Cleared when a key arrives. Runtime only.
+    pub provider_missing: Option<String>,
     /// The agent's own name for the session, from `SessionInfoUpdate`.
     pub title: String,
     /// The name you typed, which the agent never overwrites. Two fields rather
@@ -515,6 +518,7 @@ impl ChatSession {
             streaming_agent: None,
             draft_pushed: false,
             working: None,
+            provider_missing: None,
             title: String::new(),
             name: None,
             updated: SystemTime::now(),
@@ -577,6 +581,7 @@ impl ChatSession {
             streaming_agent: None,
             draft_pushed: false,
             working: None,
+            provider_missing: None,
             title: record.title,
             name: record.name,
             updated,
@@ -639,6 +644,7 @@ impl ChatSession {
             streaming_agent: None,
             draft_pushed: false,
             working: None,
+            provider_missing: None,
             title,
             name,
             updated,
@@ -1273,6 +1279,35 @@ impl ChatSession {
         }
     }
 
+    /// Give the kernel this window's model key: the key belongs to the
+    /// user, not the machine. `remember` writes it into the kernel's
+    /// config; otherwise it lives in that kernel's memory only.
+    pub fn offer_key(&mut self, remember: bool) {
+        let Connection::Live(session) = &self.connection else {
+            self.notice(true, "no live kernel connection to give the key to");
+            return;
+        };
+        let Ok(host) = arbos_core::Host::load() else {
+            self.notice(true, "this window has no model config of its own");
+            return;
+        };
+        let Some(key) = host.api_key() else {
+            self.notice(
+                true,
+                "this window has no model key of its own to give (Settings › Model)",
+            );
+            return;
+        };
+        let base = host.config.api_base().unwrap_or_default();
+        session.configure(
+            host.config.provider().as_str(),
+            &base,
+            &host.config.model(),
+            &key,
+            remember,
+        );
+    }
+
     /// Summarise the oldest turns now.
     pub fn compact(&mut self) {
         if let Connection::Live(session) = &self.connection {
@@ -1530,6 +1565,25 @@ impl ChatSession {
                     images: Vec::new(),
                 });
                 self.flush();
+            }
+            Event::Provider {
+                provider,
+                key,
+                source,
+                ..
+            } => {
+                let was = self.provider_missing.take();
+                if key {
+                    if was.is_some() {
+                        self.notice(
+                            false,
+                            &format!("{provider} key in place on this kernel ({source})"),
+                        );
+                        self.flush();
+                    }
+                } else {
+                    self.provider_missing = Some(provider);
+                }
             }
             Event::AssistantFinal(text) => {
                 self.finish_thinking();

@@ -640,6 +640,7 @@ impl Arbos {
                                         .min_h(px(root::composer_height()))
                                         .gap(px(8.))
                                         .children(self.pills(cx))
+                                        .children(self.provider_offer(cx).map(bleed))
                                         .children(self.plan(cx).map(bleed))
                                         .children(self.permission(cx).map(bleed))
                                         .children(self.questions(cx).map(bleed))
@@ -1589,6 +1590,99 @@ impl Arbos {
     /// line — steps, standing obligations, questions, queued prompts — and,
     /// unfolded, a row per open node with its trigger and last outcome.
     /// Each row can be run now, cancelled, or (a question) answered.
+    /// The kernel behind this chat has no model key, and this window has
+    /// one: offer it. The key belongs to the user, not the machine — it
+    /// goes over the connection that is already authenticated, and the
+    /// kernel keeps it 0600 (or in memory for "this session only").
+    fn provider_offer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = Theme::of(cx).clone();
+        let chat = self.workspace.read(cx).active_session()?;
+        let provider = chat.provider_missing.clone()?;
+        let id = chat.id;
+        let mine = arbos_core::Host::load()
+            .ok()
+            .and_then(|h| h.api_key())
+            .is_some();
+        let label = match provider.as_str() {
+            "openrouter" => "OpenRouter",
+            "openai" => "OpenAI",
+            other => other,
+        }
+        .to_string();
+        let button = |key: &'static str, text: String, tip: &'static str, remember: bool, cx: &mut Context<Self>| {
+            theme
+                .ghost(SharedString::from(format!("{key}-{id}")))
+                .flex_none()
+                .px(px(8.))
+                .h(px(22.))
+                .flex()
+                .items_center()
+                .rounded(px(Theme::control_radius()))
+                .tooltip(move |window, cx| bezel::ui::tooltip::Tooltip::text(tip, window, cx))
+                .child(
+                    div()
+                        .text_style(TextStyle::Caption)
+                        .text_color(theme.text)
+                        .child(SharedString::from(text)),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.workspace.update(cx, |workspace, cx| {
+                        workspace.with_session(id, cx, |chat| chat.offer_key(remember));
+                    });
+                }))
+        };
+        let row = div()
+            .id("provider-offer")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                icons::icon(icons::status::DANGER_TRIANGLE)
+                    .size(px(12.))
+                    .text_color(theme.warning),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_style(TextStyle::Callout)
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(if mine {
+                        format!("This machine has no {label} key.")
+                    } else {
+                        format!(
+                            "This machine has no {label} key, and neither does this window (Settings › Model)."
+                        )
+                    })),
+            )
+            .when(mine, |row| {
+                row.child(button(
+                    "provider-offer-remember",
+                    format!("Use my {label} key on this machine"),
+                    "Saved in that machine's ~/.config/arbos/config.toml, readable by its owner only",
+                    true,
+                    cx,
+                ))
+                .child(button(
+                    "provider-offer-session",
+                    "This session only".to_string(),
+                    "Kept in that kernel's memory; gone when it stops",
+                    false,
+                    cx,
+                ))
+            });
+        Some(
+            div()
+                .rounded(px(Theme::surface_radius()))
+                .px(px(root::COMPOSER_PAD_X))
+                .py(px(8.))
+                .child(row)
+                .surface(&theme, composer::SURFACE)
+                .into_any_element(),
+        )
+    }
+
     fn plan(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
         let chat = self.workspace.read(cx).active_session()?;
