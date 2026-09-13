@@ -40,8 +40,9 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
         skills.join(", ")
     };
     let agents_md = first_agents_md(place);
+    let git = crate::tools::git_guard::GitRules::load(place.path()).prompt_line();
     format!(
-        "You: {id}\nName: {name}\nParent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nProject: {project}\nCwd: {cwd}\nFocus: {focus}\nSkills (read SKILL.md for the body): {skills}\n{agents}",
+        "You: {id}\nName: {name}\nParent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nProject: {project}\nCwd: {cwd}\nFocus: {focus}\nSkills (read SKILL.md for the body): {skills}\n{git}\n{agents}",
         id = agent.id,
         name = agent.name,
         parent = agent.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),
