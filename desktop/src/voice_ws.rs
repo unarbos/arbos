@@ -77,6 +77,20 @@ impl Phase {
     }
 }
 
+/// What the session is for. A dictation session opens the mic per take and
+/// leaves replies to this window's kernel. A call keeps the mic open, talks
+/// to the project's main agent through the gateway's narrator, and plays
+/// every reply the gateway starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionKind {
+    Dictation,
+    Call {
+        /// `<machine>/<project>` for the gateway to pick the kernel; the
+        /// tab's label today.
+        project: String,
+    },
+}
+
 /// A snapshot for the UI: the take so far and the state.
 #[derive(Debug, Clone, Default)]
 pub struct Peek {
@@ -87,6 +101,8 @@ pub struct Peek {
     pub level: f32,
     /// The input device the mic process reads, once it is running.
     pub mic_device: String,
+    /// Why the mic is not running, when it failed to start or died.
+    pub mic_error: Option<String>,
     /// What the reply audio is saying, when the server tells us.
     pub reply: String,
     pub error: Option<String>,
@@ -100,6 +116,13 @@ pub struct Peek {
     pub reply_backend: String,
     /// `session.ready.text`: who answers the text channel (`none` = nobody).
     pub text_backend: String,
+    /// A call is live (`session.start {mode: "call"}` was answered with a
+    /// narrator).
+    pub call: bool,
+    /// The mic is sending silence.
+    pub muted: bool,
+    /// The last line the narrator spoke (`narrator.say`).
+    pub last_said: String,
 }
 
 /// Mirror lines kept when nobody drains them (a closed window).
@@ -123,10 +146,14 @@ struct Shared {
     reply: String,
     level: f32,
     mic_device: String,
+    mic_error: Option<String>,
     error: Option<String>,
     /// Bytes of reply audio played, for the tests.
     played: u64,
     interrupts: u32,
+    call: bool,
+    muted: bool,
+    last_said: String,
 }
 
 enum Cmd {
@@ -135,6 +162,7 @@ enum Cmd {
     Speak(String),
     Text(String),
     Interrupt,
+    Mute(bool),
     End,
 }
 
@@ -142,6 +170,7 @@ struct Session {
     tx: mpsc::UnboundedSender<Cmd>,
     shared: Arc<Mutex<Shared>>,
     cfg: VoiceCfg,
+    kind: SessionKind,
 }
 
 fn hold() -> &'static Mutex<Option<Session>> {
@@ -172,13 +201,85 @@ pub fn status() -> Peek {
         phase: s.phase,
         level: s.level,
         mic_device: s.mic_device.clone(),
+        mic_error: s.mic_error.clone(),
         reply: s.reply.clone(),
         error: s.error.clone(),
         engine: s.engine.clone(),
         kernel: s.kernel,
         reply_backend: s.reply_backend.clone(),
         text_backend: s.text_backend.clone(),
+        call: s.call,
+        muted: s.muted,
+        last_said: s.last_said.clone(),
     }
+}
+
+/// Whether a call is live right now.
+pub fn in_call() -> bool {
+    let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
+    hold.as_ref().is_some_and(|session| {
+        matches!(session.kind, SessionKind::Call { .. }) && {
+            let s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
+            s.phase.is_some() && s.phase != Some(Phase::Off)
+        }
+    })
+}
+
+/// Call `project`: open a call session (a dictation session, if any, ends),
+/// keep the mic open, and let the gateway's narrator speak. Blocks until the
+/// gateway answers `session.ready` or the connect times out.
+pub fn call_start(project: &str) -> Result<()> {
+    let cfg = crate::kernel::voice_config().ok_or_else(|| anyhow!("no voice_url in config"))?;
+    // No microphone program means a call that streams silence and hears
+    // nothing back: refuse now, with the install hint, not after connecting.
+    mic_command().map_err(|e| anyhow!("no microphone for the call: {e}"))?;
+    let kind = SessionKind::Call {
+        project: project.to_string(),
+    };
+    ensure_session(&cfg, &kind)?;
+    let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
+    let session = hold.as_ref().ok_or_else(|| anyhow!("voice session closed"))?;
+    {
+        let mut s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
+        if !s.call {
+            bail!("the speech server did not open a call (session.ready.mode != call); does it have a kernel?");
+        }
+        s.finals.clear();
+        s.partial.clear();
+        s.take_done = false;
+        s.error = None;
+        s.phase = Some(Phase::Listening);
+    }
+    session
+        .tx
+        .send(Cmd::MicStart)
+        .map_err(|_| anyhow!("voice session closed"))
+}
+
+/// Hang up. The session closes; the record of the call is in the chat.
+pub fn call_end() {
+    let mut hold = hold().lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(session) = hold.as_ref()
+        && matches!(session.kind, SessionKind::Call { .. })
+        && let Some(session) = hold.take()
+    {
+        let _ = session.tx.send(Cmd::End);
+    }
+}
+
+/// Mute or unmute the mic during a call. The mic keeps running (the gateway
+/// wants a continuous stream); muted frames are silence.
+pub fn call_mute(muted: bool) -> Result<()> {
+    let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
+    let session = hold.as_ref().ok_or_else(|| anyhow!("no call"))?;
+    {
+        let mut s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
+        s.muted = muted;
+    }
+    session
+        .tx
+        .send(Cmd::Mute(muted))
+        .map_err(|_| anyhow!("voice session closed"))
 }
 
 /// Take what the server's agent did since the last call.
@@ -200,11 +301,20 @@ pub fn text_input(text: &str) -> Result<()> {
         return Ok(());
     }
     let cfg = crate::kernel::voice_config().ok_or_else(|| anyhow!("no voice_url in config"))?;
-    ensure_session(&cfg)?;
+    ensure_session(&cfg, &SessionKind::Dictation)?;
     let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
     let session = hold.as_ref().ok_or_else(|| anyhow!("voice session closed"))?;
     {
         let mut s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
+        if s.call {
+            // Typed during a call: the same inbox as the spoken words, filed as `text`.
+            s.text_reply.clear();
+            drop(s);
+            return session
+                .tx
+                .send(Cmd::Text(text.to_string()))
+                .map_err(|_| anyhow!("voice session closed"));
+        }
         if s.text_backend == "none" {
             bail!(
                 "the speech server has nobody to answer text (session.ready.text = none); set voice_reply = \"kernel\" or \"openrouter\" in config.toml"
@@ -242,7 +352,10 @@ pub fn counters() -> (u64, u32) {
 /// server says `session.ready` or the connect times out.
 pub fn start() -> Result<()> {
     let cfg = crate::kernel::voice_config().ok_or_else(|| anyhow!("no voice_url in config"))?;
-    ensure_session(&cfg)?;
+    if in_call() {
+        bail!("a call is live; the mic is already open");
+    }
+    ensure_session(&cfg, &SessionKind::Dictation)?;
     let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
     let session = hold.as_ref().ok_or_else(|| anyhow!("voice session closed"))?;
     {
@@ -320,7 +433,10 @@ pub fn speak(text: &str) -> Result<()> {
         return Ok(());
     }
     let cfg = crate::kernel::voice_config().ok_or_else(|| anyhow!("no voice_url in config"))?;
-    ensure_session(&cfg)?;
+    if in_call() {
+        return Ok(()); // the narrator speaks for the agent during a call
+    }
+    ensure_session(&cfg, &SessionKind::Dictation)?;
     let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
     let session = hold.as_ref().ok_or_else(|| anyhow!("voice session closed"))?;
     {
@@ -355,7 +471,7 @@ pub fn shutdown() {
     }
 }
 
-fn ensure_session(cfg: &VoiceCfg) -> Result<()> {
+fn ensure_session(cfg: &VoiceCfg, kind: &SessionKind) -> Result<()> {
     {
         let mut hold = hold().lock().unwrap_or_else(|p| p.into_inner());
         if let Some(session) = hold.as_ref() {
@@ -363,7 +479,7 @@ fn ensure_session(cfg: &VoiceCfg) -> Result<()> {
                 let s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
                 s.phase.is_none() || s.phase == Some(Phase::Off)
             };
-            if session.cfg == *cfg && !dead {
+            if session.cfg == *cfg && session.kind == *kind && !dead {
                 return Ok(());
             }
             if let Some(old) = hold.take() {
@@ -383,8 +499,9 @@ fn ensure_session(cfg: &VoiceCfg) -> Result<()> {
     {
         let shared = Arc::clone(&shared);
         let cfg = cfg.clone();
+        let kind = kind.clone();
         crate::agent::acp::runtime().spawn(async move {
-            if let Err(e) = run(cfg, rx, Arc::clone(&shared), ready_tx).await {
+            if let Err(e) = run(cfg, kind, rx, Arc::clone(&shared), ready_tx).await {
                 let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
                 s.error = Some(format!("voice server: {e:#}"));
             }
@@ -397,6 +514,7 @@ fn ensure_session(cfg: &VoiceCfg) -> Result<()> {
         tx,
         shared: Arc::clone(&shared),
         cfg: cfg.clone(),
+        kind: kind.clone(),
     });
     drop(hold);
     match ready_rx.recv_timeout(CONNECT_TIMEOUT) {
@@ -425,6 +543,7 @@ fn install_tls_provider() {
 
 async fn run(
     cfg: VoiceCfg,
+    kind: SessionKind,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
     shared: Arc<Mutex<Shared>>,
     ready: std::sync::mpsc::Sender<Result<()>>,
@@ -462,21 +581,34 @@ async fn run(
         }
     };
     let (mut sink, mut stream) = ws.split();
-    sink.send(text_frame(json!({
+    let mut start = json!({
         "type": "session.start",
         "format": { "type": "audio/pcm", "rate": RATE },
         // Replies are ours to drive (`speak`) when the engine leaves them
         // to the client; the agent mirror is off — this window has the chat.
         "reply": if cfg.reply.is_empty() { "none" } else { cfg.reply.as_str() },
         "agents": cfg.mirror
-    })))
-    .await?;
+    });
+    if let SessionKind::Call { project } = &kind {
+        // A call: the caller's words go to the project's main agent as
+        // `voice` inbox messages and the gateway's narrator speaks the
+        // highlights. This window shows the chat, so "on your screen" fits.
+        start["mode"] = json!("call");
+        start["channel"] = json!("voice");
+        start["device"] = json!("desktop");
+        start["screen"] = json!("on your screen");
+        if !project.is_empty() {
+            start["project"] = json!(project);
+        }
+    }
+    sink.send(text_frame(start)).await?;
 
     let (mic_tx, mut mic_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let mut mic: Option<Mic> = None;
     let mut player: Option<Player> = None;
     let mut ready_sent = false;
     let mut speaking = false;
+    let mut muted = false;
 
     loop {
         tokio::select! {
@@ -486,10 +618,14 @@ async fn run(
                     Cmd::MicStart => {
                         if mic.is_none() {
                             match Mic::spawn(mic_tx.clone(), Arc::clone(&shared)) {
-                                Ok(m) => mic = Some(m),
+                                Ok(m) => {
+                                    mic = Some(m);
+                                    shared.lock().unwrap_or_else(|p| p.into_inner()).mic_error = None;
+                                }
                                 Err(e) => {
                                     let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
                                     s.error = Some(format!("microphone: {e:#}"));
+                                    s.mic_error = Some(format!("{e:#}"));
                                     s.phase = Some(Phase::Ready);
                                 }
                             }
@@ -520,6 +656,9 @@ async fn run(
                         speaking = false;
                         sink.send(text_frame(json!({ "type": "interrupt" }))).await?;
                     }
+                    Cmd::Mute(on) => {
+                        muted = on;
+                    }
                     Cmd::End => {
                         if let Some(m) = mic.take() { m.stop(); }
                         if let Some(p) = player.take() { p.stop(); }
@@ -532,6 +671,8 @@ async fn run(
             chunk = mic_rx.recv() => {
                 let Some(chunk) = chunk else { continue };
                 if mic.is_some() {
+                    // Muted: the stream keeps its clock, the words stay home.
+                    let chunk = if muted { vec![0u8; chunk.len()] } else { chunk };
                     sink.send(Message::Binary(chunk.into())).await?;
                 }
             }
@@ -579,6 +720,8 @@ async fn run(
                                 s.kernel = v.get("kernel").and_then(Value::as_bool).unwrap_or(false);
                                 s.reply_backend = field("reply");
                                 s.text_backend = field("text");
+                                s.call = field("mode") == "call"
+                                    && v.get("narrator").and_then(Value::as_bool).unwrap_or(false);
                                 if s.phase == Some(Phase::Connecting) {
                                     s.phase = Some(Phase::Ready);
                                 }
@@ -609,6 +752,10 @@ async fn run(
                             "transcript.final" => {
                                 let text = field("text");
                                 s.partial.clear();
+                                if s.call {
+                                    // A call has no take: the strip shows the last utterance only.
+                                    s.finals.clear();
+                                }
                                 if !text.trim().is_empty() {
                                     s.finals.push(text.trim().to_string());
                                 }
@@ -639,6 +786,16 @@ async fn run(
                                 let t = field("text");
                                 s.text_reply.push_str(&t);
                                 s.reply.push_str(&t);
+                            }
+                            // The narrator is about to speak this line: into
+                            // the chat as a `voice ·` line, and onto the call strip.
+                            "narrator.say" => {
+                                let text = field("text");
+                                s.last_said = text.clone();
+                                push_mirror(&mut s, Mirror { kind: format!("narrator.say/{}", field("kind")), agent: field("ref"), text });
+                            }
+                            "text.done" if v.get("forwarded").and_then(Value::as_bool).unwrap_or(false) => {
+                                s.text_reply.clear();
                             }
                             "text.done" => {
                                 let whole = field("text");
@@ -766,6 +923,13 @@ impl Mic {
                 if filled > 0 {
                     let _ = tx.send(buf[..filled].to_vec());
                 }
+                // The program ended on its own: the device is gone or busy.
+                // The strip shows it instead of a level that never moves.
+                let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
+                if s.mic_error.is_none() && s.phase.is_some_and(|p| p != Phase::Off) {
+                    s.mic_error = Some("the microphone program stopped".into());
+                }
+                s.level = 0.0;
             })
             .map_err(|e| anyhow!("mic thread: {e}"))?;
         Ok(Self { child })
