@@ -113,12 +113,16 @@ class MockKernel:
                 except json.JSONDecodeError:
                     continue
                 await self._on_frame(frame, writer)
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
         finally:
             if writer in self._clients:
                 self._clients.remove(writer)
             writer.close()
 
     def _send_to(self, writer: asyncio.StreamWriter, frame: dict) -> None:
+        if writer.is_closing():
+            return
         try:
             writer.write((json.dumps(frame) + "\n").encode())
         except Exception:
@@ -146,7 +150,8 @@ class MockKernel:
             self.users.append(frame)
             agent = frame.get("agent", "root")
             text = str(frame.get("text", ""))
-            channel = str(frame.get("channel", ""))
+            # The kernel's rule: a user frame without a channel is a typed line.
+            channel = str(frame.get("channel") or "text")
             steer = bool(frame.get("steer")) and agent in self.running
             self._inbox(agent, "user", "steer" if steer else "request", text, channel=channel)
             self._append(agent, {"kind": "user", "text": text, "attachments": []})
@@ -237,6 +242,8 @@ class MockKernel:
         event = {"ts": now_ms(), **event}
         with path.open("a") as fh:
             fh.write(json.dumps(event) + "\n")
+        # The kernel tells attached clients that a watched file moved; the desktop re-reads it.
+        self.broadcast({"type": "changed", "path": f"agents/{agent}/transcript.jsonl", "kind": "modified", "size": path.stat().st_size})
         return self._lines(agent)
 
     def _lines(self, agent: str) -> int:
