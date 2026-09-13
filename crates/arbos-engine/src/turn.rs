@@ -235,14 +235,21 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         if control.is_stopped() {
             return end(None, Some("stop"));
         }
-        if let Some(steer) = control.take_steer() {
-            append_event(
-                &transcript,
-                &Event::new(EventKind::User {
-                    text: steer,
-                    attachments: vec![],
-                }),
-            )?;
+        // Every steer that arrived since the last boundary, in order. One
+        // per step lost the rest when the user typed faster than the model
+        // stepped, and the queue died with the turn.
+        let steers = control.take_steers();
+        if !steers.is_empty() {
+            let batch: Vec<Event> = steers
+                .into_iter()
+                .map(|text| {
+                    Event::new(EventKind::User {
+                        text,
+                        attachments: vec![],
+                    })
+                })
+                .collect();
+            append_events(&transcript, &batch)?;
             events = load_transcript(&transcript)?;
         }
 
