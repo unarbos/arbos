@@ -261,7 +261,7 @@ pub fn project(
     }
 
     let cwd = agent.cwd.clone().unwrap_or_else(|| place.path.clone());
-    let mut budget = ImageBudget::new(items, cwd);
+    let mut budget = ImageBudget::new(items, cwd.clone());
     let cite = cite_path(agent);
     let superseded = superseded_results(items);
     // Assistant text waits for the tool calls of its step, if any.
@@ -321,6 +321,12 @@ pub fn project(
                                 let (part, line) = budget.take(a);
                                 t.push_str(&line);
                                 shown.extend(part);
+                            } else if crate::pdf::is_pdf_path(Path::new(a)) {
+                                // A PDF arrives as its text, capped; the
+                                // model reads the file for the rest.
+                                t.push_str(&crate::pdf::attachment_text(&resolve_attachment(
+                                    &cwd, a,
+                                )));
                             } else {
                                 t.push_str(a);
                             }
@@ -495,4 +501,15 @@ fn assistant(
     m.tool_calls = tool_calls;
     m.reasoning_details = reasoning_details;
     m
+}
+
+/// An attachment path as written (absolute from the desktop, or relative
+/// to the agent's cwd from the CLI).
+fn resolve_attachment(cwd: &Path, a: &str) -> PathBuf {
+    let p = Path::new(a);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    }
 }
