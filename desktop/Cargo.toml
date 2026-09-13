@@ -68,6 +68,10 @@ serde_json = "1"
 # needs a runtime of its own — gpui's executor is smol's.
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
+# Two TLS-using crates pull rustls with different crypto backends (ring and
+# aws-lc-rs), so rustls cannot pick a process default by itself; the voice
+# client installs ring before its first wss:// connection.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 toml = "0.8"
 # Installing an agent edits settings.toml in place. `toml` would round-trip
 # it through a value tree and drop every comment the file was written with.

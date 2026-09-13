@@ -257,6 +257,7 @@ dependencies = [
  "notify",
  "objc",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",

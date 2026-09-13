@@ -705,6 +705,14 @@ impl Composer {
 
     /// Hold-Fn (and the mic) land here: put the words in the field and send
     /// them, the same two-step as the web composer's dictation final.
+    /// Dictation that stays in the field: the words are shown, not sent
+    /// (a duplex voice server already answered them).
+    pub fn dictation_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.close_menu(cx);
+        self.voice_preview.clear();
+        self.insert_text_at(self.voice_at, text, cx);
+    }
+
     pub fn dictation_final(&mut self, text: &str, cx: &mut Context<Self>) {
         self.close_menu(cx);
         self.command = None;
