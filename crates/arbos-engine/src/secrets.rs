@@ -20,6 +20,9 @@ use std::sync::{Mutex, OnceLock};
 /// Values shorter than this are not tracked: redacting "1234" would eat
 /// every date in a log.
 const MIN_LEN: usize = 8;
+/// A run of this many consecutive characters of a value is the value
+/// too: two halves, a prefix, a `cut -c1-20`.
+const PIECE: usize = 8;
 
 #[derive(Default)]
 pub struct Store {
@@ -95,10 +98,23 @@ impl Store {
         }
         pairs.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
         let mut out = text.to_string();
-        for (name, value) in pairs {
-            if out.contains(&value) {
-                out = out.replace(&value, &format!("[REDACTED:{name}]"));
+        for (name, value) in &pairs {
+            let mark = format!("[REDACTED:{name}]");
+            if out.contains(value) {
+                out = out.replace(value, &mark);
             }
+            // The same bytes in another coat: base64 and hex, as `echo $K |
+            // base64` and `xxd -p` print them.
+            for coat in encodings(value) {
+                if out.contains(&coat) {
+                    out = out.replace(&coat, &format!("[REDACTED:{name} encoded]"));
+                }
+            }
+        }
+        // Pieces: any run of PIECE+ characters of a value, so halves and
+        // prefixes go too. Character-based, so a multibyte value is safe.
+        for (name, value) in &pairs {
+            out = redact_pieces(&out, name, value);
         }
         out
     }
@@ -106,6 +122,63 @@ impl Store {
     pub fn has_any(&self) -> bool {
         !self.granted.lock().unwrap().is_empty() || !self.protected.lock().unwrap().is_empty()
     }
+}
+
+/// base64 (standard and URL-safe, with and without padding) and lowercase
+/// hex of `value`.
+fn encodings(value: &str) -> Vec<String> {
+    use base64::Engine;
+    let bytes = value.as_bytes();
+    let mut out = vec![
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+    ];
+    // Longest first, so the padded form goes before its unpadded prefix.
+    out.sort_by_key(|c| std::cmp::Reverse(c.len()));
+    out.dedup();
+    out.retain(|c| c.len() >= MIN_LEN);
+    out
+}
+
+/// Replace every maximal run of PIECE or more consecutive characters of
+/// `value` found in `text`.
+fn redact_pieces(text: &str, name: &str, value: &str) -> String {
+    let vchars: Vec<char> = value.chars().collect();
+    if vchars.len() < PIECE {
+        return text.to_string();
+    }
+    let tchars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < tchars.len() {
+        // Longest run starting at i that is a substring of value.
+        let mut best = 0;
+        for start in 0..vchars.len() {
+            let mut k = 0;
+            while i + k < tchars.len()
+                && start + k < vchars.len()
+                && tchars[i + k] == vchars[start + k]
+            {
+                k += 1;
+            }
+            if k > best {
+                best = k;
+            }
+            if best == vchars.len() {
+                break;
+            }
+        }
+        if best >= PIECE {
+            out.push_str(&format!("[REDACTED:{name} part]"));
+            i += best;
+        } else {
+            out.push(tchars[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// `[secrets]` in `<place>/.arbos/secrets.toml`: name → source.
@@ -210,5 +283,28 @@ mod tests {
             out,
             "x [REDACTED:LONGER] y [REDACTED:TOKEN] z [REDACTED:KEY] ab"
         );
+    }
+
+    #[test]
+    fn redacts_encodings_and_pieces() {
+        use base64::Engine;
+        let s = Store::default();
+        let key = "sk-or-v1-0123456789abcdef";
+        s.grant("KEY", key.into());
+        let b64 = base64::engine::general_purpose::STANDARD.encode(key);
+        let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            s.redact(&format!("a {b64} b")),
+            "a [REDACTED:KEY encoded] b"
+        );
+        assert_eq!(
+            s.redact(&format!("a {hex} b")),
+            "a [REDACTED:KEY encoded] b"
+        );
+        assert_eq!(
+            s.redact("first sk-or-v1-0123 then 456789abcdef end"),
+            "first [REDACTED:KEY part] then [REDACTED:KEY part] end"
+        );
+        assert_eq!(s.redact("sk-or-v1 alone"), "sk-or-v1 alone");
     }
 }
