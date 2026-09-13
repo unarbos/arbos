@@ -1392,6 +1392,11 @@ impl Arbos {
             return;
         }
         let label = Workspace::tab_label(project);
+        // What the gateway is told the call is for: the tab's hub name
+        // (`mac/arbos`), so a gateway on another machine can attach to this
+        // kernel through the hub; a gateway serving this very kernel takes
+        // the folder's name as its own.
+        let hub_name = kernel::hub_project_name(&project.place());
         // Dictation, if a take is open, ends: the call owns the mic.
         if self.composer.read(cx).is_recording() {
             self.stop_voice(cx);
@@ -1406,7 +1411,7 @@ impl Arbos {
         cx.spawn(async move |this, cx| {
             let started = cx
                 .background_executor()
-                .spawn(async move { crate::voice_ws::call_start(&label) })
+                .spawn(async move { crate::voice_ws::call_start(&hub_name) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 match started {
