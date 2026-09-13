@@ -28,13 +28,20 @@ const FOLDERS: &[(&str, &str, &str)] = &[
     ("archive", "archived chat", "archived chats"),
 ];
 
+/// One line of a note: a section heading, or a line under one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteLine {
+    pub heading: bool,
+    pub text: String,
+}
+
 /// One markdown file, as the panel shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Note {
     pub path: PathBuf,
     /// The first lines of the body, markdown marks stripped, blank lines
     /// dropped. Empty when the file exists but says nothing yet.
-    pub lines: Vec<String>,
+    pub lines: Vec<NoteLine>,
     /// Lines past the preview.
     pub more: usize,
 }
@@ -67,7 +74,7 @@ impl StoreView {
                 let plan = store.join("agents").join(ROOT_AGENT).join("plan.md");
                 plan.is_file()
                     .then(|| Note::read(&plan))
-                    .filter(|note| note.lines.iter().any(|line| line != "(no plan)"))
+                    .filter(|note| note.lines.iter().any(|line| line.text != "(no plan)"))
             });
         let notes = first_of(&store, NOTES).map(|path| Note::read(&path));
         let resources = FOLDERS
@@ -98,10 +105,13 @@ impl StoreView {
 impl Note {
     fn read(path: &Path) -> Self {
         let body = std::fs::read_to_string(path).unwrap_or_default();
-        let all: Vec<String> = body
-            .lines()
-            .map(strip_marks)
-            .filter(|line| !line.is_empty())
+        let all: Vec<NoteLine> = content_lines(&body)
+            .into_iter()
+            .map(|line| NoteLine {
+                heading: line.trim_start().starts_with("## "),
+                text: strip_marks(line),
+            })
+            .filter(|line| !line.text.is_empty())
             .collect();
         let more = all.len().saturating_sub(PREVIEW_LINES);
         let mut lines = all;
@@ -119,6 +129,51 @@ fn first_of(store: &Path, names: &[&str]) -> Option<PathBuf> {
         .iter()
         .map(|name| store.join(name))
         .find(|path| path.is_file())
+}
+
+/// The lines worth showing: front matter (`+++ … +++` TOML or `--- … ---`
+/// YAML) is metadata, not goals; the title line says what the panel's
+/// section head already says; and a section whose body is only the
+/// template's placeholders — a bare `- `, a `(hint in brackets)` — has
+/// nothing to say yet, so its heading is left out with it. A file that is
+/// still all template comes back empty, and the panel invites instead.
+fn content_lines(text: &str) -> Vec<&str> {
+    let body = strip_front_matter(text);
+    let mut sections: Vec<(Option<&str>, Vec<&str>)> = vec![(None, Vec::new())];
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("# ") && !trimmed.starts_with("##") {
+            continue;
+        }
+        if trimmed.starts_with("## ") {
+            sections.push((Some(line), Vec::new()));
+        } else if !placeholder(trimmed) {
+            sections.last_mut().expect("one section").1.push(line);
+        }
+    }
+    sections
+        .into_iter()
+        .filter(|(_, lines)| !lines.is_empty())
+        .flat_map(|(head, lines)| head.into_iter().chain(lines))
+        .collect()
+}
+
+fn strip_front_matter(text: &str) -> &str {
+    for fence in ["+++", "---"] {
+        if let Some(rest) = text.strip_prefix(fence)
+            && let Some(end) = rest.find(&format!("\n{fence}"))
+        {
+            return rest[end + 1 + fence.len()..].trim_start_matches('\n');
+        }
+    }
+    text
+}
+
+/// A line the template left for the person to fill in.
+fn placeholder(trimmed: &str) -> bool {
+    trimmed.is_empty()
+        || matches!(trimmed, "-" | "*" | "+" | "- [ ]")
+        || (trimmed.starts_with('(') && trimmed.ends_with(')'))
 }
 
 /// One line of markdown as the panel prints it: headings lose their

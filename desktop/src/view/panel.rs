@@ -513,10 +513,13 @@ impl Arbos {
             .gap(px(3.))
             .text_style(TextStyle::Caption)
             .text_color(theme.text_muted)
-            .children(lines.into_iter().map(|line| {
+            .children(lines.into_iter().enumerate().map(|(n, line)| {
                 div()
                     .line_clamp(2)
-                    .child(SharedString::from(line))
+                    .when(line.heading, |el| {
+                        el.text_color(theme.text_faint).when(n > 0, |el| el.mt(px(4.)))
+                    })
+                    .child(SharedString::from(line.text))
             }))
             .when(more > 0, |el| {
                 el.child(
@@ -532,7 +535,7 @@ impl Arbos {
     /// composer, and sending it is the person's call.
     fn invite_note(&mut self, goals: bool, cx: &mut Context<Self>) {
         let prompt = if goals {
-            "Write this project's goals to .arbos/GOALS.md as a short checklist. Ask me what you need to know first."
+            "Fill in .arbos/GOALS.md for this project: the goal, constraints, decisions, and current focus. Ask me what you need to know first."
         } else {
             "Start .arbos/notes.md with what you know about this project so far."
         };
