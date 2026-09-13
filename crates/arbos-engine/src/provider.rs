@@ -335,6 +335,9 @@ pub struct Completion {
     pub calls: Vec<ToolCall>,
     /// `(prompt_tokens, total_tokens)` when the provider reported usage.
     pub usage: Option<(u64, u64)>,
+    /// This call's price in US dollars, when the provider reported it
+    /// (OpenRouter `usage.cost`, asked for with `usage: {include: true}`).
+    pub cost: Option<f64>,
     /// `reasoning_details` blocks, to be sent back with this assistant
     /// message on later calls. Gemini 3 stops thinking without its thought
     /// signatures; Anthropic rejects a broken thinking chain.
@@ -365,6 +368,12 @@ impl Provider {
         });
         if self.base.contains("openai.com") {
             body["stream_options"] = json!({ "include_usage": true });
+        }
+        // OpenRouter streams token counts by default; the price only when
+        // asked. Other endpoints ignore the key or reject it, so it is
+        // sent to OpenRouter alone.
+        if self.base.contains("openrouter.ai") {
+            body["usage"] = json!({ "include": true });
         }
         if let Some(n) = self.max_tokens {
             body["max_tokens"] = json!(n);
@@ -489,6 +498,7 @@ impl Provider {
         let mut content = String::new();
         let mut calls: Vec<PartialCall> = Vec::new();
         let mut usage = None;
+        let mut cost = None;
         let mut reasoning_details: Vec<Value> = Vec::new();
         // Time since the last delta that carried text, reasoning or tool
         // arguments. Keep-alive comments and empty deltas do not count: a
@@ -550,6 +560,7 @@ impl Provider {
                         content,
                         calls: finish_calls(calls),
                         usage,
+                        cost,
                         reasoning_details,
                     });
                 }
@@ -586,6 +597,9 @@ impl Provider {
                 }
                 if let Some(pair) = usage_of(&v) {
                     usage = Some(pair);
+                }
+                if let Some(c) = cost_of(&v) {
+                    cost = Some(c);
                 }
                 let Some(choice) = v.get("choices").and_then(|c| c.get(0)) else {
                     continue;
@@ -628,6 +642,7 @@ impl Provider {
                             content,
                             calls: finish_calls(calls),
                             usage,
+                            cost,
                             reasoning_details,
                         });
                     }
@@ -643,6 +658,7 @@ impl Provider {
             content,
             calls: finish_calls(calls),
             usage,
+            cost,
             reasoning_details,
         })
     }
@@ -939,6 +955,12 @@ fn usage_of(v: &Value) -> Option<(u64, u64)> {
         .and_then(|t| t.as_u64())
         .unwrap_or(prompt);
     Some((prompt, total))
+}
+
+/// OpenRouter puts the call's price in `usage.cost` (dollars). Absent
+/// elsewhere.
+fn cost_of(v: &Value) -> Option<f64> {
+    v.get("usage")?.get("cost")?.as_f64()
 }
 
 /// Anthropic models cache nothing unless the request says where. OpenAI

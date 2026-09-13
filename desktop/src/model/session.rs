@@ -110,6 +110,11 @@ pub enum ChatItem {
 pub struct Usage {
     pub used: u64,
     pub size: u64,
+    /// Dollars this chat has spent since it was opened, when the provider
+    /// prices turns (OpenRouter does). Summed from every turn's report.
+    pub spent: Option<f64>,
+    /// The last finished turn's price.
+    pub last_cost: Option<f64>,
 }
 
 impl Usage {
@@ -1615,9 +1620,16 @@ impl ChatSession {
             // Reported whole, like the plan: replace, don't merge.
             SessionUpdate::ConfigOptionUpdate(update) => self.config = update.config_options,
             SessionUpdate::UsageUpdate(update) => {
+                let last_cost = update.cost.as_ref().map(|c| c.amount);
+                let spent = match (self.usage.and_then(|u| u.spent), last_cost) {
+                    (Some(a), Some(b)) => Some(a + b),
+                    (a, b) => a.or(b),
+                };
                 self.usage = Some(Usage {
                     used: update.used,
                     size: update.size,
+                    spent,
+                    last_cost,
                 });
             }
             // We echo the user's message locally.

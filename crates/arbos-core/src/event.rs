@@ -129,6 +129,10 @@ pub struct ToolRec {
 pub struct Usage {
     pub used: u64,
     pub size: u64,
+    /// What the turn cost in US dollars, summed over its model calls, when
+    /// the provider reports it (OpenRouter does).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
 }
 
 impl Event {

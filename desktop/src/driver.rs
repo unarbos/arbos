@@ -1046,7 +1046,7 @@ fn session_json(chat: &ChatSession) -> Value {
         "parent": chat.parent,
         "draft": chat.draft,
         "queued": chat.queue.len(),
-        "usage": chat.usage.map(|u| json!({"used": u.used, "size": u.size})),
+        "usage": chat.usage.map(|u| json!({"used": u.used, "size": u.size, "spent": u.spent, "last_cost": u.last_cost})),
         "connection": match chat.connection {
             Connection::Idle => "idle",
             Connection::Connecting => "connecting",

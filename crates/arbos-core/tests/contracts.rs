@@ -44,7 +44,11 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                     kind: "agent".into(),
                 }],
                 focus: ".arbos/agents/root".into(),
-                budget: Some(Usage { used: 1, size: 2 }),
+                budget: Some(Usage {
+                    used: 1,
+                    size: 2,
+                    cost: None,
+                }),
             },
             "snapshot",
         ),

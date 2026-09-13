@@ -12,8 +12,9 @@ use arbos_core::wire::Frame;
 use cacp::{
     Error,
     schema::{
-        ContentBlock, Diff, RequestPermissionRequest, RequestPermissionResponse, SessionUpdate,
-        StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolKind, UsageUpdate,
+        ContentBlock, Cost, Diff, RequestPermissionRequest, RequestPermissionResponse,
+        SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
+        ToolKind, UsageUpdate,
     },
 };
 use serde_json::Value;
@@ -529,7 +530,11 @@ fn kernel_event(event: arbos_core::Event) -> Vec<Event> {
                 vec![Event::Update(SessionUpdate::UsageUpdate(UsageUpdate {
                     used: u.used,
                     size: u.size,
-                    cost: None,
+                    cost: u.cost.map(|amount| Cost {
+                        amount,
+                        currency: "USD".into(),
+                        meta: None,
+                    }),
                     meta: None,
                 }))]
             })
