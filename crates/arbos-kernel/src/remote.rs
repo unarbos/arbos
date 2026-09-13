@@ -130,7 +130,9 @@ impl Carrier {
         let (in_tx, rx) = mpsc::unbounded_channel::<Frame>();
         tokio::spawn(async move {
             while let Some(f) = out_rx.recv().await {
-                let Ok(s) = serde_json::to_string(&f) else { continue };
+                let Ok(s) = serde_json::to_string(&f) else {
+                    continue;
+                };
                 if w.write_all(format!("{s}\n").as_bytes()).await.is_err() {
                     break;
                 }
@@ -155,7 +157,9 @@ impl Carrier {
         let (in_tx, rx) = mpsc::unbounded_channel::<Frame>();
         tokio::spawn(async move {
             while let Some(f) = out_rx.recv().await {
-                let Ok(s) = serde_json::to_string(&f) else { continue };
+                let Ok(s) = serde_json::to_string(&f) else {
+                    continue;
+                };
                 if sink.send(Message::Text(s.into())).await.is_err() {
                     break;
                 }
@@ -245,8 +249,8 @@ impl RemoteHub {
                     let outcome = async {
                         let cfg = hub_link::config_from_env()?
                             .context("no hub configured (~/.config/arbos/hub.toml)")?;
-                        let ws = hub_link::attach(&cfg, &record.machine, Some(&record.project))
-                            .await?;
+                        let ws =
+                            hub_link::attach(&cfg, &record.machine, Some(&record.project)).await?;
                         attach(
                             Arc::clone(&hooks),
                             record.clone(),
@@ -331,12 +335,13 @@ fn note_reattach_failure(hooks: &KernelHooks, record: &Record, e: anyhow::Error)
 pub async fn spawn_remote(
     hooks: Arc<KernelHooks>,
     parent: Agent,
+    name: Option<String>,
     brief: String,
     host: String,
 ) -> Result<(AgentId, String)> {
     let machines = Machines::load()?;
     if let Some(machine) = machines.get(&host).cloned() {
-        return spawn_ssh(hooks, parent, brief, machine).await;
+        return spawn_ssh(hooks, parent, name, brief, machine).await;
     }
     if let Some(info) = arbos_core::hub::roster_machine(&hooks.place, &host) {
         if !info.worker {
@@ -346,7 +351,7 @@ pub async fn spawn_remote(
                 info.name
             );
         }
-        return spawn_hub(hooks, parent, brief, info).await;
+        return spawn_hub(hooks, parent, name, brief, info).await;
     }
     let mut known: Vec<String> = machines.machine.iter().map(|m| m.name.clone()).collect();
     known.extend(
@@ -370,16 +375,17 @@ pub async fn spawn_remote(
 fn stand_in(
     hooks: &KernelHooks,
     parent: &Agent,
+    name: Option<&str>,
     brief: &str,
     machine: &str,
     remote_path: &str,
     notice: String,
 ) -> Result<(String, Agent)> {
     let place = &hooks.place;
-    let id = hooks.remote_child_id(brief)?;
+    let id = hooks.remote_child_id(name, brief)?;
     validate_id(&id)?;
     let mut child = Agent::root(&id);
-    child.name = brief.chars().take(48).collect();
+    child.name = name.unwrap_or(brief).chars().take(48).collect();
     child.parent = Some(parent.id.clone());
     child.model = parent.model.clone();
     child.allowlist = parent.allowlist.clone();
@@ -415,7 +421,13 @@ fn project_name(place: &Place) -> String {
         .to_string()
 }
 
-fn first_prompt(parent: &Agent, brief: &str, remote_path: &str, machine: &str, how: &str) -> String {
+fn first_prompt(
+    parent: &Agent,
+    brief: &str,
+    remote_path: &str,
+    machine: &str,
+    how: &str,
+) -> String {
     format!(
         "You were spawned by agent {} on another machine for this mission:\n\n{brief}\n\nYou work in {remote_path} on {machine}, {how}. Do it now; report results in your final reply — it is delivered to your parent as a message from you. If you change files, commit them on a branch and name it in the report.",
         parent.id
@@ -426,6 +438,7 @@ fn first_prompt(parent: &Agent, brief: &str, remote_path: &str, machine: &str, h
 async fn spawn_ssh(
     hooks: Arc<KernelHooks>,
     parent: Agent,
+    name: Option<String>,
     brief: String,
     machine: Machine,
 ) -> Result<(AgentId, String)> {
@@ -433,11 +446,12 @@ async fn spawn_ssh(
     let project = project_name(&place);
     // Each child gets a place of its own on the machine — its own copy,
     // kernel, and root — so two children never share a transcript.
-    let id = hooks.remote_child_id(&brief)?;
+    let id = hooks.remote_child_id(name.as_deref(), &brief)?;
     let remote_path = machine.place_for_child(&project, &id);
     let (id, child) = stand_in(
         &hooks,
         &parent,
+        name.as_deref(),
         &brief,
         &machine.name,
         &remote_path,
@@ -532,6 +546,7 @@ async fn spawn_ssh(
 async fn spawn_hub(
     hooks: Arc<KernelHooks>,
     parent: Agent,
+    name: Option<String>,
     brief: String,
     info: arbos_core::MachineInfo,
 ) -> Result<(AgentId, String)> {
@@ -558,6 +573,7 @@ async fn spawn_hub(
     let (id, child) = stand_in(
         &hooks,
         &parent,
+        name.as_deref(),
         &brief,
         &info.name,
         &format!("{project} (worktree)"),
@@ -581,7 +597,12 @@ async fn spawn_hub(
         .await?;
         let answer = tokio::time::timeout(CLAIM_READY, hub_link::next_text(&mut ws))
             .await
-            .with_context(|| format!("no answer to the claim of {} within {CLAIM_READY:?}", info.name))?
+            .with_context(|| {
+                format!(
+                    "no answer to the claim of {} within {CLAIM_READY:?}",
+                    info.name
+                )
+            })?
             .with_context(|| format!("the hub closed the claim of {}", info.name))?;
         match serde_json::from_str::<HubFrame>(&answer) {
             Ok(HubFrame::Claimed {
@@ -765,9 +786,10 @@ async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::Unbounded
                     let m = machine.clone();
                     let path = link.record.path.clone();
                     let from = mirrored;
-                    let fetched =
-                        tokio::task::spawn_blocking(move || remote_transcript_tail(&m, &path, from))
-                            .await;
+                    let fetched = tokio::task::spawn_blocking(move || {
+                        remote_transcript_tail(&m, &path, from)
+                    })
+                    .await;
                     match fetched {
                         Ok(Ok(events)) if !events.is_empty() => {
                             mirrored += events.len();

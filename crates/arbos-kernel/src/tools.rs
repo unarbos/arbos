@@ -187,6 +187,7 @@ impl Tool for Spawn {
                 let (id, where_) = crate::remote::spawn_remote(
                     Arc::clone(&hooks),
                     cx.agent.clone(),
+                    name.map(str::to_string),
                     brief.to_string(),
                     host.to_string(),
                 )

@@ -220,10 +220,14 @@ impl KernelHooks {
         self.broadcast(Frame::Tree { tree });
     }
 
-    /// A fresh child id from a brief, under the same caps as a local spawn.
-    pub fn remote_child_id(&self, brief: &str) -> Result<String> {
+    /// A fresh child id from a worker's name (or its brief), under the same
+    /// caps as a local spawn.
+    pub fn remote_child_id(&self, name: Option<&str>, brief: &str) -> Result<String> {
         let _one_at_a_time = self.spawn_lock.lock().unwrap();
-        let base = slug(brief);
+        let base = match name.map(str::trim).filter(|n| !n.is_empty()) {
+            Some(name) => name_slug(name),
+            None => slug(brief),
+        };
         let mut id = base.clone();
         let mut n = 1;
         while self.place.agent_dir(&id).exists() {
