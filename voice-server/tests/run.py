@@ -101,6 +101,7 @@ def kernel_behaviour(k: dict) -> Behaviour:
         reply=k.get("reply", ""), reply_delay=float(k.get("reply_delay", 0.3)), spawn=spawn,
         reply_after_done=k.get("reply_after_done", ""), ask=k.get("ask", ""), ask_options=list(k.get("ask_options", [])),
         tool_output_lines=int(k.get("tool_output_lines", 0)), steer_reply=k.get("steer_reply", ""),
+        approval=k.get("approval", ""), reply_denied=k.get("reply_denied", ""),
     )
 
 
@@ -366,6 +367,14 @@ def check(exp: dict, res: Result, caller: Caller, duplex: MockDuplex, kernel: Mo
     if "text_forwarded" in exp:
         done = [f for f in rec.of("text.done") if f.msg.get("forwarded")]
         add(len(done) >= int(exp["text_forwarded"]), f"{exp['text_forwarded']} typed line(s) forwarded to the agent ({len(done)})")
+    if "approvals" in exp:
+        got = [bool(a.get("allow")) for a in kernel.approvals]
+        add(got == list(exp["approvals"]), f"kernel received approve frames {exp['approvals']} (got {got}; ids {[a.get('call_id') for a in kernel.approvals]})")
+    if "approval_answered_within_s" in exp:
+        asks = [f.at for f in rec.frames if f.msg.get("type") == "narrator.say" and f.msg.get("kind") == "approval"]
+        limit = float(exp["approval_answered_within_s"])
+        ok = len(asks) >= 2 and asks[1] - asks[0] <= limit
+        add(ok, f"the approval was closed within {limit:.0f} s of being spoken ({[round(a, 1) for a in asks]})")
     if "user_frames" in exp:
         add(len(kernel.users) == int(exp["user_frames"]), f"kernel received {exp['user_frames']} user frame(s) ({len(kernel.users)})")
     for needle in exp.get("kernel_user_not", []):

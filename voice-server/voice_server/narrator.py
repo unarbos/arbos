@@ -48,6 +48,9 @@ FORWARD_GRACE_S = 1.5
 # Said when an utterance goes to the main agent, so the caller knows it landed. The main agent's
 # own reply follows as a highlight several seconds later.
 ACK = "On it."
+# The caller's yes or no to an approval, as heard.
+_YES = re.compile(r"^\W*(yes|yeah|yep|yup|sure|ok(?:ay)?|allow(?: it)?|go ahead|do it|approved?|fine|please do|of course|affirmative)\b", re.I)
+_NO = re.compile(r"^\W*(no|nope|nah|deny|denied|don'?t|do not|stop|cancel|negative|refuse|not now|never)\b", re.I)
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
 _RESULT_WORDS = re.compile(
@@ -126,6 +129,20 @@ def parse_done(text: str) -> tuple[str, bool] | None:
     return words, ok
 
 
+def is_approval(ask: dict) -> bool:
+    """An `allow …` ask: the kernel's `approve-N` id, or the allow/deny options."""
+    ident = str(ask.get("id") or "")
+    options = [str(o).lower() for o in ask.get("options") or []]
+    return ident.startswith("approve-") or options == ["allow", "deny"] or str(ask.get("question") or "").startswith("allow ")
+
+
+def split_approval(question: str) -> tuple[str, str]:
+    """`allow bash: rm -rf target` -> ("bash", "rm -rf target")."""
+    body = question.removeprefix("allow ").strip()
+    tool, _, command = body.partition(":")
+    return (tool.strip() or "a command"), command.strip()
+
+
 def speak_name(agent: str) -> str:
     """Agent ids are slugs (`fix-skeptic-test`); say them as words."""
     return re.sub(r"[-_]+", " ", agent)[:40]
@@ -148,6 +165,8 @@ class Narrator:
         speak_details: bool = True,
         device: str = "",
         model_highlights: bool = False,
+        only_asks: bool = False,
+        approval_timeout: float = 45.0,
     ):
         self.kernel = kernel
         self.speak = speak  # voices one line with the gateway TTS; returns when it has been said
@@ -159,6 +178,10 @@ class Narrator:
         self.user_talking = user_talking
         self.arbos_talking = arbos_talking
         self.device = device  # phone | desktop: written beside `channel` on every message
+        self.only_asks = only_asks  # outside call mode: speak asks and approvals, nothing else
+        self.approval_timeout = approval_timeout
+        self._ask_timer: asyncio.TimerHandle | None = None
+        self.approvals: list[tuple[str, bool, str]] = []  # (id, allowed, by: voice | timeout | card)
         # Highlights: the policy line (first sentence + the result sentence) or a model's rewrite
         # of the reply, checked against the policy's guardrails and replaced by it on any doubt.
         self.model_highlights = bool(model_highlights and model and api_key)
@@ -190,6 +213,7 @@ class Narrator:
     def close(self) -> None:
         if self.on_frame in self.kernel.listeners:
             self.kernel.listeners.remove(self.on_frame)
+        self._cancel_ask_timer()  # the question stays open on the kernel for the next client
         self._forward_pending()  # the last words of a call still reach the agent
         if self._task:
             self._task.cancel()
@@ -255,12 +279,26 @@ class Narrator:
             return
         if self.pending_ask is not None:
             ask = self.pending_ask
-            self.pending_ask = None
-            frame = {"type": "answer", "agent": ask.get("agent", self.agent), "text": text}
-            if ask.get("id"):
-                frame["id"] = ask["id"]
-            self.kernel.send(frame)
-            self.summary.append(f"answered: {text}")
+            if is_approval(ask):
+                if _YES.search(text):
+                    self._approve(ask, True, by="voice")
+                    return
+                if _NO.search(text):
+                    self._approve(ask, False, by="voice")
+                    return
+                # Neither yes nor no: the approval stays open (the card or the timeout closes it)
+                # and the words go where they were going.
+                self.summary.append(f"(approval still open) {channel}: {text}")
+            else:
+                self.pending_ask = None
+                self._cancel_ask_timer()
+                frame = {"type": "answer", "agent": ask.get("agent", self.agent), "text": text}
+                if ask.get("id"):
+                    frame["id"] = ask["id"]
+                self.kernel.send(frame)
+                self.summary.append(f"answered: {text}")
+                return
+        if self.only_asks:
             return
         self.kernel.send_user(text, self.agent, channel=channel, device=self.device)
         self.summary.append(f"{channel}: {text}")
@@ -270,6 +308,17 @@ class Narrator:
     def on_frame(self, frame: dict) -> None:
         kind = frame.get("type")
         agent = frame.get("agent")
+        if kind == "event" and (frame.get("event") or {}).get("kind") in ("approval", "answer"):
+            # Answered somewhere (a question card, another client): the spoken question is closed.
+            if self.pending_ask is not None and agent == self.pending_ask.get("agent", self.agent):
+                ev = frame.get("event") or {}
+                if ev.get("kind") == "approval":
+                    self.approvals.append((str(ev.get("call_id") or ""), bool(ev.get("allowed")), "card"))
+                self.pending_ask = None
+                self._cancel_ask_timer()
+            return
+        if self.only_asks and kind != "ask":
+            return
         if kind == "turn" and agent == self.agent:
             self.turn_running = frame.get("state") == "running"
             if self.turn_running:
@@ -322,15 +371,27 @@ class Narrator:
                 self._enqueue(Line("error", "Something failed: " + clip(text, ERROR_CAP), ref=_ref(frame)))
             elif ek == "user" and text.strip():
                 pass  # the caller's own words; never read back
-        elif kind == "ask" and agent == self.agent:
+        elif kind == "ask":
+            # Any agent's question or approval: spoken, never auto-filled. An approval waits
+            # `approval_timeout` for a yes or no, then is denied with a spoken note.
             self.pending_ask = frame
-            question = clip(str(frame.get("question") or ""), REPORT_CAP)
-            options = [str(o) for o in frame.get("options") or []]
-            spoken = f"Arbos asks: {question}"
-            if options:
-                spoken += " Options: " + ", ".join(options) + "."
-            self.summary.append(f"ask: {question}")
-            self._enqueue(Line("ask", spoken, ref=f"ask:{frame.get('id') or ''}"))
+            self._cancel_ask_timer()
+            if is_approval(frame):
+                tool, command = split_approval(str(frame.get("question") or ""))
+                who = "" if agent == self.agent else f"{speak_name(str(agent))} "
+                spoken = f"{who}wants to run {tool}: {clip(command, 120)}. Allow?"
+                spoken = spoken[0].upper() + spoken[1:] if who else "Arbos " + spoken
+                self.summary.append(f"approval: {tool}: {clip(command, 80)}")
+                self._enqueue(Line("approval", spoken, ref=f"ask:{frame.get('id') or ''}"))
+                self._ask_timer = asyncio.get_running_loop().call_later(self.approval_timeout, self._approval_timeout, frame)
+            else:
+                question = clip(str(frame.get("question") or ""), REPORT_CAP)
+                options = [str(o) for o in frame.get("options") or []]
+                spoken = f"Arbos asks: {question}"
+                if options:
+                    spoken += " Options: " + ", ".join(options) + "."
+                self.summary.append(f"ask: {question}")
+                self._enqueue(Line("ask", spoken, ref=f"ask:{frame.get('id') or ''}"))
         elif kind == "error":
             detail = clip(str(frame.get("detail") or ""), ERROR_CAP)
             if detail:
@@ -372,6 +433,29 @@ class Narrator:
             line = checked
         self.summary.append(f"arbos: {line}")
         self._enqueue(Line("highlight", line, ref=ref))
+
+    def _approve(self, ask: dict, allow: bool, *, by: str) -> None:
+        self.pending_ask = None
+        self._cancel_ask_timer()
+        call_id = str(ask.get("id") or "")
+        self.kernel.send({"type": "approve", "agent": ask.get("agent", self.agent), "call_id": call_id, "allow": allow})
+        self.approvals.append((call_id, allow, by))
+        tool, command = split_approval(str(ask.get("question") or ""))
+        self.summary.append(f"{'allowed' if allow else 'denied'} {tool} ({by})")
+        if by == "timeout":
+            self._enqueue(Line("approval", f"No answer in {self.approval_timeout:.0f} seconds; I denied {tool}: {clip(command, 80)}.", ref=f"ask:{call_id}"))
+        else:
+            self._enqueue(Line("approval", ("Allowed." if allow else "Denied."), ref=f"ask:{call_id}"))
+
+    def _approval_timeout(self, ask: dict) -> None:
+        if self.pending_ask is not ask:
+            return
+        self._approve(ask, False, by="timeout")
+
+    def _cancel_ask_timer(self) -> None:
+        if self._ask_timer is not None:
+            self._ask_timer.cancel()
+            self._ask_timer = None
 
     def child_finished(self, child: str, words: str, *, ok: bool = True) -> None:
         """The tool bridge saw a dispatched agent end (kernels without `done` files)."""

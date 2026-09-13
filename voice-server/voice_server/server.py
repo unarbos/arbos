@@ -45,7 +45,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     kernel = parser.add_argument_group("Arbos kernel (enables the agent tools and the text channel)")
     kernel.add_argument("--kernel", default=os.environ.get("VOICE_KERNEL_URL"), help="tcp://127.0.0.1:PORT of `arbos-kernel serve`")
     kernel.add_argument("--kernel-place", default=os.environ.get("VOICE_KERNEL_PLACE"), help="place dir; reads .arbos/kernel.json")
-    kernel.add_argument("--no-auto-approve", action="store_true", help="do not auto-approve the kernel's 'allow ...' asks")
+    kernel.add_argument("--auto-approve", action="store_true",
+                        help="answer the gateway's OWN kernel's 'allow ...' asks with allow, unasked. Off by default: "
+                             "approvals are spoken to the caller and answered by voice or a question card; an "
+                             "unanswered one is denied after --approval-timeout. Never applies to a hub attach")
+    kernel.add_argument("--no-auto-approve", action="store_true", help=argparse.SUPPRESS)  # old spelling of the default
+    kernel.add_argument("--approval-timeout", type=float, default=float(os.environ.get("VOICE_APPROVAL_TIMEOUT", "45")),
+                        help="seconds an approval waits for the caller before it is denied with a spoken note")
     kernel.add_argument("--hub", default=os.environ.get("VOICE_HUB_URL"),
                         help="arbos-hub URL (ws[s]://host). A call whose session.start.project names <machine>/<project> "
                              "attaches to that kernel through the hub instead of the gateway's own kernel")
@@ -152,7 +158,8 @@ async def serve_forever(args: argparse.Namespace) -> None:
     await engines.warm_up(args.voice)
     defaults = SessionDefaults(language=args.language, voice=args.voice, speed=args.speed, reply=args.reply,
                                instructions=args.instructions, narrator_model=args.narrator_model,
-                               model_voice=args.call_model_voice, model_highlights=args.highlights == "model")
+                               model_voice=args.call_model_voice, model_highlights=args.highlights == "model",
+                               approval_timeout=args.approval_timeout)
     tuning = Tuning(
         start_threshold=args.vad_threshold,
         end_threshold=max(0.1, args.vad_threshold - 0.15),

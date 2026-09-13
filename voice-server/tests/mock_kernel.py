@@ -42,6 +42,8 @@ class Behaviour:
     reply_after_done: str = ""  # the parent's turn when the child's `done` file wakes it
     ask: str = ""  # question for the user (an `ask` frame); the answer ends the turn
     ask_options: list[str] = field(default_factory=list)
+    approval: str = ""  # "bash: rm -rf target": an allow/deny ask before the reply; the reply says what happened
+    reply_denied: str = ""  # the reply when the approval was denied (default: reply)
     tool_output_lines: int = 0  # a big tool body on the root transcript during the turn
     steer_reply: str = ""  # what the running turn says when steered
 
@@ -54,6 +56,8 @@ class MockKernel:
         self.script: list[Behaviour] = []
         self.users: list[dict] = []  # every `user` frame received
         self.answers: list[dict] = []
+        self.approvals: list[dict] = []  # every `approve` frame received
+        self._approve_seq = 0
         self.running: set[str] = set()
         self.agents: dict[str, str | None] = {"root": None}  # id -> parent
         self._clients: list[asyncio.StreamWriter] = []
@@ -175,7 +179,9 @@ class MockKernel:
             if self._answer_waiter and not self._answer_waiter.done():
                 self._answer_waiter.set_result(str(frame.get("text", "")))
         elif kind == "approve":
-            pass
+            self.approvals.append(frame)
+            if self._answer_waiter and not self._answer_waiter.done():
+                self._answer_waiter.set_result("allow" if frame.get("allow") else "deny")
         elif kind in ("read", "tail", "list"):
             self._send_to(writer, self._file(frame))
         elif kind == "history":
@@ -288,8 +294,12 @@ class MockKernel:
             self._spawn(agent, child)
         if b.ask:
             await self._ask(agent, b.ask, b.ask_options)
-        if b.reply:
-            await self._say(agent, b.reply)
+        allowed = True
+        if b.approval:
+            allowed = await self._approval(agent, b.approval)
+        reply = b.reply if allowed or not b.reply_denied else b.reply_denied
+        if reply:
+            await self._say(agent, reply)
         else:
             self._end_turn(agent)
         if child is not None:
@@ -342,6 +352,24 @@ class MockKernel:
             await asyncio.wait_for(self._answer_waiter, 60)
         except asyncio.TimeoutError:
             pass
+
+    async def _approval(self, agent: str, what: str) -> bool:
+        """The kernel's allow/deny prompt: `ask {question: "allow <tool>: <command>", options: [allow, deny],
+        id: approve-N}`; the turn waits for `approve`. Records the decision on the transcript."""
+        self._approve_seq += 1
+        ident = f"approve-{self._approve_seq}"
+        tool = what.split(":", 1)[0].strip()
+        self._append(agent, {"kind": "ask", "question": f"allow {what}", "options": ["allow", "deny"], "call_id": ident})
+        self._answer_waiter = asyncio.get_running_loop().create_future()
+        self.broadcast({"type": "ask", "agent": agent, "question": f"allow {what}", "options": ["allow", "deny"], "id": ident})
+        try:
+            verdict = await asyncio.wait_for(self._answer_waiter, 90)
+        except asyncio.TimeoutError:
+            verdict = "deny"
+        allowed = verdict == "allow"
+        seq = self._append(agent, {"kind": "approval", "call_id": ident, "tool": tool, "allowed": allowed})
+        self.broadcast({"type": "event", "agent": agent, "event": {"seq": seq, "ts": now_ms(), "kind": "approval", "call_id": ident, "tool": tool, "allowed": allowed}})
+        return allowed
 
     async def _finish_child(self, parent: str, child: Child, reply_after_done: str) -> None:
         if child.tool_output_lines:

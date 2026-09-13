@@ -46,12 +46,14 @@ def hub_attach_url(hub: str, project: str, token: str = "") -> str:
 
 
 class KernelClient:
-    def __init__(self, url: str | None = None, place: str | None = None, *, auto_approve: bool = True,
+    def __init__(self, url: str | None = None, place: str | None = None, *, auto_approve: bool = False,
                  token: str = "", name: str = ""):
         if not url and not place:
             raise ValueError("need a kernel url or place")
         self.url = url
         self.place = place
+        # Never on by default: an `allow …` ask is a person's decision. The narrator speaks it and the
+        # caller answers; `--auto-approve` opts the gateway's own kernel in, never a hub attach.
         self.auto_approve = auto_approve
         self.token = token  # bearer for a WebSocket kernel or hub attach
         self.name = name or (url or place or "kernel")

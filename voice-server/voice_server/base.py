@@ -51,6 +51,8 @@ class SessionDefaults:
     narrator_model: str | None = None
     # Highlights by the narrator model (True) or by the policy alone (False).
     model_highlights: bool = False
+    # Seconds an `allow …` ask waits for the caller before it is denied.
+    approval_timeout: float = 45.0
     # Call mode, duplex engine: how much of the speech model's own voice the caller hears.
     # `ack` = short acknowledgements right after the caller speaks; `full` = everything; `off` = none.
     model_voice: str = "off"
@@ -98,6 +100,26 @@ class BaseSession:
     async def on_start(self) -> None:
         """After session.start was applied (rate/voice/... may have changed)."""
 
+    def _ensure_asker(self) -> None:
+        """Outside call mode a kernel still asks questions and for approvals. Nobody auto-fills
+        them: a narrator that speaks only asks and approvals takes the caller's yes or no."""
+        if self.narrator is not None or self.engines.kernel is None:
+            return
+        self.narrator = Narrator(
+            self.engines.kernel,
+            speak=self.speak_narration,
+            emit=self._emit,
+            screen=self.screen,
+            device=self.device,
+            user_talking=lambda: self.user_talking,
+            arbos_talking=self.arbos_talking,
+            ack=False,
+            speak_details=False,
+            only_asks=True,
+            approval_timeout=self.defaults.approval_timeout,
+        )
+        self.narrator.start()
+
     async def on_audio(self, data: bytes) -> None: ...
 
     async def on_speak(self, text: str) -> None: ...
@@ -118,10 +140,15 @@ class BaseSession:
     # ------------------------------------------------------------------ call mode
 
     def on_user_final(self, text: str) -> None:
-        """A finished caller utterance. In call mode it goes to the main agent as a `voice` message."""
+        """A finished caller utterance. In call mode it goes to the main agent as a `voice` message;
+        outside it, only a pending approval or question takes it (as the yes/no or the answer)."""
         self.user_talking = False
-        if self.call_mode and self.narrator is not None and text.strip():
+        if not text.strip() or self.narrator is None:
+            return
+        if self.call_mode:
             self.narrator.user_said_later(text, channel=self.channel)
+        elif self.narrator.pending_ask is not None:
+            self.narrator.user_said(text, channel=self.channel)
 
     def note_interrupt(self) -> None:
         """The caller cut in (barge-in or an `interrupt` frame): the narrator drops what it was saying."""
@@ -138,8 +165,11 @@ class BaseSession:
         self._emit_for_gen(gen, P.RESPONSE_DONE)
 
     async def _start_call(self) -> None:
-        if self.narrator is not None:
+        if self.narrator is not None and not self.narrator.only_asks:
             return
+        if self.narrator is not None:
+            self.narrator.close()
+            self.narrator = None
         kernel = await self._kernel_for(self.project)
         if kernel is None:
             self._emit(P.ERROR, message="call mode needs a kernel behind the gateway; staying in plain voice mode")
@@ -168,6 +198,7 @@ class BaseSession:
             ack=self.defaults.model_voice != "full",
             speak_details=self.defaults.model_voice != "full",
             model_highlights=self.defaults.model_highlights,
+            approval_timeout=self.defaults.approval_timeout,
         )
         self.tools.narrator = self.narrator
         self.tools.schemas = CALL_TOOLS
@@ -206,6 +237,7 @@ class BaseSession:
             self.engines.kernel.listeners.append(self._mirror)
         try:
             await self.on_open()
+            self._ensure_asker()
             async for message in self.ws:
                 if isinstance(message, (bytes, bytearray)):
                     if not self.ready_sent:
@@ -301,7 +333,7 @@ class BaseSession:
 
         if kind == P.SESSION_START:
             self._apply_start(msg)
-            if self.call_mode and self.narrator is None:
+            if self.call_mode and (self.narrator is None or self.narrator.only_asks):
                 await self._start_call()
             await self.on_start()
             self._send_ready()
