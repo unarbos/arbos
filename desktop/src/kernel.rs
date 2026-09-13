@@ -1913,6 +1913,46 @@ pub fn voice_config() -> Option<crate::voice_ws::VoiceCfg> {
     })
 }
 
+/// The name a call gives the speech server for a place: `<machine>/<folder>`,
+/// the hub's way of naming a kernel (`docs/arbos-mesh-design.md`). The machine is
+/// this computer's name in `~/.config/arbos/hub.toml` (`machine = "mac"`), or the
+/// ssh alias for a remote place. Without either, the folder's name alone: the
+/// gateway then takes it for its own kernel.
+pub fn hub_project_name(place: &Place) -> String {
+    let folder = place
+        .path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let machine = match &place.host {
+        Some(alias) => Some(alias.clone()),
+        None => hub_machine_name(),
+    };
+    match machine {
+        Some(machine) if !machine.is_empty() && !folder.is_empty() => format!("{machine}/{folder}"),
+        _ => folder,
+    }
+}
+
+/// `machine = "…"` from `~/.config/arbos/hub.toml`, when this computer is on a hub.
+fn hub_machine_name() -> Option<String> {
+    let text = std::fs::read_to_string(arbos_core::host_dir().join("hub.toml")).ok()?;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim() == "machine" {
+            let v = v.trim().trim_matches('"').trim_matches('\'').to_string();
+            return (!v.is_empty()).then_some(v);
+        }
+    }
+    None
+}
+
 pub fn voice_start_place(_place: &Place) -> Result<()> {
     if crate::voice_ws::configured() {
         return crate::voice_ws::start();
