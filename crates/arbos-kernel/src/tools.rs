@@ -68,6 +68,12 @@ impl Tool for Spawn {
                 ("readonly", "If true, no writes.", false, "boolean"),
                 ("cwd", "Child cwd. Overrides isolate.", false, "string"),
                 ("isolate", "none (default) or worktree.", false, "string"),
+                (
+                    "host",
+                    "A machine name from ~/.config/arbos/machines.toml (see Machines in your prompt): the child runs there, in its own synced copy of this project, and reports back here.",
+                    false,
+                    "string",
+                ),
             ],
         )
     }
@@ -81,6 +87,22 @@ impl Tool for Spawn {
             let model = opt_str(&args, "model");
             let readonly = opt_bool(&args, "readonly").unwrap_or(false);
             let cwd = opt_str(&args, "cwd").map(PathBuf::from);
+            if let Some(host) = opt_str(&args, "host") {
+                let (id, where_) = crate::remote::spawn_remote(
+                    Arc::clone(&hooks),
+                    cx.agent.clone(),
+                    brief.to_string(),
+                    host.to_string(),
+                )
+                .await?;
+                return Ok(ToolOut {
+                    body: format!("spawned {id} {where_}: {brief}"),
+                    paths: vec![format!(".arbos/agents/{id}")],
+                    child: Some(id.to_string()),
+                    images: vec![],
+                    diff: None,
+                });
+            }
             let raw = opt_str(&args, "isolate").unwrap_or("none");
             let isolate = Isolate::parse(raw).ok_or_else(|| {
                 anyhow::anyhow!("spawn: isolate must be none or worktree, not {raw:?}")

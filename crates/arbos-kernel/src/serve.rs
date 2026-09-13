@@ -141,6 +141,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
 
     doors::spawn_telegram_if_configured(Arc::clone(&hooks));
     crate::github::spawn_poller(Arc::clone(&hooks));
+    crate::remote::RemoteHub::restore(&hooks);
 
     // A dead kernel's half-run nodes go back to pending. Then continue
     // anyone whose last turn never ended.
@@ -453,6 +454,21 @@ fn handle_frame(
             }
             if steer && sched.has_job(&agent) {
                 sched.steer(&agent, text);
+                return;
+            }
+            // A child on another machine: the words go to its kernel.
+            if load_agent(place, &arbos_core::AgentId::new(&agent))
+                .is_ok_and(|a| a.remote.is_some())
+            {
+                if let Err(e) = hooks.remotes.forward(hooks, &agent, "user", &text, steer) {
+                    let _ = append_event(
+                        &Layout::new(place, &agent).transcript(),
+                        &Event::new(EventKind::Notice {
+                            text: format!("{e:#}"),
+                            failed: true,
+                        }),
+                    );
+                }
                 return;
             }
             let mut n = arbos_core::Node::inbox(text, "user");

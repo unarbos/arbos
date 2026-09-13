@@ -79,6 +79,7 @@ dependencies = [
  "serde_json",
  "tgrep-core",
  "tokio",
+ "toml",
  "tungstenite",
  "uuid",
  "which",

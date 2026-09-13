@@ -99,6 +99,8 @@ pub struct KernelHooks {
     /// that holds a large prompt made that a multi-second stall of the
     /// serve loop (QA bug qa-003).
     plans: Mutex<HashMap<String, PlanCache>>,
+    /// Children on other machines, reached over SSH.
+    pub remotes: crate::remote::RemoteHub,
 }
 
 struct PlanCache {
@@ -127,6 +129,7 @@ impl KernelHooks {
             sent: Mutex::new(HashMap::new()),
             spawn_lock: Mutex::new(()),
             plans: Mutex::new(HashMap::new()),
+            remotes: crate::remote::RemoteHub::default(),
         })
     }
 
@@ -137,6 +140,36 @@ impl KernelHooks {
 
     pub fn kick(&self) {
         let _ = self.kick.send(());
+    }
+
+    /// The agent tree to every client, after a folder appears or changes.
+    pub fn broadcast_tree(&self) {
+        let tree = list_agents(&self.place)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| arbos_core::wire::TreeNode {
+                id: a.id.to_string(),
+                name: a.name,
+                parent: a.parent.map(|p| p.to_string()),
+                paused: a.paused,
+                model: a.model,
+                kind: "agent".into(),
+            })
+            .collect();
+        self.broadcast(Frame::Tree { tree });
+    }
+
+    /// A fresh child id from a brief, under the same caps as a local spawn.
+    pub fn remote_child_id(&self, brief: &str) -> Result<String> {
+        let _one_at_a_time = self.spawn_lock.lock().unwrap();
+        let base = slug(brief);
+        let mut id = base.clone();
+        let mut n = 1;
+        while self.place.agent_dir(&id).exists() {
+            n += 1;
+            id = format!("{}-{n}", base.chars().take(20).collect::<String>());
+        }
+        Ok(id)
     }
 
     pub fn is_running(&self, agent: &str) -> bool {
@@ -986,6 +1019,16 @@ impl KernelHooks {
         let target = self.resolve(from, to)?;
         let tid = target.id.as_str();
         self.dedupe(from, tid, text)?;
+        if let Some(remote) = &target.remote {
+            // The child lives on another machine: its kernel gets the words.
+            self.remotes
+                .forward(self, tid, from.as_str(), text, false)?;
+            return Ok(format!(
+                "Sent to {} ({tid}) on {}; its reply will arrive here as a message from it.",
+                target.name,
+                remote.split(':').next().unwrap_or(remote)
+            ));
+        }
         let label = format!("{} ({})", target.name, tid);
         // A steer into a live turn is appended by that turn when it takes
         // it, so the line sits at the boundary where the model read it.

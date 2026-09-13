@@ -44,8 +44,12 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
     };
     let agents_md = first_agents_md(place);
     let git = crate::tools::git_guard::GitRules::load(place.path()).prompt_line();
+    let machines = arbos_core::Machines::load()
+        .ok()
+        .and_then(|m| m.roster())
+        .unwrap_or_default();
     format!(
-        "You: {id}\nName: {name}\nParent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nProject: {project}\nCwd: {cwd}\nFocus: {focus}\nSkills (read SKILL.md for the body): {skills}\n{git}\n{agents}",
+        "You: {id}\nName: {name}\nParent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nProject: {project}\nCwd: {cwd}\nFocus: {focus}\nSkills (read SKILL.md for the body): {skills}\n{git}\n{machines}\n{agents}",
         id = agent.id,
         name = agent.name,
         parent = agent.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),

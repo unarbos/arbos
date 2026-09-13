@@ -63,6 +63,9 @@ pub struct Agent {
     pub allowlist: Vec<String>,
     pub readonly: bool,
     pub cwd: Option<PathBuf>,
+    /// `machine:path` when this agent is a stand-in for a kernel on another
+    /// machine: its turns run there; this folder mirrors them.
+    pub remote: Option<String>,
 }
 
 impl Agent {
@@ -77,6 +80,7 @@ impl Agent {
             allowlist: ALL_TOOLS.iter().map(|s| (*s).to_string()).collect(),
             readonly: false,
             cwd: None,
+            remote: None,
         }
     }
 
@@ -111,8 +115,9 @@ impl Agent {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
+        let remote = self.remote.clone().unwrap_or_default();
         format!(
-            "name: {}\ntitle: {}\nparent: {}\npaused: {}\nmodel: {}\nallowlist: {}\nreadonly: {}\ncwd: {}\n",
+            "name: {}\ntitle: {}\nparent: {}\npaused: {}\nmodel: {}\nallowlist: {}\nreadonly: {}\ncwd: {}\nremote: {}\n",
             self.name,
             self.title,
             parent,
@@ -120,7 +125,8 @@ impl Agent {
             self.model,
             self.allowlist.join(", "),
             self.readonly,
-            cwd
+            cwd,
+            remote
         )
     }
 
@@ -165,6 +171,9 @@ impl Agent {
                     } else {
                         Some(PathBuf::from(value))
                     }
+                }
+                "remote" => {
+                    agent.remote = (!value.is_empty()).then(|| value.to_string());
                 }
                 _ => {}
             }
