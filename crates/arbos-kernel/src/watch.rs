@@ -5,8 +5,10 @@
 //! remote reads.
 //!
 //! No inotify: the kernel already walks its agents every tick; once a
-//! second it stats a fixed, small set of files per agent and the place's
-//! own, and reports size changes and appearances/disappearances. A file
+//! second it stats a fixed, small set of files per agent (its `agent.md`,
+//! `notes.md` checklist, transcript) and the place's own (the project
+//! store's `notes.md` page and context file among them), and reports size
+//! changes and appearances/disappearances. A file
 //! that changes and changes back within a second is missed; that is fine
 //! for a view. Nothing is sent when nobody is attached.
 
@@ -19,8 +21,7 @@ use arbos_core::{Place, list_agents};
 /// Per agent, relative to `agents/<id>/`.
 const AGENT_FILES: &[&str] = &[
     "agent.md",
-    "plan.jsonl",
-    "plan.md",
+    "notes.md",
     "transcript.jsonl",
     "feedback.jsonl",
     "checkpoints.jsonl",
