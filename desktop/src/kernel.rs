@@ -8,6 +8,7 @@
 
 use crate::model::{place::Place, session, settings};
 use anyhow::{Context, Result, anyhow};
+use arbos_core::host::{Host, HostConfig, KeySource, ProviderKind, attribution_headers};
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
@@ -405,7 +406,7 @@ fn fetch_gateway_models(base: &str) -> ModelsCatalog {
 /// A `:variant` tail (OpenRouter's `:batch`, `:free`) stays on the label as
 /// a parenthesised tag, so `claude-fable-5.1` and `claude-fable-5.1:batch`
 /// read as two rows instead of two "Fable 5.1".
-fn model_display_name(id: &str) -> String {
+pub fn model_display_name(id: &str) -> String {
     let id = id.trim();
     if id.is_empty() {
         return String::new();
@@ -497,7 +498,8 @@ fn align_current(current: String, models: &[ModelOption]) -> String {
     current
 }
 
-/// Catalog the rust kernel's `api_base` will accept (`~/.config/arbos/config.toml`).
+/// Catalog the rust kernel's provider will accept, read the way the kernel
+/// reads it (`arbos_core::Host`: provider, base, key, model).
 fn fetch_host_models() -> Option<ModelsCatalog> {
     let (base, key, current) = turn_host_auth()?;
     let url = format!("{}/models", base.trim_end_matches('/'));
@@ -508,6 +510,9 @@ fn fetch_host_models() -> Option<ModelsCatalog> {
     let mut req = client.get(&url);
     if !key.is_empty() {
         req = req.header("Authorization", &format!("Bearer {key}"));
+    }
+    for (name, value) in attribution_headers(ProviderKind::infer(&base)) {
+        req = req.header(*name, *value);
     }
     let Ok(mut resp) = req.call() else {
         return None;
@@ -539,57 +544,119 @@ fn fetch_host_models() -> Option<ModelsCatalog> {
     })
 }
 
+/// `(base, key, model)` for the turn host, or None when there is no key —
+/// then there is no catalog to fetch and the gateway list is the fallback.
 fn turn_host_auth() -> Option<(String, String, String)> {
-    let path = host_config_path();
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut base = String::new();
-    let mut key = String::new();
-    let mut model = String::new();
-    let mut key_env = String::from("OPENROUTER_API_KEY");
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        let v = v.trim().trim_matches('"').trim_matches('\'');
-        match k.trim() {
-            "api_base" => base = v.to_string(),
-            "api_key" => key = v.to_string(),
-            "api_key_env" => key_env = v.to_string(),
-            "model" => model = v.to_string(),
-            _ => {}
-        }
-    }
-    if base.is_empty() {
-        base = "https://openrouter.ai/api/v1".into();
-    }
-    if key.is_empty() {
-        key = std::env::var(&key_env)
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("OPENROUTER_API_KEY")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            })?;
-    }
-    Some((base, key, model))
+    let host = Host::peek().ok()?;
+    let key = host.api_key()?;
+    let base = host.config.api_base().ok()?;
+    Some((base, key, host.config.model()))
 }
 
-fn host_config_path() -> PathBuf {
-    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(base).join("arbos").join("config.toml");
+/// What the Model settings section shows: the provider, where the key is,
+/// and the model turns use when a chat says `inherit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSummary {
+    pub provider: ProviderKind,
+    pub base: String,
+    pub model: String,
+    pub key: KeySource,
+    pub config_path: PathBuf,
+    /// A malformed config.toml, verbatim, so the user can fix it.
+    pub error: Option<String>,
+}
+
+pub fn host_summary() -> HostSummary {
+    match Host::peek() {
+        Ok(host) => HostSummary {
+            provider: host.config.provider(),
+            base: host
+                .config
+                .api_base()
+                .unwrap_or_else(|e| format!("({e:#})")),
+            model: host.config.model(),
+            key: host.key_source(),
+            config_path: host.config_path(),
+            error: None,
+        },
+        Err(e) => {
+            let dir = arbos_core::host::dirs_config();
+            let cfg = HostConfig::default();
+            HostSummary {
+                provider: cfg.provider(),
+                base: cfg.api_base().unwrap_or_default(),
+                model: cfg.model(),
+                key: KeySource::Missing(cfg.key_env()),
+                config_path: dir.join("config.toml"),
+                error: Some(format!("{e:#}")),
+            }
+        }
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".config")
-            .join("arbos")
-            .join("config.toml");
+}
+
+/// Save the provider choice into config.toml. A change resets the base,
+/// key variable, and model to that provider's defaults, as setup does.
+pub fn save_host_provider(provider: ProviderKind) -> Result<HostSummary> {
+    let mut host = Host::peek()?;
+    if host.config.provider() != provider {
+        host.config.set_provider(provider);
     }
-    PathBuf::from(".arbos-host").join("config.toml")
+    host.config.provider = Some(provider);
+    host.save()?;
+    Ok(host_summary())
+}
+
+/// Is `key` accepted by the configured provider? Blocking; run it off the
+/// main thread. The same check `arbos-kernel setup` makes: OpenRouter's
+/// `/key` (its `/models` is public), `/models` elsewhere.
+pub fn check_host_key(key: &str) -> Result<()> {
+    let host = Host::peek()?;
+    let base = host.config.api_base()?;
+    let path = match ProviderKind::infer(&base) {
+        ProviderKind::OpenRouter => "/key",
+        ProviderKind::OpenAi | ProviderKind::Custom => "/models",
+    };
+    let client: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(20)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut req = client
+        .get(&format!("{base}{path}"))
+        .header("Authorization", &format!("Bearer {}", key.trim()));
+    for (name, value) in attribution_headers(ProviderKind::infer(&base)) {
+        req = req.header(*name, *value);
+    }
+    let resp = req.call().with_context(|| format!("reach {base}"))?;
+    let status = resp.status().as_u16();
+    if (200..300).contains(&status) {
+        return Ok(());
+    }
+    Err(anyhow!(match status {
+        401 => "the key was rejected".to_string(),
+        402 => "the account has no credit".to_string(),
+        403 => "the key is not allowed here".to_string(),
+        other => format!("{base} answered {other}"),
+    }))
+}
+
+/// Save a pasted key into config.toml the way `arbos-kernel setup` does:
+/// owner-readable file, key never echoed. An empty key clears the saved
+/// one so the environment variable is read again.
+pub fn save_host_key(key: &str) -> Result<HostSummary> {
+    let mut host = Host::peek()?;
+    let key = key.trim();
+    host.config.api_key = (!key.is_empty()).then(|| key.to_string());
+    host.save()?;
+    Ok(host_summary())
+}
+
+/// Set the model turns use by default. Empty = the provider's default.
+pub fn save_host_model(model: &str) -> Result<HostSummary> {
+    let mut host = Host::peek()?;
+    host.config.model = model.trim().to_string();
+    host.save()?;
+    Ok(host_summary())
 }
 
 fn picker_error(raw: Option<&str>) -> String {

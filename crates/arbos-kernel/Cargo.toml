@@ -22,6 +22,8 @@ tokio.workspace = true
 tgrep-core = { path = "../../vendor/tgrep/tgrep-core" }
 regex = "1"
 glob = "0.3"
+# `arbos-kernel setup` reads the API key with echo off.
+rpassword = "7"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 uuid = { version = "1", features = ["v4"] }
 which = "7"

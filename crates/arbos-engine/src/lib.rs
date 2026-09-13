@@ -20,9 +20,11 @@ mod turn;
 
 pub use access::{Access, Resource};
 pub use control::TurnControl;
-pub use host::{Host, HostConfig};
+pub use host::{Host, HostConfig, KeySource, ProviderKind};
 pub use jobs::{JOB_TTL, JOURNAL_WINDOW, Job, JobsRoot, Meta as JobMeta, Status as JobStatus};
-pub use provider::{Interrupted, Provider, ProviderError, warm};
+pub use provider::{
+    ChatMessage, Interrupted, Provider, ProviderError, check_key, list_model_ids, warm,
+};
 pub use tool::{
     BoxFuture, Param, Plan, PlanCx, Registry, RunCx, Tool, ToolOut, opt_bool, opt_strings,
     simple_schema, typed_schema,
