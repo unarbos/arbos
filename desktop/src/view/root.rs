@@ -52,6 +52,7 @@ actions!(
         OpenSettings,
         TogglePanel,
         ShowChat,
+        ShowProject,
         CommitName,
         DismissName,
         DismissMenu,
@@ -224,6 +225,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-c", StartCall, None),
         KeyBinding::new("cmd-shift-m", ToggleMute, None),
         KeyBinding::new("cmd-1", ShowChat, None),
+        // Cursor's Project tab sits beside the chat; ⌘2 is the next slot.
+        KeyBinding::new("cmd-2", ShowProject, None),
         // What a browser binds its zoom to. `cmd-=` first so the menu
         // draws ⌘= like Safari; `cmd-+` is the same key with shift held.
         KeyBinding::new("cmd-=", ZoomIn, None),
@@ -451,6 +454,9 @@ pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHand
 pub enum Pane {
     Chat,
     Surface,
+    /// The project page: the status page, the store's files, the context
+    /// document — Cursor's Project tab, full width in the column.
+    Project,
 }
 
 /// One step from `at` through `len` entries. Past either end is
@@ -1070,6 +1076,16 @@ impl Arbos {
         self.close_project(ix, cx);
     }
 
+    /// ⌘2 and the panel's Project header: the project page in the column.
+    pub(crate) fn show_project(
+        &mut self,
+        _: &ShowProject,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_pane(Pane::Project, cx);
+    }
+
     pub(crate) fn show_chat(&mut self, _: &ShowChat, _: &mut Window, cx: &mut Context<Self>) {
         self.workspace.update(cx, |workspace, _| {
             if let Some(project) = workspace.active_project_mut() {
@@ -1596,7 +1612,7 @@ impl Arbos {
         if self.has_pane(self.pane, cx) {
             return Some(self.pane);
         }
-        [Pane::Chat, Pane::Surface]
+        [Pane::Chat, Pane::Surface, Pane::Project]
             .into_iter()
             .find(|&pane| self.has_pane(pane, cx))
     }
@@ -1613,6 +1629,8 @@ impl Arbos {
                         .is_some_and(|focus| focus.surface.is_none())
             }
             Pane::Surface => workspace.active_surface().is_some(),
+            // Every open project has a page, written or not.
+            Pane::Project => workspace.active_project().is_some(),
         }
     }
 

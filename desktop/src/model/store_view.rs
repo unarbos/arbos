@@ -10,7 +10,10 @@
 //! the way Cursor's Projects page does: the label is the link, the
 //! readout sits dim under it.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 /// The status page, in the order it is looked for.
 const NOTES: &[&str] = &["notes.md", "NOTES.md", "Notes.md"];
@@ -115,11 +118,51 @@ pub struct Standing {
     pub paused: bool,
 }
 
+/// What a store file is, for its glyph and its viewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Markdown,
+    Image,
+    Other,
+}
+
+/// One file of the store the page lists: a document under `docs/`, a
+/// picture or clip under `media/`, the archive. Cursor's Projects page
+/// lists the shared context this way, each one a click from view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreFile {
+    pub path: PathBuf,
+    /// The file's name, without the folder.
+    pub name: String,
+    /// Where it sits under `.arbos/`: `docs`, `media/shots`, or empty.
+    pub folder: String,
+    pub kind: FileKind,
+    pub modified: Option<SystemTime>,
+    /// `docs/project-context.md`: first in every list, whatever its age.
+    pub pinned: bool,
+}
+
+/// How many files the store view keeps. The page shows them all; the
+/// panel shows the first few and says how many more.
+const FILES_CAP: usize = 80;
+
+/// Folders whose files the page lists, and how deep it looks in each.
+const FILE_FOLDERS: &[(&str, usize)] = &[("docs", 2), ("media", 2)];
+
+/// Loose files of the store the page lists beside those folders.
+const LOOSE_FILES: &[&str] = &["archived.md"];
+
 /// A project's `.arbos/`, as much of it as the panel draws.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StoreView {
     /// The context document, when one has been written.
     pub context: Option<PathBuf>,
+    /// Its text, for the page's Context section. Small by the protocol's
+    /// own rule; a file over the cap is cut with a note.
+    pub context_text: Option<String>,
+    /// `docs/`, `media/` and the loose files, the context document first,
+    /// then newest first.
+    pub files: Vec<StoreFile>,
     /// The status page, when one exists (even if still the template).
     pub page: Option<ProjectPage>,
     /// Every agent's subscriptions, root's first, then by agent and id.
@@ -154,13 +197,123 @@ impl StoreView {
             })
             .collect();
         let (standing, standing_known) = read_standing(&store);
+        let context_text = context.as_deref().and_then(read_context);
+        let files = read_files(&store, context.as_deref());
         Self {
             context,
+            context_text,
+            files,
             page,
             standing,
             standing_known,
             resources,
         }
+    }
+}
+
+/// The context document as the page renders it: front matter and the
+/// title line gone (the page's own heading says "Context"), cut at the
+/// size the kernel's prompt cap uses so a runaway file cannot stall a
+/// frame. `None` while the file is still the untouched template — every
+/// line a heading, a bare bullet, or a `(hint)`.
+fn read_context(path: &Path) -> Option<String> {
+    const CAP: usize = 16_000;
+    let text = std::fs::read_to_string(path).ok()?;
+    let body = strip_front_matter(&text);
+    let body = body
+        .trim_start()
+        .strip_prefix('#')
+        .filter(|rest| !rest.starts_with('#'))
+        .and_then(|rest| rest.split_once('\n'))
+        .map(|(_, rest)| rest)
+        .unwrap_or(body)
+        .trim_start_matches('\n');
+    let written = body.lines().map(str::trim).any(|line| {
+        !(line.is_empty()
+            || line.starts_with('#')
+            || matches!(line, "-" | "*" | "+" | "- [ ]")
+            || (line.starts_with('(') && line.ends_with(')')))
+    });
+    if !written {
+        return None;
+    }
+    if body.chars().count() <= CAP {
+        return Some(body.to_string());
+    }
+    let head: String = body.chars().take(CAP).collect();
+    Some(format!("{head}\n\n*… cut at {CAP} characters.*"))
+}
+
+/// The files the page lists: `docs/` and `media/` (two levels), the loose
+/// files, the context document pinned first, the rest newest first.
+fn read_files(store: &Path, context: Option<&Path>) -> Vec<StoreFile> {
+    let mut files = Vec::new();
+    for (folder, depth) in FILE_FOLDERS {
+        walk(&store.join(folder), folder, *depth, &mut files);
+    }
+    for name in LOOSE_FILES {
+        let path = store.join(name);
+        if path.is_file() {
+            files.push(store_file(path, String::new()));
+        }
+    }
+    for file in &mut files {
+        file.pinned = context.is_some_and(|context| context == file.path);
+    }
+    files.sort_by(|a, b| {
+        b.pinned
+            .cmp(&a.pinned)
+            .then_with(|| b.modified.cmp(&a.modified))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    files.truncate(FILES_CAP);
+    files
+}
+
+fn walk(dir: &Path, folder: &str, depth: usize, out: &mut Vec<StoreFile>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            if depth > 1 {
+                walk(&path, &format!("{folder}/{name}"), depth - 1, out);
+            }
+        } else if path.is_file() {
+            out.push(store_file(path, folder.to_string()));
+        }
+    }
+}
+
+fn store_file(path: PathBuf, folder: String) -> StoreFile {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let kind = match ext.as_str() {
+        "md" | "markdown" | "txt" => FileKind::Markdown,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" => FileKind::Image,
+        _ => FileKind::Other,
+    };
+    let modified = std::fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .ok();
+    StoreFile {
+        path,
+        name,
+        folder,
+        kind,
+        modified,
+        pinned: false,
     }
 }
 

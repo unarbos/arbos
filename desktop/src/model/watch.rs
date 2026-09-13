@@ -143,7 +143,8 @@ fn ours(dir: &Path, path: &Path) -> bool {
     };
     let head = head.as_os_str().to_string_lossy();
     match head.as_ref() {
-        "skills" | "prompts" | "hooks" | "archive" | "project.toml" | "docs" | "archived.md" => {
+        "skills" | "prompts" | "hooks" | "archive" | "project.toml" | "docs" | "media"
+        | "archived.md" => {
             true
         }
         // The project page and the old goals file the panel shows,

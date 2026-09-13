@@ -1118,6 +1118,7 @@ fn pane_name(pane: Option<Pane>) -> Value {
     match pane {
         Some(Pane::Chat) => json!("chat"),
         Some(Pane::Surface) => json!("surface"),
+        Some(Pane::Project) => json!("project"),
         None => Value::Null,
     }
 }
