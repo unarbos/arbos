@@ -18,7 +18,7 @@ use crate::{
     doors,
     grep::PlaceGrep,
     hooks::KernelHooks,
-    plan,
+    klog, plan,
     pty::PtyHub,
     sched::Scheduler,
     tools,
@@ -28,6 +28,10 @@ use crate::{
 struct KernelJson {
     url: String,
     pid: u32,
+    started: i64,
+    version: String,
+    git_sha: String,
+    log: String,
 }
 
 pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
@@ -37,6 +41,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
     );
     let _lock = PlaceLock::acquire(&place)?;
     bootstrap(&place)?;
+    klog::init(klog::log_path_for(&place.arbos()));
     let host = Host::load()?;
     host.remember_place(place.path());
     match (host.api_key(), host.config.api_base()) {
@@ -59,6 +64,17 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
         .context("bind attach")?;
     let addr = listener.local_addr()?;
     write_kernel_json(&place, addr)?;
+    klog::info(
+        "kernel_start",
+        None,
+        format!(
+            "pid={} version={} git={} place={} url=tcp://{addr}",
+            std::process::id(),
+            klog::version(),
+            klog::git_sha(),
+            place.path.display()
+        ),
+    );
 
     let (wake_tx, mut wake_rx) = mpsc::unbounded_channel::<Wake>();
     let (kick_tx, mut kick_rx) = mpsc::unbounded_channel::<()>();
@@ -87,20 +103,24 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
         let server = Arc::new(server);
         match server.tools() {
             Ok(specs) => {
-                eprintln!(
-                    "mcp: {} offers {}",
-                    server.cmd,
-                    specs
-                        .iter()
-                        .map(|s| s.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                klog::info(
+                    "mcp",
+                    None,
+                    format!(
+                        "{} offers {}",
+                        server.cmd,
+                        specs
+                            .iter()
+                            .map(|s| s.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
                 );
                 for spec in specs {
                     registry = registry.with(tools::McpTool::new(Arc::clone(&server), spec));
                 }
             }
-            Err(err) => eprintln!("mcp: {err:#}"),
+            Err(err) => klog::error("mcp", None, format!("{err:#}")),
         }
     }
     let registry = Arc::new(registry);
@@ -140,10 +160,16 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
             for agent in list_agents(&accept_place).unwrap_or_default() {
                 let _ = out_tx.send(accept_hooks.plan_frame(agent.id.as_str()));
             }
+            klog::info(
+                "attach_open",
+                None,
+                format!("clients={}", accept_hooks.frames.lock().unwrap().len()),
+            );
             tokio::spawn(attach::write_loop(w, out_rx));
             let tx = accept_frames.clone();
             tokio::spawn(async move {
-                let _ = attach::read_loop(r, tx).await;
+                let _ = attach::read_loop(r, tx, out_tx).await;
+                klog::info("attach_close", None, "");
             });
         }
     });
@@ -315,11 +341,13 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
             }
             _ = sigint.recv() => {
                 println!("arbos-kernel stopping");
+                klog::info("kernel_stop", None, "signal");
                 stop_turns(&sched, &hooks, &clock, &mut done_rx).await;
                 break;
             }
             _ = sigterm.recv() => {
                 println!("arbos-kernel stopping");
+                klog::info("kernel_stop", None, "signal");
                 stop_turns(&sched, &hooks, &clock, &mut done_rx).await;
                 break;
             }
@@ -364,6 +392,16 @@ async fn stop_turns(
     }
 }
 
+/// A client asked for something the kernel will not do. Say so on the log
+/// and to every attached client; stderr alone reached nobody.
+fn refuse(hooks: &KernelHooks, agent: Option<&str>, detail: String) {
+    klog::warn("frame_rejected", agent, &detail);
+    hooks.broadcast(Frame::Error {
+        agent: agent.map(str::to_string),
+        detail,
+    });
+}
+
 fn handle_frame(
     place: &Place,
     frame: Frame,
@@ -389,7 +427,7 @@ fn handle_frame(
             let mut n = arbos_core::Node::inbox(text, "user");
             n.attachments = attachments;
             if let Err(e) = hooks.inbox(&agent, n) {
-                eprintln!("inbox {agent}: {e:#}");
+                refuse(hooks, Some(&agent), format!("inbox: {e:#}"));
             }
         }
         Frame::PlanOp {
@@ -399,7 +437,7 @@ fn handle_frame(
             text,
         } => {
             if let Err(e) = hooks.plan_op(&agent, node, &op, &text) {
-                eprintln!("plan op {op} {agent}#{node}: {e:#}");
+                refuse(hooks, Some(&agent), format!("plan op {op} #{node}: {e:#}"));
             }
         }
         Frame::Pause { agent, paused } => {
@@ -418,7 +456,7 @@ fn handle_frame(
             // Only an existing agent folder of this place. Anything else is
             // an attach client writing where it should not.
             if let Err(e) = write_focus(place, &path) {
-                eprintln!("focus: {e:#}");
+                refuse(hooks, None, format!("{e:#}"));
             }
         }
         Frame::Stop { agent } => {
@@ -562,6 +600,10 @@ fn write_kernel_json(place: &Place, addr: SocketAddr) -> Result<()> {
     let info = KernelJson {
         url: format!("tcp://{addr}"),
         pid: std::process::id(),
+        started: arbos_core::now_ms(),
+        version: klog::version().into(),
+        git_sha: klog::git_sha().into(),
+        log: klog::log_path_for(&place.arbos()).display().to_string(),
     };
     std::fs::write(place.kernel_json(), serde_json::to_string_pretty(&info)?)?;
     Ok(())

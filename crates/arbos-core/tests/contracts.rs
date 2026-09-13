@@ -154,6 +154,13 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
             },
             "set_model",
         ),
+        (
+            Frame::Error {
+                agent: Some("root".into()),
+                detail: "no agent nobody".into(),
+            },
+            "error",
+        ),
         (Frame::VoiceStart, "voice_start"),
         (Frame::VoiceStop, "voice_stop"),
         (Frame::Refresh, "refresh"),

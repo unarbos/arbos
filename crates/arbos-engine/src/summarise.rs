@@ -113,6 +113,7 @@ pub async fn run(
         },
         // Checkpointing is template extraction, not problem solving.
         reasoning_effort: None,
+        trace_purpose: "compact".into(),
         ..provider.clone()
     };
     let max_chars = (policy.summary_window.saturating_sub(policy.reserve) as usize)

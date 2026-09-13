@@ -20,15 +20,32 @@ pub async fn write_loop(mut w: OwnedWriteHalf, mut rx: mpsc::UnboundedReceiver<F
     }
 }
 
-pub async fn read_loop(r: OwnedReadHalf, tx: mpsc::UnboundedSender<Frame>) -> Result<()> {
+/// Frames from one client. A line that is not a frame is answered with an
+/// `error` frame on the same connection and logged; it used to vanish.
+pub async fn read_loop(
+    r: OwnedReadHalf,
+    tx: mpsc::UnboundedSender<Frame>,
+    out: mpsc::UnboundedSender<Frame>,
+) -> Result<()> {
     let mut lines = BufReader::new(r).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(frame) = serde_json::from_str::<Frame>(&line) {
-            if tx.send(frame).is_err() {
-                break;
+        match serde_json::from_str::<Frame>(&line) {
+            Ok(frame) => {
+                if tx.send(frame).is_err() {
+                    break;
+                }
+            }
+            Err(e) => {
+                let head: String = line.chars().take(80).collect();
+                let detail = format!("not a frame: {e} — {head:?}");
+                crate::klog::warn("frame_rejected", None, &detail);
+                let _ = out.send(Frame::Error {
+                    agent: None,
+                    detail,
+                });
             }
         }
     }

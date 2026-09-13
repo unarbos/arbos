@@ -199,6 +199,9 @@ pub fn run(args: Args) -> Result<()> {
         // Reasoning models spend tokens thinking before the word.
         max_tokens: Some(512),
         trace: None,
+        trace_agent: "setup".into(),
+        trace_purpose: "setup".into(),
+        trace_line: 0,
     };
     let messages = [ChatMessage::plain(
         "user",

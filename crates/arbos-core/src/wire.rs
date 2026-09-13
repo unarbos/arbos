@@ -85,6 +85,13 @@ pub enum Frame {
     VoiceStart,
     VoiceStop,
     Refresh,
+    /// The kernel refused or failed something a client sent. `agent` when
+    /// the frame named one. Clients that do not know it may ignore it.
+    Error {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        detail: String,
+    },
     /// One agent's plan, whole, whenever it changes.
     Plan {
         agent: String,
