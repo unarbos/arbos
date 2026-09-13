@@ -68,6 +68,7 @@ dependencies = [
  "arbos-engine",
  "base64",
  "glob",
+ "libc",
  "portable-pty",
  "regex",
  "reqwest",
