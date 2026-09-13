@@ -85,9 +85,17 @@ struct SurfaceLine {
     glyph: &'static str,
 }
 
+/// Who holds a standing obligation: an attached chat (by its id here), or
+/// an agent known only by its kernel id (read off `subscriptions/`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Holder {
+    Session(u64),
+    Kernel(String),
+}
+
 /// A standing obligation one of the agents holds: `every 1h · next 15:04`.
 struct StandingLine {
-    agent: u64,
+    agent: Holder,
     goal: String,
     when: String,
 }
@@ -176,20 +184,39 @@ impl Arbos {
             .filter(|surface| matches!(surface.kind, SurfaceKind::Browser | SurfaceKind::Panel))
             .map(|surface| line_of(surface))
             .collect();
-        let standing: Vec<StandingLine> = project
-            .sessions
-            .iter()
-            .filter(|chat| !chat.closed)
-            .flat_map(|chat| {
-                chat.plan_open()
-                    .filter(|node| node.standing)
-                    .map(move |node| StandingLine {
-                        agent: chat.id,
-                        goal: node.goal.clone(),
-                        when: node.when.clone(),
-                    })
-            })
-            .collect();
+        // Standing work: the `subscriptions/` files when the store has
+        // them (the Cursor-model kernel); else what attached chats report
+        // in their plan (an older kernel, or a remote place).
+        let standing: Vec<StandingLine> = if store.standing.is_empty() {
+            project
+                .sessions
+                .iter()
+                .filter(|chat| !chat.closed)
+                .flat_map(|chat| {
+                    chat.plan_open()
+                        .filter(|node| node.standing)
+                        .map(move |node| StandingLine {
+                            agent: Holder::Session(chat.id),
+                            goal: node.goal.clone(),
+                            when: node.when.clone(),
+                        })
+                })
+                .collect()
+        } else {
+            store
+                .standing
+                .iter()
+                .map(|sub| StandingLine {
+                    agent: Holder::Kernel(sub.agent.clone()),
+                    goal: if sub.paused {
+                        format!("{} (paused)", sub.label)
+                    } else {
+                        sub.label.clone()
+                    },
+                    when: sub.when.clone(),
+                })
+                .collect()
+        };
 
         let call_btn = self.call_button(&theme, cx);
         let mut body = div()
@@ -212,18 +239,13 @@ impl Arbos {
                     .into_iter()
                     .map(|line| self.agent_row(line, focused, &theme, cx)),
             );
-        if !processes.is_empty() || !standing.is_empty() {
+        if !processes.is_empty() {
             body = body
                 .child(section_head("Processes", None, &theme))
                 .children(
                     processes
                         .into_iter()
                         .map(|line| self.surface_row(line, focused_surface, &theme, cx)),
-                )
-                .children(
-                    standing
-                        .into_iter()
-                        .map(|line| self.standing_row(line, &theme, cx)),
                 );
         }
         if !resources.is_empty() || !store.resources.is_empty() {
@@ -245,6 +267,16 @@ impl Arbos {
                     .map(|path| self.project_context_row(path, &theme, cx)),
             )
             .child(self.project_page(store.page.as_ref(), remote, &theme, cx));
+        if !standing.is_empty() {
+            body = body
+                .child(page_heading(2, "Standing", true, &theme))
+                .children(
+                    standing
+                        .into_iter()
+                        .enumerate()
+                        .map(|(n, line)| self.standing_row(n as u64, line, &theme, cx)),
+                );
+        }
 
         Some(
             div()
@@ -495,12 +527,13 @@ impl Arbos {
     /// opens the agent that holds it.
     fn standing_row(
         &self,
+        n: u64,
         line: StandingLine,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let agent = line.agent;
-        row(("panel-standing", agent), 0, false, theme)
+        let holder = line.agent;
+        row(("panel-standing", n), 0, false, theme)
             .child(glyph_box(
                 icons::icon(icons::media::REPEAT)
                     .size(px(12.))
@@ -524,8 +557,29 @@ impl Arbos {
                         .child(SharedString::from(line.when)),
                 )
             })
-            .on_click(cx.listener(move |this, _, _, cx| this.select_session(agent, cx)))
+            .on_click(cx.listener(move |this, _, _, cx| match &holder {
+                Holder::Session(id) => this.select_session(*id, cx),
+                Holder::Kernel(kernel_id) => this.open_worker(kernel_id.clone(), cx),
+            }))
             .into_any_element()
+    }
+
+    /// The chat of the agent with this kernel id: the main chat for root,
+    /// else the worker's own (adopted under the main chat if it was not
+    /// yet shown).
+    fn open_worker(&mut self, kernel_id: String, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |workspace, cx| {
+            let Some(main) = workspace.active_project().and_then(|p| p.main_session()) else {
+                return;
+            };
+            if kernel_id == "root" {
+                workspace.select_session(main, cx);
+                return;
+            }
+            if let Some(id) = workspace.ensure_child_agent(main, kernel_id, cx) {
+                workspace.select_session(id, cx);
+            }
+        });
     }
 
     /// The context document (`docs/project-context.md`): goals,
@@ -720,18 +774,7 @@ impl Arbos {
                 });
             }
             Target::Url(url) => cx.open_url(url),
-            Target::Worker(kernel_id) => {
-                let kernel_id = kernel_id.clone();
-                self.workspace.update(cx, |workspace, cx| {
-                    let Some(main) = workspace.active_project().and_then(|p| p.main_session())
-                    else {
-                        return;
-                    };
-                    if let Some(id) = workspace.ensure_child_agent(main, kernel_id, cx) {
-                        workspace.select_session(id, cx);
-                    }
-                });
-            }
+            Target::Worker(kernel_id) => self.open_worker(kernel_id.clone(), cx),
             Target::File(path) => self.open_store_file(path.clone(), label, cx),
         }
     }
