@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main, rust, "release/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  kernel:
+    name: kernel (build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: kernel
+      - name: System packages
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq pkg-config libssl-dev
+      - name: Build
+        run: cargo build --workspace --locked
+      - name: Test
+        # Tests run on the replay provider. No model key is set, so nothing
+        # here reaches the network.
+        env:
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+        run: cargo test --workspace --locked
+
+  desktop:
+    name: desktop (build, Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop
+          workspaces: desktop
+      - name: System packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pkg-config clang cmake libssl-dev libasound2-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libx11-xcb-dev \
+            libxcb1-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev libgl1-mesa-dev \
+            libegl1-mesa-dev libudev-dev libdbus-1-dev
+      - name: Build
+        working-directory: desktop
+        run: cargo build --locked

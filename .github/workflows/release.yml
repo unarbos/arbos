@@ -1,0 +1,60 @@
+name: release
+
+# Builds the Linux kernel binary and attaches it to the GitHub release for
+# the tag. The macOS DMG is built and uploaded by a Mac worker
+# (`cd desktop && make dmg`), not here.
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#   gh workflow run release -f tag=v0.2.0
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and attach to (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  linux-kernel:
+    name: arbos-kernel (Linux x86_64)
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-kernel
+      - name: System packages
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq pkg-config libssl-dev
+      - name: Build
+        run: cargo build --release --locked -p arbos-kernel -p arbos-hub
+      - name: Package
+        run: |
+          set -euo pipefail
+          out="arbos-kernel-${TAG}-linux-x86_64"
+          mkdir -p "dist/$out"
+          cp target/release/arbos-kernel target/release/arbos-hub LICENSE "dist/$out/"
+          tar -C dist -czf "dist/$out.tar.gz" "$out"
+          (cd dist && sha256sum "$out.tar.gz" > "$out.tar.gz.sha256")
+      - name: Attach to the release
+        # The release for the tag may already exist as a draft with
+        # hand-written notes; upload into it. Otherwise create a draft.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
+          else
+            gh release create "$TAG" --draft --title "$TAG" --generate-notes dist/*.tar.gz dist/*.sha256
+          fi
