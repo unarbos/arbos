@@ -161,6 +161,17 @@ impl Tool for GrepTool {
                     !p.starts_with(&wt) && !h.path.starts_with(&wt_abs)
                 });
             }
+            // The kernel's own state is not the project. A transcript holds
+            // every earlier tool result, so a grep that reaches into
+            // `.arbos/agents/*/transcript.jsonl` finds its own past greps
+            // and grows without bound. Asking for `.arbos/…` explicitly
+            // still works (the CONTRACT says "grep it" for prior work).
+            let scope_in_arbos = opt_str(&args, "path")
+                .map(|p| p.trim_start_matches("./").starts_with(".arbos"))
+                .unwrap_or(false);
+            if !scope_in_arbos {
+                hits.retain(|h| !inside_arbos(&h.path));
+            }
             // Every other agent's grep takes a path; models send one. Hits
             // outside it are noise that sends the model to the wrong file.
             if let Some(scope) = opt_str(&args, "path").filter(|p| *p != ".") {
@@ -184,12 +195,26 @@ impl Tool for GrepTool {
 }
 
 const GREP_SHOWN: usize = 200;
+/// Longest matched line shown. A JSONL line can be megabytes; the match
+/// is what matters, and `read` has the rest.
+const GREP_LINE_CHARS: usize = 400;
+
+/// `.arbos/…` at any depth of a relative or absolute hit path.
+fn inside_arbos(path: &str) -> bool {
+    path.split('/').any(|seg| seg == ".arbos")
+}
 
 fn format_hits(hits: &[GrepHit]) -> ToolOut {
     let mut body = String::new();
     let mut paths = Vec::new();
     for h in hits.iter().take(GREP_SHOWN) {
-        body.push_str(&format!("{}:{}:{}\n", h.path, h.line, h.text));
+        let text = if h.text.chars().count() > GREP_LINE_CHARS {
+            let head: String = h.text.chars().take(GREP_LINE_CHARS).collect();
+            format!("{head}… [line is {} chars]", h.text.chars().count())
+        } else {
+            h.text.clone()
+        };
+        body.push_str(&format!("{}:{}:{}\n", h.path, h.line, text));
         paths.push(h.path.clone());
     }
     if hits.len() > GREP_SHOWN {
@@ -535,10 +560,14 @@ fn read_image(file: &Path) -> Result<ToolOut> {
 
 pub fn find(cwd: &Path, pattern: &str) -> Result<ToolOut> {
     let glob = glob::Pattern::new(pattern).unwrap_or_else(|_| glob::Pattern::new("**/*").unwrap());
+    // The kernel's own folder is not the project (see grep). A pattern that
+    // names `.arbos` still reaches it.
+    let want_arbos = pattern.contains(".arbos");
     let mut paths = Vec::new();
     let walker = ignore::WalkBuilder::new(cwd)
         .hidden(false)
         .git_ignore(true)
+        .filter_entry(move |e| want_arbos || e.file_name() != ".arbos")
         .build();
     for entry in walker.flatten() {
         let path = entry.path();
