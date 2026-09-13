@@ -47,6 +47,7 @@ pub const ALL_TOOLS: &[&str] = &[
     "screenshot",
     "secret",
     "subscribe",
+    "record",
 ];
 
 /// How much an agent may do without asking. `agent.md` `mode:`.
@@ -258,6 +259,11 @@ impl Agent {
         {
             agent.allowlist.push("screenshot".into());
         }
+        if !agent.allowlist.iter().any(|t| t == "record")
+            && agent.allowlist.iter().any(|t| t == "screenshot")
+        {
+            agent.allowlist.push("record".into());
+        }
         Ok(agent)
     }
 
@@ -310,6 +316,7 @@ impl Agent {
                         | "screenshot"
                         | "secret"
                         | "subscribe"
+                        | "record"
                 )
             });
         }
@@ -352,9 +359,17 @@ impl Agent {
         if tool == "terminal" && self.allowlist.iter().any(|t| t == "bash") {
             return true;
         }
-        // The screen, read-only. Old agent.md files predate the tool; an
-        // agent that may look at web pages may look at the screen.
-        tool == "screenshot" && self.allowlist.iter().any(|t| t == "browser")
+        // The screen, read-only. Old agent.md files predate the tools; an
+        // agent that may look at web pages may look at the screen, and one
+        // that may take a picture of it may record it.
+        match tool {
+            "screenshot" => self.allowlist.iter().any(|t| t == "browser"),
+            "record" => self
+                .allowlist
+                .iter()
+                .any(|t| t == "screenshot" || t == "browser"),
+            _ => false,
+        }
     }
 }
 

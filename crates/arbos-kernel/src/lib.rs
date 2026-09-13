@@ -9,6 +9,7 @@ pub mod klog;
 pub mod plan;
 pub mod pty;
 pub mod remote;
+pub mod record;
 pub mod sched;
 pub mod screenshot;
 pub mod secret_tool;

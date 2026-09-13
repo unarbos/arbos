@@ -99,6 +99,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
         .with(crate::screenshot::Screenshot)
         .with(crate::secret_tool::Secret)
         .with(crate::github::Subscribe(Arc::clone(&hooks)))
+        .with(crate::record::Record::default())
         .with(tools::Terminal {
             hooks: Arc::clone(&hooks),
             ptys: Arc::clone(&ptys),
