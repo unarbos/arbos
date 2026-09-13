@@ -144,6 +144,9 @@ pub struct HostConfig {
     pub window_tokens_max: u64,
     pub search_url: Option<String>,
     pub search_key: Option<String>,
+    /// Model for OpenRouter's web-plugin searches (a small, fast one; the
+    /// answer is discarded, only its sources are kept). Empty = default.
+    pub search_model: String,
     /// Inception Mercury: instant | low | medium | high. Empty = omit.
     pub reasoning_effort: Option<String>,
     /// `max_tokens` on every call: the model's own completion limit from the
@@ -208,6 +211,7 @@ impl Default for HostConfig {
             window_tokens_max: 400_000,
             search_url: None,
             search_key: None,
+            search_model: String::new(),
             reasoning_effort: None,
             max_output_tokens: 32_000,
             max_parallel_tools: 8,

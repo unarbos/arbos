@@ -86,11 +86,9 @@ pub struct RunCx {
     pub bash_wait_ms: u64,
     /// Reply budget this turn was started with. `say` spends it.
     pub hops: u8,
-    /// Search provider from the host config: a URL template with `{q}`
-    /// (empty = the built-in engine) and an optional key sent as a bearer
-    /// token and `X-API-Key`.
-    pub search_url: String,
-    pub search_key: String,
+    /// What `search` and `fetch` may use: the custom endpoint from
+    /// config, and the model provider (OpenRouter's web plugin).
+    pub web: Arc<WebCfg>,
 }
 
 impl RunCx {
@@ -109,6 +107,19 @@ pub fn confinement_root<'a>(place: &'a Place, cwd: &'a Path) -> &'a Path {
     } else {
         place.path()
     }
+}
+
+/// Web access settings, from `config.toml` and the environment.
+#[derive(Debug, Default, Clone)]
+pub struct WebCfg {
+    pub search_url: Option<String>,
+    pub search_key: Option<String>,
+    /// The model provider's base URL and key; OpenRouter's web plugin
+    /// answers searches when no search backend is configured.
+    pub api_base: String,
+    pub api_key: Option<String>,
+    /// `search_model` from config; empty = the tool's default.
+    pub model: String,
 }
 
 #[derive(Debug)]
