@@ -1262,6 +1262,52 @@ impl ChatSession {
         self.land_turn(&content);
     }
 
+    /// A prompt another client sent to this agent — the caller's words on
+    /// a live call, the phone — as the kernel recorded it. This window's own
+    /// prompt comes back the same way a moment after it was sent, so a line
+    /// that matches the last card is the echo and is dropped. Anything else
+    /// is a turn this window did not start: the card goes up, and the pane
+    /// is working until the kernel says idle.
+    fn foreign_prompt(&mut self, text: String, attachments: Vec<String>, ts: i64) {
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        let echo = self
+            .items
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                ChatItem::User(message) => Some(message),
+                _ => None,
+            })
+            .is_some_and(|last| {
+                squash(&last.text) == squash(&text)
+                    && last.sent_at.is_none_or(|sent| (ts - sent).abs() < 120_000)
+            });
+        if echo {
+            return;
+        }
+        let mut message = crate::model::attachment::UserMessage::from(text);
+        for path in &attachments {
+            message.add_file_path(path);
+        }
+        message.sent_at = (ts > 0).then_some(ts);
+        // Spoken, not typed: while a call to this chat is live, a line this
+        // window did not type came through the caller's microphone.
+        message.channel = if crate::voice_ws::in_call() {
+            "voice".into()
+        } else {
+            String::new()
+        };
+        self.flight = Some(Flight {
+            at: SystemTime::now(),
+            used: self.usage.map_or(0, |usage| usage.used),
+        });
+        self.items.push(ChatItem::User(message));
+        self.updated = SystemTime::now();
+        self.streaming = true;
+        self.take_title_from_first_prompt();
+        self.flush();
+    }
+
     /// Put the user card in the pane this frame — before the kernel
     /// answers, and before a reconnect finishes.
     fn land_turn(&mut self, content: &Prompt) {
@@ -1664,6 +1710,11 @@ impl ChatSession {
                 });
                 self.flush();
             }
+            Event::UserLine {
+                text,
+                attachments,
+                ts,
+            } => self.foreign_prompt(text, attachments, ts),
             Event::Provider {
                 provider,
                 model,

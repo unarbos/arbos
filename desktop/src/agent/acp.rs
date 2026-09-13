@@ -49,6 +49,14 @@ pub enum Event {
         who: String,
         text: String,
     },
+    /// A person's words the kernel recorded that this window did not send:
+    /// spoken through the voice gateway during a call, or typed on the
+    /// phone. The transcript's `user` line, with its time.
+    UserLine {
+        text: String,
+        attachments: Vec<String>,
+        ts: i64,
+    },
     /// The agent spoke between turns: a callback fired, or background work
     /// finished. Not a turn, and not a failure.
     Aside(String),
@@ -631,7 +639,15 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
 fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
     use arbos_core::EventKind;
     let recorded = event.seq > 0;
+    let ts = event.ts;
     match event.kind {
+        // Another client's prompt landed on the record. This window's own
+        // prompts are on the pane already; the session tells them apart.
+        EventKind::User { text, attachments } if recorded => vec![Event::UserLine {
+            text,
+            attachments,
+            ts,
+        }],
         // A transcript line (tailed or replayed) is the step's final text;
         // a live emit without a seq is a delta (older kernels send those
         // as events too).
