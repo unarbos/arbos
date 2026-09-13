@@ -182,6 +182,16 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
             let (r, w) = stream.into_split();
             let (out_tx, out_rx) = mpsc::unbounded_channel();
             accept_hooks.frames.lock().unwrap().push(out_tx.clone());
+            // Greeting, snapshot, plans, then the focused agent's recent
+            // transcript, so a client that cannot read the files (a phone)
+            // has the conversation before the first live frame.
+            let focus_agent = focus_agent(&accept_place);
+            let _ = out_tx.send(Frame::Hello {
+                protocol: PROTOCOL,
+                kernel: env!("CARGO_PKG_VERSION").to_string(),
+                tail: ATTACH_TAIL,
+                focus: focus_agent.clone(),
+            });
             let _ = out_tx.send(snapshot(&accept_place));
             for agent in list_agents(&accept_place).unwrap_or_default() {
                 let _ = out_tx.send(accept_hooks.plan_frame(agent.id.as_str()));
@@ -191,10 +201,40 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
                 None,
                 format!("clients={}", accept_hooks.frames.lock().unwrap().len()),
             );
+            replay(&accept_place, &focus_agent, None, ATTACH_TAIL, &out_tx);
             tokio::spawn(attach::write_loop(w, out_rx));
+            // History requests are answered on this connection alone;
+            // everything else goes to the kernel like before.
+            let (local_tx, mut local_rx) = mpsc::unbounded_channel::<Frame>();
             let tx = accept_frames.clone();
+            let place_for_history = accept_place.clone();
+            let out_for_history = out_tx.clone();
+            let out_for_read = out_tx;
             tokio::spawn(async move {
-                let _ = attach::read_loop(r, tx, out_tx).await;
+                while let Some(frame) = local_rx.recv().await {
+                    match frame {
+                        Frame::History {
+                            agent,
+                            since,
+                            limit,
+                        } => {
+                            let limit = if limit == 0 {
+                                ATTACH_TAIL
+                            } else {
+                                limit.min(HISTORY_MAX)
+                            };
+                            replay(&place_for_history, &agent, Some(since), limit, &out_for_history);
+                        }
+                        other => {
+                            if tx.send(other).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            tokio::spawn(async move {
+                let _ = attach::read_loop(r, local_tx, out_for_read).await;
                 klog::info("attach_close", None, "");
             });
         }
@@ -656,6 +696,62 @@ fn shutdown_backstop(lock_path: std::path::PathBuf) {
         eprintln!("arbos-kernel: serve loop did not stop within 5s of the signal; exiting");
         let _ = std::fs::remove_file(&lock_path);
         std::process::exit(130);
+    });
+}
+
+/// What this kernel speaks on the attach socket.
+const PROTOCOL: u32 = 1;
+/// Transcript lines replayed on attach for the focused agent.
+const ATTACH_TAIL: u32 = 200;
+/// Most lines one `history` request returns.
+const HISTORY_MAX: u32 = 2000;
+
+fn focus_agent(place: &Place) -> String {
+    let focus = arbos_core::read_focus(place);
+    let agent = focus.rsplit('/').next().unwrap_or("root").trim();
+    if agent.is_empty() {
+        "root".to_string()
+    } else {
+        agent.to_string()
+    }
+}
+
+/// Send `agent`'s transcript lines to one client: the last `limit` when
+/// `since` is `None` (attach), else those with `seq > since`, oldest
+/// first, at most `limit`. Always closed by a `history_end`.
+fn replay(
+    place: &Place,
+    agent: &str,
+    since: Option<u64>,
+    limit: u32,
+    out: &mpsc::UnboundedSender<Frame>,
+) {
+    let events = load_transcript(&Layout::new(place, agent).transcript()).unwrap_or_default();
+    let total = events.len() as u64;
+    let picked: Vec<&Event> = match since {
+        None => {
+            let skip = events.len().saturating_sub(limit as usize);
+            events[skip..].iter().collect()
+        }
+        Some(since) => events
+            .iter()
+            .filter(|e| e.seq > since)
+            .take(limit as usize)
+            .collect(),
+    };
+    let from = picked.first().map(|e| e.seq).unwrap_or(since.unwrap_or(0));
+    let to = picked.last().map(|e| e.seq).unwrap_or(since.unwrap_or(0));
+    for ev in picked {
+        let _ = out.send(Frame::Replayed {
+            agent: agent.to_string(),
+            event: ev.clone(),
+        });
+    }
+    let _ = out.send(Frame::HistoryEnd {
+        agent: agent.to_string(),
+        from,
+        to,
+        total,
     });
 }
 

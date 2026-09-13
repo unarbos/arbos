@@ -171,9 +171,24 @@ impl arbos_engine::Hooks for TurnHooks {
     }
 
     fn emit(&self, event: &arbos_core::Event) {
-        self.inner.broadcast(arbos_core::wire::Frame::Event {
-            agent: self.agent.to_string(),
-            event: event.clone(),
-        });
+        use arbos_core::{EventKind, wire::Frame};
+        // Streamed text goes out as deltas: one frame per chunk, no seq.
+        // The whole step follows from the transcript tail as an `event`
+        // with its line number, which older clients already render.
+        let frame = match &event.kind {
+            EventKind::Assistant { text, .. } if event.seq == 0 => Frame::AssistantDelta {
+                agent: self.agent.to_string(),
+                text: text.clone(),
+            },
+            EventKind::Thinking { text } if event.seq == 0 => Frame::ThinkingDelta {
+                agent: self.agent.to_string(),
+                text: text.clone(),
+            },
+            _ => Frame::Event {
+                agent: self.agent.to_string(),
+                event: event.clone(),
+            },
+        };
+        self.inner.broadcast(frame);
     }
 }

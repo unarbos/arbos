@@ -400,6 +400,19 @@ impl Drop for Session {
 fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
     match frame {
         Frame::Event { agent: id, event } if id == agent || agent.is_empty() => kernel_event(event),
+        // Streamed text, one chunk per frame (the kernel's live path); the
+        // whole step arrives later as an `event` with a seq, which
+        // `merge_stream_text` folds into what the chunks built.
+        Frame::AssistantDelta { agent: id, text } if id == agent || agent.is_empty() => {
+            vec![Event::Update(SessionUpdate::AgentMessageChunk(text_chunk(
+                text,
+            )))]
+        }
+        Frame::ThinkingDelta { agent: id, text } if id == agent || agent.is_empty() => {
+            vec![Event::Update(SessionUpdate::AgentThoughtChunk(text_chunk(
+                text,
+            )))]
+        }
         Frame::Turn {
             agent: id,
             state,
@@ -439,7 +452,14 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
                 allow_multiple: false,
             }],
         }],
-        Frame::Snapshot { .. } | Frame::Tree { .. } => Vec::new(),
+        // The desktop reads transcripts from the files; the replay that a
+        // file-less client needs is not for it. Skipped here so a replayed
+        // line is never appended a second time.
+        Frame::Snapshot { .. }
+        | Frame::Tree { .. }
+        | Frame::Hello { .. }
+        | Frame::Replayed { .. }
+        | Frame::HistoryEnd { .. } => Vec::new(),
         Frame::Plan { agent: id, nodes } if id == agent => vec![Event::Plan(nodes)],
         Frame::Board {
             owner,
