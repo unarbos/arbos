@@ -1,0 +1,9 @@
+1789264942002 kernel started pid 1753165
+1789265010460 timeout waiting for turn garbage idle after 60s
+1789265010476 kernel stopped with code 0
+1789265010477 BREAK state:focus-target: focus points at '.arbos/agents/does-not-exist', which is not a folder
+1789265010477 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789265010477 BREAK state:agent-parent-dangling: parent 'ghost-parent' has no folder
+1789265010477 BREAK state:transcript-bad-lines: 2 unparseable line(s): [2, 4]
+1789265010477 BREAK state:plan-done-unattempted: user node #1 is done but no ended attempt records the turn
+1789265010482 bugs: seen qa-004-focus-frame-writes-any-path.md, seen qa-006-prompt-to-unlisted-folder-parks-forever.md, seen qa-006-prompt-to-unlisted-folder-parks-forever.md, seen qa-006-prompt-to-unlisted-folder-parks-forever.md, seen qa-001-no-key-turn-left-unended.md

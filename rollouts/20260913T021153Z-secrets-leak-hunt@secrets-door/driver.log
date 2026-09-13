@@ -1,0 +1,4 @@
+1789265513582 kernel started pid 1764850
+1789265521407 BREAK secret-leak-encoded: the secret reaches the transcript encoded as ['base64', 'spaced', 'reversed', 'hex', 'first_half', 'second_half'] (exact-substring redaction misses these)
+1789265521423 kernel stopped with code 0
+1789265521430 bugs: seen qa-016-model-api-key-reaches-transcript-via-bash-env.md

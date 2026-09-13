@@ -1,0 +1,30 @@
+1789265440516 kernel started pid 1763170
+1789265452337 kernel stopped with code 0
+1789265452340 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789265452340 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789265452340 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789265452340 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789265452340 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789265452340 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789265452340 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789265452340 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789265452340 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789265452340 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789265452340 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789265452340 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789265452340 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789265452340 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789265452340 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789265452340 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789265452340 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789265452340 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789265452340 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789265452340 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789265452340 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789265452340 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789265452340 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789265452340 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789265452340 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789265452340 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789265452341 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789265452356 bugs: new abda5948a1.md, new 0278bfb813.md, new 76f7c26c34.md, seen abda5948a1.md, seen 0278bfb813.md, seen 76f7c26c34.md, seen abda5948a1.md, seen 0278bfb813.md, seen 76f7c26c34.md, seen abda5948a1.md, seen 0278bfb813.md, seen 76f7c26c34.md, seen abda5948a1.md, seen 0278bfb813.md, seen 76f7c26c34.md, seen abda5948a1.md, seen 0278bfb813.md, seen 76f7c26c34.md, seen abda5948a1.md, seen 0278bfb813.md, seen 76f7c26c34.md, seen abda5948a1.md, seen 0278bfb813.md, seen 76f7c26c34.md, seen abda5948a1.md, seen 0278bfb813.md, seen 76f7c26c34.md
