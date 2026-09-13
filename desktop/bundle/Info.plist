@@ -27,6 +27,10 @@
 	<string>@VERSION@</string>
 	<key>CFBundleVersion</key>
 	<string>@VERSION@</string>
+	<!-- Voice: the mic is read through a helper (ffmpeg) the app spawns;
+	     TCC attributes that to this bundle and needs this string to ask. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Arbos listens on the microphone for dictation and voice calls.</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>
