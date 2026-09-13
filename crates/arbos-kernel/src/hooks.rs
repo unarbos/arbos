@@ -616,7 +616,8 @@ impl KernelHooks {
             let n = (id & !crate::plan::NOTE_ID_BIT) as usize;
             let mut notes = self.notes(agent);
             match op {
-                "check" | "answer" => {
+                // The window's ✓ / "run" on a checklist row marks it done.
+                "check" | "answer" | "run" => {
                     notes.check(n, true, Some(text))?;
                 }
                 "uncheck" | "reopen" => {

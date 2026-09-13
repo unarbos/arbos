@@ -1738,6 +1738,13 @@ impl Arbos {
             .collect();
         let answering = chat.answering;
         let live_since = chat.live_since;
+        // Plan mode with approval: the list was written read-only; the user
+        // turns it into work with one click.
+        let plan_mode = chat
+            .modes
+            .as_ref()
+            .is_some_and(|m| m.current_mode_id.to_string() == "plan");
+        let approvable = plan_mode && !chat.busy();
         let followups = self.followups(id, &queued_nodes, &theme, cx);
         if nodes.is_empty() {
             return followups;
@@ -1822,6 +1829,45 @@ impl Arbos {
             )
             .when(running, |el| {
                 el.child(transcript::spinner(since, theme.text_faint, cx))
+            })
+            .when(approvable && steps > 0, |el| {
+                el.child(
+                    theme
+                        .ghost(SharedString::from(format!("plan-approve-{id}")))
+                        .flex_none()
+                        .px(px(6.))
+                        .h(px(20.))
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .rounded(px(Theme::control_radius()))
+                        .tooltip(move |window, cx| {
+                            bezel::ui::tooltip::Tooltip::text(
+                                "Approve this plan: switch to auto and run it",
+                                window,
+                                cx,
+                            )
+                        })
+                        .child(
+                            icons::icon(icons::media::PLAY)
+                                .size(px(10.))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .text_style(TextStyle::Caption)
+                                .text_color(theme.text_muted)
+                                .child("Approve and run"),
+                        )
+                        .on_mouse_down(bezel::gpui::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation()
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.workspace
+                                .update(cx, |workspace, cx| workspace.approve_plan(id, cx));
+                        })),
+                )
             })
             // Stop everything this agent has going: the turn, its standing
             // work, its children. Scheduled nodes block until run again.
