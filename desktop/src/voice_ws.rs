@@ -586,6 +586,7 @@ async fn run(
         // highlights. This window shows the chat, so "on your screen" fits.
         start["mode"] = json!("call");
         start["channel"] = json!("voice");
+        start["device"] = json!("desktop");
         start["screen"] = json!("on your screen");
         if !project.is_empty() {
             start["project"] = json!(project);

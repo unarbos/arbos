@@ -831,9 +831,32 @@ fn user_prompt(
                 .when(!body.is_empty(), |el| {
                     el.child(
                         div()
-                            .text_style(TextStyle::Body)
-                            .text_color(theme.text)
-                            .child(prose(chat, ix, body, window, cx)),
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap(px(6.))
+                            // Spoken on a call: a small microphone leads the line.
+                            .when(message.channel == "voice", |row| {
+                                row.child(
+                                    div()
+                                        .id(SharedString::from(format!("prompt-voice-{id}-{ix}")))
+                                        .flex_none()
+                                        .mt(px(3.))
+                                        .tooltip(|window, cx| Tooltip::text("Spoken on a call", window, cx))
+                                        .child(
+                                            icons::icon(icons::media::MICROPHONE)
+                                                .size(px(12.))
+                                                .text_color(theme.text_muted),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_style(TextStyle::Body)
+                                    .text_color(theme.text)
+                                    .child(prose(chat, ix, body, window, cx)),
+                            ),
                     )
                 }),
         )
@@ -4244,6 +4267,7 @@ mod selection_tests {
                 images: vec![image.clone(), image],
                 files: Vec::new(),
                 worked_secs: None,
+                channel: String::new(),
                 sent_at: None,
                 feedback: None,
             }),

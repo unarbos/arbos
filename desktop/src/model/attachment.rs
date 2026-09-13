@@ -276,6 +276,10 @@ pub struct UserMessage {
     /// replay from the transcript's timestamps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worked_secs: Option<u32>,
+    /// How the words arrived: `voice` when spoken on a call, empty when
+    /// typed. Drawn as a small microphone on the card.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub channel: String,
     /// Unix millis when the prompt was sent (or, on replay, the transcript
     /// line's time). The relative time under the answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -343,6 +347,7 @@ impl From<StoredMessage> for UserMessage {
                 images: Vec::new(),
                 files: Vec::new(),
                 worked_secs: None,
+                channel: String::new(),
                 sent_at: None,
                 feedback: None,
             },
@@ -355,6 +360,7 @@ impl From<StoredMessage> for UserMessage {
                 images,
                 files,
                 worked_secs: None,
+                channel: String::new(),
                 sent_at: None,
                 feedback: None,
             },
@@ -371,6 +377,7 @@ impl From<String> for UserMessage {
             images: Vec::new(),
             files: Vec::new(),
             worked_secs: None,
+            channel: String::new(),
             sent_at: Some(arbos_core::now_ms()),
             feedback: None,
         };
