@@ -1082,6 +1082,8 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
             "text": field.read(cx).content().to_string(),
             "focused": composer_focused,
             "recording": composer.is_recording(),
+            // The take's live words (dictation partials), painted after the caret.
+            "preview": composer.voice_preview(),
         },
         // The call to the project in front, when one is live: what the
         // strip shows, so a test can assert on it without pixels.
@@ -1096,6 +1098,8 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
                 "muted": voice.muted,
                 "mic_device": voice.mic_device,
                 "mic_error": voice.mic_error,
+                "speaker_device": voice.speaker_device,
+                "played_bytes": crate::voice_ws::counters().0,
                 "level": voice.level,
                 "partial": voice.text,
                 "reply": voice.reply,
