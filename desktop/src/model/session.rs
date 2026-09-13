@@ -1533,6 +1533,15 @@ impl ChatSession {
             } => {
                 self.turn_alive();
                 if let Some(previous) = self.questions.take() {
+                    // The same ask reaches the window twice: once as the live
+                    // `ask` frame, again as the transcript line the tail
+                    // reads. Skipping the "previous" one answered the kernel
+                    // with "" before the user saw the card. A repeat of the
+                    // open question is the same question: keep it.
+                    if same_question(&previous, &title, &questions) {
+                        self.questions = Some(previous);
+                        return;
+                    }
                     if let Connection::Live(session) = &self.connection {
                         let _ = session.skip_question(&previous.request_id);
                     }
@@ -2100,6 +2109,24 @@ fn tool_diff_text(content: &[ToolCallContent]) -> Option<String> {
     content.iter().find_map(|c| match c {
         ToolCallContent::Diff(diff) if !diff.new_text.is_empty() => Some(diff.new_text.clone()),
         _ => None,
+    })
+}
+
+/// Whether `title`/`questions` describe the question `open` already shows:
+/// the same prompt text and the same option labels, in order.
+fn same_question(open: &AskPrompt, title: &str, questions: &[AskQuestion]) -> bool {
+    if open.title != title || open.questions.len() != questions.len() {
+        return false;
+    }
+    open.questions.iter().zip(questions).all(|(a, b)| {
+        a.prompt == b.prompt
+            && a.allow_multiple == b.allow_multiple
+            && a.options.len() == b.options.len()
+            && a
+                .options
+                .iter()
+                .zip(&b.options)
+                .all(|(x, y)| x.id == y.id && x.label == y.label)
     })
 }
 
