@@ -211,6 +211,7 @@ class Narrator:
         self._pending: tuple[str, str] | None = None
         self._pending_handle: asyncio.TimerHandle | None = None
         self._late_until = 0.0
+        self._last_detail: tuple[str, float, asyncio.Future] | None = None
         self.stats = {"heard": 0, "skipped": 0, "interrupted": 0, "details": 0}
 
     # ------------------------------------------------------------------ lifecycle
@@ -551,8 +552,24 @@ class Narrator:
     async def more_detail(self, question: str) -> str:
         """Answer from the record, in a few sentences. Escalates to the main agent only when the
         record does not hold the answer."""
-        self.stats["details"] += 1
         question = question.strip()
+        # The phrase path and the speech model's tool call can both ask within a second: one answer,
+        # the second asker waits for the first.
+        key = "".join(question.lower().split())
+        if self._last_detail and self._last_detail[0] == key and time.monotonic() - self._last_detail[1] < 8.0:
+            return await asyncio.shield(self._last_detail[2])
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._last_detail = (key, time.monotonic(), fut)
+        try:
+            answer = await self._more_detail(question)
+        except BaseException as exc:
+            fut.set_exception(exc)
+            raise
+        fut.set_result(answer)
+        return answer
+
+    async def _more_detail(self, question: str) -> str:
+        self.stats["details"] += 1
         if _wants_repeat(question):
             last = next((l for l in reversed(self.said) if l.kind in ("highlight", "report", "detail")), None)
             return last.text if last else "I have not said anything yet."
@@ -707,7 +724,9 @@ def _facts(root: list[dict], children: dict[str, list[dict]]) -> list[str]:
                     interesting = [l for l in lines if re.search(r"error|fail|assert|panic|exception|Traceback|exit", l, re.I)]
                     tail = interesting[-3:] if interesting else lines[-2:]
                     if tail:
-                        out.append(f"[{agent}] tool {name} output: " + " | ".join(_flat(l, 160) for l in tail))
+                        # Line-number tags and prompt marks are for the eye, not the ear.
+                        said = [re.sub(r"^\s*(?:\[\d+\]|\d+[:|]|[$>#]\s)\s*", "", l) for l in tail]
+                        out.append(f"[{agent}] tool {name} output: " + " | ".join(_flat(l, 160) for l in said))
             elif kind == "ask" and e.get("question"):
                 out.append(f"[{agent}] asked: {_flat(e['question'], 200)}")
 
