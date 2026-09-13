@@ -51,6 +51,14 @@ pub fn scan(hooks: &Arc<KernelHooks>) -> Vec<Wake> {
         match inbox::claim(&hooks.place, id, &filed) {
             Ok(turn_dir) => {
                 if let Some(wake) = wake_from_message(hooks, &agent, &filed.msg, &turn_dir) {
+                    // Every other finished worker's done file joins this
+                    // turn: one wake, one model call, one message to the
+                    // user ("3 workers finished"), not one turn per child.
+                    if filed.msg.kind == "done" {
+                        let mut reported = vec![filed.msg.from.clone()];
+                        reported.extend(batch_done_files(hooks, &agent, &filed, &turn_dir, now));
+                        archive_finished(hooks, &reported);
+                    }
                     wakes.push(wake);
                     hooks.broadcast(hooks.plan_frame(id));
                 }
@@ -180,7 +188,7 @@ fn wake_from_message(
             (
                 WakeKind::Plan,
                 Some(format!(
-                    "You were spawned by agent {parent} for this mission:\n\n{}\n\nDo it now. If it has several steps, write them as your checklist with plan set and work them. Standing work (\"every N\", \"keep watching\") is a subscription (subscribe add), never a loop held open. Report results to your parent with say to={parent} (mode request when you need an answer from it). Your own folder is .arbos/agents/{}/.{}",
+                    "You were spawned by agent {parent} for this mission:\n\n{}\n\nDo it now. If it has several steps, write them as your checklist with plan set and work them. Standing work (\"every N\", \"keep watching\") is a subscription (subscribe add), never a loop held open. When your turn ends, {parent} is told your last words automatically: end with a short report (outcome, paths, open questions) as your final words, and do not also say it to {parent}. Use say to={parent} mode request only for a question you need answered mid-task. The project context is in your prompt; project status is .arbos/notes.md; earlier workers' transcripts are greppable with grep path=.arbos/agents. Your own folder is .arbos/agents/{}/.{}",
                     msg.body,
                     agent.id,
                     worktree_note(hooks.place.path(), agent)
@@ -233,6 +241,107 @@ fn wake_from_message(
         channel: msg.channel.clone(),
         device: msg.device.clone(),
     })
+}
+
+/// The other `done` files waiting for `agent` go into the same turn folder
+/// (`cause-2.md`, `cause-3.md`, …) and onto the transcript as one `say`
+/// line each, so the turn that `first` opened reads them all.
+fn batch_done_files(
+    hooks: &KernelHooks,
+    agent: &Agent,
+    first: &inbox::Filed,
+    turn_dir: &std::path::Path,
+    now: i64,
+) -> Vec<String> {
+    let mut senders = Vec::new();
+    let mut n = 1;
+    for other in inbox::list(&hooks.place, agent.id.as_str()) {
+        if other.name == first.name
+            || other.msg.kind != "done"
+            || !other.msg.wake
+            || hooks.inbox_backing_off(&other.name, now)
+        {
+            continue;
+        }
+        n += 1;
+        senders.push(other.msg.from.clone());
+        let dest = turn_dir.join(format!("cause-{n}.md"));
+        if let Err(e) = std::fs::rename(&other.path, &dest) {
+            crate::klog::warn(
+                "done_batch_failed",
+                Some(agent.id.as_str()),
+                format!("{}: {e:#}", other.name),
+            );
+            continue;
+        }
+        let from = other.msg.from.as_str();
+        let from_id = from.strip_prefix("agent:").unwrap_or(from).to_string();
+        if let Err(e) = append_event(
+            &hooks.layout(agent.id.as_str()).transcript(),
+            &Event::new(EventKind::Say {
+                from: from_id,
+                text: other.msg.body.clone(),
+            }),
+        ) {
+            crate::klog::warn(
+                "inbox_say_failed",
+                Some(agent.id.as_str()),
+                format!("{e:#}"),
+            );
+        }
+    }
+    if n > 1 {
+        crate::klog::info(
+            "done_batched",
+            Some(agent.id.as_str()),
+            format!("{n} done files in one turn"),
+        );
+    }
+    senders
+}
+
+/// With `[root] archive_children = true` in project.toml: a worker whose
+/// done message its parent has just read, and that is not live (no turn,
+/// no waiting message, no parked ask, no live children of its own), moves
+/// to `.arbos/archive/agents/<id>/`. The tree frame tells every window.
+fn archive_finished(hooks: &KernelHooks, reported: &[String]) {
+    if !arbos_core::project::load(&hooks.place)
+        .root
+        .archive_children
+    {
+        return;
+    }
+    let mut moved = false;
+    for from in reported {
+        let Some(id) = from.strip_prefix("agent:") else {
+            continue;
+        };
+        if hooks.is_live(id) || hooks.live_children(&arbos_core::AgentId::new(id)) > 0 {
+            continue;
+        }
+        let src = hooks.layout(id).dir.clone();
+        if !src.join("agent.md").exists() {
+            continue;
+        }
+        let dir = arbos_core::project::archive_agents_dir(&hooks.place);
+        let dest = dir.join(id);
+        let result = std::fs::create_dir_all(&dir).and_then(|_| {
+            if dest.exists() {
+                return Err(std::io::Error::other("already archived"));
+            }
+            std::fs::rename(&src, &dest)
+        });
+        match result {
+            Ok(()) => {
+                moved = true;
+                crate::klog::info("child_archived", Some(id), dest.display().to_string());
+            }
+            Err(e) => crate::klog::warn("child_archive_failed", Some(id), format!("{e:#}")),
+        }
+    }
+    if moved {
+        hooks.broadcast_tree();
+    }
 }
 
 /// Cursor's completion notification, on disk: when a child's turn ends the

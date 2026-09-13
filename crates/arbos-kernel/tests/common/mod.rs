@@ -31,12 +31,36 @@ pub fn start_kernel(name: &str) -> Kernel {
 /// export` writes), so turns run for real and the same way twice with no
 /// key and no network.
 pub fn start_kernel_replay(name: &str, replies: &str) -> Kernel {
+    start_kernel_replay_with(name, replies, "")
+}
+
+/// Stop `k` and start a fresh kernel on the same place with a new script:
+/// what survives a restart is what is on disk.
+pub fn restart_replay(k: &mut Kernel, replies: &str) -> Kernel {
+    let _ = k.child.kill();
+    let _ = k.child.wait();
+    let file = k.scratch.join("replies.jsonl");
+    std::fs::write(&file, replies).unwrap();
+    let _ = std::fs::remove_file(k.place.join(".arbos").join("runtime").join("kernel.json"));
+    spawn_with(
+        k.scratch.clone(),
+        &[
+            "--provider",
+            "replay",
+            "--replies",
+            &file.display().to_string(),
+        ],
+    )
+}
+
+/// `start_kernel_replay` plus extra `config.toml` lines (caps, windows).
+pub fn start_kernel_replay_with(name: &str, replies: &str, config: &str) -> Kernel {
     let scratch = scratch_dir(name);
     let file = scratch.join("replies.jsonl");
     std::fs::write(&file, replies).unwrap();
     std::fs::write(
         scratch.join("xdg").join("arbos").join("config.toml"),
-        "trace = false\n",
+        format!("trace = false\n{config}"),
     )
     .unwrap();
     spawn_with(
@@ -101,7 +125,7 @@ const KEY_VARS: &[&str] = &[
     "ARBOS_REPLIES",
 ];
 
-fn spawn_with(scratch: PathBuf, extra: &[&str]) -> Kernel {
+pub fn spawn_with(scratch: PathBuf, extra: &[&str]) -> Kernel {
     let place = scratch.join("place");
     let xdg = scratch.join("xdg");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_arbos-kernel"));

@@ -310,12 +310,33 @@ impl KernelHooks {
         self.waits.lock().unwrap().remove(child);
     }
 
+    /// Children of `parent` that are still doing something: a turn in
+    /// flight, a message waiting to wake them, or a parked ask/approve.
+    /// A finished worker is not one (the multitasking audit: counting
+    /// every folder stalled a coordinator at the cap after eight spawns).
     pub fn live_children(&self, parent: &AgentId) -> usize {
         list_agents(&self.place)
             .unwrap_or_default()
             .into_iter()
             .filter(|a| a.parent.as_ref() == Some(parent))
+            .filter(|a| self.is_live(a.id.as_str()))
             .count()
+    }
+
+    /// Whether an agent is running, about to run, or parked on the user.
+    pub fn is_live(&self, agent: &str) -> bool {
+        if self
+            .in_flight
+            .lock()
+            .map(|m| m.contains_key(agent))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if !arbos_core::waiting::list(&self.place, agent).is_empty() {
+            return true;
+        }
+        inbox::list(&self.place, agent).iter().any(|f| f.msg.wake)
     }
 }
 
@@ -930,6 +951,9 @@ impl KernelHooks {
             .is_some_and(|(parent, _)| parent == tid);
         if waiting_parent && let Some((_, tx)) = self.waits.lock().unwrap().remove(from.as_str()) {
             if tx.send(text.to_string()).is_ok() {
+                // The parent has its report; the done file at this turn's
+                // end would be the same words a second time.
+                self.waited.lock().unwrap().insert(from.to_string());
                 append_event(
                     &self.layout(tid).transcript(),
                     &Event::new(EventKind::Say {

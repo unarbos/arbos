@@ -229,6 +229,18 @@ pub fn has_steer(place: &Place, agent: &str) -> bool {
         .any(|f| is_steer_kind(&f.msg.kind))
 }
 
+/// Whether a steer waiting for this agent says stop (a stop word on its
+/// own, or a first line that is one). Such a steer cancels work that has
+/// not started; any other steer waits for the tool boundary and cancels
+/// nothing the user already asked for.
+pub fn has_stop_steer(place: &Place, agent: &str) -> bool {
+    list(place, agent).iter().any(|f| {
+        is_steer_kind(&f.msg.kind)
+            && (crate::is_stop_word(&f.msg.body)
+                || f.msg.body.lines().next().is_some_and(crate::is_stop_word))
+    })
+}
+
 /// The messages a running turn reads now, oldest first, taken out of the
 /// inbox. A file the turn never reaches (it ends first) stays and starts
 /// the next turn, so nothing said mid-turn is lost to timing.
