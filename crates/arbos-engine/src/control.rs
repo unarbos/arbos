@@ -31,6 +31,8 @@ struct Inner {
     cancel: CancellationToken,
     steer: Mutex<VecDeque<Steer>>,
     compact: AtomicBool,
+    /// Why the turn was stopped, for the `interrupted` line. None = "stop".
+    reason: Mutex<Option<String>>,
 }
 
 impl TurnControl {
@@ -46,8 +48,24 @@ impl TurnControl {
         self.0.cancel.cancel();
     }
 
+    /// Stop with a reason the transcript records, e.g. `kernel stopping`.
+    pub fn stop_for(&self, reason: &str) {
+        *self.0.reason.lock().unwrap() = Some(reason.to_string());
+        self.0.cancel.cancel();
+    }
+
     pub fn is_stopped(&self) -> bool {
         self.0.cancel.is_cancelled()
+    }
+
+    /// The `interrupted` detail for this stop: the reason given, else `stop`.
+    pub fn stop_reason(&self) -> String {
+        self.0
+            .reason
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| "stop".into())
     }
 
     /// The user spoke while the turn was running.

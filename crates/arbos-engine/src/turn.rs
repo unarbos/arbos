@@ -265,7 +265,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let mut hidden_seen = 0usize;
     loop {
         if control.is_stopped() {
-            return end(None, Some("stop"));
+            return end(None, Some(&control.stop_reason()));
         }
         // Every steer that arrived since the last boundary, in order, in
         // one write. One per step lost the rest when they came faster than
@@ -292,7 +292,10 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             match compact::manage(&ccx, &mut events, &provider, &control, calib, manual).await {
                 Ok(m) => m,
                 Err(e) if e.is::<Interrupted>() || control.is_stopped() => {
-                    return end(None, Some("stop during compaction"));
+                    return end(
+                        None,
+                        Some(&format!("{} during compaction", control.stop_reason())),
+                    );
                 }
                 Err(e) => return Err(e),
             };
@@ -352,7 +355,12 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 outcomes,
                 reasoning_details,
             } => (content, calls, usage, outcomes, reasoning_details),
-            Step::Interrupted => return end(None, Some("stop during model call")),
+            Step::Interrupted => {
+                return end(
+                    None,
+                    Some(&format!("{} during model call", control.stop_reason())),
+                );
+            }
             Step::Cut { partial, why } if cuts < MAX_CUTS => {
                 cuts += 1;
                 let mut batch = Vec::new();

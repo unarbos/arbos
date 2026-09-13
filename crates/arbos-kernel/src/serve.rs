@@ -307,15 +307,53 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
             }
             _ = sigint.recv() => {
                 println!("arbos-kernel stopping");
+                stop_turns(&sched, &hooks, &clock, &mut done_rx).await;
                 break;
             }
             _ = sigterm.recv() => {
                 println!("arbos-kernel stopping");
+                stop_turns(&sched, &hooks, &clock, &mut done_rx).await;
                 break;
             }
         }
     }
     Ok(())
+}
+
+/// A graceful stop ends every running turn the way the stop button does:
+/// the turn writes `interrupted` + `turn_complete`, and its plan node
+/// closes as stopped. Without this the folder looked exactly like a crash,
+/// and the next start silently resumed a turn the user had ended.
+async fn stop_turns(
+    sched: &Scheduler,
+    hooks: &KernelHooks,
+    clock: &plan::Clock,
+    done_rx: &mut mpsc::UnboundedReceiver<String>,
+) {
+    let mut pending: std::collections::HashSet<String> =
+        sched.in_flight.lock().unwrap().keys().cloned().collect();
+    for id in &pending {
+        sched.stop_for(id, "kernel stopping");
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !pending.is_empty() {
+        match tokio::time::timeout_at(deadline, done_rx.recv()).await {
+            Ok(Some(id)) => {
+                sched.in_flight.lock().unwrap().remove(&id);
+                hooks.turn_ended(&id);
+                plan::finish_turn(hooks, clock, &id);
+                pending.remove(&id);
+            }
+            _ => {
+                eprintln!(
+                    "arbos-kernel: {} turn(s) did not end within 5s: {}",
+                    pending.len(),
+                    pending.iter().cloned().collect::<Vec<_>>().join(", ")
+                );
+                break;
+            }
+        }
+    }
 }
 
 fn handle_frame(
