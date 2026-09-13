@@ -11,3 +11,4 @@ pub mod model;
 pub mod reading;
 pub mod view;
 pub mod voice;
+pub mod voice_ws;

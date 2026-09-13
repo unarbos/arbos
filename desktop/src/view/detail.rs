@@ -608,6 +608,15 @@ impl Cydonia {
 }
 
 /// Width of the context rail on the chat's right.
+/// Frame rate of the voice status bars while listening or speaking.
+const VOICE_FPS: f32 = 20.0;
+
+/// A clock for the speaking wave, so every repaint advances it.
+fn voice_phase() -> Duration {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed()
+}
+
 const CONTEXT_PANEL_WIDTH: f32 = 200.;
 /// Below this window width the rail is left out; the transcript comes first.
 const CONTEXT_PANEL_MIN_WINDOW: f32 = 1000.;
@@ -936,6 +945,7 @@ impl Cydonia {
                     )
                     .child(div().truncate().child(SharedString::from(machine))),
             )
+            .children(self.voice_status(theme, cx))
             .child(div().flex_1())
             .children(since.map(|since| {
                 div()
@@ -943,6 +953,82 @@ impl Cydonia {
                     .child(transcript::spinner(since, theme.text_faint, cx))
             }))
             .into_any_element()
+    }
+
+    /// "Listening" with a level meter while the mic is open, "Speaking"
+    /// with a moving wave while a reply plays, in the row under the
+    /// composer. Nothing when the speech server is idle or not set up.
+    fn voice_status(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::voice_ws::Phase;
+        let status = crate::voice_ws::status();
+        let (label, level) = match status.phase? {
+            Phase::Listening => ("Listening", Some(status.level)),
+            Phase::Speaking => ("Speaking", None),
+            Phase::Connecting => ("Connecting to voice…", None),
+            Phase::Ready | Phase::Off => return None,
+        };
+        Painter::of(cx).lease(VOICE_FPS, Duration::from_millis(300), cx);
+        let t = voice_phase().as_secs_f32();
+        let reduce = cx.reduce_motion();
+        // Three bars: mic loudness when listening; a slow wave when
+        // speaking (the level of a reply is not ours to know).
+        let heights: [f32; 3] = match level {
+            Some(l) => {
+                let l = l.clamp(0.05, 1.0);
+                [l * 0.7, l, l * 0.85]
+            }
+            None if reduce => [0.5, 0.8, 0.5],
+            None => [
+                0.35 + 0.35 * (t * 6.0).sin().abs(),
+                0.35 + 0.55 * (t * 6.0 + 1.0).sin().abs(),
+                0.35 + 0.35 * (t * 6.0 + 2.0).sin().abs(),
+            ],
+        };
+        let reply = (!status.reply.is_empty()).then(|| {
+            // One line: the reply is markdown with breaks; the row is a strip.
+            let mut r = status.reply.split_whitespace().collect::<Vec<_>>().join(" ");
+            if r.chars().count() > 60 {
+                r = r.chars().take(60).collect::<String>() + "…";
+            }
+            r
+        });
+        Some(
+            div()
+                .id("composer-voice-status")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .pl(px(8.))
+                .text_style(TextStyle::Caption)
+                .text_color(theme.accent)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_end()
+                        .gap(px(2.))
+                        .h(px(12.))
+                        .children(heights.into_iter().map(|h| {
+                            div()
+                                .w(px(3.))
+                                .h(px((12.0 * h).max(2.0)))
+                                .rounded(px(1.5))
+                                .bg(theme.accent)
+                        })),
+                )
+                .child(SharedString::from(label))
+                .when_some(reply, |row, reply| {
+                    row.child(
+                        div()
+                            .max_w(px(360.))
+                            .truncate()
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(reply)),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     /// The checked-out branch of a local place, read once and kept; a

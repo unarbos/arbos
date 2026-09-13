@@ -1794,16 +1794,61 @@ struct RunRow {
 }
 
 /// Press the composer's mic. Capture runs on this Mac, not the kernel.
+/// `voice_url` / `voice_token` (or `voice_token_env`) from config.toml:
+/// the self-hosted speech server. `None` when no URL is set, in which case
+/// dictation falls back to this Mac's helper.
+pub fn voice_config() -> Option<crate::voice_ws::VoiceCfg> {
+    let text = std::fs::read_to_string(host_config_path()).ok()?;
+    let mut url = String::new();
+    let mut token = String::new();
+    let mut token_env = String::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let v = v.trim().trim_matches('"').trim_matches('\'');
+        match k.trim() {
+            "voice_url" => url = v.to_string(),
+            "voice_token" => token = v.to_string(),
+            "voice_token_env" => token_env = v.to_string(),
+            _ => {}
+        }
+    }
+    if url.is_empty() {
+        return None;
+    }
+    if token.is_empty() && !token_env.is_empty() {
+        token = std::env::var(&token_env).unwrap_or_default();
+    }
+    Some(crate::voice_ws::VoiceCfg {
+        url,
+        token: (!token.is_empty()).then_some(token),
+    })
+}
+
 pub fn voice_start_place(_place: &Place) -> Result<()> {
+    if crate::voice_ws::configured() {
+        return crate::voice_ws::start();
+    }
     crate::voice::start()
 }
 
 pub fn voice_stop_place(_place: &Place) -> Result<String> {
+    if crate::voice_ws::configured() {
+        return crate::voice_ws::stop();
+    }
     crate::voice::stop()
 }
 
 /// Latest partial transcript for a take that is still running.
 pub fn voice_peek_place(_place: &Place) -> Result<String> {
+    if crate::voice_ws::configured() {
+        return crate::voice_ws::peek();
+    }
     crate::voice::peek()
 }
 
