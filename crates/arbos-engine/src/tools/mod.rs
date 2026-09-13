@@ -159,7 +159,7 @@ pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Res
     }
     let plan = tool.plan(
         &PlanCx {
-            root: cx.place.path(),
+            root: cx.root(),
             cwd: &cx.cwd,
             agent: &cx.agent,
         },

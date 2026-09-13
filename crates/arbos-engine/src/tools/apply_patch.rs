@@ -51,7 +51,7 @@ impl Tool for ApplyPatch {
         Ok(ToolPlan::access(Access::writes(resolved)))
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
-        blocking(move || apply(cx.place.path(), &cx.cwd, req(&args, "patch")?))
+        blocking(move || apply(cx.root(), &cx.cwd, req(&args, "patch")?))
     }
 }
 

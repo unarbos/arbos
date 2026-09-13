@@ -51,4 +51,10 @@ impl Place {
     pub fn agent_dir(&self, id: &str) -> PathBuf {
         self.agents_dir().join(id)
     }
+
+    /// Where `spawn isolate=worktree` puts a child's checkout: one folder
+    /// per child under here. A cwd inside it is that child's whole world.
+    pub fn worktrees_dir(&self) -> PathBuf {
+        self.arbos().join("worktrees")
+    }
 }
