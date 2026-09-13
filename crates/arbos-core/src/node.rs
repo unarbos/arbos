@@ -183,6 +183,9 @@ pub struct Node {
     /// Reply budget carried into the turn this node starts.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub hops: u8,
+    /// For a person's message: `voice` | `text`, copied to the inbox file.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub channel: String,
     /// The attempt that holds it active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<String>,
@@ -214,6 +217,7 @@ impl Node {
             outcome: String::new(),
             origin: String::new(),
             hops: 0,
+            channel: String::new(),
             attempt: None,
             attachments: Vec::new(),
             created_ms: now,

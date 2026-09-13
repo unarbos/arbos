@@ -218,6 +218,7 @@ impl RemoteHub {
                 text: format!("[{from}] {text}"),
                 steer,
                 attachments: vec![],
+                channel: String::new(),
             })
             .map_err(|_| anyhow::anyhow!("the link to {} closed", link.record.machine))?;
         Ok(())
@@ -705,6 +706,7 @@ async fn attach(
                 text,
                 steer: false,
                 attachments: vec![],
+                channel: String::new(),
             })
             .ok();
     }

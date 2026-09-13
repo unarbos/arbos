@@ -225,6 +225,11 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         screenshot: Option<String>,
     },
+    /// A person's words for `agent`. `channel` says where they came from:
+    /// `voice` (a call, through the voice gateway) or `text` (typed). Absent
+    /// means typed: the desktop and the CLI send no channel. The kernel
+    /// writes it into the inbox file so the record shows how each line
+    /// arrived.
     User {
         agent: String,
         text: String,
@@ -232,6 +237,8 @@ pub enum Frame {
         steer: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<String>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        channel: String,
     },
     Pause {
         agent: String,

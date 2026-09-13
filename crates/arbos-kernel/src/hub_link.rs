@@ -358,6 +358,7 @@ pub async fn deliver(
             text: format!("[{from}] {text}"),
             steer: false,
             attachments: vec![],
+            channel: String::new(),
         },
     )
     .await?;

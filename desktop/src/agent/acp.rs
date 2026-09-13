@@ -307,6 +307,7 @@ impl Session {
                         .to_string()
                 })
                 .collect(),
+            channel: String::new(),
         })
     }
 

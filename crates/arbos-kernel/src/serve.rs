@@ -603,7 +603,15 @@ fn handle_frame(
             text,
             steer,
             attachments,
+            channel,
         } => {
+            // Where the words came from. A frame without a channel is a
+            // typed line (the desktop, the CLI); the voice gateway says so.
+            let channel = if channel.is_empty() {
+                "text".to_string()
+            } else {
+                channel
+            };
             // A steer goes into the live turn at its next tool boundary.
             // Everything else is a node: it fires now if the agent is idle,
             // else after the current turn — and survives a restart either way.
@@ -627,6 +635,7 @@ fn handle_frame(
             if steer && sched.has_job(&agent) {
                 let mut msg = inbox::Message::new("user", "steer", text.clone());
                 msg.attachments = attachments.clone();
+                msg.channel = channel.clone();
                 match inbox::deliver(place, &agent, &msg) {
                     Ok(_) => hooks.broadcast(hooks.plan_frame(&agent)),
                     Err(e) => refuse(hooks, Some(&agent), format!("steer: {e:#}")),
@@ -650,6 +659,7 @@ fn handle_frame(
             }
             let mut n = arbos_core::Node::inbox(text, "user");
             n.attachments = attachments;
+            n.channel = channel;
             if let Err(e) = hooks.inbox(&agent, n) {
                 refuse(hooks, Some(&agent), format!("inbox: {e:#}"));
             }

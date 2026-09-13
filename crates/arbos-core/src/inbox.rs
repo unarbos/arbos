@@ -44,6 +44,11 @@ pub struct Message {
     pub attachments: Vec<String>,
     /// RFC 3339 UTC.
     pub sent: String,
+    /// How a person's words arrived: `voice` (a call) or `text` (typed).
+    /// Empty on messages from agents and the kernel, and on files from
+    /// before the key existed.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub channel: String,
     #[serde(skip)]
     pub body: String,
 }
@@ -58,6 +63,7 @@ impl Default for Message {
             hops: 0,
             attachments: Vec::new(),
             sent: rfc3339(crate::now_ms()),
+            channel: String::new(),
             body: String::new(),
         }
     }
@@ -374,5 +380,23 @@ mod tests {
             "the note stays for the next turn"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn channel_is_written_when_set_and_absent_otherwise() {
+        let mut voice = Message::new("user", "request", "send an agent to fix CI");
+        voice.channel = "voice".into();
+        let text = voice.render().unwrap();
+        assert!(text.contains("channel = \"voice\"\n"), "{text}");
+        let back = Message::parse(&text).unwrap();
+        assert_eq!(back.channel, "voice");
+        assert_eq!(back.body, "send an agent to fix CI");
+
+        let note = Message::new("agent:peer", "message", "a note");
+        let text = note.render().unwrap();
+        assert!(!text.contains("channel"), "agents have no channel: {text}");
+        // Files from before the key existed parse with an empty channel.
+        let old = "+++\nfrom = \"user\"\nkind = \"request\"\nwake = true\nhops = 0\nsent = \"2026-09-12T21:52:10Z\"\n+++\nhello\n";
+        assert_eq!(Message::parse(old).unwrap().channel, "");
     }
 }
