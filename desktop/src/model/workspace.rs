@@ -1747,6 +1747,45 @@ impl Workspace {
     /// turn (so it reopens lit) and appended to the agent's
     /// `feedback.jsonl` in the place, for QA and the kernel. Clicking the
     /// lit thumb clears the vote.
+    /// Try Live (A-02): open or close the live view of the agent's screen.
+    /// While open, the kernel is asked for a frame every two seconds; for
+    /// an agent on another machine the kernel forwards the request over
+    /// its link, so the window sees that machine's screen.
+    pub fn toggle_live(&mut self, id: u64, cx: &mut Context<Self>) {
+        let mut opened = false;
+        self.with_session(id, cx, |chat| {
+            chat.live_open = !chat.live_open;
+            opened = chat.live_open;
+            if opened {
+                chat.request_screen();
+            }
+        });
+        if !opened {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let keep = this
+                    .update(cx, |workspace, cx| {
+                        let mut open = false;
+                        workspace.with_session(id, cx, |chat| {
+                            open = chat.live_open;
+                            if open {
+                                chat.request_screen();
+                            }
+                        });
+                        open
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// "Rewind here" under a turn: chat and files back to before its prompt.
     pub fn rewind_turn(&mut self, id: u64, turn: usize, cx: &mut Context<Self>) {
         self.with_session(id, cx, |chat| chat.rewind(turn, true));

@@ -227,6 +227,30 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         screenshot: Option<String>,
     },
+    /// Try Live (A-02): a client asks for the screen the agent works on.
+    /// For an agent on another machine the kernel forwards the request
+    /// over its link and relays the answer back.
+    Screen {
+        agent: String,
+    },
+    /// The answer: one PNG of the screen, base64, with where it came from.
+    /// `error` instead when no backend could capture (headless machine).
+    Screenshot {
+        agent: String,
+        machine: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        png: String,
+        /// `image/png` or `image/jpeg` (scaled for the wire).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        mime: String,
+        #[serde(default)]
+        width: u32,
+        #[serde(default)]
+        height: u32,
+        at_ms: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// A person's words for `agent`. `channel` says where they came from:
     /// `voice` (a call, through the voice gateway) or `text` (typed). Absent
     /// means typed: the desktop and the CLI send no channel. `device` is

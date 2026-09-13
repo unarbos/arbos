@@ -96,6 +96,58 @@ struct Captured {
     backend: &'static str,
 }
 
+/// One frame of the main screen for Try Live: captured into the place's
+/// runtime folder and removed at once (the bytes are the answer). Scaled
+/// to 1280 wide and JPEG-encoded when ImageMagick or sips is on the
+/// machine — a 4 MB PNG every two seconds is too much for a tunnel; else
+/// the PNG as captured. Returns (bytes, mime, width, height) of the
+/// original screen.
+pub fn grab_screen(place: &arbos_core::Place) -> Result<(Vec<u8>, &'static str, u32, u32)> {
+    let dir = place.runtime_dir().join("live");
+    let out = capture(&dir, Target::Screen, None)?;
+    let (w, h) = arbos_engine::image::dimensions(&out.png).unwrap_or((0, 0));
+    let small = out.path.with_extension("jpg");
+    let scaled = if which(std::ffi::OsStr::new("convert")).is_some() {
+        std::process::Command::new("convert")
+            .arg(&out.path)
+            .args(["-resize", "1280x>", "-quality", "72"])
+            .arg(&small)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    } else if which(std::ffi::OsStr::new("sips")).is_some() {
+        std::process::Command::new("sips")
+            .args([
+                "-Z",
+                "1280",
+                "-s",
+                "format",
+                "jpeg",
+                "-s",
+                "formatOptions",
+                "72",
+            ])
+            .arg(&out.path)
+            .arg("--out")
+            .arg(&small)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let result = if scaled && let Ok(bytes) = std::fs::read(&small) {
+        (bytes, "image/jpeg", w, h)
+    } else {
+        (out.png, "image/png", w, h)
+    };
+    let _ = std::fs::remove_file(&out.path);
+    let _ = std::fs::remove_file(&small);
+    Ok(result)
+}
+
 /// A fresh file name under `dir`. Two calls in one step can share a
 /// millisecond; the suffix keeps them apart.
 fn fresh_path(dir: &Path) -> PathBuf {

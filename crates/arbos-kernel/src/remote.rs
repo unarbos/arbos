@@ -191,6 +191,15 @@ pub struct RemoteHub {
     links: Mutex<HashMap<String, Arc<Link>>>,
 }
 
+impl Link {
+    /// A frame for the remote kernel, as is.
+    pub fn send(&self, frame: Frame) -> Result<()> {
+        self.to_remote
+            .send(frame)
+            .map_err(|_| anyhow::anyhow!("the link to {} closed", self.record.machine))
+    }
+}
+
 impl RemoteHub {
     pub fn link(&self, agent: &str) -> Option<Arc<Link>> {
         self.links.lock().unwrap().get(agent).cloned()
@@ -823,6 +832,21 @@ async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::Unbounded
                                 mirror(&hooks, &link, events, mirrored);
                             }
                         }
+                    }
+                    // Try Live: the remote machine's screen, rebroadcast
+                    // here under the local child's id.
+                    Frame::Screenshot { png, mime, width, height, at_ms, error, .. } => {
+                        hooks.screen_pending.lock().unwrap().remove(&link.record.agent);
+                        hooks.broadcast(Frame::Screenshot {
+                            agent: link.record.agent.clone(),
+                            machine: link.record.machine.clone(),
+                            png,
+                            mime,
+                            width,
+                            height,
+                            at_ms,
+                            error,
+                        });
                     }
                     _ => {}
                 }

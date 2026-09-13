@@ -150,6 +150,8 @@ pub struct KernelHooks {
     pub caps: Caps,
     /// Children on other machines, reached over SSH.
     pub remotes: crate::remote::RemoteHub,
+    /// Try Live requests forwarded to a remote kernel and not yet answered.
+    pub screen_pending: Arc<Mutex<HashSet<String>>>,
 }
 
 impl KernelHooks {
@@ -188,6 +190,7 @@ impl KernelHooks {
             spawn_lock: Mutex::new(()),
             inbox_retry: Mutex::new(HashMap::new()),
             remotes: crate::remote::RemoteHub::default(),
+            screen_pending: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 

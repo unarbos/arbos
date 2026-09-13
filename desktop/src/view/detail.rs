@@ -18,7 +18,7 @@ use crate::{
 use bezel::{
     gpui::{
         AnyElement, App, ClickEvent, Context, ExternalPaths, FocusHandle, Focusable as _,
-        SharedString, Window, div, prelude::*, px, svg,
+        SharedString, Window, div, img, prelude::*, px, svg,
     },
     motion::{Fade, Painter},
     theme::{TextStyle, Theme, Typeset},
@@ -645,6 +645,7 @@ impl Arbos {
                                         .children(self.permission(cx).map(bleed))
                                         .children(self.questions(cx).map(bleed))
                                         .children(self.queue(cx).map(bleed))
+                                        .children(self.live_view(cx).map(bleed))
                                         .child(self.composer.clone())
                                         .children(context_row),
                                 ),
@@ -872,6 +873,7 @@ impl Arbos {
                     )
                     .child(div().truncate().child(SharedString::from(machine))),
             )
+            .children(self.try_live_button(theme, cx))
             .children(if self.call.is_some() {
                 self.call_strip(theme, cx)
             } else {
@@ -1058,6 +1060,151 @@ impl Arbos {
                 .child(mute)
                 .child(end)
                 .into_any_element(),
+        )
+    }
+
+    /// Try Live (A-02): the toggle in the row under the composer. Open, it
+    /// reads "Live" and closes the view.
+    fn try_live_button(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let chat = self.workspace.read(cx).active_session()?;
+        if !chat.live() {
+            return None;
+        }
+        let id = chat.id;
+        let open = chat.live_open;
+        Some(
+            div()
+                .id("try-live")
+                .flex_none()
+                .ml(px(8.))
+                .px(px(6.))
+                .h(px(20.))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .rounded(px(Theme::control_radius()))
+                .cursor_pointer()
+                .text_style(TextStyle::Caption)
+                .text_color(if open { theme.text } else { theme.text_faint })
+                .when(open, |el| el.bg(theme.element_active))
+                .hover(|el| el.bg(theme.element_hover))
+                .tooltip(move |window, cx| {
+                    Tooltip::text(
+                        if open {
+                            "Close the live view"
+                        } else {
+                            "Try Live: watch the screen this agent works on, wherever it runs"
+                        },
+                        window,
+                        cx,
+                    )
+                })
+                .child(
+                    icons::icon(icons::devices::LAPTOP)
+                        .size(px(11.))
+                        .text_color(if open { theme.text } else { theme.text_faint }),
+                )
+                .child(if open { "Live" } else { "Try Live" })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.workspace
+                        .update(cx, |workspace, cx| workspace.toggle_live(id, cx));
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// The live view: the latest frame of the agent's screen, its machine,
+    /// and how old the frame is. An error from the kernel (no display, no
+    /// capture tool on that machine) shows in the frame's place.
+    fn live_view(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let theme = Theme::of(cx).clone();
+        let chat = self.workspace.read(cx).active_session()?;
+        if !chat.live_open {
+            return None;
+        }
+        let id = chat.id;
+        let screen = chat.live_screen.clone();
+        let caption = match &screen {
+            None => "Live · asking the kernel for the screen…".to_string(),
+            Some(s) => {
+                let age = s.at.elapsed().as_secs();
+                match &s.error {
+                    Some(_) => format!("Live · {} · no frame", s.machine),
+                    None => format!(
+                        "Live · {} · {}×{} · {}",
+                        s.machine,
+                        s.width,
+                        s.height,
+                        if age == 0 { "now".to_string() } else { format!("{age}s ago") }
+                    ),
+                }
+            }
+        };
+        let width = 640.0_f32;
+        let height = screen
+            .as_ref()
+            .filter(|s| s.width > 0 && s.height > 0)
+            .map(|s| (width * s.height as f32 / s.width as f32).clamp(120.0, 480.0))
+            .unwrap_or(240.0);
+        let body: AnyElement = match screen.as_ref() {
+            Some(s) if s.error.is_some() => div()
+                .p(px(12.))
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_muted)
+                .child(s.error.clone().unwrap_or_default())
+                .into_any_element(),
+            Some(s) if s.image.is_some() => img(s.image.clone().unwrap())
+                .w(px(width))
+                .h(px(height))
+                .rounded(px(Theme::control_radius()))
+                .into_any_element(),
+            _ => div()
+                .w(px(width))
+                .h(px(height))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(transcript::spinner(Duration::ZERO, theme.text_faint, cx))
+                .into_any_element(),
+        };
+        Some(
+            div()
+                .id("live-view")
+                .w_full()
+                .px(px(root::COMPOSER_PAD_X))
+                .py(px(8.))
+                .rounded(px(Theme::surface_radius()))
+                .bg(theme.surface_raised.opacity(0.7))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_style(TextStyle::Caption)
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(caption)),
+                        )
+                        .child(
+                            div()
+                                .id("live-close")
+                                .cursor_pointer()
+                                .text_style(TextStyle::Caption)
+                                .text_color(theme.text_faint)
+                                .hover(|el| el.text_color(theme.text))
+                                .child("Close")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.workspace
+                                        .update(cx, |workspace, cx| workspace.toggle_live(id, cx));
+                                })),
+                        ),
+                )
+                .child(body),
         )
     }
 
