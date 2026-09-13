@@ -734,6 +734,21 @@ impl Arbos {
         .detach();
         keep_macos_glass(window);
         this.sync_composer(cx);
+        // First launch: the permissions sheet, once. After the window has
+        // painted, so it opens over something rather than before it.
+        if !this.workspace.read(cx).permissions_seen {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(600))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.workspace
+                        .update(cx, |workspace, _| workspace.mark_permissions_seen());
+                    this.open_settings(Section::Permissions, cx);
+                });
+            })
+            .detach();
+        }
         // Where the caret starts. The composer is drawn only over a chat it can
         // send to, and focus on an element no frame draws is focus nowhere.
         let composer = this
@@ -1099,6 +1114,15 @@ impl Arbos {
             self.stop_voice(cx);
         } else {
             self.start_voice(cx);
+        }
+    }
+
+    /// The Fn key, as the native monitor (or the driver) reports it.
+    pub(crate) fn fn_key(&mut self, down: bool, cx: &mut Context<Self>) {
+        if down {
+            self.fn_down(cx);
+        } else {
+            self.fn_up(cx);
         }
     }
 

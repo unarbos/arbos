@@ -70,6 +70,10 @@ pub struct State {
     /// back on the next launch.
     #[serde(default)]
     pub dismissed: BTreeMap<String, Vec<String>>,
+    /// Whether the permissions sheet has been shown once. A first launch
+    /// opens Settings › Permissions; after that it is a click away.
+    #[serde(default)]
+    pub permissions_seen: bool,
 }
 
 /// What the body size may be set to, in points: the ladder's smallest measured
@@ -97,6 +101,7 @@ impl Default for State {
             last: BTreeMap::new(),
             names: BTreeMap::new(),
             dismissed: BTreeMap::new(),
+            permissions_seen: false,
         }
     }
 }
@@ -155,6 +160,7 @@ pub fn restore() -> State {
         last,
         names: stored.names,
         dismissed: stored.dismissed,
+        permissions_seen: stored.permissions_seen,
     }
 }
 

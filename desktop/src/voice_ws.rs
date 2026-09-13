@@ -1477,6 +1477,13 @@ fn sh(cmd: &str) -> Command {
 
 /// The first microphone program found. `ARBOS_VOICE_MIC_CMD` (a shell
 /// command writing raw PCM16 24 kHz mono to stdout) wins.
+/// The capture program the mic would run, by name, or why there is none —
+/// what the Microphone row in Settings › Permissions reads on Linux.
+pub fn mic_program() -> Result<String> {
+    let cmd = mic_command()?;
+    Ok(cmd.get_program().to_string_lossy().into_owned())
+}
+
 fn mic_command() -> Result<Command> {
     if let Some(custom) = std::env::var("ARBOS_VOICE_MIC_CMD")
         .ok()

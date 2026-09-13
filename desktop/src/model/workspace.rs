@@ -130,6 +130,8 @@ pub struct Workspace {
     /// Pencil: a past prompt to drop into the composer on the next sync.
     /// Taken by the chrome; not persisted.
     pub pending_composer: Option<String>,
+    /// Whether the permissions sheet has been shown once.
+    pub permissions_seen: bool,
 }
 
 impl Workspace {
@@ -180,6 +182,7 @@ impl Workspace {
             kernel_syncing: HashSet::new(),
             dismissed: state.dismissed,
             pending_composer: None,
+            permissions_seen: state.permissions_seen,
         };
         for ix in restore {
             this.restore_sessions(ix);
@@ -253,7 +256,14 @@ impl Workspace {
             // map stays readable for the one-time migration above.
             names: BTreeMap::new(),
             dismissed: self.dismissed.clone(),
+            permissions_seen: self.permissions_seen,
         });
+    }
+
+    /// The first-launch sheet has been shown; it will not open on its own again.
+    pub fn mark_permissions_seen(&mut self) {
+        self.permissions_seen = true;
+        self.save();
     }
 
     // ── agents ───────────────────────────────────────────────────────

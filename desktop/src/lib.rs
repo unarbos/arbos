@@ -9,6 +9,7 @@ pub mod driver;
 pub mod kernel;
 pub mod memory;
 pub mod model;
+pub mod permissions;
 pub mod reading;
 pub mod view;
 pub mod voice;

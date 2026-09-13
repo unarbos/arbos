@@ -483,6 +483,12 @@ struct KeyParams {
     keys: String,
 }
 
+/// `fn`: hold or release the Fn key, as the native monitor would report it.
+#[derive(Deserialize)]
+struct FnParams {
+    down: bool,
+}
+
 #[derive(Deserialize)]
 struct TypeParams {
     text: String,
@@ -523,7 +529,7 @@ fn parse<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T> {
 /// Do what the request asks. Whatever it returns is the reply for methods
 /// that only act; `report` replaces it for the ones that read.
 fn act(
-    _root: Option<&Entity<Arbos>>,
+    root: Option<&Entity<Arbos>>,
     method: &str,
     params: &Value,
     window: &mut Window,
@@ -711,7 +717,7 @@ fn act(
             // of the target. Close the target here instead, with the menu's
             // semantics: the chat window takes Settings with it.
             if name == "arbos::CloseWindow" {
-                if _root.is_some() {
+                if root.is_some() {
                     crate::kernel::shutdown_tunnels();
                     cx.defer(|cx| {
                         for other in cx.windows() {
@@ -755,6 +761,16 @@ fn act(
                 "width": f32::from(window.viewport_size().width),
                 "height": f32::from(window.viewport_size().height),
             }))
+        }
+        // The hold-Fn dictation path, by the same calls the key monitor
+        // makes: down starts a take into the composer, up ends it. Drivable
+        // everywhere, so the UI pass can check the wiring; on a machine with
+        // no dictation the notice it raises is the check.
+        "fn" => {
+            let FnParams { down } = parse(params)?;
+            let root = root.context("no main window")?;
+            root.update(cx, |this, cx| this.fn_key(down, cx));
+            Ok(json!({ "down": down }))
         }
         "quit" => {
             cx.quit();

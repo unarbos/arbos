@@ -25,6 +25,7 @@ use bezel::{
 mod general;
 mod model;
 mod performance;
+mod permissions;
 mod theme;
 mod typography;
 
@@ -47,14 +48,16 @@ const CONTENT_MAX_WIDTH: f32 = 860.;
 pub enum Section {
     General,
     Model,
+    Permissions,
     Appearance,
     Performance,
 }
 
 impl Section {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::General,
         Self::Model,
+        Self::Permissions,
         Self::Appearance,
         Self::Performance,
     ];
@@ -63,6 +66,7 @@ impl Section {
         match self {
             Self::General => "General",
             Self::Model => "Model",
+            Self::Permissions => "Permissions",
             Self::Appearance => "Appearance",
             Self::Performance => "Performance",
         }
@@ -74,6 +78,7 @@ impl Section {
     fn subtitle(self) -> Option<&'static str> {
         match self {
             Self::Model => Some("Who answers the chat, and with which key."),
+            Self::Permissions => Some("What the system lets Arbos do here. Each row asks for itself."),
             Self::General | Self::Appearance | Self::Performance => None,
         }
     }
@@ -82,6 +87,7 @@ impl Section {
         match self {
             Self::General => icons::system::SETTINGS_MINIMALISTIC,
             Self::Model => icons::system::KEY_MINIMALISTIC,
+            Self::Permissions => icons::media::MICROPHONE,
             Self::Appearance => icons::system::SUN,
             Self::Performance => icons::devices::CPU,
         }
@@ -92,6 +98,8 @@ pub struct SettingsWindow {
     workspace: Entity<Workspace>,
     section: Section,
     host: model::HostPanel,
+    /// The permissions rows' re-check loop is running.
+    rechecking: bool,
 }
 
 /// Open the window, or bring the open one forward — a second settings window
@@ -133,6 +141,7 @@ pub fn open(
                 workspace,
                 section,
                 host: model::HostPanel::new(cx),
+                rechecking: false,
             })
         },
     )
@@ -235,6 +244,7 @@ impl Render for SettingsWindow {
                             .child(match self.section {
                                 Section::General => self.general_body(cx),
                                 Section::Model => self.model_body(cx),
+                                Section::Permissions => self.permissions_body(cx),
                                 Section::Appearance => self.appearance_body(cx),
                                 Section::Performance => self.performance_body(cx),
                             }),
