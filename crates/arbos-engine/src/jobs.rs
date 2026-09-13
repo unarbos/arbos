@@ -141,12 +141,15 @@ impl JobsRoot {
             .open(dir.join("out.log"))?;
         let err_fd = journal.try_clone()?;
         let exit_path = dir.join("exit");
+        // `pipefail` where the shell has it (bash, zsh, macOS sh; dash does
+        // not): `curl | jq` then fails when curl does. The probe is silent
+        // so a shell without it leaves nothing in the journal.
         let script = format!(
-            "( cd {} && {command}\n); echo $? > {}",
+            "(set -o pipefail) 2>/dev/null && set -o pipefail; ( cd {} && {command}\n); echo $? > {}",
             sh_quote(&cwd.display().to_string()),
             sh_quote(&exit_path.display().to_string())
         );
-        let mut cmd = Command::new("sh");
+        let mut cmd = Command::new(job_shell());
         cmd.arg("-c")
             .arg(&script)
             .current_dir(cwd)
@@ -370,6 +373,17 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(not(unix))]
 fn pid_alive(_pid: u32) -> bool {
     false
+}
+
+/// The wrapper shell: bash when the machine has it (it has `pipefail`;
+/// Debian's `sh` is dash, which does not), else `sh`.
+fn job_shell() -> &'static str {
+    static SHELL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    SHELL.get_or_init(|| {
+        let found = std::env::var_os("PATH")
+            .is_some_and(|paths| std::env::split_paths(&paths).any(|d| d.join("bash").is_file()));
+        if found { "bash" } else { "sh" }
+    })
 }
 
 fn sh_quote(s: &str) -> String {

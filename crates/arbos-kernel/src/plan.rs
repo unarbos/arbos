@@ -479,10 +479,17 @@ async fn run_mechanical(hooks: &Arc<KernelHooks>, agent: &Agent, mut n: Node, a:
     match n.do_.clone() {
         Do::Shell { cmd, report } => {
             let (job, code, tail) = run_job(hooks, agent, &cmd).await;
-            let ok = code == 0;
+            // A node that exists to report a reading has nothing to report
+            // when the command printed nothing: that is a failure too
+            // (`curl | jq` with a dead endpoint exits 0 on some shells).
+            let silent = report.is_some() && tail.trim().is_empty();
+            let ok = code == 0 && !silent;
             // The output is the outcome: it is what the next firing, and
             // the window's `last:` line, need to see.
             let mut outcome = format!("exit {code}");
+            if silent && code == 0 {
+                outcome.push_str(", no output for the report");
+            }
             if !tail.is_empty() {
                 outcome.push_str(" — ");
                 outcome.push_str(&node::clip(&tail, 400));
@@ -510,7 +517,14 @@ async fn run_mechanical(hooks: &Arc<KernelHooks>, agent: &Agent, mut n: Node, a:
                 }
             }
             if !ok {
-                let mut wake = Node::inbox(wake_prompt(&n, WakeReason::CmdFailed, &tail), "kernel");
+                let detail = if silent && code == 0 {
+                    "the command exited 0 but printed nothing, so there was nothing to report"
+                        .to_string()
+                } else {
+                    tail.clone()
+                };
+                let mut wake =
+                    Node::inbox(wake_prompt(&n, WakeReason::CmdFailed, &detail), "kernel");
                 wake.check = format!("node #{}", n.id);
                 let _ = hooks.inbox(id, wake);
             }
