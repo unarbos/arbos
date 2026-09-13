@@ -146,17 +146,19 @@ impl KernelHooks {
 
     /// The agent tree to every client, after a folder appears or changes.
     pub fn broadcast_tree(&self) {
-        let tree = list_agents(&self.place)
-            .unwrap_or_default()
-            .into_iter()
+        let agents = list_agents(&self.place).unwrap_or_default();
+        let prs = arbos_core::load_prs(&self.place);
+        let tree = agents
+            .iter()
             .map(|a| arbos_core::wire::TreeNode {
                 id: a.id.to_string(),
-                name: a.name,
-                parent: a.parent.map(|p| p.to_string()),
+                name: a.name.clone(),
+                parent: a.parent.as_ref().map(|p| p.to_string()),
                 paused: a.paused,
-                model: a.model,
+                model: a.model.clone(),
                 kind: "agent".into(),
                 mode: a.mode.as_str().into(),
+                prs: arbos_core::prs::prs_of_tree(&prs, a.id.as_str(), &agents).len() as u32,
             })
             .collect();
         self.broadcast(Frame::Tree { tree });

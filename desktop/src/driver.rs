@@ -27,6 +27,7 @@
 
 use crate::{
     model::{
+        project::Project,
         session::{ArtifactKind, ChatItem, ChatSession, Connection, ToolStatus},
         surface::{Bind, Surface},
     },
@@ -1048,7 +1049,7 @@ fn state(root: Option<&Entity<Cydonia>>, window: &Window, cx: &App) -> Value {
                     "agent": focus.agent,
                     "surface": focus.surface.map(|id| id.0),
                 })),
-                "sessions": project.sessions.iter().map(session_json).collect::<Vec<_>>(),
+                "sessions": project.sessions.iter().map(|chat| session_json(Some(project), chat)).collect::<Vec<_>>(),
                 "surfaces": project.surfaces.iter().map(surface_json).collect::<Vec<_>>(),
             })
         })
@@ -1083,7 +1084,7 @@ fn pane_name(pane: Option<Pane>) -> Value {
     }
 }
 
-fn session_json(chat: &ChatSession) -> Value {
+fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
     json!({
         "id": chat.id,
         "title": chat.title,
@@ -1104,6 +1105,10 @@ fn session_json(chat: &ChatSession) -> Value {
         "streaming": chat.streaming,
         "turn_open": chat.turn_open,
         "closed": chat.closed,
+        "pills": project.map(|project| {
+            let (working, prs) = crate::view::detail::pill_counts(project, chat);
+            json!({ "working": working.len(), "prs": prs.len(), "pr_urls": prs })
+        }),
         "permission": chat.permission.as_ref().map(|prompt| prompt.title.clone()),
         "questions": chat.questions.as_ref().map(|prompt| prompt.title.clone()),
         "items": chat.items.iter().map(item_json).collect::<Vec<_>>(),

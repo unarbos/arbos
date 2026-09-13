@@ -166,4 +166,11 @@ pub struct TreeNode {
     pub kind: String,
     #[serde(default)]
     pub mode: String,
+    /// Pull requests this agent and its descendants opened.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub prs: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }

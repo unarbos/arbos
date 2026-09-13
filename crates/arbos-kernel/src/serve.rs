@@ -341,6 +341,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
                     let path = Layout::new(&place, agent.id.as_str()).transcript();
                     let tail = tails.entry(agent.id.to_string()).or_default();
                     for ev in tail.read_new(&path).unwrap_or_default() {
+                        if record_prs(&place, agent.id.as_str(), &ev) {
+                            hooks.broadcast(Frame::Tree { tree: tree_nodes(&place) });
+                        }
                         hooks.broadcast(Frame::Event {
                             agent: agent.id.to_string(),
                             event: ev,
@@ -653,19 +656,65 @@ fn tree_frame(place: &Place) -> Frame {
 }
 
 fn tree_nodes(place: &Place) -> Vec<TreeNode> {
-    list_agents(place)
-        .unwrap_or_default()
-        .into_iter()
+    let agents = list_agents(place).unwrap_or_default();
+    let prs = arbos_core::load_prs(place);
+    agents
+        .iter()
         .map(|a| TreeNode {
             id: a.id.to_string(),
-            name: a.name,
-            parent: a.parent.map(|p| p.to_string()),
+            name: a.name.clone(),
+            parent: a.parent.as_ref().map(|p| p.to_string()),
             paused: a.paused,
-            model: a.model,
+            model: a.model.clone(),
             kind: "agent".into(),
             mode: a.mode.as_str().into(),
+            prs: arbos_core::prs::prs_of_tree(&prs, a.id.as_str(), &agents).len() as u32,
         })
         .collect()
+}
+
+/// A finished `bash` whose command ran `gh pr create` and whose output
+/// names the pull request: one record per new URL in `.arbos/prs.jsonl`.
+/// Returns whether anything new was recorded.
+fn record_prs(place: &Place, agent: &str, ev: &Event) -> bool {
+    let EventKind::Tool(rec) = &ev.kind else {
+        return false;
+    };
+    if !matches!(rec.name.as_str(), "bash" | "terminal") || rec.error.is_some() {
+        return false;
+    }
+    let Some(command) = rec
+        .args
+        .as_ref()
+        .and_then(|a| a.get("command"))
+        .and_then(|c| c.as_str())
+    else {
+        return false;
+    };
+    if !arbos_core::prs::opens_pr(command) {
+        return false;
+    }
+    let Some(body) = rec.body.as_deref() else {
+        return false;
+    };
+    let branch = arbos_core::prs::head_branch(command);
+    let mut new = false;
+    for (url, repo, number) in arbos_core::prs::pr_urls(body) {
+        let pr = arbos_core::PrRec {
+            ts: arbos_core::now_ms(),
+            agent: agent.to_string(),
+            url,
+            repo,
+            number,
+            branch: branch.clone(),
+        };
+        match arbos_core::record_pr(place, &pr) {
+            Ok(true) => new = true,
+            Ok(false) => {}
+            Err(e) => eprintln!("prs: {e:#}"),
+        }
+    }
+    new
 }
 
 fn write_kernel_json(place: &Place, addr: SocketAddr) -> Result<()> {
