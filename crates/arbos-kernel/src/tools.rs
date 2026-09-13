@@ -372,7 +372,8 @@ impl Tool for PlanTool {
                         "text": {"type": "string", "description": "add/update: the item text, `[label](target) — readout`."},
                         "n": {"type": "integer", "description": "check/update/remove: the item number from show."},
                         "done": {"type": "boolean", "description": "check: false to reopen (default true)."},
-                        "readout": {"type": "string", "description": "check: the fresh status readout written after the dash."}
+                        "readout": {"type": "string", "description": "check: the fresh status readout written after the dash. The <tldr> bullet with the same [label] is rewritten too."},
+                        "target": {"type": "string", "description": "check: move the item's link to the deliverable (a PR URL, docs/x.md) now that it exists."}
                     },
                     "required": ["op"]
                 }
@@ -474,7 +475,12 @@ impl Tool for PlanTool {
                 "check" => {
                     let k = n()?;
                     let done = args.get("done").and_then(|v| v.as_bool()).unwrap_or(true);
-                    let item = notes.check(k, done, opt_str(&args, "readout"))?;
+                    let item = notes.check_with_target(
+                        k,
+                        done,
+                        opt_str(&args, "readout"),
+                        opt_str(&args, "target"),
+                    )?;
                     hooks.save_notes(agent, &notes)?;
                     format!(
                         "{} {}: {}. Items are renumbered after a check (done ones sink); use the numbers in this list.",

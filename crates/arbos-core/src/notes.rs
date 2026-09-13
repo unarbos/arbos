@@ -102,6 +102,15 @@ pub fn read_path(path: &Path) -> Notes {
     Notes::parse(&std::fs::read_to_string(path).unwrap_or_default())
 }
 
+/// `[label](target) …` → `label`.
+fn link_label(s: &str) -> Option<&str> {
+    let rest = s.trim_start().strip_prefix('[')?;
+    let close = rest.find("](")?;
+    rest[close + 2..].find(')')?;
+    let label = &rest[..close];
+    (!label.trim().is_empty()).then_some(label)
+}
+
 fn parse_item_line(line: &str) -> Option<(bool, &str)> {
     let t = line.trim_start();
     let rest = t.strip_prefix("- [")?;
@@ -269,6 +278,7 @@ impl Notes {
             .map(|(d, _)| d)
             .unwrap_or(false);
         self.lines[ix] = format!("- [{}] {}", if done { 'x' } else { ' ' }, text.trim());
+        self.refresh_tldr(text.trim());
         Ok(())
     }
 
@@ -276,6 +286,19 @@ impl Notes {
     /// checked item sinks to the end of its section; the section keeps
     /// `DONE_KEPT` checked items, older ones go (git has them).
     pub fn check(&mut self, n: usize, done: bool, readout: Option<&str>) -> Result<Item> {
+        self.check_with_target(n, done, readout, None)
+    }
+
+    /// `check`, and the link's target moves to `target` when given: when
+    /// the deliverable exists the item (and its tldr line) point at it,
+    /// not at the worker.
+    pub fn check_with_target(
+        &mut self,
+        n: usize,
+        done: bool,
+        readout: Option<&str>,
+        target: Option<&str>,
+    ) -> Result<Item> {
         let ix = self.line_of(n).with_context(|| format!("no item {n}"))?;
         let (_, text) = parse_item_line(&self.lines[ix]).context("not an item")?;
         let mut text = text.to_string();
@@ -286,6 +309,22 @@ impl Notes {
                 .unwrap_or(&text)
                 .to_string();
             text = format!("{label} — {r}");
+        }
+        if let Some(t) = target.map(str::trim).filter(|t| !t.is_empty()) {
+            text = match link_label(&text) {
+                Some(label) => {
+                    let after = text.split_once(')').map(|(_, rest)| rest).unwrap_or("");
+                    format!("[{label}]({t}){after}")
+                }
+                None => {
+                    let (head, rest) = text.split_once(" — ").unwrap_or((&text, ""));
+                    if rest.is_empty() {
+                        format!("[{head}]({t})")
+                    } else {
+                        format!("[{head}]({t}) — {rest}")
+                    }
+                }
+            };
         }
         let line = format!("- [{}] {text}", if done { 'x' } else { ' ' });
         self.lines.remove(ix);
@@ -324,11 +363,42 @@ impl Notes {
                 .unwrap_or(end);
             self.lines.insert(first_done, line);
         }
+        self.refresh_tldr(&text);
         let items = self.items();
         items
             .into_iter()
             .find(|i| i.text == text && i.done == done)
             .context("item lost while moving")
+    }
+
+    /// The `<tldr>` bullet that names the same `[label]` as `text` becomes
+    /// `text`: a tldr entry is a fresh readout, rewritten on every state
+    /// change, and points where the item points (the deliverable once it
+    /// exists). Nothing happens without a tldr or without a matching label.
+    fn refresh_tldr(&mut self, text: &str) {
+        let Some(label) = link_label(text).map(str::to_string) else {
+            return;
+        };
+        let mut in_tldr = false;
+        for line in self.lines.iter_mut() {
+            let t = line.trim();
+            if t == "<tldr>" {
+                in_tldr = true;
+                continue;
+            }
+            if t == "</tldr>" {
+                break;
+            }
+            if !in_tldr {
+                continue;
+            }
+            if let Some(rest) = t.strip_prefix("- ")
+                && link_label(rest).is_some_and(|l| l.eq_ignore_ascii_case(&label))
+            {
+                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+                *line = format!("{indent}- {text}");
+            }
+        }
     }
 
     pub fn remove(&mut self, n: usize) -> Result<Item> {
@@ -586,6 +656,25 @@ mod tests {
             n.items().iter().any(|i| i.section == "Desktop"),
             "{}",
             n.render()
+        );
+    }
+
+    #[test]
+    fn a_check_with_a_readout_rewrites_the_matching_tldr_line() {
+        let page = "[project context](docs/project-context.md)\n\n<tldr>\n- [River poem](agents/river) — worker pending\n- [Colour table](agents/colour) — worker pending\n</tldr>\n\n## Work\n- [ ] [River poem](agents/river) — worker pending\n- [ ] [Colour table](agents/colour) — worker pending\n";
+        let mut n = Notes::parse(page);
+        n.check_with_target(
+            1,
+            true,
+            Some("landed, 12 lines"),
+            Some("docs/river-poem.md"),
+        )
+        .unwrap();
+        let text = n.render();
+        assert!(text.contains("<tldr>\n- [River poem](docs/river-poem.md) — landed, 12 lines\n- [Colour table](agents/colour) — worker pending\n</tldr>"), "{text}");
+        assert!(
+            text.contains("- [x] [River poem](docs/river-poem.md) — landed, 12 lines"),
+            "{text}"
         );
     }
 
