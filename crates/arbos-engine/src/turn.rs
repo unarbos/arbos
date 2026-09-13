@@ -154,6 +154,10 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // wake is not replayed as unfinished at the next kernel start.
     let (key, api_base) = match (host.api_key(), host.config.api_base()) {
         (Some(key), Ok(base)) => (key, base),
+        // A compaction has no transcript of its own to refuse on.
+        (None, _) if wake.kind == WakeKind::Compact => {
+            anyhow::bail!("{}", host.missing_key_hint())
+        }
         (None, _) => return refuse(&transcript, &place, &agent, host.missing_key_hint()),
         (_, Err(e)) => return refuse(&transcript, &place, &agent, format!("{e:#}")),
     };
