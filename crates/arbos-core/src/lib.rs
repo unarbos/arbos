@@ -50,6 +50,21 @@ pub fn host_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(".arbos-host")
 }
 
+/// Whether a message is a bare control word — `stop`, `cancel`, `halt`,
+/// `wait`, `pause` — the whole message, any case, trailing punctuation
+/// allowed. Typed while a turn runs it means "interrupt", never a prompt.
+pub fn is_stop_word(text: &str) -> bool {
+    let word = text
+        .trim()
+        .trim_end_matches(['.', '!', '…', ',', ';'])
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        word.as_str(),
+        "stop" | "cancel" | "halt" | "wait" | "pause" | "stop it" | "stop now" | "cancel that"
+    )
+}
+
 /// Env var that moves the clock: `ARBOS_NOW=2026-09-13T09:00:00Z` (or unix
 /// millis). The process's clock reads that instant at start and runs
 /// forward from it, so crons and `after` nodes in a fixture fire on cue

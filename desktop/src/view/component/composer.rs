@@ -529,6 +529,17 @@ impl Composer {
         cx.notify();
     }
 
+    /// Replace the field's text for the bound session (a follow-up taken
+    /// back, a rewind handing the prompt back).
+    pub fn take_draft(&mut self, draft: &str, cx: &mut Context<Self>) {
+        self.voice_preview.clear();
+        self.field
+            .update(cx, |field, cx| field.set_content(draft.to_string(), cx));
+        self.command = None;
+        self.close_menu(cx);
+        cx.notify();
+    }
+
     pub fn set_placeholder(&mut self, placeholder: &str, cx: &mut Context<Self>) {
         if self.hint == placeholder {
             return;
