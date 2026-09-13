@@ -1,0 +1,4 @@
+https://inline-voice-occupations-ultram.trycloudflare.com
+# Arbos voice server public URL (Cloudflare quick tunnel; changes when the tunnel restarts).
+# WebSocket: wss://inline-voice-occupations-ultram.trycloudflare.com/ws?token=<VOICE_TOKEN from 1Password item jmldktl7rrc4rw4sm2akej4qne>
+# Health: https://inline-voice-occupations-ultram.trycloudflare.com/healthz   Updated: 2026-09-13T07:52:45Z by deploy/supervise.sh on 4dfc3db57c5f
