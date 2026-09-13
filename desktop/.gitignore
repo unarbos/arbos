@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.env.*
+.claude/worktrees
+/assets
+/target
+/todos
+__pycache__/
+
+# website
+www/static/og.png

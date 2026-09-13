@@ -1,0 +1,497 @@
+/// HybridIndex: merges an on-disk IndexReader with a LiveIndex overlay.
+///
+/// Queries return the union of results from both layers, with the overlay
+/// taking precedence for files that have been modified or deleted.
+///
+/// **Concurrency**: the on-disk `IndexReader` is held inside an internal
+/// `RwLock<Arc<IndexReader>>`, which lets the publish path swap the reader
+/// **without** the caller having to hold an exclusive (`&mut`) reference to
+/// the `HybridIndex`. This means `tgrep serve` can safely keep search
+/// queries running with only an outer read lock during a flush — the brief
+/// inner write lock around the `Arc` swap takes microseconds and the old
+/// reader's mmap is released only after the last in-flight query drops its
+/// `Arc<IndexReader>`.
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+
+use crate::Result;
+use crate::live::{self, LiveIndex};
+use crate::ondisk::PostingEntry;
+use crate::query::{self, QueryPlan};
+use crate::reader::IndexReader;
+
+pub struct HybridIndex {
+    reader: RwLock<Arc<IndexReader>>,
+    pub live: LiveIndex,
+    pub root: PathBuf,
+}
+
+impl HybridIndex {
+    pub fn open(index_dir: &Path, root: &Path) -> Result<Self> {
+        let reader = IndexReader::open(index_dir)?;
+        // Reject structurally inconsistent readers (mmap sections present but
+        // counters say zero entries). This catches stale-metadata corruption
+        // on Windows without rejecting valid indexes where all files are too
+        // short to produce trigrams.
+        if reader.is_degenerate() {
+            return Err(crate::Error::IndexCorrupted(
+                "degenerate reader: mmap sections non-empty but num_entries is 0".to_string(),
+            ));
+        }
+        // Validate and warm up the lookup mmap so the first searches after
+        // startup don't hit cold pages (which caused zero-candidate results
+        // on Windows).
+        if let Err(msg) = reader.validate_lookup() {
+            return Err(crate::Error::IndexCorrupted(msg));
+        }
+        Ok(Self {
+            reader: RwLock::new(Arc::new(reader)),
+            live: LiveIndex::new(),
+            root: root.to_path_buf(),
+        })
+    }
+
+    /// Snapshot the current on-disk reader. Cheap (clones an `Arc`).
+    fn reader(&self) -> Arc<IndexReader> {
+        Arc::clone(&self.reader.read().unwrap())
+    }
+
+    /// Public snapshot of the current on-disk reader (cheap `Arc` clone).
+    ///
+    /// Exposed so callers performing a memory-bounded incremental flush can
+    /// stream-merge the live overlay onto the existing on-disk index without
+    /// materializing the reader's postings on the heap.
+    pub fn reader_arc(&self) -> Arc<IndexReader> {
+        self.reader()
+    }
+
+    /// Atomically replace the on-disk reader with `new_reader`.
+    ///
+    /// Takes `&self` (not `&mut self`) so that callers can perform the swap
+    /// while holding only an outer read lock on the `HybridIndex`, which in
+    /// turn means concurrent search queries are not blocked during a flush.
+    /// The previous reader's mmap is released when the last in-flight query
+    /// drops its `Arc<IndexReader>` — Rust's `File::open` on Windows uses
+    /// `FILE_SHARE_DELETE` by default, so renaming the underlying files
+    /// before the old mmap is dropped is safe (the old section keeps the
+    /// orphaned file content alive until refs drain).
+    pub fn swap_reader(&self, new_reader: IndexReader) {
+        *self.reader.write().unwrap() = Arc::new(new_reader);
+    }
+
+    /// Replace the reader with an empty one and drop this `HybridIndex`'s
+    /// reference to the previous reader.
+    ///
+    /// **Note**: this does *not* guarantee an immediate unmap of the
+    /// previous on-disk index files. Because the reader is held inside an
+    /// `Arc<IndexReader>`, the underlying mmap section is only released
+    /// once the last in-flight reference (e.g. `Arc<IndexReader>` clones
+    /// held by concurrent search queries) is dropped. Callers that need
+    /// the file handles released before, say, overwriting the underlying
+    /// files on platforms that disallow it must additionally ensure no
+    /// outstanding readers exist.
+    ///
+    /// Retained for callers that need the old "drop then re-open" sequence;
+    /// new code should prefer `swap_reader` so there is no window during
+    /// which the reader is empty.
+    pub fn drop_reader(&self) {
+        self.swap_reader(IndexReader::empty());
+    }
+
+    /// Reopen the on-disk reader from updated index files, keeping the live
+    /// overlay intact. Equivalent to `swap_reader(IndexReader::open(..)?)`.
+    pub fn reopen_reader(&self, index_dir: &Path) -> Result<()> {
+        let new_reader = IndexReader::open(index_dir)?;
+        self.swap_reader(new_reader);
+        Ok(())
+    }
+
+    /// Check whether a reader file ID is still active (not deleted or
+    /// overridden by the live overlay).
+    fn reader_entry_active(&self, reader: &IndexReader, file_id: u32) -> bool {
+        if let Some(path) = reader.file_path(file_id) {
+            !self.live.is_deleted(path) && !self.live_has_path(path)
+        } else {
+            false
+        }
+    }
+
+    /// Look up candidate file IDs for a trigram, merging reader + overlay.
+    pub fn lookup_trigram(&self, trigram: u32) -> Vec<u32> {
+        let reader = self.reader();
+        self.lookup_trigram_using_reader(trigram, &reader)
+    }
+
+    /// Look up candidate posting entries with masks, merging reader + overlay.
+    pub fn lookup_trigram_with_masks(&self, trigram: u32) -> Vec<PostingEntry> {
+        let reader = self.reader();
+        self.lookup_trigram_with_masks_using_reader(trigram, &reader)
+    }
+
+    /// Resolve a file ID to a path (works for both reader and overlay IDs).
+    ///
+    /// Returns an owned `String` so the result is safe to use after the
+    /// internal reader is swapped out by a concurrent flush.
+    pub fn file_path(&self, file_id: u32) -> Option<String> {
+        if live::LiveIndex::is_overlay_id(file_id) {
+            self.live.file_path(file_id).map(|s| s.to_string())
+        } else {
+            self.reader().file_path(file_id).map(|s| s.to_string())
+        }
+    }
+
+    /// Get all file IDs from both layers (overlay takes precedence).
+    pub fn all_file_ids(&self) -> Vec<u32> {
+        let reader = self.reader();
+        self.all_file_ids_using(&reader)
+    }
+
+    /// Get every active content-indexed path from a consistent reader snapshot.
+    pub fn all_paths(&self) -> Vec<String> {
+        let reader = self.reader();
+        let mut paths: Vec<String> = reader
+            .all_paths()
+            .iter()
+            .enumerate()
+            .filter(|(file_id, _)| self.reader_entry_active(&reader, *file_id as u32))
+            .map(|(_, path)| path.clone())
+            .collect();
+        paths.extend(
+            self.live
+                .all_paths_ordered()
+                .into_iter()
+                .map(str::to_string),
+        );
+        paths
+    }
+
+    /// Whether a path is active in either the reader or live overlay.
+    pub fn has_active_path(&self, path: &str) -> bool {
+        if self.live.has_path(path) {
+            return true;
+        }
+        if self.live.is_deleted(path) {
+            return false;
+        }
+        self.reader().contains_path(path)
+    }
+
+    /// Execute a query plan against the hybrid index.
+    pub fn execute_query(&self, plan: &QueryPlan) -> Vec<u32> {
+        if plan.is_match_all() {
+            return self.all_file_ids();
+        }
+        // Snapshot reader once to ensure all trigram lookups use the same
+        // reader version — prevents race conditions during concurrent flushes.
+        let reader = self.reader();
+        query::execute_plan(plan, &|tri| self.lookup_trigram_using_reader(tri, &reader))
+    }
+
+    /// Execute a query plan with mask-aware filtering.
+    ///
+    /// Returns the matching file IDs **and** the `Arc<IndexReader>` snapshot
+    /// used for the lookups.  Callers that need to resolve file paths from
+    /// the returned IDs **must** use [`resolve_path`] / [`resolve_full_path`]
+    /// with the same snapshot — calling [`file_path`] instead introduces a
+    /// race: a concurrent `swap_reader` between the query and the path
+    /// resolution would resolve IDs against a different reader, silently
+    /// dropping every candidate whose ID does not exist in the new reader.
+    pub fn execute_query_with_masks(&self, plan: &QueryPlan) -> (Vec<u32>, Arc<IndexReader>) {
+        let reader = self.reader();
+        let ids = if plan.is_match_all() {
+            self.all_file_ids_using(&reader)
+        } else {
+            query::execute_plan_with_masks(plan, &|tri| {
+                self.lookup_trigram_with_masks_using_reader(tri, &reader)
+            })
+        };
+        (ids, reader)
+    }
+
+    /// Like [`all_file_ids`] but uses a caller-provided reader snapshot.
+    fn all_file_ids_using(&self, reader: &Arc<IndexReader>) -> Vec<u32> {
+        let mut ids: Vec<u32> = reader
+            .all_file_ids()
+            .into_iter()
+            .filter(|&fid| self.reader_entry_active(reader, fid))
+            .collect();
+        ids.extend(self.live.all_file_ids());
+        ids
+    }
+
+    /// Resolve a file ID to a relative path using a specific reader snapshot.
+    ///
+    /// Handles both reader IDs (looked up in the provided snapshot) and
+    /// overlay IDs (looked up in the live index).  Pair with the snapshot
+    /// returned by [`execute_query_with_masks`] to guarantee consistency.
+    pub fn resolve_path(&self, file_id: u32, reader: &IndexReader) -> Option<String> {
+        if live::LiveIndex::is_overlay_id(file_id) {
+            self.live.file_path(file_id).map(|s| s.to_string())
+        } else {
+            reader.file_path(file_id).map(|s| s.to_string())
+        }
+    }
+
+    /// Resolve a file ID to an absolute path using a specific reader snapshot.
+    pub fn resolve_full_path(&self, file_id: u32, reader: &IndexReader) -> Option<PathBuf> {
+        self.resolve_path(file_id, reader).map(|rel| {
+            self.root
+                .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR))
+        })
+    }
+
+    /// Look up candidate file IDs for a trigram using a specific reader snapshot.
+    /// Ensures all trigrams in a query are evaluated against the same reader version.
+    fn lookup_trigram_using_reader(&self, trigram: u32, reader: &Arc<IndexReader>) -> Vec<u32> {
+        let mut reader_ids = reader.lookup_trigram(trigram);
+        let live_ids = self.live.lookup_trigram(trigram);
+
+        reader_ids.retain(|&fid| self.reader_entry_active(reader, fid));
+
+        reader_ids.extend(live_ids);
+        reader_ids
+    }
+
+    /// Look up candidate posting entries with masks using a specific reader snapshot.
+    /// Ensures all trigrams in a query are evaluated against the same reader version.
+    fn lookup_trigram_with_masks_using_reader(
+        &self,
+        trigram: u32,
+        reader: &Arc<IndexReader>,
+    ) -> Vec<PostingEntry> {
+        let mut reader_entries = reader.lookup_trigram_with_masks(trigram);
+        let live_entries = self.live.lookup_trigram_with_masks(trigram);
+
+        reader_entries.retain(|e| self.reader_entry_active(reader, e.file_id));
+
+        reader_entries.extend(live_entries);
+        reader_entries
+    }
+
+    /// Total number of files across both layers.
+    pub fn num_files(&self) -> usize {
+        self.all_file_ids().len()
+    }
+
+    /// Total unique trigrams across both reader and live overlay.
+    pub fn num_trigrams(&self) -> usize {
+        let reader_count = self.reader().num_trigrams();
+        let live_count = self.live.num_trigrams();
+        if reader_count == 0 {
+            return live_count;
+        }
+        if live_count == 0 {
+            return reader_count;
+        }
+        // Both have data — return the larger as a reasonable estimate
+        // (exact count would require merging the trigram sets)
+        reader_count.max(live_count)
+    }
+
+    /// Full path on disk for a file ID.
+    pub fn full_path(&self, file_id: u32) -> Option<PathBuf> {
+        self.file_path(file_id).map(|rel| {
+            self.root
+                .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR))
+        })
+    }
+
+    fn live_has_path(&self, path: &str) -> bool {
+        self.live.has_path(path)
+    }
+
+    /// Get all paths from the on-disk reader (for skip-set construction).
+    pub fn reader_paths(&self) -> std::collections::HashSet<String> {
+        self.reader().all_paths().iter().cloned().collect()
+    }
+
+    /// Whether the active on-disk reader contains `path`.
+    pub fn reader_has_path(&self, path: &str) -> bool {
+        self.reader().contains_path(path)
+    }
+
+    /// Whether the active on-disk reader contains a path below `directory`.
+    pub fn reader_has_descendant_path(&self, directory: &str) -> bool {
+        self.reader().has_descendant_path(directory)
+    }
+
+    /// The reader paths `keep` accepts.
+    ///
+    /// For callers that want a few of them — everything under one directory,
+    /// say. [`Self::reader_paths`] allocates a copy of every path in the index
+    /// to answer that, which at repository scale is the bulk of the cost and
+    /// all of it wasted.
+    pub fn reader_paths_matching(&self, mut keep: impl FnMut(&str) -> bool) -> Vec<String> {
+        self.reader()
+            .all_paths()
+            .iter()
+            .filter(|path| keep(path))
+            .cloned()
+            .collect()
+    }
+
+    /// Number of files in the on-disk reader.
+    pub fn reader_file_count(&self) -> usize {
+        self.reader().num_files()
+    }
+
+    /// Remove overlay entries whose paths already exist in the on-disk reader.
+    ///
+    /// After a flush + `reopen_reader`, the reader contains a superset of the
+    /// snapshot data.  Any overlay entry that is also present in the reader is
+    /// now redundant — removing it avoids duplicate work during queries and
+    /// prevents unbounded overlay growth.  Entries added *after* the snapshot
+    /// (e.g. by the file-watcher) are preserved because they are **not** in
+    /// the reader yet.
+    pub fn prune_persisted_entries(&mut self) {
+        self.prune_persisted_entries_except(&std::collections::HashSet::new());
+    }
+
+    /// Remove persisted overlay entries except paths whose latest disk read
+    /// failed. Those entries may be newer than the reader copy and must remain
+    /// authoritative until a later merge successfully reads them.
+    pub fn prune_persisted_entries_except(
+        &mut self,
+        preserved: &std::collections::HashSet<String>,
+    ) {
+        let reader = self.reader();
+        let reader_paths: std::collections::HashSet<&str> = reader
+            .all_paths()
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|path| !preserved.contains(*path))
+            .collect();
+
+        // Fast path: after a successful bulk flush every overlay path is
+        // already in the new reader. Swap all overlay maps out for empty
+        // ones (microseconds) and let a background thread drop the old
+        // contents — keeping the multi-second drop work off the index
+        // write lock so concurrent searches stay responsive.
+        if self.live.try_drop_all_persisted(&reader_paths) {
+            return;
+        }
+
+        // Selective fall-back: prune only the overlay entries that are now
+        // in the reader, leaving fresher mutations alone.
+        let to_remove: Vec<String> = self
+            .live
+            .overlay_paths()
+            .into_iter()
+            .filter(|p| reader_paths.contains(p.as_str()))
+            .collect();
+        self.live.batch_remove_overlay_entries(&to_remove);
+    }
+
+    /// Produce a full snapshot merging reader + overlay for disk serialization.
+    /// Reader files not superseded by overlay are included with remapped IDs.
+    /// Preserves loc_mask and next_mask from both the on-disk reader and the
+    /// live overlay so that Bloom-filter optimizations survive flush cycles.
+    pub fn full_snapshot(
+        &self,
+    ) -> (
+        Vec<String>,
+        std::collections::HashMap<u32, Vec<PostingEntry>>,
+    ) {
+        use rayon::prelude::*;
+        use std::collections::HashMap;
+
+        let reader = self.reader();
+
+        // Phase 1: Build merged file list (reader files not in overlay + overlay files)
+        let mut paths: Vec<String> = Vec::new();
+
+        // Add reader files (skip those superseded by overlay or deleted).
+        //
+        // The old -> new id table is a dense `Vec` rather than a `HashMap`
+        // because it is consulted once per *posting entry*, and there are
+        // hundreds of millions of those (170M for a 94k-file tree). Reader ids
+        // are exactly the contiguous range `0..num_files`, so an index into a
+        // Vec replaces a hash of a random u32 — and the lookups then run in
+        // file-id order within each posting list, which is sequential rather
+        // than scattered. `DROPPED` marks a reader file the overlay supersedes
+        // or deletes.
+        const DROPPED: u32 = u32::MAX;
+        let reader_paths = reader.all_paths();
+        let mut reader_id_map: Vec<u32> = Vec::with_capacity(reader_paths.len());
+        for path in reader_paths {
+            if self.live.is_deleted(path) || self.live.has_path(path) {
+                reader_id_map.push(DROPPED);
+                continue;
+            }
+            reader_id_map.push(paths.len() as u32);
+            paths.push(path.clone());
+        }
+
+        // Add overlay files
+        let overlay_paths = self.live.all_paths_ordered();
+        let mut overlay_path_to_new_id: HashMap<&str, u32> = HashMap::new();
+        for &op in &overlay_paths {
+            let new_id = paths.len() as u32;
+            overlay_path_to_new_id.insert(op, new_id);
+            paths.push(op.to_string());
+        }
+
+        // Phase 2: Build merged inverted index with masks.
+        //
+        // Decode and remap in one parallel pass. Collecting the decoded index
+        // first and then transforming it would hold two full copies of every
+        // posting entry at once — for a 94k-file tree that is ~170M entries,
+        // and the flush is exactly when memory is most contended.
+        let mut inverted: HashMap<u32, Vec<PostingEntry>> = (0..reader.num_trigrams())
+            .into_par_iter()
+            .filter_map(|i| {
+                let (trigram, posting) = reader.trigram_posting_at(i);
+                let remapped: Vec<PostingEntry> = posting
+                    .into_iter()
+                    .filter_map(|entry| {
+                        let new_id = *reader_id_map.get(entry.file_id as usize)?;
+                        (new_id != DROPPED).then_some(PostingEntry {
+                            file_id: new_id,
+                            loc_mask: entry.loc_mask,
+                            next_mask: entry.next_mask,
+                        })
+                    })
+                    .collect();
+                (!remapped.is_empty()).then_some((trigram, remapped))
+            })
+            .collect();
+
+        // Overlay trigram postings with masks (remapped)
+        // Trigram keys in the live inverted index never have OVERLAY_BIT set
+        // (OVERLAY_BIT is only used in file IDs), so they can be used directly.
+        let overlay_inverted = self.live.inverted_index();
+        for (&trigram, file_ids) in overlay_inverted {
+            let remapped: Vec<PostingEntry> = file_ids
+                .iter()
+                .filter_map(|&fid| {
+                    self.live.file_path(fid).and_then(|p| {
+                        overlay_path_to_new_id.get(p).map(|&new_id| {
+                            let m = self.live.get_masks(trigram, fid);
+                            PostingEntry {
+                                file_id: new_id,
+                                loc_mask: m.loc_mask,
+                                next_mask: m.next_mask,
+                            }
+                        })
+                    })
+                })
+                .collect();
+            if !remapped.is_empty() {
+                inverted.entry(trigram).or_default().extend(remapped);
+            }
+        }
+
+        // Sort all posting lists by file_id.
+        //
+        // Only trigrams the overlay touched are actually out of order — the
+        // reader's own lists are already sorted and the remap preserves that,
+        // since new ids are assigned in ascending old-id order. Sorting the lot
+        // anyway keeps the invariant obvious and, fanned out across cores,
+        // costs little next to the merge itself.
+        inverted.par_iter_mut().for_each(|(_, posting)| {
+            posting.sort_unstable_by_key(|e| e.file_id);
+        });
+
+        (paths, inverted)
+    }
+}

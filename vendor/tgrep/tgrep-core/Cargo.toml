@@ -1,0 +1,43 @@
+[package]
+name = "tgrep-core"
+version = "1.0.5"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/microsoft/tgrep"
+authors = ["Shengyu Fu"]
+description = "Trigram index library for fast full-text search on large codebases"
+keywords = ["trigram", "search", "index", "grep", "full-text"]
+categories = ["text-processing", "algorithms"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+blake3 = "1"
+memmap2 = "0.9"
+memchr = "2"
+regex = "1"
+regex-syntax = "0.8"
+rayon = "1"
+ignore = "0.4"
+globset = "0.4.18"
+encoding_rs = "0.8"
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus"] }
+
+[[bench]]
+name = "trigram_extraction"
+harness = false
+
+[[bench]]
+name = "query_execution"
+harness = false
+
+[[bench]]
+name = "index_build"
+harness = false

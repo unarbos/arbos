@@ -1,0 +1,192 @@
+//! Icons and leftover catalog helpers. Chat talks to one Arbos kernel
+//! ([`acp`]); a catalog binary is not the runtime. [`mcp`] is the tool
+//! servers a kernel can be offered.
+//!
+//! Every icon the registry publishes is a `currentColor` glyph, so it carries
+//! no colour of its own: rasterised as an image it comes out black, on a dark
+//! theme against a dark row. They are cached to disk and drawn through
+//! [`crate::assets`] as svg elements instead, which paint the shape's alpha in
+//! whatever `text_color` the row already sets — the same path every other icon
+//! in the app takes.
+
+use crate::model::settings;
+use bezel::gpui::SharedString;
+use cacp_agents::{Distribution, Installed, registry};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+
+pub mod acp;
+pub mod mcp;
+
+/// Where the fetched catalog and the icons beside it are kept — a cache under
+/// the config directory, not among the files a person edits.
+pub fn cache_dir() -> Option<PathBuf> {
+    settings::dir().ok().map(|dir| dir.join("cache"))
+}
+
+/// Icon asset paths by configured agent name.
+///
+/// Blocking: this reaches the network on a cold cache. Call it off the UI
+/// thread. An empty map is the honest answer offline — every caller falls
+/// back to what it drew before.
+pub fn icons(configured: &[settings::Agent]) -> HashMap<String, SharedString> {
+    let Some(cache) = cache_dir() else {
+        return HashMap::new();
+    };
+    let Some(catalog) = registry::catalog(&cache) else {
+        return HashMap::new();
+    };
+    // Two ways in, because a settings entry arrives two ways. An installed
+    // one carries the registry id outright. A hand-written one names the npm
+    // package and nothing else, so it is matched on that — which is also all
+    // an installed entry used to have, until installing moved the package
+    // into the command path and left `args` empty.
+    let icons: HashMap<&str, &str> = catalog
+        .agents
+        .iter()
+        .filter_map(|agent| Some((agent.id.as_str(), agent.icon.as_deref()?)))
+        .collect();
+    let by_package: HashMap<&str, &str> = catalog
+        .agents
+        .iter()
+        .filter_map(|agent| match &agent.distribution {
+            Distribution::Npm { package, .. } => {
+                Some((cacp_agents::package_name(package), agent.id.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let dir = cache.join("icons");
+    configured
+        .iter()
+        .filter_map(|entry| {
+            let id = match entry.id.as_deref() {
+                Some(id) => id,
+                None => entry
+                    .args
+                    .iter()
+                    .find_map(|arg| by_package.get(cacp_agents::package_name(arg)).copied())?,
+            };
+            let path = fetch(&dir, id, icons.get(id)?)?;
+            Some((entry.name.clone(), SharedString::from(path)))
+        })
+        .collect()
+}
+
+/// The icon on disk, downloading it once. The asset path is the file's own
+/// path — [`crate::assets`] reads it back by that name, so nothing has to keep
+/// a second table mapping one to the other.
+fn fetch(dir: &Path, id: &str, url: &str) -> Option<String> {
+    if let Some(path) = cached(dir, id) {
+        return Some(path);
+    }
+    let path = cacp_agents::contained(dir, &format!("{id}.svg")).ok()?;
+    let body = ureq::get(url).call().ok()?.body_mut().read_to_vec().ok()?;
+    std::fs::create_dir_all(dir).ok()?;
+    std::fs::write(&path, body).ok()?;
+    Some(path.to_str()?.to_owned())
+}
+
+/// The icon already on disk, if it is.
+fn cached(dir: &Path, id: &str) -> Option<String> {
+    let path = cacp_agents::contained(dir, &format!("{id}.svg")).ok()?;
+    path.exists().then(|| path.to_str())?.map(str::to_owned)
+}
+
+// ── the catalog, for the settings window ─────────────────────────
+
+/// The clients Arbos supports, by their id in the catalog. Named one by one
+/// rather than taken by a rule: the registry takes any publisher who submits
+/// one, and installing an agent runs their code on this machine — so what is
+/// offered here is a list somebody chose, not a filter somebody wrote.
+const ALLOWED: [&str; 7] = [
+    "claude-acp",      // Claude Agent
+    "codex-acp",       // Codex
+    "cursor",          // Cursor
+    "gemini",          // Gemini CLI
+    "antigravity-acp", // Google Antigravity
+    "kimi",            // Kimi CLI
+    "opencode",        // OpenCode
+];
+
+/// Whether the catalog entry is one of them.
+///
+/// One predicate, because both [`listings`] and [`prefetch_icons`] have to
+/// answer it the same way: a row this admits and the prefetch skips is a row
+/// that never finds its mark.
+fn listed(agent: &registry::Agent) -> bool {
+    ALLOWED.contains(&agent.id.as_str())
+}
+
+/// One row of the agents section: what the registry publishes, and whether it
+/// is on this machine.
+pub struct Listing {
+    pub agent: registry::Agent,
+    /// The version on disk, when it is installed.
+    pub installed: Option<String>,
+    pub icon: Option<SharedString>,
+}
+
+/// The whole catalog with each entry's local state. Blocking on the registry,
+/// but never on an icon: a mark is used only if it is already on disk, so the
+/// list arrives in one round trip rather than forty. [`prefetch_icons`] is
+/// what fills the gaps in.
+pub fn listings() -> Vec<Listing> {
+    let (Some(cache), Ok(data)) = (cache_dir(), settings::data_dir()) else {
+        return Vec::new();
+    };
+    let Some(catalog) = registry::catalog(&cache) else {
+        return Vec::new();
+    };
+    let dir = cache.join("icons");
+    catalog
+        .agents
+        .into_iter()
+        .filter(listed)
+        .map(|agent| {
+            let installed = Installed::find(&data, &agent.id).map(|found| found.version);
+            let icon = cached(&dir, &agent.id).map(SharedString::from);
+            Listing {
+                agent,
+                installed,
+                icon,
+            }
+        })
+        .collect()
+}
+
+/// Download every catalog icon that is not already on disk. Blocking, and
+/// slow on a cold cache — one request per agent — so it belongs behind a list
+/// that is already on screen.
+pub fn prefetch_icons() {
+    let Some(cache) = cache_dir() else {
+        return;
+    };
+    let Some(catalog) = registry::catalog(&cache) else {
+        return;
+    };
+    let dir = cache.join("icons");
+    for agent in &catalog.agents {
+        if !listed(agent) {
+            continue;
+        }
+        if let Some(url) = agent.icon.as_deref() {
+            fetch(&dir, &agent.id, url);
+        }
+    }
+}
+
+/// Catalog ACP binaries do not drive this shell. Kept so a leftover
+/// settings button does not write a "Claude" row that still talks to Arbos.
+pub fn install(_agent: &registry::Agent) -> anyhow::Result<()> {
+    anyhow::bail!("this shell talks to one Arbos kernel; catalog agents are not used")
+}
+
+/// Take it off disk and out of `settings.toml`.
+pub fn remove(id: &str) -> anyhow::Result<()> {
+    Installed::remove(&settings::data_dir()?, id)?;
+    settings::remove_agent(id)
+}

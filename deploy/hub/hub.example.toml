@@ -1,0 +1,7 @@
+# Client-side hub config: ~/.config/arbos/hub.toml (mode 0600 when it holds
+# the token). Read by `arbos-kernel serve` (registers this kernel when `url`
+# is set), `arbos-kernel worker`, `arbos-kernel attach --hub`, and by the
+# spawn/say tools when they reach a machine through the hub.
+url = "wss://hub-api.arbos.life"
+machine = "mac"                    # this machine's name on the hub
+token_env = "ARBOS_HUB_TOKEN"      # or token = "…"

@@ -1,0 +1,29 @@
+[project]
+name = "arbos-voice-server"
+version = "0.1.0"
+description = "Self-hosted full-duplex speech server for Arbos (Silero VAD + faster-whisper + Kokoro over WebSocket)"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "websockets>=14",
+    "numpy>=1.26",
+    "onnxruntime>=1.20",
+    "faster-whisper>=1.1",
+    "kokoro-onnx>=0.4",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# CUDA 12 runtime libs for CTranslate2 (faster-whisper). deploy/run.sh swaps onnxruntime for onnxruntime-gpu.
+gpu = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9"]
+client = ["sounddevice"]
+
+[project.scripts]
+voice-server = "voice_server.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["voice_server"]

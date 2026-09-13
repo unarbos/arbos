@@ -2,79 +2,57 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, rust, "release/**"]
   pull_request:
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
 jobs:
-  build-test:
+  kernel:
+    name: kernel (build + test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v4
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
         with:
-          go-version: "1.26.x"
-          cache: true
-      - name: generate-check
-        # ADR-0004: committed tool schemas must match the arg structs.
-        run: go generate ./... && git diff --exit-code
-      - name: build
-        run: go build ./...
-      - name: vet
-        run: go vet ./...
-      - name: test (race + coverage)
-        # Coverage is reported, not gated: a hard threshold rewards line-count
-        # tests over behavior (see docs/10-testing.md).
-        run: go test -race -cover ./...
+          key: kernel
+      - name: System packages
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq pkg-config libssl-dev
+      - name: Build
+        run: cargo build --workspace --locked
+      - name: Test
+        # Tests run on the replay provider. No model key is set, so nothing
+        # here reaches the network.
+        env:
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+        run: cargo test --workspace --locked
 
-  web-dist:
-    # web/dist is committed because go:embed bakes it into the binary (and
-    # `go install @main` has no Node). This job rebuilds it from web/src with
-    # the locked toolchain and fails if the committed bundle is stale — so a UI
-    # change can never ship behind an old dist. Run `make web` before committing.
+  desktop:
+    name: desktop (build, Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v4
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
         with:
-          node-version-file: web/.nvmrc
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: rebuild web UI
-        working-directory: web
+          key: desktop
+          workspaces: desktop
+      - name: System packages
         run: |
-          npm ci
-          npm run build
-      - name: dist matches source
-        run: |
-          if ! git diff --quiet -- web/dist; then
-            echo "::error::web/dist is stale — run 'make web' and commit the result"
-            git diff --stat -- web/dist
-            exit 1
-          fi
-
-  fuzz:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-          cache: true
-      - name: short fuzz (Project)
-        run: go test -run '^$' -fuzz '^FuzzProject$' -fuzztime 30s ./internal/core
-
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-          cache: true
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: latest
-          # Compile golangci-lint with the repo's Go (above) instead of pulling
-          # a prebuilt binary: prebuilt releases lag the Go release, and a
-          # binary built with an older Go than go.mod targets refuses to run.
-          install-mode: goinstall
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pkg-config clang cmake libssl-dev libasound2-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libx11-xcb-dev \
+            libxcb1-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev libgl1-mesa-dev \
+            libegl1-mesa-dev libudev-dev libdbus-1-dev
+      - name: Build
+        working-directory: desktop
+        run: cargo build --locked

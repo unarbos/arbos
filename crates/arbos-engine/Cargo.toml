@@ -1,0 +1,23 @@
+[package]
+name = "arbos-engine"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Arbos turn: tools, evict, reset, providers"
+
+[dependencies]
+arbos-core.workspace = true
+anyhow.workspace = true
+base64 = "0.22"
+fastrand = "2"
+glob = "0.3"
+ignore = "0.4"
+libc = "0.2"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "stream", "http2"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util = "0.7"
+toml = "0.8"

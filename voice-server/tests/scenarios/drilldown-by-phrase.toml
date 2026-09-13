@@ -1,0 +1,33 @@
+# The speech model does not call more_detail (the real one seldom does). The caller's words
+# alone ("why exactly did it fail?") route to the narrator: answered from the record in a
+# moment, and the main agent is not woken for it.
+title = "Drill-down by phrase when the speech model stays quiet"
+
+[[steps]]
+say = "Send an agent to fix the flaky login test."
+model = { ack = "On it." }
+[steps.kernel]
+reply = "I sent the agent fix-login-test to look at the flaky login test."
+[steps.kernel.spawn]
+name = "fix-login-test"
+done_after = 2.0
+last_words = "The login test failed because the session cookie expired after 2 seconds in CI; I raised the test timeout to 10 seconds and it passes."
+
+[[steps]]
+wait_spoken = "fix login test is done"
+
+[[steps]]
+say = "Why exactly did it fail?"
+model = { quiet = true }
+
+[[steps]]
+wait_spoken = "From the record"
+
+[[steps]]
+wait_quiet = 1.0
+
+[expect]
+narrated_contains = ["From the record", "session cookie expired"]
+kernel_user_not = ["Why exactly"]
+user_frames = 1
+inbox = [{ channel = "voice", kind = "request", device = "desktop" }]

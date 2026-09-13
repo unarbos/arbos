@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Arbos</string>
+	<key>CFBundleExecutable</key>
+	<string>arbos</string>
+	<!-- Names Resources/arbos.icns. The extension is implied; adding it
+	     is accepted, leaving the file out is not — the app falls back to the
+	     generic executable icon. -->
+	<key>CFBundleIconFile</key>
+	<string>arbos</string>
+	<key>CFBundleIdentifier</key>
+	<string>life.arbos.desktop</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<!-- The app menu's title, which is why it is lowercase: it replaces the
+	     one `set_menus` builds in bin/main.rs. -->
+	<key>CFBundleName</key>
+	<string>arbos</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<!-- Voice: the mic is read through a helper (ffmpeg) the app spawns;
+	     TCC attributes that to this bundle and needs this string to ask. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Arbos listens on the microphone for dictation and voice calls.</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>

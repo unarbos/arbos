@@ -1,0 +1,37 @@
+# A sub-agent finishes while the caller is mid-sentence: the narrator holds the report until the
+# caller stops, then speaks it. It never talks over the caller.
+title = "Sub-agent finishes while the user is talking"
+
+[[steps]]
+say = "Send an agent to run the tests."
+model = { ack = "On it." }
+[steps.kernel]
+reply = "I sent the agent run-tests to run the whole suite."
+[steps.kernel.spawn]
+name = "run-tests"
+done_after = 4.0
+last_words = "All 212 tests pass in 41 seconds."
+
+[[steps]]
+wait_spoken = "run-tests to run the whole suite"
+
+[[steps]]
+say = "While that runs let me tell you about the plan for tomorrow because we need to look at the release notes and the deployment checklist first."
+pause_after = 0.5
+kernel = { reply = "Noted. I will keep the plan for tomorrow in mind." }
+
+[[steps]]
+wait_spoken = "run tests is done"
+
+[[steps]]
+wait_spoken = "Noted"
+
+[[steps]]
+wait_quiet = 1.0
+
+[expect]
+narrated_contains = ["run tests is done: All 212 tests pass"]
+narration_after_user_stops = true
+narrations_not_during_speech = true
+inbox = [{ channel = "voice", kind = "request" }, { channel = "voice", kind = "request" }]
+done_files = 1

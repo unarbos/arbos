@@ -1,103 +1,60 @@
 name: release
 
-# Publish prebuilt arbos binaries to GitHub Releases. Two ways to run it:
+# Builds the Linux kernel binary and attaches it to the GitHub release for
+# the tag. The macOS DMG is built and uploaded by a Mac worker
+# (`cd desktop && make dmg`), not here.
 #
-#   gh workflow run release                      # auto-bumps the patch version
-#   gh workflow run release -f version=v0.2.0    # explicit version
-#   git tag v0.2.0 && git push origin v0.2.0     # tag push
-#
-# Assets are named without the version (arbos_linux_amd64.tar.gz) so the
-# stable .../releases/latest/download/ URLs work for install.sh and
-# `arbos upgrade`.
+#   git tag v0.2.0 && git push origin v0.2.0
+#   gh workflow run release -f tag=v0.2.0
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release (e.g. v0.2.0). Empty = bump patch from the latest tag."
-        required: false
-        default: ""
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and attach to (e.g. v0.2.0)"
+        required: true
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  linux-kernel:
+    name: arbos-kernel (Linux x86_64)
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # full history: the auto-bump reads existing tags
-
-      - uses: actions/setup-node@v6
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
         with:
-          node-version-file: web/.nvmrc
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-          cache: true
-
-      - name: resolve version
-        id: version
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
+          key: release-kernel
+      - name: System packages
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq pkg-config libssl-dev
+      - name: Build
+        run: cargo build --release --locked -p arbos-kernel -p arbos-hub
+      - name: Package
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            version="${GITHUB_REF#refs/tags/}"
-          elif [[ -n "${INPUT_VERSION}" ]]; then
-            version="${INPUT_VERSION}"
-          else
-            last="$(git tag -l 'v*' --sort=-v:refname | head -1)"
-            last="${last:-v0.0.0}"
-            IFS=. read -r major minor patch <<<"${last#v}"
-            version="v${major}.${minor}.$((patch + 1))"
-          fi
-          if [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
-            echo "invalid version: ${version}" >&2
-            exit 1
-          fi
-          echo "version=${version}" >>"$GITHUB_OUTPUT"
-          echo "Releasing ${version}"
-
-      - name: build web UI
-        working-directory: web
-        run: |
-          npm ci
-          npm run build
-
-      - name: build binaries
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          mkdir -p dist-release
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
-            export GOOS="${target%/*}" GOARCH="${target#*/}"
-            name="arbos_${GOOS}_${GOARCH}"
-            CGO_ENABLED=0 go build -trimpath \
-              -ldflags "-s -w -X main.releaseVersion=${VERSION}" \
-              -o "build/${name}/arbos" ./cmd/arbos
-            tar -C "build/${name}" -czf "dist-release/${name}.tar.gz" arbos
-          done
-          (cd dist-release && sha256sum *.tar.gz >checksums.txt)
-          ls -l dist-release
-
-      - name: create release
+          set -euo pipefail
+          out="arbos-kernel-${TAG}-linux-x86_64"
+          mkdir -p "dist/$out"
+          cp target/release/arbos-kernel target/release/arbos-hub LICENSE "dist/$out/"
+          tar -C dist -czf "dist/$out.tar.gz" "$out"
+          (cd dist && sha256sum "$out.tar.gz" > "$out.tar.gz.sha256")
+      - name: Attach to the release
+        # The release for the tag may already exist as a draft with
+        # hand-written notes; upload into it. Otherwise create a draft.
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if gh release view "${VERSION}" >/dev/null 2>&1; then
-            echo "release ${VERSION} already exists — uploading assets only"
-            gh release upload "${VERSION}" --clobber dist-release/*
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
           else
-            gh release create "${VERSION}" \
-              --target "${GITHUB_SHA}" \
-              --title "${VERSION}" \
-              --generate-notes \
-              dist-release/*
+            gh release create "$TAG" --draft --title "$TAG" --generate-notes dist/*.tar.gz dist/*.sha256
           fi

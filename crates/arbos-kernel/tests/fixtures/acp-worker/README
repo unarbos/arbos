@@ -1,0 +1,10 @@
+P-14: root's kind is `fake-acp`, whose definition names an ACP program
+(`acp: python3 .arbos/agents-defs/fake_acp.py`). The kernel is the ACP
+client: the user's inbox file wakes root, the program thinks, reads
+hello.txt through fs/read_text_file, reports a tool call, asks permission
+to write (mode auto allows), writes out.txt through fs/write_text_file,
+streams a reply, ends the turn. Expect: thinking, tool, assistant, and
+turn_complete lines on root's transcript; out.txt written.
+State travels as dot-arbos/ (the repo ignores .arbos/); the runner renames
+it. hello.txt sits beside it and is copied into the place by the runner
+(any file at the fixture's top level other than the fixture's own).

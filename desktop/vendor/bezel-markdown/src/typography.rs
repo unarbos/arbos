@@ -1,0 +1,96 @@
+//! What a document is set in.
+//!
+//! Installed once at boot like the highlighter and the link preview, and read
+//! at paint: how a document is set is the app's decision, and this crate holds
+//! only what it defaults to.
+
+use gpui::{App, FontWeight, Global};
+use theme::{Metrics, TextStyle};
+
+/// What a document is set in, role by role.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Typography {
+    pub body: Metrics,
+    pub h1: Metrics,
+    pub h2: Metrics,
+    pub h3: Metrics,
+    /// Every heading past the third.
+    pub h4: Metrics,
+    /// Code, in a fence and inline.
+    pub code: Metrics,
+    /// A bookmark card's blurb and footer.
+    pub card: Metrics,
+    /// An image's caption.
+    pub caption: Metrics,
+    /// Whether prose has the front of each word set heavier — [`crate::bionic`]
+    /// reading. Here rather than on [`crate::Editing`] because it is a way of
+    /// setting type, and because a caller sizing one document apart from the
+    /// rest already hands one of these in.
+    pub bionic: bool,
+}
+
+impl Typography {
+    /// What documents are set in, or [`Typography::default`] before anything is
+    /// installed. Mirrors [`theme::Theme::of`].
+    pub fn of(cx: &App) -> Self {
+        cx.try_global::<Installed>()
+            .map_or_else(Self::default, |installed| installed.0)
+    }
+
+    /// The same set at `scale` times the ladder — what a zoomed document is
+    /// painted with. Every role moves together, so the ratios hold.
+    pub fn scaled(self, scale: f32) -> Self {
+        Self {
+            body: self.body.scaled(scale),
+            h1: self.h1.scaled(scale),
+            h2: self.h2.scaled(scale),
+            h3: self.h3.scaled(scale),
+            h4: self.h4.scaled(scale),
+            code: self.code.scaled(scale),
+            card: self.card.scaled(scale),
+            caption: self.caption.scaled(scale),
+            bionic: self.bionic,
+        }
+    }
+
+    /// The same set, weighted for bionic reading or not.
+    pub fn bionic(self, on: bool) -> Self {
+        Self { bionic: on, ..self }
+    }
+
+    pub fn heading(&self, level: u8) -> Metrics {
+        match level {
+            1 => self.h1,
+            2 => self.h2,
+            3 => self.h3,
+            _ => self.h4,
+        }
+    }
+}
+
+impl Default for Typography {
+    /// Each leading is written as the pixel pair it came from, so the ratio the
+    /// document was tuned at survives a change of size.
+    fn default() -> Self {
+        Self {
+            body: Metrics::new(TextStyle::Body, 22.0 / 14.0, FontWeight::NORMAL),
+            h1: Metrics::new(TextStyle::Title, 27.0 / 19.0, FontWeight::SEMIBOLD),
+            h2: Metrics::new(TextStyle::Title2, 24.0 / 16.0, FontWeight::SEMIBOLD),
+            h3: Metrics::new(TextStyle::Title3, 22.0 / 15.0, FontWeight::SEMIBOLD),
+            h4: Metrics::new(TextStyle::Headline, 22.0 / 14.0, FontWeight::SEMIBOLD),
+            code: Metrics::new(TextStyle::Callout, 18.0 / 12.5, FontWeight::NORMAL),
+            card: Metrics::new(TextStyle::Callout, 17.0 / 12.0, FontWeight::NORMAL),
+            caption: Metrics::new(TextStyle::Subheadline, 17.0 / 11.5, FontWeight::NORMAL),
+            bionic: false,
+        }
+    }
+}
+
+struct Installed(Typography);
+
+impl Global for Installed {}
+
+/// `markdown::set_typography(cx, my_typography)` — call once at boot.
+pub fn set_typography(cx: &mut App, typography: Typography) {
+    cx.set_global(Installed(typography));
+}

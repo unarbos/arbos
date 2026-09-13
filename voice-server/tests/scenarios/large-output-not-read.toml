@@ -1,0 +1,37 @@
+# The main agent's reply carries a 500-line tool output, a code block and a list. The narrator
+# speaks the first sentence and the one that names the result, says where the rest is, and reads
+# none of the output.
+title = "Large tool output must not be read aloud"
+
+[[steps]]
+say = "Run the full test suite and tell me what happened."
+model = { ack = "On it." }
+[steps.kernel]
+tool_output_lines = 500
+reply = """I ran the full suite. 499 tests passed and one failed: test_skeptic.py::test_timeout, because the assertion still expects the 30 second timeout.
+
+Failing output:
+```
+[0497] test_skeptic.py::test_timeout ... FAILED  (assert timeout == 30, got 60)
+[0498] tests/test_module_5.py::test_case_498 ... ok
+[0499] tests/test_module_6.py::test_case_499 ... ok
+```
+
+Next steps:
+- update the assertion to 60 seconds
+- rerun the suite
+- open a PR against rust
+"""
+
+[[steps]]
+wait_spoken = "I ran the full suite"
+
+[[steps]]
+wait_quiet = 1.0
+
+[expect]
+narration_max_chars = 260
+narrations_max = 1
+spoken_contains = ["I ran the full suite", "on your screen"]
+spoken_not_contains = ["[0497]", "test_module_", "Next steps", "```", "open a PR"]
+inbox = [{ channel = "voice", kind = "request" }]

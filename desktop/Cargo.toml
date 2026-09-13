@@ -1,0 +1,136 @@
+[workspace]
+
+[package]
+name = "arbos-desktop"
+description = "Arbos desktop: the window over the Rust arbos-kernel"
+version = "0.2.0"
+edition = "2024"
+# The floor the edition itself sets. Nothing here reaches past it on purpose.
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/unarbos/arbos"
+homepage = "https://arbos.life"
+keywords = ["acp", "agents", "desktop", "gpui", "workspace"]
+categories = ["gui", "development-tools"]
+# What a `cargo install` needs and nothing else. The default is every tracked
+# file, which would ship the website and the bundling plumbing to anyone who
+# installs the binary. `assets/` is absent by design — the logo is downloaded,
+# never committed, and `mark()` already holds the case where it is missing.
+include = ["/src", "/bin", "/build.rs", "/README.md", "/LICENSE"]
+
+[[bin]]
+name = "arbos-desktop"
+path = "bin/main.rs"
+
+[dependencies]
+# bezel — the component library the GUI is built on. Published as `bezel-*`;
+# the keys here are what the source imports. `platform` carries gpui_platform,
+# which opens the window: gpui core knows no platform of its own.
+bezel = { version = "0.1.8", features = ["platform"] }
+editor = { version = "0.1.8", package = "bezel-editor" }
+markdown = { version = "0.1.8", package = "bezel-markdown" }
+terminal = { version = "0.1.8", package = "bezel-terminal" }
+syntax = { version = "0.1.8", package = "bezel-syntax" }
+
+# cacp — our ACP implementation, taken from the registry like any other
+# dependency now that it is published and settled.
+cacp = { version = "0.1.0", default-features = false, features = ["client"] }
+cacp-agents = "0.1.0"
+
+# crates.io
+base64 = "0.22"
+anyhow = "1"
+dirs = "6"
+# `Shared`, which is the task an in-flight cover is held as. gpui builds its own
+# image cache on it and compiles the crate either way, so this names what is
+# already in the graph rather than adding to it.
+futures = "0.3"
+# Resizes a picked cover on the way in. Already in the graph — gpui decodes
+# every image it paints with it — so this names a crate that is compiled either
+# way rather than adding one.
+image = "0.25"
+# The cover cache's recency list. Zero dependencies of its own — the whole
+# crate is the map and the order, which is exactly what is missing from gpui's
+# own asset cache.
+lru = "0.18"
+# The filesystem watch behind a project's `.arbos/`. One backend per
+# platform — FSEvents here, inotify on Linux — behind one interface, which is
+# the whole reason to take a dependency for this rather than poll.
+notify = "8"
+# The project database. `bundled` compiles SQLite in: the store is a file we
+# hand to the user, so it cannot depend on whichever sqlite3 a machine ships.
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+schemars = "1.0"
+# An archived transcript is an array of tagged enum variants, which is the one
+# shape `toml` cannot round-trip.
+serde_json = "1"
+# cacp spawns its read and write loops with `tokio::spawn`, so the connection
+# needs a runtime of its own — gpui's executor is smol's.
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
+# Two TLS-using crates pull rustls with different crypto backends (ring and
+# aws-lc-rs), so rustls cannot pick a process default by itself; the voice
+# client installs ring before its first wss:// connection.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+toml = "0.8"
+# Installing an agent edits settings.toml in place. `toml` would round-trip
+# it through a value tree and drop every comment the file was written with.
+toml_edit = "0.22"
+# Downloads the registry's agent icons. The same client cacp-agents fetches
+# the catalog with, so this adds no second HTTP stack.
+ureq = "3"
+arbos-core = { path = "../crates/arbos-core" }
+# Lockfile pin: getrandom's js-sys ^0.3.77 otherwise picks 0.3.81
+# (wasm-bindgen =0.2.104) and clashes with bezel's wasm-bindgen ^0.2.120.
+js-sys = "0.3.104"
+cpal = "0.15"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# bezel's `platform` feature turns on `font-kit` and nothing else, and
+# gpui_platform on Linux panics at startup unless a window backend is enabled.
+# Naming the crate here unifies these features into bezel's own copy of it.
+gpui_platform = { version = "0.3.9", package = "bezel-gpui-platform", features = ["x11", "wayland"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Collection behavior and the transparent titlebar — AppKit, not gpui.
+objc = "0.2"
+# Fn-key monitor: `NSEvent.addLocalMonitor` takes a block.
+block = "0.1"
+# The microphone, in-process over CoreAudio: macOS attributes the capture
+# (and the Privacy › Microphone prompt) to this app, not to a child program.
+cpal = "0.15"
+
+# A dev build's frame time is spent in dependencies — gpui's layout, the text
+# shaper, the markdown parser — and unoptimized they make a long transcript
+# scroll at a crawl. Optimize them once; this crate stays at opt-level 0 so
+# an edit here still compiles quickly.
+[profile.dev.package."*"]
+opt-level = 2
+
+# objc 0.2's `msg_send!` / `class!` gate clippy on this cfg.
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ['cfg(feature, values("cargo-clippy"))']
+
+# Inline markdown opens http(s) itself. `arbos://` is left to the transcript.
+[dev-dependencies]
+gpui = { version = "0.3.9", package = "bezel-gpui", features = ["test-support"] }
+
+# Local patch of bezel-markdown: double-click selects the whole message
+# (`Pointer::SelectAll`) and inline `arbos://` links are left to the
+# transcript instead of being handed to the OS. Drop once upstreamed.
+[patch.crates-io]
+bezel-markdown = { path = "vendor/bezel-markdown" }
+# Local patch of bezel-ui: `TextField` gets the macOS click ladder —
+# double-click selects the word under the pointer, triple-click the whole
+# field, and a drag begun on a double-click grows by words. The blocks are
+# marked `ARBOS PATCH` in `src/input.rs`. Drop once upstreamed.
+bezel-ui = { path = "vendor/bezel-ui" }
+# Local patch of bezel-gpui: records an `ElementProbe` (global id + bounds +
+# hitbox) for every `.id(...)`'d element each frame and exposes
+# `Window::element_probes` / `Window::hitboxes_at`, which is what lets the
+# desktop driver (`src/driver.rs`) find and click any control by name. The
+# patch is the handful of blocks marked `ARBOS PATCH` in `src/window.rs` and
+# `src/elements/div.rs`; everything else is the published 0.3.9 source.
+bezel-gpui = { path = "vendor/bezel-gpui" }

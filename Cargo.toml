@@ -1,0 +1,25 @@
+[workspace]
+members = [
+    "crates/arbos-core",
+    "crates/arbos-engine",
+    "crates/arbos-hub",
+    "crates/arbos-kernel",
+]
+exclude = ["desktop"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+arbos-core = { path = "crates/arbos-core" }
+arbos-engine = { path = "crates/arbos-engine" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time", "fs", "signal", "io-std"] }
+
+[patch.crates-io]
+bezel-markdown = { path = "desktop/vendor/bezel-markdown" }
