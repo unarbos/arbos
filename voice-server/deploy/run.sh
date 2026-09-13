@@ -35,7 +35,7 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
   fi
   export ONNX_PROVIDER=CUDAExecutionProvider
   # CTranslate2 (faster-whisper) dlopens cuBLAS/cuDNN from the pip wheels.
-  export LD_LIBRARY_PATH="$(python -c 'import os, nvidia.cublas.lib, nvidia.cudnn.lib; print(os.path.dirname(nvidia.cublas.lib.__file__)+":"+os.path.dirname(nvidia.cudnn.lib.__file__))'):${LD_LIBRARY_PATH:-}"
+  export LD_LIBRARY_PATH="$(python -c 'import nvidia.cublas.lib as a, nvidia.cudnn.lib as b; print(":".join([*a.__path__, *b.__path__]))'):${LD_LIBRARY_PATH:-}"
 else
   uv pip install -q -e "$SRC"
 fi

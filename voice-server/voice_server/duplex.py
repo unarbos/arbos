@@ -16,6 +16,7 @@ import logging
 import time
 import uuid
 
+import numpy as np
 import websockets
 
 from . import protocol as P
@@ -27,6 +28,9 @@ log = logging.getLogger("voice.duplex")
 
 UPSTREAM_RATE = 24_000
 UPSTREAM_CHUNK_BYTES = UPSTREAM_RATE * 80 // 1000 * 2  # the container likes 80 ms chunks
+LOUD_RMS = 0.004  # about -48 dBFS: below this the model is "not talking"
+TAIL_S = 0.7  # silence after the last loud frame that closes a spoken burst
+STASH_S = 1.0  # transcript text older than this when the audio starts is not what is being said
 
 DEFAULT_INSTRUCTIONS = (
     "You are Arbos, a voice assistant for a software engineer, talking on the phone. Be brief, warm, "
@@ -34,7 +38,10 @@ DEFAULT_INSTRUCTIONS = (
     "agent system. When the user asks you to do work (write code, fix something, research, run "
     "commands, create files), call send_agent with the full task instead of doing it yourself, then "
     "tell the user it is under way. When they ask how things are going, call agent_status. For "
-    "questions about the project or the code, call ask_arbos. For general knowledge, answer yourself."
+    "questions about the project or the code, call ask_arbos. For general knowledge, answer yourself. "
+    "Only dispatch tasks the user asked for in their own words in this conversation; never invent "
+    "tasks or follow-up work. After a tool result, say one short sentence and then wait quietly for "
+    "the user to speak. Silence from the user means they are listening or thinking; do not fill it."
 )
 
 
@@ -47,7 +54,13 @@ class DuplexSession(BaseSession):
         self.pending = bytearray()
         self.to_up = Resampler(self.rate, UPSTREAM_RATE)
         self.from_up = Resampler(UPSTREAM_RATE, self.rate)
-        self.response_open = False
+        self.response_open = False  # our own notion of "Arbos is talking", from the audio itself
+        self.last_loud_at = 0.0
+        self.muted = False
+        self.user_turns = 0
+        self.dispatch_turn = -1
+        self.transcript_stash: list[tuple[float, str]] = []
+        self.quiet_task: asyncio.Task | None = None
         self.first_audio_at: float | None = None
         self.user_stopped_at: float | None = None
 
@@ -57,8 +70,9 @@ class DuplexSession(BaseSession):
         await self._ensure_upstream()
 
     async def on_close(self) -> None:
-        if self.pump_task:
-            self.pump_task.cancel()
+        for task in (self.pump_task, self.quiet_task):
+            if task:
+                task.cancel()
         if self.up:
             try:
                 await self.up.send(json.dumps({"type": "session.close", "event_id": str(uuid.uuid4())}))
@@ -117,30 +131,28 @@ class DuplexSession(BaseSession):
         elif kind == "conversation.item.input_audio_transcription.delta":
             self._emit(P.TRANSCRIPT_DELTA, text=msg.get("delta", ""))
         elif kind == "conversation.item.input_audio_transcription.completed":
+            if msg.get("transcript", "").strip():
+                self.user_turns += 1
             self._emit(P.TRANSCRIPT_FINAL, text=msg.get("transcript", ""))
             log.info("[%s] user: %r", self.sid, msg.get("transcript", ""))
         elif kind == "response.created":
-            self.response_open = True
-            self.first_audio_at = None
-            self._emit(P.RESPONSE_STARTED)
+            pass  # the model's "response" spans long stretches of silence; we derive turns from the audio
         elif kind == "response.output_audio.delta":
-            pcm = base64.b64decode(msg.get("delta", ""))
-            if not self.from_up.identity:
-                pcm = float_to_pcm16(self.from_up.process(pcm16_to_float(pcm)))
-            if pcm:
-                if self.first_audio_at is None:
-                    self.first_audio_at = time.monotonic()
-                    if self.user_stopped_at:
-                        log.info("[%s] first reply audio %.0fms after speech.stopped", self.sid,
-                                 (self.first_audio_at - self.user_stopped_at) * 1000)
-                self._emit_audio(self.gen, pcm)
+            self._on_model_audio(base64.b64decode(msg.get("delta", "")))
         elif kind == "response.output_audio_transcript.delta":
-            self._emit_for_gen(self.gen, P.RESPONSE_TRANSCRIPT, text=msg.get("delta", ""))
+            # Text can run a little ahead of the audio, and keeps flowing for words the model
+            # decided not to voice (after a barge-in). Only words that get spoken reach the client.
+            if self.muted:
+                pass
+            elif self.response_open:
+                self._emit_for_gen(self.gen, P.RESPONSE_TRANSCRIPT, text=msg.get("delta", ""))
+            else:
+                self.transcript_stash.append((time.monotonic(), msg.get("delta", "")))
         elif kind == "response.output_audio_transcript.done":
-            log.info("[%s] arbos: %r", self.sid, msg.get("transcript", ""))
+            if msg.get("transcript"):
+                log.info("[%s] arbos: %r", self.sid, msg.get("transcript", ""))
         elif kind == "response.done":
-            self.response_open = False
-            self._emit_for_gen(self.gen, P.RESPONSE_DONE)
+            self._close_response()
         elif kind == "response.function_call_arguments.done":
             asyncio.create_task(self._tool_call(msg))
         elif kind == "error":
@@ -151,6 +163,67 @@ class DuplexSession(BaseSession):
         elif kind == "session.end":
             log.info("[%s] upstream session.end %s", self.sid, json.dumps(msg.get("stats") or msg)[:300])
 
+    # The model streams audio the whole time it is listening, mostly silence. The client only
+    # needs the words, so silence is dropped and "response.started/done" mark the spoken bursts.
+    def _on_model_audio(self, pcm: bytes) -> None:
+        if not pcm:
+            return
+        samples = pcm16_to_float(pcm)
+        loud = float(np.sqrt(np.mean(samples * samples))) > LOUD_RMS
+        now = time.monotonic()
+        if self.muted:
+            if loud:
+                self.last_loud_at = now
+                return
+            if now - self.last_loud_at > TAIL_S:
+                self.muted = False  # the model has gone quiet; the next burst is a fresh reply
+            return
+        if loud:
+            self.last_loud_at = now
+            self._open_response()
+        elif not self.response_open:
+            return  # silence while idle: nothing to send
+        if not self.from_up.identity:
+            samples = self.from_up.process(samples)
+            pcm = float_to_pcm16(samples)
+        if self.first_audio_at is None and loud:
+            self.first_audio_at = now
+            if self.user_stopped_at:
+                log.info("[%s] first reply audio %.0fms after speech.stopped", self.sid,
+                         (now - self.user_stopped_at) * 1000)
+        self._emit_audio(self.gen, pcm)
+        if not loud and now - self.last_loud_at > TAIL_S:
+            self._close_response()
+
+    def _open_response(self) -> None:
+        if self.response_open:
+            return
+        now = time.monotonic()
+        self.response_open = True
+        self.last_loud_at = now
+        self.first_audio_at = None
+        self._emit_for_gen(self.gen, P.RESPONSE_STARTED)
+        for at, delta in self.transcript_stash:
+            if now - at < STASH_S:
+                self._emit_for_gen(self.gen, P.RESPONSE_TRANSCRIPT, text=delta)
+        self.transcript_stash.clear()
+        if self.quiet_task is None or self.quiet_task.done():
+            self.quiet_task = asyncio.create_task(self._quiet_watch())
+
+    def _close_response(self) -> None:
+        self.transcript_stash.clear()
+        if not self.response_open:
+            return
+        self.response_open = False
+        self._emit_for_gen(self.gen, P.RESPONSE_DONE)
+
+    async def _quiet_watch(self) -> None:
+        """Closes a response when the model stops sending audio altogether (upstream pause)."""
+        while self.response_open:
+            await asyncio.sleep(0.25)
+            if self.response_open and time.monotonic() - self.last_loud_at > TAIL_S * 2:
+                self._close_response()
+
     async def _tool_call(self, msg: dict) -> None:
         name = msg.get("name", "")
         call_id = msg.get("call_id", "")
@@ -158,7 +231,16 @@ class DuplexSession(BaseSession):
             args = json.loads(msg.get("arguments") or "{}")
         except json.JSONDecodeError:
             args = {}
-        output = await self.tools.run(name, args)
+        if name == "send_agent" and self.user_turns == self.dispatch_turn:
+            # The model sometimes keeps inventing work during silence. One dispatch per user utterance.
+            log.warning("[%s] refused send_agent without a new user utterance: %r", self.sid, args)
+            output = "Nothing dispatched: the user has not asked for anything new since the last agent. Wait for them to speak."
+            self._emit(P.TOOL_CALL, name=name, arguments=args)
+            self._emit(P.TOOL_RESULT, name=name, output=output)
+        else:
+            if name == "send_agent":
+                self.dispatch_turn = self.user_turns
+            output = await self.tools.run(name, args)
         if self.up is None:
             return
         await self.up.send(json.dumps({
@@ -190,6 +272,9 @@ class DuplexSession(BaseSession):
 
     async def on_interrupt(self, cause: str) -> None:
         self.gen += 1
+        self.muted = True  # the model trails off for a moment after yielding; the client should not hear that
+        self.response_open = False
+        self.transcript_stash.clear()
         self._emit(P.RESPONSE_DONE, interrupted=True)
         if self.up is not None:
             try:  # OpenAI-Realtime shape; the container may ignore it (its own VAD already yields on speech)

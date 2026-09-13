@@ -141,9 +141,10 @@ class ToolRunner:
                 self.watching.add(child.name)
             else:  # already done before we could watch it
                 asyncio.create_task(self._report(child.name))
+        first_sentence = re.split(r"(?<=[.!?])\s", reply.strip(), maxsplit=1)[0]
         if new:
-            return reply.strip() or f"Dispatched agent {new[0].name}."
-        return reply.strip() or "The main agent did not start a sub-agent."
+            return first_sentence or f"Dispatched agent {new[0].name}."
+        return first_sentence or "The main agent did not start a sub-agent."
 
     async def _ask(self, question: str) -> str:
         if not question:

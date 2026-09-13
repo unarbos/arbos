@@ -126,6 +126,8 @@ class Run:
         self.waiters: dict[str, asyncio.Future] = {}
         self.line = ""
         self.text_line = ""
+        self.ws = None
+        self.response_open = False
         self.player = Player(args.play)
         self.metrics: dict[str, float] = {}
 
@@ -141,8 +143,8 @@ class Run:
         now = time.monotonic()
         if isinstance(message, (bytes, bytearray)):
             self.audio_frames += 1
-            if self.interrupted_at is not None:
-                self.late_audio_frames += 1
+            if self.interrupted_at is not None and now - self.interrupted_at < 1.0:
+                self.late_audio_frames += 1  # reply audio that kept coming right after the interrupt
             if self.first_audio_at is None:
                 self.first_audio_at = now
                 self.log(f"<- audio: first frame ({len(message)} bytes)")
@@ -167,6 +169,16 @@ class Run:
         elif kind == "speech.started":
             self.player.flush()
             self.log(f"<- {kind}")
+            if self.response_open and self.ws is not None:  # what the iOS client does: stop playback, tell the server
+                self.response_open = False
+                asyncio.create_task(self.ws.send(json.dumps({"type": "interrupt"})))
+                self.log("-> interrupt (barge-in)")
+        elif kind == "response.started":
+            self.response_open = True
+            self.log(f"<- {kind}")
+        elif kind == "response.done":
+            self.response_open = False
+            self.log(f"<- {kind} {msg if msg else ''}")
         elif kind == "text.delta":
             self.text_line += msg.get("text", "")
             if self.waiters.get("text.delta"):
@@ -210,6 +222,7 @@ async def main() -> None:
 
     async with websockets.connect(args.url, max_size=4 * 1024 * 1024, compression=None) as ws:
         run.log(f"connected to {args.url.split('?')[0]}")
+        run.ws = ws
         mic = Mic(ws)
         reader = asyncio.create_task(_read(ws, run))
         ready = run.wait("session.ready")
@@ -262,6 +275,7 @@ async def main() -> None:
             second = load_wav(args.barge_in)
             started = run.wait("speech.started")
             final2 = run.wait("transcript.final")
+            done = run.wait("response.done")  # the first end-of-reply after we start talking over it
             run.log(f"-> barge-in: streaming {args.barge_in} over the reply")
             mic.play(second, "q2")
             t_started, _ = await asyncio.wait_for(started, args.timeout)
