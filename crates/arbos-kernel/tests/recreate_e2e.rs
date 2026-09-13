@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{Attach, start_kernel};
+use common::{Attach, start_kernel_replay};
 use std::time::Duration;
 
 fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
@@ -29,7 +29,16 @@ fn root_events(a: &mut Attach, kind: &str, timeout: Duration) -> bool {
 
 #[test]
 fn a_restored_chat_folder_streams_its_new_lines() {
-    let mut k = start_kernel("recreate");
+    // Three scripted replies, one per prompt: the turns run for real,
+    // deterministically, with no key (the replay provider, #69/#77).
+    let mut k = start_kernel_replay(
+        "recreate",
+        concat!(
+            "{\"content\": \"noted first\"}\n",
+            "{\"content\": \"noted second\"}\n",
+            "{\"content\": \"noted the restore\"}\n",
+        ),
+    );
     let mut a = Attach::connect(&k.url);
     assert!(
         a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")

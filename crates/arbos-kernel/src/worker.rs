@@ -47,11 +47,17 @@ impl Args {
         };
         while let Some(a) = argv.next() {
             match a.as_str() {
-                "--dir" | "-d" => args.dir = PathBuf::from(argv.next().context("--dir needs a directory")?),
+                "--dir" | "-d" => {
+                    args.dir = PathBuf::from(argv.next().context("--dir needs a directory")?)
+                }
                 "--hub" => args.hub = Some(argv.next().context("--hub needs a wss:// url")?),
                 "--machine" => args.machine = Some(argv.next().context("--machine needs a name")?),
-                "--cap" => args.capabilities.push(argv.next().context("--cap needs a name")?),
-                "--label" => args.labels.push(argv.next().context("--label needs a word")?),
+                "--cap" => args
+                    .capabilities
+                    .push(argv.next().context("--cap needs a name")?),
+                "--label" => args
+                    .labels
+                    .push(argv.next().context("--label needs a word")?),
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -93,8 +99,9 @@ pub fn run(args: Args) -> Result<i32> {
         .machine
         .clone()
         .or_else(|| std::env::var(hub_link::MACHINE_ENV).ok());
-    let cfg = HubConfig::resolve(url.as_deref(), machine.as_deref())?
-        .context("worker: no hub; pass --hub wss://… (or ARBOS_HUB) or write ~/.config/arbos/hub.toml")?;
+    let cfg = HubConfig::resolve(url.as_deref(), machine.as_deref())?.context(
+        "worker: no hub; pass --hub wss://… (or ARBOS_HUB) or write ~/.config/arbos/hub.toml",
+    )?;
     // Fail now, not at the first claim, when the token is missing.
     cfg.token()?;
     let rt = tokio::runtime::Runtime::new()?;
@@ -107,10 +114,7 @@ pub fn run(args: Args) -> Result<i32> {
                     eprintln!("worker: hub closed the socket; reconnecting");
                 }
                 Err(e) => {
-                    eprintln!(
-                        "worker: {e:#}; retry in {:?}",
-                        hub_link::backoff(attempt)
-                    );
+                    eprintln!("worker: {e:#}; retry in {:?}", hub_link::backoff(attempt));
                 }
             }
             tokio::time::sleep(hub_link::backoff(attempt)).await;

@@ -100,7 +100,12 @@ impl Auth {
             toml::from_str(text).with_context(|| format!("{}: bad hub config", path.display()))?;
         let mut entries = Vec::new();
         for row in &file.machine {
-            let token = resolve(&row.name, row.token.as_deref(), row.token_env.as_deref(), path)?;
+            let token = resolve(
+                &row.name,
+                row.token.as_deref(),
+                row.token_env.as_deref(),
+                path,
+            )?;
             entries.push(Entry {
                 token,
                 identity: Identity::Machine(row.name.clone()),
@@ -114,7 +119,12 @@ impl Auth {
                     row.name
                 );
             }
-            let token = resolve(&row.name, row.token.as_deref(), row.token_env.as_deref(), path)?;
+            let token = resolve(
+                &row.name,
+                row.token.as_deref(),
+                row.token_env.as_deref(),
+                path,
+            )?;
             entries.push(Entry {
                 token,
                 identity: Identity::Client {
