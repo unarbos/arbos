@@ -51,6 +51,20 @@ def last_speech_sample(x: np.ndarray, thresh: float = 0.01) -> int:
     return int(loud[-1]) if loud.size else x.size
 
 
+def levels(x: np.ndarray, frame: int = RATE // 25) -> dict[str, float]:
+    """Peak and RMS in dBFS of the reply audio, RMS over 40 ms frames that hold sound."""
+    if x.size == 0:
+        return {}
+    peak = float(np.max(np.abs(x)))
+    frames = x[: x.size - x.size % frame].reshape(-1, frame)
+    rms = np.sqrt(np.mean(frames * frames, axis=1))
+    loud = rms[rms > 10 ** (-50 / 20)]
+    out = {"reply.peak_dbfs": 20 * np.log10(max(peak, 1e-9))}
+    if loud.size:
+        out["reply.rms_dbfs"] = float(20 * np.log10(np.sqrt(np.mean(loud * loud))))
+    return out
+
+
 def first_speech_sample(x: np.ndarray, thresh: float = 0.01) -> int:
     win = RATE // 50
     rms = np.sqrt(np.convolve(x * x, np.ones(win) / win, mode="same"))
@@ -387,6 +401,7 @@ async def main() -> None:
             run.metrics["echo.user_transcripts"] = len(run.finals)
             run.metrics["echo.transcripts"] = " | ".join(t[:60] for t in run.finals)
         run.metrics["reply.audio_seconds"] = len(run.audio) / 2 / RATE
+        run.metrics.update(levels(pcm16_to_float(bytes(run.audio))))
         await ws.send(json.dumps({"type": "session.end"}))
         mic_task.cancel()
         reader.cancel()

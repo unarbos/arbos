@@ -55,6 +55,59 @@ class Resampler:
         return out.astype(np.float32, copy=False)
 
 
+class Normalizer:
+    """Peak-following gain toward a target level, with a soft-knee limiter.
+
+    Reply audio from different engines lands at very different levels (the duplex
+    model about 14 dB under the pipeline's TTS). This brings every frame toward
+    `target_dbfs` peak: gain drops at once when the input gets louder, rises
+    slowly (`rise_db_per_s`) when it gets quieter, never above `max_gain_db`, and
+    holds still over silence so noise is not pumped up. Whatever still overshoots
+    is bent smoothly into [-1, 1] instead of clipping.
+    """
+
+    def __init__(self, rate: int, target_dbfs: float = -3.0, max_gain_db: float = 24.0,
+                 rise_db_per_s: float = 6.0, release_s: float = 1.5, knee: float = 0.6):
+        self.rate = rate
+        self.target = 10 ** (target_dbfs / 20)
+        self.max_gain = 10 ** (max_gain_db / 20)
+        self.rise_db_per_s = rise_db_per_s
+        self.release_s = release_s
+        self.knee = knee
+        self.env = 0.0  # peak envelope of the input
+        self.gain = 1.0
+        self.loud_frames = 0
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        if x.size == 0:
+            return x
+        dt = x.size / self.rate
+        peak = float(np.max(np.abs(x)))
+        if peak < 0.002:  # silence: keep the envelope decaying, do not touch the gain
+            self.env *= 0.5 ** (dt / self.release_s)
+            return self._limit(x * self.gain)
+        self.env = max(peak, self.env * 0.5 ** (dt / self.release_s))
+        wanted = min(self.max_gain, max(1.0, self.target / max(self.env, 1e-4)))
+        self.loud_frames += 1
+        if wanted < self.gain or self.loud_frames <= 3:
+            self.gain = wanted  # louder input: back off at once; first frames: jump to the level
+        else:
+            step = 10 ** (self.rise_db_per_s * dt / 20)
+            self.gain = min(wanted, self.gain * step)
+        return self._limit(x * self.gain)
+
+    def _limit(self, y: np.ndarray) -> np.ndarray:
+        a = np.abs(y)
+        over = a > self.knee
+        if not np.any(over):
+            return y
+        span = 1.0 - self.knee
+        soft = self.knee + span * np.tanh((a[over] - self.knee) / span)
+        out = y.copy()
+        out[over] = np.sign(y[over]) * soft
+        return out
+
+
 def resample_whole(x: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     """Resample a complete buffer (used for TTS output when the client rate differs)."""
     if src_rate == dst_rate:

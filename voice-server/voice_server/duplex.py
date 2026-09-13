@@ -223,7 +223,7 @@ class DuplexSession(BaseSession):
             if self.user_stopped_at:
                 log.info("[%s] first reply audio %.0fms after speech.stopped", self.sid,
                          (now - self.user_stopped_at) * 1000)
-        self._emit_audio(self.gen, pcm, 0.3)  # the phone buffers a little before it plays
+        self._emit_audio(self.gen, pcm, 0.3, source="model")  # the phone buffers a little before it plays
         if not loud and now - self.last_loud_at > TAIL_S:
             self._close_response()
 

@@ -156,6 +156,11 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
     Audio already sent cannot be recalled, so the client must flush its playback queue on
     speech.started (the iOS client does). The client may also send "interrupt".
 
+  Output level
+    Reply audio from both engines is peak-normalised toward --out-target-dbfs (default -3 dBFS)
+    with a soft-knee limiter: gain drops at once on loud input, rises 6 dB/s on quiet input, up
+    to +24 dB, and holds over silence. --no-normalize sends the engine's raw level.
+
   Echo gate (server side, independent of the phone's echo cancellation)
     While reply audio is on its way to the speaker (and 0.6 s after), every uplink frame is
     cross-correlated with the reply audio sent in the last 3 s. A match is our own voice
