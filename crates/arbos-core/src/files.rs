@@ -229,9 +229,6 @@ pub fn bootstrap(place: &Place) -> Result<Agent> {
         agent.save(&root.dir)?;
         touch(&root.transcript())?;
         std::fs::create_dir_all(root.jobs())?;
-        if !root.plan_md().exists() {
-            std::fs::write(root.plan_md(), "")?;
-        }
         agent
     };
     // After root exists, so a missing or dangling focus can settle on it.

@@ -372,7 +372,7 @@ impl Tool for SubscribeTool {
                         "after": {"type": "string", "description": "One-shot: fire once this long from now, e.g. \"30m\"."},
                         "at": {"type": "string", "description": "Wall clock (UTC) the due moment aligns to: \"09:00\" daily, \":15\" each hour."},
                         "cmd": {"type": "string", "description": "shell: the command the kernel runs as a job."},
-                        "deliver_to": {"type": "string", "enum": ["agent", "user"], "description": "shell: user sends the output to the user with no model turn (failures still wake you). Default agent."},
+                        "deliver_to": {"type": "string", "enum": ["agent", "user", "none"], "description": "shell: user sends the output to the user with no model turn; none is a quiet chore (nothing on success). Failures always wake you. Default agent."},
                         "notify": {"type": "string", "description": "shell + deliver_to user: the line sent, must contain {output}."},
                         "repo": {"type": "string", "description": "github_*: owner/name."},
                         "pr": {"type": "integer", "description": "github_*: pull request number."},
