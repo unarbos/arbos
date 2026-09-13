@@ -106,6 +106,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                 attachments: vec!["/tmp/a.png".into()],
                 channel: String::new(),
                 device: String::new(),
+                model: String::new(),
             },
             "user",
         ),

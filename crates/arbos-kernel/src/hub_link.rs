@@ -364,6 +364,7 @@ pub async fn deliver(
             attachments: vec![],
             channel: String::new(),
             device: String::new(),
+            model: String::new(),
         },
     )
     .await?;

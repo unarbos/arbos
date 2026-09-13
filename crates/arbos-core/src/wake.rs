@@ -21,6 +21,9 @@ pub struct Wake {
     /// transcript's `user` line. Empty otherwise.
     pub channel: String,
     pub device: String,
+    /// A model for this turn only (the composer's "switch to <vision
+    /// model> for this turn"). Empty: the agent's own.
+    pub model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +62,7 @@ impl Wake {
             hops: 0,
             channel: String::new(),
             device: String::new(),
+            model: String::new(),
         }
     }
 

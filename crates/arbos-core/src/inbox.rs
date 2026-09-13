@@ -57,6 +57,9 @@ pub struct Message {
     /// Empty when unknown or not a person's message.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub device: String,
+    /// A model for the turn this message opens, and that turn only.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
     #[serde(skip)]
     pub body: String,
 }
@@ -73,6 +76,7 @@ impl Default for Message {
             sent: rfc3339(crate::now_ms()),
             channel: String::new(),
             device: String::new(),
+            model: String::new(),
             body: String::new(),
         }
     }

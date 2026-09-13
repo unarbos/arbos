@@ -205,7 +205,11 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         (None, _) => return refuse(&transcript, &place, &agent, host.missing_key_hint()),
         (_, Err(e)) => return refuse(&transcript, &place, &agent, format!("{e:#}")),
     };
-    let model = if agent.model == "inherit" || agent.model.is_empty() {
+    // The wake may name a model for this turn only ("switch to <vision
+    // model> for this turn"); otherwise the agent's, then the host's.
+    let model = if !wake.model.trim().is_empty() {
+        wake.model.trim().to_string()
+    } else if agent.model == "inherit" || agent.model.is_empty() {
         host.config.model()
     } else {
         agent.model.clone()
@@ -220,6 +224,12 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         None
     } else {
         crate::provider::context_window(&api_base, &key, &model).await
+    };
+    // Whether the model takes image input, when the provider's list says.
+    let sees_images = if replay.is_some() {
+        None
+    } else {
+        crate::provider::accepts_images(&api_base, &key, &model).await
     };
     let limit = match (host.config.window_tokens, listed) {
         (0, Some(c)) => c.min(host.config.window_tokens_max.max(MIN_WINDOW)),
@@ -442,6 +452,8 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 batch_cfg,
                 transcript: &transcript,
                 window: limit,
+                vision_model: &host.config.vision_model,
+                sees_images,
             },
             &managed.messages,
             tools,

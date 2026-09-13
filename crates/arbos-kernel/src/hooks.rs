@@ -418,7 +418,7 @@ impl KernelHooks {
         from: &str,
         attachments: Vec<String>,
     ) -> Result<NodeId> {
-        self.inbox_with(agent, text, from, attachments, "", "")
+        self.inbox_with(agent, text, from, attachments, "", "", "")
     }
 
     /// The user's own prompt, with where it came from: `channel` (voice |
@@ -431,9 +431,23 @@ impl KernelHooks {
         channel: &str,
         device: &str,
     ) -> Result<NodeId> {
-        self.inbox_with(agent, text, "user", attachments, channel, device)
+        self.inbox_with(agent, text, "user", attachments, channel, device, "")
     }
 
+    /// `inbox_user` with a model for that one turn.
+    pub fn inbox_user_on(
+        &self,
+        agent: &str,
+        text: &str,
+        attachments: Vec<String>,
+        channel: &str,
+        device: &str,
+        model: &str,
+    ) -> Result<NodeId> {
+        self.inbox_with(agent, text, "user", attachments, channel, device, model)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn inbox_with(
         &self,
         agent: &str,
@@ -442,6 +456,7 @@ impl KernelHooks {
         attachments: Vec<String>,
         channel: &str,
         device: &str,
+        model: &str,
     ) -> Result<NodeId> {
         let (from, kind) = match from {
             o if o.starts_with("spawn:") => (format!("agent:{}", &o["spawn:".len()..]), "brief"),
@@ -454,6 +469,7 @@ impl KernelHooks {
         msg.attachments = attachments;
         msg.channel = channel.to_string();
         msg.device = device.to_string();
+        msg.model = model.to_string();
         let name = self.deliver(agent, &msg)?;
         Ok(inbox_id(&name))
     }

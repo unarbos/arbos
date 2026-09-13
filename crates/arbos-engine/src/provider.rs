@@ -175,6 +175,10 @@ impl ChatMessage {
 pub struct ImagePart {
     pub mime: String,
     pub b64: String,
+    /// The attachment as the transcript names it. Ours, not the wire's:
+    /// it lets a rejected image be described and recorded by name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
 }
 
 impl From<crate::image::ImagePart> for ImagePart {
@@ -182,6 +186,7 @@ impl From<crate::image::ImagePart> for ImagePart {
         Self {
             mime: p.mime.to_string(),
             b64: p.b64,
+            path: String::new(),
         }
     }
 }
@@ -409,6 +414,34 @@ pub async fn max_completion_tokens(base: &str, key: &str, model: &str) -> Option
         .and_then(|t| t.get("max_completion_tokens"))
         .or_else(|| m.get("max_completion_tokens"))
         .and_then(Value::as_u64)
+}
+
+/// Whether the provider says `model` takes image input. OpenRouter lists
+/// `architecture.input_modalities`; hosts that list nothing answer None
+/// and the turn finds out from the first call.
+pub async fn accepts_images(base: &str, key: &str, model: &str) -> Option<bool> {
+    let m = model_entry(base, key, model).await?;
+    let mods = m.get("architecture")?.get("input_modalities")?.as_array()?;
+    Some(mods.iter().any(|v| v.as_str() == Some("image")))
+}
+
+/// Every model the provider lists as taking image input, in list order.
+pub async fn vision_models(base: &str, key: &str) -> Vec<String> {
+    let Some(list) = models_list(base, key).await else {
+        return Vec::new();
+    };
+    let Some(data) = list.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    data.iter()
+        .filter(|m| {
+            m.get("architecture")
+                .and_then(|a| a.get("input_modalities"))
+                .and_then(Value::as_array)
+                .is_some_and(|mods| mods.iter().any(|v| v.as_str() == Some("image")))
+        })
+        .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect()
 }
 
 async fn model_entry(base: &str, key: &str, model: &str) -> Option<Value> {

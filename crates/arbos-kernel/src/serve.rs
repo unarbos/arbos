@@ -617,6 +617,7 @@ fn handle_frame(
             attachments,
             channel,
             device,
+            model,
         } => {
             // Where the words came from. A frame without a channel is a
             // typed line (the desktop, the CLI); the voice gateway says so.
@@ -671,7 +672,9 @@ fn handle_frame(
                 }
                 return;
             }
-            if let Err(e) = hooks.inbox_user(&agent, &text, attachments, &channel, &device) {
+            if let Err(e) =
+                hooks.inbox_user_on(&agent, &text, attachments, &channel, &device, model.trim())
+            {
                 refuse(hooks, Some(&agent), format!("inbox: {e:#}"));
             }
         }

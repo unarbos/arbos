@@ -21,6 +21,7 @@
 
 use arbos_core::{Agent, Event, EventKind, Place, ToolRec};
 use serde_json::json;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::compact::Item;
@@ -195,10 +196,21 @@ struct ImageBudget {
     seen: usize,
     total: usize,
     cwd: PathBuf,
+    /// Images the selected model could not see, in words (`ImageDescribed`
+    /// lines): path → (model, description). Shown as text, not pixels.
+    described: HashMap<String, (String, String)>,
 }
 
 impl ImageBudget {
     fn new(items: &[Item], cwd: PathBuf) -> Self {
+        let mut described = HashMap::new();
+        for it in items {
+            if let Item::Event { event, .. } = it
+                && let EventKind::ImageDescribed { path, model, text } = &event.kind
+            {
+                described.insert(path.clone(), (model.clone(), text.clone()));
+            }
+        }
         let total = items
             .iter()
             .filter_map(|it| match it {
@@ -206,7 +218,12 @@ impl ImageBudget {
                     event,
                     folded: false,
                     ..
-                } => Some(image_paths(event).len()),
+                } => Some(
+                    image_paths(event)
+                        .iter()
+                        .filter(|p| !described.contains_key(**p))
+                        .count(),
+                ),
                 _ => None,
             })
             .sum();
@@ -214,11 +231,18 @@ impl ImageBudget {
             seen: 0,
             total,
             cwd,
+            described,
         }
     }
 
     /// Returns the part to attach, or `None` with a stub line to print.
     fn take(&mut self, path: &str) -> (Option<ImagePart>, String) {
+        if let Some((model, text)) = self.described.get(path) {
+            return (
+                None,
+                format!("[image {path} — described by {model}]\n{text}"),
+            );
+        }
         self.seen += 1;
         let keep = self.total <= KEEP_IMAGES || self.seen > self.total - KEEP_IMAGES;
         if !keep {
@@ -229,7 +253,11 @@ impl ImageBudget {
         }
         let file = crate::tools::resolve(&self.cwd, path);
         match image::load(&file) {
-            Ok(part) => (Some(part.into()), format!("[image {path}]")),
+            Ok(part) => {
+                let mut part: ImagePart = part.into();
+                part.path = path.to_string();
+                (Some(part), format!("[image {path}]"))
+            }
             Err(e) => (None, format!("[image {path}: not shown — {e}]")),
         }
     }
