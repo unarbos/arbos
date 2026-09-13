@@ -66,7 +66,12 @@ pub fn changes(cwd: &Path) -> Result<ToolOut> {
         .args(["status", "--short"])
         .current_dir(cwd)
         .output()?;
-    let mut body = String::from_utf8_lossy(&out.stdout).into_owned();
+    let status = String::from_utf8_lossy(&out.stdout).into_owned();
+    // On a branch of its own, the first line says where the work stands
+    // against the base: the moment an agent looks at its changes is the
+    // moment to notice nothing is committed yet.
+    let mut body = branch_line(cwd, &status).unwrap_or_default();
+    body.push_str(&status);
     let diff = Command::new("git")
         .args(["diff", "HEAD"])
         .current_dir(cwd)
@@ -76,6 +81,73 @@ pub fn changes(cwd: &Path) -> Result<ToolOut> {
         body = "(no changes)\n".into();
     }
     Ok(ToolOut::text(body))
+}
+
+/// "branch `fix/x`: 2 uncommitted files, 0 commits ahead of main" when
+/// `cwd` is on a branch other than the base. None on the base itself, on a
+/// detached HEAD, or outside a repository.
+fn branch_line(cwd: &Path, status: &str) -> Option<String> {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if branch.is_empty() || branch == "HEAD" {
+        return None;
+    }
+    let base = base_branch(cwd, &git);
+    if branch == base {
+        return None;
+    }
+    let dirty = status.lines().filter(|l| !l.trim().is_empty()).count();
+    let ahead = git(&["rev-list", "--count", &format!("{base}..HEAD")]).unwrap_or_default();
+    let ahead_text = if ahead.is_empty() {
+        format!("(no `{base}` branch to compare with)")
+    } else {
+        format!(
+            "{ahead} commit{} ahead of {base}",
+            if ahead == "1" { "" } else { "s" }
+        )
+    };
+    Some(format!(
+        "branch `{branch}`: {dirty} uncommitted file{}, {ahead_text}\n",
+        if dirty == 1 { "" } else { "s" }
+    ))
+}
+
+/// The branch work is measured against: `base` in `.arbos/git.toml` when the
+/// place (found upward from `cwd`) configures one, else `main`, else
+/// `master` when only that exists.
+fn base_branch(cwd: &Path, git: &dyn Fn(&[&str]) -> Option<String>) -> String {
+    let mut dir = Some(cwd);
+    while let Some(d) = dir {
+        if let Ok(text) = std::fs::read_to_string(d.join(".arbos").join("git.toml")) {
+            let base = text
+                .lines()
+                .filter_map(|l| l.split_once('='))
+                .find(|(k, _)| k.trim() == "base")
+                .map(|(_, v)| v.trim().trim_matches('"').to_string())
+                .unwrap_or_default();
+            if !base.is_empty() {
+                return base;
+            }
+            break;
+        }
+        dir = d.parent();
+    }
+    if git(&["rev-parse", "--verify", "--quiet", "refs/heads/main"]).is_some() {
+        return "main".into();
+    }
+    if git(&["rev-parse", "--verify", "--quiet", "refs/heads/master"]).is_some() {
+        return "master".into();
+    }
+    "main".into()
 }
 
 pub fn undo(cwd: &Path) -> Result<ToolOut> {

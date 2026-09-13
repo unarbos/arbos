@@ -360,7 +360,7 @@ impl Tool for Browser {
     fn schema(&self) -> Value {
         simple_schema(
             "browser",
-            "Navigate, click, type, or screenshot a page. The user sees the page as a browser row under this chat; close removes it.",
+            "Navigate, click, type, or screenshot a page. The user sees the page as a browser row under this chat; close removes it. Use screenshot whenever the user asks to see a page or a result: the image is shown to the user and to you.",
             &[
                 (
                     "action",
