@@ -17,6 +17,11 @@ pub struct Wake {
     /// Reply budget: how many agent-to-agent requests may chain from this
     /// turn before they fall back to notes.
     pub hops: u8,
+    /// For a person's words: how they arrived (`voice` | `text`) and from
+    /// which client (`phone` | `desktop` | `cli`). Written onto the
+    /// transcript's `user` line. Empty otherwise.
+    pub channel: String,
+    pub device: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +59,8 @@ impl Wake {
             steer: false,
             node: None,
             hops: 0,
+            channel: String::new(),
+            device: String::new(),
         }
     }
 

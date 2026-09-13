@@ -510,6 +510,8 @@ fn wake_from_message(
         steer: false,
         node: None,
         hops: msg.hops,
+        channel: msg.channel.clone(),
+        device: msg.device.clone(),
     })
 }
 
@@ -531,6 +533,8 @@ fn wake_for(
         steer: false,
         node: Some(n.id),
         hops: n.hops,
+        channel: n.channel.clone(),
+        device: n.device.clone(),
     }
 }
 

@@ -227,9 +227,10 @@ pub enum Frame {
     },
     /// A person's words for `agent`. `channel` says where they came from:
     /// `voice` (a call, through the voice gateway) or `text` (typed). Absent
-    /// means typed: the desktop and the CLI send no channel. The kernel
-    /// writes it into the inbox file so the record shows how each line
-    /// arrived.
+    /// means typed: the desktop and the CLI send no channel. `device` is
+    /// the client that carried them: `phone`, `desktop`, `cli`. The kernel
+    /// writes both into the inbox file and onto the transcript's `user`
+    /// line so the record shows how each line arrived.
     User {
         agent: String,
         text: String,
@@ -239,6 +240,8 @@ pub enum Frame {
         attachments: Vec<String>,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         channel: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        device: String,
     },
     Pause {
         agent: String,

@@ -132,6 +132,8 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 batch.push(Event::new(EventKind::User {
                     text: text.clone(),
                     attachments: wake.attachments.clone(),
+                    channel: wake.channel.clone(),
+                    device: wake.device.clone(),
                 }));
             }
         }
@@ -373,6 +375,8 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     _ => Event::new(EventKind::User {
                         text: msg.body,
                         attachments: msg.attachments,
+                        channel: msg.channel,
+                        device: msg.device,
                     }),
                 })
                 .collect();
@@ -567,6 +571,8 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 batch.push(Event::new(EventKind::User {
                     text: text.into(),
                     attachments: vec![],
+                    channel: String::new(),
+                    device: String::new(),
                 }));
                 append_events(&transcript, &batch)?;
                 events = load_transcript(&transcript)?;

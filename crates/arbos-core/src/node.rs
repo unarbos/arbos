@@ -186,6 +186,9 @@ pub struct Node {
     /// For a person's message: `voice` | `text`, copied to the inbox file.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub channel: String,
+    /// For a person's message: the client (`phone` | `desktop` | `cli`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub device: String,
     /// The attempt that holds it active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<String>,
@@ -218,6 +221,7 @@ impl Node {
             origin: String::new(),
             hops: 0,
             channel: String::new(),
+            device: String::new(),
             attempt: None,
             attachments: Vec::new(),
             created_ms: now,

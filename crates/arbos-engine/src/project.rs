@@ -294,7 +294,9 @@ pub fn project(
                         step_bytes,
                     );
                 }
-                EventKind::User { text, attachments } => {
+                EventKind::User {
+                    text, attachments, ..
+                } => {
                     flush(&mut out, &mut pending);
                     let mut t = text.clone();
                     // `/name args` names a skill: the transcript keeps what

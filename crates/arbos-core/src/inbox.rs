@@ -49,6 +49,10 @@ pub struct Message {
     /// before the key existed.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub channel: String,
+    /// The client that carried a person's words: `phone`, `desktop`, `cli`.
+    /// Empty when unknown or not a person's message.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub device: String,
     #[serde(skip)]
     pub body: String,
 }
@@ -64,6 +68,7 @@ impl Default for Message {
             attachments: Vec::new(),
             sent: rfc3339(crate::now_ms()),
             channel: String::new(),
+            device: String::new(),
             body: String::new(),
         }
     }
@@ -386,10 +391,13 @@ mod tests {
     fn channel_is_written_when_set_and_absent_otherwise() {
         let mut voice = Message::new("user", "request", "send an agent to fix CI");
         voice.channel = "voice".into();
+        voice.device = "desktop".into();
         let text = voice.render().unwrap();
         assert!(text.contains("channel = \"voice\"\n"), "{text}");
+        assert!(text.contains("device = \"desktop\"\n"), "{text}");
         let back = Message::parse(&text).unwrap();
         assert_eq!(back.channel, "voice");
+        assert_eq!(back.device, "desktop");
         assert_eq!(back.body, "send an agent to fix CI");
 
         let note = Message::new("agent:peer", "message", "a note");

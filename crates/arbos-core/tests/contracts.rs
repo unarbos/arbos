@@ -107,6 +107,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                 steer: true,
                 attachments: vec!["/tmp/a.png".into()],
                 channel: String::new(),
+                device: String::new(),
             },
             "user",
         ),
@@ -308,6 +309,8 @@ fn a_failed_append_leaves_no_partial_line() {
         &Event::new(EventKind::User {
             text: "one".into(),
             attachments: vec![],
+            channel: String::new(),
+            device: String::new(),
         }),
     )
     .unwrap();
@@ -329,6 +332,8 @@ fn a_failed_append_leaves_no_partial_line() {
         &Event::new(EventKind::User {
             text: big.clone(),
             attachments: vec![],
+            channel: String::new(),
+            device: String::new(),
         }),
     );
     let mut huge = Node::new(big);
@@ -386,6 +391,8 @@ fn transcript_tail_reads_only_new_lines_and_numbers_them_like_load_transcript() 
         &Event::new(EventKind::User {
             text: "one".into(),
             attachments: vec![],
+            channel: String::new(),
+            device: String::new(),
         }),
     )
     .unwrap();
@@ -432,6 +439,8 @@ fn transcript_tail_reads_only_new_lines_and_numbers_them_like_load_transcript() 
         &Event::new(EventKind::User {
             text: "fresh".into(),
             attachments: vec![],
+            channel: String::new(),
+            device: String::new(),
         }),
     )
     .unwrap();

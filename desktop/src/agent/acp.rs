@@ -308,6 +308,7 @@ impl Session {
                 })
                 .collect(),
             channel: String::new(),
+            device: String::new(),
         })
     }
 

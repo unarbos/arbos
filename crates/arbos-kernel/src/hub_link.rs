@@ -359,6 +359,7 @@ pub async fn deliver(
             steer: false,
             attachments: vec![],
             channel: String::new(),
+            device: String::new(),
         },
     )
     .await?;

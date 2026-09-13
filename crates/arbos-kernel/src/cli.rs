@@ -128,6 +128,7 @@ pub fn run(args: Args) -> Result<i32> {
             steer: args.steer,
             attachments: vec![],
             channel: String::new(),
+            device: String::new(),
         };
         w.write_all(format!("{}\n", serde_json::to_string(&frame)?).as_bytes())
             .await?;

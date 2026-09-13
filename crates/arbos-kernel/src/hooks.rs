@@ -750,6 +750,7 @@ impl KernelHooks {
         msg.hops = n.hops;
         msg.attachments = n.attachments.clone();
         msg.channel = n.channel.clone();
+        msg.device = n.device.clone();
         let name = inbox::deliver(&self.place, agent, &msg)?;
         self.plan_changed(agent);
         Ok(inbox_id(&name))

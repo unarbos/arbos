@@ -32,6 +32,13 @@ pub enum EventKind {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<String>,
+        /// How the words arrived: `voice` (a call) or `text` (typed).
+        /// Absent on lines from before the key existed.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        channel: String,
+        /// The client: `phone` | `desktop` | `cli`.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        device: String,
     },
     Assistant {
         text: String,

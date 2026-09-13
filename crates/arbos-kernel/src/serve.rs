@@ -604,6 +604,7 @@ fn handle_frame(
             steer,
             attachments,
             channel,
+            device,
         } => {
             // Where the words came from. A frame without a channel is a
             // typed line (the desktop, the CLI); the voice gateway says so.
@@ -636,6 +637,7 @@ fn handle_frame(
                 let mut msg = inbox::Message::new("user", "steer", text.clone());
                 msg.attachments = attachments.clone();
                 msg.channel = channel.clone();
+                msg.device = device.clone();
                 match inbox::deliver(place, &agent, &msg) {
                     Ok(_) => hooks.broadcast(hooks.plan_frame(&agent)),
                     Err(e) => refuse(hooks, Some(&agent), format!("steer: {e:#}")),
@@ -660,6 +662,7 @@ fn handle_frame(
             let mut n = arbos_core::Node::inbox(text, "user");
             n.attachments = attachments;
             n.channel = channel;
+            n.device = device;
             if let Err(e) = hooks.inbox(&agent, n) {
                 refuse(hooks, Some(&agent), format!("inbox: {e:#}"));
             }

@@ -1029,6 +1029,8 @@ pub fn seed_transcript(place: &Place, id: &str, items: &[crate::model::session::
                 batch.push(arbos_core::Event::new(arbos_core::EventKind::User {
                     text: message.text.clone(),
                     attachments,
+                    channel: String::new(),
+                    device: String::new(),
                 }));
             }
             crate::model::session::ChatItem::From { who, text, .. } => {
