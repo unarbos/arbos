@@ -33,3 +33,9 @@ Place with `.arbos/secrets.toml` naming `OPENROUTER_API_KEY = "env:OPENROUTER_AP
 5. Two agents `use` different secrets: the store is kernel-wide, so the child's bash sees the parent's grants too. Decide whether per-agent scoping is needed (noted in the PR).
 6. Kernel's own API key in bash `env` output → redacted from the transcript; but a child process could write it to a file and `read` it back → also redacted (same value). Check both.
 7. Secrets with regex-special characters, unicode, trailing newlines from `file:`.
+
+## Update 2026-09-13 02:20: on your leak-hunt result
+
+Pushed to the same branch: base64 (standard / unpadded / URL-safe) and hex of each value are redacted as `[REDACTED:NAME encoded]`; any run of 12+ consecutive characters of a value as `[REDACTED:NAME part]` (halves, long prefixes). Spaced and reversed still pass — noted for the sandbox item. Re-run `secrets-leak-hunt@secrets-door` when the hourly loop picks up `3e4d507`.
+
+On the pills driver gap: agreed; exposing rendered labels in `driver.rs` snapshots is a small change I will fold into the next desktop PR.
