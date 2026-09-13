@@ -119,6 +119,34 @@ pub struct NewNode {
     pub par: bool,
 }
 
+/// `"0"`, `"0s"`, `"0m"`: a duration a model writes to mean "none".
+fn is_zero_duration(x: &str) -> bool {
+    let t = x.trim().to_ascii_lowercase();
+    let digits: String = t
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let unit = &t[digits.len()..];
+    !digits.is_empty()
+        && digits.chars().all(|c| c == '0' || c == '.')
+        && matches!(
+            unit.trim(),
+            "" | "s"
+                | "sec"
+                | "secs"
+                | "m"
+                | "min"
+                | "mins"
+                | "h"
+                | "hr"
+                | "hrs"
+                | "d"
+                | "day"
+                | "days"
+                | "ms"
+        )
+}
+
 impl NewNode {
     /// `{goal, check, when:{after, every, wake, condition}, do:{shell, notify, ask}, par}`.
     pub fn from_json(v: &Value) -> Result<Self> {
@@ -136,7 +164,15 @@ impl NewNode {
         };
         let when = v.get("when");
         let do_ = v.get("do");
-        let opt = |x: String| if x.is_empty() { None } else { Some(x) };
+        // Models fill every field: `after: "0s"` next to `every: "1h"` means
+        // "no delay", not a second trigger. Zero is unset.
+        let opt = |x: String| {
+            if x.is_empty() || is_zero_duration(&x) {
+                None
+            } else {
+                Some(x)
+            }
+        };
         Ok(Self {
             goal: s("goal", Some(v)),
             check: s("check", Some(v)),
@@ -211,8 +247,10 @@ impl NewNode {
         }
         // A schedule written into the goal instead of `when` never fires.
         // Refuse it with the fix, rather than store a node that only looks
-        // scheduled.
-        if trig == 0 {
+        // scheduled. A one-shot `after` does not make "every hour" true
+        // either (QA bug qa-009): the node fires once and the user was told
+        // it recurs.
+        if n.when.every_ms.is_none() {
             let g = n.goal.to_ascii_lowercase();
             let words = [
                 "every ",
@@ -227,22 +265,27 @@ impl NewNode {
                 .iter()
                 .any(|w| g.starts_with(w) || g.contains(&format!(" {w}")))
             {
+                let fate = if n.when.after_ms.is_some() {
+                    "when.after fires it once and then it is done"
+                } else {
+                    "it would never fire"
+                };
                 bail!(
-                    "the goal reads like a recurring job but when.every is not set, so it would never fire. Set when:{{every:\"30s\"}} (or the period you mean) and keep the goal as what each firing does"
+                    "the goal reads like a recurring job but when.every is not set, so {fate}. Set when:{{every:\"1h\"}} (or the period you mean; omit after) and keep the goal as what each firing does"
                 );
             }
-            if g.starts_with("in ")
-                && node::parse_duration_ms(
-                    g[3..]
-                        .split_whitespace()
-                        .take(2)
-                        .collect::<Vec<_>>()
-                        .join("")
-                        .as_str(),
-                )
-                .is_some()
-                || g.starts_with("after ")
-            {
+            let deferred_wording = g.starts_with("after ")
+                || (g.starts_with("in ")
+                    && node::parse_duration_ms(
+                        g[3..]
+                            .split_whitespace()
+                            .take(2)
+                            .collect::<Vec<_>>()
+                            .join("")
+                            .as_str(),
+                    )
+                    .is_some());
+            if trig == 0 && deferred_wording {
                 bail!(
                     "the goal reads like a deferred task but when.after is not set, so it would never fire. Set when:{{after:\"30m\"}} (or the delay you mean)"
                 );
