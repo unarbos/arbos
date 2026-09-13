@@ -45,6 +45,7 @@ pub const ALL_TOOLS: &[&str] = &[
     "browser",
     "terminal",
     "screenshot",
+    "secret",
 ];
 
 /// One agent folder. Fields live in `agent.md`.
@@ -223,6 +224,7 @@ impl Agent {
                         | "plan"
                         | "say"
                         | "screenshot"
+                        | "secret"
                 )
             });
         }
@@ -244,6 +246,11 @@ impl Agent {
         }
         // Same write surface as edit. Old agent.md files list edit only.
         if tool == "apply_patch" && self.allowlist.iter().any(|t| t == "edit") {
+            return true;
+        }
+        // Keys into the shell's environment: goes with the shell. Old
+        // agent.md files predate the tool.
+        if tool == "secret" && self.allowlist.iter().any(|t| t == "bash") {
             return true;
         }
         // Visible shell. Old agent.md files list bash only.

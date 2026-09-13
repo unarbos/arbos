@@ -46,6 +46,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
     host.remember_place(place.path());
     match (host.api_key(), host.config.api_base()) {
         (Some(key), Ok(base)) => {
+            // bash inherits this process's environment, so the model's key is
+            // one `env` away; it never reaches the transcript.
+            arbos_engine::secrets::store().protect("MODEL_API_KEY", key.clone());
             tokio::spawn(async move {
                 arbos_engine::warm(&base, &key).await;
             });
@@ -94,6 +97,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
         .with(tools::Ask(Arc::clone(&hooks)))
         .with(tools::Browser(Arc::clone(&hooks)))
         .with(crate::screenshot::Screenshot)
+        .with(crate::secret_tool::Secret)
         .with(tools::Terminal {
             hooks: Arc::clone(&hooks),
             ptys: Arc::clone(&ptys),
