@@ -99,6 +99,69 @@ pub enum ChatItem {
         text: String,
         failed: bool,
     },
+    /// Files a tool produced for the user to look at: screenshots and
+    /// screen recordings. One row per tool call; click opens the file.
+    Artifacts(Vec<Artifact>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    Image,
+    Video,
+}
+
+impl ArtifactKind {
+    /// By file extension. Anything not a known video is an image: the
+    /// kernel only lists pictures and clips here.
+    pub fn of_path(path: &str) -> Self {
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        match ext.as_str() {
+            "mp4" | "mov" | "webm" | "mkv" | "m4v" | "avi" => Self::Video,
+            _ => Self::Image,
+        }
+    }
+}
+
+/// One file on the artifacts row. `thumb` is the picture itself, or a
+/// clip's poster frame; missing when the file could not be decoded.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Artifact {
+    pub kind: ArtifactKind,
+    pub path: String,
+    pub name: String,
+    /// `5.0s · 166 KB`, from the tool's own report when it gave one.
+    #[serde(default)]
+    pub caption: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<MessageImage>,
+}
+
+impl Artifact {
+    /// The picture at `path`, or a clip at `path` with `poster` beside it.
+    pub fn load(path: &str, poster: Option<&str>, caption: &str) -> Self {
+        let kind = ArtifactKind::of_path(path);
+        let picture = match kind {
+            ArtifactKind::Image => Some(path),
+            ArtifactKind::Video => poster,
+        };
+        let thumb = picture.and_then(|p| MessageImage::from_file(PathBuf::from(p)).ok());
+        Self {
+            kind,
+            path: path.to_owned(),
+            name: PathBuf::from(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(path)
+                .to_owned(),
+            caption: caption.to_owned(),
+            thumb,
+        }
+    }
 }
 
 /// How much of the context window the conversation has taken, as the agent
@@ -1307,6 +1370,12 @@ impl ChatSession {
                     images,
                 });
                 self.flush();
+            }
+            Event::Artifacts(files) => {
+                if !files.is_empty() {
+                    self.items.push(ChatItem::Artifacts(files));
+                    self.flush();
+                }
             }
             Event::Update(update) => self.apply_update(update),
             Event::Incoming { who, text } => {

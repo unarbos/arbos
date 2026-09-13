@@ -27,7 +27,7 @@
 
 use crate::{
     model::{
-        session::{ChatItem, ChatSession, Connection, ToolStatus},
+        session::{ArtifactKind, ChatItem, ChatSession, Connection, ToolStatus},
         surface::{Bind, Surface},
     },
     view::{
@@ -1117,6 +1117,19 @@ fn item_json(item: &ChatItem) -> Value {
             "kind": "notice",
             "text": cut(text),
             "failed": failed,
+        }),
+        ChatItem::Artifacts(files) => json!({
+            "kind": "artifacts",
+            "files": files.iter().map(|file| json!({
+                "kind": match file.kind {
+                    ArtifactKind::Image => "image",
+                    ArtifactKind::Video => "video",
+                },
+                "path": file.path,
+                "name": file.name,
+                "label": file.caption,
+                "thumb": file.thumb.is_some(),
+            })).collect::<Vec<_>>(),
         }),
     }
 }

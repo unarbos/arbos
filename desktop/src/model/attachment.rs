@@ -143,6 +143,17 @@ impl MessageImage {
         })
     }
 
+    /// A picture on disk, thumbnailed for the transcript; `name` is the
+    /// file name. Same limits as a dropped attachment.
+    pub fn from_file(path: PathBuf) -> Result<Self> {
+        let attachment = Attachment::load(path.clone())?;
+        let mut image = attachment
+            .history_image
+            .ok_or_else(|| anyhow::anyhow!("Not an image: {}", path.display()))?;
+        image.name = Some(file_name(&path));
+        Ok(image)
+    }
+
     pub fn from_part(part: &Value) -> Result<Self> {
         let data = part["image"]["data"]
             .as_str()

@@ -5,7 +5,11 @@
 
 use crate::{
     kernel,
-    model::{attachment::Prompt, place::Place},
+    model::{
+        attachment::Prompt,
+        place::Place,
+        session::{Artifact, ArtifactKind},
+    },
 };
 use anyhow::{Result, anyhow};
 use arbos_core::wire::Frame;
@@ -60,6 +64,8 @@ pub enum Event {
     },
     /// Provider-generated pictures for the turn that just finished.
     Images(Vec<crate::model::attachment::MessageImage>),
+    /// Files a tool made for the user: screenshots, screen recordings.
+    Artifacts(Vec<crate::model::session::Artifact>),
     /// Web-search sources the provider grounded the last assistant message on.
     Citations(Vec<Citation>),
     /// The agent presented a file (`show`).
@@ -492,6 +498,7 @@ fn kernel_event(event: arbos_core::Event) -> Vec<Event> {
             } else {
                 ToolCallStatus::Completed
             };
+            let body_text = rec.body.clone();
             if let Some(body) = rec.body {
                 tool.content.push(ToolCallContent::Content {
                     content: ContentBlock::Text(TextContent {
@@ -510,6 +517,10 @@ fn kernel_event(event: arbos_core::Event) -> Vec<Event> {
                 }));
             }
             let mut out = vec![Event::Update(SessionUpdate::ToolCall(tool))];
+            let files = artifacts(&rec.name, &rec.paths, &rec.images, body_text.as_deref());
+            if !files.is_empty() {
+                out.push(Event::Artifacts(files));
+            }
             // `spawn` names the agent it minted. The row goes under the
             // parent now, not on the next activity poll.
             if let Some(child) = rec.child.filter(|id| !id.is_empty()) {
@@ -539,6 +550,61 @@ fn kernel_event(event: arbos_core::Event) -> Vec<Event> {
 }
 
 fn _legacy_ws_removed() {}
+
+/// The files a tool call made for the user. Pictures the call produced
+/// (`images`) each get a card; a clip listed in `paths` gets one card with
+/// the call's picture as its poster. `read` on an image is looking, not
+/// making, so it adds nothing here.
+pub(crate) fn artifacts(
+    name: &str,
+    paths: &[String],
+    images: &[String],
+    body: Option<&str>,
+) -> Vec<Artifact> {
+    if !matches!(name, "screenshot" | "record" | "browser") {
+        return Vec::new();
+    }
+    let caption = body.map(artifact_caption).unwrap_or_default();
+    let clips: Vec<&String> = paths
+        .iter()
+        .filter(|p| ArtifactKind::of_path(p) == ArtifactKind::Video)
+        .collect();
+    if !clips.is_empty() {
+        return clips
+            .into_iter()
+            .map(|clip| Artifact::load(clip, images.first().map(String::as_str), &caption))
+            .collect();
+    }
+    images
+        .iter()
+        .map(|image| Artifact::load(image, None, &caption))
+        .collect()
+}
+
+/// `(10.2s, 177 KB, via ffmpeg x11grab)` → `10.2s · 177 KB`. The tools
+/// put their measurements in the first parenthesis; keep the sizes.
+fn artifact_caption(body: &str) -> String {
+    let Some(start) = body.find('(') else {
+        return String::new();
+    };
+    let Some(len) = body[start..].find(')') else {
+        return String::new();
+    };
+    body[start + 1..start + len]
+        .split(',')
+        .map(str::trim)
+        .filter(|part| {
+            !part.is_empty()
+                && !part.starts_with("via ")
+                && !part.starts_with("image/")
+                && part
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit())
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
 
 /// ChatView DiffCard: a write is every new line as an add. Prefer the
 /// kernel's stored `diff` when it exists (edits). Writes rarely have one.

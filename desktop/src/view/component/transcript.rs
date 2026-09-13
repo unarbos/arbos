@@ -8,7 +8,7 @@
 use crate::{
     model::{
         attachment::{MessageImage, Prompt, UserMessage},
-        session::{ChatItem, ChatSession, ToolStatus},
+        session::{Artifact, ArtifactKind, ChatItem, ChatSession, ToolStatus},
         workspace::Workspace,
     },
     reading,
@@ -615,6 +615,154 @@ fn message_images(images: &[MessageImage]) -> impl Iterator<Item = AnyElement> +
             None => div().child("Image unavailable").into_any_element(),
         }
     })
+}
+
+/// Widest an artifact card grows. Two fit side by side in the column.
+const ARTIFACT_W: f32 = 296.;
+const ARTIFACT_H: f32 = 180.;
+
+/// Files a tool made for the user — screenshots, clips — as cards in a
+/// wrapping row: the picture (a clip shows its last frame with a play
+/// badge), the file name, and the tool's measurements. Click opens the
+/// file with the system's viewer.
+fn artifacts_row(
+    chat: &ChatSession,
+    ix: usize,
+    files: &[Artifact],
+    theme: &Theme,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let id = chat.id;
+    div()
+        .id(SharedString::from(format!("artifacts-{id}-{ix}")))
+        .w_full()
+        .max_w(px(root::CHAT_MAX_WIDTH))
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(px(8.))
+        .children(files.iter().enumerate().map(|(n, file)| {
+            artifact_card(id, ix, n, file, theme, cx)
+        }))
+        .into_any_element()
+}
+
+fn artifact_card(
+    id: u64,
+    ix: usize,
+    n: usize,
+    file: &Artifact,
+    theme: &Theme,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let path = file.path.clone();
+    let preview = file.thumb.as_ref().and_then(MessageImage::preview);
+    let (w, h) = file
+        .thumb
+        .as_ref()
+        .map(|thumb| {
+            let (tw, th) = thumb.display_size();
+            let scale = (ARTIFACT_W / tw.max(1.)).min(ARTIFACT_H / th.max(1.)).min(1.);
+            (tw * scale, th * scale)
+        })
+        .unwrap_or((ARTIFACT_W, 72.));
+    let is_clip = file.kind == ArtifactKind::Video;
+    let picture = div()
+        .relative()
+        .w(px(w))
+        .h(px(h))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme.surface_raised)
+        .rounded_t(px(Theme::control_radius()))
+        .overflow_hidden()
+        .child(match preview {
+            Some(preview) => img(preview).w(px(w)).h(px(h)).into_any_element(),
+            None => div()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child(if is_clip { "Recording" } else { "Image" })
+                .into_any_element(),
+        })
+        .when(is_clip, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .left(px(w / 2. - 16.))
+                    .top(px(h / 2. - 16.))
+                    .size(px(32.))
+                    .rounded_full()
+                    .bg(rgb(0x000000).opacity(0.55))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        icons::icon(icons::media::PLAY_BOLD)
+                            .size(px(14.))
+                            .text_color(rgb(0xffffff)),
+                    ),
+            )
+        });
+    let caption = div()
+        .w_full()
+        .px(px(8.))
+        .py(px(5.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .min_w(px(0.))
+                .flex_1()
+                .font_family(theme.font_mono.clone())
+                .text_size(px(MONO_SIZE))
+                .line_height(px(MONO_LEAD))
+                .text_color(theme.text_muted)
+                .truncate()
+                .child(SharedString::from(file.name.clone())),
+        )
+        .when(!file.caption.is_empty(), |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(file.caption.clone())),
+            )
+        });
+    div()
+        .id(SharedString::from(format!("artifact-{id}-{ix}-{n}")))
+        .flex()
+        .flex_col()
+        .w(px(w.max(160.)))
+        .border_1()
+        .border_color(theme.border)
+        .rounded(px(Theme::control_radius()))
+        .overflow_hidden()
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover))
+        .child(picture)
+        .child(caption)
+        .on_click(cx.listener(move |_, _, _, _| open_external(&path)))
+        .into_any_element()
+}
+
+/// Hand a file to the system viewer. Fire and forget: a missing viewer
+/// shows the OS's own message, not ours.
+fn open_external(path: &str) {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(opener)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Web prompt-card: the plate bleeds by its own padding so the words
@@ -1881,6 +2029,9 @@ fn segments(items: &[ChatItem], body: Range<usize>) -> Vec<Seg> {
                     segs.push(Seg::Run(head..ix));
                 }
             }
+            // Artifacts are for the user, not part of the work: the turn
+            // zone paints them below the fold whether it is open or not.
+            ChatItem::Artifacts(_) => ix += 1,
             _ => {
                 segs.push(Seg::Other(ix));
                 ix += 1;
@@ -2361,6 +2512,13 @@ fn zone(
             zone = zone.child(div().flex().flex_col().gap(px(ITEM_GAP)).children(kids));
         }
     }
+    // Screenshots and clips the work produced stay in view when the work
+    // folds: they are what the user asked to see.
+    for ix in body.clone() {
+        if let ChatItem::Artifacts(files) = &chat.items[ix] {
+            zone = zone.child(artifacts_row(chat, ix, files, &theme, cx));
+        }
+    }
     // ChatView `group/msg`: copy sits on the answer, hidden until
     // the pointer is over that answer. Retry lives on error cards only.
     let msg = SharedString::from(format!("msg-{first}"));
@@ -2386,6 +2544,7 @@ fn zone(
                 from_block(chat, ix, who, text, images, &theme, window, cx)
             }
             ChatItem::Notice { text, failed } => notice(chat, ix, text, *failed, &theme, cx),
+            ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, &theme, cx),
             _ => div().into_any_element(),
         });
     }
@@ -2761,6 +2920,7 @@ fn work_other(
             from_block(chat, ix, who, text, images, theme, window, cx)
         }
         ChatItem::Notice { text, failed } => notice(chat, ix, text, *failed, theme, cx),
+        ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, theme, cx),
         _ => div().into_any_element(),
     }
 }
