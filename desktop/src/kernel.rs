@@ -1200,7 +1200,7 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
     }
     Some(crate::model::history::Replay {
         items,
-        ..crate::model::history::Replay::default()
+        model: agent_model(&arbos_core::Place::new(&place.path), id),
     })
 }
 
@@ -1211,6 +1211,15 @@ fn secs_between(from: i64, to: i64) -> Option<u32> {
         return None;
     }
     Some(((to - from) / 1000).min(u32::MAX as i64) as u32)
+}
+
+/// The model the kernel keeps for this agent in `agent.md`, when it is
+/// not `inherit`. The chip shows it, and a reopen does not fall back to
+/// the config default while the kernel keeps using the chosen one.
+pub fn agent_model(place: &arbos_core::Place, id: &str) -> Option<String> {
+    let agent = arbos_core::Agent::load(&place.agent_dir(id)).ok()?;
+    let model = agent.model.trim();
+    (!model.is_empty() && model != "inherit").then(|| model.to_string())
 }
 
 fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatItem> {

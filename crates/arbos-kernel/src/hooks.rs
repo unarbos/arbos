@@ -331,7 +331,15 @@ impl NewNode {
         n.check = self.check.clone();
         let mut execs = 0;
         if !self.shell.is_empty() {
-            // shell + notify: run it, then deliver the output.
+            // shell + notify: run it, then deliver the output. The template
+            // must place the output: a fixed message on a reading node
+            // hides what was read.
+            if !self.notify.is_empty() && !self.notify.contains("{output}") {
+                bail!(
+                    "do.notify on a shell node must contain {{output}} (where the command's output goes), got {:?}",
+                    self.notify
+                );
+            }
             n.do_ = arbos_core::Do::Shell {
                 cmd: self.shell.clone(),
                 report: (!self.notify.is_empty()).then(|| self.notify.clone()),

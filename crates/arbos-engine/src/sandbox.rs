@@ -147,7 +147,12 @@ impl Sandbox {
                 args.push("--unshare-net".into());
             }
             args.push("--die-with-parent".into());
-            args.extend(["--".into(), "sh".into(), "-c".into(), script.to_string()]);
+            args.extend([
+                "--".into(),
+                crate::jobs::job_shell().into(),
+                "-c".into(),
+                script.to_string(),
+            ]);
             return Ok(("bwrap".into(), args));
         }
         if cfg!(target_os = "macos") {
@@ -178,7 +183,7 @@ impl Sandbox {
                 vec![
                     "-p".into(),
                     profile,
-                    "sh".into(),
+                    crate::jobs::job_shell().into(),
                     "-c".into(),
                     script.to_string(),
                 ],
