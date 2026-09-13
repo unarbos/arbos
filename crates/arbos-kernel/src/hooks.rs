@@ -13,7 +13,7 @@ use arbos_core::{
     node::{self, DEFAULT_HOPS},
     validate_id,
 };
-use arbos_engine::{Steer, TurnControl};
+use arbos_engine::TurnControl;
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -284,38 +284,6 @@ impl KernelHooks {
 
     pub fn stop_waiting(&self, child: &str) {
         self.waits.lock().unwrap().remove(child);
-    }
-
-    /// Put `steer` into `agent`'s live turn. False when no turn is running,
-    /// so the caller queues a turn instead.
-    pub fn steer(&self, agent: &str, steer: Steer) -> bool {
-        let control = self.in_flight.lock().unwrap().get(agent).cloned();
-        match control {
-            Some(c) => {
-                c.push(steer);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// A turn ended with steers still queued: it never reached another
-    /// tool boundary. Each becomes a turn of its own, so nothing said to a
-    /// running agent is lost to timing.
-    pub fn requeue_steers(&self, agent: &str, steers: Vec<Steer>) {
-        for steer in steers {
-            let result = match steer {
-                Steer::User(text) => self.inbox(agent, Node::inbox(&text, "user")),
-                Steer::Say { from, text } => {
-                    let mut n = Node::inbox(&text, format!("agent:{from}"));
-                    n.hops = DEFAULT_HOPS;
-                    self.inbox(agent, n)
-                }
-            };
-            if let Err(e) = result {
-                eprintln!("requeue steer for {agent}: {e:#}");
-            }
-        }
     }
 
     pub fn live_children(&self, parent: &AgentId) -> usize {
@@ -1299,21 +1267,26 @@ impl KernelHooks {
             ));
         }
         let label = format!("{} ({})", target.name, tid);
-        // A steer into a live turn is appended by that turn when it takes
-        // it, so the line sits at the boundary where the model read it.
-        // Every other mode writes the line now.
-        if mode == SayMode::Steer
-            && self.steer(
-                tid,
-                Steer::Say {
-                    from: from.to_string(),
-                    text: text.to_string(),
-                },
-            )
-        {
-            return Ok(format!(
-                "Sent to {label} as a steer: it is running now and reads this at its next tool boundary, in the same turn. Its reply, if any, arrives here as a message from it."
-            ));
+        // A steer is an inbox file of kind `steer`: a running turn takes it
+        // at its next tool boundary; an idle one wakes on it.
+        if mode == SayMode::Steer {
+            let mut msg = inbox::Message::new(format!("agent:{from}"), "steer", text);
+            msg.hops = if hops_in > 0 {
+                hops_in - 1
+            } else {
+                DEFAULT_HOPS
+            };
+            inbox::deliver(&self.place, tid, &msg)?;
+            self.plan_changed(tid);
+            return Ok(if self.is_running(tid) {
+                format!(
+                    "Sent to {label} as a steer: it is running now and reads this at its next tool boundary, in the same turn. Its reply, if any, arrives here as a message from it."
+                )
+            } else {
+                format!(
+                    "Sent to {label} as a steer: it was idle, so a turn starts for it now. Its reply, if any, arrives here as a message from it."
+                )
+            });
         }
         // A parent blocked in spawn wait=true gets this as the tool result.
         let waiting_parent = self

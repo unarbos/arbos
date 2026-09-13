@@ -49,17 +49,6 @@ impl Scheduler {
         }
     }
 
-    /// Returns false when no turn is running for the agent.
-    pub fn steer(&self, id: &str, text: String) -> bool {
-        match self.control(id) {
-            Some(c) => {
-                c.steer(text);
-                true
-            }
-            None => false,
-        }
-    }
-
     /// Compact before the next model call. Returns false when no turn is
     /// running for the agent; the caller then wakes one to do it.
     pub fn request_compact(&self, id: &str) -> bool {

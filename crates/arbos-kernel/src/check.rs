@@ -214,6 +214,68 @@ pub fn check(place: &Place) -> Result<Report> {
         );
         let cps = layout.dir.join("checkpoints.jsonl");
         check_jsonl::<arbos_engine::git::Checkpoint>(&mut r, &rel(&cps), &cps, "checkpoint");
+        // Inbox files: front matter must parse, the kind must be known.
+        let inbox_dir = arbos_core::inbox::inbox_dir(place, a.id.as_str());
+        for e in std::fs::read_dir(&inbox_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || !name.ends_with(".md") {
+                continue;
+            }
+            let path = e.path();
+            match std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+                .and_then(|t| arbos_core::inbox::Message::parse(&t))
+            {
+                Ok(msg) => {
+                    if !matches!(
+                        msg.kind.as_str(),
+                        "message" | "request" | "brief" | "answer" | "approval" | "wake" | "steer"
+                    ) {
+                        r.error(rel(&path), None, format!("unknown kind {:?}", msg.kind));
+                    }
+                    if msg.body.trim().is_empty()
+                        && msg.attachments.is_empty()
+                        && msg.kind != "wake"
+                    {
+                        r.warn(rel(&path), None, "empty body");
+                    }
+                    if msg.sent_ms().is_none() {
+                        r.warn(
+                            rel(&path),
+                            None,
+                            format!("sent {:?} is not a time", msg.sent),
+                        );
+                    }
+                }
+                Err(e) => r.error(rel(&path), None, format!("not an inbox message: {e:#}")),
+            }
+        }
+        // Turn folders: cause.md is a message, meta.toml is TOML.
+        let turns = arbos_core::inbox::turns_dir(place, a.id.as_str());
+        for e in std::fs::read_dir(&turns).into_iter().flatten().flatten() {
+            let dir = e.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let cause = dir.join("cause.md");
+            if cause.exists()
+                && let Ok(t) = std::fs::read_to_string(&cause)
+                && let Err(e) = arbos_core::inbox::Message::parse(&t)
+            {
+                r.error(rel(&cause), None, format!("not an inbox message: {e:#}"));
+            }
+            let meta = dir.join("meta.toml");
+            if meta.exists()
+                && let Ok(t) = std::fs::read_to_string(&meta)
+                && let Err(e) = toml::from_str::<toml::Value>(&t)
+            {
+                r.error(rel(&meta), None, format!("not TOML: {e}"));
+            }
+        }
     }
 
     // focus: names an agent that exists. Read raw — `read_focus` repairs
