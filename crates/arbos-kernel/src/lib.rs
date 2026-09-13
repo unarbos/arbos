@@ -22,4 +22,5 @@ pub mod secret_tool;
 pub mod serve;
 pub mod setup;
 pub mod tools;
+pub mod watch;
 pub mod worktree;

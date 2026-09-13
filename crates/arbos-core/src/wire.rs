@@ -88,6 +88,19 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Kernel → every client, about once a second while something moved:
+    /// a file under `.arbos/` (path relative to it) was `created`,
+    /// `modified`, or `removed`; `size` is its length now. A client that
+    /// mirrors a file asks for the part it lacks with `tail` or `read`.
+    /// Only a fixed set is watched: each agent's `agent.md`, `plan.jsonl`,
+    /// `plan.md`, `transcript.jsonl`, `feedback.jsonl`, `checkpoints.jsonl`,
+    /// `instructions.md`, and the place's `focus`, `user.md`, `memory.md`,
+    /// `kernel.json`.
+    Changed {
+        path: String,
+        kind: String,
+        size: u64,
+    },
     /// Client → kernel: the entries of a folder under `.arbos/`.
     List {
         #[serde(default)]
