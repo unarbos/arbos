@@ -152,7 +152,15 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // No key or no usable base: the turn cannot start. Say so on the
     // transcript, where the window shows it, and close the turn so the
     // wake is not replayed as unfinished at the next kernel start.
+    // A scripted model needs no key and asks the network nothing.
+    let replay = crate::replay::current()?;
     let (key, api_base) = match (host.api_key(), host.config.api_base()) {
+        _ if replay.is_some() => (
+            "replay".to_string(),
+            host.config
+                .api_base()
+                .unwrap_or_else(|_| "http://replay.invalid/v1".to_string()),
+        ),
         (Some(key), Ok(base)) => (key, base),
         // A compaction has no transcript of its own to refuse on.
         (None, _) if wake.kind == WakeKind::Compact => {
@@ -172,7 +180,11 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // cap on it too, never a raise: a 16k model planned against 128k has
     // every request past 16k rejected. A provider that does not say gets
     // the old default.
-    let listed = crate::provider::context_window(&api_base, &key, &model).await;
+    let listed = if replay.is_some() {
+        None
+    } else {
+        crate::provider::context_window(&api_base, &key, &model).await
+    };
     let limit = match (host.config.window_tokens, listed) {
         (0, Some(c)) => c.min(host.config.window_tokens_max.max(MIN_WINDOW)),
         (0, None) => DEFAULT_WINDOW,
@@ -186,6 +198,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // nothing rather than guess high and get a 400.
     let output_cap = match host.config.max_output_tokens {
         0 => None,
+        _ if replay.is_some() => None,
         cap => crate::provider::max_completion_tokens(&api_base, &key, &model)
             .await
             .map(|n| n.min(cap)),
@@ -228,6 +241,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         trace_agent: agent.id.to_string(),
         trace_purpose: "turn".into(),
         trace_line: 0,
+        replay,
     };
     let batch_cfg = BatchCfg {
         max_parallel: host.config.max_parallel_tools,

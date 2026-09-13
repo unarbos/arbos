@@ -202,6 +202,7 @@ pub fn run(args: Args) -> Result<()> {
         trace_agent: "setup".into(),
         trace_purpose: "setup".into(),
         trace_line: 0,
+        replay: None,
     };
     let messages = [ChatMessage::plain(
         "user",
