@@ -4,8 +4,11 @@
 //! which carries HTTP only); anything else is the newline-delimited JSON
 //! the desktop and the CLI speak.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use arbos_core::hub::HubFrame;
 use futures_util::{SinkExt, StreamExt};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
@@ -14,6 +17,24 @@ use tokio::{
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
 pub use arbos_core::wire::{Frame, TreeNode};
+
+/// One client that reached this kernel through the hub: a numbered
+/// channel on the kernel's own outbound socket. The hub verified who it
+/// is. `open` goes false when the hub closes the channel, so the writer
+/// fails and the client's send loop ends like a dropped socket.
+pub struct HubChannel {
+    pub chan: u64,
+    pub to_hub: mpsc::UnboundedSender<HubFrame>,
+    pub open: Arc<AtomicBool>,
+}
+
+impl HubChannel {
+    /// The reader and writer for one hub channel; frames the hub delivers
+    /// for it go into `from_hub`.
+    pub fn split(self, from_hub: mpsc::UnboundedReceiver<Frame>) -> (Reader, Writer) {
+        (Reader::Chan(from_hub), Writer::Chan(self))
+    }
+}
 
 /// How long to wait for a client's first bytes before taking it for a
 /// plain TCP client that is waiting on us.
@@ -89,6 +110,9 @@ pub enum Reader {
         futures_util::stream::SplitStream<WebSocketStream<TcpStream>>,
         Vec<String>,
     ),
+    /// Frames relayed by the hub for one channel; ends when the hub
+    /// closes it or the hub link drops.
+    Chan(mpsc::UnboundedReceiver<Frame>),
 }
 
 impl Reader {
@@ -96,6 +120,13 @@ impl Reader {
     pub async fn next_line(&mut self) -> Option<String> {
         loop {
             match self {
+                Reader::Chan(rx) => {
+                    let frame = rx.recv().await?;
+                    match serde_json::to_string(&frame) {
+                        Ok(line) => return Some(line),
+                        Err(_) => continue,
+                    }
+                }
                 Reader::Tcp(lines) => match lines.next_line().await {
                     Ok(Some(line)) if line.trim().is_empty() => continue,
                     Ok(Some(line)) => return Some(line),
@@ -129,26 +160,35 @@ impl Reader {
 pub enum Writer {
     Tcp(tokio::net::tcp::OwnedWriteHalf),
     Ws(futures_util::stream::SplitSink<WebSocketStream<TcpStream>, Message>),
+    Chan(HubChannel),
 }
 
 impl Writer {
-    pub async fn send_line(&mut self, line: &str) -> Result<()> {
+    pub async fn send(&mut self, frame: &Frame) -> Result<()> {
         match self {
             Writer::Tcp(w) => {
+                let line = serde_json::to_string(frame)?;
                 w.write_all(line.as_bytes()).await?;
                 w.write_all(b"\n").await?;
                 Ok(())
             }
             Writer::Ws(sink) => {
-                sink.send(Message::Text(line.to_string().into())).await?;
+                let line = serde_json::to_string(frame)?;
+                sink.send(Message::Text(line.into())).await?;
                 Ok(())
             }
+            Writer::Chan(ch) => {
+                if !ch.open.load(Ordering::Relaxed) {
+                    bail!("hub channel {} closed", ch.chan);
+                }
+                ch.to_hub
+                    .send(HubFrame::Frame {
+                        chan: ch.chan,
+                        frame: frame.clone(),
+                    })
+                    .map_err(|_| anyhow::anyhow!("hub link closed"))
+            }
         }
-    }
-
-    pub async fn send(&mut self, frame: &Frame) -> Result<()> {
-        let line = serde_json::to_string(frame)?;
-        self.send_line(&line).await
     }
 }
 

@@ -199,6 +199,27 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
 
     doors::spawn_telegram_if_configured(Arc::clone(&hooks));
     crate::github::spawn_poller(Arc::clone(&hooks));
+    // `--hub`: register outbound so clients and other kernels reach this
+    // one by machine name, with no port open here.
+    match crate::hub_link::config_from_env() {
+        Ok(Some(cfg)) => {
+            let project = crate::hub_link::project_name(&place);
+            klog::info(
+                "hub_link",
+                None,
+                format!("hub={} machine={} project={project}", cfg.url, cfg.machine),
+            );
+            crate::hub_link::start(
+                place.clone(),
+                Arc::clone(&hooks),
+                frame_in_tx.clone(),
+                cfg,
+                project,
+            );
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("hub: {e:#}"),
+    }
     crate::remote::RemoteHub::restore(&hooks);
 
     // A dead kernel's half-run nodes go back to pending. Then continue
@@ -1131,8 +1152,10 @@ async fn admit(
     }
 }
 
-/// Greet, then run the two loops for one admitted client.
-async fn serve_client(
+/// Greet, then run the two loops for one admitted client. A client that
+/// came through the hub is served here too, on a channel instead of a
+/// socket (`attach::HubChannel`).
+pub async fn serve_client(
     r: attach::Reader,
     w: attach::Writer,
     who: access::Identity,

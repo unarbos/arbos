@@ -1,0 +1,23 @@
+# arbos-hub server config. Copy to ~/.config/arbos/hub-server.toml (mode 0600)
+# or pass --config. Put a tunnel or reverse proxy (cloudflared, Caddy) in
+# front of `bind`; the hub speaks plain HTTP/WebSocket on loopback.
+bind = "127.0.0.1:7010"
+
+# One row per machine. A kernel (`arbos-kernel serve --hub … --machine NAME`)
+# or worker (`arbos-kernel worker --machine NAME`) registers with this token,
+# and may also attach to other machines as `machine:NAME` (owner).
+# Tokens: at least 16 characters; `openssl rand -hex 24` is fine.
+[[machine]]
+name = "arboslife"
+token_env = "ARBOS_HUB_TOKEN_ARBOSLIFE"
+
+[[machine]]
+name = "mac"
+token_env = "ARBOS_HUB_TOKEN_MAC"
+
+# Clients that only attach (the desktop, the phone, a script).
+# role: owner | writer | reader — the kernel enforces it per frame.
+[[client]]
+name = "desktop"
+token_env = "ARBOS_HUB_TOKEN_DESKTOP"
+role = "owner"

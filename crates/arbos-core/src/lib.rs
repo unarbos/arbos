@@ -11,6 +11,7 @@ mod event;
 pub mod files;
 pub mod host;
 pub mod inbox;
+pub mod hub;
 mod lock;
 pub mod machines;
 pub mod node;
@@ -31,6 +32,7 @@ pub use files::{
     write_focus,
 };
 pub use host::{Host, HostConfig, KeySource, ProviderKind};
+pub use hub::{HubConfig, HubFrame, MachineInfo, MeshTarget, ProjectInfo, RegistrantKind};
 pub use lock::PlaceLock;
 pub use machines::{Machine, Machines};
 pub use node::{Attempt, Do, Node, NodeId, Status as NodeStatus, Verdict, When};

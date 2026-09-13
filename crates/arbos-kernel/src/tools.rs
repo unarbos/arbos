@@ -81,7 +81,7 @@ impl Tool for Spawn {
                 ("isolate", "none (default) or worktree.", false, "string"),
                 (
                     "host",
-                    "A machine name from ~/.config/arbos/machines.toml (see Machines in your prompt): the child runs there, in its own synced copy of this project, and reports back here.",
+                    "A machine name from ~/.config/arbos/machines.toml (ssh; the child runs in its own synced copy of this project) or from the hub roster in .arbos/machines/ (a machine with a worker; the child runs in a worktree of that machine's own checkout of this project). See Machines in your prompt. It reports back here.",
                     false,
                     "string",
                 ),
@@ -212,7 +212,11 @@ impl Tool for Say {
             "say",
             "Send a message to someone outside this conversation: another agent (by id or name — see <<peers>>) or the user. To an agent it lands in their transcript as a message from you. mode note (default) waits for their next turn; mode request queues a turn for them and their reply arrives here as a message; mode steer reaches an agent that is running now — your words land in its current turn at its next tool step, so it changes course without restarting (if it is idle, a turn starts). Use steer to add a constraint, redirect, or stop a worker mid-task. To 'user' it is a durable notice in this chat. Then end your turn; never read another agent's transcript to see whether they answered.",
             &[
-                ("to", "Agent id, agent name, or 'user'.", true),
+                (
+                    "to",
+                    "Agent id, agent name, 'user', or an agent on another machine of the hub as <machine>/<agent> (or <machine>/<project>/<agent>; see Hub machines in your prompt).",
+                    true,
+                ),
                 (
                     "text",
                     "The message. Short and self-contained: the recipient sees only this.",
@@ -237,6 +241,30 @@ impl Tool for Say {
                 None if opt_bool(&args, "wake") == Some(true) => SayMode::Request,
                 None => anyhow::bail!("say: mode must be note, request, or steer, not {raw:?}"),
             };
+            // `<machine>/<agent>`: an agent on another machine of the hub.
+            // Only when that machine is on the roster; a local agent may
+            // be named with a slash in a brief, and it stays local.
+            if let Some(target) = arbos_core::MeshTarget::parse(to)
+                && let Some(info) = arbos_core::hub::roster_machine(&hooks.place, &target.machine)
+            {
+                let cfg = crate::hub_link::config_from_env()?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "say: {} is on the hub but this kernel has no hub configured (start it with --hub)",
+                        info.name
+                    )
+                })?;
+                let from = format!("{}/{}", cfg.machine, cx.agent.id);
+                let receipt = crate::hub_link::deliver(
+                    &cfg,
+                    &info.name,
+                    target.project.as_deref(),
+                    &target.agent,
+                    &from,
+                    text,
+                )
+                .await?;
+                return Ok(ToolOut::text(receipt));
+            }
             let receipt = hooks.say(&cx.agent.id, to, text, mode, cx.hops)?;
             Ok(ToolOut::text(receipt))
         })
