@@ -184,9 +184,9 @@ pub struct State {
     follow: Follow,
     /// Keyed by the turn's first item index.
     work: HashMap<usize, Takeover>,
-    /// Thoughts the user flipped away from their default (open while
-    /// streaming, folded once done).
-    closed_thoughts: HashSet<usize>,
+    /// A thought the person folded or unfolded by hand, and which way.
+    /// Absent means the default: open while it streams, folded once done.
+    thoughts: HashMap<usize, bool>,
     /// Tool items whose output is showing, by item index.
     output: HashSet<usize>,
     /// Low-signal groups whose member names are showing, keyed by the first
@@ -304,15 +304,15 @@ impl State {
     }
 
     /// Cursor: a thought streams open, then folds to `Thought 10s`. A
-    /// click flips whichever state is on screen.
+    /// click flips whichever state is on screen, and that choice sticks —
+    /// one folded by hand while streaming stays folded when it settles.
     fn thought_open(&self, ix: usize, done: bool) -> bool {
-        self.closed_thoughts.contains(&ix) != !done
+        self.thoughts.get(&ix).copied().unwrap_or(!done)
     }
 
-    fn toggle_thought(&mut self, ix: usize, _done: bool) {
-        if !self.closed_thoughts.insert(ix) {
-            self.closed_thoughts.remove(&ix);
-        }
+    fn toggle_thought(&mut self, ix: usize, done: bool) {
+        let open = self.thought_open(ix, done);
+        self.thoughts.insert(ix, !open);
     }
 
     fn toggle_group(&mut self, start: usize) {
@@ -3971,27 +3971,42 @@ mod selection_tests {
     use super::*;
 
     #[test]
-    fn long_runs_fold_to_the_last_rows_until_opened() {
-        // Twelve distinct steps; only the tail stays on screen.
-        let items: Vec<ChatItem> = (0..12)
+    fn a_settled_run_folds_and_a_click_pins_it_open() {
+        // Twelve thoughts that lead the turn each stand on their own line;
+        // a tool call after them starts the run they lead into.
+        let mut items: Vec<ChatItem> = (0..12)
             .map(|i| ChatItem::Thinking {
                 text: format!("step {i}"),
                 done: true,
                 secs: Some(1),
             })
             .collect();
-        let bits = work_bits(&items, 0..items.len());
-        assert_eq!(bits.len(), 12);
-        let key = work_bit_index(&bits[0]);
-        let mut state = State::default();
-        let folded = bits.len() > WORK_ROWS && !state.groups.contains(&key);
-        assert!(folded);
-        assert_eq!(bits.len() - WORK_ROWS, 4);
-        state.toggle_group(key);
-        assert!(
-            state.groups.contains(&key),
-            "opening the fold pins the run open"
+        items.push(ChatItem::Tool {
+            id: "t1".into(),
+            kind: ToolKind::Read,
+            label: "read a.rs".into(),
+            status: ToolStatus::Success,
+            output: String::new(),
+            diff: None,
+            child_session: None,
+            secs: None,
+        });
+        let segs = segments(&items, 0..items.len());
+        assert_eq!(
+            segs.iter().filter(|seg| matches!(seg, Seg::Thought(_))).count(),
+            12
         );
+        assert!(matches!(segs.last(), Some(Seg::Run(range)) if range.start == 12));
+        // Cursor: the timeline shows while the turn runs and folds once it
+        // settles; from there a click owns the fold.
+        assert!(auto_work_open(&items, 0, true));
+        assert!(!auto_work_open(&items, 0, false));
+        let mut state = State::default();
+        assert!(!state.groups.contains(&0));
+        state.toggle_group(0);
+        assert!(state.groups.contains(&0), "opening the fold pins the run open");
+        state.toggle_group(0);
+        assert!(!state.groups.contains(&0));
     }
 
     #[test]
