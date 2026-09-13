@@ -101,6 +101,10 @@ impl Caps {
     }
 }
 
+/// What a coordinator reads when it left the project page alone after
+/// dispatching or receiving work.
+pub const NOTES_NUDGE: &str = "project page not updated last turn: a worker was started or reported and .arbos/notes.md did not change — update it (plan add/check) before or with your reply";
+
 pub struct KernelHooks {
     pub place: Place,
     /// Housekeeping wakes only (`Serve`, `Compact`). Work goes through the plan.
@@ -128,6 +132,10 @@ pub struct KernelHooks {
     /// `notes.md`'s (size, mtime) when each top-level turn began: the
     /// status page's `changed` frame goes out the moment the turn ends.
     notes_at_start: Mutex<HashMap<String, Option<(u64, i64)>>>,
+    /// Agents whose last turn dispatched or received work and left the
+    /// project page untouched (the notice is on their transcript, which is
+    /// the first thing the next turn's model reads after the history).
+    pub notes_nudge: Mutex<HashSet<String>>,
     pub browsers: BrowserHub,
     /// Serialises plan file writes. One kernel per place holds the lock, so
     /// this is the whole claim story.
@@ -179,6 +187,7 @@ impl KernelHooks {
             waited: Mutex::new(HashSet::new()),
             turn_lo: Mutex::new(HashMap::new()),
             notes_at_start: Mutex::new(HashMap::new()),
+            notes_nudge: Mutex::new(HashSet::new()),
             approves: Mutex::new(HashMap::new()),
             browsers: BrowserHub::new(),
             plan_lock: Mutex::new(()),
@@ -262,6 +271,7 @@ impl KernelHooks {
         let notes = store::notes_path(&self.place);
         let after = crate::watch::stat(&notes);
         if before != after {
+            self.notes_nudge.lock().unwrap().remove(agent);
             let kind = match (before, after) {
                 (None, Some(_)) => "created",
                 (Some(_), None) => "removed",
@@ -272,6 +282,8 @@ impl KernelHooks {
                 kind: kind.into(),
                 size: after.map(|(size, _)| size).unwrap_or(0),
             });
+        } else if agent == arbos_core::ROOT_ID {
+            self.notes_nudge_check(agent);
         }
         // A child whose turn ended without a report: its last words, or its
         // failure, are what the waiting parent gets.
@@ -294,6 +306,49 @@ impl KernelHooks {
                 .unwrap_or_else(|| "(the child's turn ended without a report)".into());
             let _ = tx.send(text);
         }
+    }
+
+    /// Multitasking audit, fix 10: a coordinator's turn that spawned a
+    /// worker or read a worker's report, and ended with the project page
+    /// as it was, gets a notice on its transcript and a first line on its
+    /// next wake. The page is the user's view of the work; a coordinator
+    /// that forgets it eight turns running was the audit's finding.
+    fn notes_nudge_check(&self, agent: &str) {
+        if !arbos_core::project::root_is_coordinator(&self.place) {
+            return;
+        }
+        let lo = self
+            .turn_lo
+            .lock()
+            .unwrap()
+            .get(agent)
+            .copied()
+            .unwrap_or(0);
+        let events =
+            arbos_core::load_transcript(&self.layout(agent).transcript()).unwrap_or_default();
+        let dispatched = events
+            .iter()
+            .filter(|e| e.seq >= lo)
+            .any(|e| match &e.kind {
+                EventKind::Tool(rec) => rec.name == "spawn" && rec.error.is_none(),
+                EventKind::Say { from, .. } => from != "user",
+                _ => false,
+            });
+        if !dispatched {
+            return;
+        }
+        let notice = Event::new(EventKind::Notice {
+            text: NOTES_NUDGE.to_string(),
+            failed: false,
+        });
+        let _ = append_event(&self.layout(agent).transcript(), &notice);
+        self.notes_nudge.lock().unwrap().insert(agent.to_string());
+    }
+
+    /// Whether a reminder is owed (for the window's status; cleared when
+    /// the page changes at a later turn end).
+    pub fn notes_nudged(&self, agent: &str) -> bool {
+        self.notes_nudge.lock().unwrap().contains(agent)
     }
 
     /// Register a parent waiting on `child`'s first report.

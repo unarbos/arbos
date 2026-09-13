@@ -67,6 +67,11 @@ pub struct Subscription {
     pub expires: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub paused: bool,
+    /// A kernel chore (the weekly `git gc`): fires like any other but stays
+    /// out of every user-facing list — the plan strip, the prompt's
+    /// standing section, `subscribe list`. `check` still sees it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub internal: bool,
     /// Empty in a hand-written file: `read` fills it from the file's mtime.
     #[serde(default)]
     pub created: String,
@@ -88,6 +93,14 @@ pub struct Subscription {
 
 fn default_deliver_to() -> String {
     "agent".into()
+}
+
+/// `list` without kernel chores: what a person or the model should see.
+pub fn list_visible(place: &Place, agent: &str) -> Vec<Subscription> {
+    list(place, agent)
+        .into_iter()
+        .filter(|s| !s.internal)
+        .collect()
 }
 
 impl Subscription {
@@ -554,6 +567,7 @@ mod tests {
             notify: None,
             expires: None,
             paused: false,
+            internal: false,
             created: String::new(),
             next_due: None,
             last_fired: None,

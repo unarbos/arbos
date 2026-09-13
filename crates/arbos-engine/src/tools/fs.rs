@@ -99,7 +99,7 @@ impl Tool for GrepTool {
     fn schema(&self) -> Value {
         simple_schema(
             "grep",
-            "Search file contents (tgrep).",
+            "Search file contents (tgrep). scope=history searches every agent's transcript (what earlier workers did and found).",
             &[
                 ("pattern", "Regex or literal.", true),
                 (
@@ -108,6 +108,7 @@ impl Tool for GrepTool {
                     false,
                 ),
                 ("glob", "Optional file glob.", false),
+                ("scope", "history: earlier agents' transcripts", false),
             ],
         )
     }
@@ -116,6 +117,17 @@ impl Tool for GrepTool {
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         blocking(move || {
+            // `scope: history` is sugar for `path: .arbos/agents`: what every
+            // earlier worker did, said, and found, cited by agent and line.
+            let history =
+                opt_str(&args, "scope").is_some_and(|s| s.trim().eq_ignore_ascii_case("history"));
+            if history {
+                // Transcripts change every turn and .arbos/ is usually
+                // gitignored, so this is a fresh walk, not the index.
+                let pattern = req(&args, "pattern")?;
+                let hits = history_walk(&cx.place.path().join(".arbos").join("agents"), pattern)?;
+                return Ok(format_history_hits(&hits));
+            }
             let pattern = req(&args, "pattern")?;
             let glob = opt_str(&args, "glob");
             let mut hits = if cx.grep.ready() {
@@ -192,6 +204,75 @@ impl Tool for GrepTool {
             Ok(format_hits(&hits))
         })
     }
+}
+
+/// History hits read `agent · line N: text`, with the JSON of a transcript
+/// line reduced to its kind and text so the model sees what was said, not
+/// the record's shape.
+fn history_walk(agents_dir: &Path, pattern: &str) -> Result<Vec<GrepHit>> {
+    let re = regex::RegexBuilder::new(pattern)
+        .case_insensitive(true)
+        .build()
+        .or_else(|_| regex::Regex::new(&regex::escape(pattern)))?;
+    let mut hits = Vec::new();
+    let mut agents: Vec<_> = std::fs::read_dir(agents_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    agents.sort();
+    for dir in agents {
+        let Ok(text) = std::fs::read_to_string(dir.join("transcript.jsonl")) else {
+            continue;
+        };
+        let name = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        for (i, line) in text.lines().enumerate() {
+            if re.is_match(line) {
+                hits.push(GrepHit {
+                    path: format!("{name}/transcript.jsonl"),
+                    line: i + 1,
+                    text: line.to_string(),
+                });
+            }
+        }
+    }
+    Ok(hits)
+}
+
+fn format_history_hits(hits: &[GrepHit]) -> ToolOut {
+    if hits.is_empty() {
+        return ToolOut::text("(no matches in any agent's history)");
+    }
+    let mut out = String::new();
+    for h in hits.iter().take(GREP_SHOWN) {
+        let agent = h.path.split('/').next().unwrap_or("?");
+        let shown = match serde_json::from_str::<Value>(&h.text) {
+            Ok(v) => {
+                let kind = v["kind"].as_str().unwrap_or("?");
+                let text = v["text"]
+                    .as_str()
+                    .or_else(|| v["body"].as_str())
+                    .or_else(|| v["name"].as_str())
+                    .unwrap_or("");
+                format!(
+                    "{kind}: {}",
+                    arbos_core::text::clip(text.trim(), GREP_LINE_CHARS)
+                )
+            }
+            Err(_) => arbos_core::text::clip(h.text.trim(), GREP_LINE_CHARS),
+        };
+        out.push_str(&format!("{agent} · line {}: {shown}\n", h.line));
+    }
+    if hits.len() > GREP_SHOWN {
+        out.push_str(&format!("({} more not shown)\n", hits.len() - GREP_SHOWN));
+    }
+    ToolOut::text(out.trim_end())
 }
 
 const GREP_SHOWN: usize = 200;
