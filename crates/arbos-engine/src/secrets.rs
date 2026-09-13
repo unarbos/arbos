@@ -21,8 +21,9 @@ use std::sync::{Mutex, OnceLock};
 /// every date in a log.
 const MIN_LEN: usize = 8;
 /// A run of this many consecutive characters of a value is the value
-/// too: two halves, a prefix, a `cut -c1-20`.
-const PIECE: usize = 8;
+/// too: two halves, a long prefix. Twelve, not eight: a key's fixed
+/// prefix ("sk-or-v1-") is eight and appears in ordinary text about keys.
+const PIECE: usize = 12;
 
 #[derive(Default)]
 pub struct Store {
@@ -305,6 +306,6 @@ mod tests {
             s.redact("first sk-or-v1-0123 then 456789abcdef end"),
             "first [REDACTED:KEY part] then [REDACTED:KEY part] end"
         );
-        assert_eq!(s.redact("sk-or-v1 alone"), "sk-or-v1 alone");
+        assert_eq!(s.redact("sk-or-v1-01 alone"), "sk-or-v1-01 alone");
     }
 }
