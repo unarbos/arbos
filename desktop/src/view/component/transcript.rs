@@ -2617,8 +2617,10 @@ fn zone(
     let foldable = segs
         .iter()
         .any(|seg| matches!(seg, Seg::Run(_) | Seg::Prose(_)));
+    let mut header_drawn = false;
     if !running && foldable {
         zone = zone.child(work_header(chat.id, first, &stats, open, running, chat, cx));
+        header_drawn = true;
     }
     if open || !foldable {
         let last_run = segs.iter().rposition(|seg| matches!(seg, Seg::Run(_)));
@@ -2678,7 +2680,32 @@ fn zone(
         .gap(px(ITEM_GAP));
     let mut has_tail = false;
     for ix in turn.answer_from..turn.range.end {
+        // The interruption is on the fold line already; once is enough.
+        if header_drawn
+            && let ChatItem::Notice { text, .. } = &chat.items[ix]
+            && crate::model::session::is_interrupt_notice(text)
+        {
+            continue;
+        }
         has_tail = true;
+        // The turn's own end: say how long it had run before the cut.
+        if let ChatItem::Notice { text, failed } = &chat.items[ix]
+            && crate::model::session::is_interrupt_notice(text)
+        {
+            let secs = chat.items[..=first]
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    ChatItem::User(message) => message.worked_secs,
+                    _ => None,
+                });
+            let line = match secs {
+                Some(s) if s > 0 => format!("{text} · after {}", since(Duration::from_secs(u64::from(s)))),
+                _ => text.clone(),
+            };
+            tail = tail.child(notice(chat, ix, &line, *failed, &theme, cx));
+            continue;
+        }
         tail = tail.child(match &chat.items[ix] {
             ChatItem::Agent(text) => div()
                 .self_start()
@@ -2912,7 +2939,12 @@ fn work_header(
         .elapsed()
         .filter(|_| running)
         .unwrap_or_else(|| Duration::from_secs(stamped.unwrap_or(stats.secs)));
-    let (verb, rest) = work_summary(stats, running, elapsed, true);
+    let (mut verb, rest) = work_summary(stats, running, elapsed, true);
+    // A turn that was cut short says so on its one line, with the time it
+    // had run, instead of a bare "Worked" over nothing.
+    if !running && let Some(label) = interrupt_label_of(&chat.items, turn) {
+        verb = label;
+    }
     let diff = (stats.add + stats.del > 0).then_some((stats.add, stats.del));
     fold_row(&theme, "work", turn, verb, rest, diff, false, open, cx)
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -2923,6 +2955,18 @@ fn work_header(
             });
         }))
         .into_any_element()
+}
+
+/// The interruption notice of the turn whose prompt is at `first`, if the
+/// turn ended that way: "Stopped by you" or "Interrupted: …".
+fn interrupt_label_of(items: &[ChatItem], first: usize) -> Option<String> {
+    let turn = turns(items).into_iter().find(|t| t.range.start == first)?;
+    items[turn.range.clone()].iter().rev().find_map(|item| match item {
+        ChatItem::Notice { text, .. } if crate::model::session::is_interrupt_notice(text) => {
+            Some(text.clone())
+        }
+        _ => None,
+    })
 }
 
 /// One run of tool calls as Cursor shows it: `Editing foo.rs, explored 7

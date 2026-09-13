@@ -2400,3 +2400,23 @@ pub(crate) fn conversation_key(items: &[ChatItem], title: &str) -> Option<String
     let title = title.trim();
     (!title.is_empty()).then(|| format!("title:{}", title.to_lowercase()))
 }
+
+/// What the pane says for an `interrupted` transcript line. `stop` (the
+/// button, a stop word) is the user's own hand; anything else names the
+/// cause the kernel gave.
+pub fn interrupt_label(detail: &str) -> String {
+    let d = detail.trim();
+    match d.to_ascii_lowercase().as_str() {
+        "" | "stop" | "user" | "stopped" | "stopped by user" => STOPPED_BY_YOU.to_owned(),
+        "force" | "steer" | "follow-up" => "Interrupted for your follow-up".to_owned(),
+        _ => format!("Interrupted: {d}"),
+    }
+}
+
+/// The notice text for a turn the user stopped; the fold line keys on it.
+pub const STOPPED_BY_YOU: &str = "Stopped by you";
+
+/// Whether a notice marks the end of an interrupted turn.
+pub fn is_interrupt_notice(text: &str) -> bool {
+    text == STOPPED_BY_YOU || text.starts_with("Interrupted")
+}

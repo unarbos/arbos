@@ -568,16 +568,11 @@ fn handle_frame(
             // "stop" typed at a running agent is the Stop button, not a
             // follow-up: the turn ends now and the transcript says who did it.
             if attachments.is_empty() && sched.has_job(&agent) && arbos_core::is_stop_word(&text) {
+                // The turn writes its own `interrupted` line ("Stopped by
+                // you" in the window); nothing else to record.
                 for id in hooks.stop_work(&agent) {
                     sched.stop(&id);
                 }
-                let _ = append_event(
-                    &Layout::new(place, &agent).transcript(),
-                    &Event::new(EventKind::Notice {
-                        text: "Stopped by you".into(),
-                        failed: false,
-                    }),
-                );
                 return;
             }
             if steer && sched.has_job(&agent) {

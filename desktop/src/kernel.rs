@@ -1247,6 +1247,12 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
             text: text.clone(),
             failed: *failed,
         }),
+        // The turn was cut short: by the Stop button, a stop word, a Force,
+        // or the kernel. A line in the pane, and the turn's fold says so.
+        arbos_core::EventKind::Interrupted { detail } => Some(ChatItem::Notice {
+            text: crate::model::session::interrupt_label(detail),
+            failed: false,
+        }),
         arbos_core::EventKind::Thinking { text } if text.trim().is_empty() => None,
         arbos_core::EventKind::Thinking { text } => Some(ChatItem::Thinking {
             text: text.clone(),

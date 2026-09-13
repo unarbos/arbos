@@ -551,6 +551,11 @@ fn kernel_event(event: arbos_core::Event) -> Vec<Event> {
             vec![Event::TurnDone(Err(Error::internal_error().data(text)))]
         }
         EventKind::Notice { text, .. } => vec![Event::Aside(text)],
+        // The turn was cut short; the pane says by whom (the fold line
+        // picks the same text up).
+        EventKind::Interrupted { detail } => vec![Event::Aside(
+            crate::model::session::interrupt_label(&detail),
+        )],
         EventKind::Ask {
             question, options, ..
         } => vec![Event::NeedQuestion {

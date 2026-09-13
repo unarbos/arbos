@@ -291,10 +291,10 @@ impl Arbos {
             .active_session()
             .is_some_and(|chat| chat.busy());
         if busy && text.attachments.is_empty() && arbos_core::is_stop_word(&text.text) {
-            self.workspace.update(cx, |workspace, cx| {
-                workspace.cancel(id, cx);
-                workspace.with_session(id, cx, |chat| chat.notice(false, "Stopped by you"));
-            });
+            // The kernel's `interrupted` line becomes the "Stopped by you"
+            // notice, so nothing is said twice.
+            self.workspace
+                .update(cx, |workspace, cx| workspace.cancel(id, cx));
             return;
         }
         if self
