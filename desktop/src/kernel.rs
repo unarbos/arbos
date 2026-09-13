@@ -1271,7 +1271,9 @@ pub fn agent_model(place: &arbos_core::Place, id: &str) -> Option<String> {
 fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatItem> {
     use crate::model::session::ChatItem;
     match &ev.kind {
-        arbos_core::EventKind::User { text, attachments } => {
+        arbos_core::EventKind::User {
+            text, attachments, ..
+        } => {
             let mut message = crate::model::attachment::UserMessage::from(text.clone());
             for path in attachments {
                 message.add_file_path(path);
