@@ -655,7 +655,11 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
     match event.kind {
         // Another client's prompt landed on the record. This window's own
         // prompts are on the pane already; the session tells them apart.
-        EventKind::User { text, attachments } if recorded => vec![Event::UserLine {
+        // `..`: the line also carries `channel` and `device` on kernels from
+        // integration `783d057` on; older cores lack them.
+        EventKind::User {
+            text, attachments, ..
+        } if recorded => vec![Event::UserLine {
             text,
             attachments,
             ts,
