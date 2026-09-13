@@ -1,3 +1,4 @@
+pub mod access;
 pub mod attach;
 pub mod browser;
 pub mod cli;
@@ -9,8 +10,8 @@ pub mod klog;
 pub mod mcp;
 pub mod plan;
 pub mod pty;
-pub mod remote;
 pub mod record;
+pub mod remote;
 pub mod sched;
 pub mod screenshot;
 pub mod secret_tool;

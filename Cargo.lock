@@ -69,6 +69,7 @@ dependencies = [
  "arbos-core",
  "arbos-engine",
  "base64",
+ "futures-util",
  "glob",
  "libc",
  "portable-pty",
@@ -79,6 +80,7 @@ dependencies = [
  "serde_json",
  "tgrep-core",
  "tokio",
+ "tokio-tungstenite",
  "toml",
  "tungstenite",
  "uuid",
@@ -1890,6 +1892,18 @@ checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
 dependencies = [
  "rustls",
  "tokio",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.26.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a9daff607c6d2bf6c16fd681ccb7eecc83e4e2cdc1ca067ffaadfca5de7f084"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite",
 ]
 
 [[package]]

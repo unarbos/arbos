@@ -14,6 +14,7 @@ use tokio::{
 };
 
 use crate::{
+    access,
     attach::{self, Frame, TreeNode},
     doors,
     grep::PlaceGrep,
@@ -26,7 +27,18 @@ use crate::{
 
 #[derive(Serialize)]
 struct KernelJson {
+    /// What a client on this machine dials (loopback even for a wildcard bind).
     url: String,
+    /// The network address when `--bind` opened the socket; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bind: Option<String>,
+    /// `loopback` (only this machine) or `token` (access.toml clients).
+    auth: String,
+    /// The same socket as a WebSocket URL, for clients behind an HTTP tunnel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ws: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clients: Option<usize>,
     pid: u32,
     started: i64,
     version: String,
@@ -62,11 +74,33 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
     let grep = PlaceGrep::start(place.path.clone());
     // Jobs from a previous kernel keep running; their folders say what they are.
 
-    let listener = TcpListener::bind("127.0.0.1:0")
+    // Loopback unless `--bind` says otherwise; off the machine, only a
+    // token from access.toml gets in, and there must be at least one.
+    let bind = access::bind_addr()?;
+    let access = Arc::new(access::Access::load(&place)?);
+    let open = !bind.ip().is_loopback();
+    if open && !access.has_clients() {
+        anyhow::bail!(
+            "{bind} is reachable from the network but {} has no [[client]] tokens; refusing to listen (see arbos-kernel help)",
+            access::Access::path(&place).display()
+        );
+    }
+    let listener = TcpListener::bind(bind)
         .await
-        .context("bind attach")?;
+        .with_context(|| format!("bind attach {bind}"))?;
     let addr = listener.local_addr()?;
-    write_kernel_json(&place, addr)?;
+    write_kernel_json(&place, addr, open, &access)?;
+    if open {
+        klog::info(
+            "attach_open_bind",
+            None,
+            format!(
+                "bind={addr} clients={} persons={} (persons need the hub)",
+                access.client_count(),
+                access.person_count()
+            ),
+        );
+    }
     klog::info(
         "kernel_start",
         None,
@@ -174,72 +208,30 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
     let accept_place = place.clone();
     let accept_hooks = Arc::clone(&hooks);
     let accept_frames = frame_in_tx.clone();
+    let accept_access = Arc::clone(&access);
     tokio::spawn(async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
+            let Ok((stream, peer)) = listener.accept().await else {
                 continue;
             };
-            let (r, w) = stream.into_split();
-            let (out_tx, out_rx) = mpsc::unbounded_channel();
-            accept_hooks.frames.lock().unwrap().push(out_tx.clone());
-            // Greeting, snapshot, plans, then the focused agent's recent
-            // transcript, so a client that cannot read the files (a phone)
-            // has the conversation before the first live frame.
-            let focus_agent = focus_agent(&accept_place);
-            let _ = out_tx.send(Frame::Hello {
-                protocol: PROTOCOL,
-                kernel: env!("CARGO_PKG_VERSION").to_string(),
-                tail: ATTACH_TAIL,
-                focus: focus_agent.clone(),
-            });
-            let _ = out_tx.send(snapshot(&accept_place));
-            for agent in list_agents(&accept_place).unwrap_or_default() {
-                let _ = out_tx.send(accept_hooks.plan_frame(agent.id.as_str()));
-            }
-            klog::info(
-                "attach_open",
-                None,
-                format!("clients={}", accept_hooks.frames.lock().unwrap().len()),
-            );
-            replay(&accept_place, &focus_agent, None, ATTACH_TAIL, &out_tx);
-            tokio::spawn(attach::write_loop(w, out_rx));
-            // History requests are answered on this connection alone;
-            // everything else goes to the kernel like before.
-            let (local_tx, mut local_rx) = mpsc::unbounded_channel::<Frame>();
-            let tx = accept_frames.clone();
-            let place_for_history = accept_place.clone();
-            let out_for_history = out_tx.clone();
-            let out_for_read = out_tx;
+            // Transport and login happen off the accept loop: a slow or
+            // silent peer must not hold the door for the next one.
+            let accept_place = accept_place.clone();
+            let accept_hooks = Arc::clone(&accept_hooks);
+            let accept_frames = accept_frames.clone();
+            let accept_access = Arc::clone(&accept_access);
             tokio::spawn(async move {
-                while let Some(frame) = local_rx.recv().await {
-                    match frame {
-                        Frame::History {
-                            agent,
-                            since,
-                            limit,
-                        } => {
-                            let limit = if limit == 0 {
-                                ATTACH_TAIL
-                            } else {
-                                limit.min(HISTORY_MAX)
-                            };
-                            replay(&place_for_history, &agent, Some(since), limit, &out_for_history);
-                        }
-                        other => {
-                            if tx.send(other).is_err() {
-                                break;
-                            }
-                        }
+                let (r, w, who) = match admit(stream, peer, &accept_access).await {
+                    Ok(x) => x,
+                    Err(e) => {
+                        klog::warn("attach_refused", None, format!("peer={peer} {e:#}"));
+                        return;
                     }
-                }
-            });
-            tokio::spawn(async move {
-                let _ = attach::read_loop(r, local_tx, out_for_read).await;
-                klog::info("attach_close", None, "");
+                };
+                serve_client(r, w, who, accept_place, accept_hooks, accept_frames).await;
             });
         }
     });
-
     // One signal stream for the life of the loop. A fresh `ctrl_c()` per
     // `select!` iteration misses a signal that lands while a branch body
     // runs: the old listener is gone and the new one is not yet registered.
@@ -904,9 +896,18 @@ fn record_prs(place: &Place, agent: &str, ev: &Event) -> bool {
     new
 }
 
-fn write_kernel_json(place: &Place, addr: SocketAddr) -> Result<()> {
+fn write_kernel_json(
+    place: &Place,
+    addr: SocketAddr,
+    open: bool,
+    access: &access::Access,
+) -> Result<()> {
     let info = KernelJson {
-        url: format!("tcp://{addr}"),
+        url: access::local_url(addr),
+        bind: open.then(|| addr.to_string()),
+        auth: if open { "token" } else { "loopback" }.into(),
+        ws: open.then(|| format!("ws://{addr}/")),
+        clients: open.then(|| access.client_count()),
         pid: std::process::id(),
         started: arbos_core::now_ms(),
         version: klog::version().into(),
@@ -915,4 +916,152 @@ fn write_kernel_json(place: &Place, addr: SocketAddr) -> Result<()> {
     };
     std::fs::write(place.kernel_json(), serde_json::to_string_pretty(&info)?)?;
     Ok(())
+}
+
+/// Detect the transport, then let the peer in: loopback as the owner,
+/// anyone else with a token from access.toml. Returns the split
+/// connection and who it is.
+async fn admit(
+    stream: tokio::net::TcpStream,
+    peer: SocketAddr,
+    access: &access::Access,
+) -> Result<(attach::Reader, attach::Writer, access::Identity)> {
+    let conn = attach::Conn::detect(stream).await?;
+    // Only a plain TCP peer on loopback is "this machine": the desktop, the
+    // CLI. A WebSocket from loopback is a tunnel daemon (cloudflared) or a
+    // browser fronting for someone else, so it logs in like the network.
+    if access::is_local(&peer) && matches!(conn, attach::Conn::Tcp(_)) {
+        let (r, w) = conn.split();
+        return Ok((r, w, access::Identity::local()));
+    }
+    // A WebSocket peer may have logged in on the upgrade request itself.
+    let presented = match &conn {
+        attach::Conn::Ws(_, up) => access::token_from_request(&up.uri, up.authorization.as_deref()),
+        attach::Conn::Tcp(_) => None,
+    };
+    let (mut r, mut w) = conn.split();
+    let token = match presented {
+        Some(t) => t,
+        None => {
+            let first = tokio::time::timeout(
+                Duration::from_secs(access::AUTH_TIMEOUT_SECS),
+                r.next_line(),
+            )
+            .await
+            .ok()
+            .flatten();
+            match first.and_then(|l| serde_json::from_str::<Frame>(&l).ok()) {
+                Some(Frame::Auth { token }) => token,
+                _ => {
+                    let _ = w
+                        .send(&Frame::Error {
+                            agent: None,
+                            detail: "auth required: send {\"type\":\"auth\",\"token\":\"…\"} first"
+                                .into(),
+                        })
+                        .await;
+                    anyhow::bail!("no auth frame");
+                }
+            }
+        }
+    };
+    match access.authenticate(&token) {
+        Some(who) => Ok((r, w, who)),
+        None => {
+            let detail = if access.has_clients() {
+                "auth failed: unknown token"
+            } else {
+                "auth failed: this kernel has no [[client]] tokens in .arbos/access.toml"
+            };
+            let _ = w
+                .send(&Frame::Error {
+                    agent: None,
+                    detail: detail.into(),
+                })
+                .await;
+            anyhow::bail!("bad token")
+        }
+    }
+}
+
+/// Greet, then run the two loops for one admitted client.
+async fn serve_client(
+    r: attach::Reader,
+    w: attach::Writer,
+    who: access::Identity,
+    accept_place: Place,
+    accept_hooks: Arc<KernelHooks>,
+    accept_frames: mpsc::UnboundedSender<Frame>,
+) {
+    {
+        {
+            let (out_tx, out_rx) = mpsc::unbounded_channel();
+            accept_hooks.frames.lock().unwrap().push(out_tx.clone());
+            // Greeting, snapshot, plans, then the focused agent's recent
+            // transcript, so a client that cannot read the files (a phone)
+            // has the conversation before the first live frame.
+            let focus_agent = focus_agent(&accept_place);
+            let _ = out_tx.send(Frame::Hello {
+                protocol: PROTOCOL,
+                kernel: env!("CARGO_PKG_VERSION").to_string(),
+                tail: ATTACH_TAIL,
+                focus: focus_agent.clone(),
+            });
+            let _ = out_tx.send(snapshot(&accept_place));
+            for agent in list_agents(&accept_place).unwrap_or_default() {
+                let _ = out_tx.send(accept_hooks.plan_frame(agent.id.as_str()));
+            }
+            klog::info(
+                "attach_open",
+                None,
+                format!(
+                    "clients={} who={} role={}",
+                    accept_hooks.frames.lock().unwrap().len(),
+                    who.name,
+                    who.role.as_str()
+                ),
+            );
+            replay(&accept_place, &focus_agent, None, ATTACH_TAIL, &out_tx);
+            tokio::spawn(attach::write_loop(w, out_rx));
+            // History requests are answered on this connection alone;
+            // everything else goes to the kernel like before.
+            let (local_tx, mut local_rx) = mpsc::unbounded_channel::<Frame>();
+            let tx = accept_frames.clone();
+            let place_for_history = accept_place.clone();
+            let out_for_history = out_tx.clone();
+            let out_for_read = out_tx;
+            tokio::spawn(async move {
+                while let Some(frame) = local_rx.recv().await {
+                    match frame {
+                        Frame::History {
+                            agent,
+                            since,
+                            limit,
+                        } => {
+                            let limit = if limit == 0 {
+                                ATTACH_TAIL
+                            } else {
+                                limit.min(HISTORY_MAX)
+                            };
+                            replay(
+                                &place_for_history,
+                                &agent,
+                                Some(since),
+                                limit,
+                                &out_for_history,
+                            );
+                        }
+                        other => {
+                            if tx.send(other).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            let role = who.role;
+            let _ = attach::read_loop(r, role, local_tx, out_for_read).await;
+            klog::info("attach_close", None, format!("who={}", who.name));
+        }
+    }
 }
