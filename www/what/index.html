@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>What Arbos is</title>
+  <meta name="description" content="Arbos in three ideas: your projects run as agents that delegate; you talk to them in full duplex from desktop and phone; their state lives in files you can read, git-save, and rewind.">
+  <meta name="theme-color" content="#161616">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="canonical" href="https://arbos.life/what/">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <a class="brand" href="/" aria-label="Arbos home">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M10.3 3h3.4v11.2c0 1.6.8 2.8 2.4 3.6V19H7.9v-1.2c1.6-.8 2.4-2 2.4-3.6V3z"/><path d="M14.15 9.9 17.55 6.5l2.2 2.2-3.4 3.4-2.2-2.2z"/><path d="M9.85 11.95 6.05 8.15l-2.2 2.2 3.8 3.8 2.2-2.2z"/></svg>
+        Arbos
+      </a>
+      <nav class="nav" aria-label="Main">
+        <a href="/what/" aria-current="page">What it is</a>
+        <a href="/install/">Install</a>
+        <a href="/docs/">Docs</a>
+        <a class="gh" href="https://github.com/unarbos/arbos" rel="noopener">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+          <span>GitHub</span>
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="page">
+    <div class="wrap">
+      <div class="page-head">
+        <span class="kicker">What it is</span>
+        <h1>A coding agent shaped like a project, not a chat.</h1>
+        <p>Open a folder in Arbos and it becomes a project with one main agent. That agent stays alive as long as the project does. Three ideas make it work.</p>
+      </div>
+
+      <div class="prose">
+        <h2 id="delegate">Your projects run as agents that delegate</h2>
+        <p>The main chat of a project is a coordinator. It reads the project's goals first, then hands each piece of work to a smaller agent: a short brief, the relevant notes, and pointers to where the work lives. Workers pull the rest from the file system themselves.</p>
+        <p>So the main conversation never blocks. You keep adding thoughts while workers run. Sub-agents appear in the right-hand panel; click one to open its chat. When a worker finishes, its report lands back in the main chat and the project's notes are updated.</p>
+        <p>Agents can also run on other machines. Any Arbos on your mesh can spawn work on any other: a laptop can drive a server, a server can use the worker on your Mac.</p>
+
+        <h2 id="duplex">Talk to it in full duplex, from desktop and phone</h2>
+        <p><strong>Full duplex</strong> means both sides speak and listen at the same time. You can cut Arbos off mid-sentence, and it hears you while it speaks. It is one continuous conversation, not turn-taking.</p>
+        <p>Call a project from the desktop app or from the iPhone app. The voice channel does not read the screen aloud. It gives you the short version: "the results are on your screen; the highlight is that CI failed on the skeptic test." Ask for more and it drills into the detail. Ask it to send off an agent and it does, then tells you when the agent reports back.</p>
+        <p>The speech model is open source and self-hosted. A GPU box you rent, or one you own, runs it; Arbos only needs the URL.</p>
+
+        <h2 id="files">State lives in files you can read, git-save, and rewind</h2>
+        <p>Every project keeps its state in a plain <code>.arbos/</code> folder: the agents and their sub-agents, their inboxes, the plan, notes, and the subscriptions that wake them (timers, pull requests, CI, shell jobs). Nothing important lives only in memory.</p>
+        <p>Because it is files, you can read what is happening with <code>ls</code> and <code>cat</code>. You can commit the whole agent state with git. You can check out an earlier commit and resume from there. Tests work the same way: write a state to disk, run Arbos on it.</p>
+
+        <h2 id="open">Open source, any model</h2>
+        <p>Arbos is MIT-licensed Rust: a kernel (<code>arbos-kernel</code>) that runs agents, a desktop app on top of it, an iPhone app, a mesh hub, and a voice server. It talks to models through <a href="https://openrouter.ai" rel="noopener">OpenRouter</a> by default, and to any OpenAI-compatible endpoint if you point it there.</p>
+        <p class="callout"><strong>Ready to try it?</strong> <a href="/install/">Install Arbos</a> on your Mac, or read the <a href="/docs/">design documents</a>.</p>
+      </div>
+    </div>
+  </main>
+
+  <footer class="foot">
+    <div class="wrap">
+      <span>© 2026 Arbos · <a href="https://github.com/unarbos/arbos/blob/main/LICENSE" rel="noopener">MIT license</a></span>
+      <nav aria-label="Footer">
+        <a href="https://github.com/unarbos/arbos" rel="noopener">GitHub</a>
+        <a href="https://github.com/unarbos/arbos/releases" rel="noopener">Releases</a>
+        <a href="https://github.com/unarbos/arbos/issues" rel="noopener">Issues</a>
+        <a href="https://github.com/unarbos/arbos/issues/new" rel="noopener">Contact</a>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>
