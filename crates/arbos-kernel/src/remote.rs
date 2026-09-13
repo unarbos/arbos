@@ -739,9 +739,8 @@ fn prepare_remote(machine: &Machine, local_place: &Path, remote_path: &str) -> R
                 config_home
             );
         };
-        let mut cfg = host.config.clone();
-        cfg.api_key = Some(key);
-        cfg.api_key_env = None;
+        // The same shape a window's `configure` writes into a kernel.
+        let cfg = host.config.with_key(&key);
         let text = toml::to_string_pretty(&cfg)?;
         let tmp =
             std::env::temp_dir().join(format!("arbos-remote-config-{}.toml", std::process::id()));

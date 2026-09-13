@@ -62,7 +62,9 @@ impl Role {
     /// login itself; everything else changes state on the host.
     pub fn allows(self, frame: &Frame) -> bool {
         match self {
-            Role::Owner | Role::Writer => true,
+            Role::Owner => true,
+            // A writer may not hand the kernel a model key.
+            Role::Writer => !matches!(frame, Frame::Configure { .. }),
             Role::Reader => matches!(
                 frame,
                 Frame::History { .. }

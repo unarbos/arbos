@@ -304,10 +304,13 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             state: "running".into(),
             budget: None,
         });
+        // Read afresh each turn: a `configure` frame may have changed the
+        // key (in the file, or in memory only).
+        let host_now = Host::load().unwrap_or_else(|_| host.clone());
         sched.start(
             place.clone(),
             wake,
-            host.clone(),
+            host_now,
             Arc::clone(&registry),
             grep.clone(),
             Arc::clone(&hooks),
@@ -590,6 +593,37 @@ fn handle_frame(
                 refuse(hooks, Some(&agent), format!("inbox: {e:#}"));
             }
         }
+        Frame::Configure {
+            provider,
+            api_base,
+            model,
+            api_key,
+            remember,
+        } => match configure(place, &provider, &api_base, &model, &api_key, remember) {
+            Ok(frame) => {
+                hooks.broadcast(frame);
+                let _ = append_event(
+                    &Layout::new(place, &focus_agent(place)).transcript(),
+                    &Event::new(EventKind::Notice {
+                        text: format!(
+                            "Model key set for {provider}{}: {}",
+                            if model.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({model})")
+                            },
+                            if remember {
+                                "saved to this machine's config.toml (owner-readable)"
+                            } else {
+                                "kept in memory for this kernel only"
+                            }
+                        ),
+                        failed: false,
+                    }),
+                );
+            }
+            Err(e) => refuse(hooks, None, format!("configure: {e:#}")),
+        },
         Frame::PlanOp {
             agent,
             node,
@@ -1079,6 +1113,7 @@ async fn serve_client(
                 focus: focus_agent.clone(),
             });
             let _ = out_tx.send(snapshot(&accept_place));
+            let _ = out_tx.send(provider_frame(&accept_place));
             for agent in list_agents(&accept_place).unwrap_or_default() {
                 let _ = out_tx.send(accept_hooks.plan_frame(agent.id.as_str()));
             }
@@ -1142,4 +1177,116 @@ async fn serve_client(
             klog::info("attach_close", None, format!("who={}", who.name));
         }
     }
+}
+
+/// What this kernel can say about its model provider without saying the
+/// key: which provider and model, whether a key is there, where from.
+fn provider_frame(place: &Place) -> Frame {
+    let host = Host::load().or_else(|_| Host::peek());
+    let Ok(host) = host else {
+        return Frame::Provider {
+            provider: String::new(),
+            model: String::new(),
+            key: false,
+            source: "none".into(),
+        };
+    };
+    let env = host.config.key_env();
+    let (key, source) = match host.key_source() {
+        arbos_core::KeySource::Config => (
+            true,
+            if arbos_core::host::is_overridden() {
+                "memory".to_string()
+            } else {
+                "config".to_string()
+            },
+        ),
+        arbos_core::KeySource::Env(var) => (true, format!("env:{var}")),
+        arbos_core::KeySource::Missing(_) => {
+            // secrets.toml may name it; whether it resolves shows at the turn.
+            match arbos_engine::secrets::Config::load(place.path()) {
+                Ok(cfg) if cfg.secrets.contains_key(&env) => (true, format!("secrets:{env}")),
+                _ => (false, "none".into()),
+            }
+        }
+    };
+    Frame::Provider {
+        provider: host.config.provider().as_str().to_string(),
+        model: host.config.model(),
+        key,
+        source,
+    }
+}
+
+/// `configure`: take a provider and key from an owner. The same config
+/// shape `spawn host=` writes onto a remote (`HostConfig::with_key`), saved
+/// 0600 when `remember`, else held in memory for this process.
+fn configure(
+    place: &Place,
+    provider: &str,
+    api_base: &str,
+    model: &str,
+    api_key: &str,
+    remember: bool,
+) -> Result<Frame> {
+    let key = api_key.trim();
+    if key.len() < 16 {
+        anyhow::bail!("that is not a key (too short)");
+    }
+    let mut host = Host::load().or_else(|_| Host::peek())?;
+    let kind = match provider.trim().to_ascii_lowercase().as_str() {
+        "" | "openrouter" => arbos_core::ProviderKind::OpenRouter,
+        "openai" => arbos_core::ProviderKind::OpenAi,
+        "custom" => arbos_core::ProviderKind::Custom,
+        other => anyhow::bail!("unknown provider {other:?} (openrouter, openai, custom)"),
+    };
+    if host.config.provider() != kind {
+        host.config.set_provider(kind);
+    } else {
+        host.config.provider = Some(kind);
+    }
+    if !api_base.trim().is_empty() {
+        host.config.api_base = api_base.trim().to_string();
+    }
+    if !model.trim().is_empty() {
+        host.config.model = model.trim().to_string();
+    }
+    let cfg = host.config.with_key(key);
+    // Tool output redacts it from now on, like the key the kernel started with.
+    arbos_engine::secrets::store().protect("MODEL_API_KEY", key.to_string());
+    if remember {
+        arbos_core::host::set_override(None);
+        let saved = Host {
+            config: cfg,
+            dir: host.dir.clone(),
+        };
+        saved.save()?;
+        klog::info(
+            "configured",
+            None,
+            format!(
+                "provider={} model={} remembered=true",
+                kind.as_str(),
+                saved.config.model()
+            ),
+        );
+    } else {
+        klog::info(
+            "configured",
+            None,
+            format!(
+                "provider={} model={} remembered=false",
+                kind.as_str(),
+                cfg.model()
+            ),
+        );
+        arbos_core::host::set_override(Some(cfg));
+    }
+    let base = Host::load()?;
+    if let (Some(key), Ok(url)) = (base.api_key(), base.config.api_base()) {
+        tokio::spawn(async move {
+            arbos_engine::warm(&url, &key).await;
+        });
+    }
+    Ok(provider_frame(place))
 }

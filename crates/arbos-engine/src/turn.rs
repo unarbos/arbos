@@ -157,7 +157,38 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // wake is not replayed as unfinished at the next kernel start.
     // A scripted model needs no key and asks the network nothing.
     let replay = crate::replay::current()?;
-    let (key, api_base) = match (host.api_key(), host.config.api_base()) {
+    // No key in config or environment: the place's secrets.toml may name
+    // one (`OPENROUTER_API_KEY = "op://…"`), for servers with 1Password.
+    let key_from_secrets = match host.api_key() {
+        Some(_) => None,
+        None => {
+            let dir = place.path().to_path_buf();
+            let env = host.config.key_env();
+            tokio::task::spawn_blocking(move || crate::secrets::model_key_from_place(&dir, &env))
+                .await
+                .ok()
+                .flatten()
+        }
+    };
+    let found_key = match key_from_secrets {
+        Some(Ok(k)) => {
+            crate::secrets::store().protect("MODEL_API_KEY", k.clone());
+            Some(k)
+        }
+        Some(Err(e)) => {
+            return refuse(
+                &transcript,
+                &place,
+                &agent,
+                format!(
+                    "{} (secrets.toml names it, but: {e:#})",
+                    host.missing_key_hint()
+                ),
+            );
+        }
+        None => host.api_key(),
+    };
+    let (key, api_base) = match (found_key, host.config.api_base()) {
         _ if replay.is_some() => (
             "replay".to_string(),
             host.config

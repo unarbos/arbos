@@ -309,3 +309,12 @@ mod tests {
         assert_eq!(s.redact("sk-or-v1-01 alone"), "sk-or-v1-01 alone");
     }
 }
+
+/// The model key named in `<place>/.arbos/secrets.toml` under the
+/// provider's env-variable name (`OPENROUTER_API_KEY = "op://…"`), for a
+/// kernel whose config and environment hold none. Blocking (`op`).
+pub fn model_key_from_place(place: &Path, env_name: &str) -> Option<Result<String>> {
+    let cfg = Config::load(place).ok()?;
+    let source = cfg.secrets.get(env_name)?;
+    Some(resolve(source))
+}
