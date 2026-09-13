@@ -100,12 +100,24 @@ final class AudioEngine {
               let buffer = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: AVAudioFrameCount(frames)),
               let channel = buffer.floatChannelData?[0] else { return }
         buffer.frameLength = AVAudioFrameCount(frames)
+        var peak: Float = 0
+        var squares: Double = 0
         data.withUnsafeBytes { raw in
             let samples = raw.bindMemory(to: Int16.self)
             for i in 0..<frames {
-                channel[i] = Float(Int16(littleEndian: samples[i])) / 32768
+                let s = Float(Int16(littleEndian: samples[i])) / 32768
+                channel[i] = s
+                peak = max(peak, abs(s))
+                squares += Double(s * s)
             }
         }
+        replyPeak = max(replyPeak, peak)
+        replySquares += squares
+        replySamples += frames
+        if normalise { applyGain(channel, count: frames, chunkPeak: peak) }
+        var sent: Float = 0
+        for i in 0..<frames { sent = max(sent, abs(channel[i])) }
+        outPeak = max(outPeak, sent)
         lock.lock()
         scheduled += 1
         let current = generation
@@ -127,6 +139,29 @@ final class AudioEngine {
         player.play()
     }
 
+    // MARK: - Gain
+
+    private var runningPeak: Float = 0
+    private static let targetPeak: Float = 0.707   // -3 dBFS
+    private static let maxGain: Float = 6           // +15.6 dB
+
+    /// Gain follows the loudest recent chunk (fast up, slow down) so a
+    /// whole reply sits near the target; a tanh knee catches overshoot.
+    private func applyGain(_ channel: UnsafeMutablePointer<Float>, count: Int, chunkPeak: Float) {
+        if chunkPeak > runningPeak {
+            runningPeak = chunkPeak
+        } else {
+            runningPeak = runningPeak * 0.995 + chunkPeak * 0.005
+        }
+        guard runningPeak > 0.001 else { return }
+        let gain = min(Self.maxGain, max(1, Self.targetPeak / runningPeak))
+        guard gain > 1.01 else { return }
+        for i in 0..<count {
+            let v = channel[i] * gain
+            channel[i] = abs(v) > 0.6 ? (v > 0 ? 1 : -1) * (0.6 + 0.4 * tanhf((abs(v) - 0.6) / 0.4)) : v
+        }
+    }
+
     // MARK: - Session
 
     private func configureSession() throws {
@@ -135,14 +170,61 @@ final class AudioEngine {
         // to the ear. Bluetooth (AirPods) still wins when connected.
         try session.setCategory(
             .playAndRecord,
-            mode: .voiceChat,
-            options: [.defaultToSpeaker, .allowBluetoothHFP]
+            mode: mode,
+            options: preferSpeaker ? [.defaultToSpeaker] : [.defaultToSpeaker, .allowBluetoothHFP]
         )
         try session.setPreferredSampleRate(Self.sampleRate)
         try session.setPreferredIOBufferDuration(0.02)
         try session.setActive(true)
-        routeToSpeakerIfEarpiece()
+        if preferSpeaker {
+            try? session.overrideOutputAudioPort(.speaker)
+        } else {
+            routeToSpeakerIfEarpiece()
+        }
     }
+
+    /// The user wants the phone's own speaker even with AirPods connected.
+    var preferSpeaker = false {
+        didSet { applyRoutePreference() }
+    }
+
+    /// Session mode. `.voiceChat` runs the phone's voice processing: echo
+    /// cancellation, but also a quieter, ducked speaker. `.videoChat`
+    /// keeps the canceller and is tuned for the speaker.
+    var mode: AVAudioSession.Mode = .videoChat
+
+    /// Make-up gain for the reply: TTS often peaks well under full scale.
+    /// Peaks are brought toward -3 dBFS with a soft limiter, never above.
+    var normalise = true
+
+    private var replyPeak: Float = 0
+    private var replySquares: Double = 0
+    private var replySamples: Int = 0
+    private var outPeak: Float = 0
+
+    /// Peak and RMS of the reply audio as received, and the peak actually
+    /// sent to the speaker after gain, in dBFS, since the last call.
+    func replyLevelsAndReset() -> (peak: Double, rms: Double, out: Double) {
+        func dB(_ v: Float) -> Double { v > 0 ? 20 * log10(Double(v)) : -120 }
+        let rms = replySamples > 0 ? 10 * log10(replySquares / Double(replySamples)) : -120
+        defer {
+            replyPeak = 0
+            replySquares = 0
+            replySamples = 0
+            outPeak = 0
+        }
+        return (dB(replyPeak), rms, dB(outPeak))
+    }
+
+    /// `speaker, AirPods Pro` — every current output port.
+    var outputPorts: String {
+        AVAudioSession.sharedInstance().currentRoute.outputs
+            .map { "\($0.portType.rawValue):\($0.portName)" }
+            .joined(separator: ", ")
+    }
+
+    /// The system output volume for this session's route, 0…1.
+    var systemVolume: Float { AVAudioSession.sharedInstance().outputVolume }
 
     /// `.defaultToSpeaker` is honoured on activation, but a route change
     /// (unplugging headphones) can land the output back on the earpiece.
@@ -151,6 +233,21 @@ final class AudioEngine {
         if session.currentRoute.outputs.contains(where: { $0.portType == .builtInReceiver }) {
             try? session.overrideOutputAudioPort(.speaker)
         }
+    }
+
+    /// Forcing the speaker also moves the mic to the phone (a Bluetooth
+    /// headset carries both or neither).
+    private func applyRoutePreference() {
+        let session = AVAudioSession.sharedInstance()
+        if preferSpeaker {
+            try? session.setCategory(.playAndRecord, mode: mode, options: [.defaultToSpeaker])
+            try? session.overrideOutputAudioPort(.speaker)
+        } else {
+            try? session.setCategory(.playAndRecord, mode: mode, options: [.defaultToSpeaker, .allowBluetoothHFP])
+            try? session.overrideOutputAudioPort(.none)
+            routeToSpeakerIfEarpiece()
+        }
+        onRouteChange?(outputRoute)
     }
 
     private func observeSession() {
@@ -229,10 +326,14 @@ final class AudioEngine {
         }
         let rms = (sum / Double(max(count, 1))).squareRoot()
         let now = Date()
+        // The bar sits a little above the echo the canceller leaves, never
+        // above a normal voice: the server has its own gate and hears
+        // `client.speaking`, so this one only has to catch the obvious.
+        let threshold = min(Self.maxSpeechRMS, max(Self.minSpeechRMS, echoFloor * 1.6))
+        gateLog(rms: rms, threshold: threshold)
         if now < speechHoldUntil { return false }
-        let threshold = max(Self.minSpeechRMS, echoFloor * 2.5)
         if rms > threshold {
-            speechHoldUntil = now.addingTimeInterval(0.5)
+            speechHoldUntil = now.addingTimeInterval(0.6)
             return false
         }
         // Track the echo we are hearing so a louder reply raises the bar.
@@ -242,7 +343,21 @@ final class AudioEngine {
 
     /// About -27 dBFS in Int16 units: quieter than speech at arm's length,
     /// louder than the residue the canceller leaves behind.
-    private static let minSpeechRMS: Double = 1500
+    private static let minSpeechRMS: Double = 1200
+    /// About -18 dBFS: a voice a step away from the phone always clears it.
+    private static let maxSpeechRMS: Double = 4000
+
+    private var lastGateLog: Date = .distantPast
+
+    /// Once a second while the gate is active, for tuning on a device.
+    private func gateLog(rms: Double, threshold: Double) {
+        #if DEBUG
+        let now = Date()
+        guard now.timeIntervalSince(lastGateLog) > 1 else { return }
+        lastGateLog = now
+        print("gate rms=\(Int(rms)) floor=\(Int(echoFloor)) bar=\(Int(threshold))")
+        #endif
+    }
 
     private func consumed(generation: Int) {
         lock.lock()

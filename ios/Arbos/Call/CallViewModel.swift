@@ -99,6 +99,7 @@ final class CallViewModel: ObservableObject {
             return
         }
         phase = .connecting
+        trace("startCall")
         note = nil
         lines.removeAll()
         responseDone = true
@@ -136,9 +137,23 @@ final class CallViewModel: ObservableObject {
             Task { @MainActor in self?.playbackDrained() }
         }
         audio.onRouteChange = { [weak self] route in
-            self?.route = route
-            self?.updateNote()
+            guard let self else { return }
+            self.route = route
+            self.trace("route change outputs=[\(self.audio.outputPorts)] volume=\(self.audio.systemVolume)")
+            self.updateNote()
         }
+        #if DEBUG
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: "forceSpeaker") { audio.preferSpeaker = true }
+        switch defaults.string(forKey: "audioMode") {
+        case "voiceChat": audio.mode = .voiceChat
+        case "videoChat": audio.mode = .videoChat
+        case "default": audio.mode = .default
+        case "measurement": audio.mode = .measurement
+        default: break
+        }
+        if defaults.object(forKey: "normalise") != nil { audio.normalise = defaults.bool(forKey: "normalise") }
+        #endif
         do {
             try audio.start(captureMic: captureMic)
             try await link.connect()
@@ -153,6 +168,35 @@ final class CallViewModel: ObservableObject {
         startedAt = Date()
         phase = .listening
         metric("connect", since: connectStarted, detail: "\(server.engine) route=\(route)")
+        trace("audio mode=\(audio.mode.rawValue) outputs=[\(audio.outputPorts)] volume=\(audio.systemVolume) normalise=\(audio.normalise)")
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "toneTest") {
+            // A 1 kHz tone at -3 dBFS through the same path as a reply:
+            // if this is loud and TTS is quiet, the source is quiet.
+            Task {
+                try? await Task.sleep(for: .seconds(3))
+                link.interrupt()
+                audio.stopPlayback()
+                try? await Task.sleep(for: .milliseconds(600))
+                trace("toneTest start")
+                phase = .speaking
+                audio.play(pcm16: Self.tone(seconds: 2))
+            }
+        }
+        if let text = UserDefaults.standard.string(forKey: "speakTest") {
+            Task {
+                // Cut the model's opening line so the measurement hears
+                // only the fixed sentence.
+                try? await Task.sleep(for: .seconds(3))
+                link.interrupt()
+                audio.stopPlayback()
+                try? await Task.sleep(for: .milliseconds(600))
+                trace("speakTest start")
+                // Underscores stand in for spaces on the launch line.
+                link.speak(text.replacingOccurrences(of: "_", with: " "))
+            }
+        }
+        #endif
         await joinChat()
         updateNote()
         #if DEBUG
@@ -179,10 +223,23 @@ final class CallViewModel: ObservableObject {
 
     private var route = ""
 
+    /// Phone speaker instead of a connected headset, and back.
+    func toggleSpeaker() {
+        audio.preferSpeaker.toggle()
+        route = audio.outputRoute
+        updateNote()
+    }
+
+    /// `speaker · 100%`: where the sound goes and the system volume there.
+    private var routeBadge: String {
+        guard !route.isEmpty else { return "" }
+        return "\(route) · \(Int((audio.systemVolume * 100).rounded()))%"
+    }
+
     private func updateNote() {
         var parts: [String] = []
         if !server.engine.isEmpty { parts.append(server.engine) }
-        if !route.isEmpty { parts.append(route) }
+        if !routeBadge.isEmpty { parts.append(routeBadge) }
         if server.answersItself {
             if server.kernel { parts.append("kernel tools") }
         } else {
@@ -254,6 +311,9 @@ final class CallViewModel: ObservableObject {
                 #endif
             }
             responseDone = false
+            if phase != .speaking {
+                trace("playback start outputs=[\(audio.outputPorts)] volume=\(audio.systemVolume)")
+            }
             phase = .speaking
             markSpeaking(true)
             audio.play(pcm16: pcm)
@@ -261,7 +321,8 @@ final class CallViewModel: ObservableObject {
             trace("reply: \(delta)")
             append(delta, to: .arbos)
         case .responseDone(let interrupted):
-            trace("event response.done interrupted=\(interrupted) playing=\(audio.isPlaying)")
+            let levels = audio.replyLevelsAndReset()
+            trace("event response.done interrupted=\(interrupted) playing=\(audio.isPlaying) reply peak=\(Int(levels.peak))dBFS rms=\(Int(levels.rms))dBFS out=\(Int(levels.out))dBFS")
             if interrupted { metric("barge_in_response_done", since: bargeStartedAt) }
             responseDone = true
             settle()
@@ -309,6 +370,7 @@ final class CallViewModel: ObservableObject {
     /// Back to listening once nobody is working and nothing is playing.
     private func settle() {
         guard phase.inCall, responseDone, !kernelBusy, !audio.isPlaying else { return }
+        if phase != .listening { trace("phase listening") }
         phase = .listening
     }
 
@@ -439,6 +501,19 @@ final class CallViewModel: ObservableObject {
 
     private var injector: DebugInjector?
     private var bargeClip: Data?
+
+    /// 1 kHz sine at -3 dBFS, PCM16 mono at the wire rate.
+    private static func tone(seconds: Int) -> Data {
+        let rate = Int(AudioEngine.sampleRate)
+        let count = rate * seconds
+        var samples = [Int16](repeating: 0, count: count)
+        let amplitude: Double = 0.707 * 32767
+        let step: Double = 2 * Double.pi * 1000 / Double(rate)
+        for i in 0..<count {
+            samples[i] = Int16(amplitude * sin(step * Double(i)))
+        }
+        return samples.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
 
     /// `-injectWav` replaces the microphone with a clip (see
     /// `DebugInjector`); `-bargeWav` fires a second clip 1.5 s into the

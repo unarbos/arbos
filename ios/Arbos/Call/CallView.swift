@@ -33,10 +33,15 @@ struct CallView: View {
                         .padding(.top, 6)
                 }
                 if let note = model.note, model.phase.inCall {
-                    Text(note)
-                        .font(.footnote)
-                        .foregroundStyle(.white.opacity(0.35))
-                        .padding(.top, 4)
+                    // Tap the status line to move the call between the
+                    // phone's speaker and a connected headset.
+                    Button(action: model.toggleSpeaker) {
+                        Text(note)
+                            .font(.footnote)
+                            .foregroundStyle(.white.opacity(0.35))
+                            .padding(.top, 4)
+                    }
+                    .buttonStyle(.plain)
                 }
                 if case .failed(let reason) = model.phase {
                     Text(reason)
@@ -54,7 +59,11 @@ struct CallView: View {
                 callButton
                     .padding(.bottom, 18)
                 chatHandle
-                    .padding(.bottom, 6)
+                    .padding(.bottom, 2)
+                Text(Self.buildLabel)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.18))
+                    .padding(.bottom, 4)
             }
         }
         .contentShape(Rectangle())
@@ -78,6 +87,14 @@ struct CallView: View {
         #if DEBUG
         .task { await previewIfAsked() }
         #endif
+    }
+
+    /// `0.1.0 (57)`: so anyone can say which build they are running.
+    static var buildLabel: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let version = info["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info["CFBundleVersion"] as? String ?? "?"
+        return "\(version) (\(build))"
     }
 
     private var header: some View {
