@@ -78,7 +78,9 @@ pub struct KernelHooks {
     pub kick: mpsc::UnboundedSender<()>,
     pub frames: Mutex<Vec<mpsc::UnboundedSender<Frame>>>,
     pub asks: Mutex<HashMap<String, oneshot::Sender<String>>>,
-    pub approves: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    /// Pending allow/deny questions by agent: the tool asked about, and
+    /// the receiver. One at a time per agent (approvals are interactive).
+    pub approves: Mutex<HashMap<String, (String, oneshot::Sender<bool>)>>,
     pub browsers: BrowserHub,
     /// Serialises plan file writes. One kernel per place holds the lock, so
     /// this is the whole claim story.
@@ -154,6 +156,7 @@ impl KernelHooks {
                 paused: a.paused,
                 model: a.model,
                 kind: "agent".into(),
+                mode: a.mode.as_str().into(),
             })
             .collect();
         self.broadcast(Frame::Tree { tree });
@@ -874,6 +877,7 @@ impl KernelHooks {
         allowlist: Option<Vec<String>>,
         readonly: bool,
         cwd: Option<PathBuf>,
+        kind: Option<&str>,
     ) -> Result<AgentId> {
         self.spawn_isolated(
             parent,
@@ -883,6 +887,7 @@ impl KernelHooks {
             readonly,
             cwd,
             Isolate::None,
+            kind,
         )
         .map(|(id, _)| id)
     }
@@ -899,7 +904,39 @@ impl KernelHooks {
         readonly: bool,
         cwd: Option<PathBuf>,
         isolate: Isolate,
+        kind: Option<&str>,
     ) -> Result<(AgentId, Option<Worktree>)> {
+        // A definition fills in what the call left out; the call's own
+        // model wins, the def's readonly cannot be switched off.
+        let def = match kind.map(str::trim).filter(|k| !k.is_empty()) {
+            None => None,
+            Some(k) => Some(arbos_core::find_def(&self.place, k).ok_or_else(|| {
+                let known: Vec<String> = arbos_core::load_defs(&self.place)
+                    .into_iter()
+                    .map(|d| d.name)
+                    .collect();
+                if known.is_empty() {
+                    anyhow::anyhow!(
+                        "spawn: no agent definition named {k:?}; none exist here (add .arbos/agents-defs/<name>.md)"
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "spawn: no agent definition named {k:?}. Kinds here: {}",
+                        known.join(", ")
+                    )
+                }
+            })?),
+        };
+        let model = model.or(def
+            .as_ref()
+            .map(|d| d.model.as_str())
+            .filter(|m| !m.is_empty()));
+        let allowlist = allowlist.or(def
+            .as_ref()
+            .filter(|d| !d.allowlist.is_empty())
+            .map(|d| d.allowlist.clone()));
+        let readonly = readonly || def.as_ref().is_some_and(|d| d.readonly);
+        let cwd = cwd.or(def.as_ref().and_then(|d| d.cwd.clone()));
         // One spawn at a time: the model runs parallel tool calls, and the
         // cap and the id check both read the agents folder, so without the
         // lock ten calls all see zero children and all pass.
@@ -937,10 +974,16 @@ impl KernelHooks {
         }
         child.readonly = readonly;
         child.cwd = cwd.or_else(|| worktree.as_ref().map(|w| w.path.clone()));
+        if let Some(d) = &def {
+            child.kind = d.name.clone();
+        }
         child.restrict_allowlist(parent);
         child.save(&self.place.agent_dir(&id))?;
         let layout = Layout::new(&self.place, &id);
         std::fs::create_dir_all(layout.jobs())?;
+        if let Some(d) = def.as_ref().filter(|d| !d.body.is_empty()) {
+            std::fs::write(layout.instructions(), format!("{}\n", d.body))?;
+        }
         // The brief is the child's first node: its mission root. It fires
         // a turn now with the mission spelled out; the child decomposes
         // under it with plan add and reports back with say.
@@ -1181,8 +1224,10 @@ impl KernelHooks {
     /// Post an allow/deny prompt. The receiver resolves when the user answers.
     pub fn approve(&self, agent: &AgentId, tool: &str, command: &str) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
-        let key = format!("{agent}:{tool}");
-        self.approves.lock().unwrap().insert(key, tx);
+        self.approves
+            .lock()
+            .unwrap()
+            .insert(agent.to_string(), (tool.to_string(), tx));
         self.broadcast(Frame::Ask {
             agent: agent.to_string(),
             question: format!("allow {tool}: {command}"),

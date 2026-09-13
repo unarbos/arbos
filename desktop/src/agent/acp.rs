@@ -340,8 +340,33 @@ impl Session {
         });
     }
 
-    /// No-op. The kernel has no ACP session modes.
-    pub fn set_mode(&self, _mode_id: &str) {}
+    /// The kernel's permission modes: auto, ask, plan.
+    pub fn set_mode(&self, mode_id: &str) {
+        let _ = self.send_frame(&Frame::SetMode {
+            agent: self.session_id.clone(),
+            mode: mode_id.to_string(),
+        });
+    }
+
+    /// The Mode switch the composer draws for a kernel chat: the three
+    /// permission modes, `current` from the agent's folder.
+    pub fn modes(current: &str) -> cacp::schema::SessionModeState {
+        use cacp::schema::{SessionMode, SessionModeId, SessionModeState};
+        let current = arbos_core::Mode::parse(current).unwrap_or_default();
+        SessionModeState {
+            current_mode_id: SessionModeId::from(current.as_str()),
+            available_modes: arbos_core::Mode::ALL
+                .iter()
+                .map(|m| SessionMode {
+                    id: SessionModeId::from(m.as_str()),
+                    name: m.label().to_string(),
+                    description: Some(m.describe().to_string()),
+                    meta: None,
+                })
+                .collect(),
+            meta: None,
+        }
+    }
 
     /// No-op. The kernel has no ACP config options; the model is `set_model`.
     pub fn set_config_option(

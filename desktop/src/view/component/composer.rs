@@ -100,7 +100,8 @@ pub struct Agent {
 /// same idea.
 #[derive(Clone, PartialEq, Eq)]
 pub enum SwitchId {
-    /// Leftover ACP mode switch. Unused: the kernel has no session modes.
+    /// The kernel's permission mode (auto / ask / plan), or an ACP agent's
+    /// session mode.
     Mode,
     /// Leftover ACP config switch. Unused: the model is [`SwitchId::Model`].
     Config(SharedString),
@@ -1398,6 +1399,64 @@ impl Composer {
             .into_any_element()
     }
 
+    /// The permission mode — Auto, Ask before writes, Plan only — as a
+    /// small chip left of the model. A click cycles to the next mode; the
+    /// tooltip says what the current one means. None when the chat has
+    /// no modes (an ACP agent without them).
+    fn mode_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let switch = self
+            .switches
+            .iter()
+            .find(|switch| matches!(switch.id, SwitchId::Mode))?;
+        if switch.options.is_empty() {
+            return None;
+        }
+        let current = switch.current.clone()?;
+        let ix = switch
+            .options
+            .iter()
+            .position(|o| o.id == current)
+            .unwrap_or(0);
+        let now = &switch.options[ix];
+        let next = switch.options[(ix + 1) % switch.options.len()].id.clone();
+        let label = now.name.clone();
+        let tip: SharedString = format!("Mode: {label}. Click for the next mode.").into();
+        let strict = now.id.as_ref() != "auto";
+        Some(
+            div()
+                .id("composer-mode")
+                .flex_none()
+                .h(px(root::COMPOSER_HIT))
+                .px(px(6.))
+                .rounded(px(6.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.))
+                .cursor_pointer()
+                .text_style(TextStyle::Caption)
+                .text_color(if strict { theme.text } else { theme.text_muted })
+                .when(strict, |el| el.bg(theme.element_active))
+                .hover(|button| button.bg(theme.element_hover))
+                .tooltip(move |window, cx| Tooltip::text(tip.clone(), window, cx))
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(ComposerEvent::Switch(SwitchId::Mode, next.clone()));
+                }))
+                .child(
+                    icons::icon(if strict {
+                        icons::system::TUNING
+                    } else {
+                        icons::media::PLAY
+                    })
+                    .size(px(12.))
+                    .text_color(if strict { theme.text } else { theme.text_faint })
+                    .into_any_element(),
+                )
+                .child(div().child(label))
+                .into_any_element(),
+        )
+    }
+
     fn model_switch(&self) -> Option<&Switch> {
         self.switches
             .iter()
@@ -2139,6 +2198,7 @@ impl Composer {
                                     .flex_row()
                                     .items_center()
                                     .gap(px(4.))
+                                    .children(self.mode_chip(&theme, cx))
                                     .child(
                                         div()
                                             .relative()

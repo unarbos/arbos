@@ -107,7 +107,8 @@ impl Tool for Bash {
                 .await
                 .map_err(|e| anyhow::anyhow!("git guard task: {e}"))??;
             }
-            if needs_approval(cmd) {
+            // In ask mode the call was already allowed before it ran.
+            if needs_approval(cmd) && cx.agent.mode != arbos_core::Mode::Ask {
                 let allowed = tokio::select! {
                     r = cx.hooks.approve(&cx.agent.id, "bash", cmd) => r?,
                     _ = cx.cancel.cancelled() => bail!("interrupted while waiting for approval"),

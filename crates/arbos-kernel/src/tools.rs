@@ -61,10 +61,21 @@ impl Tool for Spawn {
     fn schema(&self) -> Value {
         typed_schema(
             "spawn",
-            "Start a child agent with a brief. The child owns its own plan and schedule: do not add plan nodes of your own that mirror its job. Its reports arrive here as messages from it. isolate=worktree gives it a git worktree of this repository (.arbos/worktrees/<id>, branch arbos/<id>, cut from HEAD) so it can edit, build, and commit without touching your checkout — use it for any child that changes code while you or another child also do.",
+            "Start a child agent with a brief. The child owns its own plan and schedule: do not add plan nodes of your own that mirror its job. Its reports arrive here as messages from it. isolate=worktree gives it a git worktree of this repository (.arbos/worktrees/<id>, branch arbos/<id>, cut from HEAD) so it can edit, build, and commit without touching your checkout — use it for any child that changes code while you or another child also do. kind picks a custom agent definition (see Kinds in your prompt): its model, tools, and standing instructions apply to the child.",
             &[
                 ("brief", "What the child should do.", true, "string"),
-                ("model", "inherit or a model id.", false, "string"),
+                (
+                    "kind",
+                    "Name of an agent definition from .arbos/agents-defs/ (Kinds in your prompt).",
+                    false,
+                    "string",
+                ),
+                (
+                    "model",
+                    "inherit or a model id. Beats the kind's model.",
+                    false,
+                    "string",
+                ),
                 ("readonly", "If true, no writes.", false, "boolean"),
                 ("cwd", "Child cwd. Overrides isolate.", false, "string"),
                 ("isolate", "none (default) or worktree.", false, "string"),
@@ -103,6 +114,8 @@ impl Tool for Spawn {
                     diff: None,
                 });
             }
+            let kind = opt_str(&args, "kind");
+            let kind_owned = kind.map(str::to_string);
             let raw = opt_str(&args, "isolate").unwrap_or("none");
             let isolate = Isolate::parse(raw).ok_or_else(|| {
                 anyhow::anyhow!("spawn: isolate must be none or worktree, not {raw:?}")
@@ -120,11 +133,15 @@ impl Tool for Spawn {
                     readonly,
                     cwd,
                     isolate,
+                    kind_owned.as_deref(),
                 )
             })
             .await
             .map_err(|e| anyhow::anyhow!("spawn task: {e}"))??;
-            let mut body = format!("spawned {id}: {brief}");
+            let mut body = match kind {
+                Some(k) => format!("spawned {id} (kind {k}): {brief}"),
+                None => format!("spawned {id}: {brief}"),
+            };
             let mut paths = vec![format!(".arbos/agents/{id}")];
             if let Some(w) = &worktree {
                 body.push_str(&format!(

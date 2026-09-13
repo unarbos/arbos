@@ -2026,7 +2026,10 @@ fn pump(
             }
             workspace.with_session(id, cx, |chat| {
                 chat.agent_session = Some(session.session_id.clone());
-                chat.modes = None;
+                // The kernel's permission modes, current from agent.md.
+                let current = crate::kernel::agent_mode(&chat.place(), &session.session_id)
+                    .unwrap_or_else(|| "auto".into());
+                chat.modes = Some(crate::agent::acp::Session::modes(&current));
                 chat.config = Vec::new();
                 // A model picked while offline reaches the kernel now.
                 if let Some(model) = chat.model.clone() {

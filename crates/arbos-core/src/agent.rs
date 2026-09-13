@@ -49,6 +49,61 @@ pub const ALL_TOOLS: &[&str] = &[
     "subscribe",
 ];
 
+/// How much an agent may do without asking. `agent.md` `mode:`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Writes run; only dangerous shell commands ask. The default.
+    #[default]
+    Auto,
+    /// Every call that writes asks the user first.
+    Ask,
+    /// No writes at all: read, think, plan, report.
+    Plan,
+}
+
+impl Mode {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Ask, Self::Plan];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Ask => "ask",
+            Self::Plan => "plan",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" | "yolo" | "full" => Some(Self::Auto),
+            "ask" | "approve" | "confirm" => Some(Self::Ask),
+            "plan" | "readonly" | "read-only" => Some(Self::Plan),
+            _ => None,
+        }
+    }
+
+    /// The picker's label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Ask => "Ask before writes",
+            Self::Plan => "Plan only",
+        }
+    }
+
+    /// One line for the prompt.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Auto => "auto: your edits and commands run; only dangerous shell commands ask.",
+            Self::Ask => {
+                "ask: every call that writes (write, edit, apply_patch, a bash command that is not read-only, undo, an MCP tool) shows the user an allow/deny question before it runs; reads run freely. Just make the call — the question is asked for you; do not ask permission in words first."
+            }
+            Self::Plan => {
+                "plan: you may not write. Read, think, and put the change you would make in your plan and your reply; ask the user to switch you to ask or auto to carry it out."
+            }
+        }
+    }
+}
+
 /// One agent folder. Fields live in `agent.md`.
 #[derive(Debug, Clone)]
 pub struct Agent {
@@ -66,6 +121,10 @@ pub struct Agent {
     /// `machine:path` when this agent is a stand-in for a kernel on another
     /// machine: its turns run there; this folder mirrors them.
     pub remote: Option<String>,
+    pub mode: Mode,
+    /// The definition this agent was spawned from (`spawn kind=<name>`),
+    /// or empty. Its body lives in the agent folder as `instructions.md`.
+    pub kind: String,
 }
 
 impl Agent {
@@ -81,6 +140,8 @@ impl Agent {
             readonly: false,
             cwd: None,
             remote: None,
+            mode: Mode::Auto,
+            kind: String::new(),
         }
     }
 
@@ -117,7 +178,7 @@ impl Agent {
             .unwrap_or_default();
         let remote = self.remote.clone().unwrap_or_default();
         format!(
-            "name: {}\ntitle: {}\nparent: {}\npaused: {}\nmodel: {}\nallowlist: {}\nreadonly: {}\ncwd: {}\nremote: {}\n",
+            "name: {}\ntitle: {}\nparent: {}\npaused: {}\nmodel: {}\nallowlist: {}\nreadonly: {}\ncwd: {}\nremote: {}\nmode: {}\nkind: {}\n",
             self.name,
             self.title,
             parent,
@@ -126,7 +187,9 @@ impl Agent {
             self.allowlist.join(", "),
             self.readonly,
             cwd,
-            remote
+            remote,
+            self.mode.as_str(),
+            self.kind
         )
     }
 
@@ -165,6 +228,10 @@ impl Agent {
                     }
                 }
                 "readonly" => agent.readonly = parse_bool(value),
+                "mode" => match Mode::parse(value) {
+                    Some(m) => agent.mode = m,
+                    None => eprintln!("{}: unknown mode {value:?}; using auto", agent.id),
+                },
                 "cwd" => {
                     agent.cwd = if value.is_empty() {
                         None
@@ -175,6 +242,7 @@ impl Agent {
                 "remote" => {
                     agent.remote = (!value.is_empty()).then(|| value.to_string());
                 }
+                "kind" => agent.kind = value.to_string(),
                 _ => {}
             }
         }
@@ -219,6 +287,12 @@ impl Agent {
     pub fn restrict_allowlist(&mut self, parent: &Agent) {
         self.allowlist
             .retain(|t| parent.allowlist.iter().any(|p| p == t));
+        // A child is never freer than its parent.
+        if parent.mode == Mode::Plan {
+            self.mode = Mode::Plan;
+        } else if parent.mode == Mode::Ask && self.mode == Mode::Auto {
+            self.mode = Mode::Ask;
+        }
         if self.readonly {
             self.allowlist.retain(|t| {
                 matches!(
@@ -239,6 +313,11 @@ impl Agent {
                 )
             });
         }
+    }
+
+    /// Plan mode is readonly by another name.
+    pub fn no_writes(&self) -> bool {
+        self.readonly || self.mode == Mode::Plan
     }
 
     pub fn may(&self, tool: &str) -> bool {
