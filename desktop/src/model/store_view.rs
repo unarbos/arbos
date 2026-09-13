@@ -205,6 +205,11 @@ fn parse_standing(agent: &str, text: &str) -> Option<Standing> {
     let value: toml::Value = toml::from_str(text).ok()?;
     let table = value.as_table()?;
     let str_of = |key: &str| table.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+    // A kernel chore (`deliver_to = "none"`: the weekly `git gc`) is not
+    // the project's standing work; nobody asked for it.
+    if str_of("deliver_to").as_deref() == Some("none") {
+        return None;
+    }
     let id = table.get("id").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
     let kind = str_of("kind").unwrap_or_default();
     let label = str_of("prompt")
@@ -538,6 +543,14 @@ mod tests {
         assert_eq!(pr.label, "unarbos/arbos#103");
         assert_eq!(pr.when, "");
         assert!(parse_standing("w1", "not toml = = =").is_none());
+        assert!(
+            parse_standing(
+                "root",
+                "id = 1\nkind = \"shell\"\ncmd = \"git gc\"\nevery = \"7d\"\ndeliver_to = \"none\"\ncreated = \"x\"\n"
+            )
+            .is_none(),
+            "a kernel chore is not standing work"
+        );
     }
 
     #[test]
