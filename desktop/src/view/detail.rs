@@ -698,7 +698,12 @@ impl Cydonia {
 
     /// Cursor's chat header: the title and the place on the left, the chat's
     /// menu on the right, on one slim line the transcript scrolls under.
-    fn chat_header(&self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn chat_header(
+        &self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let workspace = self.workspace.read(cx);
         let Some(chat) = workspace.active_session() else {
             return div().into_any_element();
