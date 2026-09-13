@@ -21,6 +21,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+/// The local machine's row in the picker: named for what it is (ui-007).
+const LOCAL_MACHINE: &str = if cfg!(target_os = "macos") {
+    "This Mac"
+} else {
+    "This machine"
+};
+
 actions!(arbos_opener, [Submit, Next, Previous, Dismiss, Complete]);
 
 const KEY_CONTEXT: &str = "ArbosOpener";
@@ -199,7 +206,7 @@ impl Opener {
         }
         self.stage = Stage::Folder { host: None };
         self.field.update(cx, |field, cx| {
-            field.set_placeholder("This Mac", cx);
+            field.set_placeholder(LOCAL_MACHINE, cx);
         });
         self.prefetch(cx);
         self.ensure_listing(cx);
@@ -231,10 +238,10 @@ impl Opener {
 
     fn machines(&self) -> Vec<Offer> {
         let mut out = vec![Offer::Machine {
-            name: "This Mac".into(),
+            name: LOCAL_MACHINE.into(),
             host: None,
         }];
-        let mut seen = std::collections::HashSet::from(["This Mac".to_string()]);
+        let mut seen = std::collections::HashSet::from([LOCAL_MACHINE.to_string()]);
         let push =
             |out: &mut Vec<Offer>, seen: &mut std::collections::HashSet<String>, host: &str| {
                 if seen.insert(host.to_string()) {
@@ -335,7 +342,7 @@ impl Opener {
     fn enter_machine(&mut self, host: Option<String>, cx: &mut Context<Self>) {
         self.stage = Stage::Folder { host: host.clone() };
         self.cursor = 0;
-        let name = host.as_deref().unwrap_or("This Mac");
+        let name = host.as_deref().unwrap_or(LOCAL_MACHINE);
         self.field.update(cx, |field, cx| {
             field.set_placeholder(name, cx);
             field.set_content("/", cx);
@@ -702,7 +709,7 @@ impl Render for Opener {
         let lit = self.cursor;
         let machine = match &self.stage {
             Stage::Machine => None,
-            Stage::Folder { host } => Some(host.as_deref().unwrap_or("This Mac").to_string()),
+            Stage::Folder { host } => Some(host.as_deref().unwrap_or(LOCAL_MACHINE).to_string()),
         };
         let empty = if offers.is_empty() {
             if self.is_listing(cx) {

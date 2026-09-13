@@ -1859,8 +1859,10 @@ impl Composer {
         let busy = self.voice == VoiceState::Busy;
         let tip = if recording {
             "Stop dictation"
-        } else {
+        } else if cfg!(target_os = "macos") {
             "Hold Fn to talk"
+        } else {
+            "Dictation (macOS only for now)"
         };
         let disc = div()
             .id("composer-voice")

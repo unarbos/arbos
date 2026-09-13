@@ -1021,8 +1021,19 @@ impl Arbos {
                     .max_w(px(200.))
                     .text_style(TextStyle::Caption)
                     .text_color(theme.text_faint)
+                    .cursor_pointer()
+                    .hover(|el| el.text_color(theme.text_muted))
                     .tooltip(|window, cx| {
-                        Tooltip::text("Where this agent runs", window, cx)
+                        Tooltip::text(
+                            "Where this agent runs. Click to open a folder on another machine",
+                            window,
+                            cx,
+                        )
+                    })
+                    // The row used to take a click and do nothing (ui-011):
+                    // now it opens the picker at its machine step.
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(root::OpenProject), cx);
                     })
                     .child(
                         icons::icon(glyph)
@@ -1735,7 +1746,17 @@ impl Arbos {
             .iter()
             .filter(|n| !n.standing && n.do_kind != "ask")
             .count();
-        let standing = nodes.iter().filter(|n| n.standing).count();
+        // A standing node the user stopped is blocked: paused, not standing
+        // work in progress. The header says so and the Stop control goes
+        // until something is armed again (ui-005).
+        let standing = nodes
+            .iter()
+            .filter(|n| n.standing && n.status != "blocked")
+            .count();
+        let paused = nodes
+            .iter()
+            .filter(|n| n.standing && n.status == "blocked")
+            .count();
         let asks = nodes.iter().filter(|n| n.do_kind == "ask").count();
         let failed = nodes.iter().filter(|n| n.status == "failed").count();
         let running = nodes.iter().any(|n| n.status == "active");
@@ -1748,6 +1769,9 @@ impl Arbos {
         }
         if standing > 0 {
             parts.push(plural(standing, "standing", "standing"));
+        }
+        if paused > 0 {
+            parts.push(plural(paused, "paused", "paused"));
         }
         if asks > 0 {
             parts.push(plural(asks, "question for you", "questions for you"));
@@ -2627,6 +2651,29 @@ impl Arbos {
                                 })),
                         )
                     })
+                    .child(
+                        div()
+                            .id(("edit-queue", ix))
+                            .flex_none()
+                            .mt(px(2.))
+                            .cursor_pointer()
+                            .text_style(TextStyle::Callout)
+                            .text_color(theme.text_faint)
+                            .group_hover(group.clone(), |el| el.text_color(theme.text))
+                            .child("Edit")
+                            .tooltip(|window, cx| {
+                                bezel::ui::tooltip::Tooltip::text(
+                                    "Take this back into the composer",
+                                    window,
+                                    cx,
+                                )
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.workspace.update(cx, |workspace, cx| {
+                                    workspace.with_session(id, cx, |chat| chat.edit_queued(ix));
+                                });
+                            })),
+                    )
                     .child(
                         div()
                             .id(("unqueue", ix))

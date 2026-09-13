@@ -473,7 +473,9 @@ impl Drop for Session {
 
 fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
     match frame {
-        Frame::Event { agent: id, event } if id == agent || agent.is_empty() => kernel_event(event),
+        Frame::Event { agent: id, event } if id == agent || agent.is_empty() => {
+            kernel_event(&id, event)
+        }
         // Streamed text, one chunk per frame (the kernel's live path); the
         // whole step arrives later as an `event` with a seq, which
         // `merge_stream_text` folds into what the chunks built.
@@ -624,7 +626,7 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
     }
 }
 
-fn kernel_event(event: arbos_core::Event) -> Vec<Event> {
+fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
     use arbos_core::EventKind;
     let recorded = event.seq > 0;
     match event.kind {
@@ -653,9 +655,15 @@ fn kernel_event(event: arbos_core::Event) -> Vec<Event> {
             crate::model::session::interrupt_label(&detail),
         )],
         EventKind::Ask {
-            question, options, ..
+            question,
+            options,
+            call_id,
         } => vec![Event::NeedQuestion {
-            request_id: "ask".into(),
+            // The transcript line carries the ask's id when the kernel
+            // wrote one; without it the answer goes blind (the agent id),
+            // which the kernel accepts while one question is pending. Never
+            // a made-up id: the kernel refuses those (ui-004).
+            request_id: call_id.unwrap_or_else(|| agent.to_string()),
             title: question.clone(),
             questions: vec![crate::model::session::AskQuestion {
                 id: "q".into(),
