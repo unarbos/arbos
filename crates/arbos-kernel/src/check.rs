@@ -430,6 +430,20 @@ pub fn check(place: &Place) -> Result<Report> {
                 if pid == 0 || !pid_alive(pid as u32) {
                     r.warn(rel(&kj), None, format!("stale: pid {pid} is not running"));
                 }
+                if let Some(names) = v.get("stray_secret_env").and_then(|s| s.as_array())
+                    && !names.is_empty()
+                {
+                    let list: Vec<&str> = names.iter().filter_map(|n| n.as_str()).collect();
+                    r.warn(
+                        rel(&kj),
+                        None,
+                        format!(
+                            "the kernel's environment holds {} credential-looking variable(s) the secrets door does not manage ({}): they came from the shell it was started in; declare them in .arbos/secrets.toml or start it clean",
+                            list.len(),
+                            list.join(", ")
+                        ),
+                    );
+                }
             }
             None => r.error(rel(&kj), None, "does not parse"),
         }
