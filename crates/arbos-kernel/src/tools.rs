@@ -721,16 +721,22 @@ impl Tool for Browser {
     fn schema(&self) -> Value {
         simple_schema(
             "browser",
-            "Drive a page the user sees under this chat; screenshot shows the image to both of you.",
+            "Drive a page the user sees under this chat. snapshot lists text and numbered [n] refs; click/type/fill/hover/select/scroll take a ref; press a key (Enter, Tab, Escape, ArrowDown); wait for text or a ref (≤30 s); eval a JS expression; console shows the page's console and errors; screenshot shows the image to both of you.",
             &[
                 (
                     "action",
-                    "navigate|click|type|screenshot|snapshot|close",
+                    "navigate|snapshot|screenshot|click|type|fill|press|hover|select|scroll|back|forward|wait|eval|console|close",
                     true,
                 ),
-                ("url", "For navigate.", false),
-                ("ref", "Element ref.", false),
-                ("text", "Text to type.", false),
+                ("url", "navigate", false),
+                ("ref", "[n] from snapshot", false),
+                ("text", "type/fill: the text; wait: text to wait for", false),
+                ("key", "press", false),
+                ("value", "select: option text or value", false),
+                ("direction", "scroll: down|up|top|bottom", false),
+                ("amount", "scroll: pixels", false),
+                ("ms", "wait: at most (5000)", false),
+                ("expression", "eval: JavaScript", false),
             ],
         )
     }
@@ -764,7 +770,18 @@ impl Tool for Browser {
             }
             let agent = cx.agent.id.clone();
             let blocking = Arc::clone(&hooks);
-            let changes_page = matches!(action.as_str(), "navigate" | "click" | "type");
+            let changes_page = matches!(
+                action.as_str(),
+                "navigate"
+                    | "click"
+                    | "type"
+                    | "fill"
+                    | "press"
+                    | "select"
+                    | "scroll"
+                    | "back"
+                    | "forward"
+            );
             let out = tokio::task::spawn_blocking(move || blocking.browser(&agent, &action, &args))
                 .await
                 .map_err(|e| anyhow::anyhow!("browser task: {e}"))??;

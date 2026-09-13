@@ -138,7 +138,141 @@ impl BrowserHub {
                 cdp.type_into(r#ref, text)?;
                 Ok(format!("typed into {ref}").into())
             }
-            other => bail!("unknown browser action {other}"),
+            "fill" => {
+                // Clear, then type: a form field that already holds text.
+                let r#ref = args
+                    .get("ref")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("fill needs ref (from snapshot)"))?;
+                let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let mut cdp = self.session()?;
+                cdp.fill(r#ref, text)?;
+                Ok(format!("filled {ref}").into())
+            }
+            "press" => {
+                // A key on the focused element: Enter to submit, Tab, Escape,
+                // ArrowDown, or one character.
+                let key = args.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!("press needs key (Enter, Tab, Escape, ArrowDown, a)")
+                })?;
+                let mut cdp = self.session()?;
+                cdp.press(key)?;
+                let url = cdp.url().unwrap_or_default();
+                if !url.is_empty() {
+                    self.pages.lock().unwrap().insert(agent.to_string(), url);
+                }
+                Ok(format!(
+                    "pressed {key}
+{}",
+                    cdp.snapshot().unwrap_or_default()
+                )
+                .into())
+            }
+            "hover" => {
+                let r#ref = args
+                    .get("ref")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("hover needs ref (from snapshot)"))?;
+                let mut cdp = self.session()?;
+                cdp.hover(r#ref)?;
+                Ok(format!(
+                    "hovering {ref}
+{}",
+                    cdp.snapshot().unwrap_or_default()
+                )
+                .into())
+            }
+            "select" => {
+                // A <select>: the option by its visible text or value.
+                let r#ref = args
+                    .get("ref")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("select needs ref (from snapshot)"))?;
+                let value = args
+                    .get("value")
+                    .or_else(|| args.get("text"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("select needs value (an option's text or value)")
+                    })?;
+                let mut cdp = self.session()?;
+                let picked = cdp.select(r#ref, value)?;
+                Ok(format!("selected {picked} in {ref}").into())
+            }
+            "scroll" => {
+                // By a ref (into view) or by direction: down (default), up,
+                // top, bottom; `amount` pixels, default one screen.
+                let mut cdp = self.session()?;
+                let where_ = cdp.scroll(
+                    args.get("ref").and_then(|v| v.as_str()),
+                    args.get("direction")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("down"),
+                    args.get("amount").and_then(number),
+                )?;
+                Ok(format!(
+                    "{where_}
+{}",
+                    cdp.snapshot().unwrap_or_default()
+                )
+                .into())
+            }
+            "back" | "forward" => {
+                let mut cdp = self.session()?;
+                cdp.history(action)?;
+                let url = cdp.url().unwrap_or_default();
+                if !url.is_empty() {
+                    self.pages.lock().unwrap().insert(agent.to_string(), url);
+                }
+                Ok(format!(
+                    "went {action}
+{}",
+                    cdp.snapshot().unwrap_or_default()
+                )
+                .into())
+            }
+            "wait" => {
+                // Until text appears on the page, or a ref exists, or `ms`
+                // pass; whichever is given. Never longer than 30 s.
+                let mut cdp = self.session()?;
+                let text = args.get("text").and_then(|v| v.as_str());
+                let r#ref = args.get("ref").and_then(|v| v.as_str());
+                let ms = args
+                    .get("ms")
+                    .and_then(number)
+                    .map(|n| n.max(0.0) as u64)
+                    .unwrap_or(5_000)
+                    .min(30_000);
+                let outcome = cdp.wait_for(text, r#ref, ms)?;
+                Ok(format!(
+                    "{outcome}
+{}",
+                    cdp.snapshot().unwrap_or_default()
+                )
+                .into())
+            }
+            "eval" => {
+                // A JavaScript expression in the page; its value comes back
+                // as JSON. For reading state the snapshot does not show.
+                let expression = args
+                    .get("expression")
+                    .or_else(|| args.get("script"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("eval needs expression"))?;
+                let mut cdp = self.session()?;
+                let value = cdp.eval(expression)?;
+                let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+                Ok(arbos_core::text::clip(&text, 8_000).into())
+            }
+            "console" => {
+                // Console messages and uncaught errors since the page loaded,
+                // gathered by a hook installed the first time it is asked for.
+                let mut cdp = self.session()?;
+                Ok(cdp.console()?.into())
+            }
+            other => bail!(
+                "unknown browser action {other}; use navigate, snapshot, screenshot, click, type, fill, press, hover, select, scroll, back, forward, wait, eval, console, close"
+            ),
         }
     }
 
@@ -270,6 +404,81 @@ const SNAPSHOT_JS: &str = r#"(() => {
   return `url: ${location.href}\ntitle: ${document.title}\n\n${text}\n\ninteractive:\n${rows.join('\n')}`;
 })()"#;
 
+/// The console hook alone, for `Page.addScriptToEvaluateOnNewDocument`.
+const CONSOLE_INSTALL_JS: &str = r#"(() => {
+  if (!window.__arbosConsole) {
+    const keep = [];
+    window.__arbosConsole = keep;
+    const push = (level, args) => { try { keep.push(level + ': ' + Array.from(args).map(a => { try { return typeof a === 'string' ? a : JSON.stringify(a); } catch (e) { return String(a); } }).join(' ').slice(0, 500)); } catch (e) {} if (keep.length > 200) keep.shift(); };
+    for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
+      const orig = console[level];
+      console[level] = function () { push(level, arguments); return orig && orig.apply(console, arguments); };
+    }
+    window.addEventListener('error', e => push('uncaught', [e.message + ' @ ' + e.filename + ':' + e.lineno]));
+    window.addEventListener('unhandledrejection', e => push('unhandledrejection', [String(e.reason)]));
+  }
+})()"#;
+
+/// Install (once) a hook that keeps console output and errors, and return
+/// what it has.
+const CONSOLE_JS: &str = r#"(() => {
+  if (!window.__arbosConsole) {
+    const keep = [];
+    window.__arbosConsole = keep;
+    const push = (level, args) => { try { keep.push(level + ': ' + Array.from(args).map(a => { try { return typeof a === 'string' ? a : JSON.stringify(a); } catch (e) { return String(a); } }).join(' ').slice(0, 500)); } catch (e) {} if (keep.length > 200) keep.shift(); };
+    for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
+      const orig = console[level];
+      console[level] = function () { push(level, arguments); return orig && orig.apply(console, arguments); };
+    }
+    window.addEventListener('error', e => push('uncaught', [e.message + ' @ ' + e.filename + ':' + e.lineno]));
+    window.addEventListener('unhandledrejection', e => push('unhandledrejection', [String(e.reason)]));
+  }
+  return window.__arbosConsole.slice();
+})()"#;
+
+/// A number the model sent as a number or as a string.
+fn number(v: &Value) -> Option<f64> {
+    v.as_f64().or_else(|| v.as_str()?.trim().parse().ok())
+}
+
+/// `[12]` or `12` → 12.
+fn ref_number(r#ref: &str) -> Result<u64> {
+    r#ref
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse()
+        .map_err(|_| anyhow::anyhow!("ref must be a number from snapshot, got {ref:?}"))
+}
+
+/// DOM `key`, `code`, and Windows virtual key for the names a model uses.
+fn key_codes(key: &str) -> (String, String, u32) {
+    let k = key.trim();
+    let lower = k.to_ascii_lowercase();
+    let (dom, code, win) = match lower.as_str() {
+        "enter" | "return" => ("Enter", "Enter", 13),
+        "tab" => ("Tab", "Tab", 9),
+        "escape" | "esc" => ("Escape", "Escape", 27),
+        "backspace" => ("Backspace", "Backspace", 8),
+        "delete" => ("Delete", "Delete", 46),
+        "space" | " " => (" ", "Space", 32),
+        "arrowdown" | "down" => ("ArrowDown", "ArrowDown", 40),
+        "arrowup" | "up" => ("ArrowUp", "ArrowUp", 38),
+        "arrowleft" | "left" => ("ArrowLeft", "ArrowLeft", 37),
+        "arrowright" | "right" => ("ArrowRight", "ArrowRight", 39),
+        "home" => ("Home", "Home", 36),
+        "end" => ("End", "End", 35),
+        "pageup" => ("PageUp", "PageUp", 33),
+        "pagedown" => ("PageDown", "PageDown", 34),
+        _ => {
+            let c = k.chars().next().unwrap_or(' ');
+            let win = c.to_ascii_uppercase() as u32;
+            return (c.to_string(), format!("Key{}", c.to_ascii_uppercase()), win);
+        }
+    };
+    (dom.to_string(), code.to_string(), win)
+}
+
 impl Cdp {
     fn connect(port: u16) -> Result<Self> {
         let list = reqwest::blocking::get(format!("http://127.0.0.1:{port}/json/list"))?.text()?;
@@ -353,6 +562,13 @@ impl Cdp {
 
     fn navigate(&mut self, url: &str) -> Result<()> {
         self.call("Page.enable", json!({}))?;
+        // The console hook goes in before the page's own scripts run, so
+        // `console` sees everything from load on. Once per target; Chrome
+        // keeps it across navigations.
+        let _ = self.call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({"source": CONSOLE_INSTALL_JS}),
+        );
         let result = self.call("Page.navigate", json!({"url": url}))?;
         if let Some(err) = result.get("errorText").and_then(Value::as_str) {
             bail!("navigate {url}: {err}");
@@ -416,11 +632,7 @@ impl Cdp {
     }
 
     fn click(&mut self, r#ref: &str) -> Result<()> {
-        let n: u64 = r#ref
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse()
-            .map_err(|_| anyhow::anyhow!("ref must be a number from snapshot, got {ref:?}"))?;
+        let n = ref_number(r#ref)?;
         let js = format!(
             r#"(() => {{ const el = document.querySelector('[data-arbos-ref="{n}"]'); if (!el) return 'missing'; el.scrollIntoView({{block: 'center'}}); el.click(); return 'ok'; }})()"#
         );
@@ -436,12 +648,206 @@ impl Cdp {
         }
     }
 
+    /// Focus `ref` and clear it: the element itself for inputs and text
+    /// areas, the contenteditable's text otherwise.
+    fn focus_clear(&mut self, r#ref: &str) -> Result<()> {
+        let n = ref_number(r#ref)?;
+        let js = format!(
+            r#"(() => {{ const el = document.querySelector('[data-arbos-ref="{n}"]'); if (!el) return 'missing'; el.focus(); if ('value' in el) {{ el.value = ''; el.dispatchEvent(new Event('input', {{bubbles: true}})); }} else if (el.isContentEditable) {{ el.textContent = ''; }} return 'ok'; }})()"#
+        );
+        if self.eval(&js)?.as_str() != Some("ok") {
+            bail!("no element with ref {n}; take a new snapshot");
+        }
+        Ok(())
+    }
+
+    fn fill(&mut self, r#ref: &str, text: &str) -> Result<()> {
+        self.focus_clear(r#ref)?;
+        self.call("Input.insertText", json!({"text": text}))?;
+        Ok(())
+    }
+
+    /// One key, as a person presses it: keydown, keyup, and for a single
+    /// printable character the text too. Names follow the DOM `key` values.
+    fn press(&mut self, key: &str) -> Result<()> {
+        let (dom_key, code, win) = key_codes(key);
+        let mut down =
+            json!({"type": "keyDown", "key": dom_key, "code": code, "windowsVirtualKeyCode": win});
+        if dom_key.chars().count() == 1 {
+            down["text"] = json!(dom_key);
+        } else if dom_key == "Enter" {
+            // Without the text Chrome treats it as a raw key: no implicit
+            // form submission, no newline.
+            down["text"] = json!("\r");
+            down["unmodifiedText"] = json!("\r");
+        }
+        self.call("Input.dispatchKeyEvent", down)?;
+        self.call(
+            "Input.dispatchKeyEvent",
+            json!({"type": "keyUp", "key": dom_key, "code": code, "windowsVirtualKeyCode": win}),
+        )?;
+        if dom_key == "Enter" {
+            self.set_timeout(std::time::Duration::from_secs(2))?;
+            self.wait_event("Page.loadEventFired", std::time::Duration::from_secs(2));
+            self.set_timeout(std::time::Duration::from_secs(15))?;
+        }
+        Ok(())
+    }
+
+    fn hover(&mut self, r#ref: &str) -> Result<()> {
+        let n = ref_number(r#ref)?;
+        let js = format!(
+            r#"(() => {{ const el = document.querySelector('[data-arbos-ref="{n}"]'); if (!el) return null; el.scrollIntoView({{block: 'center'}}); const r = el.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; }})()"#
+        );
+        let point = self.eval(&js)?;
+        let (x, y) = match point.as_array().map(|a| (a[0].as_f64(), a[1].as_f64())) {
+            Some((Some(x), Some(y))) => (x, y),
+            _ => bail!("no element with ref {n}; take a new snapshot"),
+        };
+        self.call(
+            "Input.dispatchMouseEvent",
+            json!({"type": "mouseMoved", "x": x, "y": y}),
+        )?;
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        Ok(())
+    }
+
+    fn select(&mut self, r#ref: &str, value: &str) -> Result<String> {
+        let n = ref_number(r#ref)?;
+        let wanted = serde_json::to_string(value)?;
+        let js = format!(
+            r#"(() => {{ const el = document.querySelector('[data-arbos-ref="{n}"]'); if (!el) return 'missing'; if (el.tagName !== 'SELECT') return 'not-select'; const want = {wanted}; const opt = Array.from(el.options).find(o => o.value === want || o.text.trim() === want.trim()); if (!opt) return 'no-option:' + Array.from(el.options).map(o => o.text.trim()).join(' | '); el.value = opt.value; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return 'ok:' + opt.text.trim(); }})()"#
+        );
+        match self.eval(&js)?.as_str().unwrap_or("") {
+            "missing" => bail!("no element with ref {n}; take a new snapshot"),
+            "not-select" => bail!("ref {n} is not a <select>; use click or type"),
+            s if s.starts_with("no-option:") => bail!(
+                "no option {value:?} in ref {n}; options: {}",
+                &s["no-option:".len()..]
+            ),
+            s => Ok(s.trim_start_matches("ok:").to_string()),
+        }
+    }
+
+    fn scroll(
+        &mut self,
+        r#ref: Option<&str>,
+        direction: &str,
+        amount: Option<f64>,
+    ) -> Result<String> {
+        if let Some(r) = r#ref {
+            let n = ref_number(r)?;
+            let js = format!(
+                r#"(() => {{ const el = document.querySelector('[data-arbos-ref="{n}"]'); if (!el) return 'missing'; el.scrollIntoView({{block: 'center'}}); return 'ok'; }})()"#
+            );
+            if self.eval(&js)?.as_str() != Some("ok") {
+                bail!("no element with ref {n}; take a new snapshot");
+            }
+            return Ok(format!("scrolled to {r}"));
+        }
+        // Default: most of one screen, so nothing is skipped.
+        let step = match amount {
+            Some(px) if px > 0.0 => format!("{px}"),
+            _ => "window.innerHeight * 0.9".to_string(),
+        };
+        let js = match direction {
+            "top" => "window.scrollTo(0, 0)".to_string(),
+            "bottom" => "window.scrollTo(0, document.body.scrollHeight)".to_string(),
+            "up" => format!("window.scrollBy(0, -({step}))"),
+            "down" => format!("window.scrollBy(0, {step})"),
+            other => bail!("scroll direction must be up, down, top, or bottom, not {other:?}"),
+        };
+        self.eval(&js)?;
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let at = self.eval("Math.round(window.scrollY) + '/' + Math.round(document.body.scrollHeight - window.innerHeight)")?;
+        Ok(format!(
+            "scrolled {direction} (at {} px)",
+            at.as_str().unwrap_or("?")
+        ))
+    }
+
+    fn history(&mut self, which: &str) -> Result<()> {
+        let js = if which == "back" {
+            "history.back()"
+        } else {
+            "history.forward()"
+        };
+        self.eval(js)?;
+        self.set_timeout(std::time::Duration::from_secs(3))?;
+        self.wait_event("Page.loadEventFired", std::time::Duration::from_secs(3));
+        self.set_timeout(std::time::Duration::from_secs(15))?;
+        Ok(())
+    }
+
+    /// Poll the page until `text` is on it, `ref` exists, or `ms` pass.
+    fn wait_for(&mut self, text: Option<&str>, r#ref: Option<&str>, ms: u64) -> Result<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        let n = r#ref.map(ref_number).transpose()?;
+        loop {
+            let found = match (text, n) {
+                (Some(t), _) => {
+                    let want = serde_json::to_string(t)?;
+                    self.eval(&format!(
+                        "(document.body ? document.body.innerText : '').includes({want})"
+                    ))?
+                    .as_bool()
+                    .unwrap_or(false)
+                }
+                (None, Some(n)) => self
+                    .eval(&format!(
+                        r#"!!document.querySelector('[data-arbos-ref="{n}"]')"#
+                    ))?
+                    .as_bool()
+                    .unwrap_or(false),
+                (None, None) => false,
+            };
+            if found {
+                return Ok(match (text, r#ref) {
+                    (Some(t), _) => format!("found {t:?}"),
+                    (_, Some(r)) => format!("found {r}"),
+                    _ => "waited".to_string(),
+                });
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(match (text, r#ref) {
+                    (Some(t), _) => format!("waited {ms} ms; {t:?} is not on the page"),
+                    (_, Some(r)) => format!("waited {ms} ms; {r} did not appear"),
+                    _ => format!("waited {ms} ms"),
+                });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+
+    /// Console messages and uncaught errors, newest last. A hook on the
+    /// page keeps the last 200 since it was installed (the first call
+    /// installs it; nothing from before is known).
+    fn console(&mut self) -> Result<String> {
+        let out = self.eval(CONSOLE_JS)?;
+        let lines: Vec<String> = out
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if lines.is_empty() {
+            return Ok(
+                "console: nothing since the hook was installed (call again after the next action)"
+                    .to_string(),
+            );
+        }
+        Ok(format!(
+            "console ({} lines):\n{}",
+            lines.len(),
+            lines.join("\n")
+        ))
+    }
+
     fn type_into(&mut self, r#ref: &str, text: &str) -> Result<()> {
-        let n: u64 = r#ref
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse()
-            .map_err(|_| anyhow::anyhow!("ref must be a number from snapshot, got {ref:?}"))?;
+        let n = ref_number(r#ref)?;
         let js = format!(
             r#"(() => {{ const el = document.querySelector('[data-arbos-ref="{n}"]'); if (!el) return 'missing'; el.focus(); return 'ok'; }})()"#
         );
