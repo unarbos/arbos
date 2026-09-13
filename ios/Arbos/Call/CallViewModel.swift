@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 import Foundation
 
 struct TranscriptLine: Identifiable, Equatable {
@@ -53,11 +54,13 @@ final class CallViewModel: ObservableObject {
     @Published private(set) var note: String?
 
     private let settings: AppSettings
+    /// The main chat: where transcripts go and replies come from. Shared
+    /// with the chat sheet, so typed and spoken turns land in one place.
+    private let chat: ChatStore
     private let audio = AudioEngine()
     private var session: VoiceSession?
-    private var kernel: ArbosKernelClient?
     private var eventTask: Task<Void, Never>?
-    private var kernelTask: Task<Void, Never>?
+    private var busyWatch: AnyCancellable?
     /// The speech side finished sending the reply; playback may still be
     /// draining.
     private var responseDone = true
@@ -65,8 +68,9 @@ final class CallViewModel: ObservableObject {
     private var kernelBusy = false
     private var openUtterance = false
 
-    init(settings: AppSettings) {
+    init(settings: AppSettings, chat: ChatStore) {
         self.settings = settings
+        self.chat = chat
         refreshIdle()
         #if DEBUG
         applyPreviewPhase()
@@ -131,32 +135,37 @@ final class CallViewModel: ObservableObject {
                 self.handle(event)
             }
         }
-        await attachKernel()
+        await joinChat()
     }
 
-    /// The kernel is optional for the call to run; without it the speech
-    /// server has to answer on its own. Attach failure is a note, not a
-    /// failed call.
-    private func attachKernel() async {
-        guard let endpoint = settings.kernelEndpoint else {
-            note = "no kernel · speech server answers"
-            return
-        }
-        let kernel = ArbosKernelClient()
-        self.kernel = kernel
-        do {
-            try await kernel.attach(endpoint)
-        } catch {
-            self.kernel = nil
-            note = "kernel offline"
-            return
-        }
-        kernelTask = Task { [weak self] in
-            for await frame in kernel.frames {
-                guard let self, !Task.isCancelled else { return }
-                await self.handle(frame, from: kernel)
+    /// Replies come from the main chat. A live kernel is best; the scripted
+    /// stand-in still lets the loop run end to end.
+    private func joinChat() async {
+        await chat.connect()
+        chat.onAgentMessage = { [weak self] text in self?.speak(text) }
+        busyWatch = chat.$busy.sink { [weak self] running in
+            guard let self else { return }
+            self.kernelBusy = running
+            if running {
+                if self.phase == .listening { self.phase = .thinking }
+            } else {
+                self.settle()
             }
         }
+        switch chat.mode {
+        case .live: note = nil
+        case .mock: note = "no kernel · demo chat answers"
+        case .offline, .connecting: note = "kernel offline"
+        }
+    }
+
+    private func speak(_ text: String) {
+        guard phase.inCall else { return }
+        lines.append(TranscriptLine(speaker: .arbos, text: text))
+        trimLines()
+        responseDone = false
+        phase = .thinking
+        session?.speak(text)
     }
 
     // MARK: - Speech events
@@ -210,49 +219,10 @@ final class CallViewModel: ObservableObject {
     // MARK: - Kernel
 
     private func forwardToKernel(_ text: String) {
-        guard let kernel, !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        // A turn already running gets the new words as a steer at its next
-        // tool boundary; otherwise this starts one.
-        let steer = kernelBusy
+        guard !text.trimmingCharacters(in: .whitespaces).isEmpty, chat.mode != .offline else { return }
         kernelBusy = true
         phase = .thinking
-        Task {
-            do {
-                try await kernel.send(text: text, steer: steer)
-            } catch {
-                await MainActor.run {
-                    self.kernelBusy = false
-                    self.note = "kernel offline"
-                    self.settle()
-                }
-            }
-        }
-    }
-
-    private func handle(_ frame: KernelFrame, from kernel: ArbosKernelClient) async {
-        let focus = await kernel.focus
-        switch frame {
-        case .event(let agent, let kind, let text):
-            guard agent == focus, kind == "assistant",
-                  let text = text?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !text.isEmpty else { return }
-            lines.append(TranscriptLine(speaker: .arbos, text: text))
-            trimLines()
-            responseDone = false
-            session?.speak(text)
-        case .turn(let agent, let state):
-            guard agent == focus else { return }
-            kernelBusy = state == "running"
-            settle()
-        case .ask(let agent, let question, _):
-            guard agent == focus else { return }
-            lines.append(TranscriptLine(speaker: .arbos, text: question))
-            trimLines()
-            responseDone = false
-            session?.speak(question)
-        case .snapshot, .tree, .other:
-            break
-        }
+        chat.send(text)
     }
 
     // MARK: - Transcript
@@ -302,14 +272,10 @@ final class CallViewModel: ObservableObject {
     private func teardown() {
         eventTask?.cancel()
         eventTask = nil
-        kernelTask?.cancel()
-        kernelTask = nil
+        busyWatch = nil
+        chat.onAgentMessage = nil
         session?.close()
         session = nil
-        if let kernel {
-            Task { await kernel.detach() }
-        }
-        kernel = nil
         audio.stop()
         startedAt = nil
         kernelBusy = false

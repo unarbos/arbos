@@ -1,7 +1,7 @@
 import Foundation
 
 /// One agent in the kernel's tree (`TreeNode` in `arbos-core/src/wire.rs`).
-struct KernelAgent: Identifiable {
+struct KernelAgent: Identifiable, Equatable {
     let id: String
     let name: String
     let parent: String?
@@ -9,17 +9,108 @@ struct KernelAgent: Identifiable {
     let model: String
 }
 
-/// The subset of kernel → client frames the phone cares about. The wire
-/// type is `Frame` in `crates/arbos-core/src/wire.rs`: one JSON object per
-/// line, tagged by `type` in snake_case.
+/// One transcript line (`EventKind` in `arbos-core/src/event.rs`). The
+/// JSON is tagged by `kind`, snake_case, with the variant's fields
+/// flattened beside it.
+enum KernelEvent: Equatable {
+    case user(text: String)
+    case assistant(text: String)
+    case thinking
+    case tool(KernelToolRecord)
+    case ask(question: String)
+    case answer(text: String)
+    /// A child agent spoke to this one. `from` is the child's id.
+    case say(from: String, text: String)
+    case notice(text: String, failed: Bool)
+    case turnComplete
+    case interrupted(detail: String)
+    case other(kind: String)
+
+    init(json object: [String: Any]) {
+        let kind = object["kind"] as? String ?? ""
+        let text = object["text"] as? String ?? ""
+        switch kind {
+        case "user": self = .user(text: text)
+        case "assistant": self = .assistant(text: text)
+        case "thinking": self = .thinking
+        case "tool": self = .tool(KernelToolRecord(json: object))
+        case "ask": self = .ask(question: object["question"] as? String ?? "")
+        case "answer": self = .answer(text: text)
+        case "say": self = .say(from: object["from"] as? String ?? "", text: text)
+        case "notice": self = .notice(text: text, failed: object["failed"] as? Bool ?? false)
+        case "turn_complete": self = .turnComplete
+        case "interrupted": self = .interrupted(detail: object["detail"] as? String ?? "")
+        default: self = .other(kind: kind)
+        }
+    }
+}
+
+/// `ToolRec`: one tool call, already finished by the time it is on disk.
+struct KernelToolRecord: Equatable {
+    let name: String
+    let paths: [String]
+    let args: [String: Any]?
+    let error: String?
+    let child: String?
+    let seconds: Int?
+
+    init(json object: [String: Any]) {
+        name = object["name"] as? String ?? "tool"
+        paths = object["paths"] as? [String] ?? []
+        args = object["args"] as? [String: Any]
+        error = object["error"] as? String
+        child = object["child"] as? String
+        if let started = object["started"] as? Int64, let ended = object["ended"] as? Int64 {
+            seconds = Int(max(0, ended - started) / 1000)
+        } else {
+            seconds = nil
+        }
+    }
+
+    init(name: String, paths: [String] = [], args: [String: Any]? = nil, error: String? = nil,
+         child: String? = nil, seconds: Int? = nil) {
+        self.name = name
+        self.paths = paths
+        self.args = args
+        self.error = error
+        self.child = child
+        self.seconds = seconds
+    }
+
+    static func == (lhs: KernelToolRecord, rhs: KernelToolRecord) -> Bool {
+        lhs.name == rhs.name && lhs.paths == rhs.paths && lhs.error == rhs.error
+            && lhs.child == rhs.child && lhs.seconds == rhs.seconds
+    }
+
+    /// One line for the chat: what ran, on what.
+    var label: String {
+        let subject: String
+        if let first = paths.first, !first.isEmpty {
+            subject = (first as NSString).lastPathComponent
+        } else if let command = args?["command"] as? String ?? args?["cmd"] as? String {
+            subject = command
+        } else if let brief = args?["brief"] as? String {
+            subject = brief
+        } else if let query = args?["pattern"] as? String ?? args?["query"] as? String {
+            subject = query
+        } else {
+            subject = ""
+        }
+        let trimmed = subject.replacingOccurrences(of: "\n", with: " ")
+        let short = trimmed.count > 48 ? String(trimmed.prefix(47)) + "…" : trimmed
+        return short.isEmpty ? name : "\(name) · \(short)"
+    }
+}
+
+/// The kernel → client frames the phone cares about. The wire type is
+/// `Frame` in `crates/arbos-core/src/wire.rs`: one JSON object per line,
+/// tagged by `type` in snake_case.
 enum KernelFrame {
     /// First thing the kernel sends on attach: the agent tree and which
     /// agent the desktop last focused.
     case snapshot(focus: String, agents: [KernelAgent])
     case tree([KernelAgent])
-    /// A transcript line for `agent`. `kind` is the `EventKind` tag
-    /// (`user`, `assistant`, `say`, `notice`, `thinking`, `turn_complete`, …).
-    case event(agent: String, kind: String, text: String?)
+    case event(agent: String, event: KernelEvent)
     /// `running` or `idle`.
     case turn(agent: String, state: String)
     case ask(agent: String, question: String, options: [String])
@@ -36,11 +127,9 @@ enum KernelFrame {
         case "tree":
             self = .tree(Self.agents(object["tree"]))
         case "event":
-            let event = object["event"] as? [String: Any] ?? [:]
             self = .event(
                 agent: object["agent"] as? String ?? "",
-                kind: event["type"] as? String ?? "",
-                text: event["text"] as? String
+                event: KernelEvent(json: object["event"] as? [String: Any] ?? [:])
             )
         case "turn":
             self = .turn(

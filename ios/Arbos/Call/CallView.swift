@@ -1,12 +1,17 @@
 import SwiftUI
 
+/// The call. Voice first; the main chat is one swipe up.
 struct CallView: View {
     @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var chat: ChatStore
     @StateObject private var model: CallViewModel
     @State private var showSettings = false
+    @State private var showChat = false
+    /// True when the chat was opened by swiping: bring the keyboard up.
+    @State private var chatWantsKeyboard = false
 
-    init(settings: AppSettings) {
-        _model = StateObject(wrappedValue: CallViewModel(settings: settings))
+    init(settings: AppSettings, chat: ChatStore) {
+        _model = StateObject(wrappedValue: CallViewModel(settings: settings, chat: chat))
     }
 
     var body: some View {
@@ -47,16 +52,31 @@ struct CallView: View {
                     .opacity(model.lines.isEmpty ? 0 : 1)
                 Spacer(minLength: 24)
                 callButton
-                    .padding(.bottom, 36)
+                    .padding(.bottom, 18)
+                chatHandle
+                    .padding(.bottom, 6)
             }
         }
+        .contentShape(Rectangle())
+        .gesture(swipeUp)
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showSettings, onDismiss: model.refreshIdle) {
             SettingsView().environmentObject(settings)
         }
+        .sheet(isPresented: $showChat) {
+            MainChatView(focusComposer: chatWantsKeyboard)
+                .environmentObject(chat)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(Color(red: 0.06, green: 0.06, blue: 0.07))
+        }
         .onChange(of: settings.openAIKey) { _, _ in model.refreshIdle() }
         .onChange(of: settings.selfHostedURL) { _, _ in model.refreshIdle() }
         .onChange(of: settings.provider) { _, _ in model.refreshIdle() }
+        .task { await chat.connect() }
+        #if DEBUG
+        .task { await previewChatIfAsked() }
+        #endif
     }
 
     private var header: some View {
@@ -94,6 +114,38 @@ struct CallView: View {
         .animation(.easeInOut(duration: 0.25), value: model.phase)
     }
 
+    /// The only hint that text exists: a chevron. Tap or swipe up.
+    private var chatHandle: some View {
+        Button {
+            openChat(keyboard: false)
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: "chevron.compact.up")
+                    .font(.system(size: 22, weight: .regular))
+                Text("chat")
+                    .font(.caption2)
+            }
+            .foregroundStyle(.white.opacity(0.3))
+            .frame(maxWidth: .infinity)
+            .frame(height: 44)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var swipeUp: some Gesture {
+        DragGesture(minimumDistance: 30)
+            .onEnded { value in
+                if value.translation.height < -60, abs(value.translation.width) < 80 {
+                    openChat(keyboard: true)
+                }
+            }
+    }
+
+    private func openChat(keyboard: Bool) {
+        chatWantsKeyboard = keyboard
+        showChat = true
+    }
+
     private func tapCall() {
         switch model.phase {
         case .unconfigured:
@@ -120,6 +172,18 @@ struct CallView: View {
         case .connecting, .listening, .thinking, .speaking: return "phone.down.fill"
         }
     }
+
+    #if DEBUG
+    /// `-previewChat 1` opens the chat on launch and sends one message so
+    /// the streaming reply is on screen, for design review.
+    private func previewChatIfAsked() async {
+        guard UserDefaults.standard.bool(forKey: "previewChat") else { return }
+        try? await Task.sleep(for: .milliseconds(400))
+        openChat(keyboard: false)
+        try? await Task.sleep(for: .milliseconds(1500))
+        chat.send("What's left before I can merge?")
+    }
+    #endif
 }
 
 /// mm:ss since the call began.
