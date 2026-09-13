@@ -86,7 +86,8 @@ pub fn plan_segment(place: &Place, agent: &Agent) -> Option<String> {
             line
         })
         .collect();
-    if plan == node::NO_PLAN && peers.is_empty() {
+    let prs = arbos_core::load_prs(place);
+    if plan == node::NO_PLAN && peers.is_empty() && prs.is_empty() {
         return None;
     }
     let mut out = String::new();
@@ -102,6 +103,19 @@ pub fn plan_segment(place: &Place, agent: &Agent) -> Option<String> {
         out.push_str("<<peers>> agents here you can message:\n");
         out.push_str(&peers.join("\n"));
         out.push('\n');
+    }
+    if !prs.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("<<prs>> pull requests opened from this place (newest last):\n");
+        for pr in prs.iter().rev().take(20).rev() {
+            out.push_str(&format!("{} — by {}", pr.url, pr.agent));
+            if !pr.branch.is_empty() {
+                out.push_str(&format!(" from {}", pr.branch));
+            }
+            out.push('\n');
+        }
     }
     Some(out)
 }

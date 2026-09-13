@@ -5,6 +5,7 @@ use crate::{
     kernel,
     model::{
         attachment::Prompt,
+        project::Project,
         session::{ChatItem, ChatSession, Choice, Connection, PlanNode},
         settings,
     },
@@ -852,6 +853,55 @@ impl Cydonia {
 /// GitHub pull-request URLs in a tool's output, in order of appearance.
 /// `gh pr create` prints one; so does `gh pr view`. Trailing punctuation
 /// from prose around the link is dropped.
+/// What the two pills count for `chat`: the ids of its children with a
+/// turn running, and the pull-request URLs it and its subtree opened.
+///
+/// PRs come from the kernel's `.arbos/prs.jsonl` when it has any (exact:
+/// recorded from `gh pr create` results, whole subtree, survives restarts);
+/// otherwise from scanning this chat's and its children's tool output, for
+/// kernels that predate the file. The driver reports the same numbers.
+pub fn pill_counts(project: &Project, chat: &ChatSession) -> (Vec<u64>, Vec<String>) {
+    let mut working: Vec<u64> = project
+        .sessions
+        .iter()
+        .filter(|c| c.parent == Some(chat.id) && c.busy())
+        .map(|c| c.id)
+        .collect();
+    working.sort_unstable();
+    let mut prs: Vec<String> = Vec::new();
+    if chat.host.is_none() {
+        if let Some(agent) = chat.agent_session.as_deref() {
+            let place = arbos_core::Place::new(&chat.cwd);
+            let all = arbos_core::load_prs(&place);
+            if !all.is_empty() {
+                let agents = arbos_core::list_agents(&place).unwrap_or_default();
+                prs = arbos_core::prs::prs_of_tree(&all, agent, &agents)
+                    .into_iter()
+                    .map(|p| p.url)
+                    .collect();
+                return (working, prs);
+            }
+        }
+    }
+    for c in std::iter::once(chat).chain(
+        project
+            .sessions
+            .iter()
+            .filter(|c| c.parent == Some(chat.id)),
+    ) {
+        for item in &c.items {
+            if let ChatItem::Tool { output, .. } = item {
+                for url in pr_urls(output) {
+                    if !prs.contains(&url) {
+                        prs.push(url);
+                    }
+                }
+            }
+        }
+    }
+    (working, prs)
+}
+
 fn pr_urls(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for word in text.split(|c: char| {
@@ -1189,33 +1239,7 @@ impl Cydonia {
         let workspace = self.workspace.read(cx);
         let chat = workspace.active_session()?;
         let project = workspace.active_project()?;
-        let mut working: Vec<u64> = project
-            .sessions
-            .iter()
-            .filter(|c| c.parent == Some(chat.id) && c.busy())
-            .map(|c| (c.delegate_number, c.id))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|(_, id)| id)
-            .collect();
-        working.sort_unstable();
-        let mut prs: Vec<String> = Vec::new();
-        for c in std::iter::once(chat).chain(
-            project
-                .sessions
-                .iter()
-                .filter(|c| c.parent == Some(chat.id)),
-        ) {
-            for item in &c.items {
-                if let ChatItem::Tool { output, .. } = item {
-                    for url in pr_urls(output) {
-                        if !prs.contains(&url) {
-                            prs.push(url);
-                        }
-                    }
-                }
-            }
-        }
+        let (working, prs) = pill_counts(project, chat);
         if working.is_empty() && prs.is_empty() {
             return None;
         }

@@ -127,7 +127,9 @@ pub async fn model_step(s: StepCx<'_>, messages: &[ChatMessage], tools: &[Value]
         // request (OpenRouter: 404 "No endpoints found that support image
         // input"). Dropping the images and saying so beats failing the turn
         // or leaving the user's chosen model for one that can see.
-        if text_only.is_none() && rejects_images(pe) && messages.iter().any(|m| !m.images.is_empty())
+        if text_only.is_none()
+            && rejects_images(pe)
+            && messages.iter().any(|m| !m.images.is_empty())
         {
             let stripped = strip_images(messages);
             hooks.emit(&Event::new(EventKind::Notice {

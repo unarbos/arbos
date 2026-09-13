@@ -12,6 +12,7 @@ mod lock;
 pub mod node;
 mod page;
 mod place;
+pub mod prs;
 mod wake;
 pub mod wire;
 
@@ -26,6 +27,7 @@ pub use lock::PlaceLock;
 pub use node::{Attempt, Do, Node, NodeId, Status as NodeStatus, Verdict, When};
 pub use page::{Page, PageKind};
 pub use place::Place;
+pub use prs::{PrRec, load_prs, record_pr};
 pub use wake::{Wake, WakeKind};
 
 /// Unix millis.

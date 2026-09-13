@@ -42,6 +42,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                     paused: false,
                     model: "inherit".into(),
                     kind: "agent".into(),
+                    prs: 0,
                 }],
                 focus: ".arbos/agents/root".into(),
                 budget: Some(Usage { used: 1, size: 2 }),
