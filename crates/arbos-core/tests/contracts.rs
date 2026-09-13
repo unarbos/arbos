@@ -3,7 +3,7 @@
 //! lock that keeps two kernels off one folder.
 
 use arbos_core::{
-    Do, Event, EventKind, Node, NodeStatus, Place, PlaceLock, TranscriptTail, Usage, When, append_event, bootstrap, create_chat, load_transcript,
+    Do, Event, EventKind, Node, NodeStatus, Place, PlaceLock, TranscriptTail, Usage, When, agent_exists, append_event, bootstrap, create_chat, list_agents, load_transcript,
     node::can_transition,
     read_focus, validate_focus,
     wire::{Frame, TreeNode},
@@ -413,6 +413,39 @@ fn focus_only_ever_names_an_existing_agent_folder() {
     );
     write_focus(&place, id).unwrap();
     assert_eq!(read_focus(&place), format!(".arbos/agents/{id}"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn agent_exists_agrees_with_list_agents() {
+    // qa-005/qa-006: one rule for "this id is an agent here".
+    let dir = tmp("exists");
+    let place = Place::new(&dir);
+    bootstrap(&place).unwrap();
+    let chat = create_chat(&place).unwrap();
+    std::fs::create_dir_all(place.agent_dir("garbage")).unwrap();
+    std::fs::write(place.agent_dir("garbage").join("agent.md"), b"\xff\xfe").unwrap();
+    std::fs::create_dir_all(place.agent_dir("nomd")).unwrap();
+    let listed: Vec<String> = list_agents(&place)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.id.to_string())
+        .collect();
+    for id in [
+        "root",
+        chat.id.as_str(),
+        "garbage",
+        "nomd",
+        "nobody",
+        "../etc",
+        "",
+    ] {
+        assert_eq!(
+            agent_exists(&place, id),
+            listed.iter().any(|l| l == id),
+            "{id:?}: agent_exists and list_agents must agree"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
