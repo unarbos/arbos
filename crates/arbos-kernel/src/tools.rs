@@ -67,6 +67,18 @@ impl Tool for Spawn {
                 ("model", "inherit or a model id.", false, "string"),
                 ("readonly", "If true, no writes.", false, "boolean"),
                 ("cwd", "Child cwd.", false, "string"),
+                (
+                    "wait",
+                    "true: block until the child's first report (its say to you, or its first turn's last words) and return it as this result. Use it for a quick sub-task whose answer you need before going on; leave it off for parallel workers.",
+                    false,
+                    "boolean",
+                ),
+                (
+                    "wait_secs",
+                    "With wait: how long to wait before returning \"still working\" (default 600). The child keeps going; its report then arrives as a message.",
+                    false,
+                    "integer",
+                ),
             ],
         )
     }
@@ -80,9 +92,36 @@ impl Tool for Spawn {
             let model = opt_str(&args, "model");
             let readonly = opt_bool(&args, "readonly").unwrap_or(false);
             let cwd = opt_str(&args, "cwd").map(PathBuf::from);
+            let wait = opt_bool(&args, "wait").unwrap_or(false);
+            let wait_secs = args
+                .get("wait_secs")
+                .and_then(Value::as_u64)
+                .unwrap_or(600)
+                .clamp(1, 6 * 3600);
             let id = hooks.spawn(&cx.agent, brief, model, None, readonly, cwd)?;
+            let mut body = format!("spawned {id}: {brief}");
+            if wait {
+                let rx = hooks.wait_for(cx.agent.id.as_str(), id.as_str());
+                let report = tokio::select! {
+                    r = rx => r.ok(),
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(wait_secs)) => None,
+                    _ = cx.cancel.cancelled() => {
+                        hooks.stop_waiting(id.as_str());
+                        anyhow::bail!("interrupted while waiting for {id}; it keeps working")
+                    }
+                };
+                match report {
+                    Some(text) => body = format!("{id} reports:\n{text}"),
+                    None => {
+                        hooks.stop_waiting(id.as_str());
+                        body.push_str(&format!(
+                            "\n{id} is still working after {wait_secs}s; its report will arrive here as a message from it."
+                        ));
+                    }
+                }
+            }
             Ok(ToolOut {
-                body: format!("spawned {id}: {brief}"),
+                body,
                 paths: vec![format!(".arbos/agents/{id}")],
                 child: Some(id.to_string()),
                 images: vec![],
