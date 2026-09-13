@@ -332,6 +332,57 @@ fn note_reattach_failure(hooks: &KernelHooks, record: &Record, e: anyhow::Error)
 /// `spawn host=<name>`: a machine from `machines.toml` is reached over
 /// ssh; one only the hub knows is claimed through it. Neither, and the
 /// error names both files.
+/// The model fills every optional field. These spellings of `host` mean
+/// "this machine": a local spawn, not a lookup that can only fail.
+pub fn is_local_host(host: &str) -> bool {
+    matches!(
+        host.trim().to_ascii_lowercase().as_str(),
+        "" | "local"
+            | "localhost"
+            | "here"
+            | "this"
+            | "this machine"
+            | "same"
+            | "none"
+            | "null"
+            | "default"
+            | "auto"
+            | "-"
+    )
+}
+
+/// Where a `spawn host=…` should go.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HostChoice {
+    /// A local child; `note` says why when the name was not a plain "here".
+    Local { note: Option<String> },
+    /// A machine in machines.toml or on the hub roster.
+    Remote,
+}
+
+/// Local for the "here" spellings; local with a note when nothing is
+/// configured at all (no machines.toml entry, no hub roster: the name can
+/// mean no other machine, and refusing left a fresh project unable to
+/// spawn one worker — qa-031); Remote otherwise (a wrong name among real
+/// ones is still an error, reported by `spawn_remote`).
+pub fn choose_host(place: &Place, host: &str) -> HostChoice {
+    if is_local_host(host) {
+        return HostChoice::Local { note: None };
+    }
+    let known_ssh = Machines::load()
+        .map(|m| !m.machine.is_empty())
+        .unwrap_or(false);
+    let known_hub = !arbos_core::hub::read_roster(place).is_empty();
+    if !known_ssh && !known_hub {
+        return HostChoice::Local {
+            note: Some(format!(
+                "no machine named {host:?} is configured (no machines.toml entries, no hub roster); the worker runs here"
+            )),
+        };
+    }
+    HostChoice::Remote
+}
+
 pub async fn spawn_remote(
     hooks: Arc<KernelHooks>,
     parent: Agent,

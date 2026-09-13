@@ -183,7 +183,18 @@ impl Tool for Spawn {
                 .and_then(Value::as_u64)
                 .unwrap_or(600)
                 .clamp(1, 6 * 3600);
-            if let Some(host) = opt_str(&args, "host") {
+            let mut host_note = None;
+            let host = match opt_str(&args, "host") {
+                Some(host) => match crate::remote::choose_host(&hooks.place, host) {
+                    crate::remote::HostChoice::Local { note } => {
+                        host_note = note;
+                        None
+                    }
+                    crate::remote::HostChoice::Remote => Some(host),
+                },
+                None => None,
+            };
+            if let Some(host) = host {
                 let (id, where_) = crate::remote::spawn_remote(
                     Arc::clone(&hooks),
                     cx.agent.clone(),
@@ -236,6 +247,9 @@ impl Tool for Spawn {
                 Some(k) => format!("spawned {id} (kind {k}): {shown}"),
                 None => format!("spawned {id}: {shown}"),
             };
+            if let Some(note) = &host_note {
+                body.push_str(&format!("\nNote: {note}."));
+            }
             let mut paths = vec![format!(".arbos/agents/{id}")];
             if let Some(w) = &worktree {
                 body.push_str(&format!(
