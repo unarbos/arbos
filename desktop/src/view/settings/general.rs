@@ -14,7 +14,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The commit it was built from — see `build.rs`, which is the only place that
 /// can know: the app that ships has no repository to ask.
-const COMMIT: &str = env!("CYDONIA_COMMIT");
+const COMMIT: &str = env!("ARBOS_COMMIT");
 
 /// The mark over the rows. An About panel's measure — big enough to be the
 /// picture of the app, small enough that the two lines under it are still what

@@ -8,7 +8,7 @@
 use std::process::Command;
 
 fn main() {
-    println!("cargo::rustc-env=CYDONIA_COMMIT={}", commit());
+    println!("cargo::rustc-env=ARBOS_COMMIT={}", commit());
     // Cargo has no reason of its own to look at git, so without these the
     // stamp is whichever commit was checked out the last time something else
     // forced a rebuild. `--git-path` resolves them through the repository

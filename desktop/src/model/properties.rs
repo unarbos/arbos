@@ -4,7 +4,7 @@
 //!
 //! Edited in place with `toml_edit` like [`crate::model::settings`], because an
 //! agent writing into this file is expected: re-serialising it through a value
-//! tree would drop every key and comment cydonia does not itself know about.
+//! tree would drop every key and comment Arbos does not itself know about.
 
 use std::path::{Path, PathBuf};
 

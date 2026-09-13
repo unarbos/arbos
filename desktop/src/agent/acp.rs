@@ -1,6 +1,6 @@
 //! One Arbos session over the kernel's attach JSONL seam.
 //!
-//! The type names stay ACP-shaped so the Cydonia transcript and composer keep
+//! The type names stay ACP-shaped so the Arbos transcript and composer keep
 //! compiling. The transport is a loopback TCP socket on `arbos-kernel`.
 
 use crate::{

@@ -363,7 +363,7 @@ class Arbos:
     # -- app ---------------------------------------------------------------
 
     def action(self, name: str, data: Any = None) -> dict:
-        """Dispatch a gpui action by name, e.g. ``"cydonia::NewSession"``."""
+        """Dispatch a gpui action by name, e.g. ``"arbos::NewSession"``."""
         return self.call("action", name=name, data=data)
 
     def resize(self, width: float, height: float) -> dict:

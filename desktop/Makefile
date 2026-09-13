@@ -1,20 +1,20 @@
-# A bundle is the only thing that gives cydonia a Dock icon. gpui never calls
+# A bundle is the only thing that gives arbos a Dock icon. gpui never calls
 # `setApplicationIconImage:` — it reads a bundle but does not set one — so the
 # icon can come from nothing but `CFBundleIconFile`, and the bare binary
 # `cargo install` leaves behind stays generic.
 #
-# The logo is not in git. It is downloaded once into assets/, which is ignored,
-# so a fresh clone needs nothing but the network to build an illustrated app.
+# The logo is bundle/icon.png (the Arbos trunk mark), copied into assets/ at
+# build time so a fresh clone builds an illustrated app with no network.
 
 VERSION  := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 ARCH     := $(shell uname -m)
 ICON     := assets/icon.png
-ICON_URL := https://cdn.crabtalk.ai/logos/cydonia.png
-APP      := target/bundle/cydonia.app
-ICONSET  := target/bundle/cydonia.iconset
-DMG      := target/bundle/cydonia-$(VERSION)-$(ARCH).dmg
+ICON_SRC := bundle/icon.png
+APP      := target/bundle/arbos.app
+ICONSET  := target/bundle/arbos.iconset
+DMG      := target/bundle/arbos-$(VERSION)-$(ARCH).dmg
 DMGSTAGE := target/bundle/dmg
-DMGRW    := target/bundle/cydonia-rw.dmg
+DMGRW    := target/bundle/arbos-rw.dmg
 DMGMNT   := target/bundle/mnt
 # The ten `.icns` wants. Each is also emitted at @2x, so 512 covers 1024.
 SIZES    := 16 32 128 256 512
@@ -35,10 +35,10 @@ bundle:
 	rm -rf $(APP) $(ICONSET)
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	@# Cargo names the binary arbos-desktop; the bundle keeps CFBundleExecutable
-	@# as cydonia (bundle/Info.plist), so the copy renames it.
-	cp target/release/arbos-desktop $(APP)/Contents/MacOS/cydonia
+	@# as arbos (bundle/Info.plist), so the copy renames it.
+	cp target/release/arbos-desktop $(APP)/Contents/MacOS/arbos
 	sed 's/@VERSION@/$(VERSION)/g' bundle/Info.plist > $(APP)/Contents/Info.plist
-	@# An unreachable CDN costs the app its icon, not its build. The `.icns` is
+	@# A missing logo costs the app its icon, not its build. The `.icns` is
 	@# AppKit's; the 256 png beside it is the app's own — settings paints the
 	@# mark itself, and nothing in the app can read an `.icns`.
 	@[ -f $(ICON) ] || $(MAKE) --no-print-directory icon || true
@@ -48,7 +48,7 @@ bundle:
 			sips -s format png -Z $$s $(ICON) --out $(ICONSET)/icon_$${s}x$${s}.png >/dev/null; \
 			sips -s format png -Z $$((s * 2)) $(ICON) --out $(ICONSET)/icon_$${s}x$${s}@2x.png >/dev/null; \
 		done; \
-		iconutil -c icns $(ICONSET) -o $(APP)/Contents/Resources/cydonia.icns; \
+		iconutil -c icns $(ICONSET) -o $(APP)/Contents/Resources/arbos.icns; \
 		rm -rf $(ICONSET); \
 		sips -s format png -Z 256 $(ICON) --out $(APP)/Contents/Resources/icon.png >/dev/null; \
 	else \
@@ -69,9 +69,9 @@ dmg: bundle
 	cp -R $(APP) $(DMGSTAGE)/
 	@# Drag-to-install is this symlink and nothing else.
 	ln -s /Applications $(DMGSTAGE)/Applications
-	@[ -f $(APP)/Contents/Resources/cydonia.icns ] \
-		&& cp $(APP)/Contents/Resources/cydonia.icns $(DMGSTAGE)/.VolumeIcon.icns || true
-	hdiutil create -volname Cydonia -srcfolder $(DMGSTAGE) -ov -quiet -format UDRW -fs HFS+ $(DMGRW)
+	@[ -f $(APP)/Contents/Resources/arbos.icns ] \
+		&& cp $(APP)/Contents/Resources/arbos.icns $(DMGSTAGE)/.VolumeIcon.icns || true
+	hdiutil create -volname Arbos -srcfolder $(DMGSTAGE) -ov -quiet -format UDRW -fs HFS+ $(DMGRW)
 	@# `.VolumeIcon.icns` is inert until the volume root carries the custom-icon
 	@# bit, and a root exists only once the image is mounted — which is the whole
 	@# reason the image is built read-write and compressed afterwards. Detaching
@@ -109,7 +109,7 @@ release:
 # cannot leave a corrupt icon cached where nothing will look at it again.
 icon:
 	@mkdir -p $(dir $(ICON))
-	curl -fsSL $(ICON_URL) -o $(ICON).part && mv $(ICON).part $(ICON) || { rm -f $(ICON).part; exit 1; }
+	cp $(ICON_SRC) $(ICON)
 
 open: bundle
 	open $(APP)

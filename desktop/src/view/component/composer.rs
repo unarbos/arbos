@@ -28,7 +28,7 @@ use bezel::{
 use std::path::PathBuf;
 
 actions!(
-    cydonia_composer,
+    arbos_composer,
     [
         Send,
         CommandNext,
@@ -41,8 +41,8 @@ actions!(
 
 /// Claimed on top of `TextField`/`TextArea`, so `enter` sends here and stays a
 /// newline in every other multi-line field.
-const KEY_CONTEXT: &str = "CydoniaComposer";
-const MODEL_SEARCH_CONTEXT: &str = "CydoniaModelSearch";
+const KEY_CONTEXT: &str = "ArbosComposer";
+const MODEL_SEARCH_CONTEXT: &str = "ArbosModelSearch";
 
 /// What the pill and the agent mark are cut from — and every card that floats
 /// in the same stack over the transcript, which is why it is not private.

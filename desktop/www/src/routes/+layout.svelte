@@ -33,7 +33,7 @@
 <header>
 	<a class="wordmark" href="{base}/">
 		<Logo size={18} />
-		Cydonia
+		Arbos
 	</a>
 
 	<nav>
@@ -42,7 +42,7 @@
 			href={discord}
 			target="_blank"
 			rel="noreferrer"
-			aria-label="Cydonia community on Discord"
+			aria-label="Arbos community on Discord"
 		>
 			<Brand icon={siDiscord} size={16} />
 			<span>Community</span>

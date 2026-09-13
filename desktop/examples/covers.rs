@@ -8,13 +8,13 @@
 //! The content is not this program's business — articles are written by hand,
 //! and this only gives them their pictures. Each one is cut through the app's
 //! own [`cover::seed`] and [`cover::svg`], from the article's own path, so a
-//! fixture ends up with exactly the picture cydonia would have landed on for
+//! fixture ends up with exactly the picture Arbos would have landed on for
 //! that document.
 //!
 //! Articles that already have a cover are left alone, so this can be run again
 //! after more have been written.
 
-use cydonia::model::cover;
+use arbos_desktop::model::cover;
 use std::path::{Path, PathBuf};
 
 const DEST: &str = "../fixtures";

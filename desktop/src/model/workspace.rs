@@ -199,10 +199,10 @@ impl Workspace {
         this.watch_activity(cx);
         this.refresh_slash_commands(cx);
         this.refresh_models(cx);
-        // Temporary dev hook: `CYDONIA_TEST_PROMPT` sends a prompt on launch
+        // Temporary dev hook: `ARBOS_TEST_PROMPT` sends a prompt on launch
         // so a turn can be verified without a composer. Here rather than on
         // connect, which a resume would fire again.
-        if let Ok(prompt) = std::env::var("CYDONIA_TEST_PROMPT") {
+        if let Ok(prompt) = std::env::var("ARBOS_TEST_PROMPT") {
             let id = this
                 .active_id()
                 .or_else(|| this.new_session(settings::kernel_agent(), None, cx));

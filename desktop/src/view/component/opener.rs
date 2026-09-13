@@ -21,9 +21,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-actions!(cydonia_opener, [Submit, Next, Previous, Dismiss, Complete]);
+actions!(arbos_opener, [Submit, Next, Previous, Dismiss, Complete]);
 
-const KEY_CONTEXT: &str = "CydoniaOpener";
+const KEY_CONTEXT: &str = "ArbosOpener";
 
 /// The panel on its way somewhere else in the window.
 #[derive(Clone)]

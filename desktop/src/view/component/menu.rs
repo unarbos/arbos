@@ -1,7 +1,7 @@
 //! The `+` menu a project heading opens, and the field that says which menu
 //! is showing.
 
-use crate::view::root::Cydonia;
+use crate::view::root::Arbos;
 use bezel::{
     gpui::{AnyElement, Context, Div, SharedString, Stateful, Window, prelude::*},
     theme::Theme,
@@ -9,7 +9,7 @@ use bezel::{
 };
 
 /// What a row does when it is picked.
-type Act = Box<dyn Fn(&mut Cydonia, &mut Window, &mut Context<Cydonia>)>;
+type Act = Box<dyn Fn(&mut Arbos, &mut Window, &mut Context<Arbos>)>;
 
 /// Which menu is open. One field rather than a flag each, so opening one
 /// closes the rest by construction.
@@ -24,18 +24,18 @@ pub(crate) enum Menu {
 /// One row of a menu, and what picking it does.
 pub(crate) fn row(
     item: Item,
-    act: impl Fn(&mut Cydonia, &mut Window, &mut Context<Cydonia>) + 'static,
+    act: impl Fn(&mut Arbos, &mut Window, &mut Context<Arbos>) + 'static,
 ) -> (Item, Act) {
     (item, Box::new(act))
 }
 
-impl Cydonia {
+impl Arbos {
     /// Open a menu, or shut the one already open.
     ///
     /// The press that reaches a trigger is the same press the open card
     /// dismisses on, so by click time the menu already reads as shut and a
     /// plain toggle would open it straight back. What the press found is noted
-    /// by [`Cydonia::menu_press`] instead, in the capture phase — ahead of
+    /// by [`Arbos::menu_press`] instead, in the capture phase — ahead of
     /// that handler, whichever element owns it.
     pub(crate) fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
         let closed_by_this_press = std::mem::take(&mut self.menu_pressed);

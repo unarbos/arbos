@@ -1,4 +1,4 @@
-# Cydonia
+# Arbos
 
 https://github.com/user-attachments/assets/dfe51807-a24a-49f0-b702-918c317ee21d
 
@@ -8,8 +8,8 @@ in it, and keep what comes out as durable artifacts on disk — articles, boards
 and tables, not a chat log.
 
 ```sh
-cargo install cydonia
-cydonia
+cargo install arbos-desktop
+arbos-desktop
 ```
 
 > [!NOTE]
@@ -21,7 +21,7 @@ cydonia
 ## Features
 
 The rest is off until you ask for it, in **Settings › Features** or in
-`~/.config/cydonia/settings.toml`:
+`~/.config/arbos/settings.toml`:
 
 ```toml
 [features]
@@ -37,7 +37,7 @@ runs. Turning a feature off hides it; nothing on disk is deleted.
 ## Agents
 
 Install one from the ACP registry in **Settings › Agents**, or write it into
-`~/.config/cydonia/settings.toml` yourself:
+`~/.config/arbos/settings.toml` yourself:
 
 ```toml
 [[agents]]
@@ -50,12 +50,12 @@ args = ["--acp"]
 ## Where things live
 
 ```
-~/.config/cydonia/   settings.toml, mcp.toml, the agent catalogue cache
+~/.config/arbos/   settings.toml, mcp.toml, the agent catalogue cache
 ~/.local/share/      installed agents
-<project>/.cydonia/  that project's articles, boards, sessions and store
+<project>/.arbos/  that project's articles, boards, sessions and store
 ```
 
-A project's own store carries a `.gitignore` — none of what cydonia writes
+A project's own store carries a `.gitignore` — none of what arbos writes
 there is the project's source.
 
 ## Development

@@ -4,13 +4,13 @@
 	import { dmgFor, site } from '$lib/meta.js';
 
 	const description =
-		'Every release of Cydonia — what is new, what changed and what is fixed in each version.';
+		'Every release of Arbos — what is new, what changed and what is fixed in each version.';
 </script>
 
 <svelte:head>
-	<title>Cydonia — changelog</title>
+	<title>Arbos — changelog</title>
 	<meta name="description" content={description} />
-	<meta property="og:title" content="Cydonia — changelog" />
+	<meta property="og:title" content="Arbos — changelog" />
 	<meta property="og:description" content={description} />
 	<meta property="og:type" content="website" />
 	<meta property="og:image" content="{site}/og.png" />

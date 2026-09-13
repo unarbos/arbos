@@ -1,4 +1,4 @@
-//! Arbos desktop — Cydonia look, Rust kernel (`arbos-kernel serve`).
+//! Arbos desktop — Arbos look, Rust kernel (`arbos-kernel serve`).
 
 use anyhow::Result;
 use bezel::{
@@ -7,7 +7,7 @@ use bezel::{
     theme::{self, Tint, appearance},
     ui::{self, focus, input},
 };
-use cydonia::{
+use arbos_desktop::{
     assets, memory,
     model::{settings, state, workspace},
     reading,
@@ -18,8 +18,8 @@ use cydonia::{
 };
 
 fn main() -> Result<()> {
-    cydonia::kernel::install_shutdown();
-    let _tunnels = cydonia::kernel::TunnelGuard;
+    arbos_desktop::kernel::install_shutdown();
+    let _tunnels = arbos_desktop::kernel::TunnelGuard;
     let settings = settings::load().unwrap_or_else(|err| {
         eprintln!("settings: {err:#}; using defaults");
         settings::Settings::default()
@@ -33,14 +33,14 @@ fn main() -> Result<()> {
         if cx
             .windows()
             .iter()
-            .any(|window| window.downcast::<root::Cydonia>().is_some())
+            .any(|window| window.downcast::<root::Arbos>().is_some())
         {
             return;
         }
         // ⌘W of the chat window used to leave Settings holding a dead
         // Workspace. Drop those leftovers before a new one is made.
         for window in cx.windows() {
-            if let Some(handle) = window.downcast::<cydonia::view::settings::SettingsWindow>() {
+            if let Some(handle) = window.downcast::<arbos_desktop::view::settings::SettingsWindow>() {
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             }
         }
@@ -55,7 +55,7 @@ fn main() -> Result<()> {
             eprintln!("font registration failed: {err:?}");
         }
         // Cursor's colours, registered before the first palette is built.
-        cydonia::view::palette::install(cx);
+        arbos_desktop::view::palette::install(cx);
         appearance::init(state.appearance, cx);
         // Before the window is opened: it reads its background appearance
         // on the way up, and vibrancy is what decides that.
@@ -83,8 +83,8 @@ fn main() -> Result<()> {
         let window = root::open(settings, state, cx).expect("failed to open window");
         // Test harness: `ARBOS_DRIVER=1` / `ARBOS_DRIVER_SOCKET=…` opens the
         // control socket a driver program clicks and types through.
-        if cydonia::driver::socket_path().is_some()
-            && let Err(err) = cydonia::driver::start(window, cx)
+        if arbos_desktop::driver::socket_path().is_some()
+            && let Err(err) = arbos_desktop::driver::start(window, cx)
         {
             eprintln!("driver: {err:#}");
         }

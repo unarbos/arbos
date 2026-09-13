@@ -8,8 +8,8 @@
 	import { discord, dmg, dmgFor, install, repo, site, tagline as description } from '$lib/meta.js';
 
 	const author = 'https://x.com/tianyi_gc';
-	const video = 'https://cdn.crabtalk.ai/videos/cydonia.720p.mp4';
-	const poster = 'https://cdn.crabtalk.ai/pics/cydonia.720p.poster.jpg';
+	const video = 'https://cdn.crabtalk.ai/videos/arbos.720p.mp4';
+	const poster = 'https://cdn.crabtalk.ai/pics/arbos.720p.poster.jpg';
 	const acp = 'https://agentclientprotocol.com';
 
 	// Off until there are real screenshots to put in the frames — three empty
@@ -20,7 +20,7 @@
 		{
 			id: 'open',
 			title: 'Open a directory',
-			body: 'Any folder becomes a project. What you write lands in <code>.cydonia/</code> inside it, gitignored.'
+			body: 'Any folder becomes a project. What you write lands in <code>.arbos/</code> inside it, gitignored.'
 		},
 		{
 			id: 'write',
@@ -37,8 +37,8 @@
 	];
 
 	const paths = [
-		['<project>/.cydonia/', 'articles, boards, sessions'],
-		['~/.config/cydonia/', 'settings, MCP servers, agents'],
+		['<project>/.arbos/', 'articles, boards, sessions'],
+		['~/.config/arbos/', 'settings, MCP servers, agents'],
 		['~/.local/share/', 'installed agents']
 	];
 
@@ -63,7 +63,7 @@
 	const jsonLd = {
 		'@context': 'https://schema.org',
 		'@type': 'SoftwareApplication',
-		name: 'Cydonia',
+		name: 'Arbos',
 		description,
 		applicationCategory: 'ProductivityApplication',
 		operatingSystem: 'macOS',
@@ -84,9 +84,9 @@
 </script>
 
 <svelte:head>
-	<title>Cydonia — a workspace for the agents you run</title>
+	<title>Arbos — a workspace for the agents you run</title>
 	<meta name="description" content={description} />
-	<meta property="og:title" content="Cydonia — a workspace for the agents you run" />
+	<meta property="og:title" content="Arbos — a workspace for the agents you run" />
 	<meta property="og:description" content={description} />
 	<meta property="og:type" content="website" />
 	<meta property="og:image" content="{site}/og.png" />
@@ -122,7 +122,7 @@
 		muted
 		playsinline
 		preload="metadata"
-		aria-label="Cydonia in use"
+		aria-label="Arbos in use"
 	></video>
 </section>
 
@@ -166,7 +166,7 @@
 </section>
 
 <section class="get" id="download">
-	<h2>Try Cydonia</h2>
+	<h2>Try Arbos</h2>
 
 	<div class="head">
 		<a class="num" href="{base}/changelog/#{anchor(latest.version)}">{latest.version}</a>
@@ -181,7 +181,7 @@
 	<a class="dl" href={dmgFor(latest.version)}>
 		<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 		{@html Download}
-		cydonia-{latest.version}-arm64.dmg
+		arbos-{latest.version}-arm64.dmg
 	</a>
 
 	<div class="alt">
@@ -201,10 +201,10 @@
 		<a href="https://github.com/crabtalk">crabtalk</a>
 	</nav>
 	<nav class="right">
-		<a href={discord} target="_blank" rel="noreferrer" aria-label="Cydonia on Discord">
+		<a href={discord} target="_blank" rel="noreferrer" aria-label="Arbos on Discord">
 			<Brand icon={siDiscord} size={16} />
 		</a>
-		<a href={repo} aria-label="Cydonia on GitHub"><Brand icon={siGithub} size={16} /></a>
+		<a href={repo} aria-label="Arbos on GitHub"><Brand icon={siGithub} size={16} /></a>
 		<a href={author} target="_blank" rel="noreferrer" aria-label="The author on X">
 			<Brand icon={siX} size={15} />
 		</a>

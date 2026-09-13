@@ -39,7 +39,7 @@ const release = {
 export default {
 	plugins: [sveltekit(), release],
 	// Prefixed, because `define` rewrites the token everywhere, dependencies included.
-	define: { __CYDONIA_VERSION__: JSON.stringify(version) },
+	define: { __ARBOS_VERSION__: JSON.stringify(version) },
 	// The README is served as itself at `/readme.md`, and it lives a directory
 	// above: package.json is in here, so Vite roots the dev server at www.
 	server: { fs: { allow: ['..'] } }

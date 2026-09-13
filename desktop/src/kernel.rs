@@ -289,7 +289,7 @@ pub fn list_commands(place: &Place) -> Vec<session::Command> {
             }
         }
         // The kernel's own verbs, last so a skill or prompt of the same
-        // name wins. The window answers these itself (see `Cydonia::submit`).
+        // name wins. The window answers these itself (see `Arbos::submit`).
         for (name, description) in BUILTIN_COMMANDS {
             add(
                 &mut out,

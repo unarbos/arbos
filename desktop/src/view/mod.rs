@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn single_line_shift_arrows_select_to_name_boundaries() {
-        let bindings = field_editing_bindings("CydoniaSessionName", false);
+        let bindings = field_editing_bindings("ArbosSessionName", false);
         assert_binding(&bindings, "shift-up", input::SelectHome);
         assert_binding(&bindings, "shift-down", input::SelectEnd);
     }

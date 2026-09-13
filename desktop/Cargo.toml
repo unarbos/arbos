@@ -1,15 +1,15 @@
 [workspace]
 
 [package]
-name = "cydonia"
-description = "Arbos desktop shell: Cydonia look, Rust arbos-kernel backend"
+name = "arbos-desktop"
+description = "Arbos desktop: the window over the Rust arbos-kernel"
 version = "0.1.1"
 edition = "2024"
 # The floor the edition itself sets. Nothing here reaches past it on purpose.
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/crabtalk/cydonia"
-homepage = "https://cydonia.sh"
+repository = "https://github.com/unarbos/arbos"
+homepage = "https://arbos.life"
 keywords = ["acp", "agents", "desktop", "gpui", "workspace"]
 categories = ["gui", "development-tools"]
 # What a `cargo install` needs and nothing else. The default is every tracked

@@ -41,7 +41,7 @@ use bezel::{
 };
 use std::time::Duration;
 actions!(
-    cydonia,
+    arbos,
     [
         NewSession,
         OpenProject,
@@ -66,12 +66,12 @@ actions!(
 
 /// Claimed on the window's rest focus so Delete/Backspace archive the
 /// highlighted chat when no field is in front.
-const WINDOW_CONTEXT: &str = "CydoniaWindow";
+const WINDOW_CONTEXT: &str = "ArbosWindow";
 
 /// Claimed on the rename field so `enter` files the name and `escape` drops it.
-const RENAME_CONTEXT: &str = "CydoniaSessionName";
+const RENAME_CONTEXT: &str = "ArbosSessionName";
 
-fn name_field_entity(heading: bool, cx: &mut Context<Cydonia>) -> Entity<TextField> {
+fn name_field_entity(heading: bool, cx: &mut Context<Arbos>) -> Entity<TextField> {
     cx.new(|cx| {
         let field = TextField::new(cx)
             .with_frame(false)
@@ -383,7 +383,7 @@ fn force_usable_ns_frame() {}
 
 /// Open the workspace window. Called at launch, and again when the Dock
 /// reopens an app whose window ⌘W closed.
-pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHandle<Cydonia>> {
+pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHandle<Arbos>> {
     let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
     let handle = cx.open_window(
         WindowOptions {
@@ -405,7 +405,7 @@ pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHand
         |window, cx| {
             appearance::observe_window(window, cx).detach();
             window.resize(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)));
-            cx.new(|cx| Cydonia::new(settings, state, window, cx))
+            cx.new(|cx| Arbos::new(settings, state, window, cx))
         },
     )?;
     // macOS can apply a saved frame after the first paint — a 100×131
@@ -454,7 +454,7 @@ fn stepped(at: Option<usize>, len: usize, step: isize) -> Option<usize> {
 
 /// The root view. It owns no app state — only the chrome's own: how wide the
 /// sidebar is, which pane is showing, and whichever card is being written.
-pub struct Cydonia {
+pub struct Arbos {
     pub(crate) workspace: Entity<Workspace>,
     /// The open session menu was opened from the chat header's `⋯`, so it
     /// anchors there rather than at the sidebar row.
@@ -477,7 +477,7 @@ pub struct Cydonia {
     /// a cursor made afresh each paint would light nothing.
     pub(crate) menu_cursor: Cursor,
     /// Whether the press now being handled landed on the open menu's own
-    /// trigger — read by [`Cydonia::toggle_menu`] and nothing else.
+    /// trigger — read by [`Arbos::toggle_menu`] and nothing else.
     pub(crate) menu_pressed: bool,
     /// What the name field is attached to, and the field itself.
     pub(crate) renaming: Option<Renaming>,
@@ -528,7 +528,7 @@ pub struct Cydonia {
     pub(crate) draft_flush: Task<()>,
 }
 
-impl Cydonia {
+impl Arbos {
     fn sync_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let workspace = self.workspace.read(cx);
         self.terminals.retain(|id, _| {
@@ -1311,7 +1311,7 @@ impl Cydonia {
     }
 }
 
-impl Render for Cydonia {
+impl Render for Arbos {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_terminal(window, cx);
         let theme = Theme::of(cx).clone();

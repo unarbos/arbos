@@ -32,7 +32,7 @@ use crate::{
         surface::{Bind, Surface},
     },
     view::{
-        root::{Cydonia, Pane},
+        root::{Arbos, Pane},
         settings::SettingsWindow,
     },
 };
@@ -76,7 +76,7 @@ struct Job {
 }
 
 /// Start listening. Returns at once; the socket lives until the app quits.
-pub fn start(handle: WindowHandle<Cydonia>, cx: &mut App) -> Result<PathBuf> {
+pub fn start(handle: WindowHandle<Arbos>, cx: &mut App) -> Result<PathBuf> {
     let path = socket_path().context("driver is not enabled")?;
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)
@@ -129,7 +129,7 @@ pub fn start(handle: WindowHandle<Cydonia>, cx: &mut App) -> Result<PathBuf> {
             // The window is on the update stack inside this closure, so the
             // root comes from the view handed in, not from `handle.entity`.
             let step = cx.update_window(target, |view, window, cx| {
-                let root = view.downcast::<Cydonia>().ok();
+                let root = view.downcast::<Arbos>().ok();
                 let acted = act(root.as_ref(), &method, &params, window, cx)?;
                 Ok::<_, anyhow::Error>((root, acted))
             });
@@ -191,7 +191,7 @@ fn failure(id: Value, err: &anyhow::Error) -> Value {
 
 /// What kind of window a handle is, by its root view type.
 fn window_kind(window: &AnyWindowHandle) -> &'static str {
-    if window.downcast::<Cydonia>().is_some() {
+    if window.downcast::<Arbos>().is_some() {
         "main"
     } else if window.downcast::<SettingsWindow>().is_some() {
         "settings"
@@ -205,7 +205,7 @@ fn window_id_json(window: &AnyWindowHandle) -> Value {
 }
 
 /// Every open window: kind, id, size, and whether it is the active one.
-fn windows_json(main: WindowHandle<Cydonia>, cx: &mut App) -> Value {
+fn windows_json(main: WindowHandle<Arbos>, cx: &mut App) -> Value {
     let list: Vec<Value> = cx
         .windows()
         .into_iter()
@@ -230,7 +230,7 @@ fn windows_json(main: WindowHandle<Cydonia>, cx: &mut App) -> Value {
 /// `"settings"` is the settings window; anything else is a window id from
 /// `windows`.
 fn resolve_window(
-    main: WindowHandle<Cydonia>,
+    main: WindowHandle<Arbos>,
     wanted: &Value,
     cx: &mut App,
 ) -> Result<AnyWindowHandle> {
@@ -523,7 +523,7 @@ fn parse<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T> {
 /// Do what the request asks. Whatever it returns is the reply for methods
 /// that only act; `report` replaces it for the ones that read.
 fn act(
-    _root: Option<&Entity<Cydonia>>,
+    _root: Option<&Entity<Arbos>>,
     method: &str,
     params: &Value,
     window: &mut Window,
@@ -710,7 +710,7 @@ fn act(
             // update, which cannot run from inside this request's own update
             // of the target. Close the target here instead, with the menu's
             // semantics: the chat window takes Settings with it.
-            if name == "cydonia::CloseWindow" {
+            if name == "arbos::CloseWindow" {
                 if _root.is_some() {
                     crate::kernel::shutdown_tunnels();
                     cx.defer(|cx| {
@@ -767,7 +767,7 @@ fn act(
 
 /// Build the reply, one settled frame after the request.
 fn report(
-    root: Option<&Entity<Cydonia>>,
+    root: Option<&Entity<Arbos>>,
     method: &str,
     acted: Value,
     window: &mut Window,
@@ -1004,7 +1004,7 @@ fn window_json(window: &Window) -> Value {
 
 /// Every identified element on screen, with where it is and whether a click
 /// would reach it, plus the app's own account of itself.
-fn snapshot(root: Option<&Entity<Cydonia>>, window: &mut Window, cx: &mut App) -> Value {
+fn snapshot(root: Option<&Entity<Arbos>>, window: &mut Window, cx: &mut App) -> Value {
     let elements: Vec<Value> = window
         .element_probes()
         .iter()
@@ -1022,7 +1022,7 @@ fn snapshot(root: Option<&Entity<Cydonia>>, window: &mut Window, cx: &mut App) -
 
 /// What the app believes is going on, in words a test can assert on: which
 /// pane shows, what is open, what the composer holds, what was said.
-fn state(root: Option<&Entity<Cydonia>>, window: &Window, cx: &App) -> Value {
+fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
     let Some(root) = root else {
         // Not the chat window (settings, for one): only the frame is known.
         return json!({ "window": "other", "focused": window.is_window_active() });

@@ -11,7 +11,7 @@ use crate::{
     },
     view::{
         component::{composer, composer::SessionDrag, menu::Menu, surface as board, transcript},
-        root::{self, Cydonia, NewSession, Pane},
+        root::{self, Arbos, NewSession, Pane},
         sidebar::Renaming,
     },
 };
@@ -234,7 +234,7 @@ fn verdict(options: &[Choice], allow: bool) -> Option<Verdict<'_>> {
     })
 }
 
-impl Cydonia {
+impl Arbos {
     pub fn composer_focus_handle(&self, cx: &App) -> FocusHandle {
         self.composer.focus_handle(cx)
     }
@@ -621,7 +621,7 @@ const CONTEXT_PANEL_WIDTH: f32 = 200.;
 /// Below this window width the rail is left out; the transcript comes first.
 const CONTEXT_PANEL_MIN_WINDOW: f32 = 1000.;
 
-impl Cydonia {
+impl Arbos {
     /// Cursor's context rail: "On ‹branch›" at the top, then one row per
     /// thing the chat has open — a browser page, a terminal, a job — each a
     /// click from view. Left out on a narrow window.
@@ -1162,7 +1162,7 @@ fn make_list(rows: impl IntoIterator<Item = AnyElement>) -> impl IntoElement {
         .children(rows)
 }
 
-impl Cydonia {
+impl Arbos {
     /// The front door, and what stands where a pane would be if one were
     /// showing: a project to open, or the first entry to make in the one that
     /// already is.

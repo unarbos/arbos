@@ -98,7 +98,7 @@ fn cached(dir: &Path, id: &str) -> Option<String> {
 
 // ── the catalog, for the settings window ─────────────────────────
 
-/// The clients cydonia supports, by their id in the catalog. Named one by one
+/// The clients Arbos supports, by their id in the catalog. Named one by one
 /// rather than taken by a rule: the registry takes any publisher who submits
 /// one, and installing an agent runs their code on this machine — so what is
 /// offered here is a list somebody chose, not a filter somebody wrote.

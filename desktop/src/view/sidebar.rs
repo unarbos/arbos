@@ -10,7 +10,7 @@ use crate::{
             menu::{self, Menu},
             surface as board, transcript,
         },
-        root::{self, CommitName, Cydonia, DismissName, NewSession, OpenProject, Pane},
+        root::{self, CommitName, Arbos, DismissName, NewSession, OpenProject, Pane},
         settings::Section,
     },
 };
@@ -328,7 +328,7 @@ fn row_label(name: String, tint: Hsla, nested: bool) -> AnyElement {
 /// place the scroll offset for the frame being drawn is known. Read off the
 /// handle in `render` it would be the offset of the frame before, and the
 /// heading would lag the rows it belongs to by one.
-struct PinnedHead(Entity<Cydonia>);
+struct PinnedHead(Entity<Arbos>);
 
 impl UniformListDecoration for PinnedHead {
     fn compute(
@@ -347,7 +347,7 @@ impl UniformListDecoration for PinnedHead {
     }
 }
 
-impl Cydonia {
+impl Arbos {
     pub(crate) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = Theme::of(cx).clone();
         let lines = self.lines(cx);
@@ -589,7 +589,7 @@ impl Cydonia {
     /// an archive toggle when the project has put chats away, and a
     /// `+` that opens a chat.
     ///
-    /// `pinned` is the copy [`Cydonia::pinned_head`] holds at the top of the
+    /// `pinned` is the copy [`Arbos::pinned_head`] holds at the top of the
     /// list. It gives up the pill for the column's full width, and takes the
     /// glass the floating cluster below it is cut from — a heading with rows
     /// running under it has to be read against whatever is passing.

@@ -15,11 +15,11 @@
 //! Which items are live is not written here either. macOS validates each one
 //! against [`bezel::gpui::App::is_action_available`] on every open and before
 //! every key equivalent, so an item greys itself exactly when nothing in the
-//! focused path handles its action — which is what [`Cydonia::commands`] is
+//! focused path handles its action — which is what [`Arbos::commands`] is
 //! for, and why a greyed item's shortcut still reaches the keymap underneath.
 
 use crate::view::root::{
-    CloseProject, Cydonia, NewSession, NextEntry, OpenProject, OpenSettings, PrevEntry,
+    CloseProject, Arbos, NewSession, NextEntry, OpenProject, OpenSettings, PrevEntry,
     ToggleSidebar, ZoomIn, ZoomOut, ZoomReset,
 };
 use bezel::{
@@ -30,7 +30,7 @@ use bezel::{
 };
 
 actions!(
-    cydonia,
+    arbos,
     [
         CloseWindow,
         Hide,
@@ -85,7 +85,7 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &CloseWindow, cx: &mut App| {
         let closing_main = cx
             .active_window()
-            .and_then(|window| window.downcast::<Cydonia>())
+            .and_then(|window| window.downcast::<Arbos>())
             .is_some();
         if closing_main {
             crate::kernel::shutdown_tunnels();
@@ -205,11 +205,11 @@ fn front(cx: &mut App, f: impl FnOnce(&mut Window)) {
 /// Run `f` on the workspace window, brought forward first. Looked up rather
 /// than held: ⌘W closes that window and the Dock opens another, so a handle
 /// taken at launch outlives the window it names.
-fn workspace(cx: &mut App, f: impl FnOnce(&mut Cydonia, &mut Window, &mut Context<Cydonia>)) {
+fn workspace(cx: &mut App, f: impl FnOnce(&mut Arbos, &mut Window, &mut Context<Arbos>)) {
     let Some(handle) = cx
         .windows()
         .into_iter()
-        .find_map(|window| window.downcast::<Cydonia>())
+        .find_map(|window| window.downcast::<Arbos>())
     else {
         return;
     };
@@ -221,18 +221,18 @@ fn workspace(cx: &mut App, f: impl FnOnce(&mut Cydonia, &mut Window, &mut Contex
 
 /// Run `f` on the workspace window without bringing it forward. For a
 /// setting that shows everywhere at once, the window in front stays there.
-fn workspace_quiet(cx: &mut App, f: impl FnOnce(&mut Cydonia, &mut Context<Cydonia>)) {
+fn workspace_quiet(cx: &mut App, f: impl FnOnce(&mut Arbos, &mut Context<Arbos>)) {
     let Some(handle) = cx
         .windows()
         .into_iter()
-        .find_map(|window| window.downcast::<Cydonia>())
+        .find_map(|window| window.downcast::<Arbos>())
     else {
         return;
     };
     let _ = handle.update(cx, |this, _, cx| f(this, cx));
 }
 
-impl Cydonia {
+impl Arbos {
     /// Hang the menu's commands on the root, each under the condition that
     /// makes it mean something — a board cannot be started in a window with no
     /// project open, so with none there is nothing here to handle `NewBoard`

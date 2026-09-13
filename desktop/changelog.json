@@ -2,7 +2,7 @@
   {
     "version": "0.1.1",
     "date": "2026-09-09",
-    "summary": "The turn in flight carries a name and what it spends, the agent's model and mode move into its menu, and an open project reconciles whatever lands in .cydonia.",
+    "summary": "The turn in flight carries a name and what it spends, the agent's model and mode move into its menu, and an open project reconciles whatever lands in .arbos.",
     "new": [
       "Put bezel's thinking orbs on the working turn and its row",
       "Rebuild the menus on bezel 0.1.8, and describe the slash commands",
@@ -12,7 +12,7 @@
       "Select and copy text out of the transcript",
       "Pick the agent's model and mode from its menu, and meter the context",
       "Make the watch delay a setting in Settings > Performance",
-      "Watch each open project's .cydonia and reconcile what lands in it"
+      "Watch each open project's .arbos and reconcile what lands in it"
     ],
     "fixed": [
       "Capture an agent's stderr instead of inheriting it",

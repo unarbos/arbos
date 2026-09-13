@@ -165,7 +165,7 @@ impl Default for Settings {
 }
 
 /// Where this shell keeps machine-local data — `$XDG_DATA_HOME/arbos-desktop`,
-/// defaulting to `~/.local/share/arbos-desktop`. Separate from a Cydonia install.
+/// defaulting to `~/.local/share/arbos-desktop`. Separate from a Arbos install.
 pub fn data_dir() -> Result<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
         && !xdg.is_empty()
