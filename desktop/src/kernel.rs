@@ -1798,7 +1798,7 @@ struct RunRow {
 /// the self-hosted speech server. `None` when no URL is set, in which case
 /// dictation falls back to this Mac's helper.
 pub fn voice_config() -> Option<crate::voice_ws::VoiceCfg> {
-    let text = std::fs::read_to_string(host_config_path()).ok()?;
+    let text = std::fs::read_to_string(arbos_core::host_dir().join("config.toml")).ok()?;
     let mut url = String::new();
     let mut token = String::new();
     let mut token_env = String::new();
