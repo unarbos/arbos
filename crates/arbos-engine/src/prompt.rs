@@ -62,8 +62,12 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
         format!("Kind: {}\n", agent.kind)
     };
     let memory = memory_segments(place);
+    let sandbox = match crate::sandbox::for_agent(place, agent) {
+        Some(sb) => format!("Sandbox: {}\n", sb.describe()),
+        None => String::new(),
+    };
     format!(
-        "You: {id}\nName: {name}\n{kind}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\nProject: {project}\nCwd: {cwd}\nFocus: {focus}\nSkills (the user or you invoke one as /name <args>: its SKILL.md body then arrives with the message; read the file for more): {skills}\n{git}\n{machines}\n{kinds}{instructions}{agents}{memory}",
+        "You: {id}\nName: {name}\n{kind}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\n{sandbox}Project: {project}\nCwd: {cwd}\nFocus: {focus}\nSkills (the user or you invoke one as /name <args>: its SKILL.md body then arrives with the message; read the file for more): {skills}\n{git}\n{machines}\n{kinds}{instructions}{agents}{memory}",
         id = agent.id,
         name = agent.name,
         parent = agent.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),

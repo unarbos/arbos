@@ -13,6 +13,7 @@ mod prompt;
 mod provider;
 mod retry;
 pub mod secrets;
+pub mod sandbox;
 mod step;
 pub mod summarise;
 mod tool;
