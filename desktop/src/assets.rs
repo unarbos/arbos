@@ -36,6 +36,10 @@ pub const REMOTE_ICON: &str = "arbos/remote.svg";
 /// Feedback under an answer. Bezel's set has no thumbs.
 pub const THUMBS_UP_ICON: &str = "arbos/thumbs-up.svg";
 pub const THUMBS_DOWN_ICON: &str = "arbos/thumbs-down.svg";
+/// Handset, and the handset with a slash: start and end a call. Bezel's set
+/// has no phone.
+pub const PHONE_ICON: &str = "arbos/phone.svg";
+pub const PHONE_OFF_ICON: &str = "arbos/phone-off.svg";
 
 pub struct Assets;
 
@@ -55,6 +59,12 @@ impl AssetSource for Assets {
         }
         if path == THUMBS_DOWN_ICON {
             return Ok(Some(Cow::Borrowed(include_bytes!("view/thumbs-down.svg"))));
+        }
+        if path == PHONE_ICON {
+            return Ok(Some(Cow::Borrowed(include_bytes!("view/phone.svg"))));
+        }
+        if path == PHONE_OFF_ICON {
+            return Ok(Some(Cow::Borrowed(include_bytes!("view/phone-off.svg"))));
         }
         if let Some(bytes) = icons::Assets.load(path)? {
             return Ok(Some(bytes));
