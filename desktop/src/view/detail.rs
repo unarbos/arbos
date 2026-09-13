@@ -5,7 +5,7 @@ use crate::{
     kernel,
     model::{
         attachment::Prompt,
-        session::{self, ChatSession, Choice, Connection, PlanNode},
+        session::{self, ChatItem, ChatSession, Choice, Connection, PlanNode},
         settings,
     },
     view::{
@@ -17,7 +17,7 @@ use crate::{
 use bezel::{
     gpui::{
         AnyElement, App, ClickEvent, Context, ExternalPaths, FocusHandle, Focusable as _,
-        SharedString, Window, div, prelude::*, px,
+        SharedString, Window, div, prelude::*, px, svg,
     },
     motion::{Fade, Painter},
     theme::{TextStyle, Theme, Typeset},
@@ -583,6 +583,7 @@ impl Cydonia {
                                         .flex_col()
                                         .min_h(px(root::composer_height()))
                                         .gap(px(8.))
+                                        .children(self.pills(cx))
                                         .children(self.plan(cx).map(bleed))
                                         .children(self.permission(cx).map(bleed))
                                         .children(self.questions(cx).map(bleed))
@@ -934,6 +935,33 @@ impl Cydonia {
 
 /// A strip above the composer takes the composer's own plate edges: out past
 /// the column gutter by the pad the composer bleeds, so the two line up.
+/// GitHub pull-request URLs in a tool's output, in order of appearance.
+/// `gh pr create` prints one; so does `gh pr view`. Trailing punctuation
+/// from prose around the link is dropped.
+fn pr_urls(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for word in text.split(|c: char| {
+        c.is_whitespace() || c == '"' || c == '\'' || c == '<' || c == '>' || c == '(' || c == ')'
+    }) {
+        let word = word.trim_end_matches(['.', ',', ';', ':']);
+        let Some(rest) = word.strip_prefix("https://github.com/") else {
+            continue;
+        };
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() >= 4
+            && parts[2] == "pull"
+            && !parts[3].is_empty()
+            && parts[3].chars().all(|c| c.is_ascii_digit())
+        {
+            out.push(format!(
+                "https://github.com/{}/{}/pull/{}",
+                parts[0], parts[1], parts[3]
+            ));
+        }
+    }
+    out
+}
+
 fn bleed(el: impl IntoElement) -> AnyElement {
     div()
         .ml(px(-root::COMPOSER_PAD_X))
@@ -1237,6 +1265,122 @@ impl Cydonia {
             }))
             .child(inner)
             .into_any_element()
+    }
+
+    /// Cursor's chips above the composer: "Working N" for the sub-agents
+    /// with a turn running, "PRs N" for the pull requests this chat and its
+    /// children have opened. Both derived from the sessions on hand;
+    /// neither shows at zero. Working opens the first live child; PRs opens
+    /// the newest one.
+    fn pills(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = Theme::of(cx).clone();
+        let workspace = self.workspace.read(cx);
+        let chat = workspace.active_session()?;
+        let project = workspace.active_project()?;
+        let mut working: Vec<u64> = project
+            .sessions
+            .iter()
+            .filter(|c| c.parent == Some(chat.id) && c.busy())
+            .map(|c| (c.delegate_number, c.id))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect();
+        working.sort_unstable();
+        let mut prs: Vec<String> = Vec::new();
+        for c in std::iter::once(chat).chain(
+            project
+                .sessions
+                .iter()
+                .filter(|c| c.parent == Some(chat.id)),
+        ) {
+            for item in &c.items {
+                if let ChatItem::Tool { output, .. } = item {
+                    for url in pr_urls(output) {
+                        if !prs.contains(&url) {
+                            prs.push(url);
+                        }
+                    }
+                }
+            }
+        }
+        if working.is_empty() && prs.is_empty() {
+            return None;
+        }
+        let first_working = working.first().copied();
+        let newest_pr = prs.last().cloned();
+        let pr_list = prs.join("\n");
+        let pill = |id: &'static str, glyph: AnyElement, label: String| {
+            div()
+                .id(id)
+                .h(px(24.))
+                .px(px(9.))
+                .rounded_full()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.surface_raised.opacity(0.6))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .cursor_pointer()
+                .hover(|el| el.bg(theme.element_hover))
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_muted)
+                .child(glyph)
+                .child(SharedString::from(label))
+        };
+        Some(
+            div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .when(!working.is_empty(), |row| {
+                    row.child(
+                        pill(
+                            "pill-working",
+                            svg()
+                                .path(crate::assets::DELEGATE_ICON)
+                                .size(px(12.))
+                                .flex_none()
+                                .text_color(theme.text_muted)
+                                .into_any_element(),
+                            format!("Working {}", working.len()),
+                        )
+                        .tooltip(|window, cx| {
+                            Tooltip::text("Sub-agents with a turn running", window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(id) = first_working {
+                                this.select_session(id, cx);
+                            }
+                        })),
+                    )
+                })
+                .when(!prs.is_empty(), |row| {
+                    let list = pr_list.clone();
+                    row.child(
+                        pill(
+                            "pill-prs",
+                            icons::icon(icons::editing::GIT_BRANCH)
+                                .size(px(12.))
+                                .flex_none()
+                                .text_color(theme.text_muted)
+                                .into_any_element(),
+                            format!("PRs {}", prs.len()),
+                        )
+                        .tooltip(move |window, cx| Tooltip::text(list.clone(), window, cx))
+                        .on_click(move |_, _, cx| {
+                            if let Some(url) = &newest_pr {
+                                cx.open_url(url);
+                            }
+                        }),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     /// The agent's plan: what it holds that is not yet done. One header
