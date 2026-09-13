@@ -80,3 +80,41 @@ fn a_coordinator_that_spawns_and_leaves_the_page_alone_is_nudged() {
     assert!(nudge_ix > done_ix, "{evs:#?}");
     let _ = k.child.kill();
 }
+
+/// Audit §5: a one-word way for a child (or root) to reach what earlier
+/// workers did — `grep scope=history` reads every agent's transcript and
+/// cites hits by agent and line.
+#[test]
+fn grep_scope_history_reads_other_agents_transcripts() {
+    let replies = concat!(
+        "{\"agent\":\"root\",\"content\":\"delegating\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"helper\",\"task\":\"say the codeword\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"started\"}\n",
+        "{\"content\":\"the codeword is xylophone\"}\n",
+        "{\"agent\":\"root\",\"content\":\"noted\"}\n",
+        "{\"agent\":\"root\",\"content\":\"looking back\",\"calls\":[{\"name\":\"grep\",\"arguments\":{\"pattern\":\"xylophone\",\"scope\":\"history\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"found it\"}\n",
+    );
+    let mut k = start_kernel_replay("history-grep", replies);
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "get the codeword"}));
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    std::thread::sleep(Duration::from_secs(2));
+    a.send(
+        serde_json::json!({"type": "user", "agent": "root", "text": "what did the helper say?"}),
+    );
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    std::thread::sleep(Duration::from_millis(500));
+    let evs = transcript(&k.place);
+    let grep = evs
+        .iter()
+        .find(|e| e["kind"] == "tool" && e["name"] == "grep")
+        .expect("grep tool line");
+    let body = grep["body"].as_str().unwrap_or("");
+    assert!(body.contains("helper · line"), "{grep:#?}");
+    assert!(body.contains("xylophone"), "{body}");
+    let _ = k.child.kill();
+}
