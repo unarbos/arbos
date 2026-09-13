@@ -2,9 +2,9 @@
 
 The program is `arbos-swe-run` (bundled here), which runs `arbos-kernel run`
 headless inside the task's container, then leaves the patch, the exported
-rollout bundle, and a `result.json` under `/logs/artifacts/arbos`. Model
-calls go to the interception endpoint as a custom OpenAI-compatible
-provider, so the trace verifiers records is the sample.
+rollout bundle, and a `result.json` under `/tmp/vf-arbos/out`, which the
+harness copies to the host. Model calls go to the interception endpoint as a
+custom OpenAI-compatible provider, so the trace verifiers records is the sample.
 
     uv run eval swebench-verified --env.agent.harness.id arbos-harness \
         --env.agent.runtime.type docker -m <model> \
@@ -40,7 +40,10 @@ PROGRAM = Path(__file__).resolve().parent / "arbos-swe-run"
 BIN_DIR = "/tmp/vf-arbos/bin"
 KERNEL_BIN = f"{BIN_DIR}/arbos-kernel"
 PROGRAM_BIN = f"{BIN_DIR}/arbos-swe-run"
-OUT_DIR = "/logs/artifacts/arbos"
+# Not under /logs/artifacts: Harbor ships that whole tree to the grading box
+# with a 32 MB cap, and a long rollout's trace/ alone passes it (django-15629
+# errored in finalize). The harness collects this dir itself.
+OUT_DIR = "/tmp/vf-arbos/out"
 DEFAULT_IMAGE = "arbos-harness"
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "arbos-harness"
 
@@ -200,7 +203,7 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
         return len(data)
 
     async def cleanup(self, trace: Trace, runtime: Runtime) -> None:
-        await runtime.run(["rm", "-rf", f"/tmp/vf-arbos/{trace.id}"], {})
+        await runtime.run(["rm", "-rf", f"/tmp/vf-arbos/{trace.id}", OUT_DIR], {})
 
 
 def safe_name(name: str) -> str:

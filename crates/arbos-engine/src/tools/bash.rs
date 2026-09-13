@@ -529,9 +529,81 @@ mod kill_tests {
     }
 }
 
+/// Commands that ask the user first even in auto mode: wiping the root of
+/// the filesystem (or a top-level directory of it), sudo, mkfs, a fork
+/// bomb. `rm -rf /tmp/scratch` is an ordinary cleanup, not one of these;
+/// the old substring test on `rm -rf /` stopped headless runs on exactly
+/// that.
 pub fn needs_approval(cmd: &str) -> bool {
     let c = cmd.to_ascii_lowercase();
-    c.contains("rm -rf /") || c.contains("sudo ") || c.contains("mkfs") || c.contains(":(){")
+    c.contains("sudo ") || c.contains("mkfs") || c.contains(":(){") || rm_wipes_root(&c)
+}
+
+/// An `rm` with a recursive flag whose target is `/`, `/*`, `~`, or a
+/// top-level directory such as `/usr` or `/etc`.
+fn rm_wipes_root(lower: &str) -> bool {
+    for segment in lower.split(['|', ';', '&', '\n']) {
+        let mut words = segment.split_whitespace();
+        if words.next() != Some("rm") {
+            continue;
+        }
+        let mut recursive = false;
+        for w in words {
+            if let Some(flags) = w.strip_prefix('-').filter(|f| !f.starts_with('-')) {
+                recursive |= flags.contains('r');
+                continue;
+            }
+            if w == "--recursive" || w == "-r" {
+                recursive = true;
+                continue;
+            }
+            if w.starts_with("--") {
+                continue;
+            }
+            let target = w.trim_matches(['"', '\'']);
+            let t = target.trim_end_matches('/');
+            let top_level = t.starts_with('/')
+                && !t[1..].is_empty()
+                && !t[1..].contains('/')
+                && !matches!(t, "/tmp" | "/var");
+            let wipe = target == "/" || target == "/*" || t == "~" || t == "$home" || top_level;
+            if recursive && wipe {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::needs_approval;
+
+    #[test]
+    fn root_wipes_ask_and_scratch_cleanups_do_not() {
+        for ask in [
+            "rm -rf /",
+            "rm -rf /*",
+            "rm -rf ~",
+            "cd /testbed && rm -rf /usr",
+            "rm -r --no-preserve-root /etc",
+            "sudo apt-get install x",
+            "mkfs.ext4 /dev/sda1",
+        ] {
+            assert!(needs_approval(ask), "{ask:?} should ask");
+        }
+        for free in [
+            "rm -rf /tmp/udltest && cd /testbed && git diff",
+            "rm -rf build/ dist/",
+            "rm -rf /var/tmp/x",
+            "rm -rf /testbed/.pytest_cache",
+            "rm -f /tmp/a.txt",
+            "grep -r foo /",
+            "python -c 'print(1)'",
+        ] {
+            assert!(!needs_approval(free), "{free:?} should run");
+        }
+    }
 }
 
 /// Commands whose first word is here never write the place.

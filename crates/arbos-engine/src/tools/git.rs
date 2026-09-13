@@ -289,7 +289,7 @@ fn test_files_note(status: &str) -> Option<String> {
         return None;
     }
     Some(format!(
-        "\nNote: {} existing test file(s) changed: {}. Existing tests are the spec — if you altered an assertion, say why in your reply and the commit message, or put it back and add a new test instead.\n",
+        "\nNote: {} existing test file(s) changed: {}. Existing tests are read-only spec: put every changed assertion, tolerance, expected value, and fixture back as it was, and add new test functions instead. Only a request that names the test may change it.\n",
         touched.len(),
         touched.join(", ")
     ))
