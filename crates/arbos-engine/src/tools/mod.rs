@@ -12,6 +12,7 @@ pub(crate) mod file_hooks;
 pub(crate) mod fs;
 pub mod git;
 mod hashline;
+pub mod memory;
 mod web;
 
 pub use bash::{is_readonly_command, kill_job};
@@ -68,6 +69,7 @@ pub fn builtin() -> Registry {
         .with(web::Search)
         .with(git::Changes)
         .with(git::Undo)
+        .with(memory::Remember)
 }
 
 /// A call after preflight: allowlist checked, file hooks applied, planned.
