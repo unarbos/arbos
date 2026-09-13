@@ -1,7 +1,8 @@
-# The call names another project (`mac/arbos`, a hub name): the gateway attaches to that kernel
+# The call names another project (`qa-mock/arbos`, a hub name on a mock hub in this process;
+# never a real machine — Jacob's `mac` is off limits to every test): the gateway attaches to that kernel
 # through the hub for this call, and the caller's words land there, not in the gateway's own kernel.
 title = "Hub attach per call: session.start.project = machine/project"
-hub = { machine = "mac", project = "arbos" }
+hub = { machine = "qa-mock", project = "arbos" }
 
 [[steps]]
 say = "Send an agent to tidy the release notes."
