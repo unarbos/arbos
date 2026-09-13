@@ -214,12 +214,13 @@ pub async fn spawn_remote(
         .filter(|n| !n.is_empty())
         .unwrap_or("project")
         .to_string();
-    let remote_path = machine.place_for(&project);
-
     // The local stand-in first, so the window shows the child while the
-    // sync runs. Same id rules as a local spawn.
+    // sync runs. Same id rules as a local spawn. Each child gets a place
+    // of its own on the machine — its own copy, kernel, and root — so two
+    // children never share a transcript.
     let id = hooks.remote_child_id(&brief)?;
     validate_id(&id)?;
+    let remote_path = machine.place_for_child(&project, &id);
     let mut child = Agent::root(&id);
     child.name = brief.chars().take(48).collect();
     child.parent = Some(parent.id.clone());
@@ -718,7 +719,7 @@ fn prepare_remote(machine: &Machine, local_place: &Path, remote_path: &str) -> R
         );
         if local_arch != arch {
             bail!(
-                "{} has no arbos-kernel at {kernel} and runs {arch}, not {local_arch}; install one there (cargo install --path crates/arbos-kernel) or set kernel in machines.toml",
+                "{} has no arbos-kernel at {kernel} and runs {arch}, not {local_arch}, so this kernel's binary will not run there. Build one on that machine (clone the repo; cargo build --release -p arbos-kernel; copy target/release/arbos-kernel to {kernel}) or set kernel = \"<path>\" for it in machines.toml.",
                 machine.name
             );
         }
@@ -812,7 +813,8 @@ fn start_remote_kernel(machine: &Machine, path: &str) -> Result<u16> {
         r#"cd {p} && mkdir -p .arbos && \
 if test -f .arbos/kernel.json && pid=$(sed -n 's/.*"pid": *\([0-9]*\).*/\1/p' .arbos/kernel.json) && test -n "$pid" && kill -0 "$pid" 2>/dev/null; then :; else \
   rm -f .arbos/kernel.json; \
-  ( {env} setsid nohup {k} serve {p} > .arbos/kernel.log 2>&1 < /dev/null & ); \
+  if command -v setsid >/dev/null 2>&1; then ( {env} setsid nohup {k} serve {p} > .arbos/kernel.log 2>&1 < /dev/null & ); \
+  else ( {env} nohup {k} serve {p} > .arbos/kernel.log 2>&1 < /dev/null & ); fi; \
   for i in $(seq 1 60); do test -f .arbos/kernel.json && grep -q tcp .arbos/kernel.json && break; sleep 1; done; \
 fi; cat .arbos/kernel.json"#,
         p = sq(path),

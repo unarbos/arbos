@@ -72,6 +72,12 @@ impl Machine {
         format!("{}/{project}", self.dir.trim_end_matches('/'))
     }
 
+    /// One child's own copy of `project`: `<dir>/<project>--<child>`. Two
+    /// dashes, so a project whose name has one dash still reads.
+    pub fn place_for_child(&self, project: &str, child: &str) -> String {
+        format!("{}/{project}--{child}", self.dir.trim_end_matches('/'))
+    }
+
     /// One roster line for the prompt.
     pub fn describe(&self) -> String {
         let mut s = format!("{} (ssh {}", self.name, self.ssh);
