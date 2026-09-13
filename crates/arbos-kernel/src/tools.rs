@@ -186,10 +186,19 @@ impl Tool for Spawn {
             }
             let kind = opt_str(&args, "kind");
             let kind_owned = kind.map(str::to_string);
-            let raw = opt_str(&args, "isolate").unwrap_or("none");
-            let isolate = Isolate::parse(raw).ok_or_else(|| {
+            let raw = opt_str(&args, "isolate")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("none");
+            let mut isolate = Isolate::parse(raw).ok_or_else(|| {
                 anyhow::anyhow!("spawn: isolate must be none or worktree, not {raw:?}")
             })?;
+            // A worktree protects the parent's checkout; a place that is no
+            // repository has none to protect, so the child runs in place.
+            if isolate == Isolate::Worktree && !crate::worktree::is_repo(&hooks.place.path) {
+                isolate = Isolate::None;
+                ran_here.push_str(" (not a git repository, so no worktree: it works in place)");
+            }
             // git runs on the blocking pool: a large checkout takes seconds.
             let agent = cx.agent.clone();
             let brief_owned = brief.to_string();

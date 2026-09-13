@@ -58,6 +58,13 @@ pub fn branch_of(dir: &Path) -> Option<String> {
     (out.status.success() && !s.is_empty()).then_some(s)
 }
 
+/// Whether `place` is inside a git work tree.
+pub fn is_repo(place: &Path) -> bool {
+    git(place, &["rev-parse", "--is-inside-work-tree"])
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+        .unwrap_or(false)
+}
+
 /// Make the worktree. Fails, leaving nothing behind, when the place is not
 /// a repository, has no commit yet, or the branch or folder already exists.
 pub fn create(place: &Path, id: &str) -> Result<Worktree> {
