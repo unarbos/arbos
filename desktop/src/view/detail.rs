@@ -571,6 +571,7 @@ impl Arbos {
             None => self.launch(cx),
             Some(Pane::Chat) => self.conversation(window, cx),
             Some(Pane::Surface) => self.surface_pane(window, cx),
+            Some(Pane::Project) => self.project_view(window, cx),
         };
 
         let header = show_composer.then(|| self.chat_header(&theme, window, cx));

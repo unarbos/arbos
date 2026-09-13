@@ -8,25 +8,49 @@
 use crate::{
     model::{
         session::ChildState,
-        store_view::{PageBlock, PageItem, ProjectPage, Resource, Target},
+        store_view::{FileKind, PageBlock, PageItem, ProjectPage, Resource, StoreFile, Target},
         surface::{Surface, SurfaceId, SurfaceKind},
         workspace::Workspace,
     },
     view::{
         component::{composer::SessionDrag, menu::Menu, surface as board, transcript},
-        root::{self, Arbos, NewSession, TogglePanel},
+        root::{self, Arbos, NewSession, Pane, ShowProject, TogglePanel},
         settings::Section,
     },
 };
 use bezel::{
     gpui::{
-        AnyElement, App, ClickEvent, Context, Div, Hsla, Render, SharedString, Stateful, Window,
-        div, prelude::*, px, svg,
+        AnyElement, App, ClickEvent, Context, Div, FontWeight, Hsla, Render, SharedString,
+        Stateful, Window, div, prelude::*, px, svg,
     },
     theme::{TextStyle, Theme, Typeset},
     ui::{icons, popover, tooltip::Tooltip, widgets::Buttons},
 };
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, SystemTime},
+};
+
+/// The glyph a store file wears, by kind.
+pub(crate) fn file_glyph(kind: FileKind) -> &'static str {
+    match kind {
+        FileKind::Markdown => icons::files::DOCUMENT,
+        FileKind::Image => icons::system::WIDGET,
+        FileKind::Other => icons::files::FOLDER_WITH_FILES,
+    }
+}
+
+/// How long ago, in the coarsest unit that still says something:
+/// `now`, `4m`, `2h`, `3d`.
+pub(crate) fn age(at: SystemTime) -> String {
+    let secs = at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+    match secs {
+        s if s < 60 => "now".into(),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    }
+}
 
 /// The panel's width. Cursor's right panel runs 280–320 at a 1728 window.
 pub(crate) const PANEL_WIDTH: f32 = 280.;
@@ -41,6 +65,55 @@ const TREE_STEP: f32 = 14.;
 /// Padding inside the panel, and between its sections.
 const PAD_X: f32 = 10.;
 const SECTION_GAP: f32 = 14.;
+
+/// How large the project page is drawn: in the panel's caption size, or
+/// at reading size for the page in the column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PageScale {
+    Panel,
+    Page,
+}
+
+impl PageScale {
+    fn text(self) -> TextStyle {
+        match self {
+            Self::Panel => TextStyle::Caption,
+            Self::Page => TextStyle::Body,
+        }
+    }
+
+    /// A `##` heading; `###` steps one size down.
+    fn heading(self, level: u8) -> TextStyle {
+        match (self, level >= 3) {
+            (Self::Panel, _) => TextStyle::Caption,
+            (Self::Page, false) => TextStyle::Title3,
+            (Self::Page, true) => TextStyle::Body,
+        }
+    }
+
+    fn glyph(self) -> f32 {
+        match self {
+            Self::Panel => 12.,
+            Self::Page => 14.,
+        }
+    }
+
+    /// A row's vertical padding: Cursor's page rows breathe.
+    fn row_py(self) -> f32 {
+        match self {
+            Self::Panel => 3.,
+            Self::Page => 6.,
+        }
+    }
+
+    /// The left inset a row and a heading share.
+    fn inset(self) -> f32 {
+        match self {
+            Self::Panel => 8.,
+            Self::Page => 0.,
+        }
+    }
+}
 
 /// One agent on the tree, as the panel and a keyboard step walk it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,18 +331,17 @@ impl Arbos {
                 )
                 .children(store_rows(&store.resources, &theme));
         }
+        // Cursor's Project tab, in the panel's measure: the header opens
+        // the page in the column; under it the status page, then the
+        // store's files — the context document first.
+        let on_page = self.showing(cx) == Some(Pane::Project);
         body = body
-            .child(section_head("Project", None, &theme))
-            .children(
-                store
-                    .context
-                    .clone()
-                    .map(|path| self.project_context_row(path, &theme, cx)),
-            )
-            .child(self.project_page(store.page.as_ref(), remote, &theme, cx));
+            .child(self.project_head(on_page, &theme, cx))
+            .child(self.project_page(store.page.as_ref(), remote, PageScale::Panel, &theme, cx))
+            .children(self.files_rows(&store.files, &theme, cx));
         if !standing.is_empty() {
             body = body
-                .child(page_heading(2, "Standing", true, &theme))
+                .child(page_heading(2, "Standing", true, PageScale::Panel, &theme))
                 .children(
                     standing
                         .into_iter()
@@ -584,17 +656,102 @@ impl Arbos {
 
     /// The context document (`docs/project-context.md`): goals,
     /// constraints, decisions. A click opens it in the column.
-    fn project_context_row(
+    /// The Project section's head: a click puts the whole page in the
+    /// column, and a chevron says so. Lit while the page is showing.
+    fn project_head(&self, on_page: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("panel-project-head")
+            .flex_none()
+            .h(px(22.))
+            .mt(px(SECTION_GAP))
+            .px(px(8.))
+            .rounded(px(5.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .cursor_pointer()
+            .text_style(TextStyle::Caption)
+            .text_color(if on_page {
+                theme.text
+            } else {
+                theme.text_faint
+            })
+            .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+            .tooltip(|window, cx| Tooltip::with_keystroke("Open the project page", "⌘2", window, cx))
+            .child("Project")
+            .child(div().flex_1())
+            .child(
+                icons::icon(icons::arrows::ALT_ARROW_RIGHT)
+                    .size(px(12.))
+                    .text_color(theme.text_faint),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.show_project(&ShowProject, window, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// The store's files under the page, a few at a time: the context
+    /// document first, then the newest. "N more" opens the page.
+    fn files_rows(
         &self,
-        path: PathBuf,
+        files: &[StoreFile],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        const SHOWN: usize = 6;
+        if files.is_empty() {
+            return Vec::new();
+        }
+        let mut rows = vec![page_heading(2, "Files", true, PageScale::Panel, theme)];
+        rows.extend(
+            files
+                .iter()
+                .take(SHOWN)
+                .enumerate()
+                .map(|(n, file)| self.file_row(("panel-file", n as u64), file, theme, cx)),
+        );
+        let more = files.len().saturating_sub(SHOWN);
+        if more > 0 {
+            rows.push(
+                div()
+                    .id("panel-files-more")
+                    .pl(px(8. + 12. + 8.))
+                    .py(px(3.))
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .cursor_pointer()
+                    .hover(|el| el.text_color(theme.text))
+                    .child(SharedString::from(format!("{more} more…")))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.show_project(&ShowProject, window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        rows
+    }
+
+    /// One file: its kind's glyph, its name, and how long ago it changed,
+    /// dim at the right. A click opens it in the column.
+    pub(crate) fn file_row(
+        &self,
+        id: (&'static str, u64),
+        file: &StoreFile,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        row(("panel-context", 0), 0, false, theme)
+        let path = file.path.clone();
+        let title = file.name.clone();
+        row(id, 0, false, theme)
             .child(glyph_box(
-                icons::icon(icons::files::DOCUMENT)
+                icons::icon(file_glyph(file.kind))
                     .size(px(12.))
-                    .text_color(theme.text_muted)
+                    .text_color(if file.pinned {
+                        theme.accent
+                    } else {
+                        theme.text_muted
+                    })
                     .into_any_element(),
             ))
             .child(
@@ -603,10 +760,21 @@ impl Arbos {
                     .min_w_0()
                     .truncate()
                     .text_color(theme.text_muted)
-                    .child("Context"),
+                    .child(SharedString::from(if file.pinned {
+                        "Context".to_string()
+                    } else {
+                        file.name.clone()
+                    })),
             )
+            .children(file.modified.map(|at| {
+                div()
+                    .flex_none()
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(age(at)))
+            }))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_store_file(path.clone(), "Context", cx);
+                this.open_store_file(path.clone(), &title, cx);
             }))
             .into_any_element()
     }
@@ -615,21 +783,22 @@ impl Arbos {
     /// section headings, checkbox rows whose label is the link and whose
     /// readout sits dim under it. With nothing written yet, an invitation
     /// to start it through the main chat.
-    fn project_page(
+    pub(crate) fn project_page(
         &self,
         page: Option<&ProjectPage>,
         remote: bool,
+        scale: PageScale,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(page) = page.filter(|page| !page.is_empty()) else {
             return div()
-                .px(px(8.))
+                .px(px(scale.inset()))
                 .py(px(4.))
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .text_style(TextStyle::Caption)
+                .text_style(scale.text())
                 .text_color(theme.text_faint)
                 .child("Nothing on the project page yet.")
                 .when(!remote, |el| {
@@ -648,12 +817,19 @@ impl Arbos {
                 })
                 .into_any_element();
         };
+        let (tldr_id, item_id): (&'static str, &'static str) = match scale {
+            PageScale::Panel => ("panel-tldr-item", "panel-page-item"),
+            PageScale::Page => ("page-tldr-item", "page-item"),
+        };
         let mut body = div().flex().flex_col();
         if !page.tldr.is_empty() {
             body = body.child(
                 div()
-                    .id("panel-tldr")
-                    .mx(px(4.))
+                    .id(match scale {
+                        PageScale::Panel => "panel-tldr",
+                        PageScale::Page => "page-tldr",
+                    })
+                    .mx(px(scale.inset() / 2.))
                     .mb(px(6.))
                     .px(px(4.))
                     .py(px(2.))
@@ -662,16 +838,16 @@ impl Arbos {
                     .flex()
                     .flex_col()
                     .children(page.tldr.iter().enumerate().map(|(n, item)| {
-                        self.page_item(("panel-tldr-item", n as u64), item, theme, cx)
+                        self.page_item((tldr_id, n as u64), item, scale, theme, cx)
                     })),
             );
         }
         for (n, block) in page.blocks.iter().enumerate() {
             body = body.child(match block {
-                PageBlock::Heading { level, text } => page_heading(*level, text, n > 0, theme),
-                PageBlock::Item(item) => {
-                    self.page_item(("panel-page-item", n as u64), item, theme, cx)
+                PageBlock::Heading { level, text } => {
+                    page_heading(*level, text, n > 0, scale, theme)
                 }
+                PageBlock::Item(item) => self.page_item((item_id, n as u64), item, scale, theme, cx),
             });
         }
         body.into_any_element()
@@ -683,17 +859,20 @@ impl Arbos {
         &self,
         id: (&'static str, u64),
         item: &PageItem,
+        scale: PageScale,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let g = scale.glyph();
         let glyph: AnyElement = match item.done {
             Some(true) => icons::icon(icons::status::CHECK)
-                .size(px(12.))
+                .size(px(g))
                 .text_color(theme.success)
                 .into_any_element(),
+            // Cursor's open item: a hollow circle.
             Some(false) => div()
-                .size(px(9.))
-                .rounded(px(2.))
+                .size(px(g - 2.))
+                .rounded_full()
                 .border_1()
                 .border_color(theme.text_faint)
                 .into_any_element(),
@@ -715,6 +894,8 @@ impl Arbos {
             .min_w_0()
             .truncate()
             .text_color(label_tint)
+            // Cursor's page: the label in bold, the readout plain and dim.
+            .when(scale == PageScale::Page && item.done.is_some(), |el| el.font_weight(FontWeight::SEMIBOLD))
             .when(target.is_some(), |el| {
                 el.cursor_pointer()
                     .hover(|el| el.text_color(theme.accent))
@@ -728,19 +909,19 @@ impl Arbos {
         div()
             .id(id)
             .flex_none()
-            .pl(px(8. + TREE_STEP * f32::from(item.depth)))
-            .pr(px(8.))
-            .py(px(3.))
+            .pl(px(scale.inset() + TREE_STEP * f32::from(item.depth)))
+            .pr(px(scale.inset()))
+            .py(px(scale.row_py()))
             .flex()
             .flex_row()
             .items_start()
-            .gap(px(8.))
-            .text_style(TextStyle::Caption)
+            .gap(px(if scale == PageScale::Page { 10. } else { 8. }))
+            .text_style(scale.text())
             .child(
                 div()
                     .flex_none()
-                    .w(px(12.))
-                    .pt(px(3.))
+                    .w(px(g))
+                    .pt(px(if scale == PageScale::Page { 4. } else { 3. }))
                     .flex()
                     .justify_center()
                     .child(glyph),
@@ -781,8 +962,19 @@ impl Arbos {
 
     /// A file of the store in the column, as a document panel under the
     /// main chat.
-    fn open_store_file(&mut self, path: PathBuf, title: &str, cx: &mut Context<Self>) {
+    pub(crate) fn open_store_file(&mut self, path: PathBuf, title: &str, cx: &mut Context<Self>) {
         let title = title.to_owned();
+        // The viewer picks its presenter by the kind: a picture as a
+        // picture, markdown as a document, anything else by its extension.
+        let ext = path
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let kind = match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "avif" => "image",
+            "md" | "markdown" | "txt" | "" => "doc",
+            _ => "file",
+        };
         self.workspace.update(cx, |workspace, cx| {
             let Some(main) = workspace.active_project().and_then(|p| p.main_session()) else {
                 return;
@@ -791,7 +983,7 @@ impl Arbos {
                 main,
                 path.display().to_string(),
                 title,
-                "doc".into(),
+                kind.into(),
                 None,
                 None,
                 cx,
@@ -923,19 +1115,33 @@ fn section_head(label: &'static str, aside: Option<String>, theme: &Theme) -> An
 
 /// A `##` or `###` heading of the page: a faint caption, the deeper one
 /// indented a step.
-fn page_heading(level: u8, text: &str, gap_above: bool, theme: &Theme) -> AnyElement {
+pub(crate) fn page_heading(
+    level: u8,
+    text: &str,
+    gap_above: bool,
+    scale: PageScale,
+    theme: &Theme,
+) -> AnyElement {
     let sub = level >= 3;
+    let page = scale == PageScale::Page;
     div()
         .flex_none()
-        .pl(px(8. + if sub { TREE_STEP } else { 0. }))
-        .pr(px(8.))
-        .pt(px(if gap_above { 8. } else { 2. }))
-        .pb(px(2.))
-        .text_style(TextStyle::Caption)
-        .text_color(if sub {
-            theme.text_faint
-        } else {
-            theme.text_muted
+        .pl(px(scale.inset() + if sub && !page { TREE_STEP } else { 0. }))
+        .pr(px(scale.inset()))
+        .pt(px(match (page, gap_above) {
+            (true, true) => 22.,
+            (true, false) => 6.,
+            (false, true) => 8.,
+            (false, false) => 2.,
+        }))
+        .pb(px(if page { 6. } else { 2. }))
+        .text_style(scale.heading(level))
+        .when(page, |el| el.font_weight(FontWeight::SEMIBOLD))
+        .text_color(match (page, sub) {
+            (true, false) => theme.text,
+            (true, true) => theme.text_muted,
+            (false, true) => theme.text_faint,
+            (false, false) => theme.text_muted,
         })
         .truncate()
         .child(SharedString::from(text.to_owned()))
