@@ -118,7 +118,12 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<String>();
     let (frame_in_tx, mut frame_in_rx) = mpsc::unbounded_channel::<Frame>();
 
-    let hooks = KernelHooks::new(place.clone(), wake_tx.clone(), kick_tx.clone());
+    let hooks = KernelHooks::with_caps(
+        place.clone(),
+        wake_tx.clone(),
+        kick_tx.clone(),
+        crate::hooks::Caps::from_config(&host.config),
+    );
     let sched = Scheduler::sharing(Arc::clone(&hooks.in_flight));
     let clock = plan::Clock::new();
     let ptys = Arc::new(PtyHub::new());
@@ -503,7 +508,11 @@ fn handle_frame(
         if !arbos_core::agent_exists(place, &agent) {
             // Answered and logged, not just printed: the client that named
             // a missing agent is the one that needs to hear it (#14 + #24).
-            refuse(hooks, Some(&agent), format!("no agent {agent:?} in this place"));
+            refuse(
+                hooks,
+                Some(&agent),
+                format!("no agent {agent:?} in this place"),
+            );
             return;
         }
     }

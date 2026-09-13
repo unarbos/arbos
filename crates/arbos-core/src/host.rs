@@ -164,6 +164,12 @@ pub struct HostConfig {
     pub speculate: bool,
     /// How long `bash` stays attached before the command continues as a job.
     pub bash_wait_ms: u64,
+    /// Levels of agents below the root: 1 = root → child and no further
+    /// (Cursor's shape), 2 = children may spawn grandchildren, 3 = one more
+    /// (a coordinator that delegates delegation). Default 3.
+    pub max_depth: usize,
+    /// Live children one agent may have at once. Default 8.
+    pub max_children: usize,
     /// Models to try, in order, when the primary keeps failing or its
     /// provider errors out. A switch lasts one turn; the next turn tries
     /// the primary again. Accepts an array or a comma-separated string.
@@ -229,6 +235,8 @@ impl Default for HostConfig {
             // result, not as a job the model polls in two-minute slices —
             // each slice is a model call. Servers still use background:true.
             bash_wait_ms: 600_000,
+            max_depth: 3,
+            max_children: 8,
             fallback_models: Vec::new(),
             max_attempts: 5,
             backoff_base_ms: 1_000,
