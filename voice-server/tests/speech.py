@@ -8,7 +8,6 @@ gaps) that every VAD in the stack hears as talking. Takes are cached as WAV unde
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import os
 import wave
@@ -17,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from voice_server.audio import float_to_pcm16, pcm16_to_float
-from voice_server.tts import KokoroTTS
+from voice_server.tts import KokoroTTS, speakable, split_for_speech
 
 RATE = 24_000
 HERE = Path(__file__).resolve().parent
@@ -35,12 +34,9 @@ def _kokoro_synth(text: str, voice: str) -> np.ndarray:
     global _kokoro
     if _kokoro is None:
         _kokoro = KokoroTTS(str(MODELS / "kokoro-v1.0.onnx"), str(MODELS / "voices-v1.0.bin"))
-
-    async def collect() -> np.ndarray:
-        parts = [chunk async for chunk in _kokoro.stream(text, voice, 1.0)]
-        return np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
-
-    return asyncio.run(collect())
+    # Synchronous on purpose: callers may already be inside an event loop.
+    parts = [_kokoro._synth(piece, voice, 1.0) for piece in split_for_speech(speakable(text))]  # noqa: SLF001
+    return np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
 
 
 def synthetic(text: str) -> np.ndarray:

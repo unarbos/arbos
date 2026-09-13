@@ -30,6 +30,11 @@ UPSTREAM_CHUNK_BYTES = UPSTREAM_RATE * 80 // 1000 * 2  # the container likes 80 
 LOUD_RMS = 0.004  # about -48 dBFS: below this the model is "not talking"
 TAIL_S = 0.7  # silence after the last loud frame that closes a spoken burst
 STASH_S = 1.0  # transcript text older than this when the audio starts is not what is being said
+# Call mode, model voice "ack": the speech model may speak for this long per burst, and only
+# within this long of the caller finishing. Longer or later bursts are the model filling silence
+# or answering for the agent; they are cut (the narrator speaks for the agent).
+ACK_MAX_S = 3.0
+ACK_WINDOW_S = 6.0
 
 DEFAULT_INSTRUCTIONS = (
     "You are Arbos, a voice assistant for a software engineer, talking on the phone. Be brief, warm, "
@@ -76,6 +81,8 @@ class DuplexSession(BaseSession):
         self.quiet_task: asyncio.Task | None = None
         self.first_audio_at: float | None = None
         self.user_stopped_at: float | None = None
+        self.response_opened_at: float | None = None
+        self.model_voice = self.defaults.model_voice
 
     async def on_start(self) -> None:
         self.to_up = Resampler(self.rate, UPSTREAM_RATE)
@@ -194,9 +201,18 @@ class DuplexSession(BaseSession):
             if now - self.last_loud_at > TAIL_S:
                 self.muted = False  # the model has gone quiet; the next burst is a fresh reply
             return
+        if loud and not self.response_open and self._cut_model_voice(now, opening=True):
+            self.muted = True  # a burst the call does not want: swallow it whole
+            self.last_loud_at = now
+            return
         if loud:
             self.last_loud_at = now
             self._open_response()
+            if self._cut_model_voice(now, opening=False):
+                # The acknowledgement ran long: stop it here; the narrator has the floor.
+                self.muted = True
+                self._close_response()
+                return
         elif not self.response_open:
             return  # silence while idle: nothing to send
         if not self.from_up.identity:
@@ -211,11 +227,23 @@ class DuplexSession(BaseSession):
         if not loud and now - self.last_loud_at > TAIL_S:
             self._close_response()
 
+    def _cut_model_voice(self, now: float, *, opening: bool) -> bool:
+        """Call mode with model voice `ack`: is this burst more than a short acknowledgement?"""
+        if not self.call_mode or self.model_voice == "full":
+            return False
+        if self.model_voice == "off":
+            return True
+        if opening:
+            since_user = now - self.user_stopped_at if self.user_stopped_at else 1e9
+            return since_user > ACK_WINDOW_S
+        return self.response_opened_at is not None and now - self.response_opened_at > ACK_MAX_S
+
     def _open_response(self) -> None:
         if self.response_open:
             return
         now = time.monotonic()
         self.response_open = True
+        self.response_opened_at = now
         self.last_loud_at = now
         self.first_audio_at = None
         self._emit_for_gen(self.gen, P.RESPONSE_STARTED)

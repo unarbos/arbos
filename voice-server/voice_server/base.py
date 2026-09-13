@@ -48,6 +48,9 @@ class SessionDefaults:
     instructions: str | None = None
     # Narrator model for `more_detail` answers (OpenRouter id); None = extractive answers only.
     narrator_model: str | None = None
+    # Call mode, duplex engine: how much of the speech model's own voice the caller hears.
+    # `ack` = short acknowledgements right after the caller speaks; `full` = everything; `off` = none.
+    model_voice: str = "off"
 
 
 class BaseSession:
@@ -149,6 +152,10 @@ class BaseSession:
             api_key=openrouter_key() if self.defaults.narrator_model else None,
             user_talking=lambda: self.user_talking,
             arbos_talking=self.arbos_talking,
+            # With the speech model's voice off (or cut to acks), the narrator says "On it." and
+            # reads more_detail answers itself; with it in full, the model does both.
+            ack=self.defaults.model_voice != "full",
+            speak_details=self.defaults.model_voice != "full",
         )
         self.tools.narrator = self.narrator
         self.tools.schemas = CALL_TOOLS

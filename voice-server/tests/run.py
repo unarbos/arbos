@@ -119,6 +119,8 @@ class Gateway:
             sys.executable, "-m", "voice_server", "--host", "127.0.0.1", "--port", str(self.port), "--token", TOKEN,
             "--engine", "duplex", "--duplex-url", duplex_url, "--kernel", kernel_url,
             "--tts", "tone", "--asr", "none", "--reply", "none", "--no-echo-gate", "--max-lead-ms", "300",
+            # The scenarios script the speech model's voice and interrupt it: let it through.
+            "--call-model-voice", "full",
             "--model-dir", str(model_dir), "-v", *extra,
         ]
         self.proc: subprocess.Popen | None = None
@@ -177,7 +179,8 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
         if opts.gateway:
             url, token = opts.gateway, opts.token
         else:
-            gateway = Gateway(duplex_url=duplex_url, kernel_url=kernel_url, log=out / "gateway.log", extra=opts.gateway_args)
+            gateway = Gateway(duplex_url=duplex_url, kernel_url=kernel_url, log=out / "gateway.log",
+                              extra=[*opts.gateway_args, *sc.get("gateway_args", [])])
             await gateway.start()
             url, token = gateway.url, TOKEN
         caller = Caller(url, token=token, screen=sc.get("screen", "on your screen"))

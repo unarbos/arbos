@@ -41,6 +41,7 @@ class Record:
     narrations: list[Frame] = field(default_factory=list)  # narrator.say
     interrupts_sent: list[float] = field(default_factory=list)
     utterances: list[tuple[float, float, str]] = field(default_factory=list)  # (start, end, text) as played
+    pcm: bytearray = field(default_factory=bytearray)  # reply audio, when the caller keeps it
 
     def of(self, kind: str) -> list[Frame]:
         return [f for f in self.frames if f.msg.get("type") == kind]
@@ -69,8 +70,9 @@ class Record:
 
 class Caller:
     def __init__(self, url: str, *, token: str, screen: str = "on your screen", mode: str = "call",
-                 channel: str = "voice", project: str = ""):
+                 channel: str = "voice", project: str = "", keep_audio: bool = False):
         self.url = url
+        self.keep_audio = keep_audio
         self.token = token
         self.screen = screen
         self.mode = mode
@@ -170,6 +172,8 @@ class Caller:
             at = self.now()
             if isinstance(message, (bytes, bytearray)):
                 self.rec.audio.append(Audio(at, len(message), self.speaking))
+                if self.keep_audio and self.speaking:
+                    self.rec.pcm += bytes(message)
                 continue
             try:
                 msg = json.loads(message)

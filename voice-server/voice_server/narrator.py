@@ -43,6 +43,9 @@ YIELD_TO_USER_S = 30.0
 # An utterance waits this long for the speech model to claim it (a `more_detail` call) before it
 # goes to the main agent. The duplex model's tool calls land well inside this.
 FORWARD_GRACE_S = 1.5
+# Said when an utterance goes to the main agent, so the caller knows it landed. The main agent's
+# own reply follows as a highlight several seconds later.
+ACK = "On it."
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
 _RESULT_WORDS = re.compile(
@@ -139,6 +142,8 @@ class Narrator:
         api_key: str | None = None,
         user_talking: Callable[[], bool] = lambda: False,
         arbos_talking: Callable[[], bool] = lambda: False,
+        ack: bool = True,
+        speak_details: bool = True,
     ):
         self.kernel = kernel
         self.speak = speak  # voices one line with the gateway TTS; returns when it has been said
@@ -149,6 +154,8 @@ class Narrator:
         self.api_key = api_key
         self.user_talking = user_talking
         self.arbos_talking = arbos_talking
+        self.ack = ack  # say ACK when forwarding an utterance (the speech model's own voice is off)
+        self.speak_details = speak_details  # voice more_detail answers here (else the speech model reads them)
         self.queue: asyncio.Queue[Line] = asyncio.Queue()
         self.said: list[Line] = []  # everything spoken or attempted, oldest first
         self.summary: list[str] = []  # rolling summary of the main transcript, one line per event
@@ -220,6 +227,8 @@ class Narrator:
         text, channel = self._pending
         self._pending = None
         self._pending_handle = None
+        if self.ack and self.pending_ask is None:
+            self._enqueue(Line("ack", ACK, ref=""))
         self.user_said(text, channel=channel)
 
     def _cancel_pending(self) -> None:
@@ -337,6 +346,8 @@ class Narrator:
         self._enqueue(Line("report", f"{name} {verb}: {body}", ref=ref))
 
     def _enqueue(self, line: Line) -> None:
+        if line.kind == "ack" and (not self.queue.empty() or self._current is not None):
+            return  # something is being said already; that is acknowledgement enough
         if self.queue.qsize() >= QUEUE_CAP:
             dropped = self.queue.get_nowait()
             dropped.heard = False
@@ -411,10 +422,13 @@ class Narrator:
             except Exception as exc:
                 log.warning("narrator model failed, using the extractive answer: %s", exc)
         answer = clip(answer, DETAIL_CAP)
-        line = Line("detail", answer, ref="transcript")
-        line.heard = True
-        self.said.append(line)
-        self.emit(P.NARRATOR_SAY, text=answer, kind="detail", ref="transcript")
+        if self.speak_details:
+            self._enqueue(Line("detail", answer, ref="transcript"))
+        else:
+            line = Line("detail", answer, ref="transcript")
+            line.heard = True
+            self.said.append(line)
+            self.emit(P.NARRATOR_SAY, text=answer, kind="detail", ref="transcript")
         return answer
 
     async def _summarise(self, question: str, facts: list[str]) -> str:
