@@ -75,6 +75,12 @@ pub struct Prepared {
     pub tool: Arc<dyn crate::tool::Tool>,
     pub args: Value,
     pub plan: Plan,
+    /// A before-tool hook wants the user asked first; the question.
+    pub ask: Option<String>,
+    /// Text before-tool hooks add to the result the model reads.
+    pub context: Vec<String>,
+    /// Hook trouble worth a notice (a failed hook, bad `hooks.toml`).
+    pub notices: Vec<String>,
 }
 
 /// Allowlist → `before-tool` hook (may rewrite) → allowlist again → `plan`.
@@ -171,9 +177,17 @@ pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Res
     if cx.agent.readonly && !plan.access.is_readonly() {
         anyhow::bail!("readonly agent: {} would write", decided.tool);
     }
+    let plan = if decided.ask.is_some() {
+        plan.interactive()
+    } else {
+        plan
+    };
     Ok(Prepared {
         tool: Arc::clone(tool),
         args: decided.args,
         plan,
+        ask: decided.ask,
+        context: decided.context,
+        notices: decided.notices,
     })
 }
