@@ -93,6 +93,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
         .with(tools::PlanTool(Arc::clone(&hooks)))
         .with(tools::Ask(Arc::clone(&hooks)))
         .with(tools::Browser(Arc::clone(&hooks)))
+        .with(crate::screenshot::Screenshot)
         .with(tools::Terminal {
             hooks: Arc::clone(&hooks),
             ptys: Arc::clone(&ptys),

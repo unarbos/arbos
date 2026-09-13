@@ -8,6 +8,7 @@ pub mod klog;
 pub mod plan;
 pub mod pty;
 pub mod sched;
+pub mod screenshot;
 pub mod serve;
 pub mod setup;
 pub mod tools;

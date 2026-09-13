@@ -44,6 +44,7 @@ pub const ALL_TOOLS: &[&str] = &[
     "undo",
     "browser",
     "terminal",
+    "screenshot",
 ];
 
 /// One agent folder. Fields live in `agent.md`.
@@ -173,6 +174,11 @@ impl Agent {
         {
             agent.allowlist.push("terminal".into());
         }
+        if !agent.allowlist.iter().any(|t| t == "screenshot")
+            && agent.allowlist.iter().any(|t| t == "browser")
+        {
+            agent.allowlist.push("screenshot".into());
+        }
         Ok(agent)
     }
 
@@ -216,6 +222,7 @@ impl Agent {
                         | "ask"
                         | "plan"
                         | "say"
+                        | "screenshot"
                 )
             });
         }
@@ -240,7 +247,12 @@ impl Agent {
             return true;
         }
         // Visible shell. Old agent.md files list bash only.
-        tool == "terminal" && self.allowlist.iter().any(|t| t == "bash")
+        if tool == "terminal" && self.allowlist.iter().any(|t| t == "bash") {
+            return true;
+        }
+        // The screen, read-only. Old agent.md files predate the tool; an
+        // agent that may look at web pages may look at the screen.
+        tool == "screenshot" && self.allowlist.iter().any(|t| t == "browser")
     }
 }
 
