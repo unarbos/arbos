@@ -1,0 +1,9 @@
+1789273951059 kernel started pid 1830150
+1789273975266 kernel stopped with code 0
+1789273975269 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789273975269 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789273975269 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789273975269 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789273975269 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789273975269 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789273975295 bugs: seen abda5948a1.md, seen 0278bfb813.md, seen 76f7c26c34.md, seen abda5948a1.md, seen 0278bfb813.md, seen 76f7c26c34.md

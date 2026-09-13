@@ -1,0 +1,36 @@
+{
+  "scenario": "disk-full",
+  "doc": "Writes start failing mid-run (simulated with a 256 KB file-size limit on the kernel process). The kernel must report the failure and stay up, not die on SIGXFSZ or corrupt a line.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "kernel-died",
+      "detail": "kernel exited with -25 when a write hit the size limit (SIGXFSZ is 25; -25 = killed by it)",
+      "where": "crates/arbos-core/src/files.rs append_events"
+    },
+    {
+      "rule": "state:lock-leftover",
+      "detail": "lock file left behind after the kernel stopped (lock.rs Drop did not run)",
+      "where": "/tmp/arbos-qa-disk-full-pd3mqg7c/place/.arbos/lock"
+    },
+    {
+      "rule": "state:plan-bad-lines",
+      "detail": "1 unparseable line(s): [2]",
+      "where": "/tmp/arbos-qa-disk-full-pd3mqg7c/place/.arbos/agents/root/plan.jsonl"
+    },
+    {
+      "rule": "state:attempt-running-after-stop",
+      "detail": "attempt a1 never ended",
+      "where": "/tmp/arbos-qa-disk-full-pd3mqg7c/place/.arbos/agents/root/attempts.jsonl"
+    }
+  ],
+  "notes": {
+    "exit_code": -25
+  },
+  "duration_s": 2.3,
+  "place": "/tmp/arbos-qa-disk-full-pd3mqg7c/place",
+  "with_model": true,
+  "kernel": "/home/const/arbos-qa/repo/target/release/arbos-kernel",
+  "rollout": "/home/const/arbos-qa/loop/rollouts/20260913T042854Z-disk-full",
+  "usd": 0.0
+}

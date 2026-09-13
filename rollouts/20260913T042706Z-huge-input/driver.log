@@ -1,0 +1,5 @@
+1789273626521 kernel started pid 1817787
+1789273644604 BREAK kernel-hang-on-sigint: kernel did not exit within 10s of SIGINT; killed
+1789273644613 kernel stopped with code -9
+1789273644672 BREAK state:lock-leftover: lock file left behind after the kernel stopped (lock.rs Drop did not run)
+1789273644710 bugs: seen qa-003-large-prompt-starves-kernel-loop.md, seen qa-003-large-prompt-starves-kernel-loop.md
