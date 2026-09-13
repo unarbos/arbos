@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod assets;
 pub mod boardhub;
+pub mod build;
 pub mod data;
 pub mod driver;
 pub mod kernel;

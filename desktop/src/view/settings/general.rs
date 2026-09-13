@@ -1,6 +1,6 @@
 //! The general section: what this copy of the app is.
 
-use crate::{assets, view::settings::SettingsWindow, voice_ws};
+use crate::{assets, build, view::settings::SettingsWindow, voice_ws};
 use bezel::{
     gpui::{AnyElement, Context, div, img, prelude::*, px},
     theme::{TextStyle, Theme, Typeset, ink},
@@ -16,7 +16,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The commit it was built from — see `build.rs`, which is the only place that
 /// can know: the app that ships has no repository to ask.
-const COMMIT: &str = env!("ARBOS_COMMIT");
+const COMMIT: &str = build::COMMIT;
 
 /// The mark over the rows. An About panel's measure — big enough to be the
 /// picture of the app, small enough that the two lines under it are still what
@@ -58,6 +58,14 @@ impl SettingsWindow {
                             .card_row(true)
                             .child(div().flex_1().min_w_0().child(theme.row_title("Version")))
                             .child(theme.badge(VERSION)),
+                    )
+                    // The one line to read out when asked "which build": the
+                    // same badge the settings gear's tooltip carries.
+                    .child(
+                        theme
+                            .card_row(false)
+                            .child(div().flex_1().min_w_0().child(theme.row_title("Build")))
+                            .child(theme.badge(build::badge())),
                     )
                     .child(
                         theme

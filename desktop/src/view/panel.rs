@@ -564,7 +564,14 @@ impl Arbos {
                     .ghost("settings")
                     .px(px(8.))
                     .py(px(6.))
-                    .tooltip(|window, cx| Tooltip::with_keystroke("Settings", "⌘,", window, cx))
+                    .tooltip(|window, cx| {
+                        Tooltip::with_keystroke(
+                            format!("Settings — {}", crate::build::badge()),
+                            "⌘,",
+                            window,
+                            cx,
+                        )
+                    })
                     .child(
                         icons::icon(icons::system::SETTINGS_MINIMALISTIC)
                             .size(px(14.))

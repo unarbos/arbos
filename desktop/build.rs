@@ -9,6 +9,8 @@ use std::process::Command;
 
 fn main() {
     println!("cargo::rustc-env=ARBOS_COMMIT={}", commit());
+    println!("cargo::rustc-env=ARBOS_KERNEL_VERSION={}", kernel_version());
+    println!("cargo::rerun-if-changed=../crates/arbos-kernel/Cargo.toml");
     // Cargo has no reason of its own to look at git, so without these the
     // stamp is whichever commit was checked out the last time something else
     // forced a rebuild. `--git-path` resolves them through the repository
@@ -36,6 +38,22 @@ fn commit() -> String {
         true => short,
         false => format!("{short}-dirty"),
     }
+}
+
+/// The kernel this build was cut beside: the `version` line of
+/// `crates/arbos-kernel/Cargo.toml`, read by hand so the build script owes
+/// no dependency. `unknown` outside the repository, where there is no
+/// sibling crate to read.
+fn kernel_version() -> String {
+    let Ok(text) = std::fs::read_to_string("../crates/arbos-kernel/Cargo.toml") else {
+        return "unknown".into();
+    };
+    text.lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "version").then(|| value.trim().trim_matches('"').to_owned())
+        })
+        .unwrap_or_else(|| "unknown".into())
 }
 
 /// One git command, or nothing at all: every caller here has an answer for a
