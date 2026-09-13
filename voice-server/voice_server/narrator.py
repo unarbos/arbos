@@ -32,6 +32,8 @@ from .tts import speakable
 log = logging.getLogger("voice.narrator")
 
 HIGHLIGHT_CAP = 240
+# A model highlight must land in this long or the policy line is spoken instead.
+MODEL_HIGHLIGHT_TIMEOUT_S = 4.0
 REPORT_CAP = 200
 ERROR_CAP = 160
 DETAIL_CAP = 420
@@ -145,6 +147,7 @@ class Narrator:
         ack: bool = True,
         speak_details: bool = True,
         device: str = "",
+        model_highlights: bool = False,
     ):
         self.kernel = kernel
         self.speak = speak  # voices one line with the gateway TTS; returns when it has been said
@@ -156,6 +159,10 @@ class Narrator:
         self.user_talking = user_talking
         self.arbos_talking = arbos_talking
         self.device = device  # phone | desktop: written beside `channel` on every message
+        # Highlights: the policy line (first sentence + the result sentence) or a model's rewrite
+        # of the reply, checked against the policy's guardrails and replaced by it on any doubt.
+        self.model_highlights = bool(model_highlights and model and api_key)
+        self.bench = {"model_ok": 0, "model_fallback": 0, "model_ms": []}
         self.ack = ack  # say ACK when forwarding an utterance (the speech model's own voice is off)
         self.speak_details = speak_details  # voice more_detail answers here (else the speech model reads them)
         self.queue: asyncio.Queue[Line] = asyncio.Queue()
@@ -338,9 +345,33 @@ class Narrator:
         text, ref = self._turn_texts[-1]
         self._turn_texts.clear()
         line = highlight(text, screen=self.screen)
-        if line:
-            self.summary.append(f"arbos: {line}")
-            self._enqueue(Line("highlight", line, ref=ref))
+        if not line:
+            return
+        if self.model_highlights:
+            asyncio.get_running_loop().create_task(self._model_highlight(text, line, ref))
+            return
+        self.summary.append(f"arbos: {line}")
+        self._enqueue(Line("highlight", line, ref=ref))
+
+    async def _model_highlight(self, text: str, policy: str, ref: str) -> None:
+        """Ask the narrator model for the spoken form; the policy line is the fallback and the
+        judge (length, no code/links/lists, no numbers the reply does not contain)."""
+        t0 = time.monotonic()
+        try:
+            spoken = await asyncio.wait_for(model_highlight(self.model, self.api_key, text, self.screen), MODEL_HIGHLIGHT_TIMEOUT_S)
+        except Exception as exc:
+            log.warning("narrator model highlight failed (%s); policy line spoken", exc)
+            spoken = None
+        self.bench["model_ms"].append(round((time.monotonic() - t0) * 1000))
+        checked = guard_highlight(spoken, text, policy) if spoken else None
+        if checked is None:
+            self.bench["model_fallback"] += 1
+            line = policy
+        else:
+            self.bench["model_ok"] += 1
+            line = checked
+        self.summary.append(f"arbos: {line}")
+        self._enqueue(Line("highlight", line, ref=ref))
 
     def child_finished(self, child: str, words: str, *, ok: bool = True) -> None:
         """The tool bridge saw a dispatched agent end (kernels without `done` files)."""
@@ -476,6 +507,69 @@ class Narrator:
         if self.summary:
             parts.append("Most recently: " + clip(self.summary[-1], 160))
         return " ".join(parts)
+
+
+# ---------------------------------------------------------------------- model highlights
+
+HIGHLIGHT_PROMPT = (
+    "You narrate a software agent's work to its owner over the phone. Below is the agent's latest reply, as "
+    "written on the screen. Say what the owner needs to hear in one or two short plain sentences (under 200 "
+    "characters): the outcome first, then the one fact that matters (what failed and why, what was sent off, "
+    "what changed). Keep names and numbers exactly as written. No markdown, no lists, no code, no links, no "
+    "greeting. If you left out something the owner would want to see, end with: The rest is {screen}.\n\n"
+    "Reply:\n{reply}"
+)
+
+
+async def model_highlight(model: str, api_key: str, reply: str, screen: str) -> str:
+    """The narrator model's spoken form of `reply`. Raises on any transport or format problem."""
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": HIGHLIGHT_PROMPT.format(screen=screen, reply=reply[:6000])}],
+        "max_tokens": 120,
+        "temperature": 0.2,
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(MODEL_HIGHLIGHT_TIMEOUT_S, connect=2.0)) as client:
+        resp = await client.post(
+            "https://openrouter.ai/api/v1/chat/completions", json=body,
+            headers={"Authorization": f"Bearer {api_key}", "X-Title": "Arbos voice narrator"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    return str(data["choices"][0]["message"]["content"]).strip()
+
+
+_NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
+# A model line that says something went wrong when the reply does not is a made-up outcome.
+_BAD_NEWS = re.compile(r"\b(fail(?:ed|ure|s)?|error|crash(?:ed)?|broken|not (?:yet )?(?:complete|saved|done|run)|didn't|did not|hasn't|has not|wasn't|was not)\b", re.I)
+
+
+def guard_highlight(spoken: str, reply: str, policy: str, cap: int = HIGHLIGHT_CAP) -> str | None:
+    """The policy's guardrails on a model line. None = do not trust it, speak the policy line.
+    Rejects code, links, lists, more than two sentences over the cap, an empty line, and any
+    number that the reply does not contain (a made-up figure is worse than a flat sentence)."""
+    if not spoken:
+        return None
+    if _FENCE.search(spoken) or _URL.search(spoken) or _LIST_LINE.search(spoken) or "\n" in spoken.strip():
+        return None
+    clean = re.sub(r"\s+", " ", speakable(spoken)).strip()
+    if not clean or len(clean) < 8:
+        return None
+    if any(n not in reply for n in _NUMBER.findall(clean)):
+        return None
+    if _BAD_NEWS.search(clean) and not _BAD_NEWS.search(reply):
+        return None
+    # A short, plain reply needs no pointer to the screen: nothing was left out.
+    tail = re.compile(r"\s*The rest is [^.]*\.\s*$", re.I)
+    plain = len(reply) <= cap and not (_FENCE.search(reply) or _URL.search(reply) or _LIST_LINE.search(reply))
+    if plain:
+        clean = tail.sub("", clean).strip()
+    if len(clean) > cap:
+        sentences = [s for s in _SENTENCE.split(clean) if s.strip()]
+        clean = " ".join(sentences[:2])
+        if len(clean) > cap:
+            return None
+    return clean
 
 
 # ---------------------------------------------------------------------- record reading

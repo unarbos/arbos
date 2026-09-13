@@ -49,6 +49,8 @@ class SessionDefaults:
     instructions: str | None = None
     # Narrator model for `more_detail` answers (OpenRouter id); None = extractive answers only.
     narrator_model: str | None = None
+    # Highlights by the narrator model (True) or by the policy alone (False).
+    model_highlights: bool = False
     # Call mode, duplex engine: how much of the speech model's own voice the caller hears.
     # `ack` = short acknowledgements right after the caller speaks; `full` = everything; `off` = none.
     model_voice: str = "off"
@@ -165,6 +167,7 @@ class BaseSession:
             # reads more_detail answers itself; with it in full, the model does both.
             ack=self.defaults.model_voice != "full",
             speak_details=self.defaults.model_voice != "full",
+            model_highlights=self.defaults.model_highlights,
         )
         self.tools.narrator = self.narrator
         self.tools.schemas = CALL_TOOLS
@@ -214,7 +217,8 @@ class BaseSession:
             if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
                 self.engines.kernel.listeners.remove(self._mirror)
             if self.narrator is not None:
-                log.info("[%s] narrator: %s", self.sid, self.narrator.stats)
+                log.info("[%s] narrator: %s %s", self.sid, self.narrator.stats,
+                         {k: v for k, v in self.narrator.bench.items() if v})
                 self.narrator.close()
             self.tools.close()
             if self.call_kernel is not None:

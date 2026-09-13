@@ -12,7 +12,8 @@ import numpy as np
 log = logging.getLogger("voice.tts")
 
 _MD_FENCE = re.compile(r"```.*?```", re.S)
-_MD_INLINE = re.compile(r"[*_`#>]+")
+# Emphasis marks, not the underscores inside identifiers (test_skeptic stays test_skeptic).
+_MD_INLINE = re.compile(r"[*`#>]+|(?<!\w)_+|_+(?!\w)")
 _URL = re.compile(r"https?://\S+")
 _WS = re.compile(r"[ \t]+")
 

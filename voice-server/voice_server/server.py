@@ -81,6 +81,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                        help="call mode, duplex engine: how much of the speech model's own voice the caller hears. "
                             "off (default): none; the narrator says 'On it.' and speaks every result. ack: short "
                             "acknowledgements right after the caller speaks. full: everything the model says")
+    reply.add_argument("--highlights", default=os.environ.get("VOICE_HIGHLIGHTS", "policy"), choices=["policy", "model"],
+                       help="call mode: how the narrator forms a highlight of the agent's reply. policy (default): first "
+                            "sentence plus the result sentence, deterministic. model: --narrator-model rewrites the reply "
+                            "for the ear, checked against the policy's guardrails (length, no code/links/lists, no numbers "
+                            "the reply lacks) and replaced by the policy line on any doubt or after 4 s")
     reply.add_argument("--narrator-model", default=os.environ.get("VOICE_NARRATOR_MODEL") or None,
                        help="call mode: OpenRouter model that turns transcript excerpts into `more_detail` answers "
                             "(needs OPENROUTER_API_KEY). Default: none, the narrator answers from the record verbatim")
@@ -147,7 +152,7 @@ async def serve_forever(args: argparse.Namespace) -> None:
     await engines.warm_up(args.voice)
     defaults = SessionDefaults(language=args.language, voice=args.voice, speed=args.speed, reply=args.reply,
                                instructions=args.instructions, narrator_model=args.narrator_model,
-                               model_voice=args.call_model_voice)
+                               model_voice=args.call_model_voice, model_highlights=args.highlights == "model")
     tuning = Tuning(
         start_threshold=args.vad_threshold,
         end_threshold=max(0.1, args.vad_threshold - 0.15),
