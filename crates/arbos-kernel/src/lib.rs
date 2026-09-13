@@ -5,6 +5,7 @@ pub mod grep;
 pub mod hooks;
 pub mod plan;
 pub mod pty;
+pub mod record;
 pub mod sched;
 pub mod screenshot;
 pub mod serve;

@@ -241,7 +241,7 @@ fn run_capped(cmd: &mut Command) -> Result<()> {
     }
 }
 
-fn display_hint() -> String {
+pub(crate) fn display_hint() -> String {
     if cfg!(target_os = "macos") {
         " (macOS: allow Screen Recording for the app in System Settings › Privacy)".into()
     } else {
@@ -255,7 +255,7 @@ fn display_hint() -> String {
     }
 }
 
-fn which(program: &std::ffi::OsStr) -> Option<PathBuf> {
+pub(crate) fn which(program: &std::ffi::OsStr) -> Option<PathBuf> {
     let p = Path::new(program);
     if p.is_absolute() {
         return p.is_file().then(|| p.to_path_buf());
