@@ -120,15 +120,11 @@ fn an_ask_has_an_id_and_only_a_matching_answer_resolves_it() {
         .to_string();
     assert_eq!(id, "call_ask_1", "the id is the ask tool's call id");
 
-    // An id this kernel never issued is a client that knows about ids and
-    // got it wrong: refused, the question stays pending.
-    a.send(serde_json::json!({"type": "answer", "agent": "root", "text": "", "id": "call_ask_1-stale"}));
-    assert!(
-        a.wait(Duration::from_secs(5), |f| f["type"] == "error"
-            && f["agent"] == "root")
-            .is_some(),
-        "an unknown ask id is refused"
-    );
+    // An id this kernel never issued, with exactly one question pending,
+    // is taken for that question (ui-004: a client with a wrong id must
+    // not leave the user with no card and a stuck turn). Only a wrong id
+    // beside several pending questions, or a late one, is refused — the
+    // late case is checked below.
     // The real answer, with the id: resolves the question and the turn ends.
     a.send(serde_json::json!({"type": "answer", "agent": "root", "text": "teal", "id": id}));
     assert!(
