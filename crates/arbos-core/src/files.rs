@@ -89,6 +89,14 @@ checkpoint
 kernel.log
 web.json
 index-scratch-*
+agent.lock
+kernel.stdout.log
+kernel.out.log
+# The Go-era session store and the desktop's own cache of chat records:
+# large, churning, and derived from the transcripts that are committed.
+sessions.db
+sessions.db-*
+desktop/
 # Provider traces and job output: large, derived, and re-creatable.
 agents/*/trace/
 agents/*/jobs/*/out.log
