@@ -1,0 +1,190 @@
+#!/bin/sh
+# Run one Arbos agent turn against a repository, headless, and leave the
+# result where a grader can pick it up. Runs inside the task container.
+#
+#   arbos-swe-run "<task prompt>"          # or ARBOS_PROMPT / ARBOS_PROMPT_FILE
+#
+# Environment (all optional except the key):
+#   ARBOS_API_KEY | OPENROUTER_API_KEY   model key (custom endpoint | OpenRouter)
+#   ARBOS_API_BASE                       OpenAI-compatible base URL; sets provider=custom
+#   ARBOS_MODEL                          model id (kernel reads it too)
+#   ARBOS_MODE                           auto (default) | ask | plan
+#   ARBOS_PLACE                          repository dir (default: /testbed, else cwd)
+#   ARBOS_OUT                            output dir (default: /logs/artifacts/arbos)
+#   ARBOS_TIMEOUT                        seconds for the whole turn (default 2400)
+#   ARBOS_BASE_COMMIT                    diff base (default: HEAD when we start)
+#   ARBOS_TRACE                          1 = record every provider call (default 1)
+#   ARBOS_WINDOW_TOKENS                  context the loop plans against (default 200000)
+#   ARBOS_ALLOWLIST                      tools the agent may use (default: file + shell tools)
+#   ARBOS_INSTRUCTIONS                   standing instructions shown in every prompt
+#
+# Outputs in $ARBOS_OUT: patch.diff, run.jsonl (the turn's events), run.stderr,
+# kernel.log, rollout/<stamp>-root/ (the exported bundle), result.json.
+# Exit 0 whenever the agent ran and left a transcript, whatever it achieved;
+# result.json carries the kernel's own exit code (0 ok, 2 failed turn,
+# 3 waited on a question, 4 timed out). Non-zero only when nothing ran.
+set -u
+
+PLACE="${ARBOS_PLACE:-}"
+if [ -z "$PLACE" ]; then
+  if [ -d /testbed ]; then PLACE=/testbed; else PLACE="$(pwd)"; fi
+fi
+OUT="${ARBOS_OUT:-/logs/artifacts/arbos}"
+TIMEOUT="${ARBOS_TIMEOUT:-2400}"
+MODE="${ARBOS_MODE:-auto}"
+export ARBOS_MODE="$MODE"
+KERNEL="${ARBOS_KERNEL_BIN:-$(command -v arbos-kernel || echo /tmp/vf-arbos/bin/arbos-kernel)}"
+: "${XDG_CONFIG_HOME:=/tmp/arbos-home/config}"
+export XDG_CONFIG_HOME
+: "${HOME:=/root}"
+export HOME
+
+PROMPT="${1:-${ARBOS_PROMPT:-}}"
+if [ -z "$PROMPT" ] && [ -n "${ARBOS_PROMPT_FILE:-}" ] && [ -f "$ARBOS_PROMPT_FILE" ]; then
+  PROMPT="$(cat "$ARBOS_PROMPT_FILE")"
+fi
+if [ -z "$PROMPT" ]; then
+  echo "arbos-swe-run: no prompt (argument, ARBOS_PROMPT, or ARBOS_PROMPT_FILE)" >&2
+  exit 64
+fi
+if [ ! -x "$KERNEL" ]; then
+  echo "arbos-swe-run: no arbos-kernel at $KERNEL" >&2
+  exit 69
+fi
+if [ ! -d "$PLACE" ]; then
+  echo "arbos-swe-run: place $PLACE is not a directory" >&2
+  exit 66
+fi
+
+mkdir -p "$OUT" "$XDG_CONFIG_HOME/arbos"
+START=$(date +%s)
+
+# 1. Kernel config from the environment. A key in ARBOS_API_KEY with a base
+#    URL means a custom endpoint (an interception proxy); otherwise OpenRouter.
+CONFIG="$XDG_CONFIG_HOME/arbos/config.toml"
+if [ -n "${ARBOS_API_BASE:-}" ]; then
+  PROVIDER="${ARBOS_PROVIDER:-custom}"
+  KEY_ENV="${ARBOS_API_KEY_ENV:-ARBOS_API_KEY}"
+else
+  PROVIDER="${ARBOS_PROVIDER:-openrouter}"
+  KEY_ENV="${ARBOS_API_KEY_ENV:-OPENROUTER_API_KEY}"
+fi
+TRACE=true
+[ "${ARBOS_TRACE:-1}" = "0" ] && TRACE=false
+{
+  echo "provider = \"$PROVIDER\""
+  [ -n "${ARBOS_API_BASE:-}" ] && echo "api_base = \"$ARBOS_API_BASE\""
+  echo "api_key_env = \"$KEY_ENV\""
+  [ -n "${ARBOS_MODEL:-}" ] && echo "model = \"$ARBOS_MODEL\""
+  echo "window_tokens = ${ARBOS_WINDOW_TOKENS:-200000}"
+  echo "fallback_models = [\"none\"]"
+  echo "trace = $TRACE"
+} > "$CONFIG"
+chmod 600 "$CONFIG"
+
+# 2. The place: keep .arbos/ out of git, note the base commit.
+cd "$PLACE" || exit 66
+git config --global --add safe.directory '*' 2>/dev/null
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  IN_GIT=1
+  mkdir -p "$(git rev-parse --git-dir)/info"
+  grep -qx '.arbos/' "$(git rev-parse --git-dir)/info/exclude" 2>/dev/null \
+    || echo '.arbos/' >> "$(git rev-parse --git-dir)/info/exclude"
+  BASE="${ARBOS_BASE_COMMIT:-$(git rev-parse HEAD 2>/dev/null)}"
+else
+  IN_GIT=0
+  BASE=""
+fi
+
+# 3. The root agent: mode from ARBOS_MODE, a tool list with nothing that
+#    needs a person or a screen, and standing instructions for headless work.
+AGENT_DIR="$PLACE/.arbos/agents/root"
+mkdir -p "$AGENT_DIR"
+ALLOW="${ARBOS_ALLOWLIST:-ls, read, find, grep, write, edit, apply_patch, bash, await, jobs, plan, changes, undo, say, spawn, remember}"
+if [ ! -f "$AGENT_DIR/agent.md" ]; then
+  printf 'name: root\nmodel: inherit\nallowlist: %s\ncwd: %s\nmode: %s\n' "$ALLOW" "$PLACE" "$MODE" > "$AGENT_DIR/agent.md"
+fi
+if [ -n "${ARBOS_INSTRUCTIONS:-}" ]; then
+  printf '%s\n' "$ARBOS_INSTRUCTIONS" > "$AGENT_DIR/instructions.md"
+elif [ ! -f "$AGENT_DIR/instructions.md" ]; then
+  cat > "$AGENT_DIR/instructions.md" <<'EOF'
+You run headless inside a container. Nobody reads your replies while you work and nobody can answer a question, so never ask; decide and continue.
+Work only in the repository at your cwd. Make the change in the working tree and leave it there: do not commit, do not create branches, do not push.
+You have no network beyond the model. Do not try to install packages from the internet.
+Run the relevant tests with bash to check your fix before you stop. When the fix is in place and verified, stop with a short summary of what you changed.
+EOF
+fi
+
+# 4. Run the turn. A dangerous-command approval (only sudo, rm -rf /, mkfs)
+#    is denied and the turn continues; anything else that waits is a failure.
+cd "$PLACE"
+KCODE=1
+"$KERNEL" run --place "$PLACE" --json --timeout "$TIMEOUT" "$PROMPT" > "$OUT/run.jsonl" 2> "$OUT/run.stderr"
+KCODE=$?
+ROUNDS=0
+while [ "$KCODE" -eq 3 ] && [ "$ROUNDS" -lt 3 ]; do
+  ROUNDS=$((ROUNDS + 1))
+  LEFT=$((TIMEOUT - ($(date +%s) - START)))
+  [ "$LEFT" -le 5 ] && { KCODE=4; break; }
+  "$KERNEL" answer --place "$PLACE" --deny --follow --json --timeout "$LEFT" >> "$OUT/run.jsonl" 2>> "$OUT/run.stderr"
+  KCODE=$?
+done
+
+# 5. Stop the kernel `run` started (its own process group) and its jobs.
+KPID=$(sed -n 's/.*"pid":[[:space:]]*\([0-9]*\).*/\1/p' "$PLACE/.arbos/kernel.json" 2>/dev/null | head -n1)
+if [ -n "$KPID" ]; then
+  kill -TERM -- "-$KPID" 2>/dev/null || kill -TERM "$KPID" 2>/dev/null
+  i=0
+  while [ "$i" -lt 20 ] && kill -0 "$KPID" 2>/dev/null; do i=$((i + 1)); sleep 0.5; done
+  kill -KILL -- "-$KPID" 2>/dev/null
+fi
+
+# 6. Keep the record: the bundle, the kernel log, the patch.
+TRANSCRIPT="$AGENT_DIR/transcript.jsonl"
+BUNDLE=""
+if [ -s "$TRANSCRIPT" ]; then
+  BUNDLE=$("$KERNEL" rollout export "$PLACE" --agent root --out "$OUT/rollout" 2>> "$OUT/run.stderr")
+fi
+[ -f "$PLACE/.arbos/kernel.log" ] && cp "$PLACE/.arbos/kernel.log" "$OUT/kernel.log"
+
+PATCH_BYTES=0
+if [ "$IN_GIT" -eq 1 ]; then
+  git add -A . >/dev/null 2>&1
+  if [ -n "$BASE" ]; then
+    git -c core.fileMode=false diff --cached --binary "$BASE" -- . > "$OUT/patch.diff" 2>> "$OUT/run.stderr"
+  else
+    git -c core.fileMode=false diff --cached --binary > "$OUT/patch.diff" 2>> "$OUT/run.stderr"
+  fi
+  git reset -q >/dev/null 2>&1
+  PATCH_BYTES=$(wc -c < "$OUT/patch.diff" | tr -d ' ')
+fi
+
+END=$(date +%s)
+TOOL_CALLS=$(grep -c '"kind":"tool"' "$TRANSCRIPT" 2>/dev/null || echo 0)
+TURNS=$(grep -c '"kind":"turn_complete"' "$TRANSCRIPT" 2>/dev/null || echo 0)
+EVENTS=$(wc -l < "$TRANSCRIPT" 2>/dev/null | tr -d ' ' || echo 0)
+q() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+cat > "$OUT/result.json" <<EOF
+{
+  "kernel_exit": $KCODE,
+  "approval_rounds": $ROUNDS,
+  "wall_s": $((END - START)),
+  "timeout_s": $TIMEOUT,
+  "model": "$(q "${ARBOS_MODEL:-}")",
+  "provider": "$PROVIDER",
+  "mode": "$MODE",
+  "place": "$(q "$PLACE")",
+  "base_commit": "$BASE",
+  "patch_bytes": ${PATCH_BYTES:-0},
+  "events": ${EVENTS:-0},
+  "tool_calls": ${TOOL_CALLS:-0},
+  "turns": ${TURNS:-0},
+  "bundle": "$(q "$BUNDLE")"
+}
+EOF
+
+if [ -s "$TRANSCRIPT" ]; then
+  exit 0
+fi
+echo "arbos-swe-run: the agent left no transcript (kernel exit $KCODE); see $OUT/run.stderr and $OUT/kernel.log" >&2
+exit 70

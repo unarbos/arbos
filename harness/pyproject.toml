@@ -1,0 +1,17 @@
+[project]
+name = "arbos-harness"
+version = "0.1.0"
+description = "Verifiers v1 harness that runs the Arbos kernel as the agent inside a task container"
+requires-python = ">=3.11"
+dependencies = ["verifiers>=0.3.1"]
+tags = ["arbos", "harness", "agentic", "tool-use", "swe", "eval"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = ["arbos_harness/**", "pyproject.toml"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["arbos_harness"]
