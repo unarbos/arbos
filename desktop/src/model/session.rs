@@ -1757,8 +1757,7 @@ impl ChatSession {
                     // it now is.
                     _ => {
                         if let Some(sid) = &self.agent_session
-                            && let Some(replay) =
-                                crate::kernel::session_history(&self.place(), sid)
+                            && let Some(replay) = crate::kernel::session_history(&self.place(), sid)
                         {
                             self.items = replay.items;
                         }
@@ -1768,7 +1767,9 @@ impl ChatSession {
                 self.streaming_agent = None;
                 self.questions = None;
                 let what = match restored {
-                    Some(r) => format!("rewound: {dropped} transcript lines cut; project back to {r}"),
+                    Some(r) => {
+                        format!("rewound: {dropped} transcript lines cut; project back to {r}")
+                    }
                     None => format!("rewound: {dropped} transcript lines cut; files untouched"),
                 };
                 self.notice(false, &what);
@@ -1797,7 +1798,11 @@ impl ChatSession {
                         true,
                         &format!(
                             "The arbos-kernel {where_}{} {what}. {fix}",
-                            if kernel.is_empty() { String::new() } else { format!(" ({kernel})") }
+                            if kernel.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({kernel})")
+                            }
                         ),
                     );
                     self.close();
@@ -1966,7 +1971,8 @@ impl ChatSession {
             | Event::Open { .. }
             | Event::Hide { .. }
             | Event::Browser { .. }
-            | Event::Job { .. } => {}
+            | Event::Job { .. }
+            | Event::StoreChanged(_) => {}
         }
     }
 
@@ -2462,8 +2468,7 @@ fn same_question(open: &AskPrompt, title: &str, questions: &[AskQuestion]) -> bo
         a.prompt == b.prompt
             && a.allow_multiple == b.allow_multiple
             && a.options.len() == b.options.len()
-            && a
-                .options
+            && a.options
                 .iter()
                 .zip(&b.options)
                 .all(|(x, y)| x.id == y.id && x.label == y.label)
@@ -2572,7 +2577,12 @@ fn pump(
                 // is the truth on attach; a model picked while offline is
                 // pushed only when the agent has none of its own yet.
                 let kept = (chat.host.is_none())
-                    .then(|| crate::kernel::agent_model(&arbos_core::Place::new(&chat.cwd), &session.session_id))
+                    .then(|| {
+                        crate::kernel::agent_model(
+                            &arbos_core::Place::new(&chat.cwd),
+                            &session.session_id,
+                        )
+                    })
                     .flatten();
                 match (kept, chat.model.clone()) {
                     (Some(kept), _) => chat.model = Some(kept),
@@ -2598,6 +2608,7 @@ fn pump(
                 let mut surfaces = Vec::new();
                 let mut children = Vec::new();
                 let mut ended = false;
+                let mut store_moved = false;
                 workspace.with_session(id, cx, |chat| {
                     for event in batch {
                         ended |= matches!(event, Event::TurnDone(_));
@@ -2605,6 +2616,7 @@ fn pump(
                             Event::Show { path, title, kind } => {
                                 shown.push((path, title, kind));
                             }
+                            Event::StoreChanged(_) => store_moved = true,
                             // Kernel rows come and go in order; keep it.
                             event @ (Event::Open { .. }
                             | Event::Hide { .. }
@@ -2648,6 +2660,12 @@ fn pump(
                 }
                 for sid in children {
                     workspace.ensure_child_agent(id, sid, cx);
+                }
+                // The kernel says the project page moved: re-read the
+                // store now, ahead of (or instead of, for a remote place)
+                // the file watch's knock.
+                if store_moved && let Some(root) = workspace.project_root_of(id) {
+                    workspace.reload_project(&root, cx);
                 }
                 workspace.settle_delegate(id, ended, cx);
                 workspace.session(id).is_some_and(|chat| chat.busy())
@@ -2763,10 +2781,7 @@ pub fn interrupt_label(detail: &str) -> String {
     let lower = d.to_ascii_lowercase();
     // The kernel says where the stop landed ("stop during model call",
     // "stop during compaction"); the user does not need to know.
-    if lower.is_empty()
-        || lower == "user"
-        || lower.starts_with("stop")
-    {
+    if lower.is_empty() || lower == "user" || lower.starts_with("stop") {
         return STOPPED_BY_YOU.to_owned();
     }
     match lower.as_str() {

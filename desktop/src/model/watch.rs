@@ -143,11 +143,12 @@ fn ours(dir: &Path, path: &Path) -> bool {
     };
     let head = head.as_os_str().to_string_lossy();
     match head.as_ref() {
-        "skills" | "prompts" | "hooks" | "archive" | "project.toml" => true,
-        // The goals and notes the panel shows, whatever their case.
-        _ if head.eq_ignore_ascii_case("goals.md") || head.eq_ignore_ascii_case("notes.md") => {
+        "skills" | "prompts" | "hooks" | "archive" | "project.toml" | "docs" | "archived.md" => {
             true
         }
+        // The project page and the old goals file the panel shows,
+        // whatever their case.
+        _ if head.eq_ignore_ascii_case("goals.md") || head.eq_ignore_ascii_case("notes.md") => true,
         "agents" => agent_knock(rest),
         "desktop" => desktop_knock(rest),
         _ => false,
@@ -216,6 +217,8 @@ mod tests {
             "/p/.arbos/desktop/data.db-wal",
             "/p/.arbos/GOALS.md",
             "/p/.arbos/notes.md",
+            "/p/.arbos/archived.md",
+            "/p/.arbos/docs/project-context.md",
             "/p/.arbos/agents/root",
             "/p/.arbos/agents/root/plan.md",
         ] {

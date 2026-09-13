@@ -1,13 +1,14 @@
 //! The right-hand panel: a live view of the project's `.arbos/`. Agents
 //! and their sub-agents as a tree (a click puts that chat in the column),
 //! the processes those agents started, the resources they hold, and the
-//! project's goals and notes. Nothing else but a settings button at the
-//! bottom.
+//! project page: the status the main chat keeps in `notes.md`, rendered
+//! the way Cursor's Projects page is, plus the context document. Nothing
+//! else but a settings button at the bottom.
 
 use crate::{
     model::{
         session::ChildState,
-        store_view::{Note, Resource},
+        store_view::{PageBlock, PageItem, ProjectPage, Resource, Target},
         surface::{Surface, SurfaceId, SurfaceKind},
         workspace::Workspace,
     },
@@ -25,7 +26,7 @@ use bezel::{
     theme::{TextStyle, Theme, Typeset},
     ui::{icons, popover, tooltip::Tooltip, widgets::Buttons},
 };
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 /// The panel's width. Cursor's right panel runs 280–320 at a 1728 window.
 pub(crate) const PANEL_WIDTH: f32 = 280.;
@@ -167,9 +168,7 @@ impl Arbos {
         };
         let processes: Vec<SurfaceLine> = surfaces
             .iter()
-            .filter(|surface| {
-                matches!(surface.kind, SurfaceKind::Terminal | SurfaceKind::Process)
-            })
+            .filter(|surface| matches!(surface.kind, SurfaceKind::Terminal | SurfaceKind::Process))
             .map(|surface| line_of(surface))
             .collect();
         let resources: Vec<SurfaceLine> = surfaces
@@ -238,13 +237,14 @@ impl Arbos {
                 .children(store_rows(&store.resources, &theme));
         }
         body = body
-            .child(section_head("Goals", None, &theme))
-            .child(self.note_block(store.goals.as_ref(), true, remote, &theme, cx));
-        if let Some(notes) = &store.notes {
-            body = body
-                .child(section_head("Notes", None, &theme))
-                .child(self.note_block(Some(notes), false, remote, &theme, cx));
-        }
+            .child(section_head("Project", None, &theme))
+            .children(
+                store
+                    .context
+                    .clone()
+                    .map(|path| self.project_context_row(path, &theme, cx)),
+            )
+            .child(self.project_page(store.page.as_ref(), remote, &theme, cx));
 
         Some(
             div()
@@ -493,7 +493,12 @@ impl Arbos {
 
     /// A standing obligation: the goal, and when it next fires. A click
     /// opens the agent that holds it.
-    fn standing_row(&self, line: StandingLine, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn standing_row(
+        &self,
+        line: StandingLine,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let agent = line.agent;
         row(("panel-standing", agent), 0, false, theme)
             .child(glyph_box(
@@ -523,23 +528,47 @@ impl Arbos {
             .into_any_element()
     }
 
-    /// A goals or notes file's first lines, or — for goals, with none
-    /// written — an invitation to set them through the main chat.
-    fn note_block(
+    /// The context document (`docs/project-context.md`): goals,
+    /// constraints, decisions. A click opens it in the column.
+    fn project_context_row(
         &self,
-        note: Option<&Note>,
-        goals: bool,
+        path: PathBuf,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        row(("panel-context", 0), 0, false, theme)
+            .child(glyph_box(
+                icons::icon(icons::files::DOCUMENT)
+                    .size(px(12.))
+                    .text_color(theme.text_muted)
+                    .into_any_element(),
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text_muted)
+                    .child("Context"),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_store_file(path.clone(), "Context", cx);
+            }))
+            .into_any_element()
+    }
+
+    /// The status page as Cursor's Projects page draws it: tldr bullets,
+    /// section headings, checkbox rows whose label is the link and whose
+    /// readout sits dim under it. With nothing written yet, an invitation
+    /// to start it through the main chat.
+    fn project_page(
+        &self,
+        page: Option<&ProjectPage>,
         remote: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let lines = note.map(|note| note.lines.clone()).unwrap_or_default();
-        if lines.is_empty() {
-            let (hint, verb) = if goals {
-                ("No goals yet.", "Set goals…")
-            } else {
-                ("Nothing written yet.", "Add a note…")
-            };
+        let Some(page) = page.filter(|page| !page.is_empty()) else {
             return div()
                 .px(px(8.))
                 .py(px(4.))
@@ -548,58 +577,189 @@ impl Arbos {
                 .gap(px(6.))
                 .text_style(TextStyle::Caption)
                 .text_color(theme.text_faint)
-                .child(hint)
+                .child("Nothing on the project page yet.")
                 .when(!remote, |el| {
                     el.child(
                         div()
-                            .id(if goals { "panel-set-goals" } else { "panel-add-note" })
+                            .id("panel-start-page")
                             .self_start()
                             .text_color(theme.accent)
                             .cursor_pointer()
                             .hover(|el| el.text_color(theme.accent_strong))
-                            .child(verb)
+                            .child("Start the page…")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.invite_note(goals, cx);
+                                this.invite_page(cx);
                             })),
                     )
                 })
                 .into_any_element();
-        }
-        let more = note.map(|note| note.more).unwrap_or_default();
-        div()
-            .px(px(8.))
-            .py(px(4.))
-            .flex()
-            .flex_col()
-            .gap(px(3.))
-            .text_style(TextStyle::Caption)
-            .text_color(theme.text_muted)
-            .children(lines.into_iter().enumerate().map(|(n, line)| {
+        };
+        let mut body = div().flex().flex_col();
+        if !page.tldr.is_empty() {
+            body = body.child(
                 div()
-                    .line_clamp(2)
-                    .when(line.heading, |el| {
-                        el.text_color(theme.text_faint).when(n > 0, |el| el.mt(px(4.)))
-                    })
-                    .child(SharedString::from(line.text))
-            }))
-            .when(more > 0, |el| {
-                el.child(
-                    div()
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(format!("{more} more"))),
-                )
+                    .id("panel-tldr")
+                    .mx(px(4.))
+                    .mb(px(6.))
+                    .px(px(4.))
+                    .py(px(2.))
+                    .rounded(px(5.))
+                    .bg(theme.element_hover)
+                    .flex()
+                    .flex_col()
+                    .children(page.tldr.iter().enumerate().map(|(n, item)| {
+                        self.page_item(("panel-tldr-item", n as u64), item, theme, cx)
+                    })),
+            );
+        }
+        for (n, block) in page.blocks.iter().enumerate() {
+            body = body.child(match block {
+                PageBlock::Heading { level, text } => page_heading(*level, text, n > 0, theme),
+                PageBlock::Item(item) => {
+                    self.page_item(("panel-page-item", n as u64), item, theme, cx)
+                }
+            });
+        }
+        body.into_any_element()
+    }
+
+    /// One item: its checkbox (or a dot for a tldr bullet), the label as a
+    /// link, and the readout dim under it.
+    fn page_item(
+        &self,
+        id: (&'static str, u64),
+        item: &PageItem,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let glyph: AnyElement = match item.done {
+            Some(true) => icons::icon(icons::status::CHECK)
+                .size(px(12.))
+                .text_color(theme.success)
+                .into_any_element(),
+            Some(false) => div()
+                .size(px(9.))
+                .rounded(px(2.))
+                .border_1()
+                .border_color(theme.text_faint)
+                .into_any_element(),
+            None => div()
+                .size(px(4.))
+                .rounded_full()
+                .bg(theme.text_faint)
+                .into_any_element(),
+        };
+        let label_tint = match (item.done, item.target.is_some()) {
+            (Some(true), _) => theme.text_faint,
+            (_, true) => theme.text,
+            (_, false) => theme.text_muted,
+        };
+        let target = item.target.clone();
+        let label_text = item.label.clone();
+        let label = div()
+            .id((id.0, id.1.wrapping_mul(2)))
+            .min_w_0()
+            .truncate()
+            .text_color(label_tint)
+            .when(target.is_some(), |el| {
+                el.cursor_pointer()
+                    .hover(|el| el.text_color(theme.accent))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(target) = target.clone() {
+                            this.follow_page_link(&target, &label_text, cx);
+                        }
+                    }))
             })
+            .child(SharedString::from(item.label.clone()));
+        div()
+            .id(id)
+            .flex_none()
+            .pl(px(8. + TREE_STEP * f32::from(item.depth)))
+            .pr(px(8.))
+            .py(px(3.))
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap(px(8.))
+            .text_style(TextStyle::Caption)
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(12.))
+                    .pt(px(3.))
+                    .flex()
+                    .justify_center()
+                    .child(glyph),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(label)
+                    .when(!item.readout.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .line_clamp(2)
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from(item.readout.clone())),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 
-    /// Ask the main chat to write the file: the prompt lands in the
+    /// Where a page link goes: a URL to the browser (an `arbos://` chat
+    /// link stays in the app), a worker to its chat, a file to the column.
+    fn follow_page_link(&mut self, target: &Target, label: &str, cx: &mut Context<Self>) {
+        match target {
+            Target::Url(url) if url.starts_with("arbos://") => {
+                self.workspace.update(cx, |workspace, cx| {
+                    workspace.open_chat_link(url, cx);
+                });
+            }
+            Target::Url(url) => cx.open_url(url),
+            Target::Worker(kernel_id) => {
+                let kernel_id = kernel_id.clone();
+                self.workspace.update(cx, |workspace, cx| {
+                    let Some(main) = workspace.active_project().and_then(|p| p.main_session())
+                    else {
+                        return;
+                    };
+                    if let Some(id) = workspace.ensure_child_agent(main, kernel_id, cx) {
+                        workspace.select_session(id, cx);
+                    }
+                });
+            }
+            Target::File(path) => self.open_store_file(path.clone(), label, cx),
+        }
+    }
+
+    /// A file of the store in the column, as a document panel under the
+    /// main chat.
+    fn open_store_file(&mut self, path: PathBuf, title: &str, cx: &mut Context<Self>) {
+        let title = title.to_owned();
+        self.workspace.update(cx, |workspace, cx| {
+            let Some(main) = workspace.active_project().and_then(|p| p.main_session()) else {
+                return;
+            };
+            workspace.open_shown(
+                main,
+                path.display().to_string(),
+                title,
+                "doc".into(),
+                None,
+                None,
+                cx,
+            );
+        });
+    }
+
+    /// Ask the main chat to start the page: the prompt lands in the
     /// composer, and sending it is the person's call.
-    fn invite_note(&mut self, goals: bool, cx: &mut Context<Self>) {
-        let prompt = if goals {
-            "Fill in .arbos/GOALS.md for this project: the goal, constraints, decisions, and current focus. Ask me what you need to know first."
-        } else {
-            "Start .arbos/notes.md with what you know about this project so far."
-        };
+    fn invite_page(&mut self, cx: &mut Context<Self>) {
+        let prompt = "Fill in .arbos/docs/project-context.md for this project (goal, constraints, decisions, resources) and start .arbos/notes.md with the workstreams you know of. Ask me what you need to know first.";
         self.workspace.update(cx, |workspace, cx| {
             if let Some(main) = workspace.active_project().and_then(|p| p.main_session()) {
                 workspace.select_session(main, cx);
@@ -638,18 +798,16 @@ impl Arbos {
                             .size(px(14.))
                             .text_color(theme.text_muted),
                     )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open_settings(Section::General, cx)
-                    })),
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.open_settings(Section::General, cx)),
+                    ),
             )
             .child(
                 theme
                     .ghost("new-subchat")
                     .px(px(8.))
                     .py(px(6.))
-                    .tooltip(|window, cx| {
-                        Tooltip::with_keystroke("New sub-chat", "⌘N", window, cx)
-                    })
+                    .tooltip(|window, cx| Tooltip::with_keystroke("New sub-chat", "⌘N", window, cx))
                     .child(
                         icons::icon(icons::system::PLUS)
                             .size(px(14.))
@@ -683,19 +841,16 @@ impl Arbos {
                     .size(px(14.))
                     .text_color(theme.text_muted),
             )
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.toggle_panel_action(&TogglePanel, window, cx)
-            }))
+            .on_click(
+                cx.listener(|this, _, window, cx| {
+                    this.toggle_panel_action(&TogglePanel, window, cx)
+                }),
+            )
             .into_any_element()
     }
 }
 
-fn push_children(
-    rows: &mut Vec<AgentRow>,
-    workspace: &Workspace,
-    parent: u64,
-    depth: u8,
-) {
+fn push_children(rows: &mut Vec<AgentRow>, workspace: &Workspace, parent: u64, depth: u8) {
     for child in workspace.child_summaries(parent) {
         rows.push(AgentRow {
             id: child.id,
@@ -723,14 +878,30 @@ fn section_head(label: &'static str, aside: Option<String>, theme: &Theme) -> An
         .into_any_element()
 }
 
+/// A `##` or `###` heading of the page: a faint caption, the deeper one
+/// indented a step.
+fn page_heading(level: u8, text: &str, gap_above: bool, theme: &Theme) -> AnyElement {
+    let sub = level >= 3;
+    div()
+        .flex_none()
+        .pl(px(8. + if sub { TREE_STEP } else { 0. }))
+        .pr(px(8.))
+        .pt(px(if gap_above { 8. } else { 2. }))
+        .pb(px(2.))
+        .text_style(TextStyle::Caption)
+        .text_color(if sub {
+            theme.text_faint
+        } else {
+            theme.text_muted
+        })
+        .truncate()
+        .child(SharedString::from(text.to_owned()))
+        .into_any_element()
+}
+
 /// The pill every clickable row sits in. Cursor's rows: 26 tall, 5px
 /// corners, the hover wash, and the selection wash on the one in front.
-fn row(
-    id: (&'static str, u64),
-    depth: u8,
-    selected: bool,
-    theme: &Theme,
-) -> Stateful<Div> {
+fn row(id: (&'static str, u64), depth: u8, selected: bool, theme: &Theme) -> Stateful<Div> {
     div()
         .id(id)
         .flex_none()
