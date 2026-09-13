@@ -115,9 +115,10 @@ pub fn run(place: &Place) -> Vec<String> {
         if attempts.exists() {
             let _ = std::fs::rename(&attempts, attempts.with_extension("jsonl.migrated"));
         }
-        // The old generated render: notes.md is the agent's own file now.
+        // The old generated render is not anyone's file now; it goes aside.
+        // (Root's checklist lives at .arbos/notes.md, the project page.)
         let old_md = layout.plan_md();
-        if old_md.exists() && !notes::path(place, id).exists() {
+        if old_md.exists() {
             let _ = std::fs::rename(&old_md, old_md.with_extension("md.migrated"));
         }
     }
@@ -396,6 +397,11 @@ mod tests {
         let n = notes::load(&p, "root");
         let items = n.items();
         assert_eq!(items.len(), 1, "{}", n.render());
+        assert!(
+            p.arbos().join("notes.md").exists(),
+            "root's checklist is the project page"
+        );
+        assert!(!p.agent_dir("root").join("notes.md").exists());
         assert_eq!(items[0].section, "Ship the feature");
         assert!(items[0].text.starts_with("write the docs — half done"));
         let subs = subscription::list(&p, "root");

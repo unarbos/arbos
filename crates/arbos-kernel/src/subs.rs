@@ -32,6 +32,50 @@ fn in_flight() -> &'static Mutex<HashSet<String>> {
     SET.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// The command of the weekly `git gc` of the `.arbos/` repository.
+pub const GC_CMD: &str = "git -C .arbos gc --auto --quiet";
+
+/// Root's standing chores, added once: a weekly `git gc` of `.arbos/`
+/// (one commit per turn adds up; design: "a weekly gc node"). Quiet on
+/// success; a failure wakes root with the log tail like any shell job.
+pub fn ensure_chores(place: &arbos_core::Place) {
+    let root = arbos_core::ROOT_ID;
+    if !arbos_core::agent_exists(place, root) {
+        return;
+    }
+    if subscription::list(place, root)
+        .iter()
+        .any(|s| s.cmd.as_deref() == Some(GC_CMD))
+    {
+        return;
+    }
+    let sub = Subscription {
+        id: 0,
+        kind: "shell".into(),
+        prompt: "Weekly git gc of the .arbos repository (kernel chore).".into(),
+        every: Some("7d".into()),
+        at: None,
+        once: false,
+        cmd: Some(GC_CMD.into()),
+        path: None,
+        repo: None,
+        pr: None,
+        deliver_to: "none".into(),
+        notify: None,
+        expires: None,
+        paused: false,
+        created: String::new(),
+        next_due: None,
+        last_fired: None,
+        last: String::new(),
+        error: None,
+        seen: None,
+    };
+    if let Err(e) = subscription::add(place, root, sub, None) {
+        crate::klog::warn("gc_chore", Some(root), format!("{e:#}"));
+    }
+}
+
 /// Anything of the watcher's still running (for `--until-idle`).
 pub fn busy() -> bool {
     !in_flight().lock().unwrap().is_empty()
@@ -197,7 +241,16 @@ fn fire(hooks: &Arc<KernelHooks>, agent: &Agent, sub: Subscription, now: i64) {
                 let silent = to_user && tail.trim().is_empty();
                 let ok = code == 0 && !silent;
                 let outcome = if ok {
-                    if to_user {
+                    if sub.deliver_to == "none" {
+                        format!(
+                            "exit 0 — {}",
+                            if tail.is_empty() {
+                                "quiet".to_string()
+                            } else {
+                                text::clip(&tail, 120)
+                            }
+                        )
+                    } else if to_user {
                         let template = sub.notify.clone().unwrap_or_else(|| "{output}".into());
                         let line = template.replace("{output}", tail.trim());
                         match hooks.notify_user(id, &line) {

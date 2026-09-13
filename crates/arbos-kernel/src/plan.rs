@@ -17,6 +17,7 @@ use crate::hooks::KernelHooks;
 /// note. The serve wake (`needs_serve`) continues the turn itself from the
 /// transcript; the record just has to say what happened.
 pub fn reclaim(hooks: &KernelHooks) {
+    crate::subs::ensure_chores(&hooks.place);
     for agent in list_agents(&hooks.place).unwrap_or_default() {
         let id = agent.id.as_str();
         while close_turn_folder(hooks, id, Some("kernel restarted before this turn ended")) {}

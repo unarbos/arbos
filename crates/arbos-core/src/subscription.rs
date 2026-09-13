@@ -52,8 +52,9 @@ pub struct Subscription {
     pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<u64>,
-    /// `agent` (an inbox file, a turn) or `user` (a line to the user, no
-    /// model turn; `shell` only, failures still wake the agent).
+    /// `agent` (an inbox file, a turn), `user` (a line to the user, no
+    /// model turn), or `none` (a quiet chore: nothing on success). `user`
+    /// and `none` are for `shell`; a failure always wakes the agent.
     #[serde(default = "default_deliver_to")]
     pub deliver_to: String,
     /// `deliver_to = "user"`: the line sent, with `{output}` replaced.
@@ -221,12 +222,13 @@ impl Subscription {
             }
             _ => {}
         }
-        if self.deliver_to != "agent" && self.deliver_to != "user" {
-            bail!("deliver_to must be agent or user");
+        if !matches!(self.deliver_to.as_str(), "agent" | "user" | "none") {
+            bail!("deliver_to must be agent, user, or none");
         }
-        if self.deliver_to == "user" && self.kind != "shell" {
+        if self.deliver_to != "agent" && self.kind != "shell" {
             bail!(
-                "deliver_to = user is for shell (a reading with no model turn); a {} wakes the agent",
+                "deliver_to = {} is for shell (a command with no model turn); a {} wakes the agent",
+                self.deliver_to,
                 self.kind
             );
         }

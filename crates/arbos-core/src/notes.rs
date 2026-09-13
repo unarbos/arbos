@@ -56,9 +56,32 @@ pub struct Notes {
     lines: Vec<String>,
 }
 
+/// Root's checklist is the project page, `.arbos/notes.md` (one per
+/// project, like Cursor's Agent Store `notes.md`; decided 2026-09-13).
+/// Every other agent keeps its own under its folder.
 pub fn path(place: &Place, agent: &str) -> PathBuf {
-    place.agent_dir(agent).join("notes.md")
+    if agent == crate::ROOT_ID {
+        project_page(place)
+    } else {
+        place.agent_dir(agent).join("notes.md")
+    }
 }
+
+/// `.arbos/notes.md`: the user-visible status page. Root writes it; the
+/// file tools refuse other agents (`tool::PlanCx::resolve_write`).
+pub fn project_page(place: &Place) -> PathBuf {
+    place.arbos().join("notes.md")
+}
+
+/// Is `candidate` this place's project page?
+pub fn is_project_page(place_root: &Path, candidate: &Path) -> bool {
+    let page = place_root.join(".arbos").join("notes.md");
+    let a = std::fs::canonicalize(&page).unwrap_or(page);
+    let b = std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    a == b
+}
+
+pub const PAGE_REFUSAL: &str = ".arbos/notes.md is the project page, written by root only; keep your own checklist with the plan tool and tell root with say to=root";
 
 pub fn load(place: &Place, agent: &str) -> Notes {
     Notes::parse(&std::fs::read_to_string(path(place, agent)).unwrap_or_default())

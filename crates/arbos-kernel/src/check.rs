@@ -204,10 +204,23 @@ pub fn check(place: &Place) -> Result<Report> {
             &rel(&layout.dir.join("subscriptions")),
             &layout.dir.join("subscriptions"),
         );
-        check_notes(
+        if a.id.as_str() != arbos_core::ROOT_ID {
+            check_notes(
+                &mut r,
+                &rel(&layout.dir.join("notes.md")),
+                &layout.dir.join("notes.md"),
+            );
+        } else if layout.dir.join("notes.md").exists() {
+            r.warn(
+                rel(&layout.dir.join("notes.md")),
+                None,
+                "root's checklist is the project page .arbos/notes.md; this file is not read",
+            );
+        }
+        check_waiting(
             &mut r,
-            &rel(&layout.dir.join("notes.md")),
-            &layout.dir.join("notes.md"),
+            &rel(&layout.dir.join("waiting")),
+            &layout.dir.join("waiting"),
         );
         if layout.plan_jsonl().exists() {
             r.warn(
@@ -296,13 +309,41 @@ pub fn check(place: &Place) -> Result<Report> {
         }
     }
 
-    // access.toml, secrets.toml: parse.
+    // access.toml, secrets.toml: parse. access.toml also gets the lint a
+    // tunnel operator wants before opening the port: no client rows (the
+    // kernel would refuse to bind off loopback), a token in a file others
+    // can read.
     let access = arbos.join("access.toml");
     if access.exists() {
-        if let Err(e) = crate::access::Access::load(place) {
-            r.error(rel(&access), None, format!("{e:#}"));
+        match crate::access::Access::load(place) {
+            Err(e) => r.error(rel(&access), None, format!("{e:#}")),
+            Ok(a) => {
+                if !a.has_clients() {
+                    r.warn(
+                        rel(&access),
+                        None,
+                        "no [[client]] rows: a kernel bound off loopback refuses to start (fail closed)",
+                    );
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(meta) = std::fs::metadata(&access)
+                        && meta.permissions().mode() & 0o077 != 0
+                        && std::fs::read_to_string(&access).is_ok_and(|t| t.contains("token = "))
+                    {
+                        r.warn(
+                            rel(&access),
+                            None,
+                            "holds a token but is readable by others; chmod 600",
+                        );
+                    }
+                }
+            }
         }
     }
+    // The project page: root's checklist.
+    check_notes(&mut r, ".arbos/notes.md", &arbos.join("notes.md"));
     let secrets = arbos.join("secrets.toml");
     if secrets.exists() {
         if let Err(e) = arbos_engine::secrets::Config::load(place.path()) {
@@ -402,6 +443,50 @@ fn check_subscriptions(r: &mut Report, rel: &str, dir: &Path) {
                 }
                 if sub.next_due.is_some() && sub.next_due_ms().is_none() {
                     r.error(&file_rel, None, "next_due is not an RFC 3339 instant");
+                }
+            }
+            Err(e) => r.error(&file_rel, None, format!("{e:#}")),
+        }
+    }
+}
+
+/// `waiting/*.toml` must parse; an `approve` mirror with no kernel running
+/// is stale (the start clears it); an `ask` may stand for ever.
+fn check_waiting(r: &mut Report, rel: &str, dir: &Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for p in rd.flatten().map(|e| e.path()) {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name.starts_with('.') {
+            continue;
+        }
+        let file_rel = format!("{rel}/{name}");
+        match arbos_core::waiting::read(&p) {
+            Ok(w) => {
+                if !matches!(w.kind.as_str(), "ask" | "approve") {
+                    r.error(
+                        &file_rel,
+                        None,
+                        format!("kind {:?} is not ask or approve", w.kind),
+                    );
+                }
+                if !name.starts_with(&format!("{}-", w.kind)) {
+                    r.warn(
+                        &file_rel,
+                        None,
+                        format!("file name does not start with {}-", w.kind),
+                    );
+                }
+                if w.kind == "approve" {
+                    r.warn(
+                        &file_rel,
+                        None,
+                        "an approve mirror outlives no turn; the next kernel start removes it",
+                    );
                 }
             }
             Err(e) => r.error(&file_rel, None, format!("{e:#}")),
