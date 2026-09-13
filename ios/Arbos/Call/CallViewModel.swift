@@ -206,7 +206,7 @@ final class CallViewModel: ObservableObject {
             server = info
             if phase == .connecting { phase = .listening }
         case .userSpeechStarted:
-            print("event speech.started playing=\(audio.isPlaying) phase=\(phase.label)")
+            trace("event speech.started playing=\(audio.isPlaying) phase=\(phase.label)")
             // Barge-in: whatever Arbos was saying stops now.
             if audio.isPlaying || phase == .speaking {
                 audio.stopPlayback()
@@ -222,7 +222,7 @@ final class CallViewModel: ObservableObject {
         case .userTranscript(let text, let final):
             appendUserTranscript(text, final: final)
             if final {
-                print("transcript: \(text)")
+                trace("transcript: \(text)")
                 if text.trimmingCharacters(in: .whitespaces).isEmpty {
                     settle()
                 } else if !server.answersItself {
@@ -248,10 +248,10 @@ final class CallViewModel: ObservableObject {
             phase = .speaking
             audio.play(pcm16: pcm)
         case .assistantTranscript(let delta):
-            print("reply: \(delta)")
+            trace("reply: \(delta)")
             append(delta, to: .arbos)
         case .responseDone(let interrupted):
-            print("event response.done interrupted=\(interrupted) playing=\(audio.isPlaying)")
+            trace("event response.done interrupted=\(interrupted) playing=\(audio.isPlaying)")
             if interrupted { metric("barge_in_response_done", since: bargeStartedAt) }
             responseDone = true
             settle()
