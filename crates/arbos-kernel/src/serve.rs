@@ -248,7 +248,20 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             let accept_frames = accept_frames.clone();
             let accept_access = Arc::clone(&accept_access);
             tokio::spawn(async move {
-                let (r, w, who) = match admit(stream, peer, &accept_access).await {
+                let conn = match attach::Conn::detect(stream).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        klog::warn("attach_refused", None, format!("peer={peer} {e:#}"));
+                        return;
+                    }
+                };
+                // The webhook door: an HTTP POST is a message for an agent,
+                // answered and closed here, never a client.
+                if let attach::Conn::Hook(req) = conn {
+                    webhook(req, peer, &accept_access, &accept_hooks).await;
+                    return;
+                }
+                let (r, w, who) = match admit(conn, peer, &accept_access).await {
                     Ok(x) => x,
                     Err(e) => {
                         klog::warn("attach_refused", None, format!("peer={peer} {e:#}"));
@@ -1106,11 +1119,13 @@ fn write_kernel_json(
 /// anyone else with a token from access.toml. Returns the split
 /// connection and who it is.
 async fn admit(
-    stream: tokio::net::TcpStream,
+    conn: attach::Conn,
     peer: SocketAddr,
     access: &access::Access,
 ) -> Result<(attach::Reader, attach::Writer, access::Identity)> {
-    let conn = attach::Conn::detect(stream).await?;
+    if let attach::Conn::Hook(req) = conn {
+        anyhow::bail!("webhook on the attach path: {}", req.uri);
+    }
     // Only a plain TCP peer on loopback is "this machine": the desktop, the
     // CLI. A WebSocket from loopback is a tunnel daemon (cloudflared) or a
     // browser fronting for someone else, so it logs in like the network.
@@ -1121,7 +1136,7 @@ async fn admit(
     // A WebSocket peer may have logged in on the upgrade request itself.
     let presented = match &conn {
         attach::Conn::Ws(_, up) => access::token_from_request(&up.uri, up.authorization.as_deref()),
-        attach::Conn::Tcp(_) => None,
+        attach::Conn::Tcp(_) | attach::Conn::Hook(_) => None,
     };
     let (mut r, mut w) = conn.split();
     let token = match presented {
@@ -1166,6 +1181,116 @@ async fn admit(
             anyhow::bail!("bad token")
         }
     }
+}
+
+/// The webhook door (K-04): `POST /hook/<agent>` on the attach port
+/// becomes an inbox file for that agent — a Slack or Discord outgoing
+/// webhook, a CI job's curl, a Zapier step. Loopback needs no token; from
+/// anywhere else a `[[client]]` token with the writer role or better, as
+/// `Authorization: Bearer …` or `?token=…`. The body is the message: a
+/// JSON object's `text` / `content` / `message` / `body` field, else the
+/// raw text. Answers `{"ok":true,"agent":…,"file":…}`.
+async fn webhook(
+    req: attach::HookRequest,
+    peer: SocketAddr,
+    access: &access::Access,
+    hooks: &Arc<KernelHooks>,
+) {
+    let path = req.uri.split('?').next().unwrap_or("/").to_string();
+    let Some(agent) = path
+        .strip_prefix("/hook/")
+        .map(|a| a.trim_matches('/').to_string())
+    else {
+        klog::warn("webhook_refused", None, format!("peer={peer} path={path}"));
+        req.respond(
+            404,
+            "Not Found",
+            r#"{"ok":false,"error":"POST /hook/<agent>"}"#,
+        )
+        .await;
+        return;
+    };
+    let who = if access::is_local(&peer) {
+        access::Identity::local()
+    } else {
+        let token = access::token_from_request(&req.uri, req.authorization.as_deref());
+        match token.and_then(|t| access.authenticate(&t)) {
+            Some(who) if who.role != access::Role::Reader => who,
+            Some(_) => {
+                req.respond(
+                    403,
+                    "Forbidden",
+                    r#"{"ok":false,"error":"reader tokens cannot post"}"#,
+                )
+                .await;
+                return;
+            }
+            None => {
+                klog::warn(
+                    "webhook_refused",
+                    None,
+                    format!("peer={peer} agent={agent}: bad or missing token"),
+                );
+                req.respond(401, "Unauthorized", r#"{"ok":false,"error":"token required: Authorization: Bearer <token> or ?token="}"#)
+                    .await;
+                return;
+            }
+        }
+    };
+    let text = webhook_text(&req.body, req.content_type.as_deref());
+    if text.trim().is_empty() {
+        req.respond(400, "Bad Request", r#"{"ok":false,"error":"empty body"}"#)
+            .await;
+        return;
+    }
+    let from = format!("webhook:{}", who.name);
+    // On the plan-engine chain (#92+) this is `hooks.inbox(&agent, &text, &from, Vec::new())`.
+    match hooks.inbox(&agent, arbos_core::Node::inbox(text, from.clone())) {
+        Ok(_) => {
+            klog::info(
+                "webhook",
+                Some(&agent),
+                format!("from {} ({} bytes)", who.name, req.body.len()),
+            );
+            let body = serde_json::json!({"ok": true, "agent": agent, "from": from}).to_string();
+            req.respond(200, "OK", &body).await;
+        }
+        Err(e) => {
+            let body = serde_json::json!({"ok": false, "error": format!("{e:#}")}).to_string();
+            req.respond(404, "Not Found", &body).await;
+        }
+    }
+}
+
+/// The message in a webhook body: the common text field of a JSON object
+/// (Slack `text`, Discord `content`, generic `message`/`body`), with the
+/// rest of the object appended compact when there is more; else the body
+/// as text.
+fn webhook_text(body: &[u8], content_type: Option<&str>) -> String {
+    let raw = String::from_utf8_lossy(body).trim().to_string();
+    let looks_json = content_type.is_some_and(|c| c.contains("json")) || raw.starts_with('{');
+    if looks_json
+        && let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
+    {
+        for key in ["text", "content", "message", "body"] {
+            if let Some(serde_json::Value::String(t)) = map.get(key)
+                && !t.trim().is_empty()
+            {
+                let mut rest = map.clone();
+                rest.remove(key);
+                return if rest.is_empty() {
+                    t.clone()
+                } else {
+                    format!(
+                        "{t}\n\n[webhook fields] {}",
+                        serde_json::Value::Object(rest)
+                    )
+                };
+            }
+        }
+        return format!("[webhook] {}", serde_json::Value::Object(map));
+    }
+    raw
 }
 
 /// Greet, then run the two loops for one admitted client. A client that

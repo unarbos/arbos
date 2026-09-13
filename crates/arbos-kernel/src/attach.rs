@@ -9,6 +9,7 @@ use arbos_core::hub::HubFrame;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::AsyncReadExt;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
@@ -51,6 +52,102 @@ pub struct Upgrade {
 pub enum Conn {
     Tcp(TcpStream),
     Ws(WebSocketStream<TcpStream>, Upgrade),
+    /// An HTTP `POST`: a webhook. Answered and closed by the door, never
+    /// admitted as a client.
+    Hook(HookRequest),
+}
+
+/// One HTTP POST as the webhook door reads it: the request line's path,
+/// the `Authorization` header, the body, and the stream to answer on.
+pub struct HookRequest {
+    pub uri: String,
+    pub authorization: Option<String>,
+    pub content_type: Option<String>,
+    pub body: Vec<u8>,
+    pub stream: TcpStream,
+}
+
+/// Bodies beyond this are refused with 413: a hook carries a sentence,
+/// not a file.
+pub const HOOK_MAX_BODY: usize = 256 * 1024;
+
+impl HookRequest {
+    /// Write an HTTP/1.1 response and close.
+    pub async fn respond(mut self, status: u16, reason: &str, body: &str) {
+        let text = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = self.stream.write_all(text.as_bytes()).await;
+        let _ = self.stream.shutdown().await;
+    }
+}
+
+/// Read one HTTP request (headers, then `Content-Length` bytes of body).
+async fn read_http_post(mut stream: TcpStream) -> Result<HookRequest> {
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        if buf.len() > 64 * 1024 {
+            anyhow::bail!("webhook: headers over 64 KB");
+        }
+        let n = tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut chunk))
+            .await
+            .context("webhook: headers took over 10 s")??;
+        if n == 0 {
+            anyhow::bail!("webhook: connection closed before the headers ended");
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    };
+    let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+    let mut lines = head.lines();
+    let request_line = lines.next().unwrap_or_default();
+    let uri = request_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("/")
+        .to_string();
+    let mut authorization = None;
+    let mut content_type = None;
+    let mut content_length = 0usize;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        match name.trim().to_ascii_lowercase().as_str() {
+            "authorization" => authorization = Some(value.to_string()),
+            "content-type" => content_type = Some(value.to_string()),
+            "content-length" => content_length = value.parse().unwrap_or(0),
+            _ => {}
+        }
+    }
+    if content_length > HOOK_MAX_BODY {
+        anyhow::bail!(
+            "webhook: body of {content_length} bytes is over the {HOOK_MAX_BODY} byte cap"
+        );
+    }
+    let mut body = buf[header_end..].to_vec();
+    while body.len() < content_length {
+        let n = tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut chunk))
+            .await
+            .context("webhook: body took over 10 s")??;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    body.truncate(content_length);
+    Ok(HookRequest {
+        uri,
+        authorization,
+        content_type,
+        body,
+        stream,
+    })
 }
 
 impl Conn {
@@ -63,6 +160,9 @@ impl Conn {
             Ok(n) => n.context("peek")?,
             Err(_) => 0,
         };
+        if n >= 4 && &head[..4] == b"POST" {
+            return Ok(Conn::Hook(read_http_post(stream).await?));
+        }
         if n >= 3 && &head[..3] == b"GET" {
             let mut upgrade = Upgrade::default();
             let seen = &mut upgrade;
@@ -97,6 +197,12 @@ impl Conn {
             Conn::Ws(ws, _) => {
                 let (sink, source) = ws.split();
                 (Reader::Ws(source, Vec::new()), Writer::Ws(sink))
+            }
+            // The door answers a hook before anyone calls split; a hook
+            // that reaches here reads as a closed peer.
+            Conn::Hook(req) => {
+                let (r, w) = req.stream.into_split();
+                (Reader::Tcp(BufReader::new(r).lines()), Writer::Tcp(w))
             }
         }
     }
