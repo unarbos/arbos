@@ -434,7 +434,7 @@ pub const NOTE_ID_BIT: u64 = 1 << 42;
 /// already draws.
 pub fn wire_rows(place: &arbos_core::Place, agent: &str) -> Vec<PlanNode> {
     let mut rows = Vec::new();
-    for sub in subscription::list(place, agent) {
+    for sub in subscription::list_visible(place, agent) {
         rows.push(PlanNode {
             id: SUB_ID_BIT | u64::from(sub.id),
             parent: 0,

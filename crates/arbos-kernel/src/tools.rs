@@ -137,6 +137,7 @@ impl Tool for Spawn {
                     rules: opt_str(&args, "rules"),
                     output: opt_str(&args, "output"),
                     report: opt_str(&args, "report"),
+                    base_branch: arbos_core::store::current_branch(cx.place.path()),
                 }
                 .render(),
                 (None, Some(brief)) => brief.to_string(),
@@ -564,6 +565,7 @@ impl Tool for SubscribeTool {
                         notify: opt_str(&args, "notify").map(str::to_string),
                         expires: opt_str(&args, "expires").map(str::to_string),
                         paused: false,
+                        internal: false,
                         created: String::new(),
                         next_due: None,
                         last_fired: None,
@@ -598,7 +600,7 @@ impl Tool for SubscribeTool {
                     "subscribe: unknown op {other:?} (add, list, remove, pause, resume)"
                 ),
             };
-            let subs = arbos_core::subscription::list(&hooks.place, agent);
+            let subs = arbos_core::subscription::list_visible(&hooks.place, agent);
             let listing = if subs.is_empty() {
                 "(no subscriptions)".to_string()
             } else {

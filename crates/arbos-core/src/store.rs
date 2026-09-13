@@ -245,6 +245,26 @@ pub struct Kickoff<'a> {
     pub rules: Option<&'a str>,
     pub output: Option<&'a str>,
     pub report: Option<&'a str>,
+    /// The repository's current branch at the place, when it is one: the
+    /// default rules name it as the base branch instead of "the base
+    /// branch you are given" (the audit found `rules` copied verbatim).
+    pub base_branch: Option<String>,
+}
+
+/// The branch checked out at `place`, or None when it is no repository or
+/// is detached.
+pub fn current_branch(place: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(place)
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
 }
 
 pub const KICKOFF_READ_FIRST: &str = ".arbos/docs/project-context.md, then .arbos/notes.md";
@@ -281,11 +301,36 @@ impl Kickoff<'_> {
             self.do_
                 .unwrap_or("as the task says; number your steps in your first reply"),
         );
-        line("Rules", self.rules.unwrap_or(KICKOFF_RULES));
+        // A model that echoes the parameter description ("repo and base
+        // branch, no merging") gets the default instead.
+        let rules_given = self
+            .rules
+            .map(str::trim)
+            .filter(|r| !r.is_empty() && !looks_like_placeholder(r));
+        let default_rules = match &self.base_branch {
+            Some(b) => format!(
+                "Base branch: {b} (this checkout). Work on a branch cut from it; never merge. No extra documents beyond what the task needs. Secrets come through `secret` by name, never printed; redact them in captures."
+            ),
+            None => KICKOFF_RULES.to_string(),
+        };
+        line("Rules", rules_given.unwrap_or(&default_rules));
         line("Output", self.output.unwrap_or(KICKOFF_OUTPUT));
         line("Report", self.report.unwrap_or(KICKOFF_REPORT));
         out
     }
+}
+
+/// The `rules` field as a model copies it from the tool's own description
+/// rather than filling it: short, and made of the description's words.
+fn looks_like_placeholder(rules: &str) -> bool {
+    let r = rules.to_ascii_lowercase();
+    let generic = r.contains("repo and base branch")
+        || r.contains("repo/base branch")
+        || r.contains("a default covers the usual")
+        || r.contains("as usual")
+        || r == "default"
+        || r == "standard rules";
+    generic && r.len() < 160
 }
 
 /// One thing wrong with a `notes.md`, and the 1-based line it sits on.
@@ -618,6 +663,37 @@ mod tests {
                 .filter(|p| p.what.contains("more than"))
                 .count(),
             1
+        );
+    }
+}
+
+#[cfg(test)]
+mod kickoff_rules_tests {
+    use super::*;
+
+    #[test]
+    fn placeholder_rules_give_way_to_the_default_with_the_base_branch() {
+        let brief = Kickoff {
+            task: "Fix it.",
+            rules: Some("Repo and base branch, no merging, no extra docs."),
+            base_branch: Some("rust".into()),
+            ..Kickoff::default()
+        }
+        .render();
+        assert!(
+            brief.contains("Rules: Base branch: rust (this checkout)"),
+            "{brief}"
+        );
+        let real = Kickoff {
+            task: "Fix it.",
+            rules: Some("Branch from rust, open a PR against rust, never touch main."),
+            base_branch: Some("rust".into()),
+            ..Kickoff::default()
+        }
+        .render();
+        assert!(
+            real.contains("Rules: Branch from rust, open a PR"),
+            "{real}"
         );
     }
 }

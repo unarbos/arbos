@@ -43,10 +43,16 @@ pub fn ensure_chores(place: &arbos_core::Place) {
     if !arbos_core::agent_exists(place, root) {
         return;
     }
-    if subscription::list(place, root)
-        .iter()
-        .any(|s| s.cmd.as_deref() == Some(GC_CMD))
+    if let Some(existing) = subscription::list(place, root)
+        .into_iter()
+        .find(|s| s.cmd.as_deref() == Some(GC_CMD))
     {
+        // A chore written by an older kernel showed in every list.
+        if !existing.internal {
+            let mut fixed = existing;
+            fixed.internal = true;
+            let _ = subscription::save(place, root, &fixed);
+        }
         return;
     }
     let sub = Subscription {
@@ -64,6 +70,7 @@ pub fn ensure_chores(place: &arbos_core::Place) {
         notify: None,
         expires: None,
         paused: false,
+        internal: true,
         created: String::new(),
         next_due: None,
         last_fired: None,

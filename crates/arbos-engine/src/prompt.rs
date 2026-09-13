@@ -160,7 +160,7 @@ pub fn plan_segment(place: &Place, agent: &Agent) -> Option<String> {
     // The checklist (notes.md) and the standing subscriptions are what
     // the old plan tree was: intent that survives restarts and compaction.
     let notes = arbos_core::notes::load(place, id);
-    let subs = arbos_core::subscription::list(place, id);
+    let subs = arbos_core::subscription::list_visible(place, id);
     let mut plan = String::new();
     if !notes.is_empty() {
         plan.push_str(&notes.show());
