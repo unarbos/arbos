@@ -20,7 +20,12 @@ struct MainChatView: View {
         }
         .background(Color(red: 0.06, green: 0.06, blue: 0.07).ignoresSafeArea())
         .preferredColorScheme(.dark)
-        .onAppear { composing = focusComposer }
+        .onAppear {
+            composing = focusComposer
+            #if DEBUG
+            if UserDefaults.standard.bool(forKey: "previewPicker") { showTargets = true }
+            #endif
+        }
         .task { await chat.connect() }
         .sheet(isPresented: $showTargets) {
             TargetPickerView()
