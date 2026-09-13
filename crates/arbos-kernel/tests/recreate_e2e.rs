@@ -37,11 +37,22 @@ fn a_restored_chat_folder_streams_its_new_lines() {
     );
 
     // Two prompts so the old transcript is longer than one new prompt's worth.
+    // The tailed `user` line and the turn's `idle` arrive in either order:
+    // the turn frame is immediate, the transcript tail is polled.
     for text in ["first", "second"] {
         a.send(serde_json::json!({"type": "user", "agent": "root", "text": text}));
-        assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+        let (mut idle, mut user) = (false, false);
+        let seen = a.wait(Duration::from_secs(30), |f| {
+            if f["type"] == "turn" && f["agent"] == "root" && f["state"] == "idle" {
+                idle = true;
+            }
+            if f["type"] == "event" && f["agent"] == "root" && f["event"]["kind"] == "user" {
+                user = true;
+            }
+            idle && user
+        });
+        assert!(seen.is_some(), "turn idle and the user line for {text:?}");
     }
-    assert!(root_events(&mut a, "user", Duration::from_secs(5)));
     std::thread::sleep(Duration::from_millis(500));
 
     // Replace the folder in one step with a *longer* transcript, as a
