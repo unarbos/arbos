@@ -83,6 +83,7 @@ arbos-core = { path = "../crates/arbos-core" }
 # Lockfile pin: getrandom's js-sys ^0.3.77 otherwise picks 0.3.81
 # (wasm-bindgen =0.2.104) and clashes with bezel's wasm-bindgen ^0.2.120.
 js-sys = "0.3.104"
+cpal = "0.15"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # bezel's `platform` feature turns on `font-kit` and nothing else, and

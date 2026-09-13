@@ -691,6 +691,11 @@ impl Composer {
         cx.notify();
     }
 
+    /// The live words of the open take, as the strip paints them.
+    pub fn voice_preview(&self) -> &str {
+        &self.voice_preview
+    }
+
     /// Live words from the kernel, shown muted after the caret until release.
     pub fn set_voice_preview(&mut self, text: &str, cx: &mut Context<Self>) {
         let next = text.trim().to_string();

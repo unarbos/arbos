@@ -956,20 +956,26 @@ impl Arbos {
         } else {
             words
         };
-        // The microphone, so a silent call is not a mystery: which device it
-        // reads and how loud, or why it is not running, in red.
+        // The devices, the phone's way: `speaker · mic · level`, so a silent
+        // call is never a mystery; the mic's failure, in red, when it has one.
         let mic_error = status.mic_error.clone();
-        let mic_line = match &mic_error {
+        let mut parts: Vec<String> = Vec::new();
+        if !status.speaker_device.is_empty() {
+            parts.push(format!("speaker: {}", status.speaker_device));
+        }
+        match &mic_error {
             Some(e) => {
                 let e: String = e.split_whitespace().collect::<Vec<_>>().join(" ");
                 let e: String = if e.chars().count() > 70 { e.chars().take(70).collect::<String>() + "…" } else { e };
-                format!("mic: {e}")
+                parts.push(format!("mic: {e}"));
             }
             None if !status.mic_device.is_empty() => {
-                format!("mic: {} · {}%", status.mic_device, (status.level * 100.0).round() as u32)
+                parts.push(format!("mic: {}", status.mic_device));
+                parts.push(format!("{}%", (status.level * 100.0).round() as u32));
             }
-            None => String::new(),
-        };
+            None => {}
+        }
+        let mic_line = parts.join(" · ");
         let muted = status.muted;
         let mute = theme
             .ghost("call-mute")

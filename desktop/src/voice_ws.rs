@@ -30,6 +30,8 @@ pub const RATE: u32 = 24_000;
 /// 100 ms of PCM16 mono at 24 kHz.
 const CHUNK: usize = (RATE as usize / 10) * 2;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
+/// After a reply ends, how long the mic still counts as hearing the speaker.
+const ECHO_TAIL: Duration = Duration::from_millis(400);
 /// After Stop, how long the final transcript may take to arrive.
 const FINAL_WAIT: Duration = Duration::from_millis(2_000);
 
@@ -105,6 +107,8 @@ pub struct Peek {
     pub mic_device: String,
     /// Why the mic is not running, when it failed to start or died.
     pub mic_error: Option<String>,
+    /// The output device replies play through, once the first reply played.
+    pub speaker_device: String,
     /// What the reply audio is saying, when the server tells us.
     pub reply: String,
     pub error: Option<String>,
@@ -149,6 +153,7 @@ struct Shared {
     level: f32,
     mic_device: String,
     mic_error: Option<String>,
+    speaker_device: String,
     error: Option<String>,
     /// Bytes of reply audio played, for the tests.
     played: u64,
@@ -204,6 +209,7 @@ pub fn status() -> Peek {
         level: s.level,
         mic_device: s.mic_device.clone(),
         mic_error: s.mic_error.clone(),
+        speaker_device: s.speaker_device.clone(),
         reply: s.reply.clone(),
         error: s.error.clone(),
         engine: s.engine.clone(),
@@ -591,6 +597,11 @@ async fn run(
         "reply": if cfg.reply.is_empty() { "none" } else { cfg.reply.as_str() },
         "agents": cfg.mirror
     });
+    if kind == SessionKind::Dictation {
+        // Dictation: the gateway's streaming recogniser on any engine — partials
+        // as the words come, a final on release, no reply, no speech model.
+        start["mode"] = json!("dictation");
+    }
     if let SessionKind::Call { project } = &kind {
         // A call: the caller's words go to the project's main agent as
         // `voice` inbox messages and the gateway's narrator speaks the
@@ -611,6 +622,10 @@ async fn run(
     let mut ready_sent = false;
     let mut speaking = false;
     let mut muted = false;
+    // Client-side echo gate state: when playback last ended, and how loud the
+    // mic runs while we play (our own voice coming back).
+    let mut gate_until = Instant::now();
+    let mut echo_floor = 0.0f32;
 
     loop {
         tokio::select! {
@@ -674,7 +689,17 @@ async fn run(
                 let Some(chunk) = chunk else { continue };
                 if mic.is_some() {
                     // Muted: the stream keeps its clock, the words stay home.
-                    let chunk = if muted { vec![0u8; chunk.len()] } else { chunk };
+                    // Playing: a bare speaker feeds the mic our own reply (no
+                    // AEC on a plain CoreAudio stream); frames no louder than
+                    // that echo go out as silence, a voice over it passes so
+                    // barge-in still works. The gateway's gate does the rest.
+                    let playing = speaking || Instant::now() < gate_until;
+                    let level = rms(&chunk);
+                    if playing {
+                        echo_floor = if echo_floor == 0.0 { level } else { echo_floor * 0.9 + level * 0.1 };
+                    }
+                    let echo = playing && !(level > echo_floor * 2.5 && level > 0.03);
+                    let chunk = if muted || echo { vec![0u8; chunk.len()] } else { chunk };
                     sink.send(Message::Binary(chunk.into())).await?;
                 }
             }
@@ -688,7 +713,7 @@ async fn run(
                             continue;
                         }
                         if player.is_none() {
-                            match Player::spawn() {
+                            match Player::spawn(&shared) {
                                 Ok(p) => player = Some(p),
                                 Err(e) => {
                                     let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
@@ -714,6 +739,7 @@ async fn run(
                         let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
                         let field = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
                         let mut send_interrupt = false;
+                        let mut say_speaking: Option<bool> = None;
                         {
                         let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
                         match kind {
@@ -771,15 +797,23 @@ async fn run(
                                     s.reply.clear();
                                 }
                                 s.phase = Some(Phase::Speaking);
+                                // The gateway's echo gate tightens while we play.
+                                say_speaking = Some(true);
                             }
                             // Increments with their own spacing: append raw.
                             "response.transcript" => s.reply.push_str(&field("text")),
                             "response.done" => {
                                 speaking = false;
-                                if let Some(p) = player.take() { p.finish(); }
+                                let interrupted = v.get("interrupted").and_then(Value::as_bool).unwrap_or(false);
+                                if let Some(p) = player.take() {
+                                    // Cut short: nothing queued should still be heard.
+                                    if interrupted { p.stop() } else { p.finish() }
+                                }
                                 if s.phase == Some(Phase::Speaking) {
                                     s.phase = Some(if mic.is_some() { Phase::Listening } else { Phase::Ready });
                                 }
+                                gate_until = Instant::now() + ECHO_TAIL;
+                                say_speaking = Some(false);
                             }
                             // The text channel: the reply streams into the
                             // status row like a spoken one, and lands in the
@@ -846,6 +880,9 @@ async fn run(
                         }
                         if send_interrupt {
                             sink.send(text_frame(json!({ "type": "interrupt" }))).await?;
+                        }
+                        if let Some(on) = say_speaking {
+                            sink.send(text_frame(json!({ "type": "client.speaking", "speaking": on }))).await?;
                         }
                     }
                     Message::Close(_) => bail!("{} closed the session", cfg.url),
@@ -1356,42 +1393,257 @@ pub fn mic_test() -> Option<MicTest> {
     })
 }
 
-/// The speaker: a process reading raw PCM16 mono 24 kHz from stdin.
-struct Player {
-    child: Child,
+/// The speaker. In-process through cpal (CoreAudio on a Mac, ALSA or
+/// PipeWire on Linux) on the default output device, the way the phone
+/// plays: no player program to find, no pipe to fill. `ARBOS_VOICE_PLAYER_CMD`
+/// (tests, machines with no sound device) keeps the process backend: a
+/// command reading raw PCM16 mono 24 kHz from stdin.
+enum Player {
+    Device(DeviceOut),
+    Process(Child),}
+
+/// Reply audio arrives as PCM16 mono 24 kHz; the device wants its own rate
+/// and channel count. Samples are resampled linearly into a queue the
+/// output callback drains; the queue is the whole state, so stop = clear.
+struct DeviceOut {
+    /// The cpal stream is not `Send`: it lives on its own thread, which
+    /// holds it open while this flag is set.
+    alive: Arc<std::sync::atomic::AtomicBool>,
+    queue: Arc<Mutex<std::collections::VecDeque<f32>>>,
+    /// Device sample rate and channels.
+    rate: u32,
+    channels: u16,
+    /// Resampler carry: the last input sample and the fractional position.
+    last: f32,
+    pos: f64,
+    /// Peak follower for the normaliser: reply speech lands at about the
+    /// same loudness whatever the voice, like the phone's playback.
+    peak: f32,
+    gain: f32,
 }
 
-impl Player {
-    fn spawn() -> Result<Self> {
-        let mut cmd = player_command()?;
-        let child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| anyhow!("start {}: {e}", cmd.get_program().to_string_lossy()))?;
-        Ok(Self { child })
+impl Drop for DeviceOut {
+    fn drop(&mut self) {
+        // Whatever path let go of the speaker, the thread must not outlive it.
+        self.alive.store(false, std::sync::atomic::Ordering::Relaxed);
     }
+}
 
-    fn write(&mut self, pcm: &[u8]) -> std::io::Result<()> {
-        match self.child.stdin.as_mut() {
-            Some(stdin) => stdin.write_all(pcm),
-            None => Err(std::io::Error::other("player stdin closed")),
+/// Reply speech is brought to this peak (about -6 dBFS); quiet voices are
+/// lifted at most this much.
+const TARGET_PEAK: f32 = 0.5;
+const MAX_GAIN: f32 = 4.0;
+
+impl Player {
+    fn spawn(shared: &Arc<Mutex<Shared>>) -> Result<Self> {
+        if let Some(custom) = std::env::var("ARBOS_VOICE_PLAYER_CMD")
+            .ok()
+            .filter(|c| !c.trim().is_empty())
+        {
+            let mut cmd = sh(&custom);
+            let child = cmd
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| anyhow!("start {}: {e}", cmd.get_program().to_string_lossy()))?;
+            shared.lock().unwrap_or_else(|p| p.into_inner()).speaker_device = "command".into();
+            return Ok(Self::Process(child));
+        }
+        match DeviceOut::open() {
+            Ok((out, name)) => {
+                shared.lock().unwrap_or_else(|p| p.into_inner()).speaker_device = name;
+                Ok(Self::Device(out))
+            }
+            Err(e) => {
+                // No device (a headless box): a player program if there is one.
+                let mut cmd = player_command().map_err(|e2| anyhow!("{e:#}; {e2:#}"))?;
+                let child = cmd
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map_err(|e| anyhow!("start {}: {e}", cmd.get_program().to_string_lossy()))?;
+                shared.lock().unwrap_or_else(|p| p.into_inner()).speaker_device =
+                    std::path::Path::new(cmd.get_program())
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                Ok(Self::Process(child))
+            }
         }
     }
 
-    /// The reply is complete: let the player drain and exit on its own.
-    fn finish(mut self) {
-        drop(self.child.stdin.take());
-        std::thread::spawn(move || {
-            let _ = self.child.wait();
-        });
+    fn write(&mut self, pcm: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Device(out) => {
+                out.push(pcm);
+                Ok(())
+            }
+            Self::Process(child) => match child.stdin.as_mut() {
+                Some(stdin) => stdin.write_all(pcm),
+                None => Err(std::io::Error::other("player stdin closed")),
+            },
+        }
+    }
+
+    /// The reply is complete: let what is queued play out.
+    fn finish(self) {
+        match self {
+            Self::Device(out) => {
+                // The stream keeps running until the queue is empty, then ends.
+                let queue = Arc::clone(&out.queue);
+                let alive = Arc::clone(&out.alive);
+                let per_second = (out.rate.max(1) * out.channels.max(1) as u32) as f64;
+                std::thread::spawn(move || {
+                    loop {
+                        let left = queue.lock().unwrap_or_else(|p| p.into_inner()).len();
+                        if left == 0 {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_secs_f64((left as f64 / per_second).min(0.25)));
+                    }
+                    alive.store(false, std::sync::atomic::Ordering::Relaxed);
+                });
+            }
+            Self::Process(mut child) => {
+                drop(child.stdin.take());
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+        }
     }
 
     /// Barge-in: stop the sound now.
-    fn stop(mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+    fn stop(self) {
+        match self {
+            Self::Device(out) => {
+                out.queue.lock().unwrap_or_else(|p| p.into_inner()).clear();
+                out.alive.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            Self::Process(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
+impl DeviceOut {
+    fn open() -> Result<(Self, String)> {
+        let queue: Arc<Mutex<std::collections::VecDeque<f32>>> =
+            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(48_000)));
+        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(String, u32, u16)>>();
+        let q = Arc::clone(&queue);
+        let flag = Arc::clone(&alive);
+        std::thread::Builder::new()
+            .name("arbos-speaker".into())
+            .spawn(move || Self::run(q, flag, ready_tx))
+            .map_err(|e| anyhow!("speaker thread: {e}"))?;
+        let (name, rate, channels) = ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| anyhow!("speaker did not open in time"))??;
+        Ok((
+            Self {
+                alive,
+                queue,
+                rate,
+                channels,
+                last: 0.0,
+                pos: 0.0,
+                peak: TARGET_PEAK,
+                gain: 1.0,
+            },
+            name,
+        ))
+    }
+
+    /// The speaker thread: opens the default output, reports what it opened,
+    /// plays the queue until `alive` goes false, then closes the stream.
+    fn run(
+        queue: Arc<Mutex<std::collections::VecDeque<f32>>>,
+        alive: Arc<std::sync::atomic::AtomicBool>,
+        ready: std::sync::mpsc::Sender<Result<(String, u32, u16)>>,
+    ) {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        let opened = (|| -> Result<(cpal::Stream, String, u32, u16)> {
+            let host = cpal::default_host();
+            let device = host
+                .default_output_device()
+                .ok_or_else(|| anyhow!("no default output device"))?;
+            let name = device.name().unwrap_or_else(|_| "speaker".into());
+            let config = device
+                .default_output_config()
+                .map_err(|e| anyhow!("output config: {e}"))?;
+            let rate = config.sample_rate().0;
+            let channels = config.channels();
+            let q = Arc::clone(&queue);
+            let stream = device
+                .build_output_stream(
+                    &config.config(),
+                    move |data: &mut [f32], _| {
+                        let mut q = q.lock().unwrap_or_else(|p| p.into_inner());
+                        for sample in data.iter_mut() {
+                            *sample = q.pop_front().unwrap_or(0.0);
+                        }
+                    },
+                    |err| eprintln!("voice speaker: {err}"),
+                    None,
+                )
+                .map_err(|e| anyhow!("output stream: {e}"))?;
+            stream.play().map_err(|e| anyhow!("play: {e}"))?;
+            Ok((stream, name, rate, channels))
+        })();
+        match opened {
+            Err(e) => {
+                let _ = ready.send(Err(e));
+            }
+            Ok((stream, name, rate, channels)) => {
+                let _ = ready.send(Ok((name, rate, channels)));
+                while alive.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                drop(stream);
+            }
+        }
+    }
+
+    /// PCM16 mono 24 kHz in; normalised, resampled, channel-duplicated
+    /// samples onto the queue.
+    fn push(&mut self, pcm: &[u8]) {
+        let input: Vec<f32> = pcm
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+            .collect();
+        if input.is_empty() {
+            return;
+        }
+        // Normaliser: follow the peak (fast up, slow down), aim it at the target.
+        let chunk_peak = input.iter().fold(0f32, |m, s| m.max(s.abs()));
+        self.peak = if chunk_peak > self.peak {
+            chunk_peak
+        } else {
+            self.peak * 0.995 + chunk_peak * 0.005
+        };
+        let want = (TARGET_PEAK / self.peak.max(1e-3)).clamp(0.25, MAX_GAIN);
+        self.gain = self.gain * 0.9 + want * 0.1;
+        let step = RATE as f64 / self.rate as f64;
+        let mut q = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        while self.pos < input.len() as f64 {
+            let i = self.pos.floor() as usize;
+            let frac = (self.pos - i as f64) as f32;
+            let a = if i == 0 { self.last } else { input[i - 1] };
+            let b = input[i.min(input.len() - 1)];
+            let s = ((a + (b - a) * frac) * self.gain).clamp(-1.0, 1.0);
+            for _ in 0..self.channels {
+                q.push_back(s);
+            }
+            self.pos += step;
+        }
+        self.pos -= input.len() as f64;
+        self.last = *input.last().unwrap_or(&0.0);
     }
 }
 
