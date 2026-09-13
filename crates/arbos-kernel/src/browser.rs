@@ -316,6 +316,10 @@ impl BrowserHub {
                 "--no-first-run",
                 "--remote-debugging-port=0",
                 "--remote-allow-origins=*",
+                // CI runners and containers: no user namespaces for the
+                // sandbox, a tiny /dev/shm. Headless Chrome is fine without.
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
             ])
             .arg(format!("--user-data-dir={}", profile.display()))
             .stdin(Stdio::null())
@@ -325,7 +329,8 @@ impl BrowserHub {
         *self.chrome.lock().unwrap() = Some(child);
         // Chrome takes a moment to open the devtools port; poll for the file,
         // then for the port to answer, and fail with a clear message.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        // A cold runner takes a while to bring Chrome up.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
         let port = loop {
             let announced = std::fs::read_to_string(profile.join("DevToolsActivePort"))
                 .ok()

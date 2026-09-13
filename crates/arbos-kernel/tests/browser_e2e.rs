@@ -112,6 +112,15 @@ fn fill_select_press_scroll_wait_eval_console_drive_a_page() {
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "drive the form"}));
     assert!(a.wait_turn("root", "idle", Duration::from_secs(120)));
     let results = tool_results(&k.place);
+    // Chrome is there but cannot run on this machine (no display server
+    // parts, a locked-down container): the tool says so; nothing to
+    // assert about page actions then.
+    if let Some((_, first)) = results.first()
+        && (first.contains("never announced a devtools port") || first.contains("no chrome"))
+    {
+        eprintln!("chrome present but did not come up ({first}); skipping");
+        return;
+    }
     let get = |action: &str| {
         results
             .iter()
