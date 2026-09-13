@@ -78,8 +78,12 @@ pub struct Prepared {
     pub tool: Arc<dyn crate::tool::Tool>,
     pub args: Value,
     pub plan: Plan,
-    /// Ask mode: the user allows or denies this call before it runs.
-    pub ask_first: bool,
+    /// A before-tool hook wants the user asked first; the question.
+    pub ask: Option<String>,
+    /// Text before-tool hooks add to the result the model reads.
+    pub context: Vec<String>,
+    /// Hook trouble worth a notice (a failed hook, bad `hooks.toml`).
+    pub notices: Vec<String>,
 }
 
 /// Allowlist → `before-tool` hook (may rewrite) → allowlist again → `plan`.
@@ -186,15 +190,23 @@ pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Res
     // Ask mode: a write waits for the user. Interactive, so writes are
     // asked one at a time and never race a read of the same file.
     // `ask` is exclusive because it waits on the user, not because it
-    // writes; asking permission to ask would be absurd.
+    // writes; asking permission to ask would be absurd. A before-tool
+    // hook's own question wins when it set one.
     let ask_first = writes && cx.agent.mode == arbos_core::Mode::Ask && decided.tool != "ask";
-    if ask_first {
-        plan = plan.interactive();
-    }
+    let ask = decided
+        .ask
+        .or_else(|| ask_first.then(|| crate::batch::summarise_call(&decided.tool, &decided.args)));
+    let plan = if ask.is_some() {
+        plan.interactive()
+    } else {
+        plan
+    };
     Ok(Prepared {
         tool: Arc::clone(tool),
         args: decided.args,
         plan,
-        ask_first,
+        ask,
+        context: decided.context,
+        notices: decided.notices,
     })
 }

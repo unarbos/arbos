@@ -121,7 +121,7 @@ impl Outcome {
 
 /// One line naming a call for the allow/deny question: the path, the
 /// command, or the arguments, cut short.
-fn summarise_call(_name: &str, args: &serde_json::Value) -> String {
+pub(crate) fn summarise_call(_name: &str, args: &serde_json::Value) -> String {
     let key = ["command", "path", "patch", "url", "text", "brief"]
         .iter()
         .find_map(|k| args.get(*k).and_then(serde_json::Value::as_str));
@@ -280,29 +280,11 @@ pub async fn run(
                     images: vec![],
                     diff: None,
                 })));
+                for note in &prepared.notices {
+                    hook_notice(&cx, note);
+                }
                 let handle = set.spawn(async move {
-                    // Ask mode: the user sees the call and says allow or deny.
-                    if prepared.ask_first {
-                        let summary = summarise_call(&call.name, &prepared.args);
-                        let allowed = tokio::select! {
-                            r = call_cx.hooks.approve(&call_cx.agent.id, &call.name, &summary) => r.unwrap_or(false),
-                            _ = call_cx.cancel.cancelled() => false,
-                        };
-                        if !allowed {
-                            return (
-                                i,
-                                Outcome::Ran {
-                                    out: Err(anyhow::anyhow!(
-                                        "the user did not allow {} ({summary}). Do not retry it unchanged; say what you wanted to do and why, and go on with what is allowed.",
-                                        call.name
-                                    )),
-                                    started,
-                                    ended: arbos_core::now_ms(),
-                                },
-                            );
-                        }
-                    }
-                    let out = prepared.tool.run(call_cx, prepared.args).await;
+                    let out = run_with_hooks(prepared, &call_cx, &call).await;
                     (
                         i,
                         Outcome::Ran {
@@ -391,5 +373,74 @@ fn log_speedup(agent: &arbos_core::AgentId, outcomes: &[(ToolCall, Outcome)]) {
         } else {
             1.0
         }
+    );
+}
+
+/// The call itself, between its hooks: a before-tool `ask` goes to the user
+/// first (deny = tool error), then the tool runs, then after-tool hooks see
+/// the result and may add context for the model.
+async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Result<ToolOut> {
+    let name = call.name.clone();
+    if let Some(question) = &prepared.ask {
+        let allowed = tokio::select! {
+            r = cx.hooks.approve(&cx.agent.id, &name, question) => r.unwrap_or(false),
+            _ = cx.cancel.cancelled() => false,
+        };
+        if !allowed {
+            anyhow::bail!(
+                "the user did not allow {name} ({question}). Do not retry it unchanged; say what you wanted to do and why, and go on with what is allowed."
+            );
+        }
+    }
+    let args = prepared.args.clone();
+    let result = prepared.tool.run(cx.clone(), prepared.args).await;
+    let (body, error, paths) = match &result {
+        Ok(out) => (out.body.clone(), None, out.paths.clone()),
+        Err(e) => (String::new(), Some(e.to_string()), Vec::new()),
+    };
+    let after = {
+        let place = cx.place.clone();
+        let agent = cx.agent.clone();
+        let name = name.clone();
+        tokio::task::spawn_blocking(move || {
+            tools::file_hooks::after_tool(
+                &place,
+                &agent,
+                &name,
+                &args,
+                &body,
+                error.as_deref(),
+                &paths,
+            )
+        })
+        .await
+        .unwrap_or_default()
+    };
+    for note in &after.notices {
+        hook_notice(cx, note);
+    }
+    let context: Vec<String> = prepared.context.into_iter().chain(after.context).collect();
+    match result {
+        Ok(mut out) => {
+            for c in context {
+                out.body.push_str("\n\n[hook] ");
+                out.body.push_str(&c);
+            }
+            Ok(out)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Hook trouble goes on the transcript: the user should see that a hook
+/// failed or that `hooks.toml` is wrong, and it should survive the turn.
+fn hook_notice(cx: &RunCx, text: &str) {
+    let path = arbos_core::Layout::new(&cx.place, cx.agent.id.as_str()).transcript();
+    let _ = arbos_core::append_event(
+        &path,
+        &Event::new(EventKind::Notice {
+            text: text.to_string(),
+            failed: false,
+        }),
     );
 }
