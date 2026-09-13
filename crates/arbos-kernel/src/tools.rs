@@ -14,7 +14,7 @@ use base64::Engine;
 use serde_json::Value;
 use std::{path::PathBuf, sync::Arc};
 
-use crate::hooks::{KernelHooks, NewNode};
+use crate::hooks::{KernelHooks, NewNode, SayMode};
 use crate::pty::PtyHub;
 
 /// The one browser page an agent has. The desktop keys its row on this.
@@ -99,7 +99,7 @@ impl Tool for Say {
     fn schema(&self) -> Value {
         simple_schema(
             "say",
-            "Send a message to someone outside this conversation: another agent (by id or name — see <<peers>>) or the user. To an agent it lands in their transcript as a message from you. mode note (default) waits for their next turn; mode request queues a turn for them and their reply arrives here as a message. To 'user' it is a durable notice in this chat. Then end your turn; never read another agent's transcript to see whether they answered.",
+            "Send a message to someone outside this conversation: another agent (by id or name — see <<peers>>) or the user. To an agent it lands in their transcript as a message from you. mode note (default) waits for their next turn; mode request queues a turn for them and their reply arrives here as a message; mode steer reaches an agent that is running now — your words land in its current turn at its next tool step, so it changes course without restarting (if it is idle, a turn starts). Use steer to add a constraint, redirect, or stop a worker mid-task. To 'user' it is a durable notice in this chat. Then end your turn; never read another agent's transcript to see whether they answered.",
             &[
                 ("to", "Agent id, agent name, or 'user'.", true),
                 (
@@ -107,7 +107,7 @@ impl Tool for Say {
                     "The message. Short and self-contained: the recipient sees only this.",
                     true,
                 ),
-                ("mode", "note (default) or request.", false),
+                ("mode", "note (default), request, or steer.", false),
             ],
         )
     }
@@ -119,18 +119,14 @@ impl Tool for Say {
         Box::pin(async move {
             let to = req(&args, "to")?;
             let text = req(&args, "text")?;
-            let request = match opt_str(&args, "mode")
-                .unwrap_or("note")
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "note" => false,
-                "request" => true,
+            let raw = opt_str(&args, "mode").unwrap_or("note");
+            let mode = match SayMode::parse(raw) {
+                Some(m) => m,
                 // The old wire: wake:true meant request.
-                _ if opt_bool(&args, "wake") == Some(true) => true,
-                other => anyhow::bail!("say: mode must be note or request, not {other:?}"),
+                None if opt_bool(&args, "wake") == Some(true) => SayMode::Request,
+                None => anyhow::bail!("say: mode must be note, request, or steer, not {raw:?}"),
             };
-            let receipt = hooks.say(&cx.agent.id, to, text, request, cx.hops)?;
+            let receipt = hooks.say(&cx.agent.id, to, text, mode, cx.hops)?;
             Ok(ToolOut::text(receipt))
         })
     }

@@ -23,6 +23,12 @@ impl Scheduler {
         }
     }
 
+    /// A scheduler over the hooks' table, so `say mode=steer` and the
+    /// attach loop reach the same live turns.
+    pub fn sharing(in_flight: Arc<Mutex<HashMap<String, TurnControl>>>) -> Self {
+        Self { in_flight }
+    }
+
     pub fn has_job(&self, id: &str) -> bool {
         self.in_flight.lock().unwrap().contains_key(id)
     }

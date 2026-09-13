@@ -19,7 +19,7 @@ mod tools;
 mod turn;
 
 pub use access::{Access, Resource};
-pub use control::TurnControl;
+pub use control::{Steer, TurnControl};
 pub use host::{Host, HostConfig, KeySource, ProviderKind};
 pub use jobs::{JOB_TTL, JOURNAL_WINDOW, Job, JobsRoot, Meta as JobMeta, Status as JobStatus};
 pub use provider::{

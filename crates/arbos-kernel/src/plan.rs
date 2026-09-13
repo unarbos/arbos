@@ -542,7 +542,13 @@ fn deliver(hooks: &KernelHooks, agent: &str, n: &Node, text: &str) -> (bool, Str
         .or_else(|| n.origin.strip_prefix("spawn:"));
     let r = match peer {
         Some(peer) if !peer.is_empty() => hooks
-            .say(&arbos_core::AgentId::new(agent), peer, text, false, 0)
+            .say(
+                &arbos_core::AgentId::new(agent),
+                peer,
+                text,
+                crate::hooks::SayMode::Note,
+                0,
+            )
             .map(|_| ()),
         _ => hooks.notify_user(agent, text),
     };

@@ -66,7 +66,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
     let (frame_in_tx, mut frame_in_rx) = mpsc::unbounded_channel::<Frame>();
 
     let hooks = KernelHooks::new(place.clone(), wake_tx.clone(), kick_tx.clone());
-    let sched = Scheduler::new();
+    let sched = Scheduler::sharing(Arc::clone(&hooks.in_flight));
     let clock = plan::Clock::new();
     let ptys = Arc::new(PtyHub::new());
     let (pty_tx, mut pty_rx) = mpsc::unbounded_channel::<Frame>();
@@ -200,9 +200,17 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<()> {
                 }
             }
             Some(id) = done_rx.recv() => {
-                sched.in_flight.lock().unwrap().remove(&id);
+                let control = sched.in_flight.lock().unwrap().remove(&id);
                 hooks.turn_ended(&id);
                 plan::finish_turn(&hooks, &clock, &id);
+                // Said to a running agent, but its turn ended before the
+                // next tool boundary: each one becomes a turn of its own.
+                if let Some(control) = control {
+                    let left = control.take_steers();
+                    if !left.is_empty() {
+                        hooks.requeue_steers(&id, left);
+                    }
+                }
                 hooks.broadcast(Frame::Turn {
                     agent: id.clone(),
                     state: "idle".into(),
