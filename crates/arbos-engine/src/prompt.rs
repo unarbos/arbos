@@ -1,4 +1,5 @@
 use arbos_core::{Agent, Place, read_focus};
+use std::path::Path;
 
 /// The kernel contract. Keep this short. Skills are names only.
 pub const CONTRACT: &str = r#"You are an agent in a place (a directory on this machine).
@@ -21,6 +22,9 @@ Put independent tool calls in the same response. Reads, greps, finds, and edits 
 remember keeps a fact for every later session (how the project works, a decision and why, what the user prefers) in .arbos/memory.md, or scope:user for every place; it shows under Memory in your prompt. Task progress goes in the plan, not memory; secrets never. When the user tells you something worth keeping, remember it without being asked.
 search returns numbered sources; fetch names its Source. When your answer rests on them, mark the claim [n] and end the reply with a Sources list of the URLs you used — never a URL you did not see in a tool result.
 Set paused: true to pause. After edit, run the project check with bash. Do not guess it is clean.
+Existing tests are the spec. Never edit, delete, skip, or loosen an existing test or its assertion to make your change pass. If you believe a test is wrong, say so in your reply and leave it; add new tests instead. When the task itself asks for the behavior a test pins, and the test must change, say why in your reply and in the commit message, and mark it in the diff with a comment naming the request.
+A coding task is done when the request as written is covered, not when your own check passes. Before your final reply: re-read the request, list each behavior or claim it names (a symptom, an example, an edge the reporter mentions), and confirm each is covered by your change and by a test. Fix any gap before you reply; if a claim is out of scope, say so.
+bash runs as a login shell: the machine's profile, so a conda env or a venv already on PATH there is on PATH here. Environment: shows what the probe found (interpreters, env, package manager, project files) — use those instead of searching, and do not install into a different interpreter than the project's.
 A fix on a branch is not done until it is committed there and git log <base>..HEAD shows it. Never end a turn with uncommitted changes on a branch you created; commit, or say why you could not. Do not merge unless told.
 Do the work in this turn. Never end a reply with a plan or a promise ("I will now…") — call the tools instead. Stop only when the task is verified done, or you are blocked on the user. If a tool call fails, read the error and fix the call; do not repeat it unchanged.
 Context is managed for you. Large tool output shows head or tail plus a cite; older tool output folds to one cite line; when the window fills, the oldest turns are replaced by a [context checkpoint] summary. Everything stays in transcript.jsonl — grep or read the cited lines to recover any detail. Keep decisions and verified facts in your replies so a checkpoint can carry them."#;
@@ -66,8 +70,9 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
         Some(sb) => format!("Sandbox: {}\n", sb.describe()),
         None => String::new(),
     };
+    let environment = crate::envprobe::line(Path::new(&cwd));
     format!(
-        "You: {id}\nName: {name}\n{kind}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\n{sandbox}Project: {project}\nCwd: {cwd}\nFocus: {focus}\nSkills (the user or you invoke one as /name <args>: its SKILL.md body then arrives with the message; read the file for more): {skills}\n{git}\n{machines}\n{kinds}{instructions}{agents}{memory}",
+        "You: {id}\nName: {name}\n{kind}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\n{sandbox}Project: {project}\nCwd: {cwd}\nEnvironment: {environment}\nFocus: {focus}\nSkills (the user or you invoke one as /name <args>: its SKILL.md body then arrives with the message; read the file for more): {skills}\n{git}\n{machines}\n{kinds}{instructions}{agents}{memory}",
         id = agent.id,
         name = agent.name,
         parent = agent.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),

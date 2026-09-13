@@ -147,12 +147,10 @@ impl Sandbox {
                 args.push("--unshare-net".into());
             }
             args.push("--die-with-parent".into());
-            args.extend([
-                "--".into(),
-                crate::jobs::job_shell().into(),
-                "-c".into(),
-                script.to_string(),
-            ]);
+            let (shell, shell_args) = crate::jobs::shell_command(script);
+            args.push("--".into());
+            args.push(shell);
+            args.extend(shell_args);
             return Ok(("bwrap".into(), args));
         }
         if cfg!(target_os = "macos") {
@@ -178,16 +176,10 @@ impl Sandbox {
             if !self.network {
                 profile.push_str("(deny network*)\n");
             }
-            return Ok((
-                "sandbox-exec".into(),
-                vec![
-                    "-p".into(),
-                    profile,
-                    crate::jobs::job_shell().into(),
-                    "-c".into(),
-                    script.to_string(),
-                ],
-            ));
+            let (shell, shell_args) = crate::jobs::shell_command(script);
+            let mut args = vec!["-p".into(), profile, shell];
+            args.extend(shell_args);
+            return Ok(("sandbox-exec".into(), args));
         }
         bail!("sandbox is on but this platform has no sandbox backend; the command did not run")
     }
