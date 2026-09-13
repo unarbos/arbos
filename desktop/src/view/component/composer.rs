@@ -635,7 +635,9 @@ impl Composer {
 
     pub fn set_usage(&mut self, usage: Option<Usage>, cx: &mut Context<Self>) {
         let same = match (self.usage, usage) {
-            (Some(held), Some(next)) => held.used == next.used && held.size == next.size,
+            (Some(held), Some(next)) => {
+                held.used == next.used && held.size == next.size && held.spent == next.spent
+            }
             (None, None) => true,
             _ => false,
         };
@@ -1588,7 +1590,8 @@ impl Composer {
             ))
             .child(list)
             .child(popover::divider())
-            .child(self.usage_row(theme));
+            .child(self.usage_row(theme))
+            .child(self.cost_row(theme));
         // `anchored_menu_above` puts 6px between the card and the 4-box.
         // The shield covers that button too, so this hit sits on the
         // floating layer over it — a second press still toggles shut.
@@ -1718,6 +1721,39 @@ impl Composer {
                         false => theme.text_faint,
                     })
                     .child(format!("{percent}%")),
+            )
+            .into_any_element()
+    }
+
+    /// "Cost  $0.0123" under the context row, when the provider prices
+    /// turns. The tooltip has the last turn's price.
+    fn cost_row(&self, theme: &Theme) -> AnyElement {
+        let Some(usage) = self.usage else {
+            return div().into_any_element();
+        };
+        let Some(spent) = usage.spent else {
+            return div().into_any_element();
+        };
+        let last = usage.last_cost.map(dollars).unwrap_or_else(|| "—".into());
+        div()
+            .id("composer-cost")
+            .px(px(8.))
+            .py(px(6.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.))
+            .text_style(TextStyle::Body)
+            .text_color(theme.text_muted)
+            .tooltip(move |window, cx| {
+                Tooltip::text(format!("last turn {last}; this chat since it was opened"), window, cx)
+            })
+            .child(div().flex_1().min_w_0().child("Cost"))
+            .child(
+                div()
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .child(dollars(spent)),
             )
             .into_any_element()
     }
@@ -2247,5 +2283,16 @@ impl Render for Composer {
         }
         self.paint_placeholder(window, cx);
         self.body(window, cx)
+    }
+}
+
+/// `$0.0041` under a cent, `$0.12` above, `$3.40` at dollars.
+pub fn dollars(amount: f64) -> String {
+    if amount < 0.01 {
+        format!("${amount:.4}")
+    } else if amount < 1.0 {
+        format!("${amount:.3}")
+    } else {
+        format!("${amount:.2}")
     }
 }

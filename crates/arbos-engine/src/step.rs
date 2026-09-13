@@ -59,10 +59,17 @@ pub async fn model_step(s: StepCx<'_>, messages: &[ChatMessage], tools: &[Value]
     // Set once the model has said it cannot read images: the turn goes on
     // with the pictures replaced by a note, on the same model.
     let mut text_only: Option<Vec<ChatMessage>> = None;
+    // Set once the provider has rejected the stored thinking blocks
+    // (Gemini: "corrupted thought signature"): the same model, once more,
+    // with every earlier `reasoning_details` left out.
+    let mut no_reasoning: Option<Vec<ChatMessage>> = None;
     loop {
         attempt += 1;
         s.provider.model = s.models.current().to_string();
-        let messages: &[ChatMessage] = text_only.as_deref().unwrap_or(messages);
+        let messages: &[ChatMessage] = no_reasoning
+            .as_deref()
+            .or(text_only.as_deref())
+            .unwrap_or(messages);
 
         let (tx, rx) = mpsc::unbounded_channel();
         let executor = tokio::spawn(batch::run(
@@ -101,6 +108,7 @@ pub async fn model_step(s: StepCx<'_>, messages: &[ChatMessage], tools: &[Value]
                     usage: done.usage.map(|(used, _)| Usage {
                         used,
                         size: s.window,
+                        cost: done.cost,
                     }),
                     outcomes,
                     reasoning_details: done.reasoning_details,
@@ -139,6 +147,25 @@ pub async fn model_step(s: StepCx<'_>, messages: &[ChatMessage], tools: &[Value]
                 failed: false,
             }));
             text_only = Some(stripped);
+            attempt = 0;
+            continue;
+        }
+        // The provider refuses the thinking blocks we sent back from an
+        // earlier step (a signature it no longer accepts). They are not
+        // needed to answer; drop them and ask the same model again, once.
+        if no_reasoning.is_none()
+            && rejects_reasoning(pe)
+            && messages.iter().any(|m| m.reasoning_details.is_some())
+        {
+            let stripped = strip_reasoning(messages);
+            hooks.emit(&Event::new(EventKind::Notice {
+                text: format!(
+                    "{model} rejected the stored thinking blocks ({}); retrying once without them.",
+                    pe.message.trim()
+                ),
+                failed: false,
+            }));
+            no_reasoning = Some(stripped);
             attempt = 0;
             continue;
         }
@@ -203,6 +230,33 @@ pub async fn model_step(s: StepCx<'_>, messages: &[ChatMessage], tools: &[Value]
 
 /// Whether the provider refused the request because the model has no image
 /// input, as opposed to not serving the model at all.
+/// A 4xx that names the thinking blocks: Gemini's "Corrupted thought
+/// signature", Anthropic's invalid `thinking` block / signature errors,
+/// anything mentioning `reasoning_details`.
+fn rejects_reasoning(e: &ProviderError) -> bool {
+    let m = e.message.to_ascii_lowercase();
+    let names_thinking = m.contains("thought signature")
+        || m.contains("reasoning_details")
+        || m.contains("reasoning details")
+        || (m.contains("thinking") && m.contains("signature"))
+        || (m.contains("thinking") && m.contains("invalid"));
+    let client_side = matches!(e.status, Some(400) | Some(422))
+        || (e.kind == FailKind::Stream && e.status.is_none());
+    client_side && names_thinking
+}
+
+/// The same conversation without the `reasoning_details` echoes.
+fn strip_reasoning(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    messages
+        .iter()
+        .map(|m| {
+            let mut m = m.clone();
+            m.reasoning_details = None;
+            m
+        })
+        .collect()
+}
+
 fn rejects_images(e: &ProviderError) -> bool {
     let m = e.message.to_ascii_lowercase();
     matches!(e.status, Some(400) | Some(404) | Some(422))

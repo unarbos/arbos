@@ -262,6 +262,8 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
 
     let mut nudged = false;
     let mut cuts = 0u32;
+    // Dollars over every model call of this turn, when the provider prices them.
+    let mut turn_cost: Option<f64> = None;
     // Same tool, same arguments, same failure, again and again: name it.
     let mut last_failure: Option<String> = None;
     let mut failure_streak = 0u32;
@@ -426,6 +428,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         // ratio against the *raw* estimate so it does not feed on itself.
         // The provider counts the tool schemas too; they go on our side as
         // well, or a short prompt reads as 2–3× denser than it is.
+        if let Some(c) = usage.and_then(|u| u.cost) {
+            turn_cost = Some(turn_cost.unwrap_or(0.0) + c);
+        }
         if let Some(u) = usage {
             let ours = managed.raw + if tools.is_empty() { 0 } else { tool_tokens };
             if u.used > 0 && ours > 0 {
@@ -483,7 +488,13 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             }
         }
         if calls.is_empty() {
-            end(usage, None)?;
+            end(
+                usage.map(|mut u| {
+                    u.cost = turn_cost;
+                    u
+                }),
+                None,
+            )?;
             // A compact requested during the last model step would otherwise
             // die with this TurnControl. Run it now, on the finished turn.
             if control.take_compact() {
