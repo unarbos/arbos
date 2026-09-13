@@ -304,6 +304,7 @@ impl Session {
         self.send_frame(&Frame::Answer {
             agent: self.session_id.clone(),
             text,
+            id: (request_id != self.session_id).then(|| request_id.to_string()),
         })
     }
 
@@ -440,8 +441,12 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             agent: id,
             question,
             options,
+            id: ask_id,
         } if id == agent => vec![Event::NeedQuestion {
-            request_id: id,
+            // The kernel's ask id when it sends one (qa-021): the answer
+            // echoes it, so a late or duplicate answer cannot resolve a
+            // different question. Older kernels: the agent id, sent blind.
+            request_id: ask_id.unwrap_or(id),
             title: question.clone(),
             questions: vec![crate::model::session::AskQuestion {
                 id: "q".into(),
@@ -677,10 +682,7 @@ fn artifact_caption(body: &str) -> String {
             !part.is_empty()
                 && !part.starts_with("via ")
                 && !part.starts_with("image/")
-                && part
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_digit())
+                && part.chars().next().is_some_and(|c| c.is_ascii_digit())
         })
         .collect::<Vec<_>>()
         .join(" · ")

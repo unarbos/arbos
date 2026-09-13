@@ -386,7 +386,7 @@ impl Tool for Ask {
         Box::pin(async move {
             let q = req(&args, "question")?;
             let options = opt_strings(&args, "options");
-            let rx = hooks.ask(&cx.agent.id, q, &options)?;
+            let rx = hooks.ask(&cx.agent.id, q, &options, &cx.call_id)?;
             let answer = tokio::select! {
                 r = rx => r.ok(),
                 _ = cx.cancel.cancelled() => anyhow::bail!("interrupted while waiting for the user"),

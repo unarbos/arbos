@@ -128,10 +128,15 @@ pub enum Frame {
         state: String,
         budget: Option<Usage>,
     },
+    /// A question for the user. `id` names it: the ask tool's `call_id`, or
+    /// `approve-N` for an allow/deny prompt. An `answer` or `approve` that
+    /// carries the id resolves that question and nothing else (qa-021).
     Ask {
         agent: String,
         question: String,
         options: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
     Pty {
         agent: String,
@@ -175,6 +180,10 @@ pub enum Frame {
     Answer {
         agent: String,
         text: String,
+        /// The `ask` frame's `id`. Without it the answer is accepted only
+        /// when exactly one question is pending in the kernel.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
     Approve {
         agent: String,
