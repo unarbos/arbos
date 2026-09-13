@@ -193,6 +193,59 @@ pub fn load_transcript(path: &Path) -> Result<Vec<Event>> {
     Ok(out)
 }
 
+/// Incremental reader for one append-only transcript. Remembers how far it
+/// has read, so a poll costs the new bytes, not a re-parse of the file.
+/// The serve loop polls every agent five times a second; re-parsing a
+/// multi-megabyte transcript each time starved the loop until Ctrl-C was
+/// ignored (QA bug qa-003).
+#[derive(Debug, Default, Clone)]
+pub struct TranscriptTail {
+    /// Bytes consumed: always the position just after a newline.
+    pub offset: u64,
+    /// Physical lines consumed, blank and damaged ones included, so `seq`
+    /// matches `load_transcript`.
+    pub lines: u64,
+}
+
+impl TranscriptTail {
+    /// Events on lines appended since the last call, each stamped with its
+    /// 1-based physical line. A file that shrank below the offset was
+    /// replaced; the tail starts over from its beginning.
+    pub fn read_new(&mut self, path: &Path) -> Result<Vec<Event>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut file) = File::open(path) else {
+            return Ok(Vec::new());
+        };
+        let len = file.metadata()?.len();
+        if len < self.offset {
+            *self = Self::default();
+        }
+        if len == self.offset {
+            return Ok(Vec::new());
+        }
+        file.seek(SeekFrom::Start(self.offset))?;
+        let mut buf = Vec::with_capacity((len - self.offset) as usize);
+        file.take(len - self.offset).read_to_end(&mut buf)?;
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        while let Some(rel) = buf[start..].iter().position(|b| *b == b'\n') {
+            let line = &buf[start..start + rel];
+            start += rel + 1;
+            self.lines += 1;
+            self.offset += (rel + 1) as u64;
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            if let Ok(mut ev) = serde_json::from_slice::<Event>(line) {
+                ev.seq = self.lines;
+                out.push(ev);
+            }
+        }
+        // A trailing partial line (a writer mid-append) waits for its newline.
+        Ok(out)
+    }
+}
+
 pub fn list_agents(place: &Place) -> Result<Vec<Agent>> {
     let dir = place.agents_dir();
     if !dir.exists() {
