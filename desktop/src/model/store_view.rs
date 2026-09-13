@@ -1,23 +1,28 @@
-//! What the right-hand panel reads out of a project's `.arbos/`: the goals
-//! and notes files, and what the store holds. Read off disk when the
-//! project opens and again on every watch knock, never while drawing.
+//! What the right-hand panel reads out of a project's `.arbos/`: the
+//! project page (`notes.md`, the status page the main chat keeps), where
+//! the context document lives, and what the store holds. Read off disk
+//! when the project opens and again on every watch knock, never while
+//! drawing.
+//!
+//! The page follows the coordinator protocol's shape: an optional
+//! `<tldr>` of a few bullets, `##` sections by topic, and checkbox items
+//! of the form `- [ ] [label](target) — readout`. The panel renders it
+//! the way Cursor's Projects page does: the label is the link, the
+//! readout sits dim under it.
 
 use std::path::{Path, PathBuf};
 
-/// Where a project's goals may be written, in the order they are looked
-/// for. The first file that exists wins.
-const GOALS: &[&str] = &["GOALS.md", "goals.md", "Goals.md"];
-
-/// Same for notes.
+/// The status page, in the order it is looked for.
 const NOTES: &[&str] = &["notes.md", "NOTES.md", "Notes.md"];
 
-/// The kernel's root agent folder under `.arbos/agents/`. Its `plan.md` is
-/// the fallback when no goals file has been written yet.
-const ROOT_AGENT: &str = "root";
-
-/// How many lines of a file the panel shows. Enough for a list of goals;
-/// the rest is a click away in the file itself.
-const PREVIEW_LINES: usize = 12;
+/// The context document: `docs/project-context.md`, with the older
+/// `GOALS.md` names as the fallback for a store that predates it.
+const CONTEXT: &[&str] = &[
+    "docs/project-context.md",
+    "GOALS.md",
+    "goals.md",
+    "Goals.md",
+];
 
 /// Folders in `.arbos/` the panel counts, with the label it gives one
 /// entry and many.
@@ -28,22 +33,61 @@ const FOLDERS: &[(&str, &str, &str)] = &[
     ("archive", "archived chat", "archived chats"),
 ];
 
-/// One line of a note: a section heading, or a line under one.
+/// Where an item's link points.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NoteLine {
-    pub heading: bool,
-    pub text: String,
+pub enum Target {
+    /// `http(s)://…`, `arbos://…`, `mailto:` — the browser's, or the
+    /// app's own chat link.
+    Url(String),
+    /// `agents/<id>` (or `.arbos/agents/<id>`): a worker of this project,
+    /// by its kernel id. A click puts its chat in the column.
+    Worker(String),
+    /// Anything else: a file, resolved against `.arbos/` when relative.
+    File(PathBuf),
 }
 
-/// One markdown file, as the panel shows it.
+/// One item of the page: a checkbox row, or a `<tldr>` bullet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageItem {
+    /// `Some(done)` for a checkbox; `None` for a tldr bullet.
+    pub done: Option<bool>,
+    /// Nesting, from the item's indent (two spaces or a tab per level).
+    pub depth: u8,
+    /// The link's label, or the whole text when the item has no link.
+    pub label: String,
+    pub target: Option<Target>,
+    /// What follows the link, after the dash.
+    pub readout: String,
+}
+
+/// The page, top to bottom: headings and items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageBlock {
+    /// `##` is level 2, `###` level 3.
+    Heading {
+        level: u8,
+        text: String,
+    },
+    Item(PageItem),
+}
+
+/// `notes.md`, parsed.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Note {
+pub struct ProjectPage {
     pub path: PathBuf,
-    /// The first lines of the body, markdown marks stripped, blank lines
-    /// dropped. Empty when the file exists but says nothing yet.
-    pub lines: Vec<NoteLine>,
-    /// Lines past the preview.
-    pub more: usize,
+    pub tldr: Vec<PageItem>,
+    pub blocks: Vec<PageBlock>,
+}
+
+impl ProjectPage {
+    /// Nothing but the template: no tldr, no items.
+    pub fn is_empty(&self) -> bool {
+        self.tldr.is_empty()
+            && !self
+                .blocks
+                .iter()
+                .any(|block| matches!(block, PageBlock::Item(_)))
+    }
 }
 
 /// One folder of the store and how many entries it holds.
@@ -56,8 +100,10 @@ pub struct Resource {
 /// A project's `.arbos/`, as much of it as the panel draws.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StoreView {
-    pub goals: Option<Note>,
-    pub notes: Option<Note>,
+    /// The context document, when one has been written.
+    pub context: Option<PathBuf>,
+    /// The status page, when one exists (even if still the template).
+    pub page: Option<ProjectPage>,
     pub resources: Vec<Resource>,
 }
 
@@ -66,17 +112,11 @@ impl StoreView {
     /// reads as empty, which is what the panel's invitation is for.
     pub fn read(project: &Path) -> Self {
         let store = crate::model::project::root(project);
-        let goals = first_of(&store, GOALS)
-            .map(|path| Note::read(&path))
-            .or_else(|| {
-                // The kernel writes `(no plan)` into an idle root's plan;
-                // that is no goal, and the invitation reads better.
-                let plan = store.join("agents").join(ROOT_AGENT).join("plan.md");
-                plan.is_file()
-                    .then(|| Note::read(&plan))
-                    .filter(|note| note.lines.iter().any(|line| line.text != "(no plan)"))
-            });
-        let notes = first_of(&store, NOTES).map(|path| Note::read(&path));
+        let context = first_of(&store, CONTEXT);
+        let page = first_of(&store, NOTES).map(|path| {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            ProjectPage::parse(&path, &store, &text)
+        });
         let resources = FOLDERS
             .iter()
             .filter_map(|(dir, one, many)| {
@@ -90,37 +130,92 @@ impl StoreView {
             })
             .collect();
         Self {
-            goals,
-            notes,
+            context,
+            page,
             resources,
         }
     }
-
-    /// Where a goals file would go — what the invitation writes to.
-    pub fn goals_path(project: &Path) -> PathBuf {
-        crate::model::project::root(project).join(GOALS[0])
-    }
 }
 
-impl Note {
-    fn read(path: &Path) -> Self {
-        let body = std::fs::read_to_string(path).unwrap_or_default();
-        let all: Vec<NoteLine> = content_lines(&body)
-            .into_iter()
-            .map(|line| NoteLine {
-                heading: line.trim_start().starts_with("## "),
-                text: strip_marks(line),
-            })
-            .filter(|line| !line.text.is_empty())
-            .collect();
-        let more = all.len().saturating_sub(PREVIEW_LINES);
-        let mut lines = all;
-        lines.truncate(PREVIEW_LINES);
-        Self {
+impl ProjectPage {
+    /// Parse a status page. `store` is the `.arbos/` folder relative
+    /// links resolve against.
+    pub fn parse(path: &Path, store: &Path, text: &str) -> Self {
+        let body = strip_front_matter(text);
+        let mut page = Self {
             path: path.to_path_buf(),
-            lines,
-            more,
+            ..Self::default()
+        };
+        let mut in_tldr = false;
+        let mut in_fence = false;
+        let mut seen_heading = false;
+        for raw in body.lines() {
+            let line = raw.trim_end();
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            if in_fence || trimmed.is_empty() {
+                continue;
+            }
+            match trimmed {
+                "<tldr>" => {
+                    in_tldr = true;
+                    continue;
+                }
+                "</tldr>" => {
+                    in_tldr = false;
+                    continue;
+                }
+                _ => {}
+            }
+            if in_tldr {
+                if let Some(rest) = bullet(trimmed) {
+                    page.tldr.push(item(None, 0, rest, store));
+                }
+                continue;
+            }
+            if trimmed.starts_with("# ") {
+                continue;
+            }
+            if let Some(text) = trimmed.strip_prefix("### ") {
+                seen_heading = true;
+                page.blocks.push(PageBlock::Heading {
+                    level: 3,
+                    text: text.trim().to_owned(),
+                });
+                continue;
+            }
+            if let Some(text) = trimmed.strip_prefix("## ") {
+                seen_heading = true;
+                page.blocks.push(PageBlock::Heading {
+                    level: 2,
+                    text: text.trim().to_owned(),
+                });
+                continue;
+            }
+            let Some(rest) = bullet(trimmed) else {
+                // Prose above the first heading is the template's link line
+                // to the context document, which the Context row already
+                // carries. Prose elsewhere is not the page's shape; skipped.
+                continue;
+            };
+            let depth = indent_depth(line);
+            let (done, rest) = checkbox(rest);
+            // A plain bullet above the first heading is prose; under a
+            // heading it is an item that lost its checkbox.
+            if done.is_none() && !seen_heading {
+                continue;
+            }
+            page.blocks.push(PageBlock::Item(item(
+                Some(done.unwrap_or(false)),
+                depth,
+                rest,
+                store,
+            )));
         }
+        page
     }
 }
 
@@ -131,31 +226,101 @@ fn first_of(store: &Path, names: &[&str]) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// The lines worth showing: front matter (`+++ … +++` TOML or `--- … ---`
-/// YAML) is metadata, not goals; the title line says what the panel's
-/// section head already says; and a section whose body is only the
-/// template's placeholders — a bare `- `, a `(hint in brackets)` — has
-/// nothing to say yet, so its heading is left out with it. A file that is
-/// still all template comes back empty, and the panel invites instead.
-fn content_lines(text: &str) -> Vec<&str> {
-    let body = strip_front_matter(text);
-    let mut sections: Vec<(Option<&str>, Vec<&str>)> = vec![(None, Vec::new())];
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("# ") && !trimmed.starts_with("##") {
-            continue;
-        }
-        if trimmed.starts_with("## ") {
-            sections.push((Some(line), Vec::new()));
-        } else if !placeholder(trimmed) {
-            sections.last_mut().expect("one section").1.push(line);
+fn bullet(trimmed: &str) -> Option<&str> {
+    trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("+ "))
+}
+
+/// `[ ] rest` → `(Some(false), rest)`; `[x] rest` → `(Some(true), rest)`;
+/// no box → `(None, rest)`.
+fn checkbox(rest: &str) -> (Option<bool>, &str) {
+    let r = rest.trim_start();
+    if let Some(open) = r.strip_prefix("[ ]") {
+        return (Some(false), open.trim_start());
+    }
+    if let Some(done) = r.strip_prefix("[x]").or_else(|| r.strip_prefix("[X]")) {
+        return (Some(true), done.trim_start());
+    }
+    (None, r)
+}
+
+fn indent_depth(line: &str) -> u8 {
+    let mut cols = 0usize;
+    for c in line.chars() {
+        match c {
+            ' ' => cols += 1,
+            '\t' => cols += 2,
+            _ => break,
         }
     }
-    sections
-        .into_iter()
-        .filter(|(_, lines)| !lines.is_empty())
-        .flat_map(|(head, lines)| head.into_iter().chain(lines))
-        .collect()
+    (cols / 2).min(4) as u8
+}
+
+/// `[label](target) — readout` into its parts. Without a leading link the
+/// whole text is the label and there is no target.
+fn item(done: Option<bool>, depth: u8, text: &str, store: &Path) -> PageItem {
+    let text = text.trim();
+    let mut label = text.to_owned();
+    let mut target = None;
+    let mut readout = String::new();
+    if let Some((l, t, rest)) = leading_link(text) {
+        label = l.to_owned();
+        target = Some(classify(t, store));
+        readout = rest.to_owned();
+    }
+    PageItem {
+        done,
+        depth,
+        label: unbold(&label),
+        target,
+        readout: unbold(&readout),
+    }
+}
+
+/// `[label](target) rest` at the start of `s`.
+fn leading_link(s: &str) -> Option<(&str, &str, &str)> {
+    let rest = s.strip_prefix('[')?;
+    let close = rest.find("](")?;
+    let label = &rest[..close];
+    let after = &rest[close + 2..];
+    let end = after.find(')')?;
+    let target = after[..end].split_whitespace().next().unwrap_or("");
+    let tail = after[end + 1..].trim_start();
+    let tail = tail
+        .strip_prefix("—")
+        .or_else(|| tail.strip_prefix("--"))
+        .or_else(|| tail.strip_prefix('-'))
+        .or_else(|| tail.strip_prefix(':'))
+        .map(str::trim_start)
+        .unwrap_or(tail);
+    (!label.trim().is_empty()).then_some((label.trim(), target, tail))
+}
+
+fn classify(target: &str, store: &Path) -> Target {
+    let t = target.trim();
+    if t.contains("://") || t.starts_with("mailto:") {
+        return Target::Url(t.to_owned());
+    }
+    let rel = t.strip_prefix("./").unwrap_or(t);
+    let rel = rel.strip_prefix(".arbos/").unwrap_or(rel);
+    if let Some(id) = rel.strip_prefix("agents/") {
+        let id = id.trim_end_matches('/');
+        let id = id.split('/').next().unwrap_or(id);
+        if !id.is_empty() {
+            return Target::Worker(id.to_owned());
+        }
+    }
+    let path = Path::new(rel);
+    if path.is_absolute() {
+        return Target::File(path.to_owned());
+    }
+    Target::File(store.join(path))
+}
+
+fn unbold(s: &str) -> String {
+    s.replace("**", "").replace('`', "")
 }
 
 fn strip_front_matter(text: &str) -> &str {
@@ -169,29 +334,82 @@ fn strip_front_matter(text: &str) -> &str {
     text
 }
 
-/// A line the template left for the person to fill in.
-fn placeholder(trimmed: &str) -> bool {
-    trimmed.is_empty()
-        || matches!(trimmed, "-" | "*" | "+" | "- [ ]")
-        || (trimmed.starts_with('(') && trimmed.ends_with(')'))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// One line of markdown as the panel prints it: headings lose their
-/// hashes, list bullets become one glyph, checkboxes keep their state.
-fn strip_marks(line: &str) -> String {
-    let line = line.trim();
-    let line = line.trim_start_matches('#').trim_start();
-    let line = line
-        .strip_prefix("- ")
-        .or_else(|| line.strip_prefix("* "))
-        .or_else(|| line.strip_prefix("+ "))
-        .map(|rest| match rest.trim_start() {
-            done if done.starts_with("[x] ") || done.starts_with("[X] ") => {
-                format!("✓ {}", &done[4..])
+    #[test]
+    fn a_protocol_page_parses_into_tldr_sections_and_items() {
+        let store = Path::new("/p/.arbos");
+        let text = "+++\nowner = \"root\"\n+++\n# Demo\n\nGoals: [project-context](docs/project-context.md)\n\n<tldr>\n- [Voice PR](https://x/1) — live on the pod\n</tldr>\n\n## Voice\n- [ ] [Voice PR](https://x/1) — live on the pod; DNS next\n  - [ ] [Fix echo](agents/fix-echo) — echo gate landing\n- [x] [Research](docs/r.md) — delivered\n### Sub\n- [ ] **no link here**\n";
+        let page = ProjectPage::parse(Path::new("/p/.arbos/notes.md"), store, text);
+        assert_eq!(page.tldr.len(), 1);
+        assert_eq!(page.tldr[0].label, "Voice PR");
+        assert_eq!(page.tldr[0].target, Some(Target::Url("https://x/1".into())));
+        assert_eq!(page.tldr[0].readout, "live on the pod");
+        assert_eq!(
+            page.blocks[0],
+            PageBlock::Heading {
+                level: 2,
+                text: "Voice".into()
             }
-            open if open.starts_with("[ ] ") => format!("○ {}", &open[4..]),
-            rest => format!("• {rest}"),
-        })
-        .unwrap_or_else(|| line.to_string());
-    line.replace("**", "")
+        );
+        let PageBlock::Item(first) = &page.blocks[1] else {
+            panic!("item")
+        };
+        assert_eq!(first.done, Some(false));
+        assert_eq!(first.depth, 0);
+        assert_eq!(first.readout, "live on the pod; DNS next");
+        let PageBlock::Item(child) = &page.blocks[2] else {
+            panic!("item")
+        };
+        assert_eq!(child.depth, 1);
+        assert_eq!(child.target, Some(Target::Worker("fix-echo".into())));
+        let PageBlock::Item(done) = &page.blocks[3] else {
+            panic!("item")
+        };
+        assert_eq!(done.done, Some(true));
+        assert_eq!(
+            done.target,
+            Some(Target::File(PathBuf::from("/p/.arbos/docs/r.md")))
+        );
+        let PageBlock::Item(plain) = &page.blocks[5] else {
+            panic!("item")
+        };
+        assert_eq!(plain.label, "no link here");
+        assert_eq!(plain.target, None);
+        assert!(!page.is_empty());
+    }
+
+    #[test]
+    fn the_template_reads_as_empty() {
+        let text = "+++\nowner = \"root\"\n+++\n# Notes\n\nGoals, constraints, decisions: [project-context](docs/project-context.md)\n";
+        let page = ProjectPage::parse(
+            Path::new("/p/.arbos/notes.md"),
+            Path::new("/p/.arbos"),
+            text,
+        );
+        assert!(page.is_empty(), "{page:?}");
+    }
+
+    #[test]
+    fn targets_classify() {
+        let store = Path::new("/p/.arbos");
+        assert_eq!(
+            classify(".arbos/agents/w1/", store),
+            Target::Worker("w1".into())
+        );
+        assert_eq!(
+            classify("arbos://chat/3?p=x", store),
+            Target::Url("arbos://chat/3?p=x".into())
+        );
+        assert_eq!(
+            classify("media/layout/a.png", store),
+            Target::File(PathBuf::from("/p/.arbos/media/layout/a.png"))
+        );
+        assert_eq!(
+            classify("/abs/file.md", store),
+            Target::File(PathBuf::from("/abs/file.md"))
+        );
+    }
 }

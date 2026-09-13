@@ -152,6 +152,10 @@ pub enum Event {
     },
     /// The agent's plan, whole. Arrives on attach and after every change.
     Plan(Vec<arbos_core::wire::PlanNode>),
+    /// A file of the project store the panel draws moved (`changed`
+    /// frame for `notes.md`, `docs/project-context.md`, `archived.md`,
+    /// `project.toml`): re-read the store. `path` is relative to `.arbos/`.
+    StoreChanged(String),
 }
 
 /// One source the provider named. Title may be empty; URL is not.
@@ -395,7 +399,14 @@ impl Session {
     }
 
     /// Hand the kernel a provider and key (`configure`); owner only.
-    pub fn configure(&self, provider: &str, api_base: &str, model: &str, api_key: &str, remember: bool) {
+    pub fn configure(
+        &self,
+        provider: &str,
+        api_base: &str,
+        model: &str,
+        api_key: &str,
+        remember: bool,
+    ) {
         let _ = self.send_frame(&Frame::Configure {
             provider: provider.to_string(),
             api_base: api_base.to_string(),
@@ -595,6 +606,9 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             detail,
         } if id == agent => vec![Event::Refused(detail)],
         Frame::Plan { agent: id, nodes } if id == agent => vec![Event::Plan(nodes)],
+        // Not agent-scoped: every attached chat hears it, and the
+        // workspace's re-read is idempotent.
+        Frame::Changed { path, .. } if store_file(&path) => vec![Event::StoreChanged(path)],
         Frame::Board {
             owner,
             action,
@@ -649,6 +663,15 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
         }],
         _ => Vec::new(),
     }
+}
+
+/// The store files the right panel reads: the project page, the context
+/// document, the archive, and the project's face.
+fn store_file(path: &str) -> bool {
+    matches!(
+        path,
+        "notes.md" | "archived.md" | "docs/project-context.md" | "project.toml" | "GOALS.md"
+    )
 }
 
 fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {

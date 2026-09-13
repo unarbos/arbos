@@ -1161,6 +1161,12 @@ impl Workspace {
             .position(|project| project.session(id).is_some())
     }
 
+    /// The folder of the project that holds chat `id`, for a re-read by
+    /// path (`reload_project`).
+    pub fn project_root_of(&self, id: u64) -> Option<PathBuf> {
+        self.project_of(id).map(|ix| self.projects[ix].path.clone())
+    }
+
     /// Read the project's filed sessions back, minting an id for each — ids
     /// mean nothing across a launch, so a reloaded one is as new as any. The
     /// agent is resolved by name; a session whose agent has since left
@@ -1612,7 +1618,10 @@ impl Workspace {
             return;
         }
         if chat.reconnect_attempt >= Self::RECONNECT_TRIES {
-            chat.notice(true, "connection lost; retries stopped — send a message or press Reconnect to try again");
+            chat.notice(
+                true,
+                "connection lost; retries stopped — send a message or press Reconnect to try again",
+            );
             chat.flush();
             return;
         }
