@@ -150,6 +150,7 @@ fn main() -> Result<()> {
             );
             println!("{}", arbos_kernel::rollout::USAGE);
             println!("{}", arbos_kernel::check::USAGE);
+            println!("{}", arbos_kernel::prompt_size::USAGE);
             println!("{}", arbos_kernel::setup::USAGE);
             println!("{}", arbos_kernel::cli::USAGE);
             println!("{}", arbos_kernel::rewind::USAGE);

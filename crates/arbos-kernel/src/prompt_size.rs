@@ -9,6 +9,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use arbos_core::{AgentId, Place, load_agent};
 
+pub const USAGE: &str = "arbos-kernel prompt <place> [--agent ID] [--json | --dump]   (what every model call of that agent carries: sections and tool schemas in estimated tokens; --dump prints the text)";
+
 pub struct Args {
     pub place: Place,
     pub agent: String,
