@@ -767,7 +767,10 @@ impl KernelHooks {
         // Two children with the same name get distinct ids (`-2`, `-3`, …)
         // rather than the second one failing.
         let label = name.map(str::trim).filter(|n| !n.is_empty());
-        let base = slug(label.unwrap_or(brief));
+        let base = match label {
+            Some(label) => name_slug(label),
+            None => slug(brief),
+        };
         let mut id = base.clone();
         let mut n = 1;
         while self.place.agent_dir(&id).exists() {
@@ -1243,6 +1246,33 @@ pub fn roster(agents: &[Agent], me: &AgentId) -> String {
     } else {
         lines.join("; ")
     }
+}
+
+/// A worker's name as an id: words joined by `-`, so "Write river poem"
+/// reads as `write-river-poem` in the panel and in `say to=`.
+fn name_slug(name: &str) -> String {
+    let words: Vec<String> = name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let mut s = String::new();
+    for w in words {
+        if s.len() + w.len() + usize::from(!s.is_empty()) > 32 {
+            break;
+        }
+        if !s.is_empty() {
+            s.push('-');
+        }
+        s.push_str(&w);
+    }
+    if s.is_empty() {
+        return slug(name);
+    }
+    if s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        s = format!("a{s}");
+    }
+    s
 }
 
 fn slug(brief: &str) -> String {
