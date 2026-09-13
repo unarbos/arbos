@@ -16,6 +16,7 @@ which keeps the test harness deterministic.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -87,14 +88,18 @@ class Line:
     heard: bool | None = None  # None until spoken; False when interrupted
 
 
-def highlight(text: str, cap: int = HIGHLIGHT_CAP, screen: str = "on your screen") -> str:
+TAILS = ("The rest is {screen}.", "Details are {screen}.", "More {screen}.", "The full reply is {screen}.")
+
+
+def highlight(text: str, cap: int = HIGHLIGHT_CAP, screen: str = "on your screen", variant: int = 0) -> str:
     """The spoken form of a long reply: the first sentence, plus the first later one that names a
-    result, cut to `cap`. When anything was left out (more sentences, code, a diff, a list, a link)
-    the line ends with where the rest is."""
+    result, cut to `cap`. When more than one paragraph is left unspoken (code, a list, a diff and
+    further prose count as paragraphs) the line ends with where the rest is, phrased by `variant`."""
     raw = text.strip()
     if not raw:
         return ""
     had_extra = bool(_FENCE.search(raw) or _DIFF_LINE.search(raw) or _LIST_LINE.search(raw) or _URL.search(raw))
+    paragraphs = [p for p in re.split(r"\n\s*\n", _FENCE.sub("\n\n[code]\n\n", raw)) if p.strip()]
     clean = speakable(_FENCE.sub(" ", raw))
     clean = _URL.sub("", clean)
     clean = re.sub(r"\s+", " ", clean).strip()
@@ -112,9 +117,14 @@ def highlight(text: str, cap: int = HIGHLIGHT_CAP, screen: str = "on your screen
     cut = len(spoken) > cap
     if cut:
         spoken = spoken[: cap - 1].rsplit(" ", 1)[0].rstrip(",;:") + "."
-    if had_extra or cut or len(sentences) > len(picked):
-        tail = f" The rest is {screen}."
-        spoken = spoken.rstrip() + tail if len(spoken) + len(tail) <= cap + len(tail) else spoken
+    # What is left unspoken, in paragraphs: the first one when it was not said whole, and every
+    # one after it. One leftover paragraph is not worth a pointer; two or more are.
+    first = re.sub(r"\s+", " ", speakable(paragraphs[0])).strip() if paragraphs else clean
+    first_done = not cut and first and first in spoken
+    left = (0 if first_done else 1) + max(0, len(paragraphs) - 1)
+    if left > 1:
+        tail = " " + TAILS[variant % len(TAILS)].format(screen=screen)
+        spoken = spoken.rstrip() + tail
     return spoken
 
 
@@ -175,6 +185,7 @@ class Narrator:
         only_asks: bool = False,
         approval_timeout: float = 45.0,
         drilldown_by_phrase: bool = True,
+        escalations_log: str = "",
     ):
         self.kernel = kernel
         self.speak = speak  # voices one line with the gateway TTS; returns when it has been said
@@ -188,6 +199,9 @@ class Narrator:
         self.device = device  # phone | desktop: written beside `channel` on every message
         self.only_asks = only_asks  # outside call mode: speak asks and approvals, nothing else
         self.drilldown_by_phrase = drilldown_by_phrase  # "why exactly…" answers from the record without a tool call
+        # Questions that went to the main agent although something had just been said: the phrase
+        # list is grown from this file (one JSON object per line).
+        self.escalations_log = escalations_log
         self.approval_timeout = approval_timeout
         self._ask_timer: asyncio.TimerHandle | None = None
         self.approvals: list[tuple[str, bool, str]] = []  # (id, allowed, by: voice | timeout | card)
@@ -212,6 +226,7 @@ class Narrator:
         self._pending_handle: asyncio.TimerHandle | None = None
         self._late_until = 0.0
         self._last_detail: tuple[str, float, asyncio.Future] | None = None
+        self._tail_variant = 0
         self.stats = {"heard": 0, "skipped": 0, "interrupted": 0, "details": 0}
 
     # ------------------------------------------------------------------ lifecycle
@@ -261,6 +276,31 @@ class Narrator:
         self._pending = (text, channel)
         self._pending_handle = asyncio.get_running_loop().call_later(grace, self._forward_pending)
 
+    def _log_escalation(self, text: str) -> None:
+        """A question-shaped utterance forwarded to the agent right after the narrator spoke: a
+        drill-down the phrase list may have missed. Logged for mining, never blocking."""
+        if not self.escalations_log:
+            return
+        last = next((l for l in reversed(self.said) if l.kind in ("highlight", "report", "detail", "error")), None)
+        if last is None or time.monotonic() - last.at > 90.0:
+            return
+        if not (text.rstrip().endswith("?") or re.match(r"^\W*(why|what|how|which|where|when|did|does|is|was|were|can you (?:tell|say|explain))\b", text, re.I)):
+            return
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "text": text,
+            "after": last.kind,
+            "after_text": last.text[:160],
+            "since_s": round(time.monotonic() - last.at, 1),
+            "device": self.device,
+        }
+        try:
+            os.makedirs(os.path.dirname(self.escalations_log) or ".", exist_ok=True)
+            with open(self.escalations_log, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            log.warning("escalation log: %s", exc)
+
     def consume_pending(self) -> str | None:
         """The speech model answered the last utterance itself (a tool call): do not forward it."""
         if self._pending is None:
@@ -276,6 +316,7 @@ class Narrator:
         text, channel = self._pending
         self._pending = None
         self._pending_handle = None
+        self._log_escalation(text)
         if self.ack and self.pending_ask is None:
             self._enqueue(Line("ack", ACK, ref=""))
         self.user_said(text, channel=channel)
@@ -323,6 +364,13 @@ class Narrator:
     def on_frame(self, frame: dict) -> None:
         kind = frame.get("type")
         agent = frame.get("agent")
+        if kind == "link":
+            # The kernel link dropped (a restart, a tunnel): said once, and once more when it is back.
+            if frame.get("state") == "lost":
+                self._enqueue(Line("error", "I lost the connection to the agent. Reconnecting.", ref="link"))
+            elif frame.get("state") == "restored":
+                self._enqueue(Line("error", "Connected to the agent again.", ref="link"))
+            return
         if kind == "event" and (frame.get("event") or {}).get("kind") in ("approval", "answer"):
             # Answered somewhere (a question card, another client): the spoken question is closed.
             if self.pending_ask is not None and agent == self.pending_ask.get("agent", self.agent):
@@ -364,7 +412,9 @@ class Narrator:
                 # assistant steps and only the last one states the result.
                 squashed = "".join(text.split())
                 if self.turn_running and time.monotonic() < self._late_until and not self._turn_texts:
-                    line = highlight(text, screen=self.screen)  # the previous turn's final words
+                    line = highlight(text, screen=self.screen, variant=self._tail_variant)  # the previous turn's final words
+                    if line.endswith(f"{self.screen}."):
+                        self._tail_variant += 1
                     if line:
                         self.summary.append(f"arbos: {line}")
                         self._enqueue(Line("highlight", line, ref=_ref(frame)))
@@ -398,7 +448,8 @@ class Narrator:
                 spoken = spoken[0].upper() + spoken[1:] if who else "Arbos " + spoken
                 self.summary.append(f"approval: {tool}: {clip(command, 80)}")
                 self._enqueue(Line("approval", spoken, ref=f"ask:{frame.get('id') or ''}"))
-                self._ask_timer = asyncio.get_running_loop().call_later(self.approval_timeout, self._approval_timeout, frame)
+                # Re-ask once at two thirds of the wait, deny at the end.
+                self._ask_timer = asyncio.get_running_loop().call_later(self.approval_timeout * 2 / 3, self._approval_reask, frame)
             else:
                 question = clip(str(frame.get("question") or ""), REPORT_CAP)
                 options = [str(o) for o in frame.get("options") or []]
@@ -420,7 +471,9 @@ class Narrator:
     def _speak_turn(self) -> None:
         text, ref = self._turn_texts[-1]
         self._turn_texts.clear()
-        line = highlight(text, screen=self.screen)
+        line = highlight(text, screen=self.screen, variant=self._tail_variant)
+        if line.endswith(f"{self.screen}."):
+            self._tail_variant += 1
         if not line:
             return
         if self.model_highlights:
@@ -461,6 +514,14 @@ class Narrator:
             self._enqueue(Line("approval", f"No answer in {self.approval_timeout:.0f} seconds; I denied {tool}: {clip(command, 80)}.", ref=f"ask:{call_id}"))
         else:
             self._enqueue(Line("approval", ("Allowed." if allow else "Denied."), ref=f"ask:{call_id}"))
+
+    def _approval_reask(self, ask: dict) -> None:
+        if self.pending_ask is not ask:
+            return
+        tool, command = split_approval(str(ask.get("question") or ""))
+        left = self.approval_timeout / 3
+        self._enqueue(Line("approval", f"Still waiting on {tool}: {clip(command, 80)}. Allow? I deny it in {left:.0f} seconds.", ref=f"ask:{ask.get('id') or ''}"))
+        self._ask_timer = asyncio.get_running_loop().call_later(left, self._approval_timeout, ask)
 
     def _approval_timeout(self, ask: dict) -> None:
         if self.pending_ask is not ask:

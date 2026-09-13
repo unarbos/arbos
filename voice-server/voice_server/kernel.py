@@ -47,7 +47,7 @@ def hub_attach_url(hub: str, project: str, token: str = "") -> str:
 
 class KernelClient:
     def __init__(self, url: str | None = None, place: str | None = None, *, auto_approve: bool = False,
-                 token: str = "", name: str = ""):
+                 token: str = "", name: str = "", reconnect: bool = True):
         if not url and not place:
             raise ValueError("need a kernel url or place")
         self.url = url
@@ -61,6 +61,13 @@ class KernelClient:
         self.writer: asyncio.StreamWriter | None = None
         self.ws: websockets.ClientConnection | None = None
         self._closed = False
+        # A kernel restart or a dropped tunnel is not the end of a call: the link comes back with
+        # backoff, listeners hear `link {state: lost | restored}`, and frames sent meanwhile wait.
+        self.reconnect = reconnect
+        self._reconnect_task: asyncio.Task | None = None
+        self._outbox: list[dict] = []
+        self.link_lost = 0  # how many times the link dropped
+        self._opening = False
         self.agents: dict[str, AgentState] = {}
         self.focus = "root"
         self.listeners: list[Listener] = []
@@ -85,6 +92,19 @@ class KernelClient:
         return bool(self.url and self.url.startswith(("ws://", "wss://")))
 
     async def connect(self, *, hello_timeout: float = 15.0) -> None:
+        self._closed = False
+        await self._open(hello_timeout=hello_timeout)
+
+    async def _open(self, *, hello_timeout: float = 15.0) -> None:
+        self.hello = {}
+        self._first_error = ""
+        self._opening = True
+        try:
+            await self._open_transport(hello_timeout=hello_timeout)
+        finally:
+            self._opening = False
+
+    async def _open_transport(self, *, hello_timeout: float) -> None:
         if self.over_websocket:
             headers = {"Authorization": f"Bearer {self.token}"} if self.token and "token=" not in self.url else {}
             self.ws = await asyncio.wait_for(
@@ -96,13 +116,13 @@ class KernelClient:
             deadline = time.monotonic() + hello_timeout
             while not self.hello and time.monotonic() < deadline:
                 if self._first_error:
-                    await self.close()
+                    await self._drop_transport()
                     raise RuntimeError(self._first_error)
-                if self._closed:
+                if self.ws is None:
                     raise RuntimeError("the kernel closed the connection before hello")
                 await asyncio.sleep(0.05)
             if not self.hello:
-                await self.close()
+                await self._drop_transport()
                 raise RuntimeError(f"no hello from {self.url.split('?')[0]} in {hello_timeout:.0f}s")
             log.info("attached to kernel over %s", self.url.split("?")[0])
             return
@@ -111,18 +131,13 @@ class KernelClient:
         self._reader_task = asyncio.create_task(self._read_loop(), name="kernel-read")
         log.info("attached to kernel at %s:%d", host, port)
 
-    @property
-    def connected(self) -> bool:
-        if self.over_websocket:
-            return self.ws is not None and not self._closed
-        return self.writer is not None and not self.writer.is_closing()
-
-    async def close(self) -> None:
-        self._closed = True
-        if self._reader_task:
+    async def _drop_transport(self) -> None:
+        if self._reader_task and self._reader_task is not asyncio.current_task():
             self._reader_task.cancel()
+        self._reader_task = None
         if self.writer:
             self.writer.close()
+        self.writer = None
         if self.ws is not None:
             try:
                 await asyncio.wait_for(self.ws.close(), 3)
@@ -130,14 +145,80 @@ class KernelClient:
                 pass
             self.ws = None
 
-    def send(self, frame: dict) -> None:
+    def _on_link_lost(self) -> None:
+        """The read loop ended without `close()`: tell the listeners, then bring the link back."""
+        if self._closed or not self.reconnect or self._opening:
+            return
+        if self._reconnect_task and not self._reconnect_task.done():
+            return
+        self.link_lost += 1
+        self._notify({"type": "link", "state": "lost", "kernel": self.name})
+        self._reconnect_task = asyncio.create_task(self._reconnect_loop(), name=f"kernel-reconnect-{self.name}")
+
+    async def _reconnect_loop(self) -> None:
+        delay = 1.0
+        attempt = 0
+        while not self._closed:
+            attempt += 1
+            await asyncio.sleep(delay)
+            if self._closed:
+                return
+            try:
+                await self._open(hello_timeout=10.0)
+            except Exception as exc:
+                log.warning("kernel %s: reconnect %d failed (%s); next in %.0fs", self.name, attempt, str(exc)[:80], min(delay * 2, 30))
+                delay = min(delay * 2, 30.0)
+                continue
+            log.info("kernel %s: link restored after %d attempt(s)", self.name, attempt)
+            self._notify({"type": "link", "state": "restored", "kernel": self.name, "attempts": attempt})
+            outbox, self._outbox = self._outbox, []
+            for frame in outbox:
+                try:
+                    self.send(frame)
+                except Exception:
+                    self._outbox.append(frame)
+            return
+
+    def _notify(self, frame: dict) -> None:
+        for listener in list(self.listeners):
+            try:
+                result = listener(frame)
+                if asyncio.iscoroutine(result):
+                    asyncio.get_running_loop().create_task(result)
+            except Exception:
+                log.exception("kernel listener failed")
+
+    @property
+    def connected(self) -> bool:
+        if self._closed:
+            return False
         if self.over_websocket:
-            if self.ws is None or self._closed:
-                raise RuntimeError("kernel not connected")
+            return self.ws is not None
+        return self.writer is not None and not self.writer.is_closing()
+
+    @property
+    def reconnecting(self) -> bool:
+        return bool(self._reconnect_task and not self._reconnect_task.done())
+
+    async def close(self) -> None:
+        self._closed = True
+        if self._reconnect_task:
+            self._reconnect_task.cancel()
+        await self._drop_transport()
+
+    def send(self, frame: dict) -> None:
+        """One frame to the kernel. While the link is being brought back, the frame waits and goes
+        out on restore (a caller's words survive a kernel restart)."""
+        if self._closed:
+            raise RuntimeError("kernel client closed")
+        if not self.connected:
+            if self.reconnect and len(self._outbox) < 64:
+                self._outbox.append(frame)
+                return
+            raise RuntimeError("kernel not connected")
+        if self.over_websocket:
             asyncio.get_running_loop().create_task(self._ws_send(json.dumps(frame)))
             return
-        if not self.writer:
-            raise RuntimeError("kernel not connected")
         self.writer.write((json.dumps(frame) + "\n").encode())
 
     async def _ws_send(self, text: str) -> None:
@@ -177,8 +258,8 @@ class KernelClient:
             log.warning("kernel ws closed: %s", exc)
         finally:
             log.warning("kernel connection closed (%s)", self.name)
-            self._closed = True
             self.ws = None
+            self._on_link_lost()
 
     async def _read_loop(self) -> None:
         assert self.reader
@@ -193,10 +274,11 @@ class KernelClient:
                     continue
                 await self._dispatch(frame)
         finally:
-            log.warning("kernel connection closed")
+            log.warning("kernel connection closed (%s)", self.name)
             if self.writer:
                 self.writer.close()
             self.writer = None
+            self._on_link_lost()
 
     def _track(self, frame: dict) -> None:
         kind = frame.get("type")

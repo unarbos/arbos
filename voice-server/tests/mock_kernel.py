@@ -86,9 +86,29 @@ class MockKernel:
     async def stop(self) -> None:
         for t in self._tasks:
             t.cancel()
+        for w in list(self._clients):
+            w.close()
         if self._server:
             self._server.close()
-            await self._server.wait_closed()
+            try:
+                await asyncio.wait_for(self._server.wait_closed(), 2)
+            except asyncio.TimeoutError:
+                pass
+
+    async def restart(self, down_for: float = 1.5) -> None:
+        """A kernel restart: every attached client is cut, the port is dark for `down_for`, then
+        the same place is served on the same port again (the scripts and files carry on)."""
+        for w in list(self._clients):
+            w.close()
+        self._clients.clear()
+        if self._server:
+            self._server.close()
+            try:
+                await asyncio.wait_for(self._server.wait_closed(), 2)  # 3.12 waits for the clients too
+            except asyncio.TimeoutError:
+                pass
+        await asyncio.sleep(down_for)
+        self._server = await asyncio.start_server(self._client, self.host, self.port)
 
     def _bootstrap(self) -> None:
         agent = self.arbos / "agents" / "root"

@@ -270,6 +270,8 @@ async def run_steps(steps: list[dict], caller: Caller, duplex: MockDuplex, kerne
             await caller.wait_quiet(float(step["wait_quiet"]), float(step.get("timeout", 30)))
         elif "pause" in step:
             await asyncio.sleep(float(step["pause"]))
+        elif "kernel_restart" in step:
+            await kernel.restart(float(step.get("down_for", 1.5)))
         else:
             raise ValueError(f"unknown step: {step}")
 

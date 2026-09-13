@@ -53,6 +53,9 @@ class SessionDefaults:
     model_highlights: bool = False
     # Seconds an `allow …` ask waits for the caller before it is denied.
     approval_timeout: float = 45.0
+    # JSONL of question-shaped utterances that went to the agent right after a highlight (for
+    # growing the drill-down phrase list). Empty = off.
+    escalations_log: str = ""
     # Call mode, duplex engine: how much of the speech model's own voice the caller hears.
     # `ack` = short acknowledgements right after the caller speaks; `full` = everything; `off` = none.
     model_voice: str = "off"
@@ -199,6 +202,7 @@ class BaseSession:
             speak_details=self.defaults.model_voice != "full",
             model_highlights=self.defaults.model_highlights,
             approval_timeout=self.defaults.approval_timeout,
+            escalations_log=self.defaults.escalations_log,
         )
         self.tools.narrator = self.narrator
         self.tools.schemas = CALL_TOOLS

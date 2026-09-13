@@ -87,6 +87,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                        help="call mode, duplex engine: how much of the speech model's own voice the caller hears. "
                             "off (default): none; the narrator says 'On it.' and speaks every result. ack: short "
                             "acknowledgements right after the caller speaks. full: everything the model says")
+    reply.add_argument("--escalations-log",
+                       default=os.environ.get("VOICE_ESCALATIONS_LOG")
+                       or (os.path.join(os.environ["VOICE_HOME"], "logs", "call-mode-escalations.jsonl") if os.environ.get("VOICE_HOME") else ""),
+                       help="call mode: append question-shaped utterances that went to the main agent right after the "
+                            "narrator spoke (drill-downs the phrase list may have missed) to this JSONL file. Default: "
+                            "$VOICE_HOME/logs/call-mode-escalations.jsonl, or off")
     reply.add_argument("--highlights", default=os.environ.get("VOICE_HIGHLIGHTS", "policy"), choices=["policy", "model"],
                        help="call mode: how the narrator forms a highlight of the agent's reply. policy (default): first "
                             "sentence plus the result sentence, deterministic. model: --narrator-model rewrites the reply "
@@ -159,7 +165,7 @@ async def serve_forever(args: argparse.Namespace) -> None:
     defaults = SessionDefaults(language=args.language, voice=args.voice, speed=args.speed, reply=args.reply,
                                instructions=args.instructions, narrator_model=args.narrator_model,
                                model_voice=args.call_model_voice, model_highlights=args.highlights == "model",
-                               approval_timeout=args.approval_timeout)
+                               approval_timeout=args.approval_timeout, escalations_log=args.escalations_log or "")
     tuning = Tuning(
         start_threshold=args.vad_threshold,
         end_threshold=max(0.1, args.vad_threshold - 0.15),

@@ -1,0 +1,33 @@
+# The kernel restarts in the middle of a call. The gateway says so once, brings the link back
+# with backoff, says so once more, and the caller's next words still reach the agent.
+title = "Kernel restart mid-call: reconnect with backoff, spoken once"
+
+[[steps]]
+say = "Send an agent to lint the project."
+model = { ack = "On it." }
+[steps.kernel]
+reply = "I sent the agent lint-project to run the linter."
+
+[[steps]]
+wait_spoken = "lint-project to run the linter"
+
+[[steps]]
+kernel_restart = true
+down_for = 2.0
+
+[[steps]]
+wait_spoken = "Connected to the agent again"
+timeout = 30
+
+[[steps]]
+say = "Also format the code."
+model = { ack = "On it." }
+kernel = { reply = "Formatting is queued after the lint run." }
+
+[[steps]]
+wait_spoken = "Formatting is queued"
+
+[expect]
+narrated_contains = ["I lost the connection to the agent. Reconnecting.", "Connected to the agent again.", "Formatting is queued"]
+inbox = [{ channel = "voice", kind = "request", device = "desktop" }, { channel = "voice", kind = "request", device = "desktop" }]
+user_frames = 2

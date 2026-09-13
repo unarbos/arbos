@@ -19,7 +19,7 @@ wait_spoken = "did not delete anything"
 timeout = 30
 
 [expect]
-spoken_contains = ["Arbos wants to run bash: rm -rf /var/log/arbos", "Allow?", "No answer in 4 seconds; I denied bash", "I did not delete anything"]
+spoken_contains = ["Arbos wants to run bash: rm -rf /var/log/arbos", "Allow?", "Still waiting on bash", "I deny it in 1 seconds", "No answer in 4 seconds; I denied bash", "I did not delete anything"]
 spoken_not_contains = ["Old logs deleted", "Allowed."]
 approvals = [false]
 inbox = [{ channel = "voice", kind = "request", device = "desktop" }]
