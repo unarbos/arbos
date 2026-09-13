@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-pub const USAGE: &str = "arbos-kernel run [--place DIR] [--agent ID] [--json] [--steer] [--timeout SECS] [--no-spawn] \"<prompt>\"\narbos-kernel attach [--place DIR] [--agent ID] [--json]";
+pub const USAGE: &str = "arbos-kernel run [--place DIR] [--agent ID] [--json] [--steer] [--timeout SECS] [--no-spawn] \"<prompt>\"\narbos-kernel answer [--place DIR] [--agent ID] [--follow] [--json] (\"<text>\" | --approve | --deny)\narbos-kernel attach [--place DIR] [--agent ID] [--json]";
 
 /// How long to wait for a kernel this command started to write its port.
 const READY_WAIT: Duration = Duration::from_secs(60);
@@ -39,6 +39,10 @@ pub struct Args {
     pub timeout: Option<Duration>,
     pub no_spawn: bool,
     pub prompt: Option<String>,
+    /// `answer` only: stream the rest of the turn after answering.
+    pub follow: bool,
+    /// `answer` only: a bash approval instead of a text answer.
+    pub allow: Option<bool>,
 }
 
 impl Args {
@@ -51,6 +55,8 @@ impl Args {
             timeout: None,
             no_spawn: false,
             prompt: None,
+            follow: false,
+            allow: None,
         };
         let mut rest: Vec<String> = Vec::new();
         while let Some(a) = argv.next() {
@@ -62,6 +68,9 @@ impl Args {
                 "--json" => args.json = true,
                 "--steer" => args.steer = true,
                 "--no-spawn" => args.no_spawn = true,
+                "--follow" | "-f" => args.follow = true,
+                "--approve" => args.allow = Some(true),
+                "--deny" => args.allow = Some(false),
                 "--timeout" => {
                     let s = argv.next().context("--timeout needs seconds")?;
                     let secs: u64 = s.parse().with_context(|| format!("--timeout {s:?}"))?;
@@ -114,93 +123,148 @@ pub fn run(args: Args) -> Result<i32> {
         };
         w.write_all(format!("{}\n", serde_json::to_string(&frame)?).as_bytes())
             .await?;
-        let deadline = args.timeout.map(|t| Instant::now() + t);
-        // A fresh kernel replays the whole transcript once to whoever is
-        // attached; our turn starts at the line that echoes our prompt.
-        let mut started = false;
-        let mut failed = false;
-        // The kernel says "idle" the moment the turn's task ends; the
-        // transcript tail that carries turn_complete follows on its own
-        // tick, and can even land after the idle. So: once our turn has
-        // started and the agent is idle, a quiet stretch means the turn
-        // ended without completing (an error path the kernel logged).
-        let mut idle = false;
-        let mut quiet_since = Instant::now();
-        loop {
-            let mut limit = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-            if started && idle {
-                let grace = (quiet_since + IDLE_GRACE).saturating_duration_since(Instant::now());
-                limit = Some(limit.map_or(grace, |l| l.min(grace)));
-            }
-            let next = match limit {
-                Some(left) => match tokio::time::timeout(left, lines.next_line()).await {
-                    Ok(r) => r,
-                    Err(_) if started && idle && deadline.is_none_or(|d| Instant::now() < d) => {
-                        eprintln!(
-                            "run: the turn ended without completing; see {}",
-                            place.path.join(".arbos").join("kernel.log").display()
-                        );
-                        return Ok(EXIT_FAILED_TURN);
-                    }
-                    Err(_) => {
-                        eprintln!("run: timed out after {:?}", args.timeout.unwrap_or_default());
-                        return Ok(EXIT_TIMEOUT);
-                    }
-                },
-                None => lines.next_line().await,
-            };
-            let Some(line) = next? else {
-                eprintln!("run: the kernel closed the connection");
-                return Ok(EXIT_ERROR);
-            };
-            let Ok(frame) = serde_json::from_str::<Frame>(&line) else {
-                continue;
-            };
-            match frame {
-                // Live emits (seq 0: streaming text, a tool starting) are
-                // for a window; the transcript lines that follow them are
-                // the record, and the only thing printed here.
-                Frame::Event { agent, event } if agent == args.agent && event.seq > 0 => {
-                    if !started {
-                        started = matches!(&event.kind, EventKind::User { text, .. } if *text == prompt);
-                        if !started {
-                            continue;
-                        }
-                    }
-                    quiet_since = Instant::now();
-                    if let EventKind::Notice { failed: true, .. } = &event.kind {
-                        failed = true;
-                    }
-                    print_event(&event, args.json);
-                    if matches!(event.kind, EventKind::TurnComplete { .. }) {
-                        return Ok(if failed { EXIT_FAILED_TURN } else { EXIT_OK });
-                    }
-                }
-                Frame::Turn { agent, state, .. } if agent == args.agent => {
-                    idle = state == "idle";
-                    quiet_since = Instant::now();
-                }
-                Frame::Ask {
-                    agent,
-                    question,
-                    options,
-                } if agent == args.agent && started => {
-                    match answer(&agent, &question, &options)? {
-                        Some(reply) => {
-                            w.write_all(format!("{}\n", serde_json::to_string(&reply)?).as_bytes())
-                                .await?;
-                        }
-                        None => {
-                            eprintln!(
-                                "run: the agent is waiting on a question and there is no terminal to answer it; open the place in the app or answer over the frames"
-                            );
-                            return Ok(EXIT_WAITING);
-                        }
-                    }
-                }
-                _ => {}
-            }
+        stream_turn(&mut lines, &mut w, &args, &place, Some(&prompt)).await
+    })
+}
+
+/// Read frames until the agent's turn ends, printing its transcript lines.
+/// `prompt` = the user line that starts our turn (skip everything before
+/// it; a fresh kernel replays the whole transcript once); `None` = the
+/// turn is already under way.
+async fn stream_turn(
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::tcp::OwnedReadHalf>>,
+    w: &mut tokio::net::tcp::OwnedWriteHalf,
+    args: &Args,
+    place: &Place,
+    prompt: Option<&str>,
+) -> Result<i32> {
+    let deadline = args.timeout.map(|t| Instant::now() + t);
+    // A fresh kernel replays the whole transcript once to whoever is
+    // attached; our turn starts at the line that echoes our prompt.
+    let mut started = prompt.is_none();
+    let mut failed = false;
+    // The kernel says "idle" the moment the turn's task ends; the
+    // transcript tail that carries turn_complete follows on its own
+    // tick, and can even land after the idle. So: once our turn has
+    // started and the agent is idle, a quiet stretch means the turn
+    // ended without completing (an error path the kernel logged).
+    let mut idle = false;
+    let mut quiet_since = Instant::now();
+    loop {
+        let mut limit = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+        if started && idle {
+            let grace = (quiet_since + IDLE_GRACE).saturating_duration_since(Instant::now());
+            limit = Some(limit.map_or(grace, |l| l.min(grace)));
         }
+        let next = match limit {
+            Some(left) => match tokio::time::timeout(left, lines.next_line()).await {
+                Ok(r) => r,
+                Err(_) if started && idle && deadline.is_none_or(|d| Instant::now() < d) => {
+                    eprintln!(
+                        "run: the turn ended without completing; see {}",
+                        place.path.join(".arbos").join("kernel.log").display()
+                    );
+                    return Ok(EXIT_FAILED_TURN);
+                }
+                Err(_) => {
+                    eprintln!(
+                        "run: timed out after {:?}",
+                        args.timeout.unwrap_or_default()
+                    );
+                    return Ok(EXIT_TIMEOUT);
+                }
+            },
+            None => lines.next_line().await,
+        };
+        let Some(line) = next? else {
+            eprintln!("run: the kernel closed the connection");
+            return Ok(EXIT_ERROR);
+        };
+        let Ok(frame) = serde_json::from_str::<Frame>(&line) else {
+            continue;
+        };
+        match frame {
+            // Live emits (seq 0: streaming text, a tool starting) are
+            // for a window; the transcript lines that follow them are
+            // the record, and the only thing printed here.
+            Frame::Event { agent, event } if agent == args.agent && event.seq > 0 => {
+                if !started {
+                    started = matches!((&event.kind, prompt), (EventKind::User { text, .. }, Some(p)) if text == p);
+                    if !started {
+                        continue;
+                    }
+                }
+                quiet_since = Instant::now();
+                if let EventKind::Notice { failed: true, .. } = &event.kind {
+                    failed = true;
+                }
+                print_event(&event, args.json);
+                if matches!(event.kind, EventKind::TurnComplete { .. }) {
+                    return Ok(if failed { EXIT_FAILED_TURN } else { EXIT_OK });
+                }
+            }
+            Frame::Turn { agent, state, .. } if agent == args.agent => {
+                idle = state == "idle";
+                quiet_since = Instant::now();
+            }
+            Frame::Ask {
+                agent,
+                question,
+                options,
+            } if agent == args.agent && started => match answer(&agent, &question, &options)? {
+                Some(reply) => {
+                    w.write_all(format!("{}\n", serde_json::to_string(&reply)?).as_bytes())
+                        .await?;
+                }
+                None => {
+                    eprintln!(
+                        "run: the agent is waiting on a question and there is no terminal to answer it. Answer with: arbos-kernel answer [--agent ID] [--follow] \"<text>\" (or --approve / --deny)"
+                    );
+                    return Ok(EXIT_WAITING);
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
+/// Answer the question the agent is waiting on (or approve/deny a bash
+/// command), then optionally follow the rest of its turn.
+pub fn answer_cmd(args: Args, allow: Option<bool>, follow: bool) -> Result<i32> {
+    let text = args.prompt.clone().unwrap_or_default();
+    if allow.is_none() && text.trim().is_empty() {
+        bail!("answer needs the text of the answer, or --approve / --deny");
+    }
+    let place = Place::new(std::fs::canonicalize(&args.place).unwrap_or(args.place.clone()));
+    // A question is only ever waiting in a live kernel.
+    let addr = kernel_addr(&place, false)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let stream = TcpStream::connect(&addr)
+            .await
+            .with_context(|| format!("connect {addr}"))?;
+        let (r, mut w) = stream.into_split();
+        let mut lines = BufReader::new(r).lines();
+        let frame = match allow {
+            Some(allow) => Frame::Approve {
+                agent: args.agent.clone(),
+                call_id: String::new(),
+                allow,
+            },
+            None => Frame::Answer {
+                agent: args.agent.clone(),
+                text: text.clone(),
+            },
+        };
+        w.write_all(format!("{}\n", serde_json::to_string(&frame)?).as_bytes())
+            .await?;
+        if !follow {
+            eprintln!("answered {} on {}", args.agent, place.path.display());
+            return Ok(EXIT_OK);
+        }
+        stream_turn(&mut lines, &mut w, &args, &place, None).await
     })
 }
 

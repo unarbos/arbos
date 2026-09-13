@@ -16,6 +16,12 @@ fn main() -> Result<()> {
             let code = arbos_kernel::cli::run(arbos_kernel::cli::Args::parse(args)?)?;
             std::process::exit(code);
         }
+        "answer" => {
+            let parsed = arbos_kernel::cli::Args::parse(args)?;
+            let (allow, follow) = (parsed.allow, parsed.follow);
+            let code = arbos_kernel::cli::answer_cmd(parsed, allow, follow)?;
+            std::process::exit(code);
+        }
         "attach" => {
             let parsed = arbos_kernel::cli::Args::parse(args)?;
             let all = std::env::args()
