@@ -11,6 +11,7 @@ mod editdiff;
 pub(crate) mod file_hooks;
 pub(crate) mod fs;
 pub mod git;
+pub mod git_guard;
 mod hashline;
 mod web;
 

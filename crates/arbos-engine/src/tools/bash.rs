@@ -93,6 +93,20 @@ impl Tool for Bash {
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         Box::pin(async move {
             let cmd = req(&args, "command")?;
+            // Before the approval prompt: a refused command is not a
+            // question for the user.
+            {
+                let dir = opt_str(&args, "cwd")
+                    .map(|c| cx.cwd.join(c))
+                    .unwrap_or_else(|| cx.cwd.clone());
+                let place = cx.place.path().to_path_buf();
+                let cmd_owned = cmd.to_string();
+                tokio::task::spawn_blocking(move || {
+                    super::git_guard::check(&place, &dir, &cmd_owned)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("git guard task: {e}"))??;
+            }
             if needs_approval(cmd) {
                 let allowed = tokio::select! {
                     r = cx.hooks.approve(&cx.agent.id, "bash", cmd) => r?,
