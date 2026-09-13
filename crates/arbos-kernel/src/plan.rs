@@ -42,7 +42,15 @@ pub struct Clock {
     mech: Mutex<HashSet<String>>,
     /// Agent → the plan turn running for it.
     turns: Mutex<HashMap<String, TurnMeta>>,
+    /// `agent#node` whose claim could not be written, and when to try
+    /// again. Without it a node whose rewrite fails (disk full, size
+    /// limit) is re-claimed every tick, each time leaving an open attempt
+    /// (QA bug qa-018).
+    backoff: Mutex<HashMap<String, i64>>,
 }
+
+/// How long a node waits after its claim could not be written.
+const CLAIM_BACKOFF_MS: i64 = 60_000;
 
 impl Clock {
     pub fn new() -> Arc<Self> {
@@ -131,7 +139,7 @@ pub fn scan(hooks: &Arc<KernelHooks>, clock: &Arc<Clock>) -> Vec<Wake> {
                 }
                 mech.insert(key.clone());
             }
-            let Some((n, attempt)) = claim(hooks, id, n, now) else {
+            let Some((n, attempt)) = claim(hooks, clock, id, n, now) else {
                 clock.mech.lock().unwrap().remove(&key);
                 continue;
             };
@@ -154,7 +162,7 @@ pub fn scan(hooks: &Arc<KernelHooks>, clock: &Arc<Clock>) -> Vec<Wake> {
         let Some((n, reason)) = fire.wakes.into_iter().next() else {
             continue;
         };
-        let Some((n, attempt)) = claim(hooks, id, n, now) else {
+        let Some((n, attempt)) = claim(hooks, clock, id, n, now) else {
             continue;
         };
         let lo = load_transcript(&hooks.layout(id).transcript())
@@ -177,8 +185,24 @@ pub fn scan(hooks: &Arc<KernelHooks>, clock: &Arc<Clock>) -> Vec<Wake> {
 /// Mark a node active and open its attempt. Disarms the clock on it: a
 /// deferral clears, a recurrence advances from now (missed firings
 /// coalesce into this one).
-fn claim(hooks: &KernelHooks, agent: &str, mut n: Node, now: i64) -> Option<(Node, Attempt)> {
+fn claim(
+    hooks: &KernelHooks,
+    clock: &Clock,
+    agent: &str,
+    mut n: Node,
+    now: i64,
+) -> Option<(Node, Attempt)> {
     let layout = hooks.layout(agent);
+    let key = format!("{agent}#{}", n.id);
+    if clock
+        .backoff
+        .lock()
+        .unwrap()
+        .get(&key)
+        .is_some_and(|until| now < *until)
+    {
+        return None;
+    }
     let _g = hooks.plan_lock.lock().unwrap();
     // Re-read: another writer may have moved it since the scan loaded.
     let fresh = hooks.plan_nodes(agent).into_iter().find(|x| x.id == n.id)?;
@@ -201,7 +225,10 @@ fn claim(hooks: &KernelHooks, agent: &str, mut n: Node, now: i64) -> Option<(Nod
         transcript_hi: None,
         job: None,
     };
-    node::save_attempt(&layout.attempts_jsonl(), &attempt).ok()?;
+    if let Err(e) = node::save_attempt(&layout.attempts_jsonl(), &attempt) {
+        claim_failed(hooks, clock, &key, agent, &format!("attempt: {e:#}"), now);
+        return None;
+    }
     n.status = Status::Active;
     n.attempt = Some(attempt.id.clone());
     n.when.after_ms = None;
@@ -209,8 +236,36 @@ fn claim(hooks: &KernelHooks, agent: &str, mut n: Node, now: i64) -> Option<(Nod
         n.when.next_due_ms = Some(now + every as i64);
     }
     n.updated_ms = now;
-    node::save_node(&layout.plan_jsonl(), &n).ok()?;
+    if let Err(e) = node::save_node(&layout.plan_jsonl(), &n) {
+        // The attempt is on disk but the node is not: close the attempt so
+        // the record says what happened, and leave the node alone for a while.
+        let mut a = attempt;
+        a.ended_ms = Some(now);
+        a.verdict = Some(Verdict::Inconclusive);
+        a.outcome = format!("could not write the plan: {e:#}");
+        a.verified_by = "kernel".into();
+        let _ = node::save_attempt(&layout.attempts_jsonl(), &a);
+        claim_failed(hooks, clock, &key, agent, &format!("node: {e:#}"), now);
+        return None;
+    }
     Some((n, attempt))
+}
+
+fn claim_failed(hooks: &KernelHooks, clock: &Clock, key: &str, agent: &str, why: &str, now: i64) {
+    clock
+        .backoff
+        .lock()
+        .unwrap()
+        .insert(key.to_string(), now + CLAIM_BACKOFF_MS);
+    crate::klog::error(
+        "claim_failed",
+        Some(agent),
+        format!("{key}: {why}; next try in {}s", CLAIM_BACKOFF_MS / 1000),
+    );
+    hooks.broadcast(crate::attach::Frame::Error {
+        agent: Some(agent.to_string()),
+        detail: format!("could not start {key}: {why}"),
+    });
 }
 
 /// The line a spawned child gets when it works in its own worktree: where

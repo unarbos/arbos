@@ -509,7 +509,7 @@ fn handle_frame(
     };
     if let Some(agent) = names {
         if !arbos_core::agent_exists(place, &agent) {
-            eprintln!("frame for unknown agent {agent:?} refused");
+            refuse(hooks, Some(&agent), format!("no agent {agent}"));
             return;
         }
     }
