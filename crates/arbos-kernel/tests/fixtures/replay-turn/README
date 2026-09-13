@@ -1,0 +1,2 @@
+An inbox node (a user prompt the kernel holds) and a one-line replies.jsonl.
+Expect: the replay provider answers, the turn completes, the node is done.

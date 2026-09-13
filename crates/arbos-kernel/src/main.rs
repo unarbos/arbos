@@ -64,6 +64,10 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        "check" => {
+            let code = arbos_kernel::check::run(arbos_kernel::check::Args::parse(args)?)?;
+            std::process::exit(code);
+        }
         "rollout" => {
             let code = arbos_kernel::rollout::run(arbos_kernel::rollout::Args::parse(args)?)?;
             std::process::exit(code);
@@ -105,6 +109,7 @@ fn main() -> Result<()> {
                 "arbos-kernel serve [place] [--provider replay --replies FILE] [--bind HOST:PORT] [--until-idle] [--horizon 1h] [--now 2026-09-13T09:00:00Z]   (off loopback: tokens in <place>/.arbos/access.toml, [[client]] name/token|token_env/role)"
             );
             println!("{}", arbos_kernel::rollout::USAGE);
+            println!("{}", arbos_kernel::check::USAGE);
             println!("{}", arbos_kernel::setup::USAGE);
             println!("{}", arbos_kernel::cli::USAGE);
             println!("{}", arbos_kernel::rewind::USAGE);

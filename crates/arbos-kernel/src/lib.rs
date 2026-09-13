@@ -1,6 +1,7 @@
 pub mod access;
 pub mod attach;
 pub mod browser;
+pub mod check;
 pub mod cli;
 pub mod doors;
 pub mod files;
