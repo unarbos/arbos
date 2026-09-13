@@ -1134,6 +1134,8 @@ fn item_json(item: &ChatItem) -> Value {
             "text": cut(&message.text),
             "images": message.images.len(),
             "files": message.files.len(),
+            "sent_at": message.sent_at,
+            "feedback": message.feedback,
         }),
         ChatItem::From { who, text, .. } => json!({
             "kind": "from",
