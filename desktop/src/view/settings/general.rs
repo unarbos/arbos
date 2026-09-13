@@ -95,13 +95,19 @@ impl SettingsWindow {
             })
             .detach();
         }
+        let permission = voice_ws::mic_permission();
         let note: Option<String> = match &test {
             Some(t) => match &t.error {
                 Some(e) => Some(format!("not hearing: {e}")),
                 None if t.device.is_empty() => Some("opening the microphone…".into()),
-                None => Some(format!("{} · {}%", t.device, (t.level * 100.0).round() as u32)),
+                None => Some(format!(
+                    "{} · {}%{}",
+                    t.device,
+                    (t.level * 100.0).round() as u32,
+                    permission.advice().map(|a| format!(" · {a}")).unwrap_or_default()
+                )),
             },
-            None => None,
+            None => permission.advice().map(str::to_string),
         };
         let level = test.as_ref().map(|t| t.level).unwrap_or(0.0);
         let bar_w = 120.0f32;

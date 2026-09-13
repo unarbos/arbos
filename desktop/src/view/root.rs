@@ -734,6 +734,12 @@ impl Arbos {
         window.focus(composer.as_ref().unwrap_or(&this.focus), cx);
         #[cfg(target_os = "macos")]
         {
+            // A speech server is configured, so the mic will be wanted:
+            // ask macOS now, from this process, so the one dialog comes up
+            // at start rather than mid-sentence on the first Fn press.
+            if crate::voice_ws::configured() {
+                crate::voice_ws::request_mic_permission();
+            }
             let (tx, rx) = futures::channel::mpsc::unbounded();
             this._fn_monitor = Some(crate::view::fn_key::Monitor::start(move |down| {
                 let _ = tx.unbounded_send(down);

@@ -884,6 +884,9 @@ impl Mic {
             .ok()
             .is_none_or(|c| c.trim().is_empty())
         {
+            // Opening the device would ask too; asking first makes the
+            // dialog the app's own even when the device open fails.
+            request_mic_permission();
             match native::Capture::start(tx.clone(), Arc::clone(&shared)) {
                 Ok(capture) => return Ok(Self::Native(capture)),
                 Err(e) => {
@@ -1174,6 +1177,104 @@ mod native {
                 }
                 let _ = self.tx.send(chunk);
             }
+        }
+    }
+}
+
+/// Whether macOS lets this app hear the microphone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicPermission {
+    /// Never asked: the next capture (or [`request_mic_permission`]) puts
+    /// the dialog on screen.
+    NotDetermined,
+    Restricted,
+    /// Jacob said no, or turned it off in Privacy & Security › Microphone.
+    Denied,
+    Authorized,
+    /// Not macOS: nothing to ask.
+    NotApplicable,
+}
+
+impl MicPermission {
+    /// What Settings tells the user to do, when something is in the way.
+    pub fn advice(self) -> Option<&'static str> {
+        match self {
+            Self::Denied | Self::Restricted => Some(
+                "microphone is off for Arbos: System Settings › Privacy & Security › Microphone, turn on Arbos",
+            ),
+            Self::NotDetermined => Some("macOS will ask: click Allow"),
+            Self::Authorized | Self::NotApplicable => None,
+        }
+    }
+}
+
+/// `AVCaptureDevice.authorizationStatusForMediaType:` — the same row
+/// System Settings shows, read from inside the app.
+#[cfg(target_os = "macos")]
+pub fn mic_permission() -> MicPermission {
+    permission::status()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn mic_permission() -> MicPermission {
+    MicPermission::NotApplicable
+}
+
+/// Ask macOS for the microphone from this process, once. The first call
+/// puts the system dialog on screen and gives the app its row under
+/// Privacy & Security › Microphone; later calls return at once. Nothing
+/// is captured. Safe to call from any thread.
+pub fn request_mic_permission() {
+    #[cfg(target_os = "macos")]
+    permission::request();
+}
+
+#[cfg(target_os = "macos")]
+mod permission {
+    use super::MicPermission;
+    use block::ConcreteBlock;
+    use objc::runtime::{BOOL, Object};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    #[link(name = "AVFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static AVMediaTypeAudio: *const Object;
+    }
+
+    pub fn status() -> MicPermission {
+        // AVAuthorizationStatus: notDetermined 0, restricted 1, denied 2,
+        // authorized 3.
+        let code: i64 = unsafe {
+            msg_send![
+                class!(AVCaptureDevice),
+                authorizationStatusForMediaType: AVMediaTypeAudio
+            ]
+        };
+        match code {
+            0 => MicPermission::NotDetermined,
+            1 => MicPermission::Restricted,
+            2 => MicPermission::Denied,
+            _ => MicPermission::Authorized,
+        }
+    }
+
+    pub fn request() {
+        if status() != MicPermission::NotDetermined {
+            return;
+        }
+        let block = ConcreteBlock::new(move |granted: BOOL| {
+            eprintln!(
+                "voice: microphone permission {}",
+                if granted == objc::runtime::YES { "granted" } else { "denied" }
+            );
+        })
+        .copy();
+        unsafe {
+            let _: () = msg_send![
+                class!(AVCaptureDevice),
+                requestAccessForMediaType: AVMediaTypeAudio
+                completionHandler: &*block
+            ];
         }
     }
 }
