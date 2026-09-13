@@ -2043,9 +2043,11 @@ impl Composer {
                 // Cursor's follow-up pill: one row, `+` at the left, the
                 // field, the model's name, then the mic — which becomes the
                 // send arrow the moment there is something to send.
+                // No explicit width: with one, the negative side margins
+                // shift the card instead of widening it, and its right edge
+                // stops short of the strips above (which stretch by margin).
                 div()
                     .id("composer-card")
-                    .w_full()
                     .flex_none()
                     .min_h(px(root::composer_height()))
                     .rounded(px(root::COMPOSER_RADIUS))

@@ -11,7 +11,7 @@ use crate::{
     view::{
         component::{composer, composer::SessionDrag, menu::Menu, surface as board, transcript},
         root::{self, Cydonia, NewSession, Pane},
-        sidebar::Renaming,
+        sidebar::{self, Renaming},
     },
 };
 use bezel::{
@@ -710,8 +710,13 @@ impl Cydonia {
         let place = workspace.active_project().map(|project| project.name());
         let name_field = naming.then(|| self.header_name_field(window, cx));
         // Folded, the sidebar's traffic lights and fold button sit on this
-        // column's left edge; the title starts after them.
-        let lead = if self.sidebar_open { 14. } else { 92. };
+        // column's left edge; the title starts after them — derived from
+        // where the cluster is and how wide it is, not a fixed figure.
+        let lead = if self.sidebar_open {
+            14.
+        } else {
+            sidebar::cluster_left(window) + sidebar::CLUSTER_WIDTH + 14.
+        };
         div()
             .id("chat-header")
             .flex_none()
@@ -1295,7 +1300,9 @@ impl Cydonia {
 
         Some(
             div()
-                .rounded(px(Theme::surface_radius()))
+                .rounded(px(root::COMPOSER_RADIUS))
+                .border_1()
+                .border_color(theme.border)
                 .px(px(root::COMPOSER_PAD_X))
                 .py(px(8.))
                 .flex()
@@ -1571,7 +1578,9 @@ impl Cydonia {
         };
         Some(
             div()
-                .rounded(px(Theme::surface_radius()))
+                .rounded(px(root::COMPOSER_RADIUS))
+                .border_1()
+                .border_color(theme.border)
                 .px(px(root::COMPOSER_PAD_X))
                 .py(px(12.))
                 .flex()
@@ -1711,7 +1720,7 @@ impl Cydonia {
         };
         Some(
             div()
-                .rounded(px(Theme::surface_radius()))
+                .rounded(px(root::COMPOSER_RADIUS))
                 .px(px(14.))
                 .py(px(12.))
                 .flex()
@@ -1875,7 +1884,7 @@ impl Cydonia {
                     .w_full()
                     .px(px(root::COMPOSER_PAD_X))
                     .py(px(9.))
-                    .rounded(px(Theme::surface_radius()))
+                    .rounded(px(root::COMPOSER_RADIUS))
                     .bg(theme.surface_raised.opacity(0.6))
                     .flex()
                     .flex_row()
