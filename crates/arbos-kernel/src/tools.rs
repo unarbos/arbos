@@ -284,7 +284,7 @@ impl Tool for PlanTool {
             "type": "function",
             "function": {
                 "name": "plan",
-                "description": "Your checklist, kept in your notes.md. op:set replaces the whole list; op:add appends one item; op:check marks item n done (or undone with done:false) with a fresh one-line readout; op:update rewrites item n's text; op:remove drops item n; op:show prints it. Items read `[label](target) — status readout`, rewritten fresh on every touch. It schedules nothing: anything timed or event-driven is a subscription (subscribe). Survives restarts and compaction; trust it over conversation memory.",
+                "description": "Your checklist, kept in your notes.md (root: the project page .arbos/notes.md). One call writes it: {\"op\":\"set\",\"items\":[{\"section\":\"Profile\",\"text\":\"[time the sort](bench.py) — not started\"},\"count comparisons\"]}. items may also be a markdown checklist string (\"## Phase\\n- [ ] item\") or nested goals ({\"goal\":\"…\",\"children\":[…]}: a parent with children becomes a ## section). op:add appends one item (text); op:check marks item n done with a readout (done:false reopens); op:update rewrites item n's text; op:remove drops item n; op:show prints it. Items read `[label](target) — status readout`, rewritten fresh on every touch. It schedules nothing: anything timed or event-driven is a subscription (subscribe). Survives restarts and compaction; trust it over conversation memory.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -312,11 +312,54 @@ impl Tool for PlanTool {
         let hooks = Arc::clone(&self.0);
         Box::pin(async move {
             let agent = cx.agent.id.as_str();
-            let op = req(&args, "op")?;
+            // What was meant when `op` is missing or spelt another way: a
+            // list under any of the usual keys is a set; text alone is a
+            // set too when it holds a checklist, else an add.
+            let list_key = [
+                "items",
+                "goals",
+                "nodes",
+                "steps",
+                "tasks",
+                "checklist",
+                "plan",
+                "list",
+            ]
+            .into_iter()
+            .find(|k| args.get(*k).is_some_and(|v| !v.is_null()));
+            let op_raw = opt_str(&args, "op")
+                .or_else(|| opt_str(&args, "action"))
+                .unwrap_or("");
+            let op = match op_raw.trim().to_ascii_lowercase().as_str() {
+                "set" | "replace" | "write" | "create" | "new" => "set",
+                "add" | "append" | "push" => "add",
+                "check" | "done" | "complete" | "finish" | "tick" => "check",
+                "update" | "edit" | "rename" => "update",
+                "remove" | "delete" | "drop" | "cancel" => "remove",
+                "show" | "list" | "get" | "read" | "view" => "show",
+                "" if list_key.is_some() => "set",
+                "" if opt_str(&args, "text")
+                    .or_else(|| opt_str(&args, "markdown"))
+                    .is_some_and(|t| t.contains("\n")) =>
+                {
+                    "set"
+                }
+                "" if opt_str(&args, "text").is_some() => "add",
+                "" if args.as_object().is_none_or(|o| o.is_empty()) => "show",
+                other => anyhow::bail!(
+                    "plan: op {other:?} is not one of set, add, check, update, remove, show. {}",
+                    arbos_core::notes::SHAPES
+                ),
+            };
             let mut notes = hooks.notes(agent);
             let n = || -> Result<usize> {
-                args.get("n")
-                    .and_then(|v| v.as_u64())
+                ["n", "item", "index", "id", "number"]
+                    .iter()
+                    .find_map(|k| args.get(*k))
+                    .and_then(|v| {
+                        v.as_u64()
+                            .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+                    })
                     .map(|v| v as usize)
                     .ok_or_else(|| {
                         anyhow::anyhow!("plan {op}: n (the item number from show) is required")
@@ -324,16 +367,32 @@ impl Tool for PlanTool {
             };
             let ack = match op {
                 "set" => {
-                    let items = arbos_core::notes::items_from_json(
-                        args.get("items")
-                            .ok_or_else(|| anyhow::anyhow!("plan set: items is required"))?,
-                    )?;
+                    let source = list_key
+                        .and_then(|k| args.get(k))
+                        .or_else(|| args.get("text"))
+                        .or_else(|| args.get("markdown"))
+                        .or_else(|| args.get("content"))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("plan set: no items. {}", arbos_core::notes::SHAPES)
+                        })?;
+                    let items = arbos_core::notes::items_from_json(source).map_err(|e| {
+                        anyhow::anyhow!("plan set: {e:#}. {}", arbos_core::notes::SHAPES)
+                    })?;
                     notes.set(&items);
                     hooks.save_notes(agent, &notes)?;
                     format!("Set {} item(s).", items.len())
                 }
                 "add" => {
-                    let text = req(&args, "text")?;
+                    let text = opt_str(&args, "text")
+                        .or_else(|| opt_str(&args, "item"))
+                        .or_else(|| opt_str(&args, "label"))
+                        .or_else(|| opt_str(&args, "goal"))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "plan add: text is required. {}",
+                                arbos_core::notes::SHAPES
+                            )
+                        })?;
                     let k = notes.add(opt_str(&args, "section").unwrap_or(""), text);
                     hooks.save_notes(agent, &notes)?;
                     format!("Added item {k}.")
@@ -362,10 +421,7 @@ impl Tool for PlanTool {
                     hooks.save_notes(agent, &notes)?;
                     format!("Removed: {}", item.text)
                 }
-                "show" => String::new(),
-                other => anyhow::bail!(
-                    "plan: unknown op {other:?} (set, add, check, update, remove, show)"
-                ),
+                _ => String::new(),
             };
             let shown = hooks.notes(agent).show();
             Ok(ToolOut::text(if ack.is_empty() {

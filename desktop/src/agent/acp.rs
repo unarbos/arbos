@@ -875,7 +875,8 @@ pub(crate) fn tool_title(name: &str, hint: Option<&str>) -> String {
     };
     let keep_full = matches!(
         name,
-        "bash" | "run" | "exec" | "grep" | "find" | "tgrep" | "glob"
+        "bash" | "run" | "exec" | "grep" | "find" | "tgrep" | "glob" | "plan" | "subscribe" | "say"
+            | "ask" | "spawn" | "remember"
     );
     let shown = if keep_full {
         hint
@@ -913,6 +914,10 @@ pub(crate) fn tool_hint(name: &str, paths: &[String], args: Option<&Value>) -> O
         other => Some(other.clone()),
     });
     let obj = parsed.as_ref().filter(|value| value.is_object());
+    // The kernel's own tools: say what was asked, not a path.
+    if let Some(summary) = obj.and_then(|o| kernel_tool_hint(name, o)) {
+        return Some(summary);
+    }
     let command = obj
         .and_then(|obj| obj.get("command").and_then(Value::as_str))
         .map(clean_shell)
@@ -936,6 +941,54 @@ pub(crate) fn tool_hint(name: &str, paths: &[String], args: Option<&Value>) -> O
             .filter(|hint| !hint.is_empty())
             .map(str::to_owned)
     })
+}
+
+/// `plan set · 12 items`, `plan check 3`, `subscribe add timer every 1h`,
+/// `say to=root`, `ask "which name…"`, `spawn "brief…"`.
+fn kernel_tool_hint(name: &str, o: &Value) -> Option<String> {
+    let s = |k: &str| o.get(k).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+    let count = |k: &str| o.get(k).and_then(Value::as_array).map(|a| a.len());
+    let head = |t: &str| {
+        let line = t.lines().next().unwrap_or("");
+        let cut: String = line.chars().take(40).collect();
+        if cut.chars().count() < line.chars().count() { format!("{cut}…") } else { cut }
+    };
+    match name {
+        "plan" => {
+            let op = s("op").or_else(|| s("action")).unwrap_or(if o.get("items").is_some() { "set" } else { "" });
+            let n = ["items", "goals", "nodes", "steps", "tasks"].iter().find_map(|k| count(k));
+            let mut out = op.to_string();
+            if let Some(n) = n {
+                out.push_str(&format!(" · {n} item{}", if n == 1 { "" } else { "s" }));
+            } else if let Some(k) = o.get("n").and_then(Value::as_u64) {
+                out.push_str(&format!(" {k}"));
+            } else if let Some(t) = s("text") {
+                out.push_str(&format!(" \"{}\"", head(t)));
+            }
+            Some(out.trim().to_string()).filter(|v| !v.is_empty())
+        }
+        "subscribe" => {
+            let mut out = s("op").unwrap_or("add").to_string();
+            if let Some(k) = s("kind") {
+                out.push(' ');
+                out.push_str(k);
+            }
+            if let Some(e) = s("every") {
+                out.push_str(&format!(" every {e}"));
+            } else if let Some(a) = s("after") {
+                out.push_str(&format!(" after {a}"));
+            }
+            if let Some(id) = o.get("id").and_then(Value::as_u64) {
+                out.push_str(&format!(" #{id}"));
+            }
+            Some(out)
+        }
+        "say" => s("to").map(|to| format!("to={to}")),
+        "ask" => s("question").map(|q| format!("\"{}\"", head(q))),
+        "spawn" => s("brief").map(|b| format!("\"{}\"", head(b))),
+        "remember" => s("fact").or_else(|| s("text")).map(|f| format!("\"{}\"", head(f))),
+        _ => None,
+    }
 }
 
 fn is_job_log(path: &str) -> bool {

@@ -1286,6 +1286,33 @@ fn display_parts(
     output: &str,
     running: bool,
 ) -> (String, Option<String>) {
+    display_parts_for(kind, label, output, running, false)
+}
+
+/// A refused call never reads as an empty step: the row says `refused:`
+/// and the error's first line; the fold body holds the whole error.
+fn display_parts_for(
+    kind: ToolKind,
+    label: &str,
+    output: &str,
+    running: bool,
+    failed: bool,
+) -> (String, Option<String>) {
+    if failed {
+        let first = output
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("no result");
+        let (verb, arg) = display_parts_for(kind, label, "", false, false);
+        let mut detail = arg.unwrap_or_default();
+        if !detail.is_empty() {
+            detail.push_str(" · ");
+        }
+        detail.push_str("refused: ");
+        detail.push_str(&shorten(first, 90));
+        return (verb, Some(detail));
+    }
     if waited_title(label, output).is_some() {
         return (display_title(kind, label, output, running), None);
     }
@@ -3419,7 +3446,7 @@ fn tool(chat: &ChatSession, ix: usize, first: bool, cx: &mut Context<Workspace>)
     // Reads get a cheap peek, not a highlighter — a 400-line file dump
     // is what froze the machine. Searches stay title-only.
     let file_view = display_kind == ToolKind::Read && !output.trim().is_empty();
-    let show_output = (explore.is_none() || file_view) && !output.is_empty();
+    let show_output = (explore.is_none() || file_view || failed) && !output.is_empty();
     let _ = first;
     if display_kind == ToolKind::Edit && edit_body {
         return diff_card(
@@ -3454,7 +3481,13 @@ fn tool(chat: &ChatSession, ix: usize, first: bool, cx: &mut Context<Workspace>)
             tool_row(
                 &theme,
                 tool_icon(display_kind),
-                display_parts(display_kind, label, output, *status == ToolStatus::Running),
+                display_parts_for(
+                    display_kind,
+                    label,
+                    output,
+                    *status == ToolStatus::Running,
+                    failed,
+                ),
                 tone,
                 meta,
                 diff,
