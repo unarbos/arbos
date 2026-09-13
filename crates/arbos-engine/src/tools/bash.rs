@@ -60,6 +60,12 @@ impl Tool for Bash {
                     "boolean",
                 ),
                 (
+                    "keep",
+                    "Let the job outlive this kernel (default: it dies with it and is reaped at the next start).",
+                    false,
+                    "boolean",
+                ),
+                (
                     "timeout_ms",
                     "Hard kill after this many ms.",
                     false,
@@ -133,6 +139,9 @@ impl Tool for Bash {
             let root = JobsRoot::for_agent(&cx.place, &cx.agent.id);
             let sandbox = crate::sandbox::for_agent(&cx.place, &cx.agent);
             let (job, mut child) = root.spawn(cmd, &dir, timeout_ms, sandbox.as_ref())?;
+            if opt_bool(&args, "keep").unwrap_or(false) {
+                let _ = std::fs::write(job.dir.join("keep"), "");
+            }
             let journal = job.journal().display().to_string();
 
             // Reap in the background so the call can return before the

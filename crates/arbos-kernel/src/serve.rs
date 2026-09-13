@@ -213,6 +213,17 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     }
     crate::remote::RemoteHub::restore(&hooks);
 
+    // Jobs left running by an earlier kernel (parent pid 1) end now: the
+    // Mac wake-up incident had one appending to .arbos/user.md every 30 s
+    // for three days across restarts. A `keep` file in the job folder
+    // spares it.
+    for agent in list_agents(&place).unwrap_or_default() {
+        let root = arbos_engine::JobsRoot::for_agent(&place, &agent.id);
+        for line in root.reap_leftovers() {
+            crate::klog::warn("job_reaped", Some(agent.id.as_str()), &line);
+        }
+    }
+
     // A dead kernel's half-run nodes go back to pending. Then continue
     // anyone whose last turn never ended.
     for line in crate::migrate::run(&hooks) {
@@ -368,6 +379,29 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 let control = sched.in_flight.lock().unwrap().remove(&id);
                 hooks.turn_ended(&id);
                 plan::finish_turn(&hooks, &id);
+                // A standing agent's transcript past the cap rolls into the
+                // archive now, between turns; attached windows reload from
+                // the short file the way they do after a rewind.
+                match arbos_core::files::roll_transcript(&place, &id, hooks.caps.transcript_roll_lines) {
+                    Ok(Some(rolled)) => {
+                        let mut fresh = TranscriptTail::default();
+                        let _ = fresh.read_new(&Layout::new(&place, &id).transcript());
+                        tails.insert(id.clone(), fresh);
+                        klog::info(
+                            "transcript_rolled",
+                            Some(&id),
+                            format!("{} lines → {}", rolled.lines, rolled.archive.display()),
+                        );
+                        hooks.broadcast(Frame::Rewound {
+                            agent: id.clone(),
+                            line: 1,
+                            dropped: rolled.lines,
+                            restored: None,
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(e) => klog::warn("transcript_roll_failed", Some(&id), format!("{e:#}")),
+                }
                 // The record of this turn is a commit in .arbos/.
                 crate::snapshot::commit_later(&place, turn_commit_message(&place, &id));
                 // A steer the turn never reached is still a file in the
@@ -720,6 +754,17 @@ fn handle_frame(
             if paused {
                 sched.stop(&agent);
             } else {
+                // Timers that came due while paused start one period from
+                // now: a resume is not a burst of everything missed.
+                let reset = crate::subs::resume_subscriptions(place, &agent, arbos_core::now_ms());
+                if reset > 0 {
+                    klog::info(
+                        "subscriptions_resumed",
+                        Some(&agent),
+                        format!("{reset} rescheduled"),
+                    );
+                    hooks.plan_changed(&agent);
+                }
                 hooks.kick();
             }
             hooks.broadcast(tree_frame(place));

@@ -323,6 +323,60 @@ impl JobsRoot {
         true
     }
 
+    /// Jobs of this agent still alive from an earlier kernel run, ended.
+    /// The leash ends a job when its kernel dies, but a job from before
+    /// the leash, or one whose leash was killed first, runs on with parent
+    /// pid 1 — the Mac wake-up incident: a feed script from three days
+    /// earlier appended to `.arbos/user.md` every 30 s across every
+    /// restart. A folder holding a `keep` file is left alone (a job the
+    /// user asked to survive). The pid is checked against the job's own
+    /// command before the signal, so a reused pid is never killed.
+    pub fn reap_leftovers(&self) -> Vec<String> {
+        let mut reaped = Vec::new();
+        let Ok(entries) = fs::read_dir(&self.0) else {
+            return reaped;
+        };
+        for e in entries.flatten() {
+            let dir = e.path();
+            let Ok(job) = load_dir(&dir) else {
+                continue;
+            };
+            if !job.running() || dir.join("keep").exists() {
+                continue;
+            }
+            if !process_looks_like(job.meta.pid, &dir, &job.meta) {
+                continue;
+            }
+            let _ = fs::write(
+                dir.join("killed"),
+                "killed: left over from an earlier kernel run (reaped at start)\n",
+            );
+            crate::tools::kill_job(job.meta.pid);
+            reaped.push(format!(
+                "{} (pid {}, started {}): {}",
+                job.id,
+                job.meta.pid,
+                arbos_core::inbox::rfc3339(job.meta.started_ms),
+                arbos_core::text::clip(job.meta.command.trim(), 80)
+            ));
+        }
+        reaped
+    }
+
+    /// Jobs of this agent still alive from an earlier kernel run, listed
+    /// (for `check`): id, pid, command.
+    pub fn leftovers(&self) -> Vec<(String, u32, String)> {
+        let Ok(entries) = fs::read_dir(&self.0) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|e| load_dir(&e.path()).ok().map(|j| (e.path(), j)))
+            .filter(|(dir, j)| j.running() && process_looks_like(j.meta.pid, dir, &j.meta))
+            .map(|(_, j)| (j.id.clone(), j.meta.pid, j.meta.command.clone()))
+            .collect()
+    }
+
     /// Remove finished folders older than `JOB_TTL`. Running jobs are never touched.
     pub fn prune(&self) {
         let cutoff = arbos_core::now_ms() - JOB_TTL.as_millis() as i64;
@@ -504,6 +558,71 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(not(unix))]
 fn pid_alive(_pid: u32) -> bool {
     false
+}
+
+/// Whether `pid` is (still) the process of this job and not a later
+/// process that got the same number. On Linux the process's start time
+/// (from /proc) must sit within two minutes of the job's `started_ms`;
+/// elsewhere its command line must name the job's folder (the leash's
+/// first argument) or the job's program.
+fn process_looks_like(pid: u32, dir: &Path, meta: &Meta) -> bool {
+    if !pid_alive(pid) {
+        return false;
+    }
+    if let Some(started) = process_start_ms(pid) {
+        return (started - meta.started_ms).abs() < 120_000;
+    }
+    let Some(args) = process_args(pid) else {
+        // No way to look (no /proc, no ps): trust the pid file.
+        return true;
+    };
+    let dir_s = dir.to_string_lossy();
+    let program = meta
+        .command
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    args.contains(dir_s.as_ref()) || (!program.is_empty() && args.contains(program))
+}
+
+/// Linux: when `pid` started, as Unix millis, from /proc/<pid>/stat field
+/// 22 (clock ticks since boot) and /proc/stat's btime.
+fn process_start_ms(pid: u32) -> Option<i64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name is in parentheses and may hold spaces: split after it.
+    let after = stat.rsplit_once(')')?.1;
+    let fields: Vec<&str> = after.split_whitespace().collect();
+    // Field 22 overall; `after` starts at field 3.
+    let ticks: i64 = fields.get(19)?.parse().ok()?;
+    let btime: i64 = fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    // SAFETY: sysconf is a plain query.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if hz <= 0 {
+        return None;
+    }
+    Some(btime * 1000 + ticks * 1000 / hz)
+}
+
+/// The command line of `pid`, from /proc or `ps`.
+fn process_args(pid: u32) -> Option<String> {
+    if let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) {
+        return Some(String::from_utf8_lossy(&raw).replace('\0', " "));
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "args=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
 /// The wrapper shell: bash when the machine has it (it has `pipefail`;

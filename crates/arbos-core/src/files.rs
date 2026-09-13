@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     agent::{Agent, AgentId, Mode},
-    event::Event,
+    event::{Event, EventKind},
     place::Place,
 };
 
@@ -411,6 +411,79 @@ pub fn load_transcript(path: &Path) -> Result<Vec<Event>> {
     Ok(out)
 }
 
+/// What one transcript roll did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rolled {
+    pub archive: PathBuf,
+    pub lines: u64,
+}
+
+/// Phase 5c, first step. A standing agent's transcript grows without end
+/// (17,969 lines on the Mac). Past `max_lines`, at a turn end, the file
+/// moves to `transcript-archive/NNNN.jsonl` and a fresh transcript opens
+/// with one `compaction` line that carries the newest compaction summary
+/// forward (or a pointer to the archive when there is none), so the model
+/// keeps what it knew and every reader sees a short file. Nothing is
+/// deleted; `grep scope=history` and `read` still reach the archive.
+pub fn roll_transcript(place: &Place, agent: &str, max_lines: u64) -> Result<Option<Rolled>> {
+    if max_lines == 0 {
+        return Ok(None);
+    }
+    let layout = Layout::new(place, agent);
+    let path = layout.transcript();
+    let events = load_transcript(&path)?;
+    let lines = events.len() as u64;
+    if lines <= max_lines {
+        return Ok(None);
+    }
+    // Only between turns: the last line is a turn's end.
+    if !matches!(
+        events.last().map(|e| &e.kind),
+        Some(EventKind::TurnComplete { .. })
+    ) {
+        return Ok(None);
+    }
+    let dir = layout.dir.join("transcript-archive");
+    std::fs::create_dir_all(&dir)?;
+    let n = std::fs::read_dir(&dir)?
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()?
+                .strip_suffix(".jsonl")?
+                .parse::<u32>()
+                .ok()
+        })
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let archive = dir.join(format!("{n:04}.jsonl"));
+    let carried = events.iter().rev().find_map(|e| match &e.kind {
+        EventKind::Compaction { summary, .. } => Some(summary.clone()),
+        _ => None,
+    });
+    let rel = format!(".arbos/agents/{agent}/transcript-archive/{n:04}.jsonl");
+    let summary = match carried {
+        Some(s) => format!(
+            "{s}\n\n[history rolled: the {lines} earlier lines are in {rel}; grep path=.arbos/agents/{agent} or read it for detail]"
+        ),
+        None => format!(
+            "[history rolled: the {lines} earlier lines of this transcript are in {rel}; grep path=.arbos/agents/{agent} or read it for detail]"
+        ),
+    };
+    std::fs::rename(&path, &archive)?;
+    let opener = Event::new(EventKind::Compaction {
+        lo: 1,
+        hi: lines,
+        summary,
+        tokens_before: 0,
+        tokens_after: 0,
+        model: String::new(),
+    });
+    append_event(&path, &opener)?;
+    Ok(Some(Rolled { archive, lines }))
+}
+
 /// Incremental reader for one append-only transcript. Remembers how far it
 /// has read, so a poll costs the new bytes, not a re-parse of the file.
 /// The serve loop polls every agent five times a second; re-parsing a
@@ -552,5 +625,69 @@ pub fn needs_serve(place: &Place, id: &str) -> bool {
         (Some(w), Some(c)) => c < w,
         (Some(_), None) => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod roll_tests {
+    use super::*;
+    use crate::event::EventKind;
+
+    #[test]
+    fn a_long_transcript_rolls_into_the_archive_and_keeps_the_last_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = Place::new(dir.path());
+        let layout = Layout::new(&place, "root");
+        std::fs::create_dir_all(&layout.dir).unwrap();
+        let path = layout.transcript();
+        for i in 0..30 {
+            if i == 10 {
+                append_event(
+                    &path,
+                    &Event::new(EventKind::Compaction {
+                        lo: 1,
+                        hi: 9,
+                        summary: "we decided on blue".into(),
+                        tokens_before: 0,
+                        tokens_after: 0,
+                        model: String::new(),
+                    }),
+                )
+                .unwrap();
+            }
+            append_event(
+                &path,
+                &Event::new(EventKind::Assistant {
+                    text: format!("line {i}"),
+                    reasoning_details: None,
+                }),
+            )
+            .unwrap();
+        }
+        // Not between turns: nothing happens.
+        assert!(roll_transcript(&place, "root", 20).unwrap().is_none());
+        append_event(&path, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+        // Under the cap: nothing happens.
+        assert!(roll_transcript(&place, "root", 100).unwrap().is_none());
+        let rolled = roll_transcript(&place, "root", 20).unwrap().unwrap();
+        assert_eq!(rolled.lines, 32);
+        assert!(rolled.archive.ends_with("transcript-archive/0001.jsonl"));
+        let archived = load_transcript(&rolled.archive).unwrap();
+        assert_eq!(archived.len(), 32);
+        let fresh = load_transcript(&path).unwrap();
+        assert_eq!(fresh.len(), 1);
+        match &fresh[0].kind {
+            EventKind::Compaction { summary, hi, .. } => {
+                assert!(summary.starts_with("we decided on blue"), "{summary}");
+                assert!(
+                    summary.contains("transcript-archive/0001.jsonl"),
+                    "{summary}"
+                );
+                assert_eq!(*hi, 32);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Off: never.
+        assert!(roll_transcript(&place, "root", 0).unwrap().is_none());
     }
 }
