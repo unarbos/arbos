@@ -17,6 +17,9 @@ use tokio_tungstenite::{
 };
 
 const RECONNECT: Duration = Duration::from_millis(800);
+/// A kernel with no HTTP gateway has no board socket to offer; look again
+/// now and then rather than every second.
+const NO_GATEWAY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
@@ -94,9 +97,10 @@ pub enum Event {
     Ready,
 }
 
-pub fn websocket_url(info: &kernel::WebInfo) -> String {
-    let base = info
-        .url
+const NO_GATEWAY_ERR: &str = "no HTTP gateway for this kernel";
+
+pub fn websocket_url(base: &str) -> String {
+    let base = base
         .trim_end_matches('/')
         .replacen("https://", "wss://", 1)
         .replacen("http://", "ws://", 1);
@@ -124,6 +128,9 @@ pub fn listen(
         loop {
             match run(&place, &mut snap_rx, &tx).await {
                 Ok(()) => {}
+                Err(e) if e.to_string() == NO_GATEWAY_ERR => {
+                    tokio::time::sleep(NO_GATEWAY).await;
+                }
                 Err(_) => {
                     tokio::time::sleep(RECONNECT).await;
                 }
@@ -141,13 +148,22 @@ async fn run(
     snaps: &mut mpsc::UnboundedReceiver<Snapshot>,
     tx: &mpsc::UnboundedSender<Event>,
 ) -> Result<()> {
-    let info = tokio::task::spawn_blocking({
+    tokio::task::spawn_blocking({
         let place = place.clone();
         move || kernel::attach_or_spawn_place(&place)
     })
     .await
     .map_err(|e| anyhow!("board attach panicked: {e}"))??;
-    let url = websocket_url(&info);
+    // The board socket is the gateway's (`web.json`), not the attach
+    // port's `tcp://` address, which no WebSocket client can open.
+    let base = tokio::task::spawn_blocking({
+        let place = place.clone();
+        move || kernel::http_base_place(&place)
+    })
+    .await
+    .map_err(|e| anyhow!("board base lookup panicked: {e}"))?
+    .ok_or_else(|| anyhow!(NO_GATEWAY_ERR))?;
+    let url = websocket_url(&base);
     let (ws, _) = tokio::time::timeout(Duration::from_secs(15), connect_async(&url))
         .await
         .map_err(|_| anyhow!("board websocket timed out"))?
