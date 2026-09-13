@@ -169,7 +169,12 @@ fn agent_knock(rest: &Path) -> bool {
         return true;
     };
     let file = file.as_os_str().to_string_lossy();
-    comps.next().is_none() && matches!(file.as_ref(), "plan.md" | "agent.md")
+    match file.as_ref() {
+        // The checklist, the agent's face, and its standing subscriptions.
+        "plan.md" | "agent.md" | "notes.md" => comps.next().is_none(),
+        "subscriptions" => true,
+        _ => false,
+    }
 }
 
 fn desktop_knock(rest: &Path) -> bool {
@@ -221,6 +226,8 @@ mod tests {
             "/p/.arbos/docs/project-context.md",
             "/p/.arbos/agents/root",
             "/p/.arbos/agents/root/plan.md",
+            "/p/.arbos/agents/root/notes.md",
+            "/p/.arbos/agents/root/subscriptions/0001-btc.toml",
         ] {
             assert!(ours(dir, Path::new(path)), "{path} should knock");
         }

@@ -97,6 +97,24 @@ pub struct Resource {
     pub count: usize,
 }
 
+/// A standing subscription one of the agents holds
+/// (`agents/<id>/subscriptions/NNNN-slug.toml`): the only scheduler in
+/// the Cursor-model kernel. Read off the files, so the panel shows them
+/// whether or not that agent's chat is attached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Standing {
+    /// The kernel id of the agent that holds it.
+    pub agent: String,
+    pub id: u32,
+    /// `timer` | `shell` | `github_pr` | `github_ci` | `inbox`.
+    pub kind: String,
+    /// The prompt, command, or pull request, clipped.
+    pub label: String,
+    /// `every 1h · next 15:04`, `once · next 15:04`, `at 09:00`, or empty.
+    pub when: String,
+    pub paused: bool,
+}
+
 /// A project's `.arbos/`, as much of it as the panel draws.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StoreView {
@@ -104,6 +122,8 @@ pub struct StoreView {
     pub context: Option<PathBuf>,
     /// The status page, when one exists (even if still the template).
     pub page: Option<ProjectPage>,
+    /// Every agent's subscriptions, root's first, then by agent and id.
+    pub standing: Vec<Standing>,
     pub resources: Vec<Resource>,
 }
 
@@ -132,9 +152,118 @@ impl StoreView {
         Self {
             context,
             page,
+            standing: read_standing(&store),
             resources,
         }
     }
+}
+
+/// Every `agents/*/subscriptions/*.toml`, parsed leniently: a file the
+/// kernel is mid-write on, or a newer kernel's field, costs one row, not
+/// the panel.
+fn read_standing(store: &Path) -> Vec<Standing> {
+    let mut agents: Vec<(String, PathBuf)> = std::fs::read_dir(store.join("agents"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                entry.path(),
+            )
+        })
+        .collect();
+    agents.sort_by(|a, b| {
+        (a.0 != "root")
+            .cmp(&(b.0 != "root"))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let mut out = Vec::new();
+    for (agent, dir) in agents {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir.join("subscriptions"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        files.sort();
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if let Some(standing) = parse_standing(&agent, &text) {
+                out.push(standing);
+            }
+        }
+    }
+    out
+}
+
+fn parse_standing(agent: &str, text: &str) -> Option<Standing> {
+    let value: toml::Value = toml::from_str(text).ok()?;
+    let table = value.as_table()?;
+    let str_of = |key: &str| table.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+    let id = table.get("id").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+    let kind = str_of("kind").unwrap_or_default();
+    let label = str_of("prompt")
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| str_of("cmd"))
+        .or_else(|| {
+            let repo = str_of("repo")?;
+            let pr = table.get("pr").and_then(|v| v.as_integer())?;
+            Some(format!("{repo}#{pr}"))
+        })
+        .or_else(|| str_of("path"))
+        .unwrap_or_else(|| kind.clone());
+    let label = clip(&label, 60);
+    let next = str_of("next_due").and_then(|s| clock_of(&s));
+    let mut when = match (
+        str_of("every"),
+        str_of("at"),
+        table.get("once").and_then(|v| v.as_bool()),
+    ) {
+        (Some(every), _, _) => format!("every {every}"),
+        (None, Some(at), _) => format!("at {at}"),
+        (None, None, Some(true)) => "once".to_owned(),
+        _ => String::new(),
+    };
+    if let Some(next) = next {
+        if !when.is_empty() {
+            when.push_str(" · ");
+        }
+        when.push_str("next ");
+        when.push_str(&next);
+    }
+    Some(Standing {
+        agent: agent.to_owned(),
+        id,
+        kind,
+        label,
+        when,
+        paused: table
+            .get("paused")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+/// `HH:MM` out of an RFC 3339 instant; the date is the kernel's business.
+fn clock_of(rfc3339: &str) -> Option<String> {
+    let (_, time) = rfc3339.split_once('T')?;
+    let hhmm: String = time.chars().take(5).collect();
+    (hhmm.len() == 5).then_some(hhmm)
+}
+
+fn clip(s: &str, max: usize) -> String {
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if s.chars().count() <= max {
+        return s;
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 impl ProjectPage {
@@ -390,6 +519,25 @@ mod tests {
             text,
         );
         assert!(page.is_empty(), "{page:?}");
+    }
+
+    #[test]
+    fn a_subscription_file_becomes_a_standing_row() {
+        let text = "id = 3\nkind = \"shell\"\ncmd = \"curl -s https://x/btc\"\nevery = \"10m\"\ndeliver_to = \"user\"\nnotify = \"BTC: {output}\"\ncreated = \"2026-09-13T16:00:00Z\"\nnext_due = \"2026-09-13T16:10:00Z\"\n";
+        let s = parse_standing("root", text).unwrap();
+        assert_eq!(s.id, 3);
+        assert_eq!(s.kind, "shell");
+        assert_eq!(s.label, "curl -s https://x/btc");
+        assert_eq!(s.when, "every 10m · next 16:10");
+        assert!(!s.paused);
+        let pr = parse_standing(
+            "w1",
+            "id = 1\nkind = \"github_pr\"\nrepo = \"unarbos/arbos\"\npr = 103\ncreated = \"x\"\n",
+        )
+        .unwrap();
+        assert_eq!(pr.label, "unarbos/arbos#103");
+        assert_eq!(pr.when, "");
+        assert!(parse_standing("w1", "not toml = = =").is_none());
     }
 
     #[test]
