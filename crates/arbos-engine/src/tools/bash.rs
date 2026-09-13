@@ -207,10 +207,10 @@ impl Tool for Bash {
                 }
                 Status::Exited(code) => body.push_str(&format!("\nexit {code}\n")),
                 Status::Killed => {
-                    let why = if timeout_ms.is_some() {
-                        "timed out"
-                    } else {
-                        "was killed"
+                    let why = match &job.killed_why {
+                        Some(why) => why.clone(),
+                        None if timeout_ms.is_some() => "timed out".to_string(),
+                        None => "was killed by a signal from outside the kernel".to_string(),
                     };
                     body.push_str(&format!(
                         "\nCommand {why} before completing (job {})\n",
