@@ -4,7 +4,7 @@
 
 use arbos_core::{
     Do, Node, NodeStatus, Place, PlaceLock, Usage, When,
-    node::can_transition,
+    node::{can_transition, ready},
     wire::{Frame, TreeNode},
 };
 use std::path::PathBuf;
@@ -266,6 +266,44 @@ fn node_serialises_with_snake_case_do_kinds() {
     }
     assert_eq!(NodeStatus::parse("Canceled"), Some(NodeStatus::Cancelled));
     assert_eq!(NodeStatus::parse("nope"), None);
+}
+
+/// qa-013: after a clock rewind a recurring node's next_due can sit days
+/// ahead. It must not go silent for that long: anything further out than
+/// one period is unreachable on the current clock and counts as due.
+#[test]
+fn a_recurring_node_scheduled_past_one_period_is_due_now() {
+    let now = 1_000_000_000_000i64;
+    let every = 30_000u64;
+    let mut n = Node::new("tick");
+    n.when = When {
+        every_ms: Some(every),
+        next_due_ms: Some(now + 10 * 86_400_000),
+        ..When::default()
+    };
+    assert!(
+        ready(&n, false, now),
+        "ten days ahead on a 30s period is a rewound clock"
+    );
+    n.when.next_due_ms = Some(now + every as i64);
+    assert!(
+        !ready(&n, false, now),
+        "exactly one period ahead is a normal schedule"
+    );
+    n.when.next_due_ms = Some(now + 5_000);
+    assert!(!ready(&n, false, now), "a few seconds ahead waits");
+    n.when.next_due_ms = Some(now - 10 * 86_400_000);
+    assert!(
+        ready(&n, false, now),
+        "ten days overdue fires (once; claim re-arms from now)"
+    );
+    // A one-shot deferral far ahead is what the user asked for.
+    let mut once = Node::new("remind");
+    once.when = When {
+        after_ms: Some(now + 10 * 86_400_000),
+        ..When::default()
+    };
+    assert!(!ready(&once, false, now));
 }
 
 #[test]
