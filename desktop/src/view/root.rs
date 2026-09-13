@@ -51,6 +51,7 @@ actions!(
         ShowChat,
         CommitName,
         DismissName,
+        DismissSearch,
         DismissMenu,
         NextEntry,
         PrevEntry,
@@ -70,6 +71,17 @@ const WINDOW_CONTEXT: &str = "CydoniaWindow";
 
 /// Claimed on the rename field so `enter` files the name and `escape` drops it.
 const RENAME_CONTEXT: &str = "CydoniaSessionName";
+/// Claimed on the sidebar search field so `escape` closes it.
+pub(crate) const SEARCH_CONTEXT: &str = "CydoniaSidebarSearch";
+
+fn search_field_entity(cx: &mut Context<Cydonia>) -> Entity<TextField> {
+    cx.new(|cx| {
+        TextField::new(cx)
+            .with_frame(false)
+            .with_key_context(SEARCH_CONTEXT)
+            .with_placeholder("Search chats…")
+    })
+}
 
 fn name_field_entity(heading: bool, cx: &mut Context<Cydonia>) -> Entity<TextField> {
     cx.new(|cx| {
@@ -236,8 +248,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", DismissMenu, Some(WINDOW_CONTEXT)),
         KeyBinding::new("enter", CommitName, Some(RENAME_CONTEXT)),
         KeyBinding::new("escape", DismissName, Some(RENAME_CONTEXT)),
+        KeyBinding::new("escape", DismissSearch, Some(SEARCH_CONTEXT)),
     ]);
     crate::view::bind_field_editing(cx, RENAME_CONTEXT, false);
+    crate::view::bind_field_editing(cx, SEARCH_CONTEXT, false);
 }
 
 /// Resting chat window. macOS can restore a last-used frame that is
@@ -491,6 +505,9 @@ pub struct Cydonia {
     /// on it would park a caret; take the whole title instead, then drop this.
     pub(crate) select_heading: bool,
     pub(crate) name_field: Entity<TextField>,
+    /// The sidebar's chat filter: the field, and whether it is showing.
+    pub(crate) search_field: Entity<TextField>,
+    pub(crate) search_open: bool,
     meter: Entity<Stats>,
     meter_at: Floating,
     /// The rail's scroll. A step taken from the keyboard has to bring its
@@ -498,7 +515,7 @@ pub struct Cydonia {
     pub(crate) rail: UniformListScrollHandle,
     /// Where the focus rests when no field holds it — a board, a table and a
     /// transcript have none — so the bindings below always have a path here.
-    focus: FocusHandle,
+    pub(crate) focus: FocusHandle,
     /// Bumps on every mic click so a late start/stop cannot paint the
     /// opposite state.
     voice_gen: u64,
@@ -602,6 +619,14 @@ impl Cydonia {
         .detach();
 
         let name_field = name_field_entity(false, cx);
+        let search_field = search_field_entity(cx);
+        // Typing in the filter must redraw the list.
+        cx.subscribe(&search_field, |_, _, event: &FieldEvent, cx| {
+            if *event == FieldEvent::Changed {
+                cx.notify();
+            }
+        })
+        .detach();
         let workspace = cx.new(|cx| Workspace::new(settings, state, cx));
         // The model is the only thing that says a session appeared or a turn
         // ended; the composer's placeholder, commands and busy state are all
@@ -656,6 +681,8 @@ impl Cydonia {
             branch_cache: std::cell::RefCell::new(None),
             menu_at_header: false,
             name_field,
+            search_field,
+            search_open: false,
             rail: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
             voice_gen: 0,
@@ -1315,6 +1342,7 @@ impl Render for Cydonia {
             .on_action(cx.listener(Self::delete_chat))
             .on_action(cx.listener(Self::commit_name))
             .on_action(cx.listener(Self::dismiss_name))
+            .on_action(cx.listener(Self::dismiss_search))
             .on_action(cx.listener(Self::dismiss_menu_action))
             // Everything the menu bar names, and only under the conditions
             // that keep its items honest.

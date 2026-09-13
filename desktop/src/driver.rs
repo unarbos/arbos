@@ -1010,6 +1010,7 @@ fn state(root: Option<&Entity<Cydonia>>, window: &Window, cx: &App) -> Value {
         "pane": pane_name(Some(this.pane)),
         "showing": pane_name(this.showing(cx)),
         "sidebar_open": this.sidebar_open,
+        "sidebar_search": this.search_open.then(|| this.search_field.read(cx).content().to_string()),
         "sidebar_width": this.sidebar_width,
         "text_size": workspace.text_size,
         "settings_open": cx.windows().iter().any(|w| w.downcast::<SettingsWindow>().is_some()),

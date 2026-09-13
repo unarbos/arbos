@@ -10,7 +10,7 @@ use crate::{
             menu::{self, Menu},
             surface as board, transcript,
         },
-        root::{self, CommitName, Cydonia, DismissName, NewSession, OpenProject, Pane},
+        root::{self, CommitName, Cydonia, DismissName, DismissSearch, NewSession, OpenProject, Pane},
         settings::Section,
     },
 };
@@ -221,6 +221,28 @@ impl Guide {
 /// between rows.
 /// "3m", "6h", "2d": the coarsest unit that still says something, as
 /// Cursor's sidebar puts it. Under a minute reads "now".
+/// The 6 px dot at the right of a chat row that says its state at a glance.
+fn status_dot(session: &SessionRow, theme: &Theme) -> Option<AnyElement> {
+    let color = if session.working.is_some() {
+        theme.accent
+    } else if session.asking {
+        theme.warning
+    } else if session.standing {
+        theme.text_faint
+    } else {
+        return None;
+    };
+    Some(
+        div()
+            .id(("status-dot", session.id as usize))
+            .flex_none()
+            .size(px(6.))
+            .rounded_full()
+            .bg(color)
+            .into_any_element(),
+    )
+}
+
 fn age_label(at: SystemTime) -> String {
     let secs = at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
     match secs {
@@ -643,6 +665,14 @@ impl Cydonia {
                     this.open_project_action(&root::OpenProject, window, cx)
                 })),
             )
+            // Cursor: a Search row under New Chat. Open, it is the field.
+            .child(if self.search_open {
+                self.search_frame(theme, cx)
+            } else {
+                row("quick-search", icons::system::MAGNIFER, "Search", theme)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx)))
+                    .into_any_element()
+            })
             .child(
                 div()
                     .h(px(22.))
@@ -655,6 +685,93 @@ impl Cydonia {
                     .child("Repositories"),
             )
             .into_any_element()
+    }
+
+    /// The filter field in the Search row's place, focused on open.
+    fn search_frame(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("sidebar-search")
+            .h(px(ROW_PILL))
+            .mx(px(8.))
+            .px(px(6.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .rounded(px(Theme::control_radius()))
+            .bg(theme.element_hover)
+            .text_style(TextStyle::Body)
+            .text_color(theme.text)
+            .child(
+                icons::icon(icons::system::MAGNIFER)
+                    .size(px(14.))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            window.focus(&this.search_field.read(cx).focus_handle(cx), cx);
+                        }),
+                    )
+                    .child(self.search_field.clone()),
+            )
+            .child(
+                div()
+                    .id("sidebar-search-close")
+                    .flex_none()
+                    .size(px(16.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|el| el.bg(theme.element_active))
+                    .child(
+                        icons::icon(icons::system::CLOSE)
+                            .size(px(10.))
+                            .text_color(theme.text_faint),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.dismiss_search(&DismissSearch, window, cx)
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = true;
+        window.focus(&self.search_field.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    pub(crate) fn dismiss_search(
+        &mut self,
+        _: &DismissSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_open = false;
+        self.search_field.update(cx, |field, cx| field.clear(cx));
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// The filter text, lower-cased; empty when the search is closed.
+    pub(crate) fn search_query(&self, cx: &App) -> String {
+        if !self.search_open {
+            return String::new();
+        }
+        self.search_field
+            .read(cx)
+            .content()
+            .trim()
+            .to_ascii_lowercase()
     }
 
     fn project_head(&self, ix: usize, pinned: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -919,8 +1036,16 @@ impl Cydonia {
         let Some(open) = workspace.projects.get(project) else {
             return Vec::new();
         };
+        let query = self.search_query(cx);
         let mut entries: Vec<(bool, i64, u64, Row)> = open
             .roots()
+            .filter(|chat| {
+                query.is_empty()
+                    || workspace
+                        .display_label(chat.id)
+                        .to_ascii_lowercase()
+                        .contains(&query)
+            })
             .map(|chat| {
                 (
                     chat.closed,
@@ -1487,6 +1612,7 @@ impl Cydonia {
     /// One session: its mark and its name.
     fn session_row(&self, session: SessionRow, depth: u8, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        let dot = status_dot(&session, &theme);
         let nested = depth > 0;
         let id = session.id;
         let archived = session.archived;
@@ -1546,6 +1672,10 @@ impl Cydonia {
                     .filter(|_| session.delegate)
                     .map(|since| transcript::spinner(since, tint, cx)),
             )
+            // Cursor's status dot: accent while a turn runs, amber when a
+            // question waits for you, faint for a standing clock. Nothing
+            // when the chat is idle.
+            .children(dot)
             // A question for you outranks a standing clock; one glyph only.
             .when(session.asking, |el| {
                 el.child(
