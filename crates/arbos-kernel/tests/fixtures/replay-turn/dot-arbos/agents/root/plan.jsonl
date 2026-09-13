@@ -1,0 +1,1 @@
+{"id":1,"parent":0,"seq":0,"goal":"Say hello to the user in one short sentence.","when":{"wake":true},"do":{"kind":"agent"},"status":"pending","origin":"user","created_ms":1789280000000,"updated_ms":1789280000000}

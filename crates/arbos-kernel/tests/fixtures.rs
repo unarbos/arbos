@@ -3,7 +3,10 @@
 //!
 //! ```text
 //! tests/fixtures/<name>/
-//! ├── .arbos/…          the authored state (agents, plans, transcripts)
+//! ├── dot-arbos/…       the authored state (agents, plans, transcripts);
+//! │                     copied to `.arbos/` in the scratch place — the
+//! │                     repository ignores `.arbos/`, so the folder must
+//! │                     not carry that name in git
 //! ├── now               optional: the kernel's clock at start (RFC 3339 UTC)
 //! ├── replies.jsonl     optional: the scripted model (--provider replay)
 //! └── expect.sh         run in the place after the kernel exits; 0 = pass
@@ -55,6 +58,16 @@ fn run_fixture(dir: &Path) -> Outcome {
     ));
     let place = scratch.join("place");
     copy_dir(dir, &place);
+    // The authored state travels as `dot-arbos/` (the repo root ignores
+    // `.arbos/`); it is `.arbos/` where the kernel runs.
+    let authored = place.join("dot-arbos");
+    if authored.is_dir() {
+        std::fs::rename(&authored, place.join(".arbos")).unwrap();
+    } else {
+        panic!(
+            "fixture {name} has no dot-arbos/ folder (an `.arbos/` folder would be ignored by git)"
+        );
+    }
     // A config home of its own: a provider that is never reached, so a
     // fixture that forgets replies.jsonl fails fast and clearly.
     let xdg = scratch.join("xdg");

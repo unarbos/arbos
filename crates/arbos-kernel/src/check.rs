@@ -302,6 +302,35 @@ pub fn check(place: &Place) -> Result<Report> {
         }
     }
 
+    // The project's own git must not track .arbos/: the nested repository
+    // would be an embedded gitlink, and every turn's commit inside would
+    // show up as a modified submodule outside. Jacob's Misc/arbos had 161
+    // tracked files there.
+    if place.path.join(".git").exists() {
+        let out = std::process::Command::new("git")
+            .args(["ls-files", "--", ".arbos"])
+            .current_dir(&place.path)
+            .stdin(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = out
+            && out.status.success()
+        {
+            let tracked = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count();
+            if tracked > 0 {
+                r.warn(
+                    ".arbos",
+                    None,
+                    format!(
+                        "the project's git tracks {tracked} file(s) under .arbos/; run `git rm -r --cached .arbos && echo .arbos/ >> .gitignore` in the project so its history and the agent's record stay apart"
+                    ),
+                );
+            }
+        }
+    }
+
     // kernel.json: a live kernel, or a stale file.
     let kj = place.kernel_json();
     if kj.exists() {
