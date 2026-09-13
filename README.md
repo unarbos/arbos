@@ -105,7 +105,7 @@ arbos-kernel answer --approve                     # answer a parked question or 
 - **Rewind**: `.arbos/` is a nested git repository with a commit per turn. `arbos-kernel rewind --back N` cuts the transcript and restores the tree from that checkpoint; the desktop offers "Rewind here".
 - **Call mode**: call a project from the desktop or the phone. A narrator in the voice gateway reads short highlights of the main agent's work, answers "why exactly?" from the record, and never reads code or diffs aloud. Speaking during a turn steers it, like typing.
 
-Design documents: [file-system state](docs/design/filesystem-state-design.md), [agent model (Cursor vs Arbos)](docs/design/cursor-vs-arbos-agent-model.md), [mesh](docs/design/arbos-mesh-design.md), [desktop call mode](docs/design/desktop-call-mode-design.md).
+Design documents: [file-system state](docs/design/filesystem-state-design.md), [agent model (Cursor vs Arbos)](docs/design/cursor-vs-arbos-agent-model.md), [mesh](docs/design/arbos-mesh-design.md), [desktop call mode](docs/design/desktop-call-mode-design.md). The kernel writes the full on-disk protocol into every project as `.arbos/PROTOCOL.md`; `arbos-kernel prompt` prints what an agent is told.
 
 ## Repository
 
