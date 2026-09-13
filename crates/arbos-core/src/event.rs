@@ -6,8 +6,10 @@ pub struct Event {
     /// Identity: the 1-based physical line in transcript.jsonl. Not
     /// written (the position is the identity); set by `load_transcript`,
     /// 0 on an event not yet on disk. Stable because the file is
-    /// append-only and a bad line still occupies its line.
-    #[serde(skip)]
+    /// append-only and a bad line still occupies its line. On the wire
+    /// when non-zero, so a client can tell a transcript line (replayed or
+    /// tailed) from a live emit; never written to the file itself.
+    #[serde(default, skip_serializing_if = "seq_is_zero")]
     pub seq: u64,
     pub ts: i64,
     #[serde(flatten)]
@@ -129,6 +131,10 @@ pub struct ToolRec {
 pub struct Usage {
     pub used: u64,
     pub size: u64,
+}
+
+fn seq_is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Event {
