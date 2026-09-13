@@ -1244,8 +1244,7 @@ async fn webhook(
         return;
     }
     let from = format!("webhook:{}", who.name);
-    // On the plan-engine chain (#92+) this is `hooks.inbox(&agent, &text, &from, Vec::new())`.
-    match hooks.inbox(&agent, arbos_core::Node::inbox(text, from.clone())) {
+    match hooks.inbox(&agent, &text, &from, Vec::new()) {
         Ok(_) => {
             klog::info(
                 "webhook",
