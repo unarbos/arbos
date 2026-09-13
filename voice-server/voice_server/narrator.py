@@ -50,6 +50,13 @@ FORWARD_GRACE_S = 1.5
 ACK = "On it."
 # The caller's yes or no to an approval, as heard.
 _YES = re.compile(r"^\W*(yes|yeah|yep|yup|sure|ok(?:ay)?|allow(?: it)?|go ahead|do it|approved?|fine|please do|of course|affirmative)\b", re.I)
+# A drill-down by its words alone: the speech model does not always claim these with more_detail.
+_DRILL = re.compile(
+    r"^\W*(?:(?:why|what|how|where|which)\b.{0,40}\b(?:exactly|precisely|specifically)|"
+    r"(?:say|read) (?:that|it) again|repeat that|come again|(?:tell me |give me |a bit |some )?more (?:detail|details|about that)|"
+    r"what (?:did|does) (?:it|that|the agent|he|she|they) (?:say|mean|write|change)|what was the (?:error|warning|failure|output))",
+    re.I,
+)
 _NO = re.compile(r"^\W*(no|nope|nah|deny|denied|don'?t|do not|stop|cancel|negative|refuse|not now|never)\b", re.I)
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
@@ -167,6 +174,7 @@ class Narrator:
         model_highlights: bool = False,
         only_asks: bool = False,
         approval_timeout: float = 45.0,
+        drilldown_by_phrase: bool = True,
     ):
         self.kernel = kernel
         self.speak = speak  # voices one line with the gateway TTS; returns when it has been said
@@ -179,6 +187,7 @@ class Narrator:
         self.arbos_talking = arbos_talking
         self.device = device  # phone | desktop: written beside `channel` on every message
         self.only_asks = only_asks  # outside call mode: speak asks and approvals, nothing else
+        self.drilldown_by_phrase = drilldown_by_phrase  # "why exactly…" answers from the record without a tool call
         self.approval_timeout = approval_timeout
         self._ask_timer: asyncio.TimerHandle | None = None
         self.approvals: list[tuple[str, bool, str]] = []  # (id, allowed, by: voice | timeout | card)
@@ -241,6 +250,11 @@ class Narrator:
             return
         if self.pending_ask is not None:
             self.user_said(text, channel=channel)
+            return
+        if self.drilldown_by_phrase and _DRILL.search(text) and any(l.kind in ("highlight", "report", "detail", "error") for l in self.said):
+            # The words ask about what was just said: the record answers, not the agent.
+            self.summary.append(f"voice (drill-down): {text}")
+            asyncio.get_running_loop().create_task(self.more_detail(text))
             return
         self._cancel_pending()
         self._pending = (text, channel)
