@@ -1,0 +1,7 @@
+{
+  "name": "malformed-frames",
+  "doc": "Garbage on the attach socket, unknown frame types, frames for missing agents and nodes, empty prompts. Kernel must survive; a client should learn what was rejected.",
+  "tags": [
+    "adversarial"
+  ]
+}

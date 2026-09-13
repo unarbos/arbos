@@ -1,0 +1,11 @@
+Walking /tmp/arbos-qa-inbox:worktree-cwd-confinement-aae6_g_a/place...
+Found 7 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (306 trigrams, 7 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-inbox:worktree-cwd-confinement-aae6_g_a/home/.cache/arbos/tgrep/ce5b1af7e41971ed
+tools root: 2 calls, wall 149ms, sum 3ms, speedup 0.0x
+tools spawnaworktreechildagent: 2 calls, wall 6ms, sum 0ms, speedup 0.0x
+tools spawnaworktreechildagent: 3 calls, wall 8ms, sum 0ms, speedup 0.0x
+tools spawnaworktreechildagent: 4 calls, wall 11ms, sum 1ms, speedup 0.1x
+tools root: 3 calls, wall 0ms, sum 0ms, speedup 1.0x
+tools root: 2 calls, wall 6ms, sum 6ms, speedup 1.0x

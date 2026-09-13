@@ -1,0 +1,6 @@
+1789259707520 kernel started pid 1704295
+1789259751220 kernel stopped with code 0
+1789259751222 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789259751222 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789259751222 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789259751239 bugs: new 0f2035577c.md, new 3c916ea97a.md, new ef97cb7674.md
