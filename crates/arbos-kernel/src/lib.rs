@@ -22,6 +22,7 @@ pub mod screenshot;
 pub mod secret_tool;
 pub mod serve;
 pub mod setup;
+pub mod snapshot;
 pub mod tools;
 pub mod watch;
 pub mod worktree;

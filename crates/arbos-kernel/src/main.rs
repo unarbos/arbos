@@ -91,6 +91,25 @@ fn main() -> Result<()> {
             let code = arbos_kernel::cli::attach(parsed, all)?;
             std::process::exit(code);
         }
+        "log" => {
+            let mut n = 20usize;
+            let mut place = None;
+            let mut it = args;
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "-n" => n = it.next().and_then(|v| v.parse().ok()).unwrap_or(20),
+                    other => place = Some(other.to_string()),
+                }
+            }
+            let place = arbos_core::Place::new(
+                std::fs::canonicalize(place.unwrap_or_else(|| ".".into()))
+                    .unwrap_or_else(|_| std::env::current_dir().unwrap()),
+            );
+            for line in arbos_kernel::snapshot::log(&place, n)? {
+                println!("{line}");
+            }
+            Ok(())
+        }
         "rewind" => {
             let code = arbos_kernel::rewind::run(arbos_kernel::rewind::Args::parse(args)?)?;
             std::process::exit(code);

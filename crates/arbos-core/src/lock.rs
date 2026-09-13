@@ -16,7 +16,7 @@ pub struct PlaceLock {
 
 impl PlaceLock {
     pub fn acquire(place: &Place) -> Result<Self> {
-        std::fs::create_dir_all(place.arbos())?;
+        std::fs::create_dir_all(place.runtime_dir())?;
         let path = place.lock_path();
         let file = OpenOptions::new()
             .create(true)

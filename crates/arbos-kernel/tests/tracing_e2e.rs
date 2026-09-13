@@ -71,7 +71,7 @@ fn tiny_model_server() -> u16 {
 }
 
 fn log_lines(place: &std::path::Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(place.join(".arbos").join("kernel.log"))
+    std::fs::read_to_string(place.join(".arbos").join("runtime").join("kernel.log"))
         .unwrap_or_default()
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -112,7 +112,8 @@ fn the_kernel_log_traces_and_kernel_json_tell_a_rollout_what_happened() {
     );
     assert!(start["ts"].is_number());
     let kj: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(k.place.join(".arbos").join("kernel.json")).unwrap(),
+        &std::fs::read_to_string(k.place.join(".arbos").join("runtime").join("kernel.json"))
+            .unwrap(),
     )
     .unwrap();
     assert!(kj["version"].is_string() && kj["git_sha"].is_string() && kj["started"].is_number());

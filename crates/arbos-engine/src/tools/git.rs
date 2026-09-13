@@ -242,7 +242,9 @@ pub fn snapshot(cwd: &Path) -> Result<()> {
     {
         let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !sha.is_empty() {
-            let _ = std::fs::write(cwd.join(".arbos").join("checkpoint"), format!("{sha}\n"));
+            let runtime = cwd.join(".arbos").join("runtime");
+            let _ = std::fs::create_dir_all(&runtime);
+            let _ = std::fs::write(runtime.join("checkpoint"), format!("{sha}\n"));
         }
     }
     Ok(())
@@ -338,7 +340,7 @@ fn base_branch(cwd: &Path, git: &dyn Fn(&[&str]) -> Option<String>) -> String {
 }
 
 pub fn undo(cwd: &Path) -> Result<ToolOut> {
-    let mark = cwd.join(".arbos").join("checkpoint");
+    let mark = cwd.join(".arbos").join("runtime").join("checkpoint");
     if let Ok(sha) = std::fs::read_to_string(&mark) {
         let sha = sha.trim();
         if !sha.is_empty() {

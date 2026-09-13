@@ -338,6 +338,8 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 let control = sched.in_flight.lock().unwrap().remove(&id);
                 hooks.turn_ended(&id);
                 plan::finish_turn(&hooks, &clock, &id);
+                // The record of this turn is a commit in .arbos/.
+                crate::snapshot::commit_later(&place, turn_commit_message(&place, &id));
                 // Said to a running agent, but its turn ended before the
                 // next tool boundary: each one becomes a turn of its own.
                 if let Some(control) = control {
@@ -1051,7 +1053,12 @@ fn write_kernel_json(
         git_sha: klog::git_sha().into(),
         log: klog::log_path_for(&place.arbos()).display().to_string(),
     };
-    std::fs::write(place.kernel_json(), serde_json::to_string_pretty(&info)?)?;
+    let text = serde_json::to_string_pretty(&info)?;
+    std::fs::create_dir_all(place.runtime_dir())?;
+    std::fs::write(place.kernel_json(), &text)?;
+    // One release of the old location too, for windows and phones that
+    // still look there. It is ignored by the .arbos/ repository.
+    let _ = std::fs::write(place.legacy_kernel_json(), &text);
     Ok(())
 }
 
@@ -1390,4 +1397,25 @@ fn rewind_live(
         });
         hooks.broadcast(hooks.plan_frame(&agent));
     });
+}
+
+/// `<agent> turn L<line>: <the last words>` — what the .arbos/ commit for a
+/// finished turn says.
+fn turn_commit_message(place: &Place, agent: &str) -> String {
+    let events = load_transcript(&Layout::new(place, agent).transcript()).unwrap_or_default();
+    let line = events.len();
+    let last = events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.kind {
+            EventKind::Assistant { text, .. } if !text.trim().is_empty() => {
+                Some(text.lines().next().unwrap_or("").trim().to_string())
+            }
+            EventKind::Interrupted { detail } => Some(format!("interrupted: {detail}")),
+            EventKind::Notice { text, failed: true } => Some(format!("failed: {text}")),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let last: String = last.chars().take(120).collect();
+    format!("{agent} turn L{line}: {last}")
 }
