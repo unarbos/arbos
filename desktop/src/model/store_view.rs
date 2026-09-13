@@ -124,6 +124,10 @@ pub struct StoreView {
     pub page: Option<ProjectPage>,
     /// Every agent's subscriptions, root's first, then by agent and id.
     pub standing: Vec<Standing>,
+    /// Whether any agent has a `subscriptions/` folder at all: the
+    /// Cursor-model kernel. Without one, the panel falls back to what
+    /// attached chats report in their plan.
+    pub standing_known: bool,
     pub resources: Vec<Resource>,
 }
 
@@ -149,10 +153,12 @@ impl StoreView {
                 (count > 0).then_some(Resource { label, count })
             })
             .collect();
+        let (standing, standing_known) = read_standing(&store);
         Self {
             context,
             page,
-            standing: read_standing(&store),
+            standing,
+            standing_known,
             resources,
         }
     }
@@ -161,7 +167,7 @@ impl StoreView {
 /// Every `agents/*/subscriptions/*.toml`, parsed leniently: a file the
 /// kernel is mid-write on, or a newer kernel's field, costs one row, not
 /// the panel.
-fn read_standing(store: &Path) -> Vec<Standing> {
+fn read_standing(store: &Path) -> (Vec<Standing>, bool) {
     let mut agents: Vec<(String, PathBuf)> = std::fs::read_dir(store.join("agents"))
         .into_iter()
         .flatten()
@@ -180,10 +186,13 @@ fn read_standing(store: &Path) -> Vec<Standing> {
             .then_with(|| a.0.cmp(&b.0))
     });
     let mut out = Vec::new();
+    let mut known = false;
     for (agent, dir) in agents {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(dir.join("subscriptions"))
-            .into_iter()
-            .flatten()
+        let Ok(entries) = std::fs::read_dir(dir.join("subscriptions")) else {
+            continue;
+        };
+        known = true;
+        let mut files: Vec<PathBuf> = entries
             .flatten()
             .map(|entry| entry.path())
             .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
@@ -198,7 +207,7 @@ fn read_standing(store: &Path) -> Vec<Standing> {
             }
         }
     }
-    out
+    (out, known)
 }
 
 fn parse_standing(agent: &str, text: &str) -> Option<Standing> {
