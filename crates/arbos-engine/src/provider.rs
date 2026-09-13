@@ -222,6 +222,9 @@ pub struct Provider {
     pub trace_agent: String,
     pub trace_purpose: String,
     pub trace_line: u64,
+    /// A script instead of the network (`ARBOS_PROVIDER=replay`). Every
+    /// call returns the next line; see [`crate::replay`].
+    pub replay: Option<std::sync::Arc<crate::replay::Replay>>,
 }
 
 /// Everything one provider call did, for the trace file.
@@ -473,6 +476,9 @@ impl Provider {
         ) {
             body["reasoning_effort"] = json!(effort);
         }
+        if let Some(replay) = &self.replay {
+            return Ok(self.replayed(replay, body, &mut on_delta));
+        }
         let url = format!("{}/chat/completions", self.base.trim_end_matches('/'));
         let mut trace = Trace {
             started_ms: now_ms(),
@@ -502,6 +508,44 @@ impl Provider {
         }
         trace.write(&self.trace);
         result
+    }
+
+    /// The scripted answer, delivered like a streamed one (one text delta,
+    /// one delta per call) and traced like one, with `replay:<file>` as
+    /// the URL.
+    fn replayed(
+        &self,
+        replay: &crate::replay::Replay,
+        body: Value,
+        on_delta: &mut impl FnMut(Delta),
+    ) -> Completion {
+        let mut trace = Trace {
+            started_ms: now_ms(),
+            agent: self.trace_agent.clone(),
+            purpose: self.trace_purpose.clone(),
+            transcript_line: self.trace_line,
+            url: format!("replay:{}", replay.path.display()),
+            model: self.model.clone(),
+            request: if self.trace.is_some() {
+                body
+            } else {
+                Value::Null
+            },
+            ..Trace::default()
+        };
+        let c = replay.next(&self.trace_agent);
+        if !c.content.is_empty() {
+            on_delta(Delta::Text(c.content.clone()));
+        }
+        for call in &c.calls {
+            on_delta(Delta::Call(call.clone()));
+        }
+        trace.content = c.content.clone();
+        trace.calls = c.calls.clone();
+        trace.call_ids = c.calls.iter().map(|c| c.id.clone()).collect();
+        trace.usage = c.usage;
+        trace.write(&self.trace);
+        c
     }
 
     async fn stream_inner(

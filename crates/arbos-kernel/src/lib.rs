@@ -11,6 +11,7 @@ pub mod plan;
 pub mod pty;
 pub mod record;
 pub mod remote;
+pub mod rollout;
 pub mod sched;
 pub mod screenshot;
 pub mod secret_tool;

@@ -11,6 +11,7 @@ mod jobs;
 pub mod project;
 mod prompt;
 mod provider;
+pub mod replay;
 mod retry;
 pub mod sandbox;
 pub mod secrets;

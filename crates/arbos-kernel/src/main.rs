@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 fn main() -> Result<()> {
     // A write past a file-size limit (quota, ulimit -f) raises SIGXFSZ,
@@ -12,12 +12,39 @@ fn main() -> Result<()> {
     let cmd = args.next().unwrap_or_else(|| "serve".into());
     match cmd.as_str() {
         "serve" => {
-            let place = args
-                .next()
+            // `serve [place] [--provider replay --replies FILE]`: the
+            // provider choice goes into the environment before the runtime
+            // starts, where every turn reads it.
+            let mut place = None;
+            let mut provider = None;
+            let mut replies = None;
+            while let Some(a) = args.next() {
+                match a.as_str() {
+                    "--provider" => provider = args.next(),
+                    "--replies" => replies = args.next(),
+                    other if other.starts_with('-') => bail!("serve: unknown flag {other}"),
+                    other => place = Some(other.to_string()),
+                }
+            }
+            match provider.as_deref() {
+                None => {}
+                Some("replay") => {
+                    let file = replies.context("--provider replay needs --replies FILE")?;
+                    arbos_engine::replay::select(std::path::Path::new(&file));
+                }
+                Some(other) => bail!(
+                    "serve: unknown provider {other} (only replay is selectable here; the model provider is in config.toml)"
+                ),
+            }
+            let place = place
                 .or_else(|| std::env::var("PWD").ok())
                 .unwrap_or_else(|| ".".into());
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(arbos_kernel::serve::run(place))
+        }
+        "rollout" => {
+            let code = arbos_kernel::rollout::run(arbos_kernel::rollout::Args::parse(args)?)?;
+            std::process::exit(code);
         }
         "setup" => arbos_kernel::setup::run(arbos_kernel::setup::Args::parse(args)?),
         "run" => {
@@ -39,7 +66,8 @@ fn main() -> Result<()> {
             std::process::exit(code);
         }
         "help" | "-h" | "--help" => {
-            println!("arbos-kernel serve [place]");
+            println!("arbos-kernel serve [place] [--provider replay --replies FILE]");
+            println!("{}", arbos_kernel::rollout::USAGE);
             println!("{}", arbos_kernel::setup::USAGE);
             println!("{}", arbos_kernel::cli::USAGE);
             Ok(())
