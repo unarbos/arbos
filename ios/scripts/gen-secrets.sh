@@ -12,7 +12,9 @@ read_field() { op item get "$1" --vault Arbos --fields "label=$2" --reveal 2>/de
 VOICE_TOKEN="$(read_field jmldktl7rrc4rw4sm2akej4qne credential)"
 KERNEL_TOKEN="$(read_field 4vgzvrtucv6dm7eyaw42ckqsv4 credential)"
 HUB_TOKEN="$(read_field 6uihrhmgfwncp3jz3vxtfxklhi credential)"
-HUB_URL="$(read_field 6uihrhmgfwncp3jz3vxtfxklhi url)"
+# Hub address: the vault's stable name, unless ARBOS_HUB_URL names the
+# interim quick tunnel, unless the published directory has a `hub:` line.
+HUB_URL="${ARBOS_HUB_URL:-$(read_field 6uihrhmgfwncp3jz3vxtfxklhi url)}"
 
 DIRECTORY="$(curl -fsS --max-time 8 https://raw.githubusercontent.com/unarbos/arbos/qa-results/voice-endpoint.txt || true)"
 VOICE_URL="$(printf '%s\n' "$DIRECTORY" | grep -v '^#' | grep -m1 '^http' | sed -e 's#^https://#wss://#' -e 's#^http://#ws://#' -e 's#/*$#/ws#')"

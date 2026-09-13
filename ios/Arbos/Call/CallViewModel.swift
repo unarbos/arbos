@@ -219,6 +219,7 @@ final class CallViewModel: ObservableObject {
             if audio.isPlaying || phase == .speaking {
                 audio.stopPlayback()
                 link.interrupt()
+                markSpeaking(false, after: 0)
                 responseDone = true
                 metric("barge_in_speech_started", since: bargeStartedAt)
             }
@@ -254,6 +255,7 @@ final class CallViewModel: ObservableObject {
             }
             responseDone = false
             phase = .speaking
+            markSpeaking(true)
             audio.play(pcm16: pcm)
         case .assistantTranscript(let delta):
             trace("reply: \(delta)")
@@ -277,7 +279,31 @@ final class CallViewModel: ObservableObject {
     }
 
     private func playbackDrained() {
+        markSpeaking(false, after: 0.3)
         settle()
+    }
+
+    private var speakingMarked = false
+    private var speakingOff: Task<Void, Never>?
+
+    /// `client.speaking` to the server: on with the first reply chunk, off
+    /// a beat after the speaker drains (echo tails the audio). New audio
+    /// in that beat cancels the off.
+    private func markSpeaking(_ speaking: Bool, after delay: TimeInterval = 0) {
+        speakingOff?.cancel()
+        speakingOff = nil
+        if speaking {
+            guard !speakingMarked else { return }
+            speakingMarked = true
+            link.setSpeaking(true)
+        } else if speakingMarked {
+            speakingOff = Task { [weak self] in
+                if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+                guard let self, !Task.isCancelled else { return }
+                self.speakingMarked = false
+                self.link.setSpeaking(false)
+            }
+        }
     }
 
     /// Back to listening once nobody is working and nothing is playing.
@@ -373,6 +399,9 @@ final class CallViewModel: ObservableObject {
         #endif
         link.unsubscribe(subscription)
         subscription = nil
+        speakingOff?.cancel()
+        speakingOff = nil
+        speakingMarked = false
         busyWatch = nil
         chat.onAgentMessage = nil
         audio.onCapture = nil

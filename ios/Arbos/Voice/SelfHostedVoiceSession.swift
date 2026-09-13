@@ -10,6 +10,7 @@ import Foundation
 ///     `session.start { format: { type: "audio/pcm", rate: 24000 } }`
 ///     <binary>                       microphone audio
 ///     `speak { text }`               voice this text (gateway TTS)
+///     `client.speaking { speaking }` the phone's speaker is (not) playing a reply
 ///     `interrupt`                    drop the current reply
 ///     `text.input { text }`          a typed turn
 ///     `text.cancel`
@@ -94,6 +95,11 @@ final class SelfHostedVoiceSession: VoiceSession {
 
     func cancelText() {
         socket?.send(json: ["type": "text.cancel"])
+    }
+
+    func setSpeaking(_ speaking: Bool) {
+        guard !closed else { return }
+        socket?.send(json: ["type": "client.speaking", "speaking": speaking])
     }
 
     func interrupt() {

@@ -31,6 +31,10 @@ protocol VoiceSession: AnyObject {
     func sendText(_ text: String)
     func cancelText()
 
+    /// Tell the server whether the phone's speaker is playing a reply, so
+    /// its echo gate can tighten while it is.
+    func setSpeaking(_ speaking: Bool)
+
     /// The user started talking over the reply. Drop the rest of it.
     func interrupt()
 

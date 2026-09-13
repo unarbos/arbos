@@ -90,6 +90,7 @@ final class VoiceLink: ObservableObject {
     }
 
     func speak(_ text: String) { session?.speak(text) }
+    func setSpeaking(_ speaking: Bool) { session?.setSpeaking(speaking) }
     func sendText(_ text: String) { session?.sendText(text) }
     func cancelText() { session?.cancelText() }
     func interrupt() { session?.interrupt() }
