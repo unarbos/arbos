@@ -340,6 +340,19 @@ fn transcript_tail_reads_only_new_lines_and_numbers_them_like_load_transcript() 
         again[0].seq, 1,
         "a replaced file is numbered from its first line"
     );
+
+    // qa-002: a different file of the same length (a chat deleted and
+    // recreated, a fork's transcript copied in) is also a replacement.
+    let swap = dir.join("swap.jsonl");
+    std::fs::copy(&path, &swap).unwrap();
+    std::fs::rename(&swap, &path).unwrap();
+    let swapped = tail.read_new(&path).unwrap();
+    assert_eq!(
+        swapped.len(),
+        1,
+        "same length, new inode: read from the start again"
+    );
+    assert_eq!(swapped[0].seq, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
