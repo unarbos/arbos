@@ -60,6 +60,11 @@ impl Clock {
     pub fn turn_for(&self, agent: &str) -> Option<TurnMeta> {
         self.turns.lock().unwrap().get(agent).cloned()
     }
+
+    /// Anything of the plan's in flight: a shell/condition run or a turn.
+    pub fn busy(&self) -> bool {
+        !self.mech.lock().unwrap().is_empty() || !self.turns.lock().unwrap().is_empty()
+    }
 }
 
 /// Kernel start: nodes left `active` by a dead kernel are settled. A node

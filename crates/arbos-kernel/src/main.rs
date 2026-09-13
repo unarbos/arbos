@@ -27,6 +27,19 @@ fn main() -> Result<()> {
                         // SAFETY: before the runtime and its threads start.
                         unsafe { std::env::set_var(arbos_kernel::access::BIND_ENV, addr) };
                     }
+                    "--until-idle" => set_env(arbos_kernel::idle::UNTIL_IDLE_ENV, "1"),
+                    "--horizon" => set_env(
+                        arbos_kernel::idle::HORIZON_ENV,
+                        &args
+                            .next()
+                            .context("--horizon needs a duration (1h, 30m)")?,
+                    ),
+                    "--now" => set_env(
+                        arbos_core::NOW_ENV,
+                        &args
+                            .next()
+                            .context("--now needs a time (2026-09-13T09:00:00Z)")?,
+                    ),
                     other if other.starts_with('-') => bail!("serve: unknown flag {other}"),
                     other => place = Some(other.to_string()),
                 }
@@ -45,7 +58,11 @@ fn main() -> Result<()> {
                 .or_else(|| std::env::var("PWD").ok())
                 .unwrap_or_else(|| ".".into());
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(arbos_kernel::serve::run(place))
+            let code = rt.block_on(arbos_kernel::serve::run(place))?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
         }
         "rollout" => {
             let code = arbos_kernel::rollout::run(arbos_kernel::rollout::Args::parse(args)?)?;
@@ -72,7 +89,7 @@ fn main() -> Result<()> {
         }
         "help" | "-h" | "--help" => {
             println!(
-                "arbos-kernel serve [place] [--provider replay --replies FILE] [--bind HOST:PORT]   (off loopback: tokens in <place>/.arbos/access.toml, [[client]] name/token|token_env/role)"
+                "arbos-kernel serve [place] [--provider replay --replies FILE] [--bind HOST:PORT] [--until-idle] [--horizon 1h] [--now 2026-09-13T09:00:00Z]   (off loopback: tokens in <place>/.arbos/access.toml, [[client]] name/token|token_env/role)"
             );
             println!("{}", arbos_kernel::rollout::USAGE);
             println!("{}", arbos_kernel::setup::USAGE);
@@ -81,4 +98,10 @@ fn main() -> Result<()> {
         }
         other => bail!("unknown command {other}"),
     }
+}
+
+/// Flags become environment for the process that is about to start.
+fn set_env(key: &str, value: &str) {
+    // SAFETY: called from `main` before the runtime and its threads start.
+    unsafe { std::env::set_var(key, value) };
 }
