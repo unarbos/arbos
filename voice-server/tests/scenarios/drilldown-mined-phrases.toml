@@ -1,0 +1,34 @@
+# Phrases mined from the pod's escalation log (internal/call-mode-escalations.jsonl): questions the
+# caller asked right after a report that went to the main agent instead of the record.
+# "And is that the whole sentence it wrote?" must be a drill-down: answered from the record, the
+# main agent not woken.
+title = "Drill-down by mined phrase: 'is that the whole sentence it wrote?'"
+
+[[steps]]
+say = "Write one sentence about autumn."
+model = { ack = "On it." }
+[steps.kernel]
+reply = "I sent the agent write-autumn to write the sentence."
+[steps.kernel.spawn]
+name = "write-autumn"
+done_after = 2.0
+last_words = "I have written one sentence about autumn: Autumn is a season of vibrant colors, crisp air, and the gentle falling of leaves that carpet the ground in gold."
+
+[[steps]]
+wait_spoken = "write autumn is done"
+
+[[steps]]
+say = "And is that the whole sentence it wrote?"
+model = { quiet = true }
+
+[[steps]]
+wait_spoken = "From the record"
+
+[[steps]]
+wait_quiet = 1.0
+
+[expect]
+narrated_contains = ["From the record", "carpet the ground in gold"]
+kernel_user_not = ["whole sentence"]
+user_frames = 1
+inbox = [{ channel = "voice", kind = "request", device = "desktop" }]

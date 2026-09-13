@@ -1,0 +1,40 @@
+# The approval frame arrives while the speech model is still talking, so the narrator's
+# "Allow?" line waits in the queue. The caller barges in. A barge-in drops queued highlights,
+# but an approval must not vanish with them: it is spoken once the caller stops, and the
+# caller's yes then closes it. (An approval nobody heard is either denied on timeout or, worse,
+# approved by a "yes" meant for something else.)
+title = "Approval: a queued approval survives a barge-in and is still spoken"
+
+[[steps]]
+say = "Clean the build directory."
+[steps.model]
+ack = "On it. Cleaning the build directory means removing every compiled artifact so the next build starts from nothing, which takes a little longer but leaves no stale object files behind, and I will tell you at some length what that involves until you stop me."
+words_per_second = 2.5
+[steps.kernel]
+approval = "bash: rm -rf target && cargo build"
+reply_delay = 0.2
+reply = "Cleaned the build directory and rebuilt: 0 warnings."
+reply_denied = "I did not run the command; the build directory is untouched."
+
+[[steps]]
+barge_in = "Hold on a second."
+after = 3.0
+model = { quiet = true }
+
+[[steps]]
+wait_spoken = "wants to run bash"
+timeout = 20
+
+[[steps]]
+say = "Yes, allow it."
+model = { quiet = true }
+
+[[steps]]
+wait_spoken = "Cleaned the build directory"
+
+[expect]
+interrupted = true
+spoken_contains = ["wants to run bash", "Allowed.", "Cleaned the build directory"]
+spoken_not_contains = ["I denied", "did not run the command"]
+approvals = [true]
+kernel_user_not = ["Yes, allow it"]

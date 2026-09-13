@@ -1,0 +1,28 @@
+# "Okay" opens most spoken sentences. "Okay, wait, don't run that" is a refusal, not consent:
+# the approval must be denied, never allowed because the sentence happened to start with "okay".
+title = "Approval: 'Okay, wait, don't run that' denies"
+
+[[steps]]
+say = "Clean the build directory."
+model = { ack = "On it." }
+[steps.kernel]
+approval = "bash: rm -rf target && cargo build"
+reply = "Cleaned the build directory and rebuilt: 0 warnings."
+reply_denied = "I did not run the command; the build directory is untouched."
+
+[[steps]]
+wait_spoken = "wants to run bash"
+
+[[steps]]
+say = "Okay, wait, don't run that."
+model = { quiet = true }
+
+[[steps]]
+wait_spoken = "did not run the command"
+
+[expect]
+spoken_contains = ["Arbos wants to run bash: rm -rf target && cargo build. Allow?", "Denied.", "did not run the command"]
+spoken_not_contains = ["Allowed.", "Cleaned the build directory"]
+approvals = [false]
+approval_answered_within_s = 20
+kernel_user_not = ["Okay, wait"]

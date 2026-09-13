@@ -49,16 +49,38 @@ FORWARD_GRACE_S = 1.5
 # Said when an utterance goes to the main agent, so the caller knows it landed. The main agent's
 # own reply follows as a highlight several seconds later.
 ACK = "On it."
-# The caller's yes or no to an approval, as heard.
+# The caller's yes or no to an approval, as heard. A yes counts only when the whole utterance is
+# consent: it starts with a yes-word, is short, and carries no deny, no hold-off and no question.
+# "Okay, wait, don't run that" and "Sure, but what does it do?" are not consent. Deny wins.
 _YES = re.compile(r"^\W*(yes|yeah|yep|yup|sure|ok(?:ay)?|allow(?: it)?|go ahead|do it|approved?|fine|please do|of course|affirmative)\b", re.I)
+_DENY = re.compile(r"\b(no(?! problem| worries| doubt)|nope|nah|deny|denied|don'?t|do not|stop|cancel|negative|refuse|not now|never|abort)\b", re.I)
+_HOLD = re.compile(r"\b(wait|hold on|hang on|not yet|one (?:second|sec|moment)|but|first|before|instead|actually|what|why|how|which|where|when|if|unless)\b|\?", re.I)
+CONSENT_MAX_WORDS = 8
 # A drill-down by its words alone: the speech model does not always claim these with more_detail.
+# Grown from internal/call-mode-escalations.jsonl (questions that went to the agent instead).
 _DRILL = re.compile(
     r"^\W*(?:(?:why|what|how|where|which)\b.{0,40}\b(?:exactly|precisely|specifically)|"
     r"(?:say|read) (?:that|it) again|repeat that|come again|(?:tell me |give me |a bit |some )?more (?:detail|details|about that)|"
-    r"what (?:did|does) (?:it|that|the agent|he|she|they) (?:say|mean|write|change)|what was the (?:error|warning|failure|output))",
+    r"what (?:did|does) (?:it|that|the agent|he|she|they) (?:say|mean|write|change|do|produce|output)|what was the (?:error|warning|failure|output)|"
+    r"(?:and |so )?(?:is|was) that (?:the whole|the full|the entire|all|all of it|everything|it)\b|"
+    r"(?:and |so )?(?:did|does) (?:it|that|the agent|he|she|they) (?:write|say|do|finish|change) (?:the whole|all|everything|anything else|more)|"
+    r"(?:and |so )?what else (?:did|does|has) (?:it|that|the agent|he|she|they)\b|"
+    r"(?:and |so )?(?:which|what) (?:sentence|text|words|line|command|file|error|test)s? (?:did|was|were|is) (?:it|that)\b)",
     re.I,
 )
 _NO = re.compile(r"^\W*(no|nope|nah|deny|denied|don'?t|do not|stop|cancel|negative|refuse|not now|never)\b", re.I)
+
+
+def consent(text: str) -> bool | None:
+    """What the caller's words say about an open approval: True allows, False denies, None leaves
+    it open (the words were about something else, or hedged)."""
+    if _DENY.search(text):
+        return False
+    if not _YES.search(text):
+        return None
+    if _HOLD.search(text) or len(text.split()) > CONSENT_MAX_WORDS:
+        return None
+    return True
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
 _RESULT_WORDS = re.compile(
@@ -86,6 +108,7 @@ class Line:
     ref: str = ""
     at: float = field(default_factory=time.monotonic)
     heard: bool | None = None  # None until spoken; False when interrupted
+    asks: str = ""  # the ask id this line puts to the caller; such a line survives a barge-in and is skipped once answered
 
 
 TAILS = ("The rest is {screen}.", "Details are {screen}.", "More {screen}.", "The full reply is {screen}.")
@@ -246,14 +269,22 @@ class Narrator:
     def interrupted(self) -> None:
         """The caller spoke over us: what was being said is not heard; the queue is dropped."""
         self._gen += 1
+        keep: list[Line] = []
         if self._current is not None and self._current.heard is None:
             self._current.heard = False
             self.stats["interrupted"] += 1
+            if self._current.asks:
+                keep.append(Line(self._current.kind, self._current.text, ref=self._current.ref, asks=self._current.asks))
         while not self.queue.empty():
             line = self.queue.get_nowait()
+            if line.asks:
+                keep.append(line)  # a question to the caller is not a highlight: it is asked again, not dropped
+                continue
             line.heard = False
             self.said.append(line)
             self.stats["skipped"] += 1
+        for line in keep:
+            self.queue.put_nowait(line)
 
     # ------------------------------------------------------------------ the caller
 
@@ -336,11 +367,13 @@ class Narrator:
         if self.pending_ask is not None:
             ask = self.pending_ask
             if is_approval(ask):
-                if _YES.search(text):
-                    self._approve(ask, True, by="voice")
-                    return
-                if _NO.search(text):
-                    self._approve(ask, False, by="voice")
+                answer = consent(text)
+                if answer is True and not self._ask_put(ask):
+                    # The caller cannot be allowing a question they have not heard yet.
+                    answer = None
+                    self.summary.append(f"(yes before the approval was spoken; ignored) {channel}: {text}")
+                if answer is not None:
+                    self._approve(ask, answer, by="voice")
                     return
                 # Neither yes nor no: the approval stays open (the card or the timeout closes it)
                 # and the words go where they were going.
@@ -447,7 +480,7 @@ class Narrator:
                 spoken = f"{who}wants to run {tool}: {clip(command, 120)}. Allow?"
                 spoken = spoken[0].upper() + spoken[1:] if who else "Arbos " + spoken
                 self.summary.append(f"approval: {tool}: {clip(command, 80)}")
-                self._enqueue(Line("approval", spoken, ref=f"ask:{frame.get('id') or ''}"))
+                self._enqueue(Line("approval", spoken, ref=f"ask:{frame.get('id') or ''}", asks=str(frame.get("id") or "?")))
                 # Re-ask once at two thirds of the wait, deny at the end.
                 self._ask_timer = asyncio.get_running_loop().call_later(self.approval_timeout * 2 / 3, self._approval_reask, frame)
             else:
@@ -457,7 +490,7 @@ class Narrator:
                 if options:
                     spoken += " Options: " + ", ".join(options) + "."
                 self.summary.append(f"ask: {question}")
-                self._enqueue(Line("ask", spoken, ref=f"ask:{frame.get('id') or ''}"))
+                self._enqueue(Line("ask", spoken, ref=f"ask:{frame.get('id') or ''}", asks=str(frame.get("id") or "?")))
         elif kind == "error":
             detail = clip(str(frame.get("detail") or ""), ERROR_CAP)
             if detail:
@@ -520,13 +553,23 @@ class Narrator:
             return
         tool, command = split_approval(str(ask.get("question") or ""))
         left = self.approval_timeout / 3
-        self._enqueue(Line("approval", f"Still waiting on {tool}: {clip(command, 80)}. Allow? I deny it in {left:.0f} seconds.", ref=f"ask:{ask.get('id') or ''}"))
+        self._enqueue(Line("approval", f"Still waiting on {tool}: {clip(command, 80)}. Allow? I deny it in {left:.0f} seconds.", ref=f"ask:{ask.get('id') or ''}", asks=str(ask.get("id") or "?")))
         self._ask_timer = asyncio.get_running_loop().call_later(left, self._approval_timeout, ask)
+
+    def _ask_put(self, ask: dict) -> bool:
+        """Has the caller heard this ask, at least in part? True once its line started playing."""
+        want = str(ask.get("id") or "?")
+        if self._current is not None and self._current.asks == want:
+            return True
+        return any(l.asks == want and l.heard is not None for l in self.said)
 
     def _approval_timeout(self, ask: dict) -> None:
         if self.pending_ask is not ask:
             return
         self._approve(ask, False, by="timeout")
+
+    def _ask_open(self, ask_id: str) -> bool:
+        return self.pending_ask is not None and str(self.pending_ask.get("id") or "?") == ask_id
 
     def _cancel_ask_timer(self) -> None:
         if self._ask_timer is not None:
@@ -561,11 +604,18 @@ class Narrator:
         if line.kind == "ack" and (not self.queue.empty() or self._current is not None):
             return  # something is being said already; that is acknowledgement enough
         if self.queue.qsize() >= QUEUE_CAP:
-            dropped = self.queue.get_nowait()
-            dropped.heard = False
-            self.said.append(dropped)
-            self.stats["skipped"] += 1
-            line.text = line.text.rstrip(".") + f", and more {self.screen}."
+            # Drop the oldest highlight, never a question to the caller.
+            waiting = [self.queue.get_nowait() for _ in range(self.queue.qsize())]
+            victim = next((l for l in waiting if not l.asks), None)
+            for l in waiting:
+                if l is victim:
+                    l.heard = False
+                    self.said.append(l)
+                    self.stats["skipped"] += 1
+                else:
+                    self.queue.put_nowait(l)
+            if victim is not None and not line.asks:
+                line.text = line.text.rstrip(".") + f", and more {self.screen}."
         self.queue.put_nowait(line)
 
     # ------------------------------------------------------------------ speaking
@@ -586,6 +636,8 @@ class Narrator:
                         f"{len(names)} agents finished: " + "; ".join(l.text for l in names),
                         ref=",".join(l.ref for l in names),
                     )
+            if line.asks and not self._ask_open(line.asks):
+                continue  # answered (by card, by voice, or timed out) before its turn to be spoken
             gen = self._gen
             # Never talk over the caller; wait for the model to finish its own sentence.
             waited = 0.0
@@ -593,6 +645,9 @@ class Narrator:
                 await asyncio.sleep(0.1)
                 waited += 0.1
             if gen != self._gen:  # interrupted while waiting
+                if line.asks:
+                    self.queue.put_nowait(line)  # a question waits for the caller; it is not dropped
+                    continue
                 line.heard = False
                 self.said.append(line)
                 continue
