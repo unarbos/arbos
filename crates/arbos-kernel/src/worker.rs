@@ -84,8 +84,17 @@ fn projects_in(dir: &Path) -> Vec<String> {
 pub fn run(args: Args) -> Result<i32> {
     let dir = std::fs::canonicalize(&args.dir)
         .with_context(|| format!("--dir {}: not a directory", args.dir.display()))?;
-    let cfg = HubConfig::resolve(args.hub.as_deref(), args.machine.as_deref())?
-        .context("worker: no hub; pass --hub wss://… or write ~/.config/arbos/hub.toml")?;
+    // Flags, then the environment `serve` also reads, then hub.toml.
+    let url = args
+        .hub
+        .clone()
+        .or_else(|| std::env::var(hub_link::URL_ENV).ok());
+    let machine = args
+        .machine
+        .clone()
+        .or_else(|| std::env::var(hub_link::MACHINE_ENV).ok());
+    let cfg = HubConfig::resolve(url.as_deref(), machine.as_deref())?
+        .context("worker: no hub; pass --hub wss://… (or ARBOS_HUB) or write ~/.config/arbos/hub.toml")?;
     // Fail now, not at the first claim, when the token is missing.
     cfg.token()?;
     let rt = tokio::runtime::Runtime::new()?;
