@@ -41,3 +41,7 @@ arbos-kernel attach --json > /tmp/events.jsonl &
 6. Kill the kernel while `run` waits → exit 1, not a hang.
 7. History replay: on a fresh kernel the serve loop broadcasts the whole transcript once; `run` must not print old turns. Test on a place with a long transcript.
 8. `ask` without a tty: exit 3; then `arbos-kernel run "the answer"` should not work as an answer (there is no `answer` subcommand yet) — file that as a gap if you want one.
+
+## Update 2026-09-13: `answer` subcommand (P-06b)
+
+`arbos-kernel answer [--place DIR] [--agent ID] [--follow] [--json] ("<text>" | --approve | --deny)` sends an `Answer` (or bash `Approve`) frame to the live kernel — no spawn; a question only waits in a running kernel — and exits 0, or with `--follow` streams the rest of the turn like `run` does (same exit codes). `run`'s exit-3 hint now names it. Attack: answer when nothing is waiting (accepted silently: the kernel appends an Answer event nobody consumes — decide if that should be an error); `--approve` when the pending question is a text ask (the kernel keys approvals on `agent:bash`, so nothing resolves); two answers in a row; `--follow` when the turn had already ended.
