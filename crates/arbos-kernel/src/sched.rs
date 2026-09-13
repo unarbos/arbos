@@ -103,6 +103,20 @@ impl Scheduler {
                 let _ = done.send(id);
                 return;
             }
+            // An outside ACP program runs this kind's turns (P-14).
+            if crate::acp_worker::command_for(&place, &agent).is_some() {
+                let res = crate::acp_worker::turn(place, agent, wake, hooks, control).await;
+                match &res {
+                    Ok(()) => crate::klog::info(
+                        "turn_end",
+                        Some(&id),
+                        format!("acp {:.1}s", started.elapsed().as_secs_f64()),
+                    ),
+                    Err(e) => crate::klog::error("turn_error", Some(&id), format!("acp: {e:#}")),
+                }
+                let _ = done.send(id);
+                return;
+            }
             let wrap = TurnHooks {
                 inner: hooks,
                 agent: wake.agent.clone(),

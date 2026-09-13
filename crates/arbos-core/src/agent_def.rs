@@ -21,6 +21,10 @@ pub struct AgentDef {
     pub allowlist: Vec<String>,
     pub readonly: bool,
     pub cwd: Option<PathBuf>,
+    /// An outside program that speaks the Agent Client Protocol runs this
+    /// kind's turns (P-14): the command line, started in the agent's cwd,
+    /// e.g. `npx -y @zed-industries/claude-code-acp`.
+    pub acp: Option<String>,
     /// Standing instructions for the child: the text after the front matter.
     pub body: String,
     pub path: PathBuf,
@@ -112,6 +116,7 @@ impl AgentDef {
                 }
                 "readonly" => def.readonly = matches!(value, "true" | "yes" | "1"),
                 "cwd" if !value.is_empty() => def.cwd = Some(PathBuf::from(value)),
+                "acp" | "acp_command" if !value.is_empty() => def.acp = Some(value.to_string()),
                 _ => {}
             }
         }
@@ -132,6 +137,9 @@ impl AgentDef {
         let mut flags = Vec::new();
         if self.readonly {
             flags.push("readonly".to_string());
+        }
+        if self.acp.is_some() {
+            flags.push("acp: an outside agent program".to_string());
         }
         if !self.model.is_empty() && self.model != "inherit" {
             flags.push(format!("model {}", self.model));
