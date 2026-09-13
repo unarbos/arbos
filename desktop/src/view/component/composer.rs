@@ -2174,7 +2174,10 @@ impl Composer {
                 // send arrow the moment there is something to send.
                 div()
                     .id("composer-card")
-                    .w_full()
+                    // No explicit width: the column stretches it, and the
+                    // negative margins then bleed both edges like the
+                    // strips above it do. `w_full` pinned it to the column
+                    // width and only shifted it left.
                     .flex_none()
                     .min_h(px(root::composer_height()))
                     .rounded(px(root::COMPOSER_RADIUS))

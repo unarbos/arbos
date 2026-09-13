@@ -297,6 +297,8 @@ const CLUSTER_PAD: f32 = 2.;
 /// The floating cluster's height, half of which is the pill's radius: a ghost
 /// button's box — a 14pt glyph in 4pt of padding — inside that inset.
 const CLUSTER_HEIGHT: f32 = 14. + 2. * 4. + 2. * CLUSTER_PAD;
+/// The folded cluster holds one square button, so it is as wide as it is tall.
+pub(crate) const CLUSTER_WIDTH: f32 = CLUSTER_HEIGHT;
 
 /// A row's name. Agents use body; children use caption so the step down
 /// the tree is a size you can see, not only an indent.

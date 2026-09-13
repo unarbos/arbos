@@ -12,7 +12,7 @@ use crate::{
     view::{
         component::{composer, composer::SessionDrag, menu::Menu, surface as board, transcript},
         root::{self, Arbos, NewSession, Pane},
-        sidebar::Renaming,
+        sidebar::{self, Renaming},
     },
 };
 use bezel::{
@@ -812,8 +812,14 @@ impl Arbos {
         let place = workspace.active_project().map(|project| project.name());
         let name_field = naming.then(|| self.header_name_field(window, cx));
         // Folded, the sidebar's traffic lights and fold button sit on this
-        // column's left edge; the title starts after them.
-        let lead = if self.sidebar_open { 14. } else { 92. };
+        // column's left edge; the title starts after them. The cluster
+        // begins at TOOLBAR_INSET and is CLUSTER_WIDTH wide, so a fixed
+        // 92pt put the button over the title's first letters.
+        let lead = if self.sidebar_open {
+            14.
+        } else {
+            root::TOOLBAR_INSET + sidebar::CLUSTER_WIDTH + 10.
+        };
         div()
             .id("chat-header")
             .flex_none()
