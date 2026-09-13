@@ -172,6 +172,7 @@ mod platform {
     //! prompts, which we raise from the UI thread that calls `request`.
 
     use super::{Requested, Status};
+    use crate::voice_ws::{self, MicPermission};
     use block::ConcreteBlock;
     use objc::{
         class, msg_send,
@@ -183,7 +184,6 @@ mod platform {
         sync::atomic::{AtomicI64, Ordering},
     };
 
-    #[link(name = "AVFoundation", kind = "framework")]
     #[link(name = "UserNotifications", kind = "framework")]
     unsafe extern "C" {}
 
@@ -200,40 +200,19 @@ mod platform {
         static kAXTrustedCheckOptionPrompt: *const c_void;
     }
 
-    /// `AVMediaTypeAudio` is the string `soun`; naming it here keeps the
-    /// constant's symbol out of the link.
-    fn media_type_audio() -> *mut Object {
-        unsafe {
-            let s: *mut Object = msg_send![class!(NSString), alloc];
-            let bytes = b"soun\0";
-            msg_send![s, initWithUTF8String: bytes.as_ptr()]
-        }
-    }
-
-    /// `AVAuthorizationStatus`: 0 not determined, 1 restricted, 2 denied,
-    /// 3 authorized.
+    /// The microphone is `voice_ws`'s: the same `AVCaptureDevice` read and
+    /// request the capture path uses, so this row and the first take lead to
+    /// the one dialog.
     pub fn microphone_status() -> Status {
-        let status: i64 = unsafe {
-            let media = media_type_audio();
-            msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: media]
-        };
-        match status {
-            3 => Status::Granted,
-            0 => Status::NotAsked,
-            _ => Status::Denied,
+        match voice_ws::mic_permission() {
+            MicPermission::Authorized | MicPermission::NotApplicable => Status::Granted,
+            MicPermission::NotDetermined => Status::NotAsked,
+            MicPermission::Denied | MicPermission::Restricted => Status::Denied,
         }
     }
 
     pub fn request_microphone() -> Requested {
-        unsafe {
-            let media = media_type_audio();
-            let handler = ConcreteBlock::new(move |_granted: BOOL| {}).copy();
-            let () = msg_send![
-                class!(AVCaptureDevice),
-                requestAccessForMediaType: media
-                completionHandler: &*handler
-            ];
-        }
+        voice_ws::request_mic_permission();
         Requested::Prompted
     }
 

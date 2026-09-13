@@ -184,27 +184,30 @@ impl SettingsWindow {
         .detach();
     }
 
-    /// The microphone, heard: a level bar while a test take runs, through
-    /// the same capture the composer's mic and hold-Fn dictation use once
-    /// they share the in-process path. Until then the test opens a speech
-    /// session, so it needs the speech server configured.
+    /// The microphone, heard: the same in-process capture a take, a call
+    /// and hold-Fn dictation open, with nobody listening to the audio — a
+    /// level bar shows what it hears. On macOS the first run is also when
+    /// the system asks for the microphone, so the Request above and this
+    /// row lead to the same dialog.
     fn mic_test_group(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let status = voice_ws::status();
-        let live = status.phase.is_some_and(|phase| phase != voice_ws::Phase::Off);
+        let test = voice_ws::mic_test();
+        let live = test.is_some();
         if live {
             Painter::of(cx).lease(LEVEL_FPS, Duration::from_millis(300), cx);
         }
-        let configured = voice_ws::configured();
-        let detail: String = match (&status.mic_error, live) {
-            (Some(err), _) => err.clone(),
-            (None, true) if !status.mic_device.is_empty() => format!("Listening on {}.", status.mic_device),
-            (None, true) => "Listening.".into(),
-            (None, false) if !configured => {
-                "Needs the speech server: set voice_url in the kernel's config.".into()
-            }
-            (None, false) => "Press Test and say something; the bar shows what the mic hears.".into(),
+        let error = test.as_ref().and_then(|t| t.error.clone());
+        let detail: String = match &test {
+            Some(t) => match &t.error {
+                Some(err) => format!("Not hearing: {err}"),
+                None if t.device.is_empty() => "Opening the microphone…".into(),
+                None => format!("Listening on {}.", t.device),
+            },
+            None => match voice_ws::mic_permission().advice() {
+                Some(advice) => advice.to_string(),
+                None => "Press Test and say something; the bar shows what the mic hears.".into(),
+            },
         };
-        let level = status.level.clamp(0., 1.);
+        let level = test.as_ref().map(|t| t.level).unwrap_or(0.).clamp(0., 1.);
         theme
             .group_box()
             .child(
@@ -221,7 +224,7 @@ impl SettingsWindow {
                                 div()
                                     .mt(px(4.))
                                     .text_style(TextStyle::Subheadline)
-                                    .text_color(if status.mic_error.is_some() {
+                                    .text_color(if error.is_some() {
                                         theme.danger
                                     } else {
                                         theme.text_muted
@@ -248,7 +251,11 @@ impl SettingsWindow {
                                             .h_full()
                                             .rounded_full()
                                             .w(px(LEVEL_WIDTH * level))
-                                            .bg(if live { theme.success } else { theme.text_faint }),
+                                            .bg(if live && level > 0.02 {
+                                                theme.success
+                                            } else {
+                                                theme.text_faint
+                                            }),
                                     ),
                             )
                             .child(
@@ -263,12 +270,11 @@ impl SettingsWindow {
                                         None,
                                     )
                                     .id("mic-test")
-                                    .when(!configured && !live, |el| el.opacity(0.5))
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         if live {
-                                            let _ = voice_ws::stop();
-                                        } else if configured {
-                                            let _ = voice_ws::start();
+                                            voice_ws::mic_test_stop();
+                                        } else {
+                                            voice_ws::mic_test_start();
                                         }
                                         cx.notify();
                                     })),
