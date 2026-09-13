@@ -18,6 +18,15 @@ pub struct Kernel {
     pub scratch: PathBuf,
 }
 
+/// A test that panics before its `k.child.kill()` must not leave a kernel
+/// running for hours (fifteen were found idling after one session).
+impl Drop for Kernel {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// Start `serve` on a fresh folder with its own config home. No API key is
 /// set (every key variable is scrubbed from the environment), so a prompt
 /// fails fast without a model; that is enough to exercise the kernel's own
