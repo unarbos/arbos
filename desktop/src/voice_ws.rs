@@ -70,11 +70,15 @@ pub struct Peek {
     /// What the reply audio is saying, when the server tells us.
     pub reply: String,
     pub error: Option<String>,
+    /// `session.ready.engine`: `duplex` answers on its own; `pipeline`
+    /// (or an older server that says nothing) leaves replies to us.
+    pub engine: String,
 }
 
 #[derive(Default)]
 struct Shared {
     phase: Option<Phase>,
+    engine: String,
     finals: Vec<String>,
     partial: String,
     /// Set when the server closed the take (`transcript.final`).
@@ -130,7 +134,15 @@ pub fn status() -> Peek {
         level: s.level,
         reply: s.reply.clone(),
         error: s.error.clone(),
+        engine: s.engine.clone(),
     }
+}
+
+/// Whether the connected server answers by itself (`engine: duplex`). A
+/// dictated prompt must then not be sent to the kernel too, and the
+/// kernel's answer must not be `speak`-ed: the user would hear two replies.
+pub fn server_answers() -> bool {
+    status().engine == "duplex"
 }
 
 /// Bytes of reply audio handed to the player so far, and interrupts sent.
@@ -320,12 +332,22 @@ fn ensure_session(cfg: &VoiceCfg) -> Result<()> {
 
 /// The session task: one socket, the mic and player processes, the
 /// commands from the UI thread.
+/// rustls has two crypto backends in this binary (ring via one crate,
+/// aws-lc-rs via another) and refuses to guess; `wss://` needs one named.
+fn install_tls_provider() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 async fn run(
     cfg: VoiceCfg,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
     shared: Arc<Mutex<Shared>>,
     ready: std::sync::mpsc::Sender<Result<()>>,
 ) -> Result<()> {
+    install_tls_provider();
     let mut request = cfg
         .url
         .as_str()
@@ -360,7 +382,11 @@ async fn run(
     let (mut sink, mut stream) = ws.split();
     sink.send(text_frame(json!({
         "type": "session.start",
-        "format": { "type": "audio/pcm", "rate": RATE }
+        "format": { "type": "audio/pcm", "rate": RATE },
+        // Replies are ours to drive (`speak`) when the engine leaves them
+        // to the client; the agent mirror is off — this window has the chat.
+        "reply": "none",
+        "agents": false
     })))
     .await?;
 
@@ -463,6 +489,7 @@ async fn run(
                         let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
                         match kind {
                             "session.ready" => {
+                                s.engine = field("engine");
                                 if s.phase == Some(Phase::Connecting) {
                                     s.phase = Some(Phase::Ready);
                                 }
@@ -484,7 +511,12 @@ async fn run(
                                 }
                             }
                             "speech.stopped" => {}
-                            "transcript.delta" => s.partial = field("text"),
+                            // An increment: append. (The Swift comment reads
+                            // as a replacement; the server's protocol text says
+                            // increment, and the live server sends increments.)
+                            "transcript.delta" => s.partial.push_str(&field("text")),
+                            // The whole line, replacing the open one. Empty =
+                            // nothing was said; back to listening.
                             "transcript.final" => {
                                 let text = field("text");
                                 s.partial.clear();
@@ -493,20 +525,17 @@ async fn run(
                                 }
                                 s.take_done = true;
                             }
+                            // A duplex server starts replies on its own; play
+                            // them like our own `speak`.
                             "response.started" => {
-                                if speaking {
-                                    s.phase = Some(Phase::Speaking);
+                                if !speaking {
+                                    speaking = true;
+                                    s.reply.clear();
                                 }
+                                s.phase = Some(Phase::Speaking);
                             }
-                            "response.transcript" => {
-                                let t = field("text");
-                                if !t.is_empty() {
-                                    if !s.reply.is_empty() {
-                                        s.reply.push(' ');
-                                    }
-                                    s.reply.push_str(&t);
-                                }
-                            }
+                            // Increments with their own spacing: append raw.
+                            "response.transcript" => s.reply.push_str(&field("text")),
                             "response.done" => {
                                 speaking = false;
                                 if let Some(p) = player.take() { p.finish(); }

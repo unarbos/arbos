@@ -1182,7 +1182,11 @@ impl Arbos {
                     return;
                 }
                 let spoken = matches!(&text, Ok(t) if !t.trim().is_empty());
-                if spoken && crate::voice_ws::configured() {
+                // A duplex server answered the words itself (and may have
+                // sent them to its own kernel): the transcript goes into the
+                // composer for the record, but is neither sent nor read back.
+                let server_answers = crate::voice_ws::configured() && crate::voice_ws::server_answers();
+                if spoken && crate::voice_ws::configured() && !server_answers {
                     // The answer to a dictated prompt is read aloud.
                     if let Some(id) = this.workspace.read(cx).active_id() {
                         this.workspace.update(cx, |workspace, cx| {
@@ -1195,7 +1199,11 @@ impl Arbos {
                     if let Ok(text) = &text
                         && !text.trim().is_empty()
                     {
-                        composer.dictation_final(text, cx);
+                        if server_answers {
+                            composer.dictation_text(text, cx);
+                        } else {
+                            composer.dictation_final(text, cx);
+                        }
                     }
                 });
                 if let Err(e) = text {
