@@ -636,7 +636,7 @@ impl Arbos {
                     crate::voice_ws::interrupt();
                     this.submit(text.clone(), cx)
                 }
-                ComposerEvent::Force(text) => this.force_turn(text.clone(), cx),
+                ComposerEvent::Queue(text) => this.queue_turn(text.clone(), cx),
                 // Escape in the composer with no picker open: a menu, if one
                 // is up, goes first; only then does it mean "stop the turn".
                 ComposerEvent::Cancel => {
