@@ -42,6 +42,7 @@ pub const ALL_TOOLS: &[&str] = &[
     "plan",
     "changes",
     "undo",
+    "remember",
     "browser",
     "terminal",
     "screenshot",
