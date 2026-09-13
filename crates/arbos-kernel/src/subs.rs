@@ -76,6 +76,12 @@ pub fn ensure_chores(place: &arbos_core::Place) {
     }
 }
 
+/// Unreadable subscription files already reported, by agent, name, and reason.
+fn reported() -> &'static Mutex<HashSet<String>> {
+    static SET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
 /// Anything of the watcher's still running (for `--until-idle`).
 pub fn busy() -> bool {
     !in_flight().lock().unwrap().is_empty()
@@ -88,7 +94,26 @@ pub fn tick(hooks: &Arc<KernelHooks>, now: i64) {
             continue;
         }
         let id = agent.id.as_str();
-        for sub in subscription::list(&hooks.place, id) {
+        let (subs, errors) = subscription::list_with_errors(&hooks.place, id);
+        for (name, why) in errors {
+            // Said once per file and reason, so a hand-written file that
+            // does not read is seen and does not flood the log.
+            let key = format!("{id}/{name}: {why}");
+            if reported().lock().unwrap().insert(key) {
+                crate::klog::warn(
+                    "subscription_unreadable",
+                    Some(id),
+                    format!("subscriptions/{name}: {why}"),
+                );
+                hooks.broadcast(arbos_core::wire::Frame::Error {
+                    agent: Some(id.to_string()),
+                    detail: format!(
+                        "subscriptions/{name} does not read and is not scheduled: {why}"
+                    ),
+                });
+            }
+        }
+        for sub in subs {
             if sub.expired(now) {
                 let _ = subscription::remove(&hooks.place, id, sub.id);
                 let _ = inbox::deliver(

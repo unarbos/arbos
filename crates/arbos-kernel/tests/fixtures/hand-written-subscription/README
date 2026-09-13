@@ -1,0 +1,7 @@
+qa-029: a subscription file written by hand, the way the inbox note shows
+it — no id, created, or next_due (every = 1d, so the walker's 1h horizon
+lets the kernel go idle after the first run). Expect: the kernel fills them in (id from
+the file name, created from the mtime, due now), the command runs once
+before the kernel goes idle, and the file is rewritten with the fields. A
+second file with no cmd is not scheduled; the kernel log names it once.
+State travels as dot-arbos/ (the repo ignores .arbos/); the runner renames it.

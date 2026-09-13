@@ -23,6 +23,8 @@ pub const KINDS: &[&str] = &["timer", "shell", "github_pr", "github_ci", "inbox"
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Subscription {
+    /// 0 in a hand-written file: `read` fills it from the `NNNN-` prefix.
+    #[serde(default)]
     pub id: u32,
     /// `timer` | `shell` | `github_pr` | `github_ci` | `inbox`.
     pub kind: String,
@@ -65,6 +67,8 @@ pub struct Subscription {
     pub expires: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub paused: bool,
+    /// Empty in a hand-written file: `read` fills it from the file's mtime.
+    #[serde(default)]
     pub created: String,
     /// RFC 3339: when the kernel next looks. The kernel writes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,24 +280,87 @@ pub fn dir(place: &Place, agent: &str) -> PathBuf {
     place.agent_dir(agent).join("subscriptions")
 }
 
-/// Every subscription of `agent`, by id.
+/// Every subscription of `agent`, by id. A file that does not read is
+/// skipped here; `list_with_errors` says which and why (the watcher logs
+/// it once, `check` reports it).
 pub fn list(place: &Place, agent: &str) -> Vec<Subscription> {
+    list_with_errors(place, agent).0
+}
+
+/// The readable subscriptions and, per unreadable file, its name and the
+/// error.
+pub fn list_with_errors(place: &Place, agent: &str) -> (Vec<Subscription>, Vec<(String, String)>) {
     let Ok(rd) = std::fs::read_dir(dir(place, agent)) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
-    let mut out: Vec<Subscription> = rd
+    let mut out = Vec::new();
+    let mut errors = Vec::new();
+    let mut paths: Vec<PathBuf> = rd
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "toml"))
-        .filter_map(|p| read(&p).ok())
+        .filter(|p| {
+            !p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        })
         .collect();
+    paths.sort();
+    for p in paths {
+        match read(&p) {
+            Ok(sub) => out.push(sub),
+            Err(e) => errors.push((
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                format!("{e:#}"),
+            )),
+        }
+    }
     out.sort_by_key(|s| s.id);
-    out
+    (out, errors)
 }
 
+/// Read one file. A hand-written file may leave out what the kernel
+/// usually writes: `id` comes from the `NNNN-` file prefix, `created`
+/// from the file's mtime, and `next_due` is now (so it fires on the next
+/// scan) — file-authored subscriptions are the point of the folder. What
+/// the file cannot do without (a kind, a command for `shell`, a period)
+/// still fails, with the reason.
 pub fn read(path: &Path) -> Result<Subscription> {
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
+    let mut sub: Subscription =
+        toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if sub.id == 0 {
+        sub.id = name
+            .split('-')
+            .next()
+            .and_then(|n| n.trim_end_matches(".toml").parse::<u32>().ok())
+            .filter(|n| *n > 0)
+            .with_context(|| {
+                format!("{name}: no id in the file and no NNNN- prefix in the name")
+            })?;
+    }
+    if sub.created.trim().is_empty() {
+        let ms = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_else(crate::now_ms);
+        sub.created = crate::inbox::rfc3339(ms);
+    }
+    if sub.next_due.is_none() && !sub.paused && (sub.every_ms().is_some() || sub.kind == "inbox") {
+        sub.next_due = Some(crate::inbox::rfc3339(align_at(
+            crate::now_ms(),
+            sub.at.as_deref(),
+        )));
+    }
+    sub.validate().with_context(|| format!("{name}"))?;
+    Ok(sub)
 }
 
 /// The file for `sub`, whatever slug an earlier save gave it.
@@ -331,8 +398,7 @@ pub fn add(
     after: Option<&str>,
 ) -> Result<Subscription> {
     let now = crate::now_ms();
-    let existing = list(place, agent);
-    sub.id = existing.iter().map(|s| s.id).max().unwrap_or(0) + 1;
+    sub.id = next_id(place, agent);
     if sub.created.is_empty() {
         sub.created = crate::inbox::rfc3339(now);
     }
@@ -362,6 +428,29 @@ pub fn add(
     sub.validate()?;
     save(place, agent, &sub)?;
     Ok(sub)
+}
+
+/// One past the highest id in the folder — by file prefix as well as by
+/// content, so a file that does not read (or has no `id` yet) is never
+/// overwritten by the next `add`.
+fn next_id(place: &Place, agent: &str) -> u32 {
+    let by_name = std::fs::read_dir(dir(place, agent))
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    name.split('-')
+                        .next()?
+                        .trim_end_matches(".toml")
+                        .parse::<u32>()
+                        .ok()
+                })
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    let by_content = list(place, agent).iter().map(|s| s.id).max().unwrap_or(0);
+    by_name.max(by_content) + 1
 }
 
 pub fn remove(place: &Place, agent: &str, id: u32) -> Result<bool> {
@@ -521,6 +610,57 @@ mod tests {
         assert!(add(&p, "root", shell.clone(), None).is_err());
         shell.notify = Some("now: {output}".into());
         assert!(add(&p, "root", shell, None).is_ok());
+    }
+
+    #[test]
+    fn a_hand_written_file_gets_id_created_and_next_due_filled_in() {
+        let p = place("hand");
+        let d = dir(&p, "root");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("0007-tick.toml"),
+            "kind = \"shell\"\ncmd = \"echo tick\"\nevery = \"30s\"\nprompt = \"tick ran\"\n",
+        )
+        .unwrap();
+        let subs = list(&p, "root");
+        assert_eq!(subs.len(), 1, "{subs:?}");
+        assert_eq!(subs[0].id, 7);
+        assert!(!subs[0].created.is_empty());
+        assert!(subs[0].is_due(crate::now_ms() + 1), "due on the next scan");
+        // What it cannot do without still fails, and the error is kept.
+        std::fs::write(
+            d.join("0008-bad.toml"),
+            "kind = \"shell\"\nevery = \"30s\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("noid.toml"),
+            "kind = \"timer\"\nevery = \"1h\"\nprompt = \"x\"\n",
+        )
+        .unwrap();
+        let (ok, errors) = list_with_errors(&p, "root");
+        assert_eq!(ok.len(), 1);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(
+            errors
+                .iter()
+                .any(|(n, e)| n == "0008-bad.toml" && e.contains("shell needs cmd")),
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|(n, e)| n == "noid.toml" && e.contains("no id")),
+            "{errors:?}"
+        );
+        // The next add never lands on an unreadable file's number.
+        let added = add(&p, "root", timer("later", Some("1h")), None).unwrap();
+        assert_eq!(added.id, 9, "{added:?}");
+        assert!(d.join("0008-bad.toml").exists());
+        assert_eq!(
+            std::fs::read_to_string(d.join("0008-bad.toml")).unwrap(),
+            "kind = \"shell\"\nevery = \"30s\"\n"
+        );
     }
 
     #[test]

@@ -222,7 +222,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
 
     // A dead kernel's half-run nodes go back to pending. Then continue
     // anyone whose last turn never ended.
-    for line in crate::migrate::run(&place) {
+    for line in crate::migrate::run(&hooks) {
         crate::klog::info("migrated", None, line);
     }
     plan::reclaim(&hooks);
