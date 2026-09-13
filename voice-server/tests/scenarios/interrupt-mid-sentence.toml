@@ -1,0 +1,26 @@
+# The caller talks over a long reply: the audio stops at once, response.done says interrupted,
+# the speech model sees the barge-in, and the caller's new words still reach the main agent.
+title = "Interrupt mid-sentence"
+
+[[steps]]
+say = "Give me the status of the project."
+[steps.model]
+tool = "agent_status"
+after_tool = "Here is the status: {result} And there is a great deal more I could say about every agent and every job that has run today and every file that was touched so let me keep going for a good while longer until you stop me."
+
+[[steps]]
+barge_in = "Stop, that is enough."
+after = 0.8
+kernel = { reply = "Stopped." }
+
+[[steps]]
+wait_spoken = "Stopped"
+
+[expect]
+interrupted = true
+audio_stops_within_ms = 400
+barge_ins = 1
+mock_seen = ["Give me the status of the project.", "Stop, that is enough."]
+kernel_user_not = ["Give me the status"]
+inbox = [{ channel = "voice", kind = "request" }]
+spoken_contains = ["Here is the status", "Stopped"]

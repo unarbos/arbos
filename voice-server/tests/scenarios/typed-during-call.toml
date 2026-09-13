@@ -1,0 +1,33 @@
+# A line typed while the main agent's turn runs lands in the same inbox as the spoken words,
+# filed as channel = "text" and kind = "steer"; the spoken one is channel = "voice".
+title = "Typed message during a call"
+
+[[steps]]
+say = "Send an agent to update the README."
+model = { ack = "On it." }
+[steps.kernel]
+reply_delay = 2.5
+reply = "I sent the agent update-readme to rewrite the README with the new install steps."
+[steps.kernel.spawn]
+name = "update-readme"
+done_after = 5.0
+last_words = "README updated with the new install steps and the version line."
+
+[[steps]]
+pause = 1.8
+
+[[steps]]
+text = "Also bump the version to 2.0 in the README."
+
+[[steps]]
+wait_spoken = "update-readme to rewrite"
+
+[[steps]]
+wait_spoken = "update readme is done"
+
+[expect]
+inbox = [{ channel = "voice", kind = "request" }, { channel = "text", kind = "steer" }]
+inbox_bodies = ["Send an agent to update the README.", "bump the version to 2.0"]
+text_forwarded = 1
+spoken_contains = ["I sent the agent update-readme", "update readme is done"]
+narration_max_chars = 260

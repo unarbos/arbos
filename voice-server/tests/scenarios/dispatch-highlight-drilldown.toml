@@ -1,0 +1,43 @@
+# Send a sub-agent, hear the highlight when it finishes, ask why, get detail from the record.
+title = "Send a sub-agent, hear the highlight, ask why, get detail"
+
+[[steps]]
+say = "Send an agent to fix the skeptic test in CI."
+model = { ack = "On it." }
+[steps.kernel]
+reply = "I sent the agent fix-skeptic-test to look at the failing skeptic test. It will report back when it is done."
+reply_after_done = "The skeptic test is fixed and CI is green again."
+[steps.kernel.spawn]
+name = "fix-skeptic-test"
+done_after = 3.0
+tool_output_lines = 300
+last_words = "CI failed because the skeptic test asserts the old 30 second timeout. I changed the assertion to 60 seconds and reran: green."
+
+[[steps]]
+wait_spoken = "fix skeptic test is done"
+
+[[steps]]
+wait_spoken = "CI is green"
+
+[[steps]]
+say = "Why exactly did it fail?"
+model = { tool = "more_detail" }
+
+[[steps]]
+wait_tool_result = "more_detail"
+
+[[steps]]
+wait_quiet = 1.0
+
+[expect]
+spoken_contains = ["I sent the agent", "fix skeptic test is done", "30 second timeout", "CI is green"]
+spoken_not_contains = ["test_module_", "[0"]
+narration_max_chars = 260
+detail_max_chars = 420
+tool_result_contains = { more_detail = "30 second" }
+tools_offered = ["more_detail", "agent_status"]
+tools_offered_not = ["send_agent"]
+inbox = [{ channel = "voice", kind = "request" }]
+kernel_user_not = ["Why exactly"]
+done_files = 1
+audio_bytes_min = 20000
