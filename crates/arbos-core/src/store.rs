@@ -303,6 +303,21 @@ pub fn lint_notes(text: &str) -> Vec<NotesProblem> {
     let mut out = Vec::new();
     let body = strip_front_matter(text);
     let offset = text.lines().count() - body.lines().count();
+    // Section 5: the top line links the context document. Checked on the
+    // preamble (everything before the first heading or item).
+    let preamble_links_context = body
+        .lines()
+        .take_while(|l| {
+            let t = l.trim_start();
+            !t.starts_with("## ") && !t.starts_with("### ") && !t.starts_with("- ")
+        })
+        .any(|l| l.contains("](docs/project-context.md)") || l.contains("](GOALS.md)"));
+    if !preamble_links_context {
+        out.push(NotesProblem {
+            line: offset + 1,
+            what: "no top line linking docs/project-context.md before the first section".into(),
+        });
+    }
     let mut in_tldr = false;
     let mut tldr_bullets = 0usize;
     let mut in_fence = false;
@@ -565,6 +580,7 @@ mod tests {
         let bad = "# Demo\n\n<tldr>\n- [a](x) — 1\n- [b](x) — 2\n- [c](x) — 3\n- [d](x) — 4\n- five without link\n</tldr>\n\n## S\n- [x] [done1](x) — a\n- [ ] [open](x) — b\n- plain bullet\n- [ ] no link here\n- [x] [done2](x) — c\n- [x] [done3](x) — d\n- [x] [done4](x) — e\n";
         let found = lint_notes(bad);
         let whats: Vec<&str> = found.iter().map(|p| p.what.as_str()).collect();
+        assert!(whats.iter().any(|w| w.contains("no top line linking")), "{whats:?}");
         assert!(
             whats.iter().any(|w| w.contains("more than 4 bullets")),
             "{whats:?}"
