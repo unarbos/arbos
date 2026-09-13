@@ -1,70 +1,61 @@
-//! qa-018: a node whose claim cannot be written (disk full, size limit)
-//! used to be re-claimed every tick, each time leaving an open attempt,
-//! with no error anywhere. Now the attempt is closed, the client is told,
-//! and the node waits a minute.
+//! qa-018: a message whose turn cannot be started (the claim — the rename
+//! of the inbox file into turns/tNNNN/ — fails: disk full, a read-only
+//! folder) used to be retried every tick with no error anywhere. Now the
+//! client is told once, the kernel logs once, and the message waits a
+//! minute before the next try.
 
 mod common;
 
 use common::{Attach, start_kernel};
 use std::time::Duration;
 
-fn set_fsize(cur: libc::rlim_t) {
-    let l = libc::rlimit {
-        rlim_cur: cur,
-        rlim_max: libc::RLIM_INFINITY,
-    };
-    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &l) }, 0);
-}
-
 #[test]
-fn an_unwritable_claim_closes_its_attempt_and_backs_off() {
-    set_fsize(256 * 1024);
+fn an_unclaimable_message_is_reported_once_and_backs_off() {
     let mut k = start_kernel("claim");
-    set_fsize(libc::RLIM_INFINITY);
     let mut a = Attach::connect(&k.url);
     assert!(
         a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
             .is_some()
     );
 
-    // The inbox write (one node) fits; the claim's rewrite of the same node
-    // pushes plan.jsonl past the limit.
-    let big = format!("Reply OK. {}", "x".repeat(200 * 1024));
-    a.send(serde_json::json!({"type": "user", "agent": "root", "text": big}));
+    // turns/ exists and cannot be written to: the claim's mkdir fails.
+    let root = k.place.join(".arbos").join("agents").join("root");
+    let turns = root.join("turns");
+    std::fs::create_dir_all(&turns).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turns, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "Reply OK."}));
     let err = a.wait(Duration::from_secs(20), |f| {
         f["type"] == "error" && f["agent"] == "root"
     });
     assert!(
         err.is_some(),
-        "the client must be told the node could not start"
+        "the client must be told the turn could not start"
     );
     std::thread::sleep(Duration::from_secs(12));
 
-    let root = k.place.join(".arbos").join("agents").join("root");
-    let attempts: Vec<serde_json::Value> = std::fs::read_to_string(root.join("attempts.jsonl"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
+    // The message is still there, unclaimed, and nothing was written for it.
+    let inbox: Vec<_> = std::fs::read_dir(root.join("inbox"))
+        .unwrap()
+        .flatten()
         .collect();
-    let mut latest = std::collections::BTreeMap::new();
-    for at in &attempts {
-        latest.insert(at["id"].as_str().unwrap_or("").to_string(), at.clone());
-    }
-    let open: Vec<_> = latest
-        .values()
-        .filter(|at| at["ended_ms"].is_null())
-        .collect();
-    assert!(
-        latest.len() <= 2,
-        "claims kept retrying: {} attempts in ~15s",
-        latest.len()
-    );
-    assert!(open.is_empty(), "attempts left open: {open:?}");
+    assert_eq!(inbox.len(), 1, "the message waits in the inbox");
     let log = std::fs::read_to_string(k.place.join(".arbos").join("runtime").join("kernel.log"))
+        .or_else(|_| std::fs::read_to_string(k.place.join(".arbos").join("kernel.log")))
         .unwrap_or_default();
+    let failures = log.matches("inbox_claim_failed").count();
     assert!(
-        log.contains("claim_failed"),
-        "kernel.log has no claim_failed line"
+        (1..=2).contains(&failures),
+        "claims kept retrying: {failures} log lines in ~15s"
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&turns, std::fs::Permissions::from_mode(0o755));
+    }
     let _ = k.child.kill();
 }

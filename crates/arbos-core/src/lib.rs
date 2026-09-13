@@ -10,6 +10,7 @@ pub mod chattitle;
 mod event;
 pub mod files;
 pub mod host;
+pub mod inbox;
 mod lock;
 pub mod machines;
 pub mod node;
