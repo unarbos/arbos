@@ -1119,10 +1119,22 @@ mod native {
         /// Read position in `mono`, fractional.
         pos: f64,
         mono: Vec<f32>,
-        out: Vec<u8>,
+        /// Resampled 24 kHz mono, before gain, until a chunk is full.
+        out: Vec<f32>,
+        /// Automatic gain. CoreAudio hands over the raw signal at the system
+        /// input level (a laptop set to 27 % gives speech around -35 dBFS),
+        /// which AVFoundation's capture used to lift for us and the
+        /// recogniser will not hear. Slow to rise, quick to fall, capped.
+        gain: f32,
         tx: mpsc::UnboundedSender<Vec<u8>>,
         shared: Arc<Mutex<Shared>>,
     }
+
+    /// Where speech peaks are steered to, and the most the gain may add.
+    const GAIN_TARGET: f32 = 0.5;
+    const GAIN_MAX: f32 = 24.0;
+    /// Below this raw peak the chunk is room noise: the gain holds.
+    const GAIN_FLOOR: f32 = 0.004;
 
     impl Converter {
         fn new(
@@ -1137,6 +1149,7 @@ mod native {
                 pos: 0.0,
                 mono: Vec::new(),
                 out: Vec::new(),
+                gain: 1.0,
                 tx,
                 shared,
             }
@@ -1160,8 +1173,7 @@ mod native {
                 let i = self.pos as usize;
                 let f = (self.pos - i as f64) as f32;
                 let v = self.mono[i] * (1.0 - f) + self.mono[i + 1] * f;
-                let s = (v.clamp(-1.0, 1.0) * 32767.0) as i16;
-                self.out.extend_from_slice(&s.to_le_bytes());
+                self.out.push(v);
                 self.pos += self.step;
             }
             let consumed = (self.pos as usize).min(self.mono.len());
@@ -1169,8 +1181,22 @@ mod native {
                 self.mono.drain(..consumed);
                 self.pos -= consumed as f64;
             }
-            while self.out.len() >= CHUNK {
-                let chunk: Vec<u8> = self.out.drain(..CHUNK).collect();
+            while self.out.len() >= CHUNK / 2 {
+                let frame: Vec<f32> = self.out.drain(..CHUNK / 2).collect();
+                let peak = frame.iter().fold(0f32, |m, v| m.max(v.abs()));
+                if peak > GAIN_FLOOR {
+                    let wanted = (GAIN_TARGET / peak).clamp(1.0, GAIN_MAX);
+                    self.gain = if wanted < self.gain {
+                        wanted
+                    } else {
+                        self.gain * 0.7 + wanted * 0.3
+                    };
+                }
+                let mut chunk = Vec::with_capacity(CHUNK);
+                for v in frame {
+                    let s = ((v * self.gain).clamp(-1.0, 1.0) * 32767.0) as i16;
+                    chunk.extend_from_slice(&s.to_le_bytes());
+                }
                 {
                     let mut s = self.shared.lock().unwrap_or_else(|p| p.into_inner());
                     s.level = rms(&chunk);
