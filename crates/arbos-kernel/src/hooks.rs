@@ -479,7 +479,7 @@ impl NewNode {
             }
             if !matches!(n.do_, arbos_core::Do::Agent | arbos_core::Do::Notify { .. }) {
                 bail!(
-                    "when.condition fires an agent or notify do, not a {} node",
+                    "when.condition fires an agent or notify do, not a {} node. For a command on a schedule drop when.condition and keep when.every (the shell runs each period; add do.notify to report its output). To run the command only when a check passes, put the check inside the command: shell:\"<check> && <command>\"",
                     n.do_.kind()
                 );
             }
@@ -493,7 +493,7 @@ impl NewNode {
 pub fn is_no_kind(kind: &str) -> bool {
     matches!(
         kind.trim().to_ascii_lowercase().as_str(),
-        "default" | "none" | "null" | "auto" | "standard" | "generic" | "-"
+        "default" | "none" | "null" | "auto" | "standard" | "generic" | "inherit" | "-"
     )
 }
 
@@ -971,22 +971,33 @@ impl KernelHooks {
             .filter(|k| !k.is_empty() && !is_no_kind(k));
         let def = match kind {
             None => None,
-            Some(k) => Some(arbos_core::find_def(&self.place, k).ok_or_else(|| {
-                let known: Vec<String> = arbos_core::load_defs(&self.place)
-                    .into_iter()
-                    .map(|d| d.name)
-                    .collect();
-                if known.is_empty() {
-                    anyhow::anyhow!(
-                        "spawn: no agent definition named {k:?}; none exist here (add .arbos/agents-defs/<name>.md)"
-                    )
-                } else {
-                    anyhow::anyhow!(
-                        "spawn: no agent definition named {k:?}. Kinds here: {}",
-                        known.join(", ")
-                    )
+            Some(k) => match arbos_core::find_def(&self.place, k) {
+                Some(d) => Some(d),
+                None => {
+                    let known: Vec<String> = arbos_core::load_defs(&self.place)
+                        .into_iter()
+                        .map(|d| d.name)
+                        .collect();
+                    if known.is_empty() {
+                        // Nothing to choose from: the name cannot mean a
+                        // definition, so it is the built-in child. Refusing
+                        // here left a fresh place unable to spawn at all.
+                        crate::klog::warn(
+                            "spawn_kind_ignored",
+                            Some(parent.id.as_str()),
+                            format!(
+                                "kind {k:?}: no agent definitions exist here; spawning the built-in child"
+                            ),
+                        );
+                        None
+                    } else {
+                        bail!(
+                            "spawn: no agent definition named {k:?}. Kinds here: {}",
+                            known.join(", ")
+                        );
+                    }
                 }
-            })?),
+            },
         };
         let model = model.or(def
             .as_ref()

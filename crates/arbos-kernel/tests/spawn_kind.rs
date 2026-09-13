@@ -43,8 +43,37 @@ fn default_and_none_kinds_spawn_the_built_in_child() {
 }
 
 #[test]
+fn any_kind_spawns_the_built_in_child_when_no_definitions_exist() {
+    // "inherit" is what the model writes for the model field; it wrote it
+    // for kind too. And with no definitions at all, no name can mean one.
+    let (h, root) = hooks("nodefs");
+    for kind in ["inherit", "reviewer", "Worker"] {
+        h.spawn_isolated(
+            &root,
+            "brief",
+            None,
+            None,
+            false,
+            None,
+            Isolate::None,
+            Some(kind),
+        )
+        .unwrap_or_else(|e| panic!("kind={kind:?} with no definitions must spawn: {e:#}"));
+    }
+    assert!(is_no_kind("inherit"));
+}
+
+#[test]
 fn a_real_unknown_kind_is_still_refused_with_the_list() {
     let (h, root) = hooks("unknown");
+    // One real definition exists, so an unknown name is a mistake to report.
+    let defs = h.place.arbos().join("agents-defs");
+    std::fs::create_dir_all(&defs).unwrap();
+    std::fs::write(
+        defs.join("tester.md"),
+        "---\nname: tester\n---\nYou test things.\n",
+    )
+    .unwrap();
     let err = h
         .spawn_isolated(
             &root,
