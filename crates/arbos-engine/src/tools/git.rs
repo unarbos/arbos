@@ -44,9 +44,9 @@ const TAG: &str = "arbos-checkpoint";
 
 /// One turn's starting point, for `arbos-kernel rewind`: the transcript
 /// line the turn began on, HEAD, and a commit holding the working tree as
-/// it was (`git stash create`; None when the tree was clean). The commit
-/// is kept alive by `refs/arbos/cp/<agent>/<line>`. One JSON line per turn
-/// in `<agent dir>/checkpoints.jsonl`.
+/// it was, untracked files included (None when the tree matched HEAD).
+/// The commit is kept alive by `refs/arbos/cp/<agent>/<line>`. One JSON
+/// line per turn in `<agent dir>/checkpoints.jsonl`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Checkpoint {
     pub line: u64,
@@ -67,9 +67,7 @@ pub fn snapshot_turn(cwd: &Path, agent_dir: &Path, agent: &str, line: u64) -> Re
     if head.is_empty() {
         return Ok(());
     }
-    // `stash create` writes the commit and touches nothing else; an empty
-    // answer means the tree matched HEAD.
-    let work = git_out(cwd, &["stash", "create"]).filter(|s| !s.is_empty());
+    let work = work_commit(cwd, &head);
     if let Some(w) = &work {
         let safe: String = agent
             .chars()
@@ -104,6 +102,60 @@ pub fn snapshot_turn(cwd: &Path, agent_dir: &Path, agent: &str, line: u64) -> Re
     Ok(())
 }
 
+/// A commit whose tree is the working tree as it stands — tracked
+/// changes and untracked files alike, ignored files and `.arbos/` left
+/// out — parented on HEAD so `read-tree` can bring it all back. Built
+/// through a scratch index copied from the real one (so the add is
+/// incremental) and never touching the real index or the branch. `None`
+/// when the tree equals HEAD's.
+fn work_commit(cwd: &Path, head: &str) -> Option<String> {
+    let index = git_out(cwd, &["rev-parse", "--git-path", "index"])?;
+    let index = cwd.join(index);
+    let scratch = cwd
+        .join(".arbos")
+        .join(format!("index-scratch-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(cwd.join(".arbos"));
+    if index.exists() {
+        std::fs::copy(&index, &scratch).ok()?;
+    }
+    let run = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git")
+            .args(args)
+            .env("GIT_INDEX_FILE", &scratch)
+            .current_dir(cwd)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let result = (|| {
+        run(&["add", "-A", "--", "."])?;
+        // `.arbos/` is the agent's own state, never part of the project's
+        // checkpoint; it is dropped from the scratch index when not ignored.
+        let _ = run(&[
+            "rm",
+            "-r",
+            "-q",
+            "--cached",
+            "--ignore-unmatch",
+            "--",
+            ".arbos",
+        ]);
+        let tree = run(&["write-tree"])?;
+        let head_tree = git_out(cwd, &["rev-parse", &format!("{head}^{{tree}}")])?;
+        if tree == head_tree {
+            return None;
+        }
+        git_out(
+            cwd,
+            &["commit-tree", &tree, "-p", head, "-m", "arbos checkpoint"],
+        )
+    })();
+    let _ = std::fs::remove_file(&scratch);
+    result
+}
+
 fn git_out(cwd: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
         .args(args)
@@ -130,6 +182,19 @@ pub fn checkpoints(agent_dir: &Path) -> Vec<Checkpoint> {
 /// files to the saved tree (or to HEAD when the tree was clean), untracked
 /// files from after it removed — never `.arbos/`.
 pub fn restore(cwd: &Path, cp: &Checkpoint) -> Result<String> {
+    // The agent's own state must not be part of what comes back: a
+    // `.arbos/` tracked by the project repo would be reset to an old
+    // transcript under a running kernel. Its own repo (the F design's
+    // Phase 1) is the real fix; until then, refuse.
+    if git_out(cwd, &["ls-files", "--", ".arbos"]).is_some_and(|l| !l.is_empty()) {
+        anyhow::bail!(
+            ".arbos/ is tracked by the project repository; run `git rm -r --cached .arbos` (and add .arbos to .gitignore) before rewinding files"
+        );
+    }
+    // Order matters: HEAD back first, then everything untracked that the
+    // later turns added goes (never `.arbos/`), then the checkpoint's tree
+    // — tracked changes and the untracked files of that moment — comes
+    // back, and the index returns to HEAD so it all shows as it did.
     let st = Command::new("git")
         .args(["reset", "--hard", &cp.head])
         .current_dir(cwd)
@@ -137,10 +202,11 @@ pub fn restore(cwd: &Path, cp: &Checkpoint) -> Result<String> {
     if !st.success() {
         anyhow::bail!("git reset --hard {} failed", cp.head);
     }
+    let _ = Command::new("git")
+        .args(["clean", "-fd", "-e", ".arbos", "-e", ".arbos/**"])
+        .current_dir(cwd)
+        .status();
     if let Some(work) = &cp.work {
-        // The stash commit's tree is the working tree as it was; read it
-        // into the index and the tree, then leave the index as HEAD's so
-        // the changes show as unstaged, the way they were.
         let st = Command::new("git")
             .args(["read-tree", "-u", "--reset", work])
             .current_dir(cwd)
@@ -153,10 +219,6 @@ pub fn restore(cwd: &Path, cp: &Checkpoint) -> Result<String> {
             .current_dir(cwd)
             .status();
     }
-    let _ = Command::new("git")
-        .args(["clean", "-fd", "-e", ".arbos", "-e", ".arbos/**"])
-        .current_dir(cwd)
-        .status();
     Ok(match &cp.work {
         Some(w) => format!(
             "{} + working tree {}",

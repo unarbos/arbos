@@ -1581,11 +1581,26 @@ impl Workspace {
     /// turn (so it reopens lit) and appended to the agent's
     /// `feedback.jsonl` in the place, for QA and the kernel. Clicking the
     /// lit thumb clears the vote.
+    /// "Rewind here" under a turn: chat and files back to before its prompt.
+    pub fn rewind_turn(&mut self, id: u64, turn: usize, cx: &mut Context<Self>) {
+        self.with_session(id, cx, |chat| chat.rewind(turn, true));
+    }
+
     pub fn vote_turn(&mut self, id: u64, turn: usize, value: i8, cx: &mut Context<Self>) {
         let mut line: Option<serde_json::Value> = None;
         self.with_session(id, cx, |chat| {
             let answer = transcript::answer_of(&chat.items, turn).unwrap_or_default();
-            let Some(ChatItem::User(message)) = chat.items.get_mut(turn) else {
+            // The footer's turn may start at a `From` block; the vote goes
+            // on the user prompt that began it.
+            let Some(start) = chat
+                .items
+                .iter()
+                .take(turn + 1)
+                .rposition(|item| matches!(item, ChatItem::User(_)))
+            else {
+                return;
+            };
+            let Some(ChatItem::User(message)) = chat.items.get_mut(start) else {
                 return;
             };
             let next = if message.feedback == Some(value) {

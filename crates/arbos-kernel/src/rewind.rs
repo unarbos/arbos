@@ -82,6 +82,133 @@ impl Args {
     }
 }
 
+/// Which turn to go back to.
+#[derive(Debug, Clone, Copy)]
+pub enum Target {
+    /// The checkpoint at exactly this transcript line.
+    Line(u64),
+    /// This many turns back from the last one.
+    Back(u64),
+    /// The Nth user turn (1-based), counted over `user` transcript lines.
+    Turn(u32),
+}
+
+/// What a cut did.
+#[derive(Debug, Clone)]
+pub struct Cut {
+    pub checkpoint: Checkpoint,
+    /// Transcript lines removed.
+    pub dropped: u64,
+    /// Where they went.
+    pub archive: PathBuf,
+}
+
+/// The checkpoint `target` means, given the transcript and checkpoints.
+pub fn resolve(
+    events: &[arbos_core::Event],
+    cps: &[Checkpoint],
+    target: Target,
+) -> Result<Checkpoint> {
+    match target {
+        Target::Line(line) => cps
+            .iter()
+            .find(|cp| cp.line == line)
+            .cloned()
+            .with_context(|| format!("no turn starts at line {line}; see --list")),
+        Target::Back(n) => {
+            let ix = cps
+                .len()
+                .checked_sub(n as usize)
+                .with_context(|| format!("only {} turns to go back over", cps.len()))?;
+            Ok(cps[ix].clone())
+        }
+        Target::Turn(n) => {
+            // The Nth user line; the turn starts at the checkpoint on or
+            // just before it (the wake line).
+            let user_line = events
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::User { .. }))
+                .nth(n.saturating_sub(1) as usize)
+                .map(|e| e.seq)
+                .with_context(|| format!("no user turn {n}"))?;
+            cps.iter()
+                .filter(|cp| cp.line <= user_line)
+                .max_by_key(|cp| cp.line)
+                .cloned()
+                .with_context(|| format!("no checkpoint for user turn {n} (line {user_line})"))
+        }
+    }
+}
+
+/// Cut the transcript at the checkpoint's line and trim the checkpoints.
+/// The cut lines go to `transcript.rewound-<ts>.jsonl` first, whole.
+pub fn cut(place: &Place, agent: &str, target: Target) -> Result<Cut> {
+    let layout = Layout::new(place, agent);
+    if !layout.agent_md().exists() {
+        bail!("no agent {agent} in {}", place.path.display());
+    }
+    let events = load_transcript(&layout.transcript()).unwrap_or_default();
+    let cps = checkpoints(&layout.dir);
+    if cps.is_empty() {
+        bail!(
+            "{agent} has no checkpoints yet (they are written when a turn starts, from this version on)"
+        );
+    }
+    let checkpoint = resolve(&events, &cps, target)?;
+    let cut_from = checkpoint.line.saturating_sub(1) as usize;
+    if cut_from >= events.len() {
+        bail!(
+            "line {} is at or past the end of the transcript ({} lines); nothing to rewind",
+            checkpoint.line,
+            events.len()
+        );
+    }
+    let raw = std::fs::read_to_string(layout.transcript())?;
+    let lines: Vec<&str> = raw.lines().collect();
+    let at = cut_from.min(lines.len());
+    let keep = lines[..at].join("\n");
+    let gone = lines[at..].join("\n");
+    let archive = layout
+        .dir
+        .join(format!("transcript.rewound-{}.jsonl", arbos_core::now_ms()));
+    std::fs::write(&archive, format!("{gone}\n"))?;
+    std::fs::write(
+        layout.transcript(),
+        if keep.is_empty() {
+            String::new()
+        } else {
+            format!("{keep}\n")
+        },
+    )?;
+    // Checkpoints of the cut turns go too, the target's own included: the
+    // next turn starts on that line and writes a fresh one.
+    let mut text = String::new();
+    for cp in cps.iter().filter(|cp| cp.line < checkpoint.line) {
+        text.push_str(&serde_json::to_string(cp)?);
+        text.push('\n');
+    }
+    std::fs::write(layout.dir.join("checkpoints.jsonl"), text)?;
+    Ok(Cut {
+        checkpoint,
+        dropped: (lines.len() - at) as u64,
+        archive,
+    })
+}
+
+/// Put the agent's working directory back to the checkpoint.
+pub fn restore_files(place: &Place, agent: &str, cp: &Checkpoint) -> Result<String> {
+    let layout = Layout::new(place, agent);
+    let a = arbos_core::Agent::load(&layout.dir)?;
+    let cwd = a.cwd.clone().unwrap_or_else(|| place.path.clone());
+    if !cwd.join(".git").exists() {
+        bail!(
+            "{} is not a git repository; files left as they are",
+            cwd.display()
+        );
+    }
+    restore(&cwd, cp)
+}
+
 pub fn run(args: Args) -> Result<i32> {
     let place = Place::new(std::fs::canonicalize(&args.place).unwrap_or(args.place.clone()));
     let layout = Layout::new(&place, &args.agent);
@@ -136,39 +263,31 @@ pub fn run(args: Args) -> Result<i32> {
     }
     if kernel_alive(&place) {
         bail!(
-            "a kernel is serving {}; stop it first (it would replay the cut transcript to every window)",
+            "a kernel is serving {}; use the desktop's Rewind here, or stop it first (its tail would replay the cut transcript to every window)",
             place.path.display()
         );
     }
-    let target: &Checkpoint = match (args.to, args.back) {
-        (Some(line), _) => cps
-            .iter()
-            .find(|cp| cp.line == line)
-            .with_context(|| format!("no turn starts at line {line}; see --list"))?,
-        (None, Some(n)) => {
-            let ix = cps
-                .len()
-                .checked_sub(n as usize)
-                .with_context(|| format!("only {} turns to go back over", cps.len()))?;
-            &cps[ix]
-        }
+    let target = match (args.to, args.back) {
+        (Some(line), _) => Target::Line(line),
+        (None, Some(n)) => Target::Back(n),
         (None, None) => unreachable!("parse requires one"),
     };
-    let cut_from = target.line.saturating_sub(1) as usize;
+    let planned = resolve(&events, &cps, target)?;
+    let cut_from = planned.line.saturating_sub(1) as usize;
     if cut_from >= events.len() {
         bail!(
             "line {} is at or past the end of the transcript ({} lines); nothing to rewind",
-            target.line,
+            planned.line,
             events.len()
         );
     }
-    let dropped = events.len() - cut_from;
     println!(
-        "rewind {}: cut {dropped} transcript lines from line {} on; project {}{}",
+        "rewind {}: cut {} transcript lines from line {} on; project {}{}",
         args.agent,
-        target.line,
-        &target.head[..target.head.len().min(12)],
-        match (&target.work, args.files) {
+        events.len() - cut_from,
+        planned.line,
+        &planned.head[..planned.head.len().min(12)],
+        match (&planned.work, args.files) {
             (Some(_), true) => " + saved working tree (restoring)",
             (None, true) => " (restoring)",
             (_, false) => " (files untouched: add --files)",
@@ -185,40 +304,14 @@ pub fn run(args: Args) -> Result<i32> {
             return Ok(1);
         }
     }
-    // The cut lines go to a side file, whole, before the transcript changes.
-    let raw = std::fs::read_to_string(layout.transcript())?;
-    let lines: Vec<&str> = raw.lines().collect();
-    let keep = lines[..cut_from.min(lines.len())].join("\n");
-    let cut = lines[cut_from.min(lines.len())..].join("\n");
-    let side = layout
-        .dir
-        .join(format!("transcript.rewound-{}.jsonl", arbos_core::now_ms()));
-    std::fs::write(&side, format!("{cut}\n"))?;
-    std::fs::write(
-        layout.transcript(),
-        if keep.is_empty() {
-            String::new()
-        } else {
-            format!("{keep}\n")
-        },
-    )?;
-    // Checkpoints of the cut turns go too, the target's own included: the
-    // next turn starts on that line and writes a fresh one.
-    let kept: Vec<&Checkpoint> = cps.iter().filter(|cp| cp.line < target.line).collect();
-    let mut text = String::new();
-    for cp in kept {
-        text.push_str(&serde_json::to_string(cp)?);
-        text.push('\n');
-    }
-    std::fs::write(layout.dir.join("checkpoints.jsonl"), text)?;
+    let done = cut(&place, &args.agent, target)?;
     println!(
-        "transcript cut; the {dropped} lines are in {}",
-        side.display()
+        "transcript cut; the {} lines are in {}",
+        done.dropped,
+        done.archive.display()
     );
     if args.files {
-        let agent = arbos_core::Agent::load(&layout.dir)?;
-        let cwd = agent.cwd.clone().unwrap_or_else(|| place.path.clone());
-        match restore(&cwd, target) {
+        match restore_files(&place, &args.agent, &done.checkpoint) {
             Ok(what) => println!("project restored to {what}"),
             Err(e) => {
                 println!("project not restored: {e:#}");
