@@ -369,7 +369,11 @@ fn handle_frame(
             hooks.broadcast(tree_frame(place));
         }
         Frame::Focus { path } => {
-            let _ = write_focus(place, &path);
+            // Only an existing agent folder of this place. Anything else is
+            // an attach client writing where it should not.
+            if let Err(e) = write_focus(place, &path) {
+                eprintln!("focus: {e:#}");
+            }
         }
         Frame::Stop { agent } => {
             // Stop means all of it: the turn, the standing work, the
