@@ -460,18 +460,72 @@ fn human_bytes(n: u64) -> String {
 }
 
 /// Kill the job and everything it spawned. The job leads its own process
-/// group, so a negative pid reaches the whole tree.
+/// group, so signalling the group reaches the whole tree.
+///
+/// This used to shell out to `kill -9 -<pid>`. Without `--`, procps `kill`
+/// read the negative pid as an option and sent `kill(-1, SIGKILL)`: every
+/// process the user may signal, twice on a production box (QA bug qa-020).
+/// No shell here: the syscalls take the numbers as numbers. Pids 0 and 1
+/// (and anything that does not fit) are refused outright, because
+/// `kill(0)` and `killpg(0)` also mean "my whole group" or "everything".
 pub fn kill_job(pid: u32) {
-    let group = format!("-{pid}");
-    let ok = std::process::Command::new("kill")
-        .args(["-9", &group])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !ok {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status();
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        eprintln!("kill_job: pid {pid} out of range; refusing");
+        return;
+    };
+    if pid <= 1 {
+        eprintln!("kill_job: pid {pid} is not a job; refusing");
+        return;
+    }
+    // SAFETY: plain syscalls on a validated positive pid; no memory involved.
+    let group_ok = unsafe { libc::killpg(pid, libc::SIGKILL) } == 0;
+    if !group_ok {
+        let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+}
+
+#[cfg(test)]
+mod kill_tests {
+    use super::kill_job;
+    use std::{os::unix::process::CommandExt, process::Command, time::Duration};
+
+    fn alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    #[test]
+    fn kill_job_ends_the_jobs_group_and_nothing_else() {
+        // The job: a shell in its own process group with a child.
+        let mut job = Command::new("sh")
+            .args(["-c", "sleep 300 & wait"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        // A bystander in a different group: what `kill -1` would have taken.
+        let mut bystander = Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        kill_job(job.id());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(job.try_wait().unwrap().is_some(), "the job leader is dead");
+        assert!(
+            alive(bystander.id()),
+            "a process outside the job's group must survive"
+        );
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+    }
+
+    #[test]
+    fn kill_job_refuses_pids_that_mean_everything() {
+        // 0 = own group, 1 = init; both must be no-ops. If either were
+        // signalled, this test process would not be here to assert.
+        kill_job(0);
+        kill_job(1);
     }
 }
 
