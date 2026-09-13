@@ -2087,14 +2087,20 @@ fn merge_stream_text(body: &mut String, text: &str) {
         body.push_str(&text[body.len()..]);
         return;
     }
+    // The same words with the whitespace reshaped: the persisted line ends
+    // in a newline the deltas never sent, or the other way round.
+    if body.trim() == text.trim() {
+        *body = text.to_owned();
+        return;
+    }
     // The whole message, sent again after its deltas, and not quite what the
     // deltas added up to — a chunk lost on the way, a space reshaped. It
     // opens the way the body opens; a delta never does. It is the message,
     // so it replaces the body rather than following it as a second copy.
-    if text.len() >= RESEND_PREFIX
-        && body.len() >= RESEND_PREFIX
-        && text.as_bytes()[..RESEND_PREFIX] == body.as_bytes()[..RESEND_PREFIX]
-    {
+    // A short reply shares its whole shorter self; a fixed 64 bytes made
+    // every reply under that print twice.
+    let shared = RESEND_PREFIX.min(body.len()).min(text.len());
+    if shared >= RESEND_MIN && text.as_bytes()[..shared] == body.as_bytes()[..shared] {
         *body = text.to_owned();
         return;
     }
@@ -2102,8 +2108,10 @@ fn merge_stream_text(body: &mut String, text: &str) {
 }
 
 /// How much of a message's opening two texts must share before one is taken
-/// to be the other, sent whole.
+/// to be the other, sent whole — and the least that counts when the texts
+/// are shorter than that.
 const RESEND_PREFIX: usize = 64;
+const RESEND_MIN: usize = 12;
 
 /// Drain the kernel event channel into the session, for as long as there is one.
 ///
