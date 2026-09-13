@@ -219,7 +219,12 @@ fn optional_frame_fields_default_and_stay_hidden() {
 
 #[test]
 fn unknown_frame_type_and_missing_fields_are_rejected() {
-    assert!(serde_json::from_str::<Frame>(r#"{"type":"no_such_frame"}"#).is_err());
+    // A frame from a newer build reads as `unknown` and is skipped, so a
+    // client keeps its connection when the kernel grows a frame type.
+    assert!(matches!(
+        serde_json::from_str::<Frame>(r#"{"type":"no_such_frame","x":1}"#),
+        Ok(Frame::Unknown)
+    ));
     assert!(serde_json::from_str::<Frame>(r#"{"type":"user"}"#).is_err());
     assert!(serde_json::from_str::<Frame>(r#"{"agent":"root","text":"hi"}"#).is_err());
 }

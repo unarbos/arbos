@@ -463,7 +463,9 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
         | Frame::Tree { .. }
         | Frame::Hello { .. }
         | Frame::Replayed { .. }
-        | Frame::HistoryEnd { .. } => Vec::new(),
+        | Frame::HistoryEnd { .. }
+        // A newer kernel's frame: nothing to show, nothing to lose.
+        | Frame::Unknown => Vec::new(),
         Frame::Plan { agent: id, nodes } if id == agent => vec![Event::Plan(nodes)],
         Frame::Board {
             owner,
