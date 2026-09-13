@@ -7,6 +7,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Env var naming the model for this process, over `model` in config.toml.
+pub const MODEL_ENV: &str = "ARBOS_MODEL";
+
 /// Where model calls go. Every kind speaks the OpenAI chat-completions
 /// wire; they differ in base URL, key variable, and extra headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -295,8 +298,17 @@ impl HostConfig {
         }
     }
 
-    /// The model a turn uses when the agent says `inherit`.
+    /// The model a turn uses when the agent says `inherit`. `ARBOS_MODEL`
+    /// in the environment wins over the file: a container or a script picks
+    /// the model without writing config.toml first.
     pub fn model(&self) -> String {
+        if let Some(m) = std::env::var(MODEL_ENV)
+            .ok()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+        {
+            return m;
+        }
         let m = self.model.trim();
         if m.is_empty() {
             self.provider().default_model().to_string()

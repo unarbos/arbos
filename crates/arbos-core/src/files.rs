@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    agent::{Agent, AgentId},
+    agent::{Agent, AgentId, Mode},
     event::Event,
     place::Place,
 };
@@ -226,6 +226,9 @@ pub fn bootstrap(place: &Place) -> Result<Agent> {
     } else {
         let mut agent = Agent::root(ROOT_ID);
         agent.cwd = Some(place.path.clone());
+        if let Some(mode) = mode_from_env() {
+            agent.mode = mode;
+        }
         agent.save(&root.dir)?;
         touch(&root.transcript())?;
         std::fs::create_dir_all(root.jobs())?;
@@ -234,6 +237,22 @@ pub fn bootstrap(place: &Place) -> Result<Agent> {
     // After root exists, so a missing or dangling focus can settle on it.
     let _ = read_focus(place);
     Ok(agent)
+}
+
+/// Env var naming the mode a freshly minted root agent starts in
+/// (`auto`, `ask`, `plan`). A headless container sets `auto` so no call
+/// waits on a question nobody will answer. An existing `agent.md` wins.
+pub const MODE_ENV: &str = "ARBOS_MODE";
+
+fn mode_from_env() -> Option<Mode> {
+    let raw = std::env::var(MODE_ENV).ok()?;
+    match Mode::parse(&raw) {
+        Some(m) => Some(m),
+        None => {
+            eprintln!("{MODE_ENV}={raw:?} is not auto, ask, or plan; ignored");
+            None
+        }
+    }
 }
 
 /// A new top-level chat: its own folder and empty transcript, copied
