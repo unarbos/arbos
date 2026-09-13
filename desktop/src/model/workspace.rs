@@ -1306,8 +1306,11 @@ impl Workspace {
                     if chat.updated < updated {
                         chat.updated = updated;
                     }
+                    // The kernel's parent wins where it names one. Where it
+                    // names none the desktop's stands: a ⌘N sub-chat is
+                    // nested here and nowhere the kernel can see.
                     let parent = row.parent.clone().filter(|p| !p.is_empty());
-                    if chat.parent_kernel != parent {
+                    if parent.is_some() && chat.parent_kernel != parent {
                         chat.parent_kernel = parent;
                         chat.parent = None;
                         chat.flush();
@@ -1338,8 +1341,10 @@ impl Workspace {
                     if chat.updated < updated {
                         chat.updated = updated;
                     }
-                    chat.parent_kernel = row.parent.clone().filter(|p| !p.is_empty());
-                    chat.parent = None;
+                    if let Some(parent) = row.parent.clone().filter(|p| !p.is_empty()) {
+                        chat.parent_kernel = Some(parent);
+                        chat.parent = None;
+                    }
                     chat.flush();
                 }
                 known.insert(row.id, id);
@@ -2153,10 +2158,29 @@ impl Workspace {
             chat.flush();
         });
         if let Some(ix) = self.project_of(id) {
+            self.stamp_children(ix, id);
             self.resolve_parents(ix);
             self.push_snapshot(ix);
         }
         cx.notify();
+    }
+
+    /// A sub-chat opened under a parent that had no kernel id yet (⌘N on a
+    /// fresh main chat) was filed without one. Now the parent has it, write
+    /// it on each child so a relaunch nests them again.
+    fn stamp_children(&mut self, ix: usize, parent: u64) {
+        let Some(parent_kernel) = self.projects[ix]
+            .session(parent)
+            .and_then(|chat| chat.agent_session.clone())
+        else {
+            return;
+        };
+        for chat in &mut self.projects[ix].sessions {
+            if chat.parent == Some(parent) && chat.parent_kernel.is_none() {
+                chat.parent_kernel = Some(parent_kernel.clone());
+                chat.flush();
+            }
+        }
     }
 
     /// The session the chat pane would show. Gated, and it is the gate that

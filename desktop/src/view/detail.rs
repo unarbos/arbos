@@ -6,7 +6,7 @@ use crate::{
     model::{
         attachment::Prompt,
         project::Project,
-        session::{self, ChatItem, ChatSession, Choice, Connection, PlanNode},
+        session::{ChatItem, ChatSession, Choice, Connection, PlanNode},
         settings,
     },
     view::{

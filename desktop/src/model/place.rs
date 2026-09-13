@@ -232,6 +232,13 @@ fn looks_like_host(s: &str) -> bool {
 }
 
 fn expand_local(path: &str) -> PathBuf {
+    // A `/` typed after the picker's own `/` is still one root.
+    let collapsed = format!("/{}", path.trim_start_matches('/'));
+    let path = if path.starts_with("//") {
+        collapsed.as_str()
+    } else {
+        path
+    };
     if path == "~" {
         return dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
     }

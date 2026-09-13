@@ -60,11 +60,15 @@ impl StoreView {
     pub fn read(project: &Path) -> Self {
         let store = crate::model::project::root(project);
         let goals = first_of(&store, GOALS)
+            .map(|path| Note::read(&path))
             .or_else(|| {
+                // The kernel writes `(no plan)` into an idle root's plan;
+                // that is no goal, and the invitation reads better.
                 let plan = store.join("agents").join(ROOT_AGENT).join("plan.md");
-                plan.is_file().then_some(plan)
-            })
-            .map(|path| Note::read(&path));
+                plan.is_file()
+                    .then(|| Note::read(&plan))
+                    .filter(|note| note.lines.iter().any(|line| line != "(no plan)"))
+            });
         let notes = first_of(&store, NOTES).map(|path| Note::read(&path));
         let resources = FOLDERS
             .iter()

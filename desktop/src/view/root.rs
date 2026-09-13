@@ -198,13 +198,14 @@ pub fn init(cx: &mut App) {
         // ⌘W closes the tab in front, as in a browser; the window itself
         // closes on ⇧⌘W — see `menubar`.
         KeyBinding::new("cmd-w", CloseProject, None),
-        // Browser tab cycling. `[` and `]` first, which is how macOS names
-        // the keys and what the menu draws; the braces are the same keys
-        // with shift held, as Linux reports them.
+        // Browser tab cycling: ⇧⌘] and ⇧⌘[. macOS names the key `]` with
+        // shift held, and that is what the menu draws; Linux reports the
+        // shifted glyph itself and drops the shift, so `}` is the same
+        // chord there.
         KeyBinding::new("cmd-shift-]", NextTab, None),
         KeyBinding::new("cmd-shift-[", PrevTab, None),
-        KeyBinding::new("cmd-shift-}", NextTab, None),
-        KeyBinding::new("cmd-shift-{", PrevTab, None),
+        KeyBinding::new("cmd-}", NextTab, None),
+        KeyBinding::new("cmd-{", PrevTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
         KeyBinding::new("ctrl-shift-tab", PrevTab, None),
         // What macOS binds Preferences to in every other app.
