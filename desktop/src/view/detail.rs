@@ -849,9 +849,10 @@ impl Arbos {
             .ml(px(-root::COMPOSER_PAD_X + 2.))
             .mr(px(-root::COMPOSER_PAD_X))
             .h(px(24.))
+            // A label, as Cursor's "Cloud" is: where the agent runs is the
+            // tab's to choose, so there is nothing here to click.
             .child(
                 div()
-                    .id("composer-machine")
                     .flex()
                     .flex_row()
                     .items_center()
@@ -860,20 +861,6 @@ impl Arbos {
                     .max_w(px(200.))
                     .text_style(TextStyle::Caption)
                     .text_color(theme.text_faint)
-                    .cursor_pointer()
-                    .hover(|el| el.text_color(theme.text_muted))
-                    .tooltip(|window, cx| {
-                        Tooltip::text(
-                            "Where this agent runs. Click to open a folder on another machine",
-                            window,
-                            cx,
-                        )
-                    })
-                    // The row used to take a click and do nothing (ui-011):
-                    // now it opens the picker at its machine step.
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(root::OpenProject), cx);
-                    })
                     .child(
                         icons::icon(glyph)
                             .size(px(11.))

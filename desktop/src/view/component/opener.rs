@@ -575,11 +575,9 @@ impl Opener {
         cx.notify();
     }
 
+    /// Escape closes, from either step. Going back up to the machines is
+    /// what ← and ⌫ at the top of the tree do.
     fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.stage, Stage::Folder { .. }) {
-            self.to_machines(cx);
-            return;
-        }
         self.open = false;
         cx.emit(OpenerEvent::Dismiss);
         cx.notify();
