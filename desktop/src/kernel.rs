@@ -286,11 +286,17 @@ pub fn http_base_place(place: &Place) -> Option<String> {
 /// Loopback HTTP origin for the gateway (`GET /api/models`, sessions).
 /// Attach is `tcp://` in `kernel.json`. HTTP is `web.json`.
 pub fn http_base(workspace: &Path) -> Option<String> {
-    let gateway = read_json_info(&gateway_json(workspace)).filter(alive);
+    // Only an HTTP address is worth a probe. `kernel.json` is `tcp://` on
+    // every kernel of this generation, and probing it opened and closed an
+    // attach socket — logged by the kernel as a client — on every poll.
+    let gateway = read_json_info(&gateway_json(workspace))
+        .filter(|info| http_url(info).is_some())
+        .filter(alive);
     if let Some(url) = gateway.as_ref().and_then(http_url) {
         return Some(url);
     }
     read_info(workspace)
+        .filter(|info| http_url(info).is_some())
         .filter(alive)
         .and_then(|info| http_url(&info))
 }

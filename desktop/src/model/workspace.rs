@@ -1564,9 +1564,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Stop the in-flight turn and send `content` plus anything already
-    /// queued, as the next prompt on this chat.
-    pub fn force(&mut self, id: u64, content: impl Into<Prompt>, cx: &mut Context<Self>) {
+    /// Hold `content` for the next turn on this chat: the kernel keeps it
+    /// and runs it when the turn in flight ends. See
+    /// [`ChatSession::queue_next`].
+    pub fn queue_next(&mut self, id: u64, content: impl Into<Prompt>, cx: &mut Context<Self>) {
         let content = content.into();
         let found = self
             .projects
@@ -1582,10 +1583,7 @@ impl Workspace {
         if chat.idle() && chat.resumable() {
             chat.resume(cx);
         }
-        chat.force(content);
-        if chat.idle() && chat.resumable() && !chat.queue.is_empty() {
-            chat.resume(cx);
-        }
+        chat.queue_next(content);
         let file = chat.file.clone();
         if let (Some(file), Some(ix)) = (file, self.project_of(id)) {
             self.remember(
@@ -1599,13 +1597,15 @@ impl Workspace {
 
     /// Stop the in-flight turn. If the attach socket died, say Stopped
     /// and attach again so the next send works — no kernel jargon.
-    /// How many automatic reconnects a remote place gets before it waits
-    /// for a hand.
+    /// How many automatic reconnects a chat gets before it waits for a
+    /// hand.
     pub const RECONNECT_TRIES: u32 = 30;
 
-    /// A remote kernel's connection dropped: try again after 2, 4, 8, 16,
-    /// 32, then 60 s, up to [`Self::RECONNECT_TRIES`] times. The row under
-    /// the composer counts down; a Send or Stop meanwhile tries at once.
+    /// The connection failed or dropped: try again after 2, 4, 8, 16, 32,
+    /// then 60 s, up to [`Self::RECONNECT_TRIES`] times — a first start
+    /// that lost the spawn race to another row, a remote tunnel, a local
+    /// kernel that stopped. The row under the composer counts down; a Send
+    /// or Stop meanwhile tries at once.
     pub fn schedule_reconnect(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(chat) = self.session_mut(id) else {
             return;
@@ -1640,7 +1640,7 @@ impl Workspace {
                         return false;
                     }
                     chat.reconnect_at = None;
-                    !chat.closed
+                    chat.resumable()
                         && matches!(chat.connection, crate::model::session::Connection::Lost)
                 });
                 if go {
