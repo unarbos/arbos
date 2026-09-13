@@ -2185,7 +2185,7 @@ struct WorkStats {
     /// What the last tool of the range does — the verb a live header leads with.
     last_kind: Option<ToolKind>,
     /// Seconds the turn's tools and thoughts took, added up: the settled
-    /// "Worked for …" figure when the live clock is gone.
+    /// "Worked …" figure for records that predate the stamped wall time.
     secs: u64,
     /// The last tool's title, for a live run with nothing else to count
     /// (an `ask`, a `say`): "Ask Coffee or tea?" beats "Working".
@@ -2801,12 +2801,17 @@ fn work_header(
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let theme = Theme::of(cx).clone();
-    // Live: the clock since the turn began. Settled: what the record says
-    // the tools and thoughts took.
+    // Live: the clock since the turn began. Settled: the turn's wall time
+    // stamped on its prompt; for records that predate the stamp, what the
+    // tools and thoughts took.
+    let stamped = match chat.items.get(turn) {
+        Some(ChatItem::User(message)) => message.worked_secs.map(u64::from),
+        _ => None,
+    };
     let elapsed = chat
         .elapsed()
         .filter(|_| running)
-        .unwrap_or_else(|| Duration::from_secs(stats.secs));
+        .unwrap_or_else(|| Duration::from_secs(stamped.unwrap_or(stats.secs)));
     let (verb, rest) = work_summary(stats, running, elapsed, true);
     let diff = (stats.add + stats.del > 0).then_some((stats.add, stats.del));
     fold_row(&theme, "work", turn, verb, rest, diff, false, open, cx)
@@ -2929,8 +2934,8 @@ fn live_phase() -> Duration {
     START.get_or_init(Instant::now).elapsed()
 }
 
-/// Cursor's fold label. Finished: "Worked for 15m 20s", as the Agents
-/// window puts it — what was done is one click away in the fold. Live:
+/// Cursor's fold label. Finished: "Worked 21s", as the Agents window
+/// puts it — what was done is one click away in the fold. Live:
 /// "Editing transcript.rs, 4 searches, ran 5 commands", present tense, so
 /// the row says what is happening right now. Returned as (verb, rest) so the
 /// verb can paint brighter than the rest.
@@ -2946,7 +2951,7 @@ fn work_summary(
         return if elapsed.as_secs() == 0 {
             ("Worked".to_owned(), String::new())
         } else {
-            ("Worked".to_owned(), format!("for {}", since(elapsed)))
+            ("Worked".to_owned(), since(elapsed))
         };
     }
     let mut parts: Vec<String> = Vec::new();
@@ -2998,7 +3003,7 @@ fn work_summary(
         } else if elapsed.as_secs() == 0 {
             ("Worked".to_owned(), String::new())
         } else {
-            ("Worked".to_owned(), format!("for {}", since(elapsed)))
+            ("Worked".to_owned(), since(elapsed))
         };
     }
     let first = parts.remove(0);
@@ -3854,6 +3859,7 @@ mod selection_tests {
                 text: String::new(),
                 images: vec![image.clone(), image],
                 files: Vec::new(),
+                worked_secs: None,
             }),
             ChatItem::Agent("two pictures".into()),
         ];
