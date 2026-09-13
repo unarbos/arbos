@@ -2122,10 +2122,19 @@ fn spawn(workspace: &Path) -> Result<Child> {
     // The kernel picks its own loopback port and writes it to kernel.json
     // as `tcp://127.0.0.1:port`. Do not invent an HTTP URL here — that
     // port is not the attach port, and waiting on it is a 60s miss.
+    // Not the window's whole environment: launched from a shell, that is
+    // every `export` in the user's rc file, and the kernel would hand it
+    // to every job. The allowlist, the configured model key, the vault
+    // token, and what the place's secrets.toml reads — nothing else.
+    let key_env = Host::peek()
+        .map(|h| h.config.key_env())
+        .unwrap_or_else(|_| "OPENROUTER_API_KEY".to_string());
     let mut cmd = Command::new(&bin);
     cmd.arg("serve")
         .arg(workspace)
         .current_dir(workspace)
+        .env_clear()
+        .envs(arbos_core::envsafe::kernel_env(workspace, &key_env))
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))

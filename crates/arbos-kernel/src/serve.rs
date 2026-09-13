@@ -42,6 +42,12 @@ struct KernelJson {
     clients: Option<usize>,
     pid: u32,
     started: i64,
+    /// Names (never values) in this kernel's environment that read like
+    /// credentials and are not the model key, the vault token, or a
+    /// source in the place's secrets.toml: what came along from the shell
+    /// the kernel was started from. `check` warns about them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    stray_secret_env: Vec<String>,
     version: String,
     git_sha: String,
     log: String,
@@ -1078,6 +1084,23 @@ fn record_prs(place: &Place, agent: &str, ev: &Event) -> bool {
     new
 }
 
+/// Secret-looking variable names in this process's environment that the
+/// secrets door does not account for. Names only.
+fn stray_secret_env(place: &Place) -> Vec<String> {
+    let mut managed = vec![
+        "OP_SERVICE_ACCOUNT_TOKEN".to_string(),
+        "OP_SESSION".to_string(),
+    ];
+    if let Ok(host) = Host::load().or_else(|_| Host::peek()) {
+        managed.push(host.config.key_env());
+    }
+    managed.extend(arbos_core::envsafe::place_secret_env_names(place.path()));
+    arbos_core::envsafe::stray_secrets(&managed)
+        .into_iter()
+        .filter(|n| !n.starts_with("OP_SESSION_"))
+        .collect()
+}
+
 fn write_kernel_json(
     place: &Place,
     addr: SocketAddr,
@@ -1095,7 +1118,19 @@ fn write_kernel_json(
         version: klog::version().into(),
         git_sha: klog::git_sha().into(),
         log: klog::log_path_for(&place.arbos()).display().to_string(),
+        stray_secret_env: stray_secret_env(place),
     };
+    if !info.stray_secret_env.is_empty() {
+        klog::warn(
+            "env_stray_secrets",
+            None,
+            format!(
+                "{} variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: {} — start the kernel from a clean environment or declare them in .arbos/secrets.toml",
+                info.stray_secret_env.len(),
+                info.stray_secret_env.join(", ")
+            ),
+        );
+    }
     let text = serde_json::to_string_pretty(&info)?;
     std::fs::create_dir_all(place.runtime_dir())?;
     std::fs::write(place.kernel_json(), &text)?;

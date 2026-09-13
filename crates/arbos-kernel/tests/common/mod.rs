@@ -135,12 +135,21 @@ const KEY_VARS: &[&str] = &[
 ];
 
 pub fn spawn_with(scratch: PathBuf, extra: &[&str]) -> Kernel {
+    spawn_with_env(scratch, extra, &[])
+}
+
+/// `spawn_with`, plus variables set in the kernel's environment (what a
+/// shell's rc file would have exported).
+pub fn spawn_with_env(scratch: PathBuf, extra: &[&str], env: &[(&str, &str)]) -> Kernel {
     let place = scratch.join("place");
     let xdg = scratch.join("xdg");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_arbos-kernel"));
     cmd.arg("serve").arg(&place).args(extra);
     for var in KEY_VARS {
         cmd.env_remove(var);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
     }
     let child = cmd
         .env("XDG_CONFIG_HOME", &xdg)

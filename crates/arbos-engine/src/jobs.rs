@@ -164,10 +164,14 @@ impl JobsRoot {
         // `pipefail` where the shell has it (bash, zsh, macOS sh; dash does
         // not): `curl | jq` then fails when curl does. The probe is silent
         // so a shell without it leaves nothing in the journal.
+        // After the login shell has read the user's profile, secrets that
+        // came back with it go out again unless the secrets door granted
+        // them (see `envsafe::scrub_prologue`).
         let script = format!(
-            "(set -o pipefail) 2>/dev/null && set -o pipefail; ( cd {} && {command}\n); echo $? > {}",
+            "(set -o pipefail) 2>/dev/null && set -o pipefail; {scrub} ( cd {} && {command}\n); echo $? > {}",
             sh_quote(&cwd.display().to_string()),
-            sh_quote(&exit_path.display().to_string())
+            sh_quote(&exit_path.display().to_string()),
+            scrub = arbos_core::envsafe::scrub_prologue(),
         );
         // Inside a sandbox the wrapper shell runs there too, so the exit
         // file is written from within (the jobs dir is under the place).
@@ -188,9 +192,22 @@ impl JobsRoot {
             .stdin(Stdio::null())
             .stdout(Stdio::from(journal))
             .stderr(Stdio::from(err_fd));
-        // Secrets the agent asked to use, by name; their values are
-        // redacted from everything that comes back.
-        cmd.envs(crate::secrets::store().env());
+        // An allowlisted environment, not the kernel's whole one, plus the
+        // secrets the agent asked to use by name (their values are
+        // redacted from everything that comes back). `ARBOS_GRANTED` tells
+        // the shell-side scrub which secret-looking names to keep.
+        let granted = crate::secrets::store().env();
+        cmd.env_clear();
+        cmd.envs(arbos_core::envsafe::filtered(&[]));
+        cmd.env(
+            "ARBOS_GRANTED",
+            granted
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        cmd.envs(granted);
         #[cfg(unix)]
         cmd.process_group(0);
         let child = match cmd.spawn() {
