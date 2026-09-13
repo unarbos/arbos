@@ -172,11 +172,13 @@ impl Notes {
         None
     }
 
-    /// Replace the whole checklist: sections and items as given, prose
-    /// dropped. `items` are `(section, text)`; an empty section name puts
-    /// the item under the last heading.
+    /// Replace the checklist: sections and items as given. The preamble —
+    /// front matter and every line before the first heading or item (the
+    /// page's top link to `docs/project-context.md`, a `<tldr>`) — stays;
+    /// the rest is rewritten. `items` are `(section, text)`; an empty
+    /// section name puts the item under the last heading.
     pub fn set(&mut self, items: &[(String, String)]) {
-        let mut lines: Vec<String> = Vec::new();
+        let mut lines: Vec<String> = self.preamble();
         let mut current = String::new();
         for (section, text) in items {
             let section = section.trim();
@@ -190,6 +192,36 @@ impl Notes {
             lines.push(format!("- [ ] {}", text.trim()));
         }
         self.lines = lines;
+    }
+
+    /// Front matter plus every line up to the first `##`/`###` heading or
+    /// checkbox item, trailing blank lines dropped.
+    fn preamble(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut in_front = false;
+        for (i, line) in self.lines.iter().enumerate() {
+            let t = line.trim_start();
+            if i == 0 && (t == "+++" || t == "---") {
+                in_front = true;
+                out.push(line.clone());
+                continue;
+            }
+            if in_front {
+                out.push(line.clone());
+                if t == "+++" || t == "---" {
+                    in_front = false;
+                }
+                continue;
+            }
+            if t.starts_with("## ") || t.starts_with("### ") || parse_item_line(line).is_some() {
+                break;
+            }
+            out.push(line.clone());
+        }
+        while out.last().is_some_and(|l| l.trim().is_empty()) {
+            out.pop();
+        }
+        out
     }
 
     /// Append an item under `section` (created at the end when new).
@@ -332,28 +364,176 @@ impl Notes {
     }
 }
 
-/// The `plan set` items argument: `["text", {"section": "..", "text": ".."}]`.
+/// The item text from one object the model sent: `text` as is, or
+/// `[label](target) — readout` from the parts, or a `goal`/`title`/
+/// `name`/`description`/`step`/`task` field. None when nothing reads as
+/// an item.
+fn item_text(o: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let str_of = |k: &str| {
+        o.get(k)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    if let Some(t) = str_of("text") {
+        return Some(t.to_string());
+    }
+    let label = str_of("label")
+        .or_else(|| str_of("goal"))
+        .or_else(|| str_of("title"))
+        .or_else(|| str_of("name"))
+        .or_else(|| str_of("step"))
+        .or_else(|| str_of("task"))
+        .or_else(|| str_of("description"))?;
+    let readout = str_of("readout")
+        .or_else(|| str_of("status"))
+        .or_else(|| str_of("outcome"));
+    let mut text = match str_of("target")
+        .or_else(|| str_of("link"))
+        .or_else(|| str_of("url"))
+    {
+        Some(target) => format!("[{label}]({target})"),
+        None => label.to_string(),
+    };
+    if let Some(r) = readout {
+        text.push_str(" — ");
+        text.push_str(r);
+    }
+    Some(text)
+}
+
+/// Children of an item object: `children`, `items`, `steps`, `subtasks`,
+/// `tasks`, `nodes`, `goals` — the shapes a "plan graph" comes in.
+fn children_of(o: &serde_json::Map<String, serde_json::Value>) -> Option<&Vec<serde_json::Value>> {
+    [
+        "children", "items", "steps", "subtasks", "tasks", "nodes", "goals", "subgoals",
+    ]
+    .iter()
+    .find_map(|k| o.get(*k).and_then(|v| v.as_array()))
+    .filter(|a| !a.is_empty())
+}
+
+/// The accepted shapes, for an error the model can act on.
+pub const SHAPES: &str = "plan takes one of: {\"op\":\"set\",\"items\":[\"text\", {\"section\":\"Phase 1\",\"text\":\"[label](target) — readout\"}, {\"label\":\"…\",\"readout\":\"…\"}]} · {\"text\":\"- [ ] one\\n## Section\\n- [ ] two\"} (a markdown checklist) · nested {\"goals\":[{\"goal\":\"…\",\"children\":[…]}]} (a parent with children becomes a ## section) · {\"op\":\"add\",\"text\":\"…\"} · {\"op\":\"check\",\"n\":1,\"readout\":\"…\"} · {\"op\":\"show\"}";
+
+/// A checklist from a JSON array the model sent: strings, `{section,
+/// text}`, `{label, target, readout}`, or nested goal objects whose
+/// children become the items of a section named for the parent.
 pub fn items_from_json(v: &serde_json::Value) -> Result<Vec<(String, String)>> {
-    let arr = v.as_array().context("items must be an array")?;
     let mut out = Vec::new();
     let mut section = String::new();
-    for it in arr {
-        match it {
-            serde_json::Value::String(s) => out.push((section.clone(), s.clone())),
-            serde_json::Value::Object(o) => {
-                if let Some(s) = o.get("section").and_then(|s| s.as_str()) {
-                    section = s.to_string();
+    fn walk(
+        arr: &[serde_json::Value],
+        section: &mut String,
+        out: &mut Vec<(String, String)>,
+        depth: usize,
+    ) -> Result<()> {
+        for it in arr {
+            match it {
+                serde_json::Value::String(s) if !s.trim().is_empty() => {
+                    let parsed = parse_checklist_text(s);
+                    if parsed.is_empty() {
+                        // One plain string is one item.
+                        out.push((section.clone(), s.trim().to_string()));
+                    }
+                    for (sec, text) in parsed {
+                        if !sec.is_empty() {
+                            *section = sec;
+                        }
+                        out.push((section.clone(), text));
+                    }
                 }
-                let text = o
-                    .get("text")
-                    .and_then(|t| t.as_str())
-                    .context("item needs text")?;
-                out.push((section.clone(), text.to_string()));
+                serde_json::Value::String(_) => {}
+                serde_json::Value::Object(o) => {
+                    if let Some(s) = o.get("section").and_then(|s| s.as_str()) {
+                        *section = s.trim().to_string();
+                    }
+                    let text = item_text(o);
+                    match (children_of(o), text) {
+                        // A parent with children is a section; its children
+                        // are the lines. Deeper nesting flattens under it.
+                        (Some(kids), Some(title)) if depth == 0 => {
+                            *section = crate::text::clip(&title, 60);
+                            walk(kids, section, out, depth + 1)?;
+                        }
+                        (Some(kids), Some(title)) => {
+                            out.push((section.clone(), title));
+                            walk(kids, section, out, depth + 1)?;
+                        }
+                        (Some(kids), None) => walk(kids, section, out, depth + 1)?,
+                        (None, Some(text)) => out.push((section.clone(), text)),
+                        (None, None) => {
+                            if o.get("section").is_none() {
+                                bail!(
+                                    "an item needs text (or label, goal, title): got {}",
+                                    crate::text::clip(&it.to_string(), 80)
+                                );
+                            }
+                        }
+                    }
+                }
+                serde_json::Value::Array(inner) => walk(inner, section, out, depth)?,
+                other => bail!(
+                    "an item is a string or an object, not {}",
+                    crate::text::clip(&other.to_string(), 40)
+                ),
             }
-            _ => bail!("an item is a string or {{section, text}}"),
         }
+        Ok(())
+    }
+    let arr = match v {
+        serde_json::Value::Array(a) => a.clone(),
+        serde_json::Value::String(s) => return Ok(parse_checklist_text(s)),
+        serde_json::Value::Object(o) => match children_of(o) {
+            Some(kids) => kids.clone(),
+            None => vec![v.clone()],
+        },
+        _ => bail!("items must be an array"),
+    };
+    walk(&arr, &mut section, &mut out, 0)?;
+    if out.is_empty() {
+        bail!("no items found");
     }
     Ok(out)
+}
+
+/// A markdown checklist as text: `## Section` headings, `- [ ] item`,
+/// `- [x] item`, plain `- item` / `* item`, and `1. item` lines. Anything
+/// else is skipped.
+pub fn parse_checklist_text(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut section = String::new();
+    for raw in text.lines() {
+        let t = raw.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Some(h) = t
+            .strip_prefix("### ")
+            .or_else(|| t.strip_prefix("## "))
+            .or_else(|| t.strip_prefix("# "))
+        {
+            section = h.trim().to_string();
+            continue;
+        }
+        if let Some((_, item)) = parse_item_line(t) {
+            out.push((section.clone(), item.to_string()));
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
+            out.push((section.clone(), rest.trim().to_string()));
+            continue;
+        }
+        let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty()
+            && let Some(rest) = t[digits.len()..]
+                .strip_prefix(". ")
+                .or_else(|| t[digits.len()..].strip_prefix(") "))
+        {
+            out.push((section.clone(), rest.trim().to_string()));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -407,6 +587,47 @@ mod tests {
             "{}",
             n.render()
         );
+    }
+
+    #[test]
+    fn set_keeps_the_page_preamble() {
+        let mut n = Notes::parse(
+            "+++\nowner = \"root\"\n+++\n# Notes\n\nGoals: [project-context](docs/project-context.md)\n\n## Old\n- [ ] gone\n",
+        );
+        n.set(&[("New".into(), "kept".into())]);
+        let text = n.render();
+        assert!(text.starts_with("+++\nowner = \"root\"\n+++\n# Notes\n\nGoals: [project-context](docs/project-context.md)\n\n## New\n- [ ] kept\n"), "{text}");
+        assert!(!text.contains("gone"));
+    }
+
+    #[test]
+    fn the_common_shapes_all_read_as_items() {
+        let v: serde_json::Value = serde_json::from_str(r#"["a", {"section":"S","text":"b"}, {"label":"PR 1","target":"https://x/1","readout":"open"}]"#).unwrap();
+        let items = items_from_json(&v).unwrap();
+        assert_eq!(
+            items,
+            vec![
+                ("".to_string(), "a".to_string()),
+                ("S".to_string(), "b".to_string()),
+                ("S".to_string(), "[PR 1](https://x/1) — open".to_string())
+            ]
+        );
+        let graph: serde_json::Value = serde_json::from_str(r#"{"goals":[{"goal":"Profile the sort","children":[{"goal":"time it","status":"todo"},{"title":"count comparisons"}]},{"goal":"Ship","steps":["write the test"]}]}"#).unwrap();
+        let items = items_from_json(&graph).unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            items[0],
+            ("Profile the sort".to_string(), "time it — todo".to_string())
+        );
+        assert_eq!(items[2], ("Ship".to_string(), "write the test".to_string()));
+        let md = items_from_json(&serde_json::Value::String(
+            "## Phase 1\n- [ ] read\n- [x] plan\n1. run tests\n".into(),
+        ))
+        .unwrap();
+        assert_eq!(md.len(), 3);
+        assert_eq!(md[2], ("Phase 1".to_string(), "run tests".to_string()));
+        let err = items_from_json(&serde_json::json!([{"when": {"every": "1h"}}])).unwrap_err();
+        assert!(format!("{err:#}").contains("needs text"), "{err:#}");
     }
 
     #[test]

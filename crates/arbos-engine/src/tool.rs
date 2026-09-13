@@ -81,11 +81,8 @@ impl PlanCx<'_> {
         {
             anyhow::bail!("{}", arbos_core::store::COORDINATOR_REFUSAL);
         }
-        if arbos_core::notes::is_project_page(self.root, &resolved)
-            && self.agent.id.as_str() != arbos_core::ROOT_ID
-        {
-            anyhow::bail!("{}", arbos_core::notes::PAGE_REFUSAL);
-        }
+        // The project page (.arbos/notes.md) guard lives in the store
+        // module's root-owned check (#103); nothing more here.
         Ok(resolved)
     }
 
@@ -459,10 +456,6 @@ mod store_guard_tests {
         }
         assert!(for_child.resolve_write(".arbos/docs/design.md").is_ok());
         assert!(for_child.resolve_write("main.py").is_ok());
-        std::fs::write(dir.join(".arbos/notes.md"), "# notes\n").unwrap();
-        assert!(for_root.resolve_write(".arbos/notes.md").is_ok());
-        let err = for_child.resolve_write(".arbos/notes.md").unwrap_err();
-        assert!(err.to_string().contains("project page"), "{err}");
     }
 
     #[test]
