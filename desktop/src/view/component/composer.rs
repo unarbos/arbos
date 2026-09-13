@@ -1401,64 +1401,6 @@ impl Composer {
             .into_any_element()
     }
 
-    /// The permission mode — Auto, Ask before writes, Plan only — as a
-    /// small chip left of the model. A click cycles to the next mode; the
-    /// tooltip says what the current one means. None when the chat has
-    /// no modes (an ACP agent without them).
-    fn mode_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let switch = self
-            .switches
-            .iter()
-            .find(|switch| matches!(switch.id, SwitchId::Mode))?;
-        if switch.options.is_empty() {
-            return None;
-        }
-        let current = switch.current.clone()?;
-        let ix = switch
-            .options
-            .iter()
-            .position(|o| o.id == current)
-            .unwrap_or(0);
-        let now = &switch.options[ix];
-        let next = switch.options[(ix + 1) % switch.options.len()].id.clone();
-        let label = now.name.clone();
-        let tip: SharedString = format!("Mode: {label}. Click for the next mode.").into();
-        let strict = now.id.as_ref() != "auto";
-        Some(
-            div()
-                .id("composer-mode")
-                .flex_none()
-                .h(px(root::COMPOSER_HIT))
-                .px(px(6.))
-                .rounded(px(6.))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.))
-                .cursor_pointer()
-                .text_style(TextStyle::Caption)
-                .text_color(if strict { theme.text } else { theme.text_muted })
-                .when(strict, |el| el.bg(theme.element_active))
-                .hover(|button| button.bg(theme.element_hover))
-                .tooltip(move |window, cx| Tooltip::text(tip.clone(), window, cx))
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(ComposerEvent::Switch(SwitchId::Mode, next.clone()));
-                }))
-                .child(
-                    icons::icon(if strict {
-                        icons::system::TUNING
-                    } else {
-                        icons::media::PLAY
-                    })
-                    .size(px(12.))
-                    .text_color(if strict { theme.text } else { theme.text_faint })
-                    .into_any_element(),
-                )
-                .child(div().child(label))
-                .into_any_element(),
-        )
-    }
-
     fn model_switch(&self) -> Option<&Switch> {
         self.switches
             .iter()
@@ -1891,40 +1833,6 @@ impl Composer {
             .into_any_element()
     }
 
-    /// The small mic glyph before the round button: dictation is one click
-    /// away whatever the round button is doing (mic, send, stop). Solid
-    /// while recording, faint otherwise.
-    fn mic_icon(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let recording = self.voice == VoiceState::Recording;
-        let busy = self.voice == VoiceState::Busy;
-        let tip = if recording { "Stop dictation" } else { "Dictate" };
-        div()
-            .id("composer-mic")
-            .flex_none()
-            .size(px(root::COMPOSER_HIT))
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .when(!busy, |el| el.cursor_pointer().hover(|s| s.bg(theme.element_hover)))
-            .tooltip(move |window, cx| Tooltip::text(tip, window, cx))
-            .child(
-                icons::icon(icons::media::MICROPHONE)
-                    .size(px(14.))
-                    .text_color(if recording {
-                        theme.accent
-                    } else {
-                        theme.text_faint
-                    }),
-            )
-            .on_click(cx.listener(|composer, _, _, cx| {
-                if composer.voice != VoiceState::Busy {
-                    cx.emit(ComposerEvent::Voice);
-                }
-            }))
-            .into_any_element()
-    }
-
     /// Mic: ghost when idle, filled disc while the kernel is listening, faint
     /// while a transcript is coming back.
     fn voice_btn(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -2271,16 +2179,15 @@ impl Composer {
                                     .flex_row()
                                     .items_center()
                                     .gap(px(4.))
-                                    .children(self.mode_chip(&theme, cx))
                                     .child(
                                         div()
                                             .relative()
                                             .children(self.menu_card(&theme, window, cx))
                                             .child(self.chip(&theme, cx)),
                                     )
-                                    // Cursor: a mic glyph of its own, then
-                                    // the one round button.
-                                    .child(self.mic_icon(&theme, cx))
+                                    // One round button: mic while the field
+                                    // is empty, send once there is text,
+                                    // stop while a turn streams.
                                     .when(empty && !streaming, |row| {
                                         row.child(self.voice_btn(&theme, cx))
                                     })

@@ -312,6 +312,7 @@ pub const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ),
     ("stop", "Stop the current turn"),
     ("model", "Switch model: /model <id>"),
+    ("mode", "Permission mode: /mode auto | ask | plan"),
     ("pause", "Pause this agent: prompts wait until /resume"),
     ("resume", "Resume a paused agent"),
     ("fork", "Copy this chat into a new one"),

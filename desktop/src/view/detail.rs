@@ -314,9 +314,9 @@ impl Arbos {
             .update(cx, |workspace, cx| workspace.send(id, text, cx));
     }
 
-    /// `/compact`, `/undo`, `/stop`, `/model <id>`, `/pause`, `/resume`,
-    /// `/fork`: the kernel's own verbs, sent as frames rather than as a
-    /// prompt. True when the text was one of them.
+    /// `/compact`, `/undo`, `/stop`, `/model <id>`, `/mode <id>`, `/pause`,
+    /// `/resume`, `/fork`: the kernel's own verbs, sent as frames rather
+    /// than as a prompt. True when the text was one of them.
     fn builtin_command(&mut self, id: u64, text: &str, cx: &mut Context<Self>) -> bool {
         let Some(rest) = text.trim().strip_prefix('/') else {
             return false;
@@ -351,6 +351,14 @@ impl Arbos {
             "model" if !arg.is_empty() => {
                 self.workspace.update(cx, |workspace, cx| {
                     workspace.set_session_model(id, arg.to_string(), cx)
+                });
+                true
+            }
+            // The permission mode has no chip in the composer; this is the
+            // one way to change it from the window.
+            "mode" if matches!(arg, "auto" | "ask" | "plan") => {
+                self.workspace.update(cx, |workspace, cx| {
+                    workspace.set_session_mode(id, arg.to_string(), cx)
                 });
                 true
             }
