@@ -220,8 +220,40 @@ pub fn attach_or_spawn(workspace: &Path) -> Result<WebInfo> {
     if let Some(info) = read_info(&workspace).filter(alive) {
         return Ok(info);
     }
+    // One spawn per place at a time. The chat, the board and the terminal
+    // all attach when a place opens; without this, each of them started a
+    // kernel, the losers of the `.arbos/runtime/lock` race exited 1, and
+    // that exit landed in the transcript as a failed notice.
+    let spawning = spawn_lock(&workspace);
+    let _spawning = spawning
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(info) = read_info(&workspace).filter(alive) {
+        return Ok(info);
+    }
     let child = spawn(&workspace)?;
     wait_ready(&workspace, child)
+}
+
+fn spawn_lock(workspace: &Path) -> Arc<Mutex<()>> {
+    static SPAWN_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    SPAWN_LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(workspace.to_path_buf())
+        .or_default()
+        .clone()
+}
+
+/// The kernel's own words when a second `serve` finds the place taken
+/// (`arbos_core::PlaceLock::acquire`).
+const LOCK_HELD: &str = "place already served";
+
+/// A spawned kernel exited because another kernel holds the place: not an
+/// error of ours, the other kernel is the one to attach to.
+fn lost_lock_race(status: &std::process::ExitStatus, log_tail: &str) -> bool {
+    !status.success() && log_tail.contains(LOCK_HELD)
 }
 
 pub fn websocket_url(info: &WebInfo) -> String {
@@ -2036,8 +2068,18 @@ pub fn tcp_addr(url: &str) -> Option<std::net::SocketAddr> {
     raw.parse().ok()
 }
 
+/// Kernels this process has started. Tests read it to prove one place gets
+/// one spawn however many attachers race.
+static SPAWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+fn spawn_count() -> usize {
+    SPAWNS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 fn spawn(workspace: &Path) -> Result<Child> {
     let bin = arbos_bin()?;
+    SPAWNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     // The kernel's stdout/stderr go under runtime/: process facts, never
     // part of the .arbos/ record.
     let dir = workspace.join(".arbos").join("runtime");
@@ -2067,10 +2109,13 @@ fn wait_ready(workspace: &Path, mut child: Child) -> Result<WebInfo> {
             return Ok(info);
         }
         if let Ok(Some(status)) = child.try_wait() {
-            return Err(anyhow!(
-                "arbos-kernel exited ({status}){}",
-                kernel_log_tail(workspace)
-            ));
+            let tail = kernel_log_tail(workspace);
+            if lost_lock_race(&status, &tail) {
+                // Another process (a CLI `serve`, an older desktop) holds the
+                // place. Wait for its kernel.json instead of reporting ours.
+                return wait_other(workspace, deadline);
+            }
+            return Err(anyhow!("arbos-kernel exited ({status}){tail}"));
         }
         thread::sleep(POLL);
     }
@@ -2079,6 +2124,21 @@ fn wait_ready(workspace: &Path, mut child: Child) -> Result<WebInfo> {
         "arbos-kernel did not write a live .arbos/kernel.json within {:?}{}",
         READY_WAIT,
         kernel_log_tail(workspace)
+    ))
+}
+
+/// The lock holder is starting up (or already serving): poll for its live
+/// kernel.json until `deadline`.
+fn wait_other(workspace: &Path, deadline: Instant) -> Result<WebInfo> {
+    while Instant::now() < deadline {
+        if let Some(info) = read_info(workspace).filter(alive) {
+            return Ok(info);
+        }
+        thread::sleep(POLL);
+    }
+    Err(anyhow!(
+        "another arbos-kernel holds {} but never wrote a live .arbos/kernel.json",
+        workspace.join(".arbos").display()
     ))
 }
 
