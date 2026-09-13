@@ -270,7 +270,20 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         }),
     };
 
+    // The desktop deletes a chat with `rm -rf` on its folder, turn or no
+    // turn. Every append would recreate the folder as a ghost (a transcript
+    // with no agent.md that nothing lists). A turn whose folder is gone is
+    // over: nothing more is written for it (QA bug qa-017).
+    let gone = || !layout.agent_md().exists();
+
     let end = |usage: Option<Usage>, interrupted: Option<&str>| -> Result<()> {
+        if gone() {
+            eprintln!(
+                "turn {}: agent folder was deleted; ending without writing",
+                agent.id
+            );
+            return Ok(());
+        }
         let mut batch = Vec::new();
         if let Some(detail) = interrupted {
             batch.push(Event::new(EventKind::Interrupted {
@@ -294,6 +307,13 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let mut repeats: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut hidden_seen = 0usize;
     loop {
+        if gone() {
+            eprintln!(
+                "turn {}: agent folder was deleted; ending without writing",
+                agent.id
+            );
+            return Ok(());
+        }
         if control.is_stopped() {
             return end(None, Some(&control.stop_reason()));
         }
@@ -584,6 +604,13 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 }
             }
             results.push(ev);
+        }
+        if gone() {
+            eprintln!(
+                "turn {}: agent folder was deleted; ending without writing",
+                agent.id
+            );
+            return Ok(());
         }
         append_events(&transcript, &results)?;
         events = load_transcript(&transcript)?;
