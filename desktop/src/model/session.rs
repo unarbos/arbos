@@ -1304,7 +1304,7 @@ impl ChatSession {
     /// that matches the last card is the echo and is dropped. Anything else
     /// is a turn this window did not start: the card goes up, and the pane
     /// is working until the kernel says idle.
-    fn foreign_prompt(&mut self, text: String, attachments: Vec<String>, ts: i64) {
+    fn foreign_prompt(&mut self, text: String, attachments: Vec<String>, ts: i64, channel: String) {
         let squash = |s: &str| s.split_whitespace().collect::<String>();
         let echo = self
             .items
@@ -1326,9 +1326,12 @@ impl ChatSession {
             message.add_file_path(path);
         }
         message.sent_at = (ts > 0).then_some(ts);
-        // Spoken, not typed: while a call to this chat is live, a line this
-        // window did not type came through the caller's microphone.
-        message.channel = if crate::voice_ws::in_call() {
+        // Spoken, not typed: the kernel says so on the line (#99). A kernel
+        // from before that wrote no channel; then a line this window did not
+        // type while a call to this chat is live came through the microphone.
+        message.channel = if !channel.is_empty() {
+            channel
+        } else if crate::voice_ws::in_call() {
             "voice".into()
         } else {
             String::new()
@@ -1773,7 +1776,8 @@ impl ChatSession {
                 text,
                 attachments,
                 ts,
-            } => self.foreign_prompt(text, attachments, ts),
+                channel,
+            } => self.foreign_prompt(text, attachments, ts, channel),
             Event::Provider {
                 provider,
                 model,
