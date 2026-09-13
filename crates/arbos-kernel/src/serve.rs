@@ -129,20 +129,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let ptys = Arc::new(PtyHub::new());
     let (pty_tx, mut pty_rx) = mpsc::unbounded_channel::<Frame>();
     ptys.bind(place.path.clone(), pty_tx);
-    let mut registry = Registry::builtin()
-        .with(tools::Spawn(Arc::clone(&hooks)))
-        .with(tools::Say(Arc::clone(&hooks)))
-        .with(tools::PlanTool(Arc::clone(&hooks)))
-        .with(tools::Ask(Arc::clone(&hooks)))
-        .with(tools::Browser(Arc::clone(&hooks)))
-        .with(crate::screenshot::Screenshot)
-        .with(crate::secret_tool::Secret)
-        .with(crate::tools::SubscribeTool(Arc::clone(&hooks)))
-        .with(crate::record::Record::default())
-        .with(tools::Terminal {
-            hooks: Arc::clone(&hooks),
-            ptys: Arc::clone(&ptys),
-        });
+    let mut registry = kernel_registry(&hooks, &ptys);
     // MCP: every tool of every configured server (`.arbos/mcp.toml`,
     // `.cursor/mcp.json`, `~/.config/arbos/mcp.toml`, `ARBOS_MCP_CMD`)
     // joins the registry as `mcp__<server>__<tool>`, callable like any
@@ -1290,6 +1277,25 @@ fn webhook_text(body: &[u8], content_type: Option<&str>) -> String {
         return format!("[webhook] {}", serde_json::Value::Object(map));
     }
     raw
+}
+
+/// Every tool the kernel offers, builtins and its own. `arbos-kernel
+/// prompt` builds the same set to measure what the model is sent.
+pub fn kernel_registry(hooks: &Arc<KernelHooks>, ptys: &Arc<PtyHub>) -> Registry {
+    Registry::builtin()
+        .with(tools::Spawn(Arc::clone(hooks)))
+        .with(tools::Say(Arc::clone(hooks)))
+        .with(tools::PlanTool(Arc::clone(hooks)))
+        .with(tools::Ask(Arc::clone(hooks)))
+        .with(tools::Browser(Arc::clone(hooks)))
+        .with(crate::screenshot::Screenshot)
+        .with(crate::secret_tool::Secret)
+        .with(crate::tools::SubscribeTool(Arc::clone(hooks)))
+        .with(crate::record::Record::default())
+        .with(tools::Terminal {
+            hooks: Arc::clone(hooks),
+            ptys: Arc::clone(ptys),
+        })
 }
 
 /// Greet, then run the two loops for one admitted client. A client that

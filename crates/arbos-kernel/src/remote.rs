@@ -329,9 +329,6 @@ fn note_reattach_failure(hooks: &KernelHooks, record: &Record, e: anyhow::Error)
     );
 }
 
-/// `spawn host=<name>`: a machine from `machines.toml` is reached over
-/// ssh; one only the hub knows is claimed through it. Neither, and the
-/// error names both files.
 /// The model fills every optional field. These spellings of `host` mean
 /// "this machine": a local spawn, not a lookup that can only fail.
 pub fn is_local_host(host: &str) -> bool {
@@ -383,6 +380,9 @@ pub fn choose_host(place: &Place, host: &str) -> HostChoice {
     HostChoice::Remote
 }
 
+/// `spawn host=<name>`: a machine from `machines.toml` is reached over
+/// ssh; one only the hub knows is claimed through it. Neither, and the
+/// error names both files.
 pub async fn spawn_remote(
     hooks: Arc<KernelHooks>,
     parent: Agent,

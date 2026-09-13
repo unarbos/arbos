@@ -147,12 +147,12 @@ impl Machines {
             return None;
         }
         Some(format!(
-            "Machines: this one (local); {}. spawn host=<name> runs a child on that machine, in its own copy of this project.",
+            "Machines (spawn host=<name>; details in ~/.config/arbos/machines.toml): {}",
             self.machine
                 .iter()
-                .map(Machine::describe)
+                .map(|m| m.name.as_str())
                 .collect::<Vec<_>>()
-                .join("; ")
+                .join(", ")
         ))
     }
 }

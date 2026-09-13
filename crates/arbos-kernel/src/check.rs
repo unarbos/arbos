@@ -320,6 +320,22 @@ pub fn check(place: &Place) -> Result<Report> {
             r.warn(rel(&notes), Some(p.line), p.what);
         }
     }
+    // PROTOCOL.md: the long-form contract the prompt points at. The kernel
+    // rewrites it at start; a stale copy means an older kernel wrote it.
+    let protocol = arbos_core::protocol::path(place);
+    match std::fs::read_to_string(&protocol) {
+        Ok(text) if text == arbos_core::protocol::TEXT => {}
+        Ok(_) => r.warn(
+            rel(&protocol),
+            None,
+            "differs from this build's protocol text (the kernel rewrites it at start)",
+        ),
+        Err(_) => r.warn(
+            rel(&protocol),
+            None,
+            "missing: the contract points agents here (the kernel writes it at start)",
+        ),
+    }
     // GOALS.md: a real file here is the pre-store layout; bootstrap moves
     // it into docs/project-context.md at the next start.
     let goals = arbos_core::store::goals_alias_path(place);

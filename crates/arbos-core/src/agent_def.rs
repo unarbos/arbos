@@ -130,19 +130,12 @@ impl AgentDef {
     /// `name — description` for the roster of kinds in a prompt.
     pub fn roster_line(&self) -> String {
         let mut line = self.name.clone();
-        if !self.description.is_empty() {
-            line.push_str(" — ");
-            line.push_str(&self.description);
-        }
         let mut flags = Vec::new();
         if self.readonly {
-            flags.push("readonly".to_string());
+            flags.push("readonly");
         }
         if self.acp.is_some() {
-            flags.push("acp: an outside agent program".to_string());
-        }
-        if !self.model.is_empty() && self.model != "inherit" {
-            flags.push(format!("model {}", self.model));
+            flags.push("acp");
         }
         if !flags.is_empty() {
             line.push_str(&format!(" ({})", flags.join(", ")));

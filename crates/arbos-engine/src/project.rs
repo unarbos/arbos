@@ -235,6 +235,63 @@ impl ImageBudget {
     }
 }
 
+/// The system prompt's parts and their token estimates (chars/4), plus the
+/// tool schemas: what every model call carries before the conversation.
+/// For `arbos-kernel prompt` and the per-turn `prompt_size` log line.
+pub fn measure(
+    place: &Place,
+    agent: &Agent,
+    skills: &[String],
+    view: &crate::tool::View,
+) -> Vec<(String, u64)> {
+    use crate::evict::estimate_tokens;
+    sections(place, agent, skills, view)
+        .into_iter()
+        .map(|(k, text)| (k, estimate_tokens(&text)))
+        .collect()
+}
+
+/// The same parts as text: the contract, the project context, the instance
+/// prompt (whole, then per block), the plan segment, the tool schemas
+/// (whole, then per tool). Nested rows start with two spaces.
+pub fn sections(
+    place: &Place,
+    agent: &Agent,
+    skills: &[String],
+    view: &crate::tool::View,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    out.push(("contract".to_string(), CONTRACT.to_string()));
+    if let Some(context) = arbos_core::store::prompt_segment(place) {
+        out.push(("project-context".to_string(), context));
+    }
+    let inst = instance_prompt(place, agent, skills);
+    for block in inst.split("\n\n").filter(|b| !b.trim().is_empty()) {
+        let head: String = block
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(48)
+            .collect();
+        out.push((format!("  instance › {head}"), block.to_string()));
+    }
+    out.push(("instance".to_string(), inst));
+    if let Some(seg) = crate::prompt::plan_segment(place, agent) {
+        out.push(("plan".to_string(), seg));
+    }
+    for schema in view.schemas() {
+        let name = schema
+            .pointer("/function/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        out.push((format!("  tool › {name}"), schema.to_string()));
+    }
+    let schemas = serde_json::to_string(view.schemas()).unwrap_or_default();
+    out.push((format!("tools ({})", view.schemas().len()), schemas));
+    out
+}
+
 /// `step_bytes`: most bytes one step's fresh tool results may take together.
 pub fn project(
     place: &Place,

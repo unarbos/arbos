@@ -48,10 +48,7 @@ impl Tool for Search {
         simple_schema(
             "search",
             "Web search. Returns numbered sources ([n] title — URL, snippet). Cite [n] for what you use and end with a Sources list.",
-            &[
-                ("query", "Search query.", true),
-                ("max_results", "How many sources, 1–20 (default 8).", false),
-            ],
+            &[("query", "", true), ("max_results", "1–20 (8).", false)],
         )
     }
     fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {

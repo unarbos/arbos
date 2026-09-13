@@ -233,28 +233,20 @@ pub fn typed_schema(name: &str, desc: &str, params: &[Param]) -> Value {
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for (key, d, req, kind) in params {
-        let prop = if *kind == "array" {
-            json!({"type": "array", "items": {"type": "string"}, "description": d})
+        let mut prop = if *kind == "array" {
+            json!({"type": "array", "items": {"type": "string"}})
         } else {
-            json!({"type": kind, "description": d})
+            json!({"type": kind})
         };
+        if !d.is_empty() {
+            prop["description"] = json!(d);
+        }
         properties.insert((*key).into(), prop);
         if *req {
             required.push(*key);
         }
     }
-    json!({
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": desc,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            }
-        }
-    })
+    function_schema(name, desc, properties, required)
 }
 
 /// A boolean argument, accepting the strings a lax model may still send.
@@ -298,22 +290,33 @@ pub fn simple_schema(name: &str, desc: &str, params: &[(&str, &str, bool)]) -> V
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for (key, d, req) in params {
-        properties.insert((*key).into(), json!({"type": "string", "description": d}));
+        let mut prop = json!({"type": "string"});
+        if !d.is_empty() {
+            prop["description"] = json!(d);
+        }
+        properties.insert((*key).into(), prop);
         if *req {
             required.push(*key);
         }
     }
+    function_schema(name, desc, properties, required)
+}
+
+/// The provider's function shape. An empty `required` is left out: every
+/// key of every schema rides in every model call, so nothing empty rides.
+fn function_schema(
+    name: &str,
+    desc: &str,
+    properties: serde_json::Map<String, Value>,
+    required: Vec<&str>,
+) -> Value {
+    let mut parameters = json!({"type": "object", "properties": properties});
+    if !required.is_empty() {
+        parameters["required"] = json!(required);
+    }
     json!({
         "type": "function",
-        "function": {
-            "name": name,
-            "description": desc,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            }
-        }
+        "function": {"name": name, "description": desc, "parameters": parameters}
     })
 }
 

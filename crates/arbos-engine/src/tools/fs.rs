@@ -49,7 +49,7 @@ impl Tool for Read {
             "read",
             "Read a file (text or image). Text lines are LINE:HASH|body. Pass LINE:HASH to edit.",
             &[
-                ("path", "File path.", true, "string"),
+                ("path", "", true, "string"),
                 ("offset", "Start line (1-based).", false, "integer"),
                 ("limit", "Max lines.", false, "integer"),
             ],
@@ -234,10 +234,7 @@ impl Tool for Write {
         simple_schema(
             "write",
             "Create or overwrite a file.",
-            &[
-                ("path", "File path.", true),
-                ("contents", "Full contents.", true),
-            ],
+            &[("path", "", true), ("contents", "", true)],
         )
     }
     fn plan(&self, cx: &PlanCx, args: &Value) -> Result<Plan> {
@@ -264,28 +261,16 @@ impl Tool for Edit {
             "type": "function",
             "function": {
                 "name": "edit",
-                "description": "Edit one file. Prefer hashline: path + anchor from read (LINE:HASH) + content. Empty content deletes. end_anchor replaces a range. op=insert_after uses anchor 0: or EOF. op=write replaces the whole file. edits is a list of {op,anchor,content}. Classic unique old_string/new_string still works.",
+                "description": "Edit one file by hashline: anchor from read (LINE:HASH) + content (empty deletes; end_anchor for a range; op insert_after with anchor 0: or EOF; op write for the whole file). Classic unique old_string/new_string also works.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "File path."},
+                        "path": {"type": "string"},
                         "anchor": {"type": "string", "description": "LINE:HASH from read, or 0: / EOF."},
-                        "end_anchor": {"type": "string", "description": "Inclusive end LINE:HASH for a range replace."},
-                        "content": {"type": "string", "description": "Replacement or insert text. Empty deletes."},
+                        "end_anchor": {"type": "string", "description": "Inclusive range end."},
+                        "content": {"type": "string", "description": "Empty deletes."},
                         "op": {"type": "string", "enum": ["replace", "insert_after", "write"], "description": "Default replace."},
-                        "edits": {
-                            "type": "array",
-                            "description": "Several hashline ops on this file, applied bottom-up.",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "op": {"type": "string", "enum": ["replace", "insert_after", "write"]},
-                                    "anchor": {"type": "string"},
-                                    "end_anchor": {"type": "string"},
-                                    "content": {"type": "string"}
-                                }
-                            }
-                        },
+                        "edits": {"type": "array", "items": {"type": "object"}, "description": "Several {op, anchor, end_anchor, content} on this file, applied bottom-up."},
                         "old_string": {"type": "string", "description": "Unique text to find (classic)."},
                         "new_string": {"type": "string", "description": "Replacement (classic)."}
                     },

@@ -15,6 +15,7 @@ pub mod klog;
 pub mod mcp;
 pub mod migrate;
 pub mod plan;
+pub mod prompt_size;
 pub mod pty;
 pub mod record;
 pub mod remote;

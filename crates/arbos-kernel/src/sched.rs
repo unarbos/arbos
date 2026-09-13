@@ -200,4 +200,21 @@ impl arbos_engine::Hooks for TurnHooks {
             secs,
         });
     }
+
+    /// One `prompt_size` line per turn in kernel.log: what the first model
+    /// call carried before any history, so a grown prompt shows up in
+    /// `arbos-kernel log` rather than on the bill.
+    fn prompt_size(&self, size: arbos_engine::PromptSize) {
+        crate::klog::info(
+            "prompt_size",
+            Some(self.agent.as_str()),
+            format!(
+                "system={} tools={} conversation={} total={} (estimated tokens)",
+                size.system,
+                size.tools,
+                size.conversation,
+                size.total()
+            ),
+        );
+    }
 }

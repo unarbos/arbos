@@ -70,9 +70,9 @@ impl Tool for Remember {
     fn schema(&self) -> Value {
         simple_schema(
             "remember",
-            "Keep a fact for future sessions: how this project works, a decision and why, a preference of the user. It lands in .arbos/memory.md (scope place, default) or ~/.config/arbos/memory.md (scope user: true in every place) and shows in your prompt from now on. Not for task progress (that is the plan) and never for secrets. op forget removes the lines that contain text.",
+            "Keep a durable fact (how the project works, a decision, a preference) in memory.md; scope user for every place. Not progress, never secrets. op forget removes matching lines.",
             &[
-                ("text", "The fact, one line, self-contained.", true),
+                ("text", "One self-contained line.", true),
                 ("scope", "place (default) or user.", false),
                 ("op", "add (default) or forget.", false),
             ],

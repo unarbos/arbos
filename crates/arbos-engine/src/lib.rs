@@ -35,5 +35,5 @@ pub use tool::{
     simple_schema, typed_schema,
 };
 pub use tools::git;
-pub use tools::{Grep, GrepHit, Hooks, is_readonly_command, kill_job};
+pub use tools::{Grep, GrepHit, Hooks, PromptSize, is_readonly_command, kill_job};
 pub use turn::{TurnOpts, turn};

@@ -54,6 +54,25 @@ pub trait Hooks: Send + Sync {
     /// The model has been silent for `secs` seconds and the call is still
     /// open. Live only; never on the transcript.
     fn working(&self, _secs: u64) {}
+    /// What the turn's first model call carries, in estimated tokens: the
+    /// system prompt (contract, context, instance, plan), the tool schemas,
+    /// and the conversation. Once per turn; for the kernel log.
+    fn prompt_size(&self, _size: PromptSize) {}
+}
+
+/// Token estimates (chars/4, calibrated against the provider's count once
+/// it has reported) of the parts of one model call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PromptSize {
+    pub system: u64,
+    pub tools: u64,
+    pub conversation: u64,
+}
+
+impl PromptSize {
+    pub fn total(&self) -> u64 {
+        self.system + self.tools + self.conversation
+    }
 }
 
 /// Every tool the engine ships. Hosts add theirs with [`Registry::with`].

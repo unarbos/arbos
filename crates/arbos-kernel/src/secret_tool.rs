@@ -14,15 +14,10 @@ impl Tool for Secret {
     fn schema(&self) -> Value {
         typed_schema(
             "secret",
-            "Use a key or token from the vault without seeing it. list: the names this place configures (.arbos/secrets.toml) and what kind of source each has. use NAME: the kernel fetches the value and sets it as an environment variable of that name for every bash command from now on; the value never comes back to you, and it is replaced by [REDACTED:NAME] in every tool result. revoke NAME: stop providing it. Never echo, print, or write a secret's value; pass it to programs through the environment ($NAME).",
+            "Keys without seeing them: list names (.arbos/secrets.toml); use NAME sets $NAME in bash's env from now on (value redacted everywhere); revoke NAME. Never print a value.",
             &[
                 ("action", "list (default), use, or revoke.", false, "string"),
-                (
-                    "name",
-                    "For use and revoke: the secret's name.",
-                    false,
-                    "string",
-                ),
+                ("name", "Secret name.", false, "string"),
             ],
         )
     }

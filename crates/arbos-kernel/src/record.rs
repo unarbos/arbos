@@ -63,18 +63,18 @@ impl Tool for Record {
     fn schema(&self) -> Value {
         typed_schema(
             "record",
-            "Screen recording for the user. op start begins recording the machine's screen in the background and returns at once; then do the work you want shown; op stop ends it and returns the video path plus its last frame as an image. op status says whether one is running. One recording per agent at a time; it ends on its own at max_secs. Use screenshot for a single moment, record for a flow.",
+            "Screen recording for the user: start (returns at once), do the steps, stop (video path + last frame). status. Ends by itself at max_secs.",
             &[
-                ("op", "start, stop, or status.", true, "string"),
+                ("op", "start|stop|status", true, "string"),
                 (
                     "max_secs",
-                    "start: longest the recording may run (default 120, max 600). It stops by itself at this point.",
+                    "start: cap in seconds (120, max 600).",
                     false,
                     "integer",
                 ),
                 (
                     "display",
-                    "start: display index, 1-based, when there are several (macOS). Default: the main one.",
+                    "start: 1-based display index (macOS).",
                     false,
                     "integer",
                 ),

@@ -43,30 +43,25 @@ impl Tool for Bash {
     fn schema(&self) -> Value {
         typed_schema(
             "bash",
-            "Run a shell command as a job. Returns output when it finishes within wait_ms; otherwise the command keeps running and you get a job id for await/jobs. The wait never kills; only timeout_ms does. Use background:true for servers and watchers.",
+            "Run a shell command. Output returns within wait_ms; otherwise it continues as a job (await/jobs). Only timeout_ms kills. background:true for servers.",
             &[
-                ("command", "Command.", true, "string"),
-                (
-                    "cwd",
-                    "Working directory, relative to cwd.",
-                    false,
-                    "string",
-                ),
+                ("command", "", true, "string"),
+                ("cwd", "", false, "string"),
                 (
                     "wait_ms",
-                    "How long this call stays attached (default 600000 = 10 min). The command is not killed when it expires; it continues as a job.",
+                    "Attached wait, ms (default 600000).",
                     false,
                     "integer",
                 ),
                 (
                     "background",
-                    "true: return after 500ms and keep the command running as a job.",
+                    "Return at once; keep running as a job.",
                     false,
                     "boolean",
                 ),
                 (
                     "timeout_ms",
-                    "Hard limit: kill the command when this expires, even after backgrounding.",
+                    "Hard kill after this many ms.",
                     false,
                     "integer",
                 ),
@@ -231,19 +226,11 @@ impl Tool for Await {
     fn schema(&self) -> Value {
         simple_schema(
             "await",
-            "Wait on a job started by bash. Returns the output produced since you last saw it, as soon as the job exits, its new output matches pattern, or wait_ms elapses.",
+            "Wait on a bash job: new output when it exits, matches pattern, or wait_ms elapses.",
             &[
-                ("id", "Job id, e.g. j3.", true),
-                (
-                    "pattern",
-                    "Optional regex; return as soon as new output matches it.",
-                    false,
-                ),
-                (
-                    "wait_ms",
-                    "How long to block (default 30000, max 3600000).",
-                    false,
-                ),
+                ("id", "e.g. j3", true),
+                ("pattern", "Regex: return on match.", false),
+                ("wait_ms", "ms (30000, max 3600000).", false),
             ],
         )
     }
@@ -314,11 +301,7 @@ impl Tool for Jobs {
         "jobs"
     }
     fn schema(&self) -> Value {
-        simple_schema(
-            "jobs",
-            "List this agent's jobs: id, status, command, log path. Survives kernel restarts.",
-            &[],
-        )
+        simple_schema("jobs", "List this agent's jobs.", &[])
     }
     fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
         Ok(Plan::access(Access::none()))

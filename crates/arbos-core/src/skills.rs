@@ -174,11 +174,7 @@ impl Skill {
 
     /// `name — description` for a roster.
     pub fn roster_line(&self) -> String {
-        if self.description.is_empty() {
-            self.name.clone()
-        } else {
-            format!("{} — {}", self.name, self.description)
-        }
+        self.name.clone()
     }
 }
 
