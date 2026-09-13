@@ -888,7 +888,9 @@ impl Cydonia {
             .into_any_element()
     }
 
-    /// The line under the pill: a spinner on the right while a turn runs.
+    /// The line under the pill: where the agent runs on the left (Cursor's
+    /// "Cloud" label; here `Local` or the remote place's ssh alias), a
+    /// spinner on the right while a turn runs.
     fn context_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let workspace = self.workspace.read(cx);
         let since = workspace
@@ -896,6 +898,13 @@ impl Cydonia {
             .filter(|chat| chat.busy())
             .and_then(|chat| chat.live_since)
             .and_then(|at| at.elapsed().ok());
+        let host = workspace
+            .active_project()
+            .and_then(|project| project.host.clone());
+        let (glyph, machine) = match host {
+            Some(alias) => (icons::devices::CLOUD, alias),
+            None => (icons::devices::LAPTOP, "Local".to_owned()),
+        };
         div()
             .id("composer-context")
             .flex()
@@ -905,6 +914,28 @@ impl Cydonia {
             .ml(px(-root::COMPOSER_PAD_X + 2.))
             .mr(px(-root::COMPOSER_PAD_X))
             .h(px(24.))
+            .child(
+                div()
+                    .id("composer-machine")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(5.))
+                    .pl(px(8.))
+                    .max_w(px(200.))
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .tooltip(|window, cx| {
+                        Tooltip::text("Where this agent runs", window, cx)
+                    })
+                    .child(
+                        icons::icon(glyph)
+                            .size(px(11.))
+                            .flex_none()
+                            .text_color(theme.text_faint),
+                    )
+                    .child(div().truncate().child(SharedString::from(machine))),
+            )
             .child(div().flex_1())
             .children(since.map(|since| {
                 div()

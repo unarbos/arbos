@@ -1891,6 +1891,40 @@ impl Composer {
             .into_any_element()
     }
 
+    /// The small mic glyph before the round button: dictation is one click
+    /// away whatever the round button is doing (mic, send, stop). Solid
+    /// while recording, faint otherwise.
+    fn mic_icon(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let recording = self.voice == VoiceState::Recording;
+        let busy = self.voice == VoiceState::Busy;
+        let tip = if recording { "Stop dictation" } else { "Dictate" };
+        div()
+            .id("composer-mic")
+            .flex_none()
+            .size(px(root::COMPOSER_HIT))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(!busy, |el| el.cursor_pointer().hover(|s| s.bg(theme.element_hover)))
+            .tooltip(move |window, cx| Tooltip::text(tip, window, cx))
+            .child(
+                icons::icon(icons::media::MICROPHONE)
+                    .size(px(14.))
+                    .text_color(if recording {
+                        theme.accent
+                    } else {
+                        theme.text_faint
+                    }),
+            )
+            .on_click(cx.listener(|composer, _, _, cx| {
+                if composer.voice != VoiceState::Busy {
+                    cx.emit(ComposerEvent::Voice);
+                }
+            }))
+            .into_any_element()
+    }
+
     /// Mic: ghost when idle, filled disc while the kernel is listening, faint
     /// while a transcript is coming back.
     fn voice_btn(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -2241,6 +2275,9 @@ impl Composer {
                                             .children(self.menu_card(&theme, window, cx))
                                             .child(self.chip(&theme, cx)),
                                     )
+                                    // Cursor: a mic glyph of its own, then
+                                    // the one round button.
+                                    .child(self.mic_icon(&theme, cx))
                                     .when(empty && !streaming, |row| {
                                         row.child(self.voice_btn(&theme, cx))
                                     })
