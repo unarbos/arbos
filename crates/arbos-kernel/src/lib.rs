@@ -1,3 +1,4 @@
+pub mod access;
 pub mod attach;
 pub mod browser;
 pub mod cli;
