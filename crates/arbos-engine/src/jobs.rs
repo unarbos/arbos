@@ -179,10 +179,7 @@ impl JobsRoot {
                     return Err(e);
                 }
             },
-            None => (
-                job_shell().to_string(),
-                vec!["-c".to_string(), script.clone()],
-            ),
+            None => shell_command(&script),
         };
         let (program, args) = leashed(&dir, program, args);
         let mut cmd = Command::new(program);
@@ -501,6 +498,22 @@ pub(crate) fn job_shell() -> &'static str {
             .is_some_and(|paths| std::env::split_paths(&paths).any(|d| d.join("bash").is_file()));
         if found { "bash" } else { "sh" }
     })
+}
+
+/// The shell and arguments that run `script`. bash runs as a login shell
+/// (`-l`): the machine's profile puts a conda env, a venv, or a toolchain
+/// on PATH the way the user's own terminal has them (SWE-bench images keep
+/// their interpreter in a conda env that only a login shell activates).
+/// `ARBOS_NO_LOGIN_SHELL=1` turns that off for a profile that misbehaves.
+pub(crate) fn shell_command(script: &str) -> (String, Vec<String>) {
+    let shell = job_shell();
+    (shell.to_string(), shell_args(shell, script))
+}
+
+pub(crate) fn shell_args(shell: &str, script: &str) -> Vec<String> {
+    let login = shell == "bash" && std::env::var_os("ARBOS_NO_LOGIN_SHELL").is_none();
+    let flag = if login { "-lc" } else { "-c" };
+    vec![flag.to_string(), script.to_string()]
 }
 
 fn sh_quote(s: &str) -> String {

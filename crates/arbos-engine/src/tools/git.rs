@@ -269,7 +269,48 @@ pub fn changes(cwd: &Path) -> Result<ToolOut> {
     if body.trim().is_empty() {
         body = "(no changes)\n".into();
     }
+    if let Some(note) = test_files_note(&status) {
+        body.push_str(&note);
+    }
     Ok(ToolOut::text(body))
+}
+
+/// A line naming the existing test files the working tree changes, so the
+/// agent sees when it is editing the spec (SWE-bench: two of four losses
+/// were a rewritten or loosened test). New test files are not the point.
+fn test_files_note(status: &str) -> Option<String> {
+    let touched: Vec<&str> = status
+        .lines()
+        .filter(|l| l.len() > 3 && !l.starts_with("??") && !l.starts_with('A'))
+        .map(|l| l[3..].trim())
+        .filter(|p| is_test_path(p))
+        .collect();
+    if touched.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\nNote: {} existing test file(s) changed: {}. Existing tests are the spec — if you altered an assertion, say why in your reply and the commit message, or put it back and add a new test instead.\n",
+        touched.len(),
+        touched.join(", ")
+    ))
+}
+
+pub(crate) fn is_test_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    lower
+        .split('/')
+        .any(|seg| seg == "tests" || seg == "test" || seg == "__tests__" || seg == "spec")
+        || name.starts_with("test_")
+        || name.ends_with("_test.py")
+        || name.ends_with("_test.go")
+        || name.ends_with("_test.rs")
+        || name.ends_with(".test.ts")
+        || name.ends_with(".test.js")
+        || name.ends_with(".test.tsx")
+        || name.ends_with(".spec.ts")
+        || name.ends_with(".spec.js")
+        || name.ends_with("_spec.rb")
 }
 
 /// "branch `fix/x`: 2 uncommitted files, 0 commits ahead of main" when
@@ -374,4 +415,19 @@ pub fn undo(cwd: &Path) -> Result<ToolOut> {
         return Ok(ToolOut::text("restored stash checkpoint"));
     }
     Ok(ToolOut::text("no checkpoint"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_note_names_changed_existing_tests_only() {
+        let status = " M src/lib.rs\n M tests/test_csv.py\n?? tests/test_new.py\nA  tests/test_added.py\n M pkg/foo_test.go\n";
+        let note = test_files_note(status).unwrap();
+        assert!(note.contains("2 existing test file(s)"), "{note}");
+        assert!(note.contains("tests/test_csv.py") && note.contains("pkg/foo_test.go"));
+        assert!(!note.contains("test_new.py") && !note.contains("test_added.py"));
+        assert!(test_files_note(" M src/lib.rs\n").is_none());
+    }
 }
