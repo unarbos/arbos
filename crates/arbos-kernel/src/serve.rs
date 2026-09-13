@@ -1097,6 +1097,13 @@ async fn serve_client(
                                 &out_for_history,
                             );
                         }
+                        // Files under .arbos/, answered here too; a slow
+                        // disk stalls this client alone.
+                        f @ (Frame::Read { .. } | Frame::Tail { .. } | Frame::List { .. }) => {
+                            if let Some(reply) = crate::files::handle(&place_for_history, f) {
+                                let _ = out_for_history.send(reply);
+                            }
+                        }
                         other => {
                             if tx.send(other).is_err() {
                                 break;

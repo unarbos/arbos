@@ -48,6 +48,59 @@ pub enum Frame {
         to: u64,
         total: u64,
     },
+    /// Client → kernel: one file under `.arbos/`, as text. `path` is
+    /// relative to `.arbos/` (`agents/root/plan.md`). Answered with `file`;
+    /// a file past the cap comes back `truncated` and is paged with `tail`.
+    /// For clients that cannot read the folder (a phone); the desktop
+    /// reads the files itself.
+    Read {
+        path: String,
+    },
+    /// Kernel → client: the file, or the reason it was refused.
+    File {
+        path: String,
+        #[serde(default)]
+        text: String,
+        size: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Client → kernel: bytes `from..from+limit` of a file under `.arbos/`,
+    /// cut back to a line boundary. For the open transcript segment: keep
+    /// `to` and ask again from it.
+    Tail {
+        path: String,
+        #[serde(default)]
+        from: u64,
+        #[serde(default)]
+        limit: u64,
+    },
+    /// Kernel → client: the bytes as text, and where they sit in the file.
+    Chunk {
+        path: String,
+        from: u64,
+        to: u64,
+        size: u64,
+        #[serde(default)]
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Client → kernel: the entries of a folder under `.arbos/`.
+    List {
+        #[serde(default)]
+        path: String,
+    },
+    /// Kernel → client: the folder's entries, sorted by name.
+    Listing {
+        path: String,
+        #[serde(default)]
+        entries: Vec<Entry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Live text as the model streams it, one frame per chunk. The whole
     /// step arrives later as an `event` with a `seq` (the transcript line).
     AssistantDelta {
@@ -244,4 +297,17 @@ pub struct TreeNode {
 
 fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+/// One folder entry in a `listing`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Entry {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dir: bool,
+    #[serde(default)]
+    pub size: u64,
+    /// Unix millis of the last write, when the file system says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified: Option<i64>,
 }
