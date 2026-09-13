@@ -286,7 +286,19 @@ impl Session {
         ))
     }
 
+    /// A prompt for the next turn. While a turn runs the kernel holds it
+    /// as an inbox file and runs it when the turn ends.
     pub fn prompt(&self, content: &Prompt) -> Result<()> {
+        self.user(content, false)
+    }
+
+    /// Words for the turn in flight: the kernel takes them at its next
+    /// tool boundary. On an idle agent the kernel treats it as a prompt.
+    pub fn steer(&self, content: &Prompt) -> Result<()> {
+        self.user(content, true)
+    }
+
+    fn user(&self, content: &Prompt, steer: bool) -> Result<()> {
         // Every attachment goes over as a path, images included: the kernel's
         // projection loads image files itself and sends them as pixels
         // (arbos-engine `project::image_paths`). Filtering images out here
@@ -296,7 +308,7 @@ impl Session {
         self.send_frame(&Frame::User {
             agent: self.session_id.clone(),
             text: content.text.clone(),
-            steer: false,
+            steer,
             attachments: content
                 .attachments
                 .iter()

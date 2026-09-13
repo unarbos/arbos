@@ -420,14 +420,14 @@ impl Arbos {
             .update(cx, |workspace, cx| workspace.cancel(id, cx));
     }
 
-    /// Stop the running turn and send the queue plus `extra` (composer
-    /// text the Force disc already took) as the next message on this chat.
-    pub(crate) fn force_turn(&mut self, extra: Prompt, cx: &mut Context<Self>) {
+    /// Hold the composer's text for the next turn on this chat; the kernel
+    /// keeps it and runs it when the turn in flight ends.
+    pub(crate) fn queue_turn(&mut self, text: Prompt, cx: &mut Context<Self>) {
         let Some(id) = self.workspace.read(cx).active_id() else {
             return;
         };
         self.workspace
-            .update(cx, |workspace, cx| workspace.force(id, extra, cx));
+            .update(cx, |workspace, cx| workspace.queue_next(id, text, cx));
     }
 
     /// Leftover handler. The composer chip is a model picker and never
@@ -494,7 +494,6 @@ impl Arbos {
         .to_owned();
         let commands = workspace.slash_commands.clone();
         let streaming = chat.is_some_and(|chat| chat.busy());
-        let queued = chat.is_some_and(|chat| !chat.queue.is_empty());
         let reconnect = matches!(chat.map(|chat| &chat.connection), Some(Connection::Lost));
         let current = chat.map(|_| 0);
         let live = chat.filter(|chat| chat.live());
@@ -540,7 +539,6 @@ impl Arbos {
             composer.set_placeholder(&placeholder, cx);
             composer.set_commands(&commands, cx);
             composer.set_streaming(streaming, cx);
-            composer.set_queued(queued, cx);
             composer.set_reconnect(reconnect, cx);
             composer.set_agents(&agents, current, cx);
             composer.set_model_note(&model_note, cx);
@@ -815,10 +813,9 @@ impl Arbos {
             Some(alias) => (icons::devices::CLOUD, alias),
             None => (icons::devices::LAPTOP, "Local".to_owned()),
         };
-        // A remote kernel that dropped: say what the window is doing about it.
-        if let Some(chat) = workspace.active_session()
-            && chat.host.is_some()
-        {
+        // A kernel that dropped, or a start still being tried: say what the
+        // window is doing about it.
+        if let Some(chat) = workspace.active_session() {
             match (&chat.connection, chat.reconnect_at) {
                 (Connection::Lost, Some(at)) => {
                     let left = at.saturating_duration_since(std::time::Instant::now()).as_secs();
@@ -1644,12 +1641,12 @@ impl Arbos {
                 .child(control(
                     "send",
                     "Send now",
-                    "Interrupt the running turn and send this now",
+                    "Into the running turn now, at its next step",
                     cx,
                     |this, id, node, text, cx| {
                         this.workspace.update(cx, |workspace, cx| {
                             workspace.with_session(id, cx, |chat| chat.plan_op(node, "cancel", ""));
-                            workspace.force(id, text, cx);
+                            workspace.send(id, text, cx);
                         });
                     },
                 ))
@@ -2076,10 +2073,11 @@ impl Arbos {
         cx.notify();
     }
 
-    /// Prompts waiting for the in-flight turn — a steer, drawn as what it is:
-    /// the message you have already written, not yet sent. The same bubble the
-    /// transcript gives a sent one, held back to the muted tone, and an ✕ to
-    /// take it back while it is still yours to take back.
+    /// Prompts typed before the socket was up, waiting on the wire — drawn as
+    /// what they are: the message you have already written, not yet sent.
+    /// The same bubble the transcript gives a sent one, held back to the
+    /// muted tone, and an ✕ to take it back while it is still yours to take
+    /// back. A turn in flight holds nothing here: those words steer it.
     fn queue(&self, cx: &Context<Self>) -> Option<impl IntoElement + use<>> {
         let theme = Theme::of(cx).clone();
         let chat = self.workspace.read(cx).active_session()?;
@@ -2088,7 +2086,6 @@ impl Arbos {
             return None;
         }
         let id = chat.id;
-        let busy = chat.busy();
         Some(div().flex().flex_col().w_full().gap(px(6.)).children(
             waiting.into_iter().enumerate().map(|(ix, text)| {
                 // An svg paints in its own `text_color` and inherits none,
@@ -2113,31 +2110,6 @@ impl Arbos {
                             .text_color(theme.text_muted)
                             .child(text.display()),
                     )
-                    .when(busy && ix == 0, |row| {
-                        row.child(
-                            div()
-                                .id("force-queue")
-                                .flex_none()
-                                .mt(px(2.))
-                                .cursor_pointer()
-                                .text_style(TextStyle::Callout)
-                                .text_color(theme.text_faint)
-                                .group_hover(group.clone(), |el| el.text_color(theme.text))
-                                .child("Interrupt now")
-                                .tooltip(|window, cx| {
-                                    bezel::ui::tooltip::Tooltip::text(
-                                        "Stop the running turn and send this now",
-                                        window,
-                                        cx,
-                                    )
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.composer.update(cx, |composer, cx| {
-                                        composer.force(cx);
-                                    });
-                                })),
-                        )
-                    })
                     .child(
                         div()
                             .id(("edit-queue", ix))

@@ -31,6 +31,7 @@ actions!(
     arbos_composer,
     [
         Send,
+        QueueNext,
         CommandNext,
         CommandPrevious,
         CommandDismiss,
@@ -71,6 +72,8 @@ pub fn init(cx: &mut App) {
     let search = Some(MODEL_SEARCH_CONTEXT);
     cx.bind_keys([
         KeyBinding::new("enter", Send, ctx),
+        // Enter steers a running turn; this holds the words for the next one.
+        KeyBinding::new("cmd-shift-enter", QueueNext, ctx),
         // Bound explicitly: the field's own `enter` is what usually inserts a
         // newline, and the composer has just taken it.
         KeyBinding::new("shift-enter", input::InsertNewline, ctx),
@@ -132,8 +135,9 @@ pub struct Switch {
 #[derive(Clone)]
 pub enum ComposerEvent {
     Submit(Prompt),
-    /// Stop the in-flight turn and send this plus the queue, now.
-    Force(Prompt),
+    /// Hold this for the next turn: the kernel keeps it and runs it when
+    /// the turn in flight ends.
+    Queue(Prompt),
     Cancel,
     /// Leftover. The chip is a model picker; this is never emitted.
     Agent(usize),
@@ -367,8 +371,6 @@ pub struct Composer {
     scroll: ScrollHandle,
     /// Whether a turn is in flight — what the button does when pressed.
     streaming: bool,
-    /// A follow-up is sitting above the card, waiting for this turn.
-    queued: bool,
     /// The configured agents, and which one the session runs on.
     agents: Vec<Agent>,
     agent: Option<usize>,
@@ -464,7 +466,6 @@ impl Composer {
             entries,
             scroll: ScrollHandle::new(),
             streaming: false,
-            queued: false,
             agents: Vec::new(),
             agent: None,
             switches: Vec::new(),
@@ -587,13 +588,6 @@ impl Composer {
     pub fn set_streaming(&mut self, streaming: bool, cx: &mut Context<Self>) {
         if self.streaming != streaming {
             self.streaming = streaming;
-            cx.notify();
-        }
-    }
-
-    pub fn set_queued(&mut self, queued: bool, cx: &mut Context<Self>) {
-        if self.queued != queued {
-            self.queued = queued;
             cx.notify();
         }
     }
@@ -1001,9 +995,9 @@ impl Composer {
         cx.notify();
     }
 
-    /// Stop the running turn and send the queue plus whatever is in the
-    /// field. Empty field is fine: the queue alone is enough.
-    pub(crate) fn force(&mut self, cx: &mut Context<Self>) {
+    /// Hold what is in the field for the next turn. Nothing to hold, nothing
+    /// sent.
+    pub(crate) fn queue(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.bound else {
             return;
         };
@@ -1021,21 +1015,23 @@ impl Composer {
                 .get(self.bound)
                 .is_none_or(|tray| tray.items.is_empty() && tray.loading == 0)
             && self.chat_links.is_empty();
-        let prompt = if empty {
-            Prompt::default()
-        } else {
-            let prompt = Prompt::compose(
-                &join_chat_links(&self.chat_links, &content),
-                std::mem::take(&mut self.attachments.get_mut(id).items),
-            );
-            self.field.update(cx, |field, cx| field.clear(cx));
-            self.attachments.get_mut(id).error = None;
-            self.chat_links.clear();
-            self.command = None;
-            prompt
-        };
-        cx.emit(ComposerEvent::Force(prompt));
+        if empty {
+            return;
+        }
+        let prompt = Prompt::compose(
+            &join_chat_links(&self.chat_links, &content),
+            std::mem::take(&mut self.attachments.get_mut(id).items),
+        );
+        self.field.update(cx, |field, cx| field.clear(cx));
+        self.attachments.get_mut(id).error = None;
+        self.chat_links.clear();
+        self.command = None;
+        cx.emit(ComposerEvent::Queue(prompt));
         cx.notify();
+    }
+
+    fn queue_next(&mut self, _: &QueueNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.queue(cx);
     }
 
     fn send(&mut self, _: &Send, window: &mut Window, cx: &mut Context<Self>) {
@@ -1910,14 +1906,14 @@ impl Composer {
     /// Send sits at the end of the tool row. Empty: a faint arrow. Ready or
     /// stopping: one filled disc, never a second colour.
     ///
-    /// A turn in flight used to steal this disc for Stop, so a follow-up
-    /// had no button. Stop stays while it is running; Send comes back the
-    /// moment there is text, and queues. Force sits beside Stop when there
-    /// is something to push now — a queued line, or text in the field.
+    /// While a turn runs, Stop is its own disc and never shares one with
+    /// Send. Send comes back the moment there is text and steers the turn —
+    /// the words reach the agent at its next step, Cursor's default. Queue
+    /// sits between them: hold the words for the next turn instead.
     fn button(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let streaming = self.streaming;
         let empty = self.is_empty(cx);
-        let can_force = streaming && (self.queued || !empty);
+        let can_queue = streaming && !empty;
         div()
             .flex()
             .flex_row()
@@ -1934,15 +1930,15 @@ impl Composer {
                     |_, cx| cx.emit(ComposerEvent::Cancel),
                 ))
             })
-            .when(can_force, |row| {
+            .when(can_queue, |row| {
                 row.child(self.disc(
-                    "composer-force",
+                    "composer-queue",
                     icons::media::SKIP_NEXT,
                     true,
-                    "Interrupt now: stop the running turn and send this",
+                    "Queue for the next turn (⇧⌘↩)",
                     theme,
                     cx,
-                    |composer, cx| composer.force(cx),
+                    |composer, cx| composer.queue(cx),
                 ))
             })
             .when(!streaming || !empty, |row| {
@@ -1951,7 +1947,7 @@ impl Composer {
                     icons::arrows::ARROW_UP,
                     !empty || self.reconnect,
                     if streaming {
-                        "Queue"
+                        "Send now: the running turn reads this at its next step"
                     } else if self.reconnect {
                         "Reconnect"
                     } else {
@@ -2086,6 +2082,7 @@ impl Composer {
 
         div()
             .on_action(cx.listener(Self::send))
+            .on_action(cx.listener(Self::queue_next))
             .on_action(cx.listener(Self::command_next))
             .on_action(cx.listener(Self::command_previous))
             .on_action(cx.listener(Self::command_dismiss))

@@ -1059,8 +1059,19 @@ impl ChatSession {
     /// Whether this chat can be pointed at the kernel again. The kernel is
     /// attached, not spawned from `entry.command`, so an empty command is
     /// not a reason to hide the composer.
+    /// Whether a reconnect makes sense: the chat is open and, for a local
+    /// place, its agent folder still exists. A child deleted under a live
+    /// window is not attached to again and again.
     pub fn resumable(&self) -> bool {
-        !self.closed
+        !self.closed && !self.agent_gone()
+    }
+
+    /// A local agent whose folder is no longer on disk.
+    pub fn agent_gone(&self) -> bool {
+        self.host.is_none()
+            && self.agent_session.as_deref().is_some_and(|sid| {
+                !arbos_core::agent_exists(&arbos_core::Place::new(&self.cwd), sid)
+            })
     }
 
     pub fn number_delegates(sessions: &mut [Self]) -> Vec<usize> {
@@ -1188,12 +1199,32 @@ impl ChatSession {
         "New chat".into()
     }
 
-    /// Send now, or queue it for whenever there is an agent to send it to —
-    /// a turn in flight, or a connection still being made.
+    /// Send now. A turn in flight is steered: the kernel takes the words at
+    /// its next tool boundary, Cursor's default, and the card lands in the
+    /// transcript at once. Nothing waits in this window's memory but a
+    /// prompt typed before the socket is up, which goes the moment it is.
     pub fn send(&mut self, content: Prompt) {
         self.reap_dead_socket();
-        if self.streaming {
+        if !self.live() {
+            self.land_turn(&content);
+            self.pending_wire = true;
             self.queue.push_back(content);
+            return;
+        }
+        if self.streaming || self.has_running_tool() {
+            self.steer(content);
+            return;
+        }
+        self.prompt(content);
+    }
+
+    /// Hold the words for the next turn. The kernel keeps them as an inbox
+    /// file — the follow-up row under the composer — and runs them when
+    /// this turn ends, through a restart of this window too. On an idle
+    /// chat this is a send.
+    pub fn queue_next(&mut self, content: Prompt) {
+        self.reap_dead_socket();
+        if content.is_empty() {
             return;
         }
         if !self.live() {
@@ -1202,7 +1233,19 @@ impl ChatSession {
             self.queue.push_back(content);
             return;
         }
-        self.prompt(content);
+        if !(self.streaming || self.has_running_tool()) {
+            self.prompt(content);
+            return;
+        }
+        let held = match &self.connection {
+            Connection::Live(session) if !session.is_closed() => session.prompt(&content).is_ok(),
+            _ => false,
+        };
+        if !held {
+            self.queue.push_back(content);
+            self.reap_dead_socket();
+        }
+        self.flush();
     }
 
     /// Send the next queued prompt, if there is one and nothing is in flight.
@@ -1215,30 +1258,23 @@ impl ChatSession {
         }
     }
 
-    /// Interrupt the in-flight turn and send the queued follow-up plus
-    /// `content` as the next user message. Does not wait for the old turn
-    /// to finish on its own — the next send is the forced line, on this
-    /// same chat.
-    pub fn force(&mut self, content: Prompt) {
-        self.reap_dead_socket();
-        let mut parts: Vec<Prompt> = self.queue.drain(..).collect();
-        if !content.is_empty() {
-            parts.push(content);
-        }
-        let next = Prompt::join(parts);
-        if next.is_empty() {
+    /// Words into the running turn. The card lands now, under the work in
+    /// progress; the kernel's own record of the line carries the same words
+    /// and is not drawn twice.
+    fn steer(&mut self, content: Prompt) {
+        let sent = match &self.connection {
+            Connection::Live(session) if !session.is_closed() => session.steer(&content).is_ok(),
+            _ => false,
+        };
+        if !sent {
+            self.queue.push_back(content);
+            self.reap_dead_socket();
+            self.flush();
             return;
         }
-        if self.streaming || self.has_running_tool() {
-            self.queue.push_back(next);
-            self.interrupt(false);
-            return;
-        }
-        if !self.live() {
-            self.queue.push_back(next);
-            return;
-        }
-        self.prompt(next);
+        self.items.push(ChatItem::User(content.message()));
+        self.updated = SystemTime::now();
+        self.flush();
     }
 
     fn prompt(&mut self, content: Prompt) {
@@ -1560,9 +1596,13 @@ impl ChatSession {
         } else {
             prompt.build_answers(held)
         };
+        // Words typed with no option picked are the answer in the user's
+        // own terms, never a skip: a skip is the Skip button and nothing
+        // else, so what was typed is not lost.
         let answered = answers
             .iter()
-            .any(|answer| !answer.selected_ids.is_empty() || !answer.other_text.is_empty());
+            .any(|answer| !answer.selected_ids.is_empty() || !answer.other_text.is_empty())
+            || !details.trim().is_empty();
         let (answers, details, skipped) = if skipped || !answered {
             (Vec::new(), String::new(), true)
         } else {
@@ -1574,6 +1614,25 @@ impl ChatSession {
                     session.answer_questions(&prompt.request_id, &answers, &details, skipped)
                 {
                     self.notice(true, &format!("could not answer: {e:#}"));
+                    self.flush();
+                    return;
+                }
+                // The answer is a line of yours in the conversation, under
+                // the question it answers.
+                let said = if !details.is_empty() {
+                    details
+                } else {
+                    answers
+                        .iter()
+                        .flat_map(|a| a.selected_ids.iter().chain(Some(&a.other_text)))
+                        .filter(|s| !s.is_empty())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                if !said.is_empty() {
+                    self.items.push(ChatItem::User(UserMessage::from(said)));
+                    self.updated = SystemTime::now();
                     self.flush();
                 }
             }
@@ -1782,6 +1841,11 @@ impl ChatSession {
                 self.rewind_to = None;
                 self.notice(true, &detail);
                 self.flush();
+                // The kernel no longer has this agent: the row keeps its
+                // words and stops asking for a socket.
+                if detail.starts_with("no agent ") {
+                    self.close();
+                }
             }
             Event::NeedApproval { request_id, title } => {
                 self.turn_alive();
@@ -1939,10 +2003,13 @@ impl ChatSession {
     }
 
     /// Nodes the strip draws: open, not the agent's own inbox.
+    /// The plan's open nodes, less the kernel's own housekeeping — a chore
+    /// it runs for itself (the weekly `git gc`) is nothing the user asked
+    /// for or should manage.
     pub fn plan_open(&self) -> impl Iterator<Item = &PlanNode> {
-        self.plan
-            .iter()
-            .filter(|n| !n.inbox && n.status != "done" && n.status != "cancelled")
+        self.plan.iter().filter(|n| {
+            !n.inbox && n.status != "done" && n.status != "cancelled" && !kernel_chore(n)
+        })
     }
 
     /// Prompts the kernel holds for this agent that have not run yet.
@@ -2477,21 +2544,28 @@ fn pump(
         let (session, mut events) = match opened {
             Ok(pair) => pair,
             Err(e) => {
+                // A start that lost the race — two rows spawning the same
+                // kernel, one exits on the lock; the socket not yet open;
+                // a remote tunnel that dropped — is tried again with
+                // backoff until hello. Only a fault no retry can mend (no
+                // kernel binary, a path that is not a directory) stops here.
+                let again = transient_connect_error(&e);
                 let _ = this.update(cx, |workspace, cx| {
                     workspace.with_session(id, cx, |chat| {
                         if chat.attach_gen != attach_gen {
                             return;
                         }
                         chat.connection = Connection::Lost;
-                        // The first failure is news; the retries are not.
-                        if chat.reconnect_attempt == 0 {
+                        // A fault is news; a retry in progress is not, and
+                        // a race the next try wins is not worth a line.
+                        if !again || chat.reconnect_attempt >= 1 && chat.reconnect_attempt % 5 == 0 {
                             chat.notice(true, &format!("connection failed: {e:#}"));
                         }
                     });
-                    let retry = workspace.session(id).is_some_and(|chat| {
-                        chat.attach_gen == attach_gen && chat.host.is_some() && !chat.closed
-                    });
-                    if retry {
+                    let retry = workspace
+                        .session(id)
+                        .is_some_and(|chat| chat.attach_gen == attach_gen && chat.resumable());
+                    if again && retry {
                         workspace.schedule_reconnect(id, cx);
                     }
                 });
@@ -2631,20 +2705,37 @@ fn pump(
                     chat.resume(cx);
                 }
             }
-            // A remote place that dropped and was not resumed at once
-            // comes back on its own, with backoff.
-            let lost_remote = workspace.session(id).is_some_and(|chat| {
+            // A socket that dropped and was not resumed at once comes back
+            // on its own, with backoff — a remote tunnel, or a local kernel
+            // that stopped and gets started again.
+            let lost = workspace.session(id).is_some_and(|chat| {
                 chat.attach_gen == attach_gen
-                    && chat.host.is_some()
-                    && !chat.closed
+                    && chat.resumable()
                     && matches!(chat.connection, Connection::Lost)
             });
-            if lost_remote {
+            if lost {
                 workspace.schedule_reconnect(id, cx);
             }
             cx.notify();
         });
     })
+}
+
+/// A standing node the kernel keeps for itself: it marks the prompt so and
+/// answers to nobody (`deliver_to = none`).
+pub fn kernel_chore(node: &PlanNode) -> bool {
+    node.standing && node.goal.contains("(kernel chore)")
+}
+
+/// Whether a failed connect is worth another try. A kernel that exited on
+/// start (the lock race between two rows spawning it), a port not yet
+/// listening, a timeout, a tunnel that dropped: yes. No kernel binary, a
+/// path that is not a directory, a URL that is not one: no retry mends it.
+fn transient_connect_error(e: &anyhow::Error) -> bool {
+    let text = format!("{e:#}");
+    !["failed to start", "is not a file", "is not a directory", "bad kernel url"]
+        .iter()
+        .any(|fault| text.contains(fault))
 }
 
 /// A child's row name from the brief the kernel named it after: the lead

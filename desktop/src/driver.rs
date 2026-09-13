@@ -1108,6 +1108,9 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         "parent": chat.parent,
         "draft": chat.draft,
         "queued": chat.queue.len(),
+        "held": chat.plan_queued(),
+        "asks": chat.plan_open().filter(|n| n.do_kind == "ask").count(),
+        "reconnect_attempt": chat.reconnect_attempt,
         "usage": chat.usage.map(|u| json!({"used": u.used, "size": u.size, "spent": u.spent, "last_cost": u.last_cost})),
         "connection": match chat.connection {
             Connection::Idle => "idle",
