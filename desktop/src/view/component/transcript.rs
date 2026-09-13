@@ -8,7 +8,7 @@
 use crate::{
     model::{
         attachment::{MessageImage, Prompt, UserMessage},
-        session::{Artifact, ArtifactKind, ChatItem, ChatSession, ToolStatus},
+        session::{Artifact, ArtifactKind, ChatItem, ChatSession, PlanNode, ToolStatus},
         workspace::Workspace,
     },
     reading,
@@ -25,7 +25,7 @@ use bezel::{
         icons,
         scroll::{FOLLOW_SLACK, at_bottom},
         tooltip::Tooltip,
-        widgets::{Layout, Status, Takeover},
+        widgets::{Buttons, Layout, Status, Takeover},
     },
 };
 use cacp::schema::ToolKind;
@@ -2375,6 +2375,17 @@ pub fn render(chat: &ChatSession, window: &mut Window, cx: &mut Context<Workspac
                 .into_any_element(),
         );
     }
+    let theme = Theme::of(cx).clone();
+    for node in chat.plan_open().filter(|n| n.do_kind == "ask") {
+        zones.push(
+            div()
+                .w_full()
+                .max_w(px(column))
+                .self_center()
+                .child(ask_card(chat, node, &theme, cx))
+                .into_any_element(),
+        );
+    }
     // The drop target is a column flex, so `flex_1` here is a real height.
     // The rail is absolute on this pane — not a flex sibling — so it cannot
     // shift the centred column or collapse the scroll viewport.
@@ -2423,6 +2434,105 @@ pub fn render(chat: &ChatSession, window: &mut Window, cx: &mut Context<Workspac
                 cx,
             )
         })
+        .into_any_element()
+}
+
+/// A question the agent parked for you — an `ask` node — as a card at the
+/// turn it belongs to, after the last one. Answer points the composer's next
+/// send at it (the placeholder says so); ✕ drops the question.
+fn ask_card(
+    chat: &ChatSession,
+    node: &PlanNode,
+    theme: &Theme,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let id = chat.id;
+    let ask = node.id;
+    let answering = chat.answering == Some(ask);
+    let group = SharedString::from(format!("ask-card-{id}-{ask}"));
+    let head = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            icons::icon(icons::system::CHAT_ROUND_LINE)
+                .size(px(12.))
+                .text_color(theme.accent),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child("Question for you"),
+        )
+        .child(
+            theme
+                .ghost(SharedString::from(format!("ask-drop-{id}-{ask}")))
+                .flex_none()
+                .size(px(20.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .tooltip(|window, cx| Tooltip::text("Drop this question", window, cx))
+                .child(
+                    icons::icon(icons::system::CLOSE)
+                        .size(px(11.))
+                        .text_color(theme.text_faint.opacity(0.35))
+                        .group_hover(group.clone(), |el| el.text_color(theme.text)),
+                )
+                .on_click(cx.listener(move |workspace, _, _, cx| {
+                    workspace.with_session(id, cx, |c| c.plan_op(ask, "cancel", ""));
+                    cx.notify();
+                })),
+        );
+    let answer = theme
+        .ghost(SharedString::from(format!("ask-answer-{id}-{ask}")))
+        .px(px(8.))
+        .h(px(22.))
+        .flex()
+        .items_center()
+        .rounded(px(Theme::control_radius()))
+        .border_1()
+        .border_color(theme.border)
+        .text_style(TextStyle::Caption)
+        .text_color(if answering { theme.accent } else { theme.text })
+        .child(if answering {
+            "Answering below…"
+        } else {
+            "Answer"
+        })
+        .on_click(cx.listener(move |workspace, _, _, cx| {
+            workspace.with_session(id, cx, |c| {
+                c.answering = if c.answering == Some(ask) {
+                    None
+                } else {
+                    Some(ask)
+                };
+            });
+            cx.notify();
+        }));
+    div()
+        .group(group)
+        .mt(px(8.))
+        .rounded(px(Theme::surface_radius()))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
+        .px(px(12.))
+        .py(px(10.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(head)
+        .child(
+            div()
+                .text_style(TextStyle::Body)
+                .text_color(theme.text)
+                .child(SharedString::from(node.goal.clone())),
+        )
+        .child(div().flex().flex_row().child(answer))
         .into_any_element()
 }
 

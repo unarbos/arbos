@@ -522,8 +522,6 @@ pub struct Arbos {
     /// The loop that carries the speech server's agent activity into the
     /// chat is running.
     voice_mirror_on: bool,
-    /// The plan strip above the composer shows one summary line only.
-    pub(crate) plan_folded: bool,
     /// Native Fn monitor. Lives with the window so Drop removes it.
     #[cfg(target_os = "macos")]
     _fn_monitor: Option<crate::view::fn_key::Monitor>,
@@ -685,7 +683,6 @@ impl Arbos {
             fn_held: false,
             voice_want_stop: false,
             voice_mirror_on: false,
-            plan_folded: false,
             #[cfg(target_os = "macos")]
             _fn_monitor: None,
             draft_flush: Task::ready(()),
