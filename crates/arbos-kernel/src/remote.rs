@@ -329,6 +329,24 @@ fn note_reattach_failure(hooks: &KernelHooks, record: &Record, e: anyhow::Error)
     );
 }
 
+/// Names a model writes for "this machine" when it fills the optional
+/// `host` field anyway.
+pub fn means_local(host: &str) -> bool {
+    matches!(
+        host.trim().to_ascii_lowercase().as_str(),
+        "local" | "localhost" | "here" | "this" | "none" | "self" | "default"
+    )
+}
+
+/// Whether any machine is configured at all: `machines.toml` has one, or
+/// the hub roster in `.arbos/machines/` is not empty.
+pub fn any_machines(place: &arbos_core::Place) -> bool {
+    Machines::load()
+        .map(|m| !m.machine.is_empty())
+        .unwrap_or(false)
+        || !arbos_core::hub::read_roster(place).is_empty()
+}
+
 /// `spawn host=<name>`: a machine from `machines.toml` is reached over
 /// ssh; one only the hub knows is claimed through it. Neither, and the
 /// error names both files.

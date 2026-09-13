@@ -101,11 +101,11 @@ impl Tool for Spawn {
                     false,
                     "string",
                 ),
-                ("kind", "An agent definition name (Kinds).", false, "string"),
-                ("isolate", "none (default) or worktree.", false, "string"),
+                ("kind", "Leave out unless a Kind fits.", false, "string"),
+                ("isolate", "Leave out, or worktree.", false, "string"),
                 (
                     "host",
-                    "A machine name (Machines): the child runs there.",
+                    "Leave out to run here. Else a name from Machines.",
                     false,
                     "string",
                 ),
@@ -154,23 +154,35 @@ impl Tool for Spawn {
                 .and_then(Value::as_u64)
                 .unwrap_or(600)
                 .clamp(1, 6 * 3600);
-            if let Some(host) = opt_str(&args, "host") {
-                let (id, where_) = crate::remote::spawn_remote(
-                    Arc::clone(&hooks),
-                    cx.agent.clone(),
-                    name.map(str::to_string),
-                    brief.to_string(),
-                    host.to_string(),
-                )
-                .await?;
-                return Ok(ToolOut {
-                    body: format!("spawned {id} {where_}: {brief}"),
-                    paths: vec![format!(".arbos/agents/{id}")],
-                    child: Some(id.to_string()),
-                    images: vec![],
-                    diff: None,
-                    park: None,
-                });
+            // Models that fill every optional field write "local", "here",
+            // or an empty string when they mean this machine; a name that
+            // is on no roster while no roster exists means the same.
+            let host = opt_str(&args, "host")
+                .map(str::trim)
+                .filter(|h| !h.is_empty() && !crate::remote::means_local(h));
+            let mut ran_here = String::new();
+            if let Some(host) = host {
+                if crate::remote::any_machines(&hooks.place) {
+                    let (id, where_) = crate::remote::spawn_remote(
+                        Arc::clone(&hooks),
+                        cx.agent.clone(),
+                        name.map(str::to_string),
+                        brief.to_string(),
+                        host.to_string(),
+                    )
+                    .await?;
+                    return Ok(ToolOut {
+                        body: format!("spawned {id} {where_}: {brief}"),
+                        paths: vec![format!(".arbos/agents/{id}")],
+                        child: Some(id.to_string()),
+                        images: vec![],
+                        diff: None,
+                        park: None,
+                    });
+                }
+                ran_here = format!(
+                    " (no machine named {host:?} is configured and no roster exists, so it runs here)"
+                );
             }
             let kind = opt_str(&args, "kind");
             let kind_owned = kind.map(str::to_string);
@@ -204,8 +216,8 @@ impl Tool for Spawn {
                 None => brief.to_string(),
             };
             let mut body = match kind {
-                Some(k) => format!("spawned {id} (kind {k}): {shown}"),
-                None => format!("spawned {id}: {shown}"),
+                Some(k) => format!("spawned {id} (kind {k}){ran_here}: {shown}"),
+                None => format!("spawned {id}{ran_here}: {shown}"),
             };
             let mut paths = vec![format!(".arbos/agents/{id}")];
             if let Some(w) = &worktree {
