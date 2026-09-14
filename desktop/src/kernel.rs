@@ -409,6 +409,11 @@ pub struct ModelOption {
     /// `architecture.input_modalities`). None: the host did not say; the
     /// name is the guess (`arbos_core::models::looks_vision`).
     pub vision: Option<bool>,
+    /// A free endpoint (`:free`, or a zero price): OpenRouter's free
+    /// providers are the ones whose terms commonly allow training on
+    /// prompts, and the account's "free models" privacy toggle governs
+    /// them separately. The picker says so.
+    pub free: bool,
 }
 
 impl ModelOption {
@@ -478,6 +483,7 @@ fn fetch_gateway_models(base: &str) -> ModelsCatalog {
         .filter(|row| !row.id.is_empty())
         .map(|row| ModelOption {
             name: model_display_name(&row.id),
+            free: row.id.ends_with(":free"),
             id: row.id,
             vision: None,
         })
@@ -629,6 +635,7 @@ fn fetch_host_models() -> Option<ModelsCatalog> {
                 .as_ref()
                 .filter(|a| !a.input_modalities.is_empty())
                 .map(|a| a.input_modalities.iter().any(|m| m == "image")),
+            free: row.is_free(),
             id: row.id,
         })
         .collect();
@@ -1587,11 +1594,32 @@ struct UpstreamModels {
 struct UpstreamModel {
     #[serde(default)]
     id: String,
+    #[serde(default)]
+    pricing: Option<UpstreamPricing>,
     /// OpenRouter lists what each model accepts. Absent on other hosts.
     #[serde(default)]
     supported_parameters: Vec<String>,
     #[serde(default)]
     architecture: Option<UpstreamArchitecture>,
+}
+
+#[derive(Deserialize, Default)]
+struct UpstreamPricing {
+    #[serde(default)]
+    prompt: String,
+    #[serde(default)]
+    completion: String,
+}
+
+impl UpstreamModel {
+    /// `:free` in the id, or a zero price for both prompt and completion.
+    fn is_free(&self) -> bool {
+        self.id.ends_with(":free")
+            || self.pricing.as_ref().is_some_and(|p| {
+                let zero = |s: &str| s.trim().parse::<f64>().is_ok_and(|v| v == 0.0);
+                zero(&p.prompt) && zero(&p.completion)
+            })
+    }
 }
 
 #[derive(Deserialize, Default)]

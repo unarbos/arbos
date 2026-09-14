@@ -222,6 +222,9 @@ pub struct Provider {
     /// `cache_control.ttl` for Claude breakpoints: None = the 5-minute
     /// default, Some("1h") = an hour.
     pub cache_ttl: Option<String>,
+    /// OpenRouter routing by data policy: "deny" or "zdr" (see
+    /// `HostConfig::data_policy`); empty = the account's default.
+    pub data_policy: String,
     /// Longest silence tolerated mid-stream before the call counts as lost.
     pub stream_idle: Duration,
     /// `max_tokens` to send. None = omit the field.
@@ -518,6 +521,9 @@ impl Provider {
         // sent to OpenRouter alone.
         if self.base.contains("openrouter.ai") {
             body["usage"] = json!({ "include": true });
+            if let Some(provider) = data_policy_routing(&self.data_policy) {
+                body["provider"] = provider;
+            }
         }
         if let Some(n) = self.max_tokens {
             body["max_tokens"] = json!(n);
@@ -1187,6 +1193,17 @@ fn cost_of(v: &Value) -> Option<f64> {
     v.get("usage")?.get("cost")?.as_f64()
 }
 
+/// OpenRouter's `provider` routing object for a data policy: "deny"
+/// keeps the request off providers that may store or train on prompts;
+/// "zdr" adds zero-data-retention endpoints only. None for anything else.
+fn data_policy_routing(policy: &str) -> Option<Value> {
+    match policy.trim().to_ascii_lowercase().as_str() {
+        "deny" => Some(json!({ "data_collection": "deny" })),
+        "zdr" => Some(json!({ "data_collection": "deny", "zdr": true })),
+        _ => None,
+    }
+}
+
 /// Who needs the `cache_control` marker. Anthropic models cache nothing
 /// unless the request says where. Through OpenRouter the same marker also
 /// drives Google's explicit caching (Gemini; the 2.5 line caches on its
@@ -1373,6 +1390,20 @@ mod cache_tests {
         assert_eq!(
             plain[0]["content"][0]["cache_control"],
             json!({"type": "ephemeral"})
+        );
+    }
+
+    #[test]
+    fn the_data_policy_becomes_openrouters_provider_routing() {
+        assert_eq!(data_policy_routing(""), None);
+        assert_eq!(data_policy_routing("allow"), None);
+        assert_eq!(
+            data_policy_routing("deny"),
+            Some(json!({"data_collection": "deny"}))
+        );
+        assert_eq!(
+            data_policy_routing(" ZDR "),
+            Some(json!({"data_collection": "deny", "zdr": true}))
         );
     }
 
