@@ -375,8 +375,12 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         // crash leaves behind starts the next turn instead.
         let steers = arbos_core::inbox::take_steers(&place, agent.id.as_str());
         if !steers.is_empty() {
+            // An answer's words are already on the transcript (the kernel
+            // appended the `answer` line when the user replied); taking the
+            // file is what makes this step read them.
             let batch: Vec<Event> = steers
                 .into_iter()
+                .filter(|msg| msg.kind != "answer")
                 .map(|msg| match msg.from.as_str() {
                     "kernel" => Event::new(EventKind::Notice {
                         text: msg.body,
@@ -394,7 +398,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     }),
                 })
                 .collect();
-            append_events(&transcript, &batch)?;
+            if !batch.is_empty() {
+                append_events(&transcript, &batch)?;
+            }
             events = load_transcript(&transcript)?;
         }
 

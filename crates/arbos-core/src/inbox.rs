@@ -222,7 +222,10 @@ pub fn read(place: &Place, agent: &str, name: &str) -> Result<Filed> {
 /// the turn under way (`steer`), and the kernel's "something finished"
 /// (`wake`). Requests, briefs, and notes wait for the next turn.
 pub fn is_steer_kind(kind: &str) -> bool {
-    matches!(kind, "steer" | "wake")
+    // An `answer` reaches a running turn too: a question asked with
+    // `wait:false` gets its reply at the next tool boundary instead of a
+    // turn later. Idle, it opens the next turn like any wake.
+    matches!(kind, "steer" | "wake" | "answer")
 }
 
 /// Whether a steer waits: a batch of tool calls stops taking new calls
