@@ -137,6 +137,10 @@ impl Caps {
 
 /// What a coordinator reads when it left the project page alone after
 /// dispatching or receiving work.
+/// Derived status frames are sent at most this often per agent; the file
+/// always holds the latest, and one trailing frame closes a burst.
+pub const STATUS_DEBOUNCE_MS: i64 = 300;
+
 pub const NOTES_NUDGE: &str = "project page not updated last turn: a worker was started or reported and .arbos/notes.md did not change — update it (plan add/check) before or with your reply";
 
 pub struct KernelHooks {
@@ -170,6 +174,9 @@ pub struct KernelHooks {
     /// Agents that called `status` this turn: the kernel's derived guess
     /// stays out of their way until the turn ends.
     pub status_said: Mutex<HashSet<String>>,
+    /// When a derived status frame was last sent per agent, for the
+    /// debounce; cleared by an agent's own line or the turn's end.
+    pub status_pending: Arc<Mutex<HashMap<String, i64>>>,
     /// Transcript length when each running turn began, for the `done`
     /// message's summary of what the turn said.
     pub turn_lo: Mutex<HashMap<String, u64>>,
@@ -234,6 +241,7 @@ impl KernelHooks {
             archive_after: Mutex::new(HashMap::new()),
             stop_requests: Mutex::new(Vec::new()),
             status_said: Mutex::new(HashSet::new()),
+            status_pending: Arc::new(Mutex::new(HashMap::new())),
             turn_lo: Mutex::new(HashMap::new()),
             notes_at_start: Mutex::new(HashMap::new()),
             notes_nudge: Mutex::new(HashSet::new()),
@@ -317,6 +325,7 @@ impl KernelHooks {
         self.running.lock().unwrap().remove(agent);
         // Nothing is being done now: the live line goes.
         self.status_said.lock().unwrap().remove(agent);
+        self.status_pending.lock().unwrap().remove(agent);
         if arbos_core::status::clear(&self.place, agent) {
             self.broadcast(Frame::Status {
                 agent: agent.to_string(),
@@ -704,12 +713,73 @@ impl KernelHooks {
             self.status_said.lock().unwrap().insert(agent.to_string());
         }
         let s = arbos_core::status::write(&self.place, agent, step, source)?;
-        self.broadcast(Frame::Status {
+        let frame = Frame::Status {
             agent: agent.to_string(),
             step: s.step,
             since: s.since,
             source: s.source,
-        });
+        };
+        if source != "derived" {
+            self.status_pending.lock().unwrap().remove(agent);
+            self.broadcast(frame);
+            return Ok(());
+        }
+        // Derived lines come in bursts (eight parallel reads start at
+        // once): the file always holds the latest; the frame is sent at
+        // most once per STATUS_DEBOUNCE, with whatever the file says then.
+        let now = arbos_core::now_ms();
+        let hold = {
+            let mut pending = self.status_pending.lock().unwrap();
+            match pending.get(agent) {
+                Some(&last) if now - last < STATUS_DEBOUNCE_MS => true,
+                _ => {
+                    pending.insert(agent.to_string(), now);
+                    false
+                }
+            }
+        };
+        if !hold {
+            self.broadcast(frame);
+            return Ok(());
+        }
+        // One trailing send for the burst, with the latest line.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let pending = Arc::clone(&self.status_pending);
+            let place = self.place.clone();
+            let senders: Vec<mpsc::UnboundedSender<Frame>> = self.frames.lock().unwrap().clone();
+            let agent = agent.to_string();
+            handle.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(STATUS_DEBOUNCE_MS as u64))
+                    .await;
+                // Only if nothing else went out since (an agent line, or
+                // the turn's end, both clear the entry) and the latest is
+                // still a guess.
+                let due = {
+                    let mut pending = pending.lock().unwrap();
+                    match pending.get(&agent) {
+                        Some(&last) if arbos_core::now_ms() - last >= STATUS_DEBOUNCE_MS => {
+                            pending.insert(agent.clone(), arbos_core::now_ms());
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if due
+                    && let Some(s) = arbos_core::status::read(&place, &agent)
+                    && s.source == "derived"
+                {
+                    let frame = Frame::Status {
+                        agent,
+                        step: s.step,
+                        since: s.since,
+                        source: s.source,
+                    };
+                    for tx in &senders {
+                        let _ = tx.send(frame.clone());
+                    }
+                }
+            });
+        }
         Ok(())
     }
 
