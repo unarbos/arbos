@@ -489,7 +489,19 @@ pub fn turn_outcome(events: &[Event], lo: u64) -> (String, bool) {
         }
     }
     if let Some(why) = stopped {
-        return (format!("stopped: {why}"), false);
+        // What it had before the stop rides along: a parent that stopped a
+        // worker early wants the partial result, not only the reason.
+        return (
+            if last_text.is_empty() {
+                format!("stopped: {why}")
+            } else {
+                format!(
+                    "stopped: {why}\nLast words before the stop: {}",
+                    arbos_core::text::clip(&last_text, 300)
+                )
+            },
+            false,
+        );
     }
     if last_text.is_empty() {
         if let Some(f) = failed {

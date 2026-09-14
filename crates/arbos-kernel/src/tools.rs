@@ -303,7 +303,11 @@ impl Tool for Say {
             &[
                 ("to", "Agent id or name, user, or <machine>/<agent>.", true),
                 ("text", "The message; the recipient sees only this.", true),
-                ("mode", "note (default), request, or steer.", false),
+                (
+                    "mode",
+                    "note (default), request, steer, or stop (end a worker's turn now; its done brings what it had).",
+                    false,
+                ),
             ],
         )
     }
@@ -320,7 +324,9 @@ impl Tool for Say {
                 Some(m) => m,
                 // The old wire: wake:true meant request.
                 None if opt_bool(&args, "wake") == Some(true) => SayMode::Request,
-                None => anyhow::bail!("say: mode must be note, request, or steer, not {raw:?}"),
+                None => {
+                    anyhow::bail!("say: mode must be note, request, steer, or stop, not {raw:?}")
+                }
             };
             // `<machine>/<agent>`: an agent on another machine of the hub.
             // Only when that machine is on the roster; a local agent may
