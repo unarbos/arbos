@@ -2087,11 +2087,13 @@ impl ChatSession {
         })
     }
 
-    /// Prompts the kernel holds for this agent that have not run yet.
+    /// Prompts the kernel holds for this agent that have not run yet. A
+    /// steer in the inbox is not one: the running turn takes it at its
+    /// next step.
     pub fn plan_queued(&self) -> usize {
         self.plan
             .iter()
-            .filter(|n| n.inbox && n.status == "pending")
+            .filter(|n| n.inbox && n.status == "pending" && n.do_kind != "steer")
             .count()
     }
 

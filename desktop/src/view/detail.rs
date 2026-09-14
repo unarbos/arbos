@@ -1738,7 +1738,7 @@ impl Arbos {
         let queued: Vec<PlanNode> = chat
             .plan
             .iter()
-            .filter(|n| n.inbox && n.status == "pending")
+            .filter(|n| n.inbox && n.status == "pending" && n.do_kind != "steer")
             .cloned()
             .collect();
         self.followups(id, &queued, &theme, cx)
