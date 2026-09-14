@@ -151,7 +151,12 @@ const BODY_HEAD: usize = 64 * 1024;
 /// `read` it in slices by the path the evicted view cites; the transcript
 /// keeps it whole too, up to `BODY_CAP`. Past that the transcript line
 /// holds a head plus the path instead.
-pub fn cap_body(cx: &RunCx, call_id: &str, body: String) -> String {
+pub fn cap_body(cx: &RunCx, tool: &str, call_id: &str, body: String) -> String {
+    // A `read` result already has a file behind it — the one it read; the
+    // evicted view cites that path, so no copy is kept.
+    if tool == "read" && body.len() <= BODY_CAP {
+        return body;
+    }
     if !crate::evict::spills(&body) {
         return body;
     }
@@ -449,7 +454,7 @@ async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Resu
         .run(cx.clone(), prepared.args)
         .await
         .map(|mut out| {
-            out.body = cap_body(cx, &call.id, std::mem::take(&mut out.body));
+            out.body = cap_body(cx, &name, &call.id, std::mem::take(&mut out.body));
             out
         });
     let (body, error, paths) = match &result {

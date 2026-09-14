@@ -466,6 +466,14 @@ fn tool_step(
     // A result spilled to `results/<call>.txt` is cited by that file: a
     // path `read` takes with an offset, instead of a transcript line.
     let result_cite = |r: &ToolRec, seq: u64| -> String {
+        // A `read` is cited by the file it read: `read` it again with an
+        // offset past what was shown.
+        if r.name == "read"
+            && let Some(source) = r.paths.first()
+            && r.error.is_none()
+        {
+            return source.clone();
+        }
         let name = crate::evict::spill_name(&r.call_id);
         if agent_dir.join("results").join(&name).exists() {
             let agent_rel = cite.trim_end_matches("/transcript.jsonl");
@@ -683,6 +691,37 @@ mod spill_cite_tests {
         );
         assert!(t.contains("line-400"), "the tail is still shown: {t}");
         assert!(crate::evict::spills(&body) && !crate::evict::spills("short"));
+        // A `read` is cited by the file it read, never by a copy (its view
+        // is a longer head: 600 lines).
+        let long: String = (1..=700).map(|i| format!("{i:>6}:aa|line-{i}\n")).collect();
+        let read_rec = ToolRec {
+            name: "read".into(),
+            call_id: "call_2".into(),
+            paths: vec!["/src/big.rs".into()],
+            started: None,
+            ended: None,
+            result_size: None,
+            error: None,
+            body: Some(long),
+            args: None,
+            child: None,
+            images: vec![],
+            diff: None,
+        };
+        let mut read_event = Event::new(EventKind::Tool(read_rec));
+        read_event.seq = 3;
+        let mut with_read = events.clone();
+        with_read.push(read_event);
+        let items = crate::compact::visible(&with_read);
+        let p = project(&place, &agent, &items, &[], STEP_BYTES);
+        let read_text = p
+            .messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .nth(1)
+            .and_then(|m| m.content.clone())
+            .unwrap_or_default();
+        assert!(read_text.contains("…evicted (/src/big.rs;"), "{read_text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
