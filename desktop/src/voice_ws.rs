@@ -38,9 +38,10 @@ const ECHO_TAIL: Duration = Duration::from_millis(400);
 /// at release can be missing the last words (a Mac run lost two); the final
 /// is what has them, and it comes well inside this on a healthy link.
 const FINAL_WAIT: Duration = Duration::from_millis(700);
-/// A reply the server announced but never played or finished: after this
-/// long with nothing heard the phase goes back to ready instead of reading
-/// "speaking" until the next take.
+/// A reply with no sign of life — no audio frame and no done frame — for
+/// this long is over: the phase goes back to ready instead of reading
+/// "speaking" until the next take. Armed when a reply starts, when a take
+/// ends into a reply, and re-armed by every audio frame that arrives.
 const REPLY_STALL: Duration = Duration::from_secs(5);
 /// After a release the microphone stays open, its frames dropped, so the
 /// next press streams in the same instant instead of paying the device's
@@ -493,15 +494,16 @@ pub fn speak(text: &str) -> Result<()> {
     let session = hold
         .as_ref()
         .ok_or_else(|| anyhow!("voice session closed"))?;
-    {
-        let mut s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
-        s.reply.clear();
-        s.phase = Some(Phase::Speaking);
-    }
     session
         .tx
         .send(Cmd::Speak(text.to_string()))
-        .map_err(|_| anyhow!("voice session closed"))
+        .map_err(|_| anyhow!("voice session closed"))?;
+    // Only a command on its way marks the phase: a closed session must
+    // not leave it reading "speaking".
+    let mut s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
+    s.reply.clear();
+    s.phase = Some(Phase::Speaking);
+    Ok(())
 }
 
 /// Stop the reply audio now. Harmless when nothing plays.
@@ -674,8 +676,9 @@ async fn run(
     let mut player: Option<Player> = None;
     let mut ready_sent = false;
     let mut speaking = false;
-    // When the server announced the reply now playing, for the stall guard.
-    let mut speaking_since: Option<Instant> = None;
+    // The last sign of life from the reply now playing — its start, or its
+    // latest audio frame — for the stall guard.
+    let mut reply_alive_at: Option<Instant> = None;
     let mut muted = false;
     // Client-side echo gate state: when playback last ended, and how loud the
     // mic runs while we play (our own voice coming back).
@@ -714,13 +717,19 @@ async fn run(
                         }
                         let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
                         s.level = 0.0;
+                        // A take ending into a reply the guard is not
+                        // watching: watch it, so a reply that never plays
+                        // cannot hold the phase at speaking.
+                        if s.phase == Some(Phase::Speaking) && reply_alive_at.is_none() {
+                            reply_alive_at = Some(Instant::now());
+                        }
                     }
                     Cmd::Speak(text) => {
                         if let Some(p) = player.take() {
                             p.stop();
                         }
                         speaking = true;
-                        speaking_since = Some(Instant::now());
+                        reply_alive_at = Some(Instant::now());
                         sink.send(text_frame(json!({ "type": "speak", "text": text }))).await?;
                     }
                     Cmd::Text(text) => {
@@ -732,7 +741,7 @@ async fn run(
                             p.stop();
                         }
                         speaking = false;
-                        speaking_since = None;
+                        reply_alive_at = None;
                         sink.send(text_frame(json!({ "type": "interrupt" }))).await?;
                     }
                     Cmd::Mute(on) => {
@@ -757,8 +766,8 @@ async fn run(
             // A reply announced with nothing played and no done frame — a
             // text-only reply backend, or a dropped frame — must not leave
             // the phase reading "speaking" until the next take.
-            _ = tokio::time::sleep_until(speaking_since.map(|at| tokio::time::Instant::from_std(at + REPLY_STALL)).unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))), if speaking_since.is_some() && player.is_none() => {
-                speaking_since = None;
+            _ = tokio::time::sleep_until(reply_alive_at.map(|at| tokio::time::Instant::from_std(at + REPLY_STALL)).unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))), if reply_alive_at.is_some() => {
+                reply_alive_at = None;
                 speaking = false;
                 let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
                 if s.phase == Some(Phase::Speaking) {
@@ -795,6 +804,7 @@ async fn run(
                         if !speaking {
                             continue;
                         }
+                        reply_alive_at = Some(Instant::now());
                         if player.is_none() {
                             match Player::spawn(&shared) {
                                 Ok(p) => player = Some(p),
@@ -845,7 +855,7 @@ async fn run(
                                 // The user talks over the reply: cut it.
                                 if speaking {
                                     speaking = false;
-                                    speaking_since = None;
+                                    reply_alive_at = None;
                                     s.interrupts += 1;
                                     if let Some(p) = player.take() { p.stop(); }
                                     if s.phase == Some(Phase::Speaking) {
@@ -887,7 +897,7 @@ async fn run(
                                     speaking = true;
                                     s.reply.clear();
                                 }
-                                speaking_since = Some(Instant::now());
+                                reply_alive_at = Some(Instant::now());
                                 // A reply backend of "none" plays nothing:
                                 // the phase would say speaking for no sound.
                                 if s.reply_backend != "none" {
@@ -900,7 +910,7 @@ async fn run(
                             "response.transcript" => s.reply.push_str(&field("text")),
                             "response.done" => {
                                 speaking = false;
-                                speaking_since = None;
+                                reply_alive_at = None;
                                 let interrupted = v.get("interrupted").and_then(Value::as_bool).unwrap_or(false);
                                 if let Some(p) = player.take() {
                                     // Cut short: nothing queued should still be heard.
