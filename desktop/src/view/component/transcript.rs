@@ -4774,10 +4774,14 @@ mod selection_tests {
             12
         );
         assert!(matches!(segs.last(), Some(Seg::Run(range)) if range.start == 12));
-        // Cursor: the timeline shows while the turn runs and folds once it
-        // settles; from there a click owns the fold.
+        // Cursor: the timeline shows while the turn runs and stays open on
+        // the newest turn; an older turn folds once it settles, and from
+        // there a click owns the fold.
         assert!(auto_work_open(&items, 0, true));
-        assert!(!auto_work_open(&items, 0, false));
+        assert!(auto_work_open(&items, 0, false), "the newest turn stays open");
+        let mut older = items.clone();
+        older.push(ChatItem::User("Next".to_string().into()));
+        assert!(!auto_work_open(&older, 0, false), "an older turn folds");
         let mut state = State::default();
         assert!(!state.groups.contains(&0));
         state.toggle_group(0);
