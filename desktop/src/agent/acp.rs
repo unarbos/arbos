@@ -360,7 +360,7 @@ impl Session {
                         .to_string()
                 })
                 .collect(),
-            channel: String::new(),
+            channel: content.channel.clone(),
             device: String::new(),
             model: content.model.clone().unwrap_or_default(),
         })

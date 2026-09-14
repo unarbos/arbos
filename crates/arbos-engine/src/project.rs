@@ -34,6 +34,10 @@ use crate::provider::{ChatMessage, ImagePart, ToolCall};
 pub const COMPACTION_HEADER: &str = "[context checkpoint — earlier turns summarised]";
 /// First line of the user message that carries a tool step's images.
 const IMAGES_HEADER: &str = "[images from tool results]";
+/// Prefix on a user line that came in as speech (`channel = "voice"`):
+/// the words are a transcript, not typing.
+pub const VOICE_MARK: &str = "[spoken — transcribed speech, may hold transcription errors] ";
+
 /// Characters of a folded tool body kept as a preview.
 const PREVIEW_CHARS: usize = 120;
 /// Most bytes one step's fresh tool results may add to the prompt together
@@ -383,10 +387,19 @@ pub fn project(
                     );
                 }
                 EventKind::User {
-                    text, attachments, ..
+                    text,
+                    attachments,
+                    channel,
+                    ..
                 } => {
                     flush(&mut out, &mut pending);
                     let mut t = text.clone();
+                    // Spoken, not typed (dictation or a call): the model is
+                    // told, or "can you hear me" reads as a question about
+                    // its ears and gets "I have no audio capabilities".
+                    if channel == "voice" {
+                        t = format!("{VOICE_MARK}{t}");
+                    }
                     // `/name args` names a skill: the transcript keeps what
                     // was typed; the model reads the skill's body under it.
                     if text.trim_start().starts_with('/') {
@@ -722,6 +735,54 @@ mod spill_cite_tests {
             .and_then(|m| m.content.clone())
             .unwrap_or_default();
         assert!(read_text.contains("…evicted (/src/big.rs;"), "{read_text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod voice_mark_tests {
+    use super::*;
+
+    #[test]
+    fn a_spoken_line_is_marked_for_the_model_and_a_typed_one_is_not() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-voice-mark-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join(".arbos/agents/root")).unwrap();
+        let place = Place::new(&dir);
+        arbos_core::bootstrap(&place).unwrap();
+        let agent = arbos_core::Agent::root("root");
+        let user = |text: &str, channel: &str| {
+            Event::new(EventKind::User {
+                text: text.into(),
+                attachments: vec![],
+                channel: channel.into(),
+                device: String::new(),
+            })
+        };
+        let mut events = vec![
+            user("Hello, can you hear", "voice"),
+            user("now typed", "text"),
+        ];
+        for (i, e) in events.iter_mut().enumerate() {
+            e.seq = i as u64 + 1;
+        }
+        let items = crate::compact::visible(&events);
+        let p = project(&place, &agent, &items, &[], STEP_BYTES);
+        let users: Vec<String> = p
+            .messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .filter_map(|m| m.content.clone())
+            .collect();
+        assert_eq!(users.len(), 2, "{users:?}");
+        assert!(users[0].starts_with(VOICE_MARK), "{}", users[0]);
+        assert!(users[0].ends_with("Hello, can you hear"), "{}", users[0]);
+        assert!(!users[1].contains("[spoken"), "{}", users[1]);
+        // The contract tells the model what the mark means.
+        assert!(CONTRACT.contains("Voice: a user line marked [spoken"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
