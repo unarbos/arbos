@@ -37,8 +37,8 @@ pub use agent_def::{AgentDef, find_def, load_defs};
 pub use event::{Event, EventKind, ToolRec, Usage};
 pub use files::{
     Layout, ROOT_ID, TranscriptTail, agent_exists, append_event, append_events, bootstrap,
-    create_chat, list_agents, load_agent, load_transcript, needs_serve, read_focus, validate_focus,
-    write_focus,
+    create_chat, lineage, list_agents, load_agent, load_transcript, needs_serve, read_focus,
+    subtree, validate_focus, write_focus,
 };
 pub use host::{Host, HostConfig, KeySource, ProviderKind};
 pub use hub::{HubConfig, HubFrame, MachineInfo, MeshTarget, ProjectInfo, RegistrantKind};

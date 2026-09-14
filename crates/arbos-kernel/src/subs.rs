@@ -465,7 +465,6 @@ struct Polled {
 fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
     let repo = sub.repo.clone().unwrap_or_default();
     let pr = sub.pr.unwrap_or(0);
-    // A `github_ci` with a branch and no PR watches the branch's runs.
     let branch = sub
         .branch
         .as_deref()
@@ -475,9 +474,11 @@ fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
         Some(b) => format!("{repo}@{b}"),
         None => format!("{repo}#{pr}"),
     };
+    // `gh` runs with the grants this agent (or one above it) holds.
+    let env = arbos_engine::secrets::store().env_for(&arbos_core::lineage(&hooks.place, agent));
     let looked = match branch {
-        Some(b) => crate::github::branch_snapshot(&repo, b),
-        None => crate::github::snapshot(&repo, pr),
+        Some(b) => crate::github::branch_snapshot(&repo, b, &env),
+        None => crate::github::snapshot(&repo, pr, &env),
     };
     match looked {
         Ok(now) => {
@@ -560,7 +561,15 @@ async fn run_job(hooks: &KernelHooks, agent: &Agent, cmd: &str) -> (Option<Strin
         .clone()
         .unwrap_or_else(|| hooks.place.path.clone());
     let root = JobsRoot::for_agent(&hooks.place, &agent.id);
-    let (job, mut child) = match root.spawn(cmd, &cwd, Some(CMD_TIMEOUT.as_millis() as u64), None) {
+    let granted = arbos_engine::secrets::store()
+        .env_for(&arbos_core::lineage(&hooks.place, agent.id.as_str()));
+    let (job, mut child) = match root.spawn(
+        cmd,
+        &cwd,
+        Some(CMD_TIMEOUT.as_millis() as u64),
+        None,
+        granted,
+    ) {
         Ok(x) => x,
         Err(e) => return (None, -1, format!("could not start: {e}")),
     };
@@ -578,7 +587,10 @@ async fn run_job(hooks: &KernelHooks, agent: &Agent, cmd: &str) -> (Option<Strin
         },
         Err(_) => -1,
     };
-    let out = journal_tail(&job.journal(), 256 * 1024);
+    // What leaves the journal for a message or a notice is redacted like
+    // a tool result: a command that echoes a key does not put it in the
+    // user's line or the agent's inbox.
+    let out = arbos_engine::secrets::store().redact(&journal_tail(&job.journal(), 256 * 1024));
     let mut tail = text::tail(&out);
     if timed_out {
         tail = format!("timed out after {}s\n{tail}", CMD_TIMEOUT.as_secs());

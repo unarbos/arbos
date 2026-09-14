@@ -681,6 +681,43 @@ pub fn agent_exists(place: &Place, id: &str) -> bool {
     crate::validate_id(id).is_ok() && Agent::load(&place.agent_dir(id)).is_ok()
 }
 
+/// `id`, its parent, grandparent, … up to the top (or an unreadable or
+/// looping link). What a scoped grant is checked against.
+pub fn lineage(place: &Place, id: &str) -> Vec<String> {
+    let mut out = vec![id.to_string()];
+    let mut cur = id.to_string();
+    while let Ok(a) = Agent::load(&place.agent_dir(&cur)) {
+        let Some(p) = a.parent else {
+            break;
+        };
+        let p = p.to_string();
+        if out.contains(&p) || out.len() > 64 {
+            break;
+        }
+        out.push(p.clone());
+        cur = p;
+    }
+    out
+}
+
+/// `id` and every agent under it, by the parent links on disk.
+pub fn subtree(place: &Place, id: &str) -> Vec<String> {
+    let agents = list_agents(place).unwrap_or_default();
+    let mut out = vec![id.to_string()];
+    let mut i = 0;
+    while i < out.len() {
+        for a in &agents {
+            if a.parent.as_ref().is_some_and(|p| p.as_str() == out[i])
+                && !out.iter().any(|x| x == a.id.as_str())
+            {
+                out.push(a.id.to_string());
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 fn touch(path: &Path) -> Result<()> {
     if path.exists() {
         return Ok(());

@@ -151,6 +151,7 @@ impl JobsRoot {
         cwd: &Path,
         timeout_ms: Option<u64>,
         sandbox: Option<&crate::sandbox::Sandbox>,
+        granted: Vec<(String, String)>,
     ) -> Result<(Job, Child)> {
         fs::create_dir_all(&self.0).with_context(|| format!("jobs dir {}", self.0.display()))?;
         self.prune();
@@ -193,10 +194,10 @@ impl JobsRoot {
             .stdout(Stdio::from(journal))
             .stderr(Stdio::from(err_fd));
         // An allowlisted environment, not the kernel's whole one, plus the
-        // secrets the agent asked to use by name (their values are
-        // redacted from everything that comes back). `ARBOS_GRANTED` tells
-        // the shell-side scrub which secret-looking names to keep.
-        let granted = crate::secrets::store().env();
+        // secrets granted to this agent or one above it (`granted`, from
+        // `secrets::Store::env_for`; their values are redacted from
+        // everything that comes back). `ARBOS_GRANTED` tells the
+        // shell-side scrub which secret-looking names to keep.
         cmd.env_clear();
         cmd.envs(arbos_core::envsafe::filtered(&[]));
         cmd.env(
