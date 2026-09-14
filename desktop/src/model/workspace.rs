@@ -102,6 +102,9 @@ pub struct Workspace {
     /// Whether the window is showing the frame meter. Runtime only — a switch
     /// you left on is not a preference worth restoring.
     pub meter: bool,
+    /// Uncommitted changes per local project root, as the poll last read
+    /// them — Cursor's Changes pill and Files Changed card.
+    pub changes: HashMap<std::path::PathBuf, crate::model::changes::GitChanges>,
     /// The registry's mark for each configured agent, by name. Empty until the
     /// catalog lands, and stays empty offline.
     agent_icons: HashMap<String, SharedString>,
@@ -170,6 +173,7 @@ impl Workspace {
             bionic_reading: state.bionic_reading,
             tint: Tint::new(state.hue, state.chroma),
             meter: false,
+            changes: HashMap::new(),
             next_id: 0,
             agent_icons: HashMap::new(),
             last: state.last,
@@ -2341,6 +2345,36 @@ impl Workspace {
         project.surfaces.retain(|surface| surface.id != id);
         self.push_snapshot(ix);
         cx.notify();
+    }
+
+    /// Cursor's Review: the working tree's diff (one file, or all of it),
+    /// written under the project's desktop folder and opened in the column
+    /// as code.
+    pub fn review_changes(&mut self, root: &std::path::Path, file: Option<&str>, cx: &mut Context<Self>) {
+        let text = crate::model::changes::GitChanges::diff_text(root, file);
+        let path = crate::model::changes::GitChanges::review_path(root, file);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&path, text).is_err() {
+            return;
+        }
+        let title = match file {
+            Some(f) => format!("{f} · changes"),
+            None => "Changes".to_string(),
+        };
+        let Some(owner) = self.active_id() else {
+            return;
+        };
+        self.open_shown(
+            owner,
+            path.to_string_lossy().into_owned(),
+            title,
+            "code".to_string(),
+            None,
+            None,
+            cx,
+        );
     }
 
     /// Something the agent put under its chat: a file it `show`ed, or a

@@ -2634,6 +2634,7 @@ fn tool_icon(kind: ToolKind) -> &'static str {
 /// the flow, in the reading column, not pinned over the composer.
 pub fn render(
     chat: &ChatSession,
+    changes: Option<crate::model::changes::GitChanges>,
     tail: Vec<AnyElement>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
@@ -2702,6 +2703,24 @@ pub fn render(
                 .max_w(px(column))
                 .self_center()
                 .child(zone(chat, turn, running, footer, window, cx))
+                .into_any_element(),
+        );
+    }
+    // Cursor's "2 Files Changed · Review" card under the last answer: the
+    // working tree's uncommitted files with their line counts, while the
+    // chat is idle. The main chat of a local repository only.
+    if !chat.busy()
+        && chat.parent.is_none()
+        && chat.host.is_none()
+        && !turns.is_empty()
+        && let Some(changes) = changes.as_ref().filter(|c| !c.is_empty())
+    {
+        zones.push(
+            div()
+                .w_full()
+                .max_w(px(column))
+                .self_center()
+                .child(files_changed_card(chat.cwd.clone(), changes, &theme, cx))
                 .into_any_element(),
         );
     }
@@ -3751,6 +3770,14 @@ fn run_fold(
     let key = range.start;
     let stats = work_stats(&chat.items, range.clone());
     let (verb, rest) = work_summary(&stats, live, Duration::ZERO, false);
+    // Cursor's run lines start with a capital: "Explored 2 files, 2 searches".
+    let verb = {
+        let mut chars = verb.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => verb,
+        }
+    };
     let diff = (stats.add + stats.del > 0).then_some((stats.add, stats.del));
     let open = chat.transcript.groups.contains(&key);
     div()
@@ -4935,4 +4962,98 @@ mod selection_tests {
             "hello"
         );
     }
+}
+
+/// Cursor's card under an answer that changed files: "2 Files Changed" with
+/// Review on the right, then one row per file — its glyph, name, and
+/// `+N −M`. A row opens that file's diff; Review opens the whole tree's.
+fn files_changed_card(
+    root: std::path::PathBuf,
+    changes: &crate::model::changes::GitChanges,
+    theme: &Theme,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let n = changes.files.len();
+    let head = format!("{n} File{} Changed", if n == 1 { "" } else { "s" });
+    let review_root = root.clone();
+    let mut card = div()
+        .id("files-changed")
+        .w_full()
+        .mt(px(4.))
+        .rounded(px(Theme::surface_radius()))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.ink(0.02))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .px(px(12.))
+                .py(px(8.))
+                .border_b_1()
+                .border_color(theme.border)
+                .text_style(TextStyle::Callout)
+                .child(div().flex_1().text_color(theme.text).child(SharedString::from(head)))
+                .child(
+                    div()
+                        .id("files-changed-review")
+                        .cursor_pointer()
+                        .text_color(theme.text_muted)
+                        .hover(|el| el.text_color(theme.text))
+                        .child("Review")
+                        .on_mouse_down(
+                            bezel::gpui::MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.review_changes(&review_root, None, cx);
+                            }),
+                        ),
+                ),
+        );
+    for (ix, file) in changes.files.iter().enumerate() {
+        let path = file.path.clone();
+        let review_root = root.clone();
+        let name = std::path::Path::new(&file.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file.path.clone());
+        card = card.child(
+            div()
+                .id(("files-changed-row", ix))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .px(px(12.))
+                .py(px(5.))
+                .cursor_pointer()
+                .hover(|el| el.bg(theme.element_hover))
+                .text_style(TextStyle::Callout)
+                .child(
+                    icons::icon(icons::files::DOCUMENT)
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(theme.text_faint),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.text)
+                        .child(SharedString::from(name)),
+                )
+                .child(crate::view::detail::diff_marks(theme, file.add, file.del))
+                .on_mouse_down(
+                    bezel::gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.review_changes(&review_root, Some(&path), cx);
+                    }),
+                ),
+        );
+    }
+    card.into_any_element()
 }

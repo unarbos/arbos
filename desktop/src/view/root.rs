@@ -144,6 +144,8 @@ pub(crate) const CHAT_MAX_WIDTH: f32 = 720.;
 /// Cursor's chat prose: 14 px on a 23 px line (measured 14/22 on Jacob's
 /// Mac, 15/25 on the Linux build; the Mac is the reference).
 pub(crate) const CURSOR_PROSE_SIZE: f32 = 14.;
+/// How often the working tree is re-read for the Changes pill.
+const CHANGES_POLL: Duration = Duration::from_secs(4);
 pub(crate) const CURSOR_PROSE_LEADING: f32 = 23.;
 /// Web `px-3.5`. Cards bleed by `COMPOSER_PAD_X` so their words sit on
 /// this edge, same as the answer.
@@ -905,6 +907,46 @@ impl Arbos {
                 .get(ix)
                 .is_some_and(|project| !project.identity_saved)
         });
+        // Cursor's Changes pill: what the project's working tree holds
+        // uncommitted, read from git off the UI thread every few seconds
+        // for the project in front.
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(CHANGES_POLL).await;
+                let Ok(root) = this.update(cx, |this, cx| {
+                    this.workspace
+                        .read(cx)
+                        .active_project()
+                        .filter(|project| !project.is_remote())
+                        .map(|project| project.path.clone())
+                }) else {
+                    break;
+                };
+                let Some(root) = root else { continue };
+                let read_root = root.clone();
+                let changes = cx
+                    .background_executor()
+                    .spawn(async move { crate::model::changes::GitChanges::read(&read_root) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.workspace.update(cx, |workspace, cx| {
+                        let before = workspace.changes.get(&root).cloned();
+                        match changes {
+                            Some(changes) => {
+                                workspace.changes.insert(root.clone(), changes);
+                            }
+                            None => {
+                                workspace.changes.remove(&root);
+                            }
+                        }
+                        if workspace.changes.get(&root).cloned() != before {
+                            cx.notify();
+                        }
+                    });
+                });
+            }
+        })
+        .detach();
         if home_fresh || !this.workspace.read(cx).permissions_seen {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor()

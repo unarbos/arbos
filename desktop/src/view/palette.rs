@@ -22,6 +22,13 @@ fn build(appearance: Appearance) -> Theme {
     if appearance == Appearance::Dark {
         cursor_dark(&mut theme);
     }
+    // Cursor sets its chat in the platform's UI face: SF on a Mac, and on
+    // Linux whatever fontconfig calls `sans-serif` (Electron's `system-ui`).
+    // gpui's `.SystemUIFont` is SF on a Mac; on Linux it fell to the GTK
+    // default, which is not the same face — ask fontconfig's instead.
+    if cfg!(target_os = "linux") {
+        theme.font_sans = "sans-serif".into();
+    }
     theme
 }
 
