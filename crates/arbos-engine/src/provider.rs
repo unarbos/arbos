@@ -219,6 +219,9 @@ pub struct Provider {
     pub key: String,
     pub model: String,
     pub reasoning_effort: Option<String>,
+    /// `cache_control.ttl` for Claude breakpoints: None = the 5-minute
+    /// default, Some("1h") = an hour.
+    pub cache_ttl: Option<String>,
     /// Longest silence tolerated mid-stream before the call counts as lost.
     pub stream_idle: Duration,
     /// `max_tokens` to send. None = omit the field.
@@ -494,7 +497,13 @@ impl Provider {
     ) -> Result<Completion> {
         let mut msgs = messages_json(messages);
         if wants_cache_control(&self.model, &self.base) {
-            mark_cache_breakpoints(&mut msgs);
+            // The hour is Anthropic's; others drop or reject the field.
+            let m = self.model.to_ascii_lowercase();
+            let ttl = self
+                .cache_ttl
+                .as_deref()
+                .filter(|t| *t == "1h" && (m.contains("claude") || m.starts_with("anthropic/")));
+            mark_cache_breakpoints(&mut msgs, ttl);
         }
         let mut body = json!({
             "model": self.model,
@@ -1205,15 +1214,19 @@ fn wants_cache_control(model: &str, base: &str) -> bool {
 /// next step's prefix). Cache reads cost a tenth of fresh tokens and cut
 /// time to first byte; without the markers every step re-reads the whole
 /// conversation at full price.
-fn mark_cache_breakpoints(msgs: &mut [Value]) {
-    fn mark(m: &mut Value) {
+fn mark_cache_breakpoints(msgs: &mut [Value], ttl: Option<&str>) {
+    let marker = match ttl {
+        Some(t) => json!({ "type": "ephemeral", "ttl": t }),
+        None => json!({ "type": "ephemeral" }),
+    };
+    let mark = |m: &mut Value| {
         let Some(content) = m.get_mut("content") else {
             return;
         };
         match content {
             Value::String(s) => {
                 let text = std::mem::take(s);
-                *content = json!([{ "type": "text", "text": text, "cache_control": { "type": "ephemeral" } }]);
+                *content = json!([{ "type": "text", "text": text, "cache_control": marker }]);
             }
             Value::Array(parts) => {
                 if let Some(last) = parts
@@ -1221,14 +1234,14 @@ fn mark_cache_breakpoints(msgs: &mut [Value]) {
                     .rev()
                     .find(|p| p.get("type").and_then(Value::as_str) == Some("text"))
                 {
-                    last["cache_control"] = json!({ "type": "ephemeral" });
+                    last["cache_control"] = marker.clone();
                 } else if let Some(last) = parts.last_mut() {
-                    last["cache_control"] = json!({ "type": "ephemeral" });
+                    last["cache_control"] = marker.clone();
                 }
             }
             _ => {}
         }
-    }
+    };
     let n = msgs.len();
     if n == 0 {
         return;
@@ -1338,6 +1351,29 @@ mod cache_tests {
         ] {
             assert!(!wants_cache_control(m, OR), "{m} caches on its own");
         }
+    }
+
+    #[test]
+    fn the_hour_ttl_rides_on_the_marker_only_when_asked() {
+        let mut msgs = vec![
+            json!({"role": "system", "content": "rules"}),
+            json!({"role": "user", "content": "hi"}),
+        ];
+        mark_cache_breakpoints(&mut msgs, Some("1h"));
+        assert_eq!(
+            msgs[0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        assert_eq!(
+            msgs[1]["content"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        let mut plain = vec![json!({"role": "system", "content": "rules"})];
+        mark_cache_breakpoints(&mut plain, None);
+        assert_eq!(
+            plain[0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
     }
 
     #[test]
