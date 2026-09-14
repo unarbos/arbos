@@ -14,7 +14,7 @@ use crate::{
     },
     view::{
         component::{composer::SessionDrag, menu::Menu, surface as board, transcript},
-        root::{self, Arbos, NewSession, Pane, ShowProject, TogglePanel},
+        root::{self, Arbos, NewSession, Pane, SearchChats, ShowProject, TogglePanel},
         settings::Section,
     },
 };
@@ -1126,6 +1126,21 @@ impl Arbos {
                     .on_click(
                         cx.listener(|this, _, _, cx| this.open_settings(Section::General, cx)),
                     ),
+            )
+            .child(
+                theme
+                    .ghost("search-chats")
+                    .px(px(8.))
+                    .py(px(6.))
+                    .tooltip(|window, cx| Tooltip::with_keystroke("Search chats", "⌘K", window, cx))
+                    .child(
+                        icons::icon(icons::system::MAGNIFER)
+                            .size(px(14.))
+                            .text_color(theme.text_muted),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.search_chats(&SearchChats, window, cx)
+                    })),
             )
             .child(
                 theme

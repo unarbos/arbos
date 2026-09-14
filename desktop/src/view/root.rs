@@ -15,6 +15,7 @@ use crate::{
             menu::Menu,
             meter,
             opener::{Opener, OpenerEvent},
+            chat_search::{ChatSearch, ChatSearchEvent, Hit},
             tab_sheet::{TabSheet, TabSheetEvent},
         },
         naming::Renaming,
@@ -54,6 +55,7 @@ actions!(
         TogglePanel,
         ShowChat,
         ShowProject,
+        SearchChats,
         CommitName,
         DismissName,
         DismissMenu,
@@ -236,6 +238,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-1", ShowChat, None),
         // Cursor's Project tab sits beside the chat; ⌘2 is the next slot.
         KeyBinding::new("cmd-2", ShowProject, None),
+        KeyBinding::new("cmd-k", SearchChats, None),
         // What a browser binds its zoom to. `cmd-=` first so the menu
         // draws ⌘= like Safari; `cmd-+` is the same key with shift held.
         KeyBinding::new("cmd-=", ZoomIn, None),
@@ -519,6 +522,8 @@ pub struct Arbos {
     pub(crate) opener: Entity<Opener>,
     /// The sheet a tab's name, glyph and colour are set in.
     pub(crate) tab_sheet: Entity<TabSheet>,
+    /// ⌘K: the palette over every open tab's chats.
+    pub(crate) chat_search: Entity<ChatSearch>,
     settings_window: Option<WindowHandle<SettingsWindow>>,
     pub(crate) pane: Pane,
     pub(crate) menu: Option<Menu>,
@@ -610,6 +615,24 @@ impl Arbos {
         let composer = cx.new(Composer::new);
         let opener = cx.new(Opener::new);
         let tab_sheet = cx.new(TabSheet::new);
+        let chat_search = cx.new(ChatSearch::new);
+        cx.subscribe_in(
+            &chat_search,
+            window,
+            |this, _, event: &ChatSearchEvent, window, cx| match event {
+                ChatSearchEvent::Open { project, session } => {
+                    let (project, session) = (*project, *session);
+                    this.workspace.update(cx, |workspace, cx| {
+                        workspace.active = Some(project);
+                        workspace.select_session(session, cx);
+                    });
+                    this.show_pane(Pane::Chat, cx);
+                    this.focus_composer(window, cx);
+                }
+                ChatSearchEvent::Dismiss => this.focus_composer(window, cx),
+            },
+        )
+        .detach();
         cx.subscribe_in(
             &opener,
             window,
@@ -729,6 +752,7 @@ impl Arbos {
             composer,
             opener,
             tab_sheet,
+            chat_search,
             settings_window: None,
             pane: Pane::Chat,
             menu: None,
@@ -1139,6 +1163,48 @@ impl Arbos {
         self.close_project(ix, cx);
     }
 
+    /// ⌘K and the panel's magnifier: search every open tab's chats by
+    /// title and first words; Enter opens the one lit, in its tab.
+    pub(crate) fn search_chats(&mut self, _: &SearchChats, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = self.workspace.read(cx);
+        let mut hits: Vec<Hit> = Vec::new();
+        for (ix, project) in workspace.projects.iter().enumerate() {
+            let tab = Workspace::tab_label(project);
+            let mut chats: Vec<&ChatSession> = project.sessions.iter().filter(|chat| !chat.closed).collect();
+            chats.sort_by(|a, b| b.updated.cmp(&a.updated));
+            for chat in chats {
+                let title = chat.label();
+                let first = crate::model::session::first_user_text(&chat.items)
+                    .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .unwrap_or_default();
+                let first: String = first.chars().take(72).collect();
+                let label = if first.is_empty() || first == title {
+                    format!("{tab} › {title}")
+                } else {
+                    format!("{tab} › {title} — {first}")
+                };
+                hits.push(Hit {
+                    project: ix,
+                    session: chat.id,
+                    label,
+                });
+            }
+        }
+        self.dismiss_menu(cx);
+        self.chat_search
+            .update(cx, |search, cx| search.show(hits, window, cx));
+    }
+
+    /// The composer takes the keyboard back, when there is one to take it.
+    fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let composer = self
+            .workspace
+            .read(cx)
+            .active_session()
+            .map(|_| self.composer.read(cx).focus_handle(cx));
+        window.focus(composer.as_ref().unwrap_or(&self.focus), cx);
+    }
+
     /// ⌘2 and the panel's Project header: the project page in the column.
     pub(crate) fn show_project(
         &mut self,
@@ -1405,12 +1471,12 @@ impl Arbos {
         .detach();
     }
 
+    /// A microphone or speech-server failure belongs under the mic button,
+    /// not in the transcript: the conversation did not fail, the take did.
     fn voice_error(&mut self, msg: &str, cx: &mut Context<Self>) {
-        if let Some(id) = self.workspace.read(cx).active_id() {
-            self.workspace.update(cx, |workspace, cx| {
-                workspace.with_session(id, cx, |chat| chat.notice(true, msg));
-            });
-        }
+        let note = msg.strip_prefix("voice failed: ").unwrap_or(msg).to_string();
+        self.composer
+            .update(cx, |composer, cx| composer.set_voice_note(Some(note), cx));
     }
 
     // ------------------------------------------------------------------ calls
@@ -1850,6 +1916,7 @@ impl Render for Arbos {
             )
             .child(self.opener.clone())
             .child(self.tab_sheet.clone())
+            .child(self.chat_search.clone())
     }
 }
 

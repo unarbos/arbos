@@ -20,7 +20,7 @@
 
 use crate::view::root::{
     Arbos, CloseProject, EndCall, NewSession, NewTab, NextEntry, NextTab, OpenProject,
-    OpenSettings, PrevEntry, PrevTab, ShowProject, StartCall, ToggleMute, TogglePanel, ZoomIn,
+    OpenSettings, PrevEntry, PrevTab, SearchChats, ShowProject, StartCall, ToggleMute, TogglePanel, ZoomIn,
     ZoomOut, ZoomReset,
 };
 use bezel::{
@@ -177,6 +177,7 @@ fn menus() -> Vec<Menu> {
         Menu::new("View").items([
             MenuItem::action("Toggle Panel", TogglePanel),
             MenuItem::action("Show Project", ShowProject),
+            MenuItem::action("Search Chats…", SearchChats),
             MenuItem::separator(),
             // A call to the project in front, through the speech server.
             MenuItem::action("Call Project", StartCall),
@@ -269,6 +270,7 @@ impl Arbos {
             .on_action(cx.listener(Self::attach_paths_action))
             .on_action(cx.listener(Self::show_chat))
             .on_action(cx.listener(Self::show_project))
+            .on_action(cx.listener(Self::search_chats))
             .on_action(cx.listener(Self::zoom_in_action))
             .on_action(cx.listener(Self::zoom_out_action))
             .on_action(cx.listener(Self::zoom_reset_action))
