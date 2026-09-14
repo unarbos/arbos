@@ -448,12 +448,18 @@ async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Resu
         }
     }
     let args = prepared.args.clone();
+    // The first edit of a task states its mechanism or does not run.
+    let recorded = crate::mechanism::gate(&cx.place, &cx.agent.id, &name, &args)?;
     let result = prepared
         .tool
         .run(cx.clone(), prepared.args)
         .await
         .map(|mut out| {
             out.body = cap_body(cx, &call.id, std::mem::take(&mut out.body));
+            if let Some(line) = &recorded {
+                out.body.push_str("\n\nMechanism recorded for this task: ");
+                out.body.push_str(line);
+            }
             out
         });
     let (body, error, paths) = match &result {

@@ -312,11 +312,18 @@ impl Tool for Write {
         "write"
     }
     fn schema(&self) -> Value {
-        simple_schema(
+        let mut schema = simple_schema(
             "write",
             "Create or overwrite a file.",
             &[("path", "", true), ("contents", "", true)],
-        )
+        );
+        if let Some(props) = schema
+            .pointer_mut("/function/parameters/properties")
+            .and_then(Value::as_object_mut)
+        {
+            props.insert("mechanism".into(), crate::mechanism::schema_property());
+        }
+        schema
     }
     fn plan(&self, cx: &PlanCx, args: &Value) -> Result<Plan> {
         Ok(Plan::access(Access::write_path(
@@ -353,7 +360,8 @@ impl Tool for Edit {
                         "op": {"type": "string", "enum": ["replace", "insert_after", "write"], "description": "Default replace."},
                         "edits": {"type": "array", "items": {"type": "object"}, "description": "Several {op, anchor, end_anchor, content} on this file, applied bottom-up."},
                         "old_string": {"type": "string", "description": "Unique text to find (classic)."},
-                        "new_string": {"type": "string", "description": "Replacement (classic)."}
+                        "new_string": {"type": "string", "description": "Replacement (classic)."},
+                        "mechanism": crate::mechanism::schema_property()
                     },
                     "required": ["path"]
                 }

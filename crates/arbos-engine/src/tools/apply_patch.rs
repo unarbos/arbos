@@ -31,7 +31,8 @@ impl Tool for ApplyPatch {
                         "patch": {
                             "type": "string",
                             "description": "Full patch text, including *** Begin Patch and *** End Patch."
-                        }
+                        },
+                        "mechanism": crate::mechanism::schema_property()
                     },
                     "required": ["patch"]
                 }
