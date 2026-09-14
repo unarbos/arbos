@@ -2843,7 +2843,13 @@ fn pump(
                             cwd,
                             url,
                         } => workspace.open_shown(id, path, title, kind, cwd, url, cx),
-                        Event::Hide { path, .. } => workspace.close_shown(id, &path, cx),
+                        Event::Hide { path, kind } => {
+                            if kind == "process" {
+                                workspace.finish_shown_process(id, &path, cx)
+                            } else {
+                                workspace.close_shown(id, &path, cx)
+                            }
+                        }
                         Event::Browser {
                             page,
                             url,

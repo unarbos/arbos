@@ -2454,6 +2454,57 @@ impl Workspace {
         }
     }
 
+    /// A detached job ended: the kernel closes its board row, but the
+    /// output stays readable here. The row keeps its streamed tail and
+    /// exit status until the user closes it; only the oldest finished rows
+    /// go when more than `KEEP_FINISHED` of an owner's have piled up.
+    pub fn finish_shown_process(&mut self, owner: u64, kernel_id: &str, cx: &mut Context<Self>) {
+        const KEEP_FINISHED: usize = 3;
+        let Some(ix) = self.project_of(owner) else {
+            return;
+        };
+        let project = &mut self.projects[ix];
+        let Some(pos) = project
+            .surfaces
+            .iter()
+            .position(|surface| surface.owner == Some(owner) && surface.kernel_id() == Some(kernel_id))
+        else {
+            return;
+        };
+        if let Bind::Process { done, log, .. } = &mut project.surfaces[pos].bind
+            && done.is_none()
+        {
+            // The job frame with `running: false` usually came first; when
+            // it did not (a remote place, a missed tick), read the exit the
+            // wrapper shell wrote.
+            let code = log
+                .parent()
+                .and_then(|dir| std::fs::read_to_string(dir.join("exit")).ok())
+                .and_then(|s| s.trim().parse::<i32>().ok());
+            *done = Some(code);
+        }
+        let mut finished: Vec<(u128, SurfaceId)> = project
+            .surfaces
+            .iter()
+            .filter(|s| s.owner == Some(owner))
+            .filter_map(|s| match &s.bind {
+                Bind::Process { done: Some(_), .. } => Some((s.touched, s.id)),
+                _ => None,
+            })
+            .collect();
+        finished.sort_by_key(|(touched, _)| *touched);
+        let extra: Vec<SurfaceId> = finished
+            .iter()
+            .take(finished.len().saturating_sub(KEEP_FINISHED))
+            .map(|(_, id)| *id)
+            .collect();
+        for id in extra {
+            self.close_surface(id, cx);
+        }
+        self.push_snapshot(ix);
+        cx.notify();
+    }
+
     /// The agent's browser page moved, or sent a picture. Creates the row
     /// if the open was missed; never takes the column on its own.
     /// New output from one of `owner`'s detached jobs. Appended to the
