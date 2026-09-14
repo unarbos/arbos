@@ -409,6 +409,43 @@ fn archive_finished(hooks: &KernelHooks, reported: &[String]) {
     }
 }
 
+/// Where a worktree worker's changes are when its turn ends, for the done
+/// message. A worker that edited in its own worktree and never committed
+/// left the user's checkout untouched; its parent said "renamed
+/// everywhere" all the same (symmetry loop, cycle 4). The done line
+/// makes the state plain so the answer can be.
+fn worktree_state(hooks: &KernelHooks, agent: &str) -> Option<String> {
+    let left = crate::worktree::leftover(hooks.place.path(), agent)?;
+    if left.dirty == usize::MAX || left.ahead == usize::MAX {
+        // git could not say; better no line than a wrong one.
+        return None;
+    }
+    let rel = left
+        .path
+        .strip_prefix(hooks.place.path())
+        .unwrap_or(&left.path)
+        .display()
+        .to_string();
+    Some(match (left.dirty, left.ahead) {
+        (0, 0) => format!(
+            "Worktree {rel} (branch {}): no changes committed or pending; the checkout is as it was.",
+            left.branch
+        ),
+        (0, ahead) => format!(
+            "Its changes are {ahead} commit(s) on branch {} (worktree {rel}), not in the user's checkout until merged.",
+            left.branch
+        ),
+        (dirty, 0) => format!(
+            "Its changes are UNCOMMITTED: {dirty} path(s) in worktree {rel} (branch {}); the user's checkout is unchanged. Not done until committed and merged.",
+            left.branch
+        ),
+        (dirty, ahead) => format!(
+            "Its changes: {ahead} commit(s) on branch {} plus {dirty} uncommitted path(s) in worktree {rel}; the user's checkout is unchanged until merged.",
+            left.branch
+        ),
+    })
+}
+
 /// The project page's rows for an archived worker stop saying "worker
 /// running". While a worker runs its row targets `agents/<id>`; once the
 /// folder has moved that link is dead and the readout is stale. A turn
@@ -491,9 +528,13 @@ fn notify_parent_done(hooks: &KernelHooks, agent: &str) {
     let events = load_transcript(&hooks.layout(agent).transcript()).unwrap_or_default();
     let (outcome, ok) = turn_outcome(&events, lo);
     let status = if ok { "ended" } else { "ended badly" };
-    let body = format!(
+    let mut body = format!(
         "Turn {status}. Last words: {outcome}\n(transcript: .arbos/agents/{agent}/transcript.jsonl)"
     );
+    if let Some(note) = worktree_state(hooks, agent) {
+        body.push('\n');
+        body.push_str(&note);
+    }
     let msg = inbox::Message {
         from: format!("agent:{agent}"),
         kind: "done".into(),
