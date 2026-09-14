@@ -132,15 +132,16 @@ fn an_ask_has_an_id_and_only_a_matching_answer_resolves_it() {
         "turn never ended after the answer; transcript: {:?}",
         kinds(&k.place)
     );
-    std::thread::sleep(Duration::from_millis(400));
-    let text = std::fs::read_to_string(
-        k.place
-            .join(".arbos")
-            .join("agents")
-            .join("root")
-            .join("transcript.jsonl"),
-    )
-    .unwrap();
+    let path = k
+        .place
+        .join(".arbos")
+        .join("agents")
+        .join("root")
+        .join("transcript.jsonl");
+    common::wait_for(Duration::from_secs(5), || {
+        std::fs::read_to_string(&path).is_ok_and(|t| t.contains("You chose teal."))
+    });
+    let text = std::fs::read_to_string(&path).unwrap();
     assert!(
         text.contains("\"call_id\":\"call_ask_1\""),
         "the transcript ask line carries the id"
@@ -160,7 +161,9 @@ fn an_ask_has_an_id_and_only_a_matching_answer_resolves_it() {
         })
         .expect("a late answer is refused with an error frame");
     assert!(err["detail"].as_str().unwrap().contains("refused"), "{err}");
-    std::thread::sleep(Duration::from_millis(300));
+    common::wait_for(Duration::from_secs(5), || {
+        kinds(&k.place).iter().filter(|k| *k == "answer").count() >= 1
+    });
     assert_eq!(kinds(&k.place).iter().filter(|k| *k == "answer").count(), 1);
     let _ = k.child.kill();
 }
@@ -198,7 +201,9 @@ fn an_answer_with_nothing_pending_is_refused_and_a_blind_one_is_tolerated_once()
     // A blind answer (old client) while exactly one question is pending: accepted.
     a.send(serde_json::json!({"type": "answer", "agent": "root", "text": "red"}));
     assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
-    std::thread::sleep(Duration::from_millis(300));
+    common::wait_for(Duration::from_secs(5), || {
+        kinds(&k.place).iter().filter(|k| *k == "answer").count() >= 1
+    });
     assert_eq!(kinds(&k.place).iter().filter(|k| *k == "answer").count(), 1);
 
     // The late answer with the now-resolved id: refused.
@@ -207,7 +212,9 @@ fn an_answer_with_nothing_pending_is_refused_and_a_blind_one_is_tolerated_once()
         a.wait(Duration::from_secs(5), |f| f["type"] == "error")
             .is_some()
     );
-    std::thread::sleep(Duration::from_millis(300));
+    common::wait_for(Duration::from_secs(5), || {
+        kinds(&k.place).iter().filter(|k| *k == "answer").count() >= 1
+    });
     assert_eq!(kinds(&k.place).iter().filter(|k| *k == "answer").count(), 1);
     let _ = k.child.kill();
 }
