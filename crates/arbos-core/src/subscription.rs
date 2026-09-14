@@ -71,6 +71,12 @@ pub struct Subscription {
     pub expires: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub paused: bool,
+    /// `timer` / `shell`: each firing carries what the last one produced
+    /// — the command's output, or the last words of the turn the timer
+    /// opened — so a monitor can compare instead of starting over
+    /// (Hermes cron `continuity`). Kept in `seen`, capped.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continuity: bool,
     /// A kernel chore (the weekly `git gc`): fires like any other but stays
     /// out of every user-facing list — the plan strip, the prompt's
     /// standing section, `subscribe list`. `check` still sees it.
@@ -277,6 +283,9 @@ impl Subscription {
                 }
             }
             _ => {}
+        }
+        if self.continuity && !matches!(self.kind.as_str(), "timer" | "shell") {
+            bail!("continuity is for timer and shell subscriptions");
         }
         if !matches!(self.deliver_to.as_str(), "agent" | "user" | "none") {
             bail!("deliver_to must be agent, user, or none");
@@ -608,6 +617,7 @@ mod tests {
             notify: None,
             expires: None,
             paused: false,
+            continuity: false,
             internal: false,
             created: String::new(),
             next_due: None,
@@ -757,6 +767,7 @@ mod branch_tests {
             notify: None,
             expires: None,
             paused: false,
+            continuity: false,
             internal: false,
             created: String::new(),
             next_due: None,

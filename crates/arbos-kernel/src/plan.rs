@@ -141,6 +141,21 @@ fn close_turn_folder(hooks: &KernelHooks, agent: &str, forced: Option<&str>) -> 
         Some(why) => (why.to_string(), false),
         None => turn_outcome(&events, lo),
     };
+    // A timer with continuity: the words this turn ended with ride on its
+    // next firing.
+    if let Ok(cause) = std::fs::read_to_string(dir.join("cause.md"))
+        && let Ok(msg) = inbox::Message::parse(&cause)
+        && let Some(n) = msg
+            .from
+            .strip_prefix("subscription:")
+            .and_then(|n| n.parse::<u32>().ok())
+        && let Some(mut sub) = arbos_core::subscription::get(&hooks.place, agent, n)
+        && sub.continuity
+        && sub.kind == "timer"
+    {
+        sub.seen = Some(arbos_core::text::clip(outcome.trim(), 4000));
+        let _ = arbos_core::subscription::save(&hooks.place, agent, &sub);
+    }
     let verdict = if ok { "success" } else { "failed" };
     let line: String = outcome
         .lines()

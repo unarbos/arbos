@@ -39,6 +39,7 @@ fn timer(prompt: &str, every: Option<&str>) -> Subscription {
         notify: None,
         expires: None,
         paused: false,
+        continuity: false,
         internal: false,
         created: String::new(),
         next_due: None,

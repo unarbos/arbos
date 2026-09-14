@@ -72,6 +72,7 @@ pub fn ensure_chores(place: &arbos_core::Place) {
         notify: None,
         expires: None,
         paused: false,
+        continuity: false,
         internal: true,
         created: String::new(),
         next_due: None,
@@ -259,7 +260,16 @@ fn fire_with_note(
     };
     match sub.kind.as_str() {
         "timer" => {
-            let body = sub.prompt.clone();
+            // With continuity, the last words of the turn the previous
+            // firing opened ride along (close_turn_folder stores them).
+            let body = match (&sub.continuity, sub.seen.as_deref()) {
+                (true, Some(prev)) if !prev.trim().is_empty() => format!(
+                    "{}\n\nLast time this fired, your turn ended with:\n{}",
+                    sub.prompt,
+                    text::clip(prev, CONTINUITY_CAP)
+                ),
+                _ => sub.prompt.clone(),
+            };
             let outcome = match inbox::deliver(&hooks.place, id, &message(&sub, true, noted(body)))
             {
                 Ok(_) => "fired".to_string(),
@@ -337,6 +347,22 @@ fn fire_with_note(
                 let (job, code, tail) = run_job(&hooks, &agent, &cmd).await;
                 let id = agent.id.as_str();
                 let to_user = sub.deliver_to == "user";
+                // What the command printed last time, for a message or a
+                // notice that compares instead of starting over.
+                let previous = sub
+                    .continuity
+                    .then(|| sub.seen.clone())
+                    .flatten()
+                    .filter(|p| !p.trim().is_empty());
+                let last_time = previous
+                    .as_deref()
+                    .map(|p| {
+                        format!(
+                            "\n\nLast time it printed:\n{}",
+                            text::clip(p, CONTINUITY_CAP)
+                        )
+                    })
+                    .unwrap_or_default();
                 // A reading with nothing to read is a failure too (`curl |
                 // jq` with a dead endpoint exits 0 on some shells).
                 let silent = to_user && tail.trim().is_empty();
@@ -353,14 +379,20 @@ fn fire_with_note(
                         )
                     } else if to_user {
                         let template = sub.notify.clone().unwrap_or_else(|| "{output}".into());
-                        let line = template.replace("{output}", tail.trim());
+                        let line = template.replace("{output}", tail.trim()).replace(
+                            "{previous}",
+                            previous
+                                .as_deref()
+                                .map(str::trim)
+                                .unwrap_or("(nothing yet)"),
+                        );
                         match hooks.notify_user(id, &line) {
                             Ok(()) => format!("exit 0 — told the user: {}", text::clip(&line, 120)),
                             Err(e) => format!("exit 0 — could not tell the user: {e:#}"),
                         }
                     } else {
                         let body = format!(
-                            "{}\n\nSubscription #{} ran `{}` (exit 0). Output:\n{}",
+                            "{}\n\nSubscription #{} ran `{}` (exit 0). Output:\n{}{last_time}",
                             sub.prompt,
                             sub.id,
                             cmd,
@@ -378,7 +410,7 @@ fn fire_with_note(
                         format!("exit {code}")
                     };
                     let body = format!(
-                        "Subscription #{} (`{}`) failed: {why}. Output tail:\n{}\nDiagnose and act: fix the cause, change the command (subscribe remove {} and add a new one), or remove it and say so.",
+                        "Subscription #{} (`{}`) failed: {why}. Output tail:\n{}{last_time}\nDiagnose and act: fix the cause, change the command (subscribe remove {} and add a new one), or remove it and say so.",
                         sub.id,
                         cmd,
                         if tail.is_empty() {
@@ -396,6 +428,9 @@ fn fire_with_note(
                     let mut current = current;
                     current.last = text::clip(&outcome, 200);
                     current.last_fired = Some(inbox::rfc3339(arbos_core::now_ms()));
+                    if current.continuity {
+                        current.seen = Some(text::clip(tail.trim(), CONTINUITY_CAP));
+                    }
                     if current.once || current.every_ms().is_none() {
                         let _ = subscription::remove(&hooks.place, id, sub.id);
                     } else {
@@ -453,6 +488,9 @@ fn fire_with_note(
         }
     }
 }
+
+/// Most of a previous output a continuity firing carries.
+const CONTINUITY_CAP: usize = 4000;
 
 struct Polled {
     seen: Option<String>,
