@@ -418,6 +418,19 @@ pub fn check(place: &Place) -> Result<Report> {
         }
     }
 
+    // A place inside iCloud / a file-provider sync: reads of .arbos/ can
+    // block for minutes on dataless items (Jacob's ~/Documents/Misc/arbos).
+    // Silent once the store is a symlink out of the sync.
+    if let Some(sync) = arbos_core::cloudsync::detect(place.path())
+        && !arbos_core::cloudsync::settled(place.path())
+    {
+        r.warn(
+            ".arbos",
+            None,
+            arbos_core::cloudsync::advice(&sync, place.path()),
+        );
+    }
+
     // kernel.json: a live kernel, or a stale file.
     let kj = place.kernel_json();
     if kj.exists() {
