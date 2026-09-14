@@ -1291,11 +1291,16 @@ fn children_lines(
                         "Working".to_string()
                     };
                     first_working = false;
-                    (
-                        verb,
-                        child.step.clone().unwrap_or_else(|| child.title.clone()),
-                        theme.text_muted,
-                    )
+                    // One worker: "1 Working  <step>", as Jacob's Cursor
+                    // still reads. Several: each line names its worker
+                    // before the step, so three "Reading project context"
+                    // lines are not one worker said thrice.
+                    let rest = match (&child.step, working > 1) {
+                        (Some(step), true) => format!("{} · {step}", child.title),
+                        (Some(step), false) => step.clone(),
+                        (None, _) => child.title.clone(),
+                    };
+                    (verb, rest, theme.text_muted)
                 }
                 ChildState::Asking => ("Asking".to_string(), child.title.clone(), theme.accent),
                 ChildState::Waiting => {
@@ -2528,8 +2533,10 @@ struct WorkStats {
 
 /// Cursor: the timeline is on screen while the turn runs, then folds to
 /// one line above the answer. A click takes over from there.
-fn auto_work_open(_items: &[ChatItem], _first: usize, running: bool) -> bool {
-    running
+/// Cursor leaves the newest turn's timeline open — "Worked 6s ⌄" with its
+/// Thought / Explored / Edited lines — until the next prompt folds it.
+fn auto_work_open(items: &[ChatItem], first: usize, running: bool) -> bool {
+    running || turns(items).last().is_some_and(|turn| turn.range.start == first)
 }
 
 fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
@@ -2673,9 +2680,11 @@ pub fn render(
             }
         }
     }
+    // Workers still running count as the turn still going: no footer yet.
+    let workers_busy_now = chat.children.iter().any(|c| c.state == crate::model::session::ChildState::Working);
     for (position, turn) in turns.iter().enumerate() {
         let running = position == last && chat.busy();
-        let footer = footer_at[position];
+        let footer = footer_at[position] && !(position == last && workers_busy_now);
         // Cursor's Agents chat draws no date line over a turn; the footer's
         // "2m ago" is the only clock. The divider stays for a day crossing
         // inside one conversation, where "Yesterday" earns its line.
@@ -2709,7 +2718,16 @@ pub fn render(
     // Cursor's "2 Files Changed · Review" card under the last answer: the
     // working tree's uncommitted files with their line counts, while the
     // chat is idle. The main chat of a local repository only.
+    let workers_busy = chat.children.iter().any(|c| c.state == crate::model::session::ChildState::Working);
+    let newest_worked = turns.last().is_some_and(|turn| {
+        chat.items[turn.range.clone()]
+            .iter()
+            .any(|item| matches!(item, ChatItem::Tool { .. } | ChatItem::From { .. }))
+            || !spawned_in(&chat.items, turn.range.clone()).is_empty()
+    });
     if !chat.busy()
+        && !workers_busy
+        && newest_worked
         && chat.parent.is_none()
         && chat.host.is_none()
         && !turns.is_empty()
@@ -3284,9 +3302,16 @@ fn zone(
         .iter()
         .any(|seg| matches!(seg, Seg::Run(_) | Seg::Prose(_)));
     let mut header_drawn = false;
+    let mut open = open;
     if !running && foldable {
-        zone = zone.child(work_header(chat.id, first, &stats, open, running, chat, cx));
-        header_drawn = true;
+        match work_header(chat.id, first, &stats, open, running, chat, cx) {
+            Some(header) => {
+                zone = zone.child(header);
+                header_drawn = true;
+            }
+            // No headline to fold under: the body stands as it is.
+            None => open = true,
+        }
     }
     if open || !foldable {
         let last_run = segs.iter().rposition(|seg| matches!(seg, Seg::Run(_)));
@@ -3709,7 +3734,7 @@ fn work_header(
     running: bool,
     chat: &ChatSession,
     cx: &mut Context<Workspace>,
-) -> AnyElement {
+) -> Option<AnyElement> {
     let theme = Theme::of(cx).clone();
     // Live: the clock since the turn began. Settled: the turn's wall time
     // stamped on its prompt; for records that predate the stamp, what the
@@ -3728,16 +3753,23 @@ fn work_header(
     if !running && let Some(label) = interrupt_label_of(&chat.items, turn) {
         verb = label;
     }
+    // Nothing to say — no time, no tools worth a word: Cursor draws no
+    // line at all; the caller shows the body as it is.
+    if verb == "Worked" && rest.is_empty() {
+        return None;
+    }
     let diff = (stats.add + stats.del > 0).then_some((stats.add, stats.del));
-    fold_row(&theme, "work", turn, verb, rest, diff, false, open, cx)
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.with_session(id, cx, |chat| {
-                let running = chat.busy();
-                let auto = auto_work_open(&chat.items, turn, running);
-                chat.transcript.work.entry(turn).or_default().toggle(auto);
-            });
-        }))
-        .into_any_element()
+    Some(
+        fold_row(&theme, "work", turn, verb, rest, diff, false, open, cx)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.with_session(id, cx, |chat| {
+                    let running = chat.busy();
+                    let auto = auto_work_open(&chat.items, turn, running);
+                    chat.transcript.work.entry(turn).or_default().toggle(auto);
+                });
+            }))
+            .into_any_element(),
+    )
 }
 
 /// The interruption notice of the turn whose prompt is at `first`, if the
@@ -3890,12 +3922,11 @@ fn work_summary(
 ) -> (String, String) {
     // The turn's one settled line says how long; a run inside the opened
     // timeline still says what it did.
-    if !running && headline {
-        return if elapsed.as_secs() == 0 {
-            ("Worked".to_owned(), String::new())
-        } else {
-            ("Worked".to_owned(), since(elapsed))
-        };
+    // A settled turn with a known time is "Worked 23s"; one without (a
+    // record older than the stamp, a worker's report) says what it did
+    // instead — Cursor never shows a bare "Worked".
+    if !running && headline && elapsed.as_secs() > 0 {
+        return ("Worked".to_owned(), since(elapsed));
     }
     let mut parts: Vec<String> = Vec::new();
     if stats.edits > 0 {
@@ -3943,10 +3974,10 @@ fn work_summary(
                 }
                 _ => ("Working".to_owned(), String::new()),
             }
-        } else if elapsed.as_secs() == 0 {
-            ("Worked".to_owned(), String::new())
         } else {
-            ("Worked".to_owned(), since(elapsed))
+            // With no time and nothing to describe there is no line; the
+            // caller drops the header and shows the body open.
+            ("Worked".to_owned(), if elapsed.as_secs() == 0 { String::new() } else { since(elapsed) })
         };
     }
     let first = parts.remove(0);
@@ -4743,10 +4774,14 @@ mod selection_tests {
             12
         );
         assert!(matches!(segs.last(), Some(Seg::Run(range)) if range.start == 12));
-        // Cursor: the timeline shows while the turn runs and folds once it
-        // settles; from there a click owns the fold.
+        // Cursor: the timeline shows while the turn runs and stays open on
+        // the newest turn; an older turn folds once it settles, and from
+        // there a click owns the fold.
         assert!(auto_work_open(&items, 0, true));
-        assert!(!auto_work_open(&items, 0, false));
+        assert!(auto_work_open(&items, 0, false), "the newest turn stays open");
+        let mut older = items.clone();
+        older.push(ChatItem::User("Next".to_string().into()));
+        assert!(!auto_work_open(&older, 0, false), "an older turn folds");
         let mut state = State::default();
         assert!(!state.groups.contains(&0));
         state.toggle_group(0);
@@ -5013,7 +5048,8 @@ fn files_changed_card(
                         ),
                 ),
         );
-    for (ix, file) in changes.files.iter().enumerate() {
+    const SHOWN: usize = 8;
+    for (ix, file) in changes.files.iter().take(SHOWN).enumerate() {
         let path = file.path.clone();
         let review_root = root.clone();
         let name = std::path::Path::new(&file.path)
@@ -5052,6 +5088,25 @@ fn files_changed_card(
                     cx.listener(move |this, _, _, cx| {
                         this.review_changes(&review_root, Some(&path), cx);
                     }),
+                ),
+        );
+    }
+    if changes.files.len() > SHOWN {
+        let more = changes.files.len() - SHOWN;
+        let review_root = root.clone();
+        card = card.child(
+            div()
+                .id("files-changed-more")
+                .px(px(12.))
+                .py(px(5.))
+                .cursor_pointer()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .hover(|el| el.text_color(theme.text_muted))
+                .child(SharedString::from(format!("+{more} more")))
+                .on_mouse_down(
+                    bezel::gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| this.review_changes(&review_root, None, cx)),
                 ),
         );
     }

@@ -1842,12 +1842,25 @@ impl Arbos {
         let (working, prs) = pill_counts(project, chat);
         // Cursor's Changes pill: the working tree's uncommitted lines, and
         // beside it Commit & Push. Only for a local repository with changes.
-        let changes = (!project.is_remote())
+        let tree = (!project.is_remote())
             .then(|| workspace.changes.get(&project.path))
             .flatten()
-            .filter(|changes| !changes.is_empty())
             .cloned();
-        if working.is_empty() && prs.is_empty() && changes.is_none() {
+        let changes = tree.clone().filter(|changes| !changes.is_empty());
+        // A clean tree with commits the upstream lacks: Cursor's "Push".
+        let ahead = tree
+            .as_ref()
+            .filter(|tree| tree.is_empty() && tree.ahead > 0)
+            .map(|tree| tree.ahead);
+        // A turn stopped mid-way: Cursor offers "Continue Working".
+        let stopped = !chat.busy()
+            && chat
+                .items
+                .iter()
+                .rev()
+                .take_while(|item| !matches!(item, crate::model::session::ChatItem::User(_)))
+                .any(|item| matches!(item, crate::model::session::ChatItem::Notice { text, .. } if crate::model::session::is_interrupt_notice(text)));
+        if working.is_empty() && prs.is_empty() && changes.is_none() && ahead.is_none() && !stopped {
             return None;
         }
         let root = project.path.clone();
@@ -1958,6 +1971,46 @@ impl Arbos {
                                     "Commit all current changes with a clear, conventional commit message and push the branch.".to_string(),
                                     cx,
                                 );
+                            });
+                        })),
+                    )
+                })
+                .when(stopped, |row| {
+                    row.child(
+                        pill(
+                            "pill-continue",
+                            icons::icon(icons::arrows::ALT_ARROW_RIGHT)
+                                .size(px(12.))
+                                .flex_none()
+                                .text_color(theme.text_muted)
+                                .into_any_element(),
+                            "Continue Working".to_string(),
+                        )
+                        .tooltip(|window, cx| Tooltip::text("Pick the stopped turn back up", window, cx))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.workspace.update(cx, |workspace, cx| {
+                                workspace.send(main_id, "Continue where you stopped.".to_string(), cx);
+                            });
+                        })),
+                    )
+                })
+                .when_some(ahead, |row, ahead| {
+                    row.child(
+                        pill(
+                            "pill-push",
+                            icons::icon(icons::arrows::ARROW_UP)
+                                .size(px(12.))
+                                .flex_none()
+                                .text_color(theme.text_muted)
+                                .into_any_element(),
+                            "Push".to_string(),
+                        )
+                        .tooltip(move |window, cx| {
+                            Tooltip::text(format!("{ahead} commit{} not yet pushed", if ahead == 1 { "" } else { "s" }), window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.workspace.update(cx, |workspace, cx| {
+                                workspace.send(main_id, "Push the current branch to its remote.".to_string(), cx);
                             });
                         })),
                     )
