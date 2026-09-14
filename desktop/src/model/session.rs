@@ -1937,10 +1937,8 @@ impl ChatSession {
                     && matches!(self.items.last(), Some(ChatItem::Notice { text, .. }) if text.starts_with("rewound:") && text.ends_with(RESTORING))
                 {
                     self.items.pop();
-                    self.notice(
-                        false,
-                        &format!("rewound: {dropped} transcript lines cut; project back to {r}"),
-                    );
+                    let _ = r;
+                    self.notice(false, &rewound_line(dropped, true));
                     self.flush();
                     return;
                 }
@@ -1966,13 +1964,9 @@ impl ChatSession {
                 self.streaming_agent = None;
                 self.questions = None;
                 let what = match restored {
-                    Some(r) => {
-                        format!("rewound: {dropped} transcript lines cut; project back to {r}")
-                    }
-                    None if pending => {
-                        format!("rewound: {dropped} transcript lines cut; {RESTORING}")
-                    }
-                    None => format!("rewound: {dropped} transcript lines cut; files untouched"),
+                    Some(_) => rewound_line(dropped, true),
+                    None if pending => format!("rewound: {dropped} transcript lines cut; {RESTORING}"),
+                    None => rewound_line(dropped, false),
                 };
                 self.notice(false, &what);
                 self.flush();
@@ -3176,4 +3170,15 @@ pub(crate) fn worker_name(id: &str) -> Option<String> {
         return None;
     }
     Some(words.join(" "))
+}
+
+/// The line under a rewind, in the reader's words: what came back, not
+/// the commit hashes the kernel reports (they are in the kernel's log).
+fn rewound_line(dropped: u64, files: bool) -> String {
+    let lines = if dropped == 1 { "1 line".to_string() } else { format!("{dropped} lines") };
+    if files {
+        format!("Rewound to before this prompt: {lines} of chat cut, files restored")
+    } else {
+        format!("Rewound to before this prompt: {lines} of chat cut, files untouched")
+    }
 }

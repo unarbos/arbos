@@ -3758,9 +3758,10 @@ fn work_header(
     if verb == "Worked" && rest.is_empty() {
         return None;
     }
-    let diff = (stats.add + stats.del > 0).then_some((stats.add, stats.del));
+    // Cursor's headline is "Worked 12s ⌄" alone; the +3 −3 sits on the
+    // "Edited 2 files" run line inside the fold.
     Some(
-        fold_row(&theme, "work", turn, verb, rest, diff, false, open, cx)
+        fold_row(&theme, "work", turn, verb, rest, None, false, open, cx)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.with_session(id, cx, |chat| {
                     let running = chat.busy();
