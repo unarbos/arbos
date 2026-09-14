@@ -440,14 +440,46 @@ pub fn confine(root: &Path, cwd: &Path, path: &str) -> Result<PathBuf> {
     let candidate = normalize(&resolve(cwd, &path));
     let root_real = realize(&normalize(root));
     let real = realize(&candidate);
-    if !real.starts_with(&root_real) {
+    if !real.starts_with(&root_real) && !in_shared_store(root, &real) {
         bail!(
-            "{} is outside the workspace {}; file tools only reach files under it",
+            "{} is outside the workspace {}; file tools reach files under it and the project store .arbos/",
             path,
             root.display()
         );
     }
     Ok(candidate)
+}
+
+/// The place's `.arbos/` for a confinement root: the root's own when the
+/// root is the place, the place's when the root is a worktree under
+/// `<place>/.arbos/worktrees/<id>` (a worktree has no `.arbos` of its own;
+/// the store is excluded from git).
+pub fn store_dir(root: &Path) -> PathBuf {
+    if let Some(store) = worktree_store(root) {
+        return store;
+    }
+    root.join(".arbos")
+}
+
+/// `<place>/.arbos` when `root` is `<place>/.arbos/worktrees/<id>`.
+fn worktree_store(root: &Path) -> Option<PathBuf> {
+    let worktrees = root.parent()?;
+    let store = worktrees.parent()?;
+    (worktrees.file_name()? == "worktrees" && store.file_name()? == ".arbos")
+        .then(|| store.to_path_buf())
+}
+
+/// A worktree child reaches the project store (`docs/`, `notes.md`,
+/// `internal/`, `media/`, its own `agents/<id>/`) like any worker of the
+/// project — the brief points there and the output rules name it (qa-035).
+/// Not the other workers' worktrees under `.arbos/worktrees/`: those are
+/// checkouts it may not touch. `real` is the canonicalised candidate.
+fn in_shared_store(root: &Path, real: &Path) -> bool {
+    let Some(store) = worktree_store(root) else {
+        return false;
+    };
+    let store_real = realize(&normalize(&store));
+    real.starts_with(&store_real) && !real.starts_with(store_real.join("worktrees"))
 }
 
 /// The project store is spoken of as `docs/`, `internal/`, `media/`,
@@ -463,17 +495,26 @@ fn store_alias(root: &Path, cwd: &Path, path: &str) -> String {
     if trimmed.is_empty() || Path::new(trimmed).is_absolute() {
         return path.to_string();
     }
+    let store = store_dir(root);
     // A finished worker's folder has moved to the archive; the path the
     // done message named (and the one the parent remembers) still reads.
     if let Some(rest) = trimmed.strip_prefix(".arbos/agents/")
-        && !root.join(trimmed).exists()
+        && !store.join("agents").join(rest).exists()
     {
-        let archived = root.join(".arbos/archive/agents").join(rest);
+        let archived = store.join("archive/agents").join(rest);
         if archived.exists() {
             return archived.display().to_string();
         }
     }
-    if trimmed.starts_with(".arbos") {
+    if let Some(rest) = trimmed
+        .strip_prefix(".arbos/")
+        .or_else(|| (trimmed == ".arbos").then_some(""))
+    {
+        // From a worktree, `.arbos/…` means the place's store, which the
+        // worktree does not contain.
+        if worktree_store(root).is_some() {
+            return store.join(rest).display().to_string();
+        }
         return path.to_string();
     }
     let mut parts = trimmed.splitn(2, '/');
@@ -488,7 +529,6 @@ fn store_alias(root: &Path, cwd: &Path, path: &str) -> String {
     if cwd.join(head).exists() {
         return path.to_string();
     }
-    let store = root.join(".arbos");
     let target = store.join(&store_rel);
     let dir_exists = target.parent().is_some_and(|d| d.exists());
     if target.exists() || dir_exists {
@@ -1023,5 +1063,65 @@ mod store_alias_tests {
             confine(root, root, "media/x.png").unwrap(),
             root.join("media/x.png")
         );
+    }
+
+    /// qa-035: a worktree child is confined to its worktree for the
+    /// checkout, but the project store is every worker's — by absolute
+    /// path, by `.arbos/…`, and by the spoken aliases. Other workers'
+    /// worktrees are not.
+    #[test]
+    fn a_worktree_root_reaches_the_places_store_but_not_other_worktrees() {
+        let d = place();
+        let place_root = d.path();
+        let store = place_root.join(".arbos");
+        let wt = store.join("worktrees/w1");
+        let other = store.join("worktrees/w2");
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::create_dir_all(store.join("agents/w1")).unwrap();
+        std::fs::write(other.join("secret.rs"), "x").unwrap();
+        let root = wt.as_path();
+        assert_eq!(store_dir(root), store);
+        // Its own checkout, as before.
+        assert_eq!(
+            confine(root, root, "src/main.rs").unwrap(),
+            wt.join("src/main.rs")
+        );
+        // The store, three spellings.
+        let ctx = store.join("docs/project-context.md");
+        assert_eq!(
+            confine(root, root, &ctx.display().to_string()).unwrap(),
+            ctx
+        );
+        assert_eq!(
+            confine(root, root, ".arbos/docs/project-context.md").unwrap(),
+            ctx
+        );
+        assert_eq!(confine(root, root, "project-context.md").unwrap(), ctx);
+        assert_eq!(
+            confine(root, root, "docs/new-report.md").unwrap(),
+            store.join("docs/new-report.md")
+        );
+        assert_eq!(
+            confine(root, root, ".arbos/notes.md").unwrap(),
+            store.join("notes.md")
+        );
+        // Its own folder.
+        assert_eq!(
+            confine(root, root, ".arbos/agents/w1/notes.md").unwrap(),
+            store.join("agents/w1/notes.md")
+        );
+        // Not the parent's checkout, not a sibling's worktree.
+        assert!(
+            confine(
+                root,
+                root,
+                &place_root.join("main.py").display().to_string()
+            )
+            .is_err()
+        );
+        assert!(confine(root, root, &other.join("secret.rs").display().to_string()).is_err());
+        assert!(confine(root, root, ".arbos/worktrees/w2/secret.rs").is_err());
+        assert!(confine(root, root, "../w2/secret.rs").is_err());
     }
 }

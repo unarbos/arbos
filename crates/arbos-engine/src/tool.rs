@@ -71,13 +71,18 @@ impl PlanCx<'_> {
     /// worker's job.
     pub fn resolve_write(&self, path: &str) -> Result<PathBuf> {
         let resolved = self.resolve(path)?;
-        if arbos_core::store::is_root_owned(self.root, &resolved)
+        // The store's rules are the place's, whichever root confines this
+        // agent: a worktree child reaches `.arbos/` too (qa-035), and
+        // the page stays root's.
+        let store = crate::tools::fs::store_dir(self.root);
+        let place_root = store.parent().unwrap_or(self.root);
+        if arbos_core::store::is_root_owned(place_root, &resolved)
             && !arbos_core::store::may_write(self.agent)
         {
             anyhow::bail!("{}", arbos_core::store::REFUSAL);
         }
         if self.agent.role.as_deref() == Some(arbos_core::project::COORDINATOR)
-            && !arbos_core::store::is_store_path(self.root, &resolved)
+            && !arbos_core::store::is_store_path(place_root, &resolved)
         {
             anyhow::bail!("{}", arbos_core::store::COORDINATOR_REFUSAL);
         }
