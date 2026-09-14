@@ -44,9 +44,45 @@ fn path(place: &Place, agent: &AgentId) -> PathBuf {
     Layout::new(place, agent.as_str()).dir.join("repro.jsonl")
 }
 
+fn last_failing_path(place: &Place, agent: &AgentId) -> PathBuf {
+    Layout::new(place, agent.as_str())
+        .dir
+        .join("repro-last-failing.json")
+}
+
+/// Every bash command that exits non-zero before the first edit is a
+/// candidate reproduction. Cycle 5: the agent ran the failing snippet
+/// without `repro:true` in 46 of 146 refusals, then wandered; the gate
+/// now takes the last failing command as the reproduction instead of
+/// refusing.
+pub fn note_failing(place: &Place, agent: &AgentId, command: &str, cwd: &Path, exit: Option<i32>) {
+    if exit == Some(0) {
+        return;
+    }
+    let entry = Repro {
+        command: command.to_string(),
+        cwd: cwd.to_path_buf(),
+        exit,
+        ts: arbos_core::now_ms(),
+    };
+    let file = last_failing_path(place, agent);
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(file, serde_json::to_string(&entry).unwrap_or_default());
+}
+
+fn take_last_failing(place: &Place, agent: &AgentId) -> Option<Repro> {
+    let file = last_failing_path(place, agent);
+    let entry = serde_json::from_str(&std::fs::read_to_string(&file).ok()?).ok()?;
+    let _ = std::fs::remove_file(file);
+    Some(entry)
+}
+
 /// A user message starts a new task: forget the previous reproductions.
 pub fn reset(place: &Place, agent: &AgentId) {
     let _ = std::fs::remove_file(path(place, agent));
+    let _ = std::fs::remove_file(last_failing_path(place, agent));
 }
 
 pub fn list(place: &Place, agent: &AgentId) -> Vec<Repro> {
@@ -103,13 +139,23 @@ pub fn record(
 }
 
 /// Before a write tool runs: with `ARBOS_REPRO_REQUIRED=1`, the first edit
-/// of a task needs one failing reproduction on record.
-pub fn gate(place: &Place, agent: &AgentId, tool: &str) -> Result<()> {
+/// of a task needs one failing reproduction on record. When none was
+/// marked but the agent's last bash command failed, that command is taken
+/// as the reproduction and the edit proceeds with a note (`Ok(Some)`).
+pub fn gate(place: &Place, agent: &AgentId, tool: &str) -> Result<Option<String>> {
     if !required() || !crate::mechanism::GATED.contains(&tool) {
-        return Ok(());
+        return Ok(None);
     }
     if list(place, agent).iter().any(|r| r.exit != Some(0)) {
-        return Ok(());
+        return Ok(None);
+    }
+    if let Some(last) = take_last_failing(place, agent) {
+        let note = record(place, agent, &last.command, &last.cwd, last.exit);
+        let shown: String = last.command.chars().take(120).collect();
+        return Ok(Some(format!(
+            "Your last failing bash command was taken as the reproduction ({}): {shown}. Mark the intended one with repro:true next time.",
+            note.split(". ").next().unwrap_or("recorded")
+        )));
     }
     bail!(
         "{tool} refused: no failing reproduction is on record for this task. Before the first edit, run the failure with bash repro:true — a command you derive from the request (the reporter's example, and a second input the request implies: another edge, another caller, another type) that exits non-zero now. Then repeat this call."
@@ -195,10 +241,16 @@ mod tests {
         let place = Place::new(dir.clone());
         let agent = AgentId::new("root");
         assert!(gate(&place, &agent, "edit").is_err());
-        assert!(gate(&place, &agent, "read").is_ok());
+        assert!(gate(&place, &agent, "read").unwrap().is_none());
         let note = record(&place, &agent, "true", &dir, Some(0));
         assert!(note.starts_with("Not recorded"));
         assert!(gate(&place, &agent, "edit").is_err());
+        // An unmarked failing command is taken as the reproduction.
+        note_failing(&place, &agent, "false", &dir, Some(1));
+        let taken = gate(&place, &agent, "edit").unwrap().unwrap();
+        assert!(taken.contains("taken as the reproduction"), "{taken}");
+        assert_eq!(list(&place, &agent).len(), 1);
+        reset(&place, &agent);
         let flag = dir.join("fixed");
         let cmd = format!("test -f {}", flag.display());
         let note = record(&place, &agent, &cmd, &dir, Some(1));

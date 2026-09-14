@@ -231,11 +231,11 @@ impl Tool for Bash {
                 }
                 Status::Running => unreachable!(),
             }
+            let exit = match job.status {
+                Status::Exited(code) => Some(code),
+                _ => None,
+            };
             if crate::repro::marked(&args) {
-                let exit = match job.status {
-                    Status::Exited(code) => Some(code),
-                    _ => None,
-                };
                 body.push('\n');
                 body.push_str(&crate::repro::record(
                     &cx.place,
@@ -244,6 +244,8 @@ impl Tool for Bash {
                     &dir,
                     exit,
                 ));
+            } else {
+                crate::repro::note_failing(&cx.place, &cx.agent.id, cmd, &dir, exit);
             }
             Ok(ToolOut::with_paths(body, vec![journal]))
         })

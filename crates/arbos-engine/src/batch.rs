@@ -451,7 +451,7 @@ async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Resu
     let args = prepared.args.clone();
     // The first edit of a task states its mechanism or does not run.
     let recorded = crate::mechanism::gate(&cx.place, &cx.agent.id, &name, &args)?;
-    crate::repro::gate(&cx.place, &cx.agent.id, &name)?;
+    let taken = crate::repro::gate(&cx.place, &cx.agent.id, &name)?;
     let result = prepared
         .tool
         .run(cx.clone(), prepared.args)
@@ -461,6 +461,10 @@ async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Resu
             if let Some(line) = &recorded {
                 out.body.push_str("\n\nMechanism recorded for this task: ");
                 out.body.push_str(line);
+            }
+            if let Some(note) = &taken {
+                out.body.push_str("\n\n");
+                out.body.push_str(note);
             }
             out
         });
