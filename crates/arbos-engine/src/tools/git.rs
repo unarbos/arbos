@@ -299,9 +299,11 @@ fn test_files_note(status: &str) -> Option<String> {
 /// functions the diff touches. SWE-bench cycle 1: five of eight losses
 /// changed the layer the reporter saw the symptom in while the hidden tests
 /// exercise the shared helper underneath; "no existing test names this
-/// function" is the signal that the fix may sit at the wrong layer. Test
-/// files and non-code files are skipped; outside git there is nothing to
-/// say.
+/// function" is the signal that the fix may sit at the wrong layer. The
+/// report is per changed function or method: a broad class name (cycle 2:
+/// `FigureCanvasBase`, `_print_Pow`'s printer) is named by every test that
+/// imports it and said nothing. Test files and non-code files are skipped;
+/// outside git there is nothing to say.
 pub fn coverage_note(cwd: &Path, paths: &[String]) -> Option<String> {
     let mut lines = Vec::new();
     for path in paths {
@@ -312,29 +314,58 @@ pub fn coverage_note(cwd: &Path, paths: &[String]) -> Option<String> {
         if is_test_path(&rel) || !is_code_path(&rel) {
             continue;
         }
-        let diff = git_out(cwd, &["diff", "HEAD", "--", &rel])?;
-        let names = changed_symbols(&diff);
-        if names.is_empty() {
+        let diff = git_out(cwd, &["diff", "-U0", "HEAD", "--", &rel])?;
+        let text = std::fs::read_to_string(cwd.join(&rel)).unwrap_or_default();
+        let symbols = changed_symbols(&diff, &text);
+        if symbols.functions.is_empty() && symbols.classes.is_empty() {
             continue;
         }
-        let refs = test_files_naming(cwd, &names);
-        let shown: Vec<&str> = names.iter().take(4).map(String::as_str).collect();
-        if refs.is_empty() {
+        let fns: Vec<&str> = symbols
+            .functions
+            .iter()
+            .take(4)
+            .map(String::as_str)
+            .collect();
+        let fn_refs = if symbols.functions.is_empty() {
+            Vec::new()
+        } else {
+            test_files_naming(cwd, &symbols.functions)
+        };
+        if !fn_refs.is_empty() {
             lines.push(format!(
-                "{rel}: no existing test names {}. If the wrong value comes from a helper this calls, the fix belongs in the helper that has tests (fix at the root); if this is the right level, add a test here.",
-                shown.join(", ")
+                "{rel}: {} named in {}",
+                fns.join(", "),
+                list_files(&fn_refs)
+            ));
+            continue;
+        }
+        let class_refs = if symbols.classes.is_empty() {
+            Vec::new()
+        } else {
+            test_files_naming(cwd, &symbols.classes)
+        };
+        let advice = "If the wrong value comes from a helper this calls, the fix belongs in the helper that has tests (fix at the root); if this is the right level, add a test here.";
+        if fns.is_empty() {
+            lines.push(format!(
+                "{rel}: class-level change ({}), no changed function to check{}. {advice}",
+                symbols.classes.join(", "),
+                if class_refs.is_empty() {
+                    String::new()
+                } else {
+                    format!("; class named in {}", list_files(&class_refs))
+                }
+            ));
+        } else if class_refs.is_empty() {
+            lines.push(format!(
+                "{rel}: no existing test names {}. {advice}",
+                fns.join(", ")
             ));
         } else {
-            let list: Vec<&str> = refs.iter().take(5).map(String::as_str).collect();
             lines.push(format!(
-                "{rel}: {} named in {}{}",
-                shown.join(", "),
-                list.join(", "),
-                if refs.len() > 5 {
-                    format!(" (+{} more)", refs.len() - 5)
-                } else {
-                    String::new()
-                }
+                "{rel}: class-level match only ({} named in {}), no test names {}. {advice}",
+                symbols.classes.join(", "),
+                list_files(&class_refs),
+                fns.join(", ")
             ));
         }
     }
@@ -342,6 +373,15 @@ pub fn coverage_note(cwd: &Path, paths: &[String]) -> Option<String> {
         return None;
     }
     Some(format!("Tests covering this edit — {}", lines.join(" | ")))
+}
+
+fn list_files(files: &[String]) -> String {
+    let shown: Vec<&str> = files.iter().take(5).map(String::as_str).collect();
+    if files.len() > 5 {
+        format!("{} (+{} more)", shown.join(", "), files.len() - 5)
+    } else {
+        shown.join(", ")
+    }
 }
 
 fn is_code_path(path: &str) -> bool {
@@ -369,41 +409,100 @@ fn is_code_path(path: &str) -> bool {
     )
 }
 
-/// Function and class names a diff touches: the enclosing symbol git puts
-/// in each hunk header, plus definitions on the hunk's own lines.
-fn changed_symbols(diff: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for line in diff.lines() {
-        let text = if let Some(rest) = line.strip_prefix("@@") {
-            match rest.split_once("@@") {
-                Some((_, ctx)) => ctx,
-                None => continue,
-            }
-        } else if line.starts_with('+') || line.starts_with('-') || line.starts_with(' ') {
-            // Context lines count too: in a small file the enclosing def is
-            // inside the hunk, not in its header.
-            if line.starts_with("+++") || line.starts_with("---") {
-                continue;
-            }
-            &line[1..]
-        } else {
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ChangedSymbols {
+    /// Functions and methods that enclose a changed line, or are defined
+    /// on one, in order of first appearance.
+    functions: Vec<String>,
+    /// The classes (or impl blocks) those lines sit in.
+    classes: Vec<String>,
+}
+
+/// The functions and classes a `-U0` diff touches, resolved against the
+/// file as it is now: for every changed line, the nearest `def`/`fn`/
+/// `function` above it (a method's own name, not its class) and the
+/// nearest `class`/`impl` above that.
+fn changed_symbols(diff_u0: &str, text: &str) -> ChangedSymbols {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = ChangedSymbols::default();
+    for header in diff_u0.lines().filter(|l| l.starts_with("@@")) {
+        let Some(plus) = header.split_whitespace().nth(2) else {
             continue;
         };
-        let mut words = text.split(|c: char| !c.is_alphanumeric() && c != '_');
-        while let Some(w) = words.next() {
-            if matches!(w, "def" | "fn" | "function" | "class" | "func" | "impl") {
-                if let Some(name) = words.next() {
-                    if name.len() > 1 && !out.iter().any(|n| n == name) {
-                        out.push(name.to_string());
-                    }
-                }
+        let plus = plus.trim_start_matches('+');
+        let (start, count) = match plus.split_once(',') {
+            Some((s, c)) => (
+                s.parse::<usize>().unwrap_or(0),
+                c.parse::<usize>().unwrap_or(0),
+            ),
+            None => (plus.parse::<usize>().unwrap_or(0), 1),
+        };
+        // A pure deletion reports the line before it; look from there.
+        let first = start.max(1);
+        let last = (start + count.max(1)).saturating_sub(1).max(first);
+        for n in first..=last.min(lines.len()) {
+            if let Some(name) = definition_name(lines[n - 1], false) {
+                push_unique(&mut out.functions, name);
             }
         }
-        if out.len() >= 8 {
+        let mut found_fn = false;
+        for n in (1..=first.min(lines.len())).rev() {
+            let line = lines[n - 1];
+            if !found_fn {
+                if let Some(name) = definition_name(line, false) {
+                    push_unique(&mut out.functions, name);
+                    found_fn = true;
+                    continue;
+                }
+            }
+            if let Some(name) = definition_name(line, true) {
+                push_unique(&mut out.classes, name);
+                break;
+            }
+        }
+        if out.functions.len() + out.classes.len() >= 12 {
             break;
         }
     }
     out
+}
+
+/// `def name(`, `fn name<`, `function name(`, `func name(` (or, with
+/// `class_like`, `class Name`, `impl Name`, `struct Name`) at the start of
+/// a line, whatever the indentation.
+fn definition_name(line: &str, class_like: bool) -> Option<String> {
+    let mut words = line
+        .trim_start()
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|w| !w.is_empty());
+    let mut kw = words.next()?;
+    // `pub fn`, `async def`, `pub(crate) fn`, `export function`, `static def`.
+    for _ in 0..3 {
+        if matches!(
+            kw,
+            "pub" | "crate" | "async" | "export" | "static" | "unsafe" | "const" | "default"
+        ) {
+            kw = words.next()?;
+        } else {
+            break;
+        }
+    }
+    let matches = if class_like {
+        matches!(kw, "class" | "impl" | "struct" | "trait" | "enum")
+    } else {
+        matches!(kw, "def" | "fn" | "function" | "func")
+    };
+    if !matches {
+        return None;
+    }
+    let name = words.next()?;
+    (name.len() > 1 && !matches!(name, "self" | "cls")).then(|| name.to_string())
+}
+
+fn push_unique(v: &mut Vec<String>, name: String) {
+    if !v.iter().any(|n| *n == name) {
+        v.push(name);
+    }
 }
 
 /// Existing test files that mention any of `names` as a whole word.
@@ -560,12 +659,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn changed_symbols_come_from_hunk_headers_and_definitions() {
-        let diff = "@@ -10,3 +10,4 @@ def set_cmap(cmap):\n-    rc('image', cmap=cmap.name)\n+    rc('image', cmap=name)\n@@ -40,2 +41,5 @@ class Registry:\n+    def register(self, cmap, *, name=None):\n+        pass\n";
+    fn changed_symbols_resolve_each_line_to_its_method_and_class() {
+        let text = "class Registry:\n    def register(self, cmap, *, name=None):\n        x = 1\n        return x\n\n    def unregister(self, name):\n        pass\n\ndef set_cmap(cmap):\n    rc('image', cmap=cmap.name)\n";
+        // Line 3 changed (inside register), line 10 changed (inside set_cmap).
+        let diff = "@@ -3 +3 @@\n-        x = 0\n+        x = 1\n@@ -10 +10 @@\n-    rc('image', cmap=name)\n+    rc('image', cmap=cmap.name)\n";
+        let got = changed_symbols(diff, text);
         assert_eq!(
-            changed_symbols(diff),
-            vec!["set_cmap".to_string(), "Registry".into(), "register".into()]
+            got.functions,
+            vec!["register".to_string(), "set_cmap".into()]
         );
+        assert_eq!(got.classes, vec!["Registry".to_string()]);
     }
 
     #[test]
@@ -625,6 +728,33 @@ mod tests {
         );
         let test = dir.join("tests/test_cm.py").display().to_string();
         assert!(coverage_note(&dir, &[test]).is_none());
+        // A method of a class the tests import but never call by name:
+        // the class match alone must not read as coverage.
+        std::fs::write(
+            dir.join("pkg/base.py"),
+            "class Base:\n    def run(self):\n        return 1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("tests/test_base.py"),
+            "from pkg.base import Base\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "base"]);
+        std::fs::write(
+            dir.join("pkg/base.py"),
+            "class Base:\n    def run(self):\n        return 2\n",
+        )
+        .unwrap();
+        let base = dir.join("pkg/base.py").display().to_string();
+        let note = coverage_note(&dir, &[base]).unwrap();
+        assert!(
+            note.contains(
+                "class-level match only (Base named in tests/test_base.py), no test names run"
+            ),
+            "{note}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
