@@ -1315,6 +1315,7 @@ fn follow_prs(hooks: &Arc<KernelHooks>, agent: &str, opened: &[arbos_core::PrRec
                 expires: None,
                 paused: false,
                 internal: false,
+                continuity: false,
                 created: String::new(),
                 next_due: None,
                 last_fired: None,
