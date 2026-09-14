@@ -494,6 +494,9 @@ pub struct ChatSession {
     /// When each running tool call began, by call id, so its finished
     /// item can say how long it took.
     tool_started: HashMap<String, Instant>,
+    /// The turn's reply so far was only `status:` lines, kept out of the
+    /// transcript — still a reply, not a kernel that never answered.
+    status_only: bool,
     /// The kernel is mid-turn here without this window having asked: a
     /// delegate on its brief, a chat a `say` woke. Set by the first
     /// streamed token or tool, cleared by `Turn idle`. Runtime only.
@@ -603,6 +606,7 @@ impl ChatSession {
             draft: String::new(),
             live: Vec::new(),
             tool_started: HashMap::new(),
+            status_only: false,
             live_since: None,
             status: None,
             turn_open: false,
@@ -676,6 +680,7 @@ impl ChatSession {
             draft: record.draft,
             live: Vec::new(),
             tool_started: HashMap::new(),
+            status_only: false,
             live_since: None,
             status: None,
             turn_open: false,
@@ -749,6 +754,7 @@ impl ChatSession {
             draft: String::new(),
             live: Vec::new(),
             tool_started: HashMap::new(),
+            status_only: false,
             live_since: None,
             status: None,
             turn_open: false,
@@ -2011,6 +2017,7 @@ impl ChatSession {
                     if self.busy() {
                         self.status = Some(step);
                     }
+                    self.status_only = true;
                     self.flush();
                     return;
                 }
@@ -2144,6 +2151,7 @@ impl ChatSession {
                 self.turn_open = false;
                 self.turn_ended = Some(Instant::now());
                 let stopped = std::mem::take(&mut self.stop_requested);
+                let status_only = std::mem::take(&mut self.status_only);
                 match result {
                     Ok(StopReason::EndTurn) => {
                         // Cursor just ends. A lone "done" line is extra.
@@ -2151,7 +2159,7 @@ impl ChatSession {
                         // and not when this window asked it to stop: the
                         // kernel's own `interrupted` line ("Stopped by you")
                         // follows on the tail.
-                        if !stopped && !self.busy() && ended_on_user(&self.items) {
+                        if !stopped && !status_only && !self.busy() && ended_on_user(&self.items) {
                             // Kernel turn failed before any token (missing
                             // agent.md, bad model, no key). Idle used to
                             // clear the thinking row and leave a blank pane.
