@@ -1007,6 +1007,9 @@ fn from_block(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
+    if let Some((ok, words)) = done_report(text) {
+        return worker_card(chat, ix, who, ok, &words, theme, window, cx);
+    }
     div()
         .self_start()
         .max_w(px(520.))
@@ -1028,6 +1031,172 @@ fn from_block(
         )
         .children(message_images(images))
         .into_any_element()
+}
+
+/// The kernel's done file for a worker, as it lands in the parent's chat:
+/// `Turn ended. Last words: … (transcript: …)`, or `Turn ended badly.
+/// …`. The verdict and the words, without the file pointer.
+fn done_report(text: &str) -> Option<(bool, String)> {
+    let text = text.trim();
+    let (ok, rest) = if let Some(rest) = text.strip_prefix("Turn ended. Last words:") {
+        (true, rest)
+    } else if let Some(rest) = text.strip_prefix("Turn ended badly. Last words:") {
+        (false, rest)
+    } else {
+        return None;
+    };
+    let mut words = rest.trim().to_string();
+    if let Some(at) = words.rfind("(transcript:") {
+        words.truncate(at);
+    }
+    Some((ok, words.trim().trim_end_matches('…').trim().to_string()))
+}
+
+/// A worker's completion as a compact card at the turn it came back to —
+/// name, verdict, its last words — instead of the done file's raw body.
+/// Click opens the worker's chat.
+fn worker_card(
+    chat: &ChatSession,
+    ix: usize,
+    who: &str,
+    ok: bool,
+    words: &str,
+    theme: &Theme,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let name = chat.who_label(who);
+    let child = chat
+        .children
+        .iter()
+        .find(|c| c.kernel_id.as_deref() == Some(who))
+        .map(|c| c.id);
+    let (glyph, verdict, tone) = if ok {
+        (icons::status::CHECK, "done", theme.success)
+    } else {
+        (icons::status::DANGER_TRIANGLE, "ended badly", theme.danger)
+    };
+    let head = div()
+        .id(("worker-card-head", chat.id * 100_000 + ix as u64))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .when(child.is_some(), |el| el.cursor_pointer())
+        .child(icons::icon(glyph).size(px(12.)).text_color(tone))
+        .child(
+            div()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child("worker"),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_muted)
+                .child(SharedString::from(name)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_style(TextStyle::Caption)
+                .text_color(tone)
+                .child(verdict),
+        )
+        .when_some(child, |el, id| {
+            el.on_click(cx.listener(move |this, _, _, cx| this.select_session(id, cx)))
+        });
+    div()
+        .self_start()
+        .w_full()
+        .max_w(px(520.))
+        .rounded(px(Theme::surface_radius()))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
+        .px(px(12.))
+        .py(px(8.))
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(head)
+        .when(!words.is_empty(), |el| {
+            el.child(
+                div()
+                    .text_style(TextStyle::Callout)
+                    .text_color(theme.text)
+                    .child(prose(chat, ix, words, window, cx)),
+            )
+        })
+        .into_any_element()
+}
+
+/// A subscription the agent set up in this turn, as a small card under
+/// the work: what stands now and when it fires. The Project panel keeps
+/// the full list; this is the moment it was made.
+fn subscription_cards(
+    chat: &ChatSession,
+    body: Range<usize>,
+    theme: &Theme,
+) -> Vec<AnyElement> {
+    chat.items[body]
+        .iter()
+        .filter_map(|item| match item {
+            ChatItem::Tool {
+                label,
+                status: ToolStatus::Success,
+                output,
+                ..
+            } if label.starts_with("subscribe") && !label.starts_with("subscribe remove") => {
+                let line = output
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("")
+                    .split(". ")
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('.')
+                    .to_string();
+                (!line.is_empty() && line.starts_with("Subscribed")).then_some(line)
+            }
+            _ => None,
+        })
+        .map(|line| {
+            div()
+                .self_start()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .rounded(px(Theme::surface_radius()))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.surface_raised)
+                .px(px(10.))
+                .py(px(6.))
+                .child(
+                    icons::icon(icons::media::REPEAT)
+                        .size(px(12.))
+                        .text_color(theme.text_muted),
+                )
+                .child(
+                    div()
+                        .text_style(TextStyle::Caption)
+                        .text_color(theme.text_faint)
+                        .child("standing"),
+                )
+                .child(
+                    div()
+                        .text_style(TextStyle::Callout)
+                        .text_color(theme.text)
+                        .child(SharedString::from(line)),
+                )
+                .into_any_element()
+        })
+        .collect()
 }
 
 /// The kernel ids of the sub-agents a turn's body spawned — the `spawn`
@@ -2439,7 +2608,15 @@ fn tool_icon(kind: ToolKind) -> &'static str {
 
 /// The transcript of one session, rendered from the model that owns it —
 /// expanding a work section or a tool's output writes back through `cx`.
-pub fn render(chat: &ChatSession, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
+/// `tail` is what belongs at the end of the conversation right now — a
+/// question the agent is asking, an approval it needs — drawn as cards in
+/// the flow, in the reading column, not pinned over the composer.
+pub fn render(
+    chat: &ChatSession,
+    tail: Vec<AnyElement>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
     let id = chat.id;
     let turns = turns(&chat.items);
     let last = turns.len().saturating_sub(1);
@@ -2466,6 +2643,17 @@ pub fn render(chat: &ChatSession, window: &mut Window, cx: &mut Context<Workspac
                 .max_w(px(column))
                 .self_center()
                 .child(ask_card(chat, node, &theme, cx))
+                .into_any_element(),
+        );
+    }
+    for card in tail {
+        zones.push(
+            div()
+                .w_full()
+                .max_w(px(column))
+                .self_center()
+                .mt(px(8.))
+                .child(card)
                 .into_any_element(),
         );
     }
@@ -2906,6 +3094,8 @@ fn zone(
     if !spawned.is_empty() && !chat.children.is_empty() {
         zone = zone.child(children_lines(chat, &spawned, &theme, cx));
     }
+    // Standing work the turn set up: a small card at the moment it was made.
+    zone = zone.children(subscription_cards(chat, body.clone(), &theme));
     // Screenshots and clips the work produced stay in view when the work
     // folds: they are what the user asked to see.
     for ix in body.clone() {
