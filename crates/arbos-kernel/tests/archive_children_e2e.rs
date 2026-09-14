@@ -153,39 +153,46 @@ fn archiving_a_worker_retires_its_row_on_the_project_page() {
     );
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "get the codeword"}));
     assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
-    let page = k.place.join(".arbos/notes.md");
+    // The replay worker answers at once, so the page may already be past
+    // "worker running" by the time anyone looks: the row's first state is
+    // read from root's `plan` result, which is on the transcript before
+    // root's turn ends, not from the file.
+    let plan = transcript(&k.place, "root")
+        .into_iter()
+        .find(|e| e["kind"] == "tool" && e["name"] == "plan")
+        .expect("root's plan call");
+    let body = plan["body"].as_str().unwrap_or("");
     assert!(
-        wait_for(Duration::from_secs(10), || std::fs::read_to_string(&page)
-            .unwrap_or_default()
-            .contains("- [ ] [Codeword](agents/code-word) — worker running")),
-        "root's row while the worker runs: {}",
-        std::fs::read_to_string(&page).unwrap_or_default()
-    );
-    let agent_md = std::fs::read_to_string(k.place.join(".arbos/agents/code-word/agent.md"))
-        .unwrap_or_default();
-    assert!(
-        agent_md.contains("Code word"),
-        "the slug the model passed reads as words: {agent_md}"
+        body.contains("Added item 1")
+            && body.contains("[Codeword](agents/code-word) — worker running"),
+        "root's row while the worker runs: {body}"
     );
 
-    let archived = k.place.join(".arbos/archive/agents/code-word");
+    // The archive step moves the folder, then rewrites the page: wait on
+    // the row itself, the last thing to change.
+    let page = k.place.join(".arbos/notes.md");
+    let retired =
+        "- [x] [Codeword](archive/agents/code-word) — worker finished: the codeword is xylophone";
     assert!(
-        wait_for(Duration::from_secs(30), || archived
-            .join("transcript.jsonl")
-            .exists()),
-        "the worker moves to the archive once root has read its done"
+        wait_for(Duration::from_secs(30), || std::fs::read_to_string(&page)
+            .unwrap_or_default()
+            .contains(retired)),
+        "the row is checked, says what the worker said, and links the archive: {}",
+        std::fs::read_to_string(&page).unwrap_or_default()
     );
     let text = std::fs::read_to_string(&page).unwrap_or_default();
-    assert!(
-        text.contains(
-            "- [x] [Codeword](archive/agents/code-word) — worker finished: the codeword is xylophone"
-        ),
-        "the row is checked, says what the worker said, and links the archive: {text}"
-    );
     assert_eq!(
         text.matches("[Codeword]").count(),
         1,
         "one row, not two: {text}"
+    );
+    let archived = k.place.join(".arbos/archive/agents/code-word");
+    assert!(archived.join("transcript.jsonl").exists());
+    assert!(!k.place.join(".arbos/agents/code-word").exists());
+    let agent_md = std::fs::read_to_string(archived.join("agent.md")).unwrap_or_default();
+    assert!(
+        agent_md.contains("Code word"),
+        "the slug the model passed reads as words: {agent_md}"
     );
     let _ = k.child.kill();
 }
