@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{Attach, start_kernel_replay};
+use common::{Attach, restart_replay, start_kernel_replay};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -245,5 +245,28 @@ fn rewound_arrives_before_the_file_restore() {
         (f["type"] == "rewound" && !f["restored"].is_null()) || f["type"] == "error"
     });
     assert!(follow.is_some(), "the file restore must report");
-    let _ = k.child.kill();
+
+    // qa-032: the cut takes the turn whole, wake included. What remains
+    // ends on turn 1's turn_complete, and a restart fires nothing.
+    let cut = transcript(&k.place, "root");
+    assert!(
+        cut.last().is_some_and(|e| e["kind"] == "turn_complete"),
+        "the transcript must end on a finished turn, not a dangling wake: {cut:?}"
+    );
+    assert_eq!(
+        cut.iter().filter(|e| e["kind"] == "wake").count(),
+        1,
+        "only turn 1's wake remains: {cut:?}"
+    );
+    let mut k2 = restart_replay(&mut k, "{\"agent\":\"root\",\"content\":\"unprompted\"}\n");
+    let mut b = snapshot(&k2);
+    assert!(
+        b.wait(Duration::from_secs(3), |f| f["type"] == "turn"
+            && f["agent"] == "root")
+            .is_none(),
+        "no turn may start on restart after a rewind"
+    );
+    let after_restart = transcript(&k2.place, "root");
+    assert_eq!(after_restart.len(), cut.len(), "{after_restart:?}");
+    let _ = k2.child.kill();
 }
