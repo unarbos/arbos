@@ -177,9 +177,12 @@ pub fn cut(place: &Place, agent: &str, target: Target) -> Result<Cut> {
         .dir
         .join(format!("transcript.rewound-{}.jsonl", arbos_core::now_ms()));
     std::fs::write(&archive, format!("{gone}\n"))?;
-    std::fs::write(
-        layout.transcript(),
-        if keep.is_empty() {
+    // Whole or not at all: `fs::write` truncates first, and a reader in
+    // that gap (the desktop's tail, a test) saw an empty transcript. Write
+    // beside it and rename over it.
+    replace_file(
+        &layout.transcript(),
+        &if keep.is_empty() {
             String::new()
         } else {
             format!("{keep}\n")
@@ -192,12 +195,32 @@ pub fn cut(place: &Place, agent: &str, target: Target) -> Result<Cut> {
         text.push_str(&serde_json::to_string(cp)?);
         text.push('\n');
     }
-    std::fs::write(layout.dir.join("checkpoints.jsonl"), text)?;
+    replace_file(&layout.dir.join("checkpoints.jsonl"), &text)?;
     Ok(Cut {
         checkpoint,
         dropped: (lines.len() - at) as u64,
         archive,
     })
+}
+
+/// Replace `path` with `text` in one step: a temp file in the same folder,
+/// fsynced, renamed over it. No reader sees the file half-written or empty.
+fn replace_file(path: &std::path::Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    let dir = path.parent().context("file has no parent folder")?;
+    let tmp = dir.join(format!(
+        ".{}.tmp-{}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
+        std::process::id()
+    ));
+    {
+        let mut f =
+            std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} over {}", tmp.display(), path.display()))
 }
 
 /// The index to cut at so the turn goes whole: the checkpoint names the

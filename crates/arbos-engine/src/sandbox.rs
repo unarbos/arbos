@@ -6,6 +6,8 @@
 //! enabled = true
 //! network = false
 //! allow_write = ["~/.cache", "~/.cargo/registry"]
+//! allow_metadata = false   # true: this really runs on a cloud instance and
+//!                          # needs its role; the metadata guard stays quiet
 //! ```
 //!
 //! `agent.md` may say `sandbox: on` / `sandbox: off` to override the place
@@ -31,6 +33,17 @@ struct File {
     enabled: bool,
     network: Option<bool>,
     allow_write: Option<Vec<String>>,
+    allow_metadata: bool,
+}
+
+/// Whether a command that reaches the cloud metadata service runs without
+/// a question here. Read whether or not the sandbox itself is on: the
+/// guard is about the command's reach, not the sandbox's walls.
+pub fn metadata_allowed(place: &Place) -> bool {
+    std::fs::read_to_string(config_path(place))
+        .ok()
+        .and_then(|t| toml::from_str::<File>(&t).ok())
+        .is_some_and(|f| f.allow_metadata)
 }
 
 /// Where the config lives.

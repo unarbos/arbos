@@ -279,6 +279,21 @@ pub fn sigint(child: &Child) {
 }
 
 /// Exit status within `timeout`, or None if the process is still running.
+/// Poll `ok` every 50 ms until it holds or `timeout` passes; returns the
+/// last verdict. For file-side checks after a frame: the frame says the
+/// turn ended, the file's last line lands a moment later. A fixed sleep
+/// here was the source of the CI re-runs (#149, #168).
+pub fn wait_for(timeout: Duration, mut ok: impl FnMut() -> bool) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    ok()
+}
+
 pub fn wait_exit(child: &mut Child, timeout: Duration) -> Option<i32> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {

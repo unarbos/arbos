@@ -45,6 +45,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                     kind: "agent".into(),
                     mode: String::new(),
                     prs: 0,
+                    step: None,
                 }],
                 focus: ".arbos/agents/root".into(),
                 budget: Some(Usage {

@@ -46,7 +46,11 @@ fn a_non_blocking_ask_keeps_the_turn_going_and_reads_the_answer_at_the_next_boun
     std::thread::sleep(Duration::from_millis(800));
     a.send(serde_json::json!({"type": "answer", "agent": "root", "text": "teal", "id": id}));
     assert!(a.wait_turn("root", "idle", Duration::from_secs(40)));
-    std::thread::sleep(Duration::from_millis(500));
+    common::wait_for(Duration::from_secs(5), || {
+        transcript(&k.place)
+            .iter()
+            .any(|e| e["kind"] == "turn_complete")
+    });
 
     let t = transcript(&k.place);
     let kinds: Vec<&str> = t.iter().filter_map(|e| e["kind"].as_str()).collect();

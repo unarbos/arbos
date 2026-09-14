@@ -86,6 +86,7 @@ fn switches(chat: Option<&ChatSession>, catalog: &kernel::ModelsCatalog) -> Vec<
                     id: mode.id.to_string().into(),
                     name: mode.name.clone().into(),
                     vision: None,
+                    free: false,
                 })
                 .collect(),
         });
@@ -111,6 +112,7 @@ fn switches(chat: Option<&ChatSession>, catalog: &kernel::ModelsCatalog) -> Vec<
                         id: model.id.clone().into(),
                         name: model.name.clone().into(),
                         vision: Some(model.sees_images()),
+                        free: model.free,
                     })
                     .collect(),
             },
@@ -166,6 +168,7 @@ fn select_options(options: &SessionConfigSelectOptions) -> Vec<composer::SwitchO
             id: option.value.to_string().into(),
             name: option.name.clone().into(),
             vision: None,
+            free: false,
         }
     }
     match options {

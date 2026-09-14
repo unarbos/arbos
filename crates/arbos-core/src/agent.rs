@@ -49,6 +49,7 @@ pub const ALL_TOOLS: &[&str] = &[
     "secret",
     "subscribe",
     "record",
+    "status",
 ];
 
 /// How much an agent may do without asking. `agent.md` `mode:`.
@@ -289,6 +290,11 @@ impl Agent {
             && agent.allowlist.iter().any(|t| t == "screenshot")
         {
             agent.allowlist.push("record".into());
+        }
+        // Every agent may say what it is doing; folders from before the
+        // tool existed get it too.
+        if !agent.allowlist.iter().any(|t| t == "status") {
+            agent.allowlist.push("status".into());
         }
         Ok(agent)
     }

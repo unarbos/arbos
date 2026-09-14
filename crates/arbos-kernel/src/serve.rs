@@ -219,6 +219,15 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     // for three days across restarts. A `keep` file in the job folder
     // spares it.
     for agent in list_agents(&place).unwrap_or_default() {
+        // Nothing runs yet: a status line left by a kernel that died
+        // mid-turn is stale, and a fresh attach would draw it.
+        if arbos_core::status::clear(&place, agent.id.as_str()) {
+            klog::info(
+                "status_cleared",
+                Some(agent.id.as_str()),
+                "left by an earlier kernel run",
+            );
+        }
         let root = arbos_engine::JobsRoot::for_agent(&place, &agent.id);
         let found = root.reap_leftovers();
         for line in &found.reaped {
@@ -1198,6 +1207,7 @@ fn tree_nodes(place: &Place) -> Vec<TreeNode> {
             kind: "agent".into(),
             mode: a.mode.as_str().into(),
             prs: arbos_core::prs::prs_of_tree(&prs, a.id.as_str(), &agents).len() as u32,
+            step: arbos_core::status::read(place, a.id.as_str()).map(|s| s.step),
         })
         .collect()
 }
@@ -1576,6 +1586,7 @@ pub fn kernel_registry(hooks: &Arc<KernelHooks>, ptys: &Arc<PtyHub>) -> Registry
         .with(tools::Say(Arc::clone(hooks)))
         .with(tools::PlanTool(Arc::clone(hooks)))
         .with(tools::Ask(Arc::clone(hooks)))
+        .with(tools::StatusTool(Arc::clone(hooks)))
         .with(tools::Browser(Arc::clone(hooks)))
         .with(crate::screenshot::Screenshot)
         .with(crate::secret_tool::Secret)
