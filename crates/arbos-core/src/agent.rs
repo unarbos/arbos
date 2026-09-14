@@ -125,6 +125,9 @@ pub struct Agent {
     /// a child that does its own task and does not delegate — saved at
     /// spawn, or applied in memory to any kind-less child without one.
     pub role: Option<String>,
+    /// A skill pinned to this chat as its mode (`/mode <name>`): its
+    /// SKILL.md joins the prompt every turn until `/mode off`.
+    pub skill: Option<String>,
     pub cwd: Option<PathBuf>,
     /// `machine:path` when this agent is a stand-in for a kernel on another
     /// machine: its turns run there; this folder mirrors them.
@@ -160,6 +163,7 @@ impl Agent {
             allowlist: ALL_TOOLS.iter().map(|s| (*s).to_string()).collect(),
             readonly: false,
             role: None,
+            skill: None,
             cwd: None,
             remote: None,
             mode: Mode::Auto,
@@ -200,7 +204,7 @@ impl Agent {
             .unwrap_or_default();
         let remote = self.remote.clone().unwrap_or_default();
         format!(
-            "name: {}\ntitle: {}\nparent: {}\npaused: {}\nmodel: {}\nallowlist: {}\nreadonly: {}\ncwd: {}\nremote: {}\nmode: {}\nkind: {}\n{}",
+            "name: {}\ntitle: {}\nparent: {}\npaused: {}\nmodel: {}\nallowlist: {}\nreadonly: {}\ncwd: {}\nremote: {}\nmode: {}\nkind: {}\n{}{}",
             self.name,
             self.title,
             parent,
@@ -215,6 +219,10 @@ impl Agent {
             match self.role.as_deref() {
                 // The coordinator role is per turn, never on disk.
                 Some(r) if r != crate::project::COORDINATOR => format!("role: {r}\n"),
+                _ => String::new(),
+            },
+            match self.skill.as_deref() {
+                Some(s) if !s.is_empty() => format!("skill: {s}\n"),
                 _ => String::new(),
             }
         )
@@ -271,6 +279,7 @@ impl Agent {
                 }
                 "kind" => agent.kind = value.to_string(),
                 "role" => agent.role = (!value.is_empty()).then(|| value.to_string()),
+                "skill" => agent.skill = (!value.is_empty()).then(|| value.to_string()),
                 _ => {}
             }
         }

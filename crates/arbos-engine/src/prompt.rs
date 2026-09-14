@@ -89,7 +89,7 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
     };
     let environment = crate::envprobe::line(Path::new(&cwd));
     format!(
-        "You: {id}\nName: {name}\n{kind}{role}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\n{sandbox}Project: {project}\nCwd: {cwd}\nEnvironment: {environment}\nFocus: {focus}\nSkills (/name <args> brings its SKILL.md; .arbos/skills/<name>/): {skills}\n{git}\n{machines}\n{kinds}{instructions}{agents}{memory}",
+        "You: {id}\nName: {name}\n{kind}{role}{mode_skill}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\n{sandbox}Project: {project}\nCwd: {cwd}\nEnvironment: {environment}\nFocus: {focus}\nSkills (/name <args> brings its SKILL.md; .arbos/skills/<name>/): {skills}\n{git}\n{machines}\n{kinds}{instructions}{agents}{memory}",
         id = agent.id,
         name = agent.name,
         parent = agent.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),
@@ -100,6 +100,7 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
         mode = agent.mode.describe(),
         kinds = kinds_segment(place, agent),
         instructions = instructions_segment(place, agent),
+        mode_skill = mode_segment(place, agent),
         agents = agents_md,
         memory = memory,
     )
@@ -142,6 +143,25 @@ fn memory_segments(place: &Place) -> String {
         out.push_str(&format!("\n{label} ({}):\n{brief}\n", path.display()));
     }
     out
+}
+
+/// The skill pinned to this chat as its mode (`/mode <name>`): a line
+/// naming it, and its body in full, every turn — Cursor's custom modes,
+/// "a skill that stays pinned in the chat".
+fn mode_segment(place: &Place, agent: &Agent) -> String {
+    let Some(name) = agent.skill.as_deref().filter(|s| !s.is_empty()) else {
+        return String::new();
+    };
+    match arbos_core::skills::find_skill(place, name) {
+        Some(skill) => format!(
+            "Mode: {name} (this skill is pinned to this chat and applies to every turn; /mode off ends it)\n[skill {name} — {}]\n{}\n",
+            skill.path.display(),
+            skill.render("")
+        ),
+        None => {
+            format!("Mode: {name} (pinned, but no skill of that name is here now; say so once)\n")
+        }
+    }
 }
 
 /// `instructions.md` in the agent folder: the standing brief a definition
