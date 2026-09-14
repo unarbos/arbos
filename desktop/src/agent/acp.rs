@@ -356,8 +356,8 @@ impl Session {
                         .to_string()
                 })
                 .collect(),
-            channel: String::new(),
-            device: String::new(),
+            channel: content.channel.clone(),
+            device: content.device.clone(),
             model: content.model.clone().unwrap_or_default(),
         })
     }

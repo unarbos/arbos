@@ -994,6 +994,18 @@ fn describe(probe: &ElementProbe, window: &Window) -> Value {
     })
 }
 
+/// The last dictated take's clock, with the gateway's own numbers.
+fn voice_latency(this: &Arbos) -> Value {
+    let voice = crate::voice_ws::status();
+    json!({
+        "first_partial_ms": this.dictation.first_partial_ms,
+        "release_to_send_ms": this.dictation.release_to_send_ms,
+        "gateway_first_partial_ms": voice.first_partial_ms,
+        "partial_age_ms": voice.partial_age_ms,
+        "phase": voice.phase.map(|p| p.as_str()),
+    })
+}
+
 fn point_json(position: Point<Pixels>) -> Value {
     json!({ "x": f32::from(position.x), "y": f32::from(position.y) })
 }
@@ -1087,6 +1099,9 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
             // The take's live words (dictation partials), painted after the caret.
             "preview": composer.voice_preview(),
         },
+        // The last dictated take's clock: Fn press to first partial, release
+        // to send. The gateway's own numbers ride along.
+        "voice_latency": voice_latency(this),
         // The call to the project in front, when one is live: what the
         // strip shows, so a test can assert on it without pixels.
         "call": this.call.as_ref().map(|call| {

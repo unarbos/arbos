@@ -454,6 +454,9 @@ pub struct Composer {
     /// which is the conversation's. Cleared when a take starts or the
     /// field changes.
     voice_note: Option<String>,
+    /// The send in flight is a dictated take: its prompt goes out marked
+    /// `channel = voice`, `device = desktop`.
+    dictated: bool,
     /// Byte offset in the field where this take should land. Snapshotted
     /// when recording starts so later peek updates stay at the caret.
     voice_at: usize,
@@ -545,6 +548,7 @@ impl Composer {
             voice: VoiceState::Idle,
             voice_preview: String::new(),
             voice_note: None,
+            dictated: false,
             voice_at: 0,
             reconnect: false,
             hint: "Send follow-up".into(),
@@ -804,7 +808,9 @@ impl Composer {
         if self.is_empty(cx) {
             return;
         }
+        self.dictated = true;
         self.submit(cx);
+        self.dictated = false;
     }
 
     /// Drop dictation at the caret. A space separates it from whatever was
@@ -1067,6 +1073,10 @@ impl Composer {
             std::mem::take(&mut self.attachments.get_mut(id).items),
         );
         prompt.model = self.turn_model.take().map(|m| m.to_string());
+        // A take that ends in a send is spoken: the kernel's line says so.
+        if std::mem::take(&mut self.dictated) {
+            prompt = prompt.dictated();
+        }
         self.field.update(cx, |field, cx| field.clear(cx));
         self.attachments.get_mut(id).error = None;
         self.voice_note = None;
