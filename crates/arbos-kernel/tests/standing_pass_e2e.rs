@@ -256,8 +256,14 @@ fn rewound_arrives_before_the_file_restore() {
     assert!(follow.is_some(), "the file restore must report");
 
     // qa-032: the cut takes the turn whole, wake included. What remains
-    // ends on turn 1's turn_complete, and a restart fires nothing.
-    let cut = transcript(&k.place, "root");
+    // ends on turn 1's turn_complete, and a restart fires nothing. Read
+    // the file by polling, as every other file check here does: a single
+    // read right after the frame caught the file mid-rewrite on the CI
+    // runner (#158/#162: "not a dangling wake: []"); the cut itself is
+    // now written whole, the poll is the belt to that brace.
+    let cut = wait_transcript(&k.place, "root", Duration::from_secs(5), |t| {
+        t.last().is_some_and(|e| e["kind"] == "turn_complete")
+    });
     assert!(
         cut.last().is_some_and(|e| e["kind"] == "turn_complete"),
         "the transcript must end on a finished turn, not a dangling wake: {cut:?}"
