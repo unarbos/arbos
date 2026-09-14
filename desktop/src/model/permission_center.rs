@@ -288,9 +288,10 @@ impl PermissionCenter {
         }
     }
 
-    /// A real capture attempt. On Sequoia an app appears in the Screen
-    /// Recording list only after it has tried to capture; the row's "Try a
-    /// capture now" is that attempt, off the UI thread.
+    /// A real capture attempt through ScreenCaptureKit. On macOS 15 and
+    /// later an app appears in the Screen Recording list only after it has
+    /// asked for shareable content, and that ask is what raises the dialog;
+    /// the row's "Try a capture now" is that attempt, off the UI thread.
     pub fn try_capture(&mut self, cx: &mut Context<Self>) {
         if let Some(row) = self.row_mut(Permission::ScreenRecording) {
             row.phase = Phase::Requesting { since: Instant::now() };
@@ -303,10 +304,12 @@ impl PermissionCenter {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(row) = this.row_mut(Permission::ScreenRecording) {
+                    // Not granted yet: the dialog may be up, so give it the
+                    // prompt's window before the row points at the pane.
                     row.phase = if captured {
                         Phase::Idle
                     } else {
-                        Phase::NeedsSettings
+                        Phase::Prompted { since: Instant::now() }
                     };
                 }
                 this.refresh(cx);

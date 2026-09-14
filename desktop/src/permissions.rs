@@ -191,7 +191,11 @@ mod platform {
     };
     use std::{
         ffi::c_void,
-        sync::atomic::{AtomicI64, Ordering},
+        sync::{
+            Mutex, mpsc,
+            atomic::{AtomicI64, Ordering},
+        },
+        time::Duration,
     };
 
     #[link(name = "UserNotifications", kind = "framework")]
@@ -201,42 +205,37 @@ mod platform {
     unsafe extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
         fn CGRequestScreenCaptureAccess() -> bool;
-        fn CGWindowListCreateImage(
-            rect: CGRect,
-            option: u32,
-            window_id: u32,
-            image_option: u32,
-        ) -> *mut c_void;
-        fn CGImageRelease(image: *mut c_void);
     }
 
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CGRect {
-        x: f64,
-        y: f64,
-        w: f64,
-        h: f64,
-    }
+    #[link(name = "ScreenCaptureKit", kind = "framework")]
+    unsafe extern "C" {}
 
-    /// `CGWindowListCreateImage` over the whole screen: the capture the
-    /// screenshot tool would make. Null without the grant; on Sequoia the
-    /// attempt is what lists the app under Screen Recording.
+    /// How long the shareable-content call gets to answer. It returns at
+    /// once when the grant is in or refused; a prompt keeps it open until
+    /// the user answers, and the row is polling by then anyway.
+    const CAPTURE_WAIT: Duration = Duration::from_secs(3);
+
+    /// A real capture attempt through ScreenCaptureKit:
+    /// `SCShareableContent.getShareableContentWithCompletionHandler:` is
+    /// what puts an app into Screen & System Audio Recording on macOS 15
+    /// and later and raises the dialog; `CGWindowListCreateImage` does
+    /// neither there (Mac worker, macOS 26). True when content came back
+    /// with no error, which is the grant.
     pub fn try_screen_capture() -> bool {
-        const ON_SCREEN_ONLY: u32 = 1;
-        let infinite = CGRect {
-            x: f64::NEG_INFINITY / 2.0,
-            y: f64::NEG_INFINITY / 2.0,
-            w: f64::INFINITY,
-            h: f64::INFINITY,
-        };
+        let (tx, rx) = mpsc::channel::<bool>();
         unsafe {
-            let image = CGWindowListCreateImage(infinite, ON_SCREEN_ONLY, 0, 0);
-            if image.is_null() {
-                return false;
-            }
-            CGImageRelease(image);
-            CGPreflightScreenCaptureAccess()
+            let handler = ConcreteBlock::new(move |content: *mut Object, error: *mut Object| {
+                let _ = tx.send(!content.is_null() && error.is_null());
+            })
+            .copy();
+            let () = msg_send![
+                class!(SCShareableContent),
+                getShareableContentWithCompletionHandler: &*handler
+            ];
+        }
+        match rx.recv_timeout(CAPTURE_WAIT) {
+            Ok(granted) => granted,
+            Err(_) => unsafe { CGPreflightScreenCaptureAccess() },
         }
     }
 
@@ -307,6 +306,39 @@ mod platform {
     /// 2 authorized, 3 provisional, 4 ephemeral). The centre answers on
     /// its own thread; the row polls this.
     static NOTIFICATION_STATUS: AtomicI64 = AtomicI64::new(-1);
+    /// The error the last `requestAuthorization` came back with. The
+    /// centre refuses an ad-hoc bundle outside /Applications outright — no
+    /// dialog, "denied" within a moment — and that is not the user's no.
+    static NOTIFICATION_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+    fn notification_error() -> Option<String> {
+        NOTIFICATION_ERROR
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// The app is somewhere macOS registers notifications for; an ad-hoc
+    /// build launched from a build folder is not.
+    fn in_applications() -> bool {
+        std::env::current_exe()
+            .ok()
+            .is_some_and(|exe| exe.starts_with("/Applications") || exe.starts_with("/System/Applications"))
+    }
+
+    fn describe(error: *mut Object) -> String {
+        unsafe {
+            let text: *mut Object = msg_send![error, localizedDescription];
+            if text.is_null() {
+                return "the notification centre refused the request".into();
+            }
+            let utf8: *const std::os::raw::c_char = msg_send![text, UTF8String];
+            if utf8.is_null() {
+                return "the notification centre refused the request".into();
+            }
+            std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+        }
+    }
 
     /// A bare binary has no bundle proxy and the notification centre
     /// aborts on it; only a bundle may ask.
@@ -334,7 +366,15 @@ mod platform {
         }
         match NOTIFICATION_STATUS.load(Ordering::SeqCst) {
             2 | 3 | 4 => Status::Granted,
-            1 => Status::Denied,
+            1 => match notification_error() {
+                // Refused by the system, not by the user: nothing to flip
+                // in a pane. Say what to do instead.
+                Some(why) if !in_applications() => Status::Unavailable(format!(
+                    "macOS registers notifications only for an app in /Applications; move Arbos.app there. ({why})"
+                )),
+                Some(why) => Status::Unavailable(why),
+                None => Status::Denied,
+            },
             0 => Status::NotAsked,
             _ => Status::NotAsked,
         }
@@ -349,7 +389,11 @@ mod platform {
                 msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
             // badge | sound | alert
             let options: u64 = 1 | 2 | 4;
-            let handler = ConcreteBlock::new(move |_granted: BOOL, _error: *mut Object| {}).copy();
+            let handler = ConcreteBlock::new(move |_granted: BOOL, error: *mut Object| {
+                let why = (!error.is_null()).then(|| describe(error));
+                *NOTIFICATION_ERROR.lock().unwrap_or_else(|p| p.into_inner()) = why;
+            })
+            .copy();
             let () = msg_send![
                 center,
                 requestAuthorizationWithOptions: options
