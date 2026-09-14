@@ -303,7 +303,9 @@ fn a_stop_word_typed_while_running_stops_the_turn() {
     );
     steer_when_running(&mut a, "stop");
     assert!(a.wait_turn("root", "idle", Duration::from_secs(40)));
-    std::thread::sleep(Duration::from_millis(500));
+    common::wait_for(Duration::from_secs(5), || {
+        count(&transcript(&k.place, "root"), "interrupted") >= 1
+    });
     let root = transcript(&k.place, "root");
     assert!(count(&root, "interrupted") >= 1, "{root:#?}");
     assert!(
