@@ -4,6 +4,7 @@
 use crate::{
     kernel,
     model::{
+        permission_center::{PermissionCenter, Permissions},
         session::ChatSession,
         settings::Settings,
         state::{self, State},
@@ -16,6 +17,7 @@ use crate::{
             meter,
             opener::{Opener, OpenerEvent},
             chat_search::{ChatSearch, ChatSearchEvent, Hit},
+            permissions_sheet::{PermissionsSheet, PermissionsSheetEvent},
             tab_sheet::{TabSheet, TabSheetEvent},
         },
         naming::Renaming,
@@ -52,6 +54,7 @@ actions!(
         NextTab,
         PrevTab,
         OpenSettings,
+        ShowPermissions,
         TogglePanel,
         ShowChat,
         ShowProject,
@@ -203,6 +206,7 @@ pub(crate) const TOOLBAR_INSET: f32 = if cfg!(target_os = "macos") {
 
 pub fn init(cx: &mut App) {
     crate::view::terminal::init(cx);
+    crate::view::component::permissions_sheet::init(cx);
     cx.bind_keys([
         // A sub-chat under the project's main chat. The project has one
         // main chat, so this never makes a second root.
@@ -522,6 +526,8 @@ pub struct Arbos {
     pub(crate) opener: Entity<Opener>,
     /// The sheet a tab's name, glyph and colour are set in.
     pub(crate) tab_sheet: Entity<TabSheet>,
+    pub(crate) permissions_sheet: Entity<PermissionsSheet>,
+    pub(crate) permission_center: Entity<PermissionCenter>,
     /// ⌘K: the palette over every open tab's chats.
     pub(crate) chat_search: Entity<ChatSearch>,
     settings_window: Option<WindowHandle<SettingsWindow>>,
@@ -618,6 +624,22 @@ impl Arbos {
         let composer = cx.new(Composer::new);
         let opener = cx.new(Opener::new);
         let tab_sheet = cx.new(TabSheet::new);
+        let permission_center = cx.new(|_| PermissionCenter::new(None));
+        cx.set_global(Permissions(permission_center.clone()));
+        let permissions_sheet = cx.new(|cx| PermissionsSheet::new(permission_center.clone(), cx));
+        cx.observe(&permission_center, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &permissions_sheet,
+            window,
+            |this, _, event: &PermissionsSheetEvent, window, cx| match event {
+                PermissionsSheetEvent::Closed => {
+                    this.workspace
+                        .update(cx, |workspace, _| workspace.mark_permissions_seen());
+                    this.focus_composer(window, cx);
+                }
+            },
+        )
+        .detach();
         let chat_search = cx.new(ChatSearch::new);
         cx.subscribe_in(
             &chat_search,
@@ -652,7 +674,7 @@ impl Arbos {
             },
         )
         .detach();
-        cx.subscribe(&tab_sheet, |this, _, event: &TabSheetEvent, cx| {
+        cx.subscribe_in(&tab_sheet, window, |this, _, event: &TabSheetEvent, window, cx| {
             match event {
                 TabSheetEvent::Keep(ix, identity) => {
                     let (ix, identity) = (*ix, identity.clone());
@@ -677,7 +699,7 @@ impl Arbos {
                 }
             }
             if std::mem::take(&mut this.home_offer) {
-                this.permissions_once(cx);
+                this.permissions_once(window, cx);
             }
         })
         .detach();
@@ -755,6 +777,8 @@ impl Arbos {
             composer,
             opener,
             tab_sheet,
+            permissions_sheet,
+            permission_center,
             chat_search,
             settings_window: None,
             pane: Pane::Chat,
@@ -853,7 +877,7 @@ impl Arbos {
                         this.home_offer = true;
                         this.edit_tab(ix, window, cx);
                     } else {
-                        this.permissions_once(cx);
+                        this.permissions_once(window, cx);
                     }
                 });
             })
@@ -1535,6 +1559,13 @@ impl Arbos {
     /// not in the transcript: the conversation did not fail, the take did.
     fn voice_error(&mut self, msg: &str, cx: &mut Context<Self>) {
         let note = msg.strip_prefix("voice failed: ").unwrap_or(msg).to_string();
+        // The microphone was wanted and the system said no: after "Skip for
+        // now" this is what lights the dot on the gear.
+        if crate::voice_ws::mic_permission().advice().is_some() {
+            self.permission_center.update(cx, |center, cx| {
+                center.note_needed(crate::permissions::Permission::Microphone, cx)
+            });
+        }
         self.composer
             .update(cx, |composer, cx| composer.set_voice_note(Some(note), cx));
     }
@@ -1818,14 +1849,36 @@ impl Arbos {
     /// A folder opened for the first time has no `project.toml`: offer the
     /// sheet with the folder's own defaults filled in. A folder that has
     /// one comes back wearing it, no questions.
-    /// Settings › Permissions, the first time only.
-    fn permissions_once(&mut self, cx: &mut Context<Self>) {
+    /// The permissions sheet, the first time only. Skip for now marks it
+    /// seen; after that only the dot on the gear says a grant is wanted.
+    fn permissions_once(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.read(cx).permissions_seen {
             return;
         }
-        self.workspace
-            .update(cx, |workspace, _| workspace.mark_permissions_seen());
-        self.open_settings(Section::Permissions, cx);
+        self.show_permissions(window, cx);
+    }
+
+    /// The permissions sheet over the chat, for the open project's folder.
+    pub(crate) fn show_permissions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let project = self
+            .workspace
+            .read(cx)
+            .active_project()
+            .filter(|project| !project.is_remote())
+            .map(|project| project.path.clone());
+        self.permission_center
+            .update(cx, |center, cx| center.set_project(project, cx));
+        self.permissions_sheet
+            .update(cx, |sheet, cx| sheet.show(window, cx));
+    }
+
+    pub(crate) fn show_permissions_action(
+        &mut self,
+        _: &ShowPermissions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_permissions(window, cx);
     }
 
     fn offer_tab_face(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1976,6 +2029,7 @@ impl Render for Arbos {
             )
             .child(self.opener.clone())
             .child(self.tab_sheet.clone())
+            .child(self.permissions_sheet.clone())
             .child(self.chat_search.clone())
     }
 }

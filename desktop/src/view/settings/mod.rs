@@ -161,12 +161,17 @@ pub fn open(
         },
         |window, cx| {
             appearance::observe_window(window, cx).detach();
-            let view = cx.new(|cx| SettingsWindow {
-                workspace,
-                section,
-                host: model::HostPanel::new(cx),
-                rechecking: false,
-                focus: cx.focus_handle(),
+            let view = cx.new(|cx| {
+                // The permission rows are the centre's; follow it.
+                let center = cx.global::<crate::model::permission_center::Permissions>().0.clone();
+                cx.observe(&center, |_, _, cx| cx.notify()).detach();
+                SettingsWindow {
+                    workspace,
+                    section,
+                    host: model::HostPanel::new(cx),
+                    rechecking: false,
+                    focus: cx.focus_handle(),
+                }
             });
             let focus = view.read(cx).focus.clone();
             window.focus(&focus, cx);

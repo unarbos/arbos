@@ -20,7 +20,7 @@
 
 use crate::view::root::{
     Arbos, CloseProject, EndCall, NewSession, NewTab, NextEntry, NextTab, OpenProject,
-    OpenSettings, PrevEntry, PrevTab, SearchChats, ShowProject, StartCall, ToggleMute, TogglePanel, ZoomIn,
+    OpenSettings, PrevEntry, PrevTab, SearchChats, ShowPermissions, ShowProject, StartCall, ToggleMute, TogglePanel, ZoomIn,
     ZoomOut, ZoomReset,
 };
 use bezel::{
@@ -140,6 +140,7 @@ fn menus() -> Vec<Menu> {
         // menu's name from `CFBundleName`, which is this same lowercase word.
         Menu::new("Arbos").items([
             MenuItem::action("Settings…", OpenSettings),
+            MenuItem::action("Permissions…", ShowPermissions),
             MenuItem::separator(),
             MenuItem::action("Hide Arbos", Hide),
             MenuItem::action("Hide Others", HideOthers),
@@ -267,6 +268,7 @@ impl Arbos {
             .on_action(cx.listener(Self::open_project_action))
             .on_action(cx.listener(Self::new_tab_action))
             .on_action(cx.listener(Self::open_settings_action))
+            .on_action(cx.listener(Self::show_permissions_action))
             .on_action(cx.listener(Self::attach_paths_action))
             .on_action(cx.listener(Self::show_chat))
             .on_action(cx.listener(Self::show_project))
