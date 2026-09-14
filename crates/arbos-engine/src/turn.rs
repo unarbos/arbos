@@ -589,6 +589,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 calib = (u.used as f64 / ours as f64).clamp(CALIB_MIN, CALIB_MAX);
             }
         }
+        if let Some(step) = arbos_core::status::spoken(&content) {
+            hooks.spoke_status(&step);
+        }
         if !content.trim().is_empty() || !calls.is_empty() {
             // The Assistant line is the step boundary the projection and the
             // fold units cut on. A step that called tools without saying

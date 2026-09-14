@@ -204,6 +204,12 @@ impl arbos_engine::Hooks for TurnHooks {
         self.inner.broadcast(frame);
     }
 
+    /// "status: Running sleep 45" as a one-line reply: the live line takes
+    /// the words; the transcript keeps the model's line as it was.
+    fn spoke_status(&self, step: &str) {
+        let _ = self.inner.set_status(self.agent.as_str(), step, "agent");
+    }
+
     fn working(&self, secs: u64) {
         self.inner.broadcast(arbos_core::wire::Frame::Working {
             agent: self.agent.to_string(),

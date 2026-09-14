@@ -47,7 +47,7 @@ impl Tool for StatusTool {
     fn schema(&self) -> Value {
         typed_schema(
             "status",
-            "Say what you are doing now, for the line beside your name: a verb phrase, six words or less (\"Reading project context\"). Call it at each major step; it replaces the last one.",
+            "Say what you are doing now, for the line beside your name: a verb phrase, six words or less (\"Reading project context\"). Call it at each major step; it replaces the last one. A tool call, not a line of text in your reply.",
             &[("step", "", true, "string")],
         )
     }

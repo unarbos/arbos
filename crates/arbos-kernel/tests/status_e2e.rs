@@ -182,3 +182,45 @@ fn stale_status_clears_at_start_and_derived_frames_are_debounced() {
     );
     let _ = k.child.kill();
 }
+
+/// A model that writes its step as a one-line reply — `status: Running
+/// sleep 45` — instead of calling the tool: the live line takes the
+/// words (source `agent`), and the transcript keeps the line as the
+/// model wrote it. A reply with more in it is prose, not a status.
+#[test]
+fn a_status_written_as_a_one_line_reply_sets_the_live_line() {
+    let replies = concat!(
+        "{\"agent\":\"root\",\"content\":\"status: Running sleep 45\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"sleep 1; echo ok\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"The status: all good.\"}\n",
+    );
+    let mut k = start_kernel_replay_prepared("status-spoken", replies, "", |place| {
+        std::fs::create_dir_all(place.join(".arbos")).unwrap();
+        std::fs::write(
+            place.join(".arbos/project.toml"),
+            "schema = 2\nname = \"s\"\n",
+        )
+        .unwrap();
+    });
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "go"}));
+    let said = a
+        .wait(Duration::from_secs(20), |f| {
+            f["type"] == "status" && f["agent"] == "root" && f["source"] == "agent"
+        })
+        .expect("the spoken status as a status frame");
+    assert_eq!(said["step"], "Running sleep 45");
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    let transcript =
+        std::fs::read_to_string(k.place.join(".arbos/agents/root/transcript.jsonl")).unwrap();
+    assert!(
+        transcript.contains("\"text\":\"status: Running sleep 45\""),
+        "the model's line stays as written: {transcript}"
+    );
+    // The turn is over: the line is cleared, not left at the last step.
+    assert!(!k.place.join(".arbos/agents/root/status.toml").exists());
+    let _ = k.child.kill();
+}

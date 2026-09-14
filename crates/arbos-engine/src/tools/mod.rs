@@ -58,6 +58,10 @@ pub trait Hooks: Send + Sync {
     /// system prompt (contract, context, instance, plan), the tool schemas,
     /// and the conversation. Once per turn; for the kernel log.
     fn prompt_size(&self, _size: PromptSize) {}
+    /// The model set its status in prose — a one-line reply `status: …`
+    /// instead of the `status` tool. `step` is the words after the colon,
+    /// clipped; the kernel shows them as the live line.
+    fn spoke_status(&self, _step: &str) {}
 }
 
 /// Token estimates (chars/4, calibrated against the provider's count once
