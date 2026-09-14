@@ -1228,7 +1228,27 @@ impl Arbos {
 
     pub(crate) fn open_settings(&mut self, section: Section, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
+        let had = self.settings_window.is_some();
         self.settings_window = settings::open(workspace, self.settings_window, section, cx);
+        // When the window goes — Escape, ⌘W, the title bar — this window
+        // comes back forward and the composer takes the keyboard, so the
+        // settings never sit between the user and the chat.
+        if !had && let Some(view) = self
+            .settings_window
+            .and_then(|handle| handle.entity(cx).ok())
+        {
+            cx.observe_release(&view, |this, _, cx| {
+                this.settings_window = None;
+                if let Some(main) = cx.windows().into_iter().find(|w| w.downcast::<Self>().is_some()) {
+                    let _ = main.update(cx, |_, window, _| window.activate_window());
+                }
+                let composer = this.composer.read(cx).focus_handle(cx);
+                if let Some(main) = cx.windows().into_iter().find(|w| w.downcast::<Self>().is_some()) {
+                    let _ = main.update(cx, |_, window, cx| window.focus(&composer, cx));
+                }
+            })
+            .detach();
+        }
     }
 
     /// Mic button: start capture, or stop, put the words in the field, and send.
