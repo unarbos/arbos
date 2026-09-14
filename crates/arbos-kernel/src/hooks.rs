@@ -154,6 +154,10 @@ pub struct KernelHooks {
     /// Children whose turn end already reached a parent blocked in `wait`:
     /// no `done` message for that turn (it would say the same thing twice).
     pub waited: Mutex<HashSet<String>>,
+    /// Children reported through `spawn wait=true` whose folder is to be
+    /// archived once the parent's turn ends (no `done` file will do it):
+    /// child id → parent id.
+    pub archive_after: Mutex<HashMap<String, String>>,
     /// Transcript length when each running turn began, for the `done`
     /// message's summary of what the turn said.
     pub turn_lo: Mutex<HashMap<String, u64>>,
@@ -215,6 +219,7 @@ impl KernelHooks {
             approve_seq: std::sync::atomic::AtomicU64::new(1),
             waits: Mutex::new(HashMap::new()),
             waited: Mutex::new(HashSet::new()),
+            archive_after: Mutex::new(HashMap::new()),
             turn_lo: Mutex::new(HashMap::new()),
             notes_at_start: Mutex::new(HashMap::new()),
             notes_nudge: Mutex::new(HashSet::new()),
