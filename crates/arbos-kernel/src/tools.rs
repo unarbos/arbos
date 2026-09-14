@@ -235,7 +235,7 @@ impl Tool for Spawn {
             let mut paths = vec![format!(".arbos/agents/{id}")];
             if let Some(w) = &worktree {
                 body.push_str(&format!(
-                    "\nIt works in its own worktree {} on branch {} (cut from {}). Your checkout is untouched. When its branch is merged or abandoned, remove it: {}",
+                    "\nIt works in its own worktree {} on branch {} (cut from {}). Your checkout is untouched. The worktree is removed when the worker is archived and has nothing uncommitted (its commits stay on the branch); to take it down yourself: {}",
                     w.path.display(),
                     w.branch,
                     w.base,
