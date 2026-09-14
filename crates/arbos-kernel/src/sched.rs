@@ -219,7 +219,8 @@ impl arbos_engine::Hooks for TurnHooks {
             "prompt_size",
             Some(self.agent.as_str()),
             format!(
-                "system={} tools={} conversation={} total={} (estimated tokens)",
+                "model={} system={} tools={} conversation={} total={} (estimated tokens)",
+                size.model,
                 size.system,
                 size.tools,
                 size.conversation,

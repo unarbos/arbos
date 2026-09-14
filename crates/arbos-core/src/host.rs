@@ -211,6 +211,11 @@ pub struct HostConfig {
     pub data_policy: String,
     /// Model that writes compaction summaries. Empty = the turn's model.
     pub compact_model: String,
+    /// Model every spawned child runs, whatever its spawn call or kind
+    /// asked for (Claude Code's `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`): one
+    /// knob to keep a fleet of workers on a cheap or an approved model.
+    /// Empty = as asked. A per-turn switch the user makes still wins.
+    pub child_model: String,
     /// Vision-capable model that describes an attached image in words when
     /// the turn's model cannot see it. Empty = the first vision-capable
     /// fallback, else a cheap OpenRouter vision model.
@@ -277,6 +282,7 @@ impl Default for HostConfig {
             stream_idle_ms: 120_000,
             compact_model: String::new(),
             data_policy: String::new(),
+            child_model: String::new(),
             vision_model: String::new(),
             compact_window_tokens: 0,
             // Folding at half the window made models re-read what had

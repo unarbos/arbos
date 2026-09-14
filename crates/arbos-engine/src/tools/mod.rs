@@ -62,8 +62,10 @@ pub trait Hooks: Send + Sync {
 
 /// Token estimates (chars/4, calibrated against the provider's count once
 /// it has reported) of the parts of one model call.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PromptSize {
+    /// The model this turn's calls go to, after every override.
+    pub model: String,
     pub system: u64,
     pub tools: u64,
     pub conversation: u64,
