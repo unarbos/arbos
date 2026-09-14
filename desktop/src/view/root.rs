@@ -141,6 +141,10 @@ pub(crate) const COMPOSER_PAD_X: f32 = 8.;
 /// Transcript and composer share this reading column. Web: `max-w-4xl`
 /// on both `transcript-col` and `composer-col`.
 pub(crate) const CHAT_MAX_WIDTH: f32 = 720.;
+/// Cursor's chat prose: 14 px on a 23 px line (measured 14/22 on Jacob's
+/// Mac, 15/25 on the Linux build; the Mac is the reference).
+pub(crate) const CURSOR_PROSE_SIZE: f32 = 14.;
+pub(crate) const CURSOR_PROSE_LEADING: f32 = 23.;
 /// Web `px-3.5`. Cards bleed by `COMPOSER_PAD_X` so their words sit on
 /// this edge, same as the answer.
 pub(crate) const CHAT_GUTTER: f32 = 14.;
@@ -206,6 +210,26 @@ pub(crate) const TOOLBAR_INSET: f32 = if cfg!(target_os = "macos") {
 pub fn init(cx: &mut App) {
     crate::view::terminal::init(cx);
     crate::view::component::permissions_sheet::init(cx);
+    // Cursor's chat measure, taken off its screens: prose one step above
+    // the UI ladder — 14 on 23 against the ladder's 13 — and fenced code
+    // as a bare plate with the copy control on hover, no language band.
+    {
+        let base = markdown::Typography::default();
+        let scale = CURSOR_PROSE_SIZE / bezel::theme::TextStyle::Body.size();
+        markdown::set_typography(
+            cx,
+            markdown::Typography {
+                body: bezel::theme::Metrics::new(
+                    bezel::theme::TextStyle::Body,
+                    CURSOR_PROSE_LEADING / CURSOR_PROSE_SIZE,
+                    bezel::gpui::FontWeight::NORMAL,
+                )
+                .scaled(scale),
+                ..base
+            },
+        );
+        markdown::set_code_band(cx, false);
+    }
     cx.bind_keys([
         // A sub-chat under the project's main chat. The project has one
         // main chat, so this never makes a second root.
