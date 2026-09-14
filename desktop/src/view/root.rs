@@ -4,6 +4,7 @@
 use crate::{
     kernel,
     model::{
+        permission_center::{PermissionCenter, Permissions},
         session::ChatSession,
         settings::Settings,
         state::{self, State},
@@ -15,6 +16,8 @@ use crate::{
             menu::Menu,
             meter,
             opener::{Opener, OpenerEvent},
+            chat_search::{ChatSearch, ChatSearchEvent, Hit},
+            permissions_sheet::{PermissionsSheet, PermissionsSheetEvent},
             tab_sheet::{TabSheet, TabSheetEvent},
         },
         naming::Renaming,
@@ -40,7 +43,7 @@ use bezel::{
         widgets::{ButtonStyle, Buttons, Content},
     },
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 actions!(
     arbos,
     [
@@ -51,9 +54,11 @@ actions!(
         NextTab,
         PrevTab,
         OpenSettings,
+        ShowPermissions,
         TogglePanel,
         ShowChat,
         ShowProject,
+        SearchChats,
         CommitName,
         DismissName,
         DismissMenu,
@@ -201,6 +206,7 @@ pub(crate) const TOOLBAR_INSET: f32 = if cfg!(target_os = "macos") {
 
 pub fn init(cx: &mut App) {
     crate::view::terminal::init(cx);
+    crate::view::component::permissions_sheet::init(cx);
     cx.bind_keys([
         // A sub-chat under the project's main chat. The project has one
         // main chat, so this never makes a second root.
@@ -236,6 +242,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-1", ShowChat, None),
         // Cursor's Project tab sits beside the chat; ⌘2 is the next slot.
         KeyBinding::new("cmd-2", ShowProject, None),
+        KeyBinding::new("cmd-k", SearchChats, None),
         // What a browser binds its zoom to. `cmd-=` first so the menu
         // draws ⌘= like Safari; `cmd-+` is the same key with shift held.
         KeyBinding::new("cmd-=", ZoomIn, None),
@@ -512,10 +519,17 @@ pub struct Arbos {
     active_terminal: Option<String>,
     /// Whether the right-hand panel is out. ⌘B folds it away.
     pub(crate) panel_open: bool,
+    /// The panel's "N archived" row is unfolded: finished workers the
+    /// kernel moved to `archive/agents/` are listed, faint.
+    pub(crate) archived_open: bool,
     pub(crate) composer: Entity<Composer>,
     pub(crate) opener: Entity<Opener>,
     /// The sheet a tab's name, glyph and colour are set in.
     pub(crate) tab_sheet: Entity<TabSheet>,
+    pub(crate) permissions_sheet: Entity<PermissionsSheet>,
+    pub(crate) permission_center: Entity<PermissionCenter>,
+    /// ⌘K: the palette over every open tab's chats.
+    pub(crate) chat_search: Entity<ChatSearch>,
     settings_window: Option<WindowHandle<SettingsWindow>>,
     pub(crate) pane: Pane,
     pub(crate) menu: Option<Menu>,
@@ -553,6 +567,9 @@ pub struct Arbos {
     fn_held: bool,
     /// Stop was asked while start was still in flight. Finish start, then stop.
     voice_want_stop: bool,
+    /// The last dictated take's clock, for the driver: press → first
+    /// partial, release → send. What "does it feel instant" measures.
+    pub(crate) dictation: Dictation,
     /// The loop that carries the speech server's agent activity into the
     /// chat is running.
     voice_mirror_on: bool,
@@ -607,6 +624,40 @@ impl Arbos {
         let composer = cx.new(Composer::new);
         let opener = cx.new(Opener::new);
         let tab_sheet = cx.new(TabSheet::new);
+        let permission_center = cx.new(|_| PermissionCenter::new(None));
+        cx.set_global(Permissions(permission_center.clone()));
+        let permissions_sheet = cx.new(|cx| PermissionsSheet::new(permission_center.clone(), cx));
+        cx.observe(&permission_center, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &permissions_sheet,
+            window,
+            |this, _, event: &PermissionsSheetEvent, window, cx| match event {
+                PermissionsSheetEvent::Closed => {
+                    this.workspace
+                        .update(cx, |workspace, _| workspace.mark_permissions_seen());
+                    this.focus_composer(window, cx);
+                }
+            },
+        )
+        .detach();
+        let chat_search = cx.new(ChatSearch::new);
+        cx.subscribe_in(
+            &chat_search,
+            window,
+            |this, _, event: &ChatSearchEvent, window, cx| match event {
+                ChatSearchEvent::Open { project, session } => {
+                    let (project, session) = (*project, *session);
+                    this.workspace.update(cx, |workspace, cx| {
+                        workspace.active = Some(project);
+                        workspace.select_session(session, cx);
+                    });
+                    this.show_pane(Pane::Chat, cx);
+                    this.focus_composer(window, cx);
+                }
+                ChatSearchEvent::Dismiss => this.focus_composer(window, cx),
+            },
+        )
+        .detach();
         cx.subscribe_in(
             &opener,
             window,
@@ -623,7 +674,7 @@ impl Arbos {
             },
         )
         .detach();
-        cx.subscribe(&tab_sheet, |this, _, event: &TabSheetEvent, cx| {
+        cx.subscribe_in(&tab_sheet, window, |this, _, event: &TabSheetEvent, window, cx| {
             match event {
                 TabSheetEvent::Keep(ix, identity) => {
                     let (ix, identity) = (*ix, identity.clone());
@@ -648,7 +699,7 @@ impl Arbos {
                 }
             }
             if std::mem::take(&mut this.home_offer) {
-                this.permissions_once(cx);
+                this.permissions_once(window, cx);
             }
         })
         .detach();
@@ -722,9 +773,13 @@ impl Arbos {
             terminals: Default::default(),
             active_terminal: None,
             panel_open: true,
+            archived_open: false,
             composer,
             opener,
             tab_sheet,
+            permissions_sheet,
+            permission_center,
+            chat_search,
             settings_window: None,
             pane: Pane::Chat,
             menu: None,
@@ -742,6 +797,7 @@ impl Arbos {
             voice_place: None,
             fn_held: false,
             voice_want_stop: false,
+            dictation: Dictation::default(),
             voice_mirror_on: false,
             call: None,
             home_offer: false,
@@ -787,11 +843,18 @@ impl Arbos {
         cx.observe_window_bounds(window, |_, window, cx| {
             appearance::reapply_window_background(cx);
             keep_macos_glass(window);
+            sync_macos_chrome(cx);
             restore_usable_bounds(window);
             cx.notify();
         })
         .detach();
+        // The palette moved (Settings › Appearance, or the OS at sunset):
+        // the window's own chrome follows it, so the title band the traffic
+        // lights sit in is the same surface as the tab strip.
+        cx.observe_global::<Theme>(|_, cx| sync_macos_chrome(cx))
+            .detach();
         keep_macos_glass(window);
+        sync_macos_chrome(cx);
         this.sync_composer(cx);
         // First launch: the Home tab's face — name, glyph, colour, prefilled
         // "Home", skippable — then the permissions sheet, each once. After
@@ -814,7 +877,7 @@ impl Arbos {
                         this.home_offer = true;
                         this.edit_tab(ix, window, cx);
                     } else {
-                        this.permissions_once(cx);
+                        this.permissions_once(window, cx);
                     }
                 });
             })
@@ -829,6 +892,15 @@ impl Arbos {
             .is_some_and(ChatSession::resumable)
             .then(|| this.composer_focus_handle(cx));
         window.focus(composer.as_ref().unwrap_or(&this.focus), cx);
+        // A speech server is set up: open the session now, in the background,
+        // so the first Fn press has no connect to pay.
+        if crate::voice_ws::configured() {
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = crate::voice_ws::warm();
+                })
+                .detach();
+        }
         #[cfg(target_os = "macos")]
         {
             // A speech server is configured, so the mic will be wanted:
@@ -999,7 +1071,7 @@ impl Arbos {
             .read(cx)
             .active_project()
             .and_then(|project| project.focused_agent());
-        let list: Vec<u64> = self.agent_rows(cx).into_iter().map(|row| row.id).collect();
+        let list: Vec<u64> = self.visible_agent_rows(cx).into_iter().map(|row| row.id).collect();
         let at = showing.and_then(|id| list.iter().position(|entry| *entry == id));
         let Some(landing) = stepped(at, list.len(), step).map(|ix| list[ix]) else {
             return;
@@ -1135,6 +1207,48 @@ impl Arbos {
         self.close_project(ix, cx);
     }
 
+    /// ⌘K and the panel's magnifier: search every open tab's chats by
+    /// title and first words; Enter opens the one lit, in its tab.
+    pub(crate) fn search_chats(&mut self, _: &SearchChats, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = self.workspace.read(cx);
+        let mut hits: Vec<Hit> = Vec::new();
+        for (ix, project) in workspace.projects.iter().enumerate() {
+            let tab = Workspace::tab_label(project);
+            let mut chats: Vec<&ChatSession> = project.sessions.iter().filter(|chat| !chat.closed).collect();
+            chats.sort_by(|a, b| b.updated.cmp(&a.updated));
+            for chat in chats {
+                let title = chat.label();
+                let first = crate::model::session::first_user_text(&chat.items)
+                    .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .unwrap_or_default();
+                let first: String = first.chars().take(72).collect();
+                let label = if first.is_empty() || first == title {
+                    format!("{tab} › {title}")
+                } else {
+                    format!("{tab} › {title} — {first}")
+                };
+                hits.push(Hit {
+                    project: ix,
+                    session: chat.id,
+                    label,
+                });
+            }
+        }
+        self.dismiss_menu(cx);
+        self.chat_search
+            .update(cx, |search, cx| search.show(hits, window, cx));
+    }
+
+    /// The composer takes the keyboard back, when there is one to take it.
+    fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let composer = self
+            .workspace
+            .read(cx)
+            .active_session()
+            .map(|_| self.composer.read(cx).focus_handle(cx));
+        window.focus(composer.as_ref().unwrap_or(&self.focus), cx);
+    }
+
     /// ⌘2 and the panel's Project header: the project page in the column.
     pub(crate) fn show_project(
         &mut self,
@@ -1158,7 +1272,27 @@ impl Arbos {
 
     pub(crate) fn open_settings(&mut self, section: Section, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
+        let had = self.settings_window.is_some();
         self.settings_window = settings::open(workspace, self.settings_window, section, cx);
+        // When the window goes — Escape, ⌘W, the title bar — this window
+        // comes back forward and the composer takes the keyboard, so the
+        // settings never sit between the user and the chat.
+        if !had && let Some(view) = self
+            .settings_window
+            .and_then(|handle| handle.entity(cx).ok())
+        {
+            cx.observe_release(&view, |this, _, cx| {
+                this.settings_window = None;
+                if let Some(main) = cx.windows().into_iter().find(|w| w.downcast::<Self>().is_some()) {
+                    let _ = main.update(cx, |_, window, _| window.activate_window());
+                }
+                let composer = this.composer.read(cx).focus_handle(cx);
+                if let Some(main) = cx.windows().into_iter().find(|w| w.downcast::<Self>().is_some()) {
+                    let _ = main.update(cx, |_, window, cx| window.focus(&composer, cx));
+                }
+            })
+            .detach();
+        }
     }
 
     /// Mic button: start capture, or stop, put the words in the field, and send.
@@ -1225,6 +1359,10 @@ impl Arbos {
             return;
         }
         self.fn_held = true;
+        self.dictation = Dictation {
+            pressed_at: Some(Instant::now()),
+            ..Dictation::default()
+        };
         if self.composer.read(cx).is_recording() || self.composer.read(cx).voice_busy() {
             return;
         }
@@ -1236,6 +1374,7 @@ impl Arbos {
             return;
         }
         self.fn_held = false;
+        self.dictation.released_at = Some(Instant::now());
         self.stop_voice(cx);
     }
 
@@ -1320,13 +1459,21 @@ impl Arbos {
                         return;
                     }
                     if let Ok(text) = peeked {
+                        if !text.trim().is_empty() && this.dictation.first_partial_ms.is_none() {
+                            this.dictation.first_partial_ms = this
+                                .dictation
+                                .pressed_at
+                                .map(|at| at.elapsed().as_millis() as u64);
+                        }
                         this.composer.update(cx, |composer, cx| {
                             composer.set_voice_preview(&text, cx);
                         });
                     }
                 });
+                // Partials land within the first second; the poll keeps up
+                // with them.
                 cx.background_executor()
-                    .timer(Duration::from_millis(200))
+                    .timer(Duration::from_millis(80))
                     .await;
             }
         })
@@ -1381,6 +1528,7 @@ impl Arbos {
                         });
                     }
                 }
+                let sent = matches!(&text, Ok(t) if !t.trim().is_empty());
                 this.composer.update(cx, |composer, cx| {
                     composer.set_voice(VoiceState::Idle, cx);
                     if let Ok(text) = &text
@@ -1393,6 +1541,12 @@ impl Arbos {
                         }
                     }
                 });
+                if sent {
+                    this.dictation.release_to_send_ms = this
+                        .dictation
+                        .released_at
+                        .map(|at| at.elapsed().as_millis() as u64);
+                }
                 if let Err(e) = text {
                     this.voice_error(&format!("voice failed: {e:#}"), cx);
                 }
@@ -1401,12 +1555,19 @@ impl Arbos {
         .detach();
     }
 
+    /// A microphone or speech-server failure belongs under the mic button,
+    /// not in the transcript: the conversation did not fail, the take did.
     fn voice_error(&mut self, msg: &str, cx: &mut Context<Self>) {
-        if let Some(id) = self.workspace.read(cx).active_id() {
-            self.workspace.update(cx, |workspace, cx| {
-                workspace.with_session(id, cx, |chat| chat.notice(true, msg));
+        let note = msg.strip_prefix("voice failed: ").unwrap_or(msg).to_string();
+        // The microphone was wanted and the system said no: after "Skip for
+        // now" this is what lights the dot on the gear.
+        if crate::voice_ws::mic_permission().advice().is_some() {
+            self.permission_center.update(cx, |center, cx| {
+                center.note_needed(crate::permissions::Permission::Microphone, cx)
             });
         }
+        self.composer
+            .update(cx, |composer, cx| composer.set_voice_note(Some(note), cx));
     }
 
     // ------------------------------------------------------------------ calls
@@ -1688,14 +1849,36 @@ impl Arbos {
     /// A folder opened for the first time has no `project.toml`: offer the
     /// sheet with the folder's own defaults filled in. A folder that has
     /// one comes back wearing it, no questions.
-    /// Settings › Permissions, the first time only.
-    fn permissions_once(&mut self, cx: &mut Context<Self>) {
+    /// The permissions sheet, the first time only. Skip for now marks it
+    /// seen; after that only the dot on the gear says a grant is wanted.
+    fn permissions_once(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace.read(cx).permissions_seen {
             return;
         }
-        self.workspace
-            .update(cx, |workspace, _| workspace.mark_permissions_seen());
-        self.open_settings(Section::Permissions, cx);
+        self.show_permissions(window, cx);
+    }
+
+    /// The permissions sheet over the chat, for the open project's folder.
+    pub(crate) fn show_permissions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let project = self
+            .workspace
+            .read(cx)
+            .active_project()
+            .filter(|project| !project.is_remote())
+            .map(|project| project.path.clone());
+        self.permission_center
+            .update(cx, |center, cx| center.set_project(project, cx));
+        self.permissions_sheet
+            .update(cx, |sheet, cx| sheet.show(window, cx));
+    }
+
+    pub(crate) fn show_permissions_action(
+        &mut self,
+        _: &ShowPermissions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_permissions(window, cx);
     }
 
     fn offer_tab_face(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1846,7 +2029,20 @@ impl Render for Arbos {
             )
             .child(self.opener.clone())
             .child(self.tab_sheet.clone())
+            .child(self.permissions_sheet.clone())
+            .child(self.chat_search.clone())
     }
+}
+
+/// The last dictated take's clock. `pressed_at` is the Fn press; the
+/// first partial and the release-to-send times are what the driver shows
+/// as `voice_latency`, so QA can measure "instant" instead of feeling it.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Dictation {
+    pub pressed_at: Option<Instant>,
+    pub released_at: Option<Instant>,
+    pub first_partial_ms: Option<u64>,
+    pub release_to_send_ms: Option<u64>,
 }
 
 /// Native Spaces fullscreen is a black desktop, so the frost has nothing to
@@ -1886,6 +2082,63 @@ fn keep_macos_glass(_window: &Window) {
 
 #[cfg(not(target_os = "macos"))]
 fn keep_macos_glass(_window: &Window) {}
+
+/// The window's own chrome in the theme's colour. AppKit paints the title
+/// band (the traffic lights' strip) from the `NSWindow`'s background colour
+/// and its appearance, not from what we draw under it, so a dark palette
+/// over a window left at AppKit's defaults kept a white band across the
+/// top. Every window takes the chrome surface as its background — clear
+/// where glass is on, so the frost still shows — and the palette's
+/// appearance, so the lights and the band are drawn for dark.
+#[cfg(target_os = "macos")]
+fn sync_macos_chrome(cx: &App) {
+    use objc::{
+        class, msg_send,
+        runtime::{Object, YES},
+        sel, sel_impl,
+    };
+    let theme = Theme::of(cx);
+    let chrome = chrome_bg(theme);
+    let rgba = chrome.to_rgb();
+    let dark = theme.appearance == bezel::theme::Appearance::Dark;
+    unsafe {
+        let name: *mut Object = msg_send![
+            class!(NSString),
+            stringWithUTF8String: if dark {
+                c"NSAppearanceNameDarkAqua".as_ptr()
+            } else {
+                c"NSAppearanceNameAqua".as_ptr()
+            }
+        ];
+        let appearance: *mut Object = msg_send![class!(NSAppearance), appearanceNamed: name];
+        let color: *mut Object = if theme.vibrancy {
+            msg_send![class!(NSColor), clearColor]
+        } else {
+            msg_send![
+                class!(NSColor),
+                colorWithSRGBRed: rgba.r as f64
+                green: rgba.g as f64
+                blue: rgba.b as f64
+                alpha: 1.0f64
+            ]
+        };
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let windows: *mut Object = msg_send![app, windows];
+        let count: usize = msg_send![windows, count];
+        for i in 0..count {
+            let ns_window: *mut Object = msg_send![windows, objectAtIndex: i];
+            if ns_window.is_null() {
+                continue;
+            }
+            let _: () = msg_send![ns_window, setAppearance: appearance];
+            let _: () = msg_send![ns_window, setBackgroundColor: color];
+            let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: YES];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sync_macos_chrome(_cx: &App) {}
 
 /// One `voice ·` line for the chat during a call: what the narrator said,
 /// marked by kind so a question or a failure reads as one. Everything else

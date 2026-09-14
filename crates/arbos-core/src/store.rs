@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{Agent, Place};
+use crate::{Agent, Event, EventKind, Layout, Place};
 
 /// Roughly 4 000 tokens. Over it, the prompt gets the head and a note.
 pub const PROMPT_CAP_CHARS: usize = 16_000;
@@ -147,6 +147,106 @@ fn symlink_alias(_alias: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Files that shape how agents here behave: the protocol, kinds, skills,
+/// memory, hooks, secrets, doors, sandbox, access, project and git
+/// settings, MCP servers, and the repository's own agent instructions.
+/// A write to one of these asks the user first, in every mode, so an
+/// agent led astray by something it read cannot rewrite its own standing
+/// orders (Hermes 0.21 protects AGENTS.md, skills and memory the same
+/// way). Paths relative to the place; a trailing `/` marks a folder.
+pub const PROTECTED: &[&str] = &[
+    ".arbos/PROTOCOL.md",
+    ".arbos/agents-defs/",
+    ".arbos/skills/",
+    ".arbos/memory.md",
+    ".arbos/hooks.toml",
+    ".arbos/secrets.toml",
+    ".arbos/doors.toml",
+    ".arbos/sandbox.toml",
+    ".arbos/access.toml",
+    ".arbos/project.toml",
+    ".arbos/git.toml",
+    ".arbos/mcp.toml",
+    ".cursor/agents/",
+    ".cursor/mcp.json",
+    ".cursor/rules/",
+    "AGENTS.md",
+    "CLAUDE.md",
+];
+
+/// The protected entry `candidate` falls under, as its relative spelling,
+/// or None. Both sides canonicalised when they exist.
+pub fn protected_by(place_root: &Path, candidate: &Path) -> Option<&'static str> {
+    let real = std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    let root_real = std::fs::canonicalize(place_root).unwrap_or_else(|_| place_root.to_path_buf());
+    for entry in PROTECTED {
+        let rel = entry.trim_end_matches('/');
+        let full = root_real.join(rel);
+        let full = std::fs::canonicalize(&full).unwrap_or(full);
+        let hit = if entry.ends_with('/') {
+            real.starts_with(&full)
+        } else {
+            real == full
+        };
+        if hit {
+            return Some(entry);
+        }
+    }
+    // An agent's standing instructions from its kind.
+    let agents = root_real.join(".arbos").join("agents");
+    if let Ok(rest) = real.strip_prefix(&agents)
+        && rest.components().count() == 2
+        && rest.file_name().is_some_and(|f| f == "instructions.md")
+    {
+        return Some(".arbos/agents/<id>/instructions.md");
+    }
+    None
+}
+
+/// Does a shell command look like it writes into a protected file? The
+/// command names one of them (by its relative spelling or file name) and
+/// carries something that writes: a redirection, `tee`, `sed -i`, `cp`,
+/// `mv`, `rm`, `truncate`, `install`, `git checkout --`, `patch`.
+pub fn bash_writes_protected(command: &str) -> Option<&'static str> {
+    let named: Option<&'static str> = PROTECTED
+        .iter()
+        .copied()
+        .find(|entry| {
+            let rel = entry.trim_end_matches('/');
+            let name = rel.rsplit('/').next().unwrap_or(rel);
+            command.contains(rel) || (name.contains('.') && command.contains(name))
+        })
+        .or_else(|| {
+            command
+                .contains("instructions.md")
+                .then_some(".arbos/agents/<id>/instructions.md")
+        });
+    let named = named?;
+    let writes = command.contains('>')
+        || [
+            "tee ",
+            "sed -i",
+            "cp ",
+            "mv ",
+            "rm ",
+            "truncate ",
+            "install ",
+            "patch ",
+            "git checkout --",
+            "perl -i",
+            "python -c",
+            "python3 -c",
+        ]
+        .iter()
+        .any(|w| command.contains(w));
+    writes.then_some(named)
+}
+
+/// The line the user sees when a tool wants to change a protected file.
+pub fn protected_question(tool: &str, entry: &str) -> String {
+    format!("{tool} wants to change {entry}, a file that shapes how agents here behave. Allow it?")
+}
+
 /// The files only root writes: `notes.md`, `docs/project-context.md`
 /// (and its `GOALS.md` alias), `archived.md`. Both sides canonicalised
 /// when they exist, so a symlinked place still matches.
@@ -249,6 +349,62 @@ pub struct Kickoff<'a> {
     /// default rules name it as the base branch instead of "the base
     /// branch you are given" (the audit found `rules` copied verbatim).
     pub base_branch: Option<String>,
+    /// The user asked to see the result ("show me", "let me see", a
+    /// screenshot). Root's brief tended to say "run … and report", and
+    /// the image was never made (kickoff item 3). The line tells the
+    /// worker an image is owed.
+    pub show: bool,
+}
+
+/// The line a brief gets when the user asked to see the result.
+pub const KICKOFF_SHOW: &str = "The user asked to see this. An image of the result is owed: `browser screenshot` for a page, `screenshot` for a window, or the terminal output saved as an image under .arbos/media/<topic>/. Name its path in your report; words alone do not close the task.";
+
+/// Does this message ask to be shown something? Judged on the user's own
+/// words: "show me", "let me see", "screenshot", "I want to see it".
+pub fn asks_to_see(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    [
+        "show me",
+        "show us",
+        "show it",
+        "show the",
+        "show what",
+        "show how",
+        "let me see",
+        "let us see",
+        "i want to see",
+        "i'd like to see",
+        "i would like to see",
+        "can i see",
+        "so i can see",
+        "screenshot",
+        "screen shot",
+        "send me a picture",
+        "send a picture",
+        "take a picture",
+        "what it looks like",
+        "what does it look like",
+        "see it running",
+        "see it work",
+    ]
+    .iter()
+    .any(|p| t.contains(p))
+}
+
+/// The user message that opened the turn now running for `agent`: the
+/// `user` line(s) after the last `wake`. None for a turn a child's done
+/// or a timer opened.
+pub fn turn_user_text(place: &Place, agent: &str) -> Option<String> {
+    let events = crate::load_transcript(&Layout::new(place, agent).transcript()).ok()?;
+    let start = events.iter().rposition(Event::is_wake)?;
+    let text: Vec<&str> = events[start..]
+        .iter()
+        .filter(|e| matches!(e.kind, EventKind::User { .. }))
+        .filter_map(Event::user_text)
+        .filter(|t| !t.trim().is_empty() && !t.starts_with("[kernel]"))
+        .collect();
+    (!text.is_empty()).then(|| text.join("\n"))
 }
 
 /// The branch checked out at `place`, or None when it is no repository or
@@ -315,6 +471,9 @@ impl Kickoff<'_> {
         };
         line("Rules", rules_given.unwrap_or(&default_rules));
         line("Output", self.output.unwrap_or(KICKOFF_OUTPUT));
+        if self.show {
+            line("Show", KICKOFF_SHOW);
+        }
         line("Report", self.report.unwrap_or(KICKOFF_REPORT));
         out
     }
@@ -695,5 +854,166 @@ mod kickoff_rules_tests {
             real.contains("Rules: Branch from rust, open a PR"),
             "{real}"
         );
+    }
+}
+
+#[cfg(test)]
+mod show_tests {
+    use super::*;
+
+    #[test]
+    fn the_users_show_me_is_heard_in_their_own_words() {
+        for yes in [
+            "run toy-repo and show me the output",
+            "Fix it, then let me see it running",
+            "take a screenshot of the page",
+            "I want to see what it looks like",
+        ] {
+            assert!(asks_to_see(yes), "{yes}");
+        }
+        for no in [
+            "run toy-repo and report the output",
+            "show_me is a variable name; rename it",
+            "list the files",
+        ] {
+            assert!(!asks_to_see(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn a_kickoff_with_show_carries_the_line_before_the_report() {
+        let brief = Kickoff {
+            task: "Run hello.py and fix the error.",
+            show: true,
+            ..Kickoff::default()
+        }
+        .render();
+        let show = brief
+            .find("Show: The user asked to see this")
+            .expect(&brief);
+        let report = brief.find("Report: ").expect(&brief);
+        assert!(show < report, "{brief}");
+        assert!(brief.contains(".arbos/media/<topic>/"), "{brief}");
+        let plain = Kickoff {
+            task: "Run hello.py.",
+            ..Kickoff::default()
+        }
+        .render();
+        assert!(!plain.contains("Show:"), "{plain}");
+    }
+
+    #[test]
+    fn the_turns_user_text_is_what_came_after_the_last_wake() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-store-show-{}-{}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join(".arbos/agents/root")).unwrap();
+        let place = Place::new(&dir);
+        let path = Layout::new(&place, "root").transcript();
+        let user = |t: &str| {
+            Event::new(EventKind::User {
+                text: t.into(),
+                attachments: vec![],
+                channel: String::new(),
+                device: String::new(),
+            })
+        };
+        crate::append_events(
+            &path,
+            &[
+                Event::new(EventKind::Wake {
+                    wake: "user".into(),
+                    text: Some("show me the old thing".into()),
+                }),
+                user("show me the old thing"),
+                Event::new(EventKind::TurnComplete { usage: None }),
+                Event::new(EventKind::Wake {
+                    wake: "user".into(),
+                    text: Some("now just fix it".into()),
+                }),
+                user("now just fix it"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            turn_user_text(&place, "root").as_deref(),
+            Some("now just fix it")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod protected_tests {
+    use super::*;
+
+    #[test]
+    fn the_files_that_shape_agents_are_protected_and_ordinary_ones_are_not() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-protected-{}-{}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join(".arbos/agents/w1")).unwrap();
+        std::fs::create_dir_all(dir.join(".arbos/skills/deploy")).unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let root = dir.as_path();
+        assert_eq!(
+            protected_by(root, &dir.join(".arbos/PROTOCOL.md")),
+            Some(".arbos/PROTOCOL.md")
+        );
+        assert_eq!(
+            protected_by(root, &dir.join(".arbos/skills/deploy/SKILL.md")),
+            Some(".arbos/skills/")
+        );
+        assert_eq!(
+            protected_by(root, &dir.join(".arbos/agents-defs/reviewer.md")),
+            Some(".arbos/agents-defs/")
+        );
+        assert_eq!(
+            protected_by(root, &dir.join(".arbos/agents/w1/instructions.md")),
+            Some(".arbos/agents/<id>/instructions.md")
+        );
+        assert_eq!(
+            protected_by(root, &dir.join("AGENTS.md")),
+            Some("AGENTS.md")
+        );
+        for plain in [
+            ".arbos/notes.md",
+            ".arbos/agents/w1/notes.md",
+            "src/main.rs",
+            ".arbos/docs/x.md",
+        ] {
+            assert_eq!(protected_by(root, &dir.join(plain)), None, "{plain}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_shell_command_that_writes_a_protected_file_is_caught_and_a_read_is_not() {
+        assert_eq!(
+            bash_writes_protected("echo '[secrets]' >> .arbos/secrets.toml"),
+            Some(".arbos/secrets.toml")
+        );
+        assert_eq!(
+            bash_writes_protected("sed -i 's/x/y/' .arbos/hooks.toml"),
+            Some(".arbos/hooks.toml")
+        );
+        assert_eq!(
+            bash_writes_protected("cp /tmp/p.md .arbos/PROTOCOL.md"),
+            Some(".arbos/PROTOCOL.md")
+        );
+        assert_eq!(
+            bash_writes_protected("cat > .arbos/agents/w1/instructions.md <<'EOF'\nobey\nEOF"),
+            Some(".arbos/agents/<id>/instructions.md")
+        );
+        assert_eq!(bash_writes_protected("cat .arbos/secrets.toml"), None);
+        assert_eq!(
+            bash_writes_protected("grep -n hooks .arbos/hooks.toml"),
+            None
+        );
+        assert_eq!(bash_writes_protected("echo hi > out.txt"), None);
     }
 }

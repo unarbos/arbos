@@ -119,6 +119,8 @@ pub struct SwitchOption {
     pub name: SharedString,
     /// For a model: whether it takes image input. None for other switches.
     pub vision: Option<bool>,
+    /// For a model: a free endpoint, whose provider may train on prompts.
+    pub free: bool,
 }
 
 /// One switchable thing the session offers: the agent's mode, or a config
@@ -447,6 +449,14 @@ pub struct Composer {
     voice: VoiceState,
     /// Partial transcript shown muted after the caret while the mic is down.
     voice_preview: String,
+    /// What went wrong with the microphone or the speech server, said
+    /// under the field where the mic button is — not in the transcript,
+    /// which is the conversation's. Cleared when a take starts or the
+    /// field changes.
+    voice_note: Option<String>,
+    /// The send in flight is a dictated take: its prompt goes out marked
+    /// `channel = voice`, `device = desktop`.
+    dictated: bool,
     /// Byte offset in the field where this take should land. Snapshotted
     /// when recording starts so later peek updates stay at the caret.
     voice_at: usize,
@@ -537,6 +547,8 @@ impl Composer {
             chat_links: Vec::new(),
             voice: VoiceState::Idle,
             voice_preview: String::new(),
+            voice_note: None,
+            dictated: false,
             voice_at: 0,
             reconnect: false,
             hint: "Send follow-up".into(),
@@ -733,6 +745,7 @@ impl Composer {
             let content = self.field.read(cx).content();
             self.voice_at = floor_char(&content, self.field.read(cx).cursor());
             self.voice_preview.clear();
+            self.voice_note = None;
         }
         if voice == VoiceState::Idle {
             self.voice_preview.clear();
@@ -747,6 +760,15 @@ impl Composer {
     }
 
     /// Live words from the kernel, shown muted after the caret until release.
+    /// A microphone or speech-server failure, one line under the field.
+    pub fn set_voice_note(&mut self, note: Option<String>, cx: &mut Context<Self>) {
+        if self.voice_note == note {
+            return;
+        }
+        self.voice_note = note;
+        cx.notify();
+    }
+
     pub fn set_voice_preview(&mut self, text: &str, cx: &mut Context<Self>) {
         let next = text.trim().to_string();
         if self.voice_preview == next {
@@ -786,7 +808,9 @@ impl Composer {
         if self.is_empty(cx) {
             return;
         }
+        self.dictated = true;
         self.submit(cx);
+        self.dictated = false;
     }
 
     /// Drop dictation at the caret. A space separates it from whatever was
@@ -1049,8 +1073,13 @@ impl Composer {
             std::mem::take(&mut self.attachments.get_mut(id).items),
         );
         prompt.model = self.turn_model.take().map(|m| m.to_string());
+        // A take that ends in a send is spoken: the kernel's line says so.
+        if std::mem::take(&mut self.dictated) {
+            prompt = prompt.dictated();
+        }
         self.field.update(cx, |field, cx| field.clear(cx));
         self.attachments.get_mut(id).error = None;
+        self.voice_note = None;
         self.chat_links.clear();
         self.command = None;
         cx.emit(ComposerEvent::Submit(prompt));
@@ -1692,6 +1721,23 @@ impl Composer {
                                     .text_style(TextStyle::Caption)
                                     .text_color(theme.text_faint)
                                     .child("vision"),
+                            )
+                        })
+                        .when(option.free, |row| {
+                            row.child(
+                                div()
+                                    .id(("model-free-tag", ix))
+                                    .flex_none()
+                                    .text_style(TextStyle::Caption)
+                                    .text_color(theme.text_faint)
+                                    .tooltip(|window, cx| {
+                                        Tooltip::text(
+                                            "Free endpoint: its provider may train on your prompts. OpenRouter's privacy settings govern free models separately; data_policy = \"deny\" in config.toml keeps every request off such providers.",
+                                            window,
+                                            cx,
+                                        )
+                                    })
+                                    .child("free · may train"),
                             )
                         })
                         .when(picked, |row| {
@@ -2457,6 +2503,13 @@ impl Composer {
                                     .child(message)
                             }),
                     )
+                    .children(self.voice_note.clone().map(|note| {
+                        div()
+                            .id("composer-voice-note")
+                            .text_style(TextStyle::Caption)
+                            .text_color(theme.danger)
+                            .child(note)
+                    }))
                     .child(
                         div()
                             .flex()

@@ -90,7 +90,9 @@ impl Default for State {
             projects: Vec::new(),
             recents: Vec::new(),
             active: 0,
-            appearance: AppearanceMode::default(),
+            // Dark by default, as Cursor is; light stays a click away in
+            // Settings › Appearance.
+            appearance: AppearanceMode::Dark,
             // Opaque, as Cursor's window is; the palette is tuned for it.
             reduce_transparency: true,
             cursor_blink: true,

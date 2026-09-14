@@ -144,7 +144,9 @@ impl Tool for Bash {
 
             let root = JobsRoot::for_agent(&cx.place, &cx.agent.id);
             let sandbox = crate::sandbox::for_agent(&cx.place, &cx.agent);
-            let (job, mut child) = root.spawn(cmd, &dir, timeout_ms, sandbox.as_ref())?;
+            let granted = crate::secrets::store()
+                .env_for(&arbos_core::lineage(&cx.place, cx.agent.id.as_str()));
+            let (job, mut child) = root.spawn(cmd, &dir, timeout_ms, sandbox.as_ref(), granted)?;
             if opt_bool(&args, "keep").unwrap_or(false) {
                 let _ = std::fs::write(job.dir.join("keep"), "");
             }

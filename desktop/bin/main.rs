@@ -26,6 +26,15 @@ fn main() -> Result<()> {
     });
     let state = state::restore();
     let app = gpui_platform::application().with_assets(assets::Assets);
+    // `arbos://…` links (Info.plist CFBundleURLTypes) and folders opened
+    // with the app land here. Today that brings the window forward; routing
+    // a link to its chat is the next step, and a scheme nobody answers is
+    // what the bundle would otherwise advertise.
+    app.on_open_urls(|urls| {
+        for url in &urls {
+            eprintln!("open: {url}");
+        }
+    });
     // The Dock icon and a second launch both land here. ⌘W leaves the app
     // running with no window, as it does in every other mac app, so this is
     // the way back to one.
@@ -76,6 +85,8 @@ fn main() -> Result<()> {
         composer::init(cx);
         opener::init(cx);
         tab_sheet::init(cx);
+        bezel::ui::palette::init(cx);
+        arbos_desktop::view::settings::init(cx);
         editor::init(cx);
         root::init(cx);
         // Last: it reads every binding above off the keymap to put the

@@ -7,14 +7,14 @@
 
 use crate::{
     model::{
-        session::ChildState,
+        session::{ChatSession, ChildState},
         store_view::{FileKind, PageBlock, PageItem, ProjectPage, Resource, StoreFile, Target},
         surface::{Surface, SurfaceId, SurfaceKind},
         workspace::Workspace,
     },
     view::{
         component::{composer::SessionDrag, menu::Menu, surface as board, transcript},
-        root::{self, Arbos, NewSession, Pane, ShowProject, TogglePanel},
+        root::{self, Arbos, NewSession, Pane, SearchChats, ShowProject, TogglePanel},
         settings::Section,
     },
 };
@@ -136,6 +136,13 @@ struct AgentLine {
     since: Duration,
 }
 
+/// A worker the kernel archived that this window never had a row for:
+/// known only by its folder under `archive/agents/`.
+struct ArchivedOnly {
+    id: String,
+    title: String,
+}
+
 /// What rides under the cursor while an agent is being carried.
 struct Carried(SharedString);
 
@@ -196,6 +203,25 @@ impl Arbos {
         rows
     }
 
+    /// The rows the keyboard steps through: what the panel shows. Archived
+    /// workers sit behind the "N archived" row, so while it is folded the
+    /// arrows step over them, as the eye does.
+    pub(crate) fn visible_agent_rows(&self, cx: &App) -> Vec<AgentRow> {
+        let mut rows = self.agent_rows(cx);
+        if !self.archived_open {
+            let workspace = self.workspace.read(cx);
+            if let Some(project) = workspace.active_project() {
+                rows.retain(|row| {
+                    row.depth == 0
+                        || project
+                            .session(row.id)
+                            .is_none_or(|chat| !(chat.closed || chat.agent_gone()))
+                });
+            }
+        }
+        rows
+    }
+
     /// The panel, or nothing on a window too narrow to give it room.
     pub(crate) fn panel(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.panel_open || f32::from(window.viewport_size().width) < PANEL_MIN_WINDOW {
@@ -222,19 +248,35 @@ impl Arbos {
             .enumerate()
             .filter_map(|(n, row)| {
                 let chat = project.session(row.id)?;
+                let archived = n != 0 && (chat.closed || chat.agent_gone());
+                // An archived worker's folder moved with its name; a row
+                // that never learned it reads the name from the archive.
+                let title = match (&chat.name, chat.agent_gone(), &chat.agent_session) {
+                    (None, true, Some(sid)) if !remote => archived_title(&place.path, sid)
+                        .unwrap_or_else(|| workspace.display_label(row.id)),
+                    _ => workspace.display_label(row.id),
+                };
                 Some(AgentLine {
                     id: row.id,
                     depth: row.depth,
-                    title: workspace.display_label(row.id),
+                    title,
                     state: chat.child_state(),
                     main: n == 0,
-                    archived: chat.closed,
+                    // Closed here, or moved to `archive/agents/` by the
+                    // kernel once its done was read: out of the live list.
+                    archived,
                     // A kernel child has no flight to time; the shared clock
                     // keeps its spinner turning.
                     since: chat.elapsed().unwrap_or_else(transcript::live_phase),
                 })
             })
             .collect();
+        let (agents, archived): (Vec<AgentLine>, Vec<AgentLine>) =
+            agents.into_iter().partition(|line| !line.archived);
+        let archived_only = (!remote)
+            .then(|| archived_only(&place.path, &project.sessions))
+            .unwrap_or_default();
+        let archived_count = archived.len() + archived_only.len();
         let working = agents
             .iter()
             .filter(|line| line.state == ChildState::Working)
@@ -312,6 +354,22 @@ impl Arbos {
                     .into_iter()
                     .map(|line| self.agent_row(line, focused, &theme, cx)),
             );
+        if archived_count > 0 {
+            body = body.child(self.archived_head(archived_count, &theme, cx));
+            if self.archived_open {
+                body = body
+                    .children(
+                        archived
+                            .into_iter()
+                            .map(|line| self.agent_row(line, focused, &theme, cx)),
+                    )
+                    .children(
+                        archived_only
+                            .into_iter()
+                            .map(|line| archived_only_row(line, &theme)),
+                    );
+            }
+        }
         if !processes.is_empty() {
             body = body
                 .child(section_head("Processes", None, &theme))
@@ -470,6 +528,38 @@ impl Arbos {
 
     /// One agent: its state glyph, its title, indented by its depth. The
     /// one in front takes the selection wash; a finished sub-agent fades.
+    /// "N archived": the workers the kernel moved out of the live tree, one
+    /// row that unfolds them, faint with their checks, below the live ones.
+    fn archived_head(&self, count: usize, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.archived_open;
+        row(("panel-archived", 0), 1, false, theme)
+            .child(glyph_box(
+                icons::icon(if open {
+                    icons::arrows::ALT_ARROW_DOWN
+                } else {
+                    icons::arrows::ALT_ARROW_RIGHT
+                })
+                .size(px(11.))
+                .text_color(theme.text_faint)
+                .into_any_element(),
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(format!(
+                        "{count} archived"
+                    ))),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.archived_open = !this.archived_open;
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
     fn agent_row(
         &self,
         line: AgentLine,
@@ -905,7 +995,7 @@ impl Arbos {
                         }
                     }))
             })
-            .child(SharedString::from(item.label.clone()));
+            .child(SharedString::from(chip_label(item)));
         div()
             .id(id)
             .flex_none()
@@ -1005,6 +1095,9 @@ impl Arbos {
 
     /// The bottom strip: settings on the left, a sub-chat on the right.
     fn panel_foot(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        // Something the user tried needed a permission that is not granted:
+        // a dot on the gear, and nothing louder, after "Skip for now".
+        let wants_permission = self.permission_center.read(cx).wants_attention();
         div()
             .flex_none()
             .h(px(40.))
@@ -1029,13 +1122,48 @@ impl Arbos {
                         )
                     })
                     .child(
-                        icons::icon(icons::system::SETTINGS_MINIMALISTIC)
+                        div()
+                            .relative()
+                            .child(
+                                icons::icon(icons::system::SETTINGS_MINIMALISTIC)
+                                    .size(px(14.))
+                                    .text_color(theme.text_muted),
+                            )
+                            .when(wants_permission, |el| {
+                                el.child(
+                                    div()
+                                        .id("settings-dot")
+                                        .absolute()
+                                        .top(px(-2.))
+                                        .right(px(-3.))
+                                        .size(px(6.))
+                                        .rounded_full()
+                                        .bg(theme.warning),
+                                )
+                            }),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if wants_permission {
+                            this.show_permissions(window, cx);
+                        } else {
+                            this.open_settings(Section::General, cx);
+                        }
+                    })),
+            )
+            .child(
+                theme
+                    .ghost("search-chats")
+                    .px(px(8.))
+                    .py(px(6.))
+                    .tooltip(|window, cx| Tooltip::with_keystroke("Search chats", "⌘K", window, cx))
+                    .child(
+                        icons::icon(icons::system::MAGNIFER)
                             .size(px(14.))
                             .text_color(theme.text_muted),
                     )
-                    .on_click(
-                        cx.listener(|this, _, _, cx| this.open_settings(Section::General, cx)),
-                    ),
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.search_chats(&SearchChats, window, cx)
+                    })),
             )
             .child(
                 theme
@@ -1092,6 +1220,109 @@ fn push_children(rows: &mut Vec<AgentRow>, workspace: &Workspace, parent: u64, d
             depth,
         });
         push_children(rows, workspace, child.id, depth.saturating_add(1));
+    }
+}
+
+/// The title an archived worker's `agent.md` carries (`title:`, else
+/// `name:`), read from `archive/agents/<id>/`.
+fn archived_title(path: &std::path::Path, id: &str) -> Option<String> {
+    let agent_md = arbos_core::Place::new(path)
+        .arbos()
+        .join("archive")
+        .join("agents")
+        .join(id)
+        .join("agent.md");
+    let text = std::fs::read_to_string(agent_md).ok()?;
+    let field = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(key))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
+    field("title:").or_else(|| field("name:"))
+}
+
+/// Archived workers this window has no row for: folders under
+/// `.arbos/archive/agents/` whose id no session here carries. Titled from
+/// their `agent.md` (`title:`, else `name:`, else the folder).
+fn archived_only(path: &std::path::Path, sessions: &[ChatSession]) -> Vec<ArchivedOnly> {
+    let dir = arbos_core::Place::new(path).arbos().join("archive").join("agents");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<ArchivedOnly> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if sessions
+                .iter()
+                .any(|chat| chat.agent_session.as_deref() == Some(id.as_str()))
+            {
+                return None;
+            }
+            let agent_md = std::fs::read_to_string(entry.path().join("agent.md")).unwrap_or_default();
+            let field = |key: &str| {
+                agent_md
+                    .lines()
+                    .find_map(|line| line.strip_prefix(key))
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned)
+            };
+            let title = field("title:").or_else(|| field("name:")).unwrap_or_else(|| id.clone());
+            Some(ArchivedOnly { id, title })
+        })
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// A row for an archived worker with no chat here: its title, a check,
+/// nothing to click — the history is the kernel's (`grep scope=history`).
+fn archived_only_row(line: ArchivedOnly, theme: &Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .h(px(ROW_HEIGHT))
+        .pl(px(8. + TREE_STEP * 2.))
+        .pr(px(8.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.))
+        .text_style(TextStyle::Caption)
+        .child(glyph_box(
+            icons::icon(icons::status::CHECK)
+                .size(px(12.))
+                .text_color(theme.text_faint)
+                .into_any_element(),
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(theme.text_faint)
+                .child(SharedString::from(line.title)),
+        )
+        .into_any_element()
+}
+
+/// A page item's label as prose shows it: the chip glyph for what it
+/// points at (`⚙` a worker, `⛓` a pull request, `📄` a document), then
+/// the words.
+fn chip_label(item: &PageItem) -> String {
+    use crate::view::chips::{self, Kind};
+    let kind = match &item.target {
+        Some(Target::Worker(_)) => Kind::Agent,
+        Some(Target::Url(url)) => chips::classify(url),
+        Some(Target::File(path)) => chips::classify(&path.to_string_lossy()),
+        None => Kind::Other,
+    };
+    match chips::glyph(kind) {
+        Some(glyph) if !item.label.starts_with(glyph) => format!("{glyph} {}", item.label),
+        _ => item.label.clone(),
     }
 }
 

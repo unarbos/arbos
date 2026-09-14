@@ -146,16 +146,17 @@ pub fn start(handle: WindowHandle<Arbos>, cx: &mut App) -> Result<PathBuf> {
             let reply_on_error = reply.clone();
             let id_on_error = id.clone();
             let quitting = method == "quit";
-            // An action that closed its own window (CloseWindow on Settings)
-            // has nothing left to settle on: the request succeeded, and the
-            // reply says the window is gone rather than failing.
+            // A request that closed its own window (CloseWindow on
+            // Settings, Escape in it) has nothing left to settle on: the
+            // request succeeded, and the reply says the window is gone
+            // rather than failing.
             let still_open = cx.update(|cx| cx.windows().into_iter().any(|w| w == target));
-            if method == "action" && !still_open {
-                let _ = reply.send(json!({
-                    "id": id,
-                    "ok": true,
-                    "result": { "action": acted.get("action").cloned().unwrap_or(Value::Null), "window_closed": true }
-                }));
+            if !still_open {
+                let mut result = acted;
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("window_closed".into(), json!(true));
+                }
+                let _ = reply.send(json!({ "id": id, "ok": true, "result": result }));
                 continue;
             }
             let settled = cx.update_window(target, |_, window, _| {
@@ -993,6 +994,18 @@ fn describe(probe: &ElementProbe, window: &Window) -> Value {
     })
 }
 
+/// The last dictated take's clock, with the gateway's own numbers.
+fn voice_latency(this: &Arbos) -> Value {
+    let voice = crate::voice_ws::status();
+    json!({
+        "first_partial_ms": this.dictation.first_partial_ms,
+        "release_to_send_ms": this.dictation.release_to_send_ms,
+        "gateway_first_partial_ms": voice.first_partial_ms,
+        "partial_age_ms": voice.partial_age_ms,
+        "phase": voice.phase.map(|p| p.as_str()),
+    })
+}
+
 fn point_json(position: Point<Pixels>) -> Value {
     json!({ "x": f32::from(position.x), "y": f32::from(position.y) })
 }
@@ -1076,6 +1089,28 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         "text_size": workspace.text_size,
         "settings_open": cx.windows().iter().any(|w| w.downcast::<SettingsWindow>().is_some()),
         "opener_open": this.opener.read(cx).open,
+        "search_open": this.chat_search.read(cx).is_open(),
+        "permissions": {
+            "open": this.permissions_sheet.read(cx).is_open(),
+            "seen": workspace.permissions_seen,
+            "wants_attention": this.permission_center.read(cx).wants_attention(),
+            "enabling_all": this.permission_center.read(cx).enabling_all,
+            "rows": this.permission_center.read(cx).rows.iter().map(|row| json!({
+                "permission": row.permission.title(),
+                "status": match &row.status {
+                    crate::permissions::Status::Granted => "granted",
+                    crate::permissions::Status::NotAsked => "not_asked",
+                    crate::permissions::Status::Denied => "denied",
+                    crate::permissions::Status::Unavailable(_) => "unavailable",
+                },
+                "phase": match &row.phase {
+                    crate::model::permission_center::Phase::Idle => "idle",
+                    crate::model::permission_center::Phase::Requesting { .. } => "requesting",
+                    crate::model::permission_center::Phase::Prompted { .. } => "prompted",
+                    crate::model::permission_center::Phase::NeedsSettings => "needs_settings",
+                },
+            })).collect::<Vec<_>>(),
+        },
         "menu_open": this.menu.is_some(),
         "renaming": this.renaming.is_some(),
         "composer": {
@@ -1085,6 +1120,9 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
             // The take's live words (dictation partials), painted after the caret.
             "preview": composer.voice_preview(),
         },
+        // The last dictated take's clock: Fn press to first partial, release
+        // to send. The gateway's own numbers ride along.
+        "voice_latency": voice_latency(this),
         // The call to the project in front, when one is live: what the
         // strip shows, so a test can assert on it without pixels.
         "call": this.call.as_ref().map(|call| {

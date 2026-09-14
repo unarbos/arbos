@@ -146,29 +146,30 @@ pub(crate) fn summarise_call(_name: &str, args: &serde_json::Value) -> String {
 pub const BODY_CAP: usize = 1024 * 1024;
 const BODY_HEAD: usize = 64 * 1024;
 
-/// Spill an oversized body to `<agent dir>/results/<call_id>.txt` and put a
-/// head plus the cite on the transcript line instead.
-pub fn cap_body(cx: &RunCx, call_id: &str, body: String) -> String {
-    if body.len() <= BODY_CAP {
+/// A body larger than the model's view of it (the eviction limits) is
+/// written whole to `<agent dir>/results/<call_id>.txt`, so the model can
+/// `read` it in slices by the path the evicted view cites; the transcript
+/// keeps it whole too, up to `BODY_CAP`. Past that the transcript line
+/// holds a head plus the path instead.
+pub fn cap_body(cx: &RunCx, tool: &str, call_id: &str, body: String) -> String {
+    // A `read` result already has a file behind it — the one it read; the
+    // evicted view cites that path, so no copy is kept.
+    if tool == "read" && body.len() <= BODY_CAP {
+        return body;
+    }
+    if !crate::evict::spills(&body) {
         return body;
     }
     let dir = arbos_core::Layout::new(&cx.place, cx.agent.id.as_str())
         .dir
         .join("results");
-    let safe: String = call_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let path = dir.join(format!("{safe}.txt"));
+    let path = dir.join(crate::evict::spill_name(call_id));
     let spilled = std::fs::create_dir_all(&dir)
         .and_then(|_| std::fs::write(&path, &body))
         .is_ok();
+    if body.len() <= BODY_CAP {
+        return body;
+    }
     let cut = body
         .char_indices()
         .map(|(i, _)| i)
@@ -456,7 +457,7 @@ async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Resu
         .run(cx.clone(), prepared.args)
         .await
         .map(|mut out| {
-            out.body = cap_body(cx, &call.id, std::mem::take(&mut out.body));
+            out.body = cap_body(cx, &name, &call.id, std::mem::take(&mut out.body));
             if let Some(line) = &recorded {
                 out.body.push_str("\n\nMechanism recorded for this task: ");
                 out.body.push_str(line);

@@ -166,6 +166,18 @@ pub enum Frame {
     /// `line`; `dropped` lines went to the archive; `restored` names the
     /// project state put back, when files were. Reload the chat from the
     /// files or cut your own copy — the lines will not be replayed.
+    /// Kernel → every client: what `agent` is doing now, in a few words —
+    /// the agent's own `status` line (`source: "agent"`) or the kernel's
+    /// guess from the tool in flight (`"derived"`). An empty `step` means
+    /// idle: the line goes.
+    Status {
+        agent: String,
+        step: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        since: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        source: String,
+    },
     Rewound {
         agent: String,
         line: u64,
@@ -418,6 +430,11 @@ pub struct TreeNode {
     /// Pull requests this agent and its descendants opened.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub prs: u32,
+    /// What the agent is doing right now, in a few words (`status.toml`):
+    /// its own `status` line, or the kernel's guess from the tool in
+    /// flight. Absent when idle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
 }
 
 fn is_zero(n: &u32) -> bool {

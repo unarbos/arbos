@@ -1,11 +1,22 @@
 name: release
 
-# Builds the Linux kernel binary and attaches it to the GitHub release for
-# the tag. The macOS DMG is built and uploaded by a Mac worker
-# (`cd desktop && make dmg`), not here.
+# Builds the Linux kernel binary and the signed, notarized macOS disk image,
+# and attaches both to the GitHub release for the tag.
 #
 #   git tag v0.2.0 && git push origin v0.2.0
 #   gh workflow run release -f tag=v0.2.0
+#
+# The macOS job needs five repository secrets, all from Jacob's Apple
+# developer account (team 25SCF3Q2AK):
+#   DEVELOPER_ID_CERT_P12  base64 of the "Developer ID Application" cert + key
+#                          (Keychain Access › export .p12; `base64 -i cert.p12`)
+#   P12_PASSWORD           the password given at export
+#   APPLE_ID               the Apple ID email
+#   APPLE_TEAM_ID          25SCF3Q2AK
+#   APPLE_APP_PASSWORD     an app-specific password (appleid.apple.com › Sign-In
+#                          and Security › App-Specific Passwords)
+# Without them the job skips itself and the Mac worker's `make release`
+# is the fallback.
 
 on:
   push:
@@ -57,4 +68,83 @@ jobs:
             gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
           else
             gh release create "$TAG" --draft --title "$TAG" --generate-notes dist/*.tar.gz dist/*.sha256
+          fi
+
+  macos-dmg:
+    name: Arbos.app (macOS arm64, signed + notarized)
+    runs-on: macos-14
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      HAVE_CERT: ${{ secrets.DEVELOPER_ID_CERT_P12 != '' && secrets.APPLE_APP_PASSWORD != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          # The Makefile stamps CFBundleVersion with the commit count.
+          fetch-depth: 0
+      - name: Skip without signing secrets
+        if: env.HAVE_CERT != 'true'
+        run: echo "DEVELOPER_ID_CERT_P12 / APPLE_APP_PASSWORD not set; the Mac worker builds the DMG (cd desktop && make release)."
+      - name: Toolchain from rust-toolchain.toml
+        if: env.HAVE_CERT == 'true'
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        if: env.HAVE_CERT == 'true'
+        with:
+          key: release-macos
+          workspaces: |
+            .
+            desktop
+      - name: Import the Developer ID certificate
+        if: env.HAVE_CERT == 'true'
+        env:
+          P12_B64: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          pass="$(openssl rand -hex 16)"
+          echo "$P12_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$pass" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
+          test -n "$identity" || { echo "no Developer ID Application identity in the .p12"; exit 1; }
+          echo "SIGN=$identity" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/cert.p12"
+      - name: Build, sign, notarize, staple
+        if: env.HAVE_CERT == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          # No Finder on a runner: the image keeps its backdrop and icon,
+          # only the icon positions are left to Finder's defaults.
+          DMG_LAYOUT: "0"
+        run: |
+          set -euo pipefail
+          cd desktop
+          make release SIGN="$SIGN"
+      - name: Package
+        if: env.HAVE_CERT == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp desktop/target/bundle/Arbos-*-arm64.dmg dist/
+          cp target/release/arbos-kernel "dist/arbos-kernel-${TAG#v}-macos-arm64"
+          (cd dist && for f in *; do shasum -a 256 "$f" > "$f.sha256"; done)
+          ls -la dist
+      - name: Attach to the release
+        if: env.HAVE_CERT == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" --draft --title "$TAG" --generate-notes dist/*
           fi

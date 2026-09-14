@@ -36,6 +36,37 @@ fn board(owner: &str, action: &str, panel: &str, ids: Vec<String>) -> Frame {
 pub struct Spawn(pub Arc<KernelHooks>);
 pub struct Say(pub Arc<KernelHooks>);
 pub struct Ask(pub Arc<KernelHooks>);
+/// `status "Reading project context"`: the live line beside the agent's
+/// name in every window (Cursor's UpdateCurrentStep).
+pub struct StatusTool(pub Arc<KernelHooks>);
+
+impl Tool for StatusTool {
+    fn name(&self) -> &'static str {
+        "status"
+    }
+    fn schema(&self) -> Value {
+        typed_schema(
+            "status",
+            "Say what you are doing now, for the line beside your name: a verb phrase, six words or less (\"Reading project context\"). Call it at each major step; it replaces the last one.",
+            &[("step", "", true, "string")],
+        )
+    }
+    fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
+        Ok(Plan::access(Access::none()))
+    }
+    fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
+        let hooks = Arc::clone(&self.0);
+        Box::pin(async move {
+            let step = req(&args, "step")?.trim().to_string();
+            if step.is_empty() {
+                anyhow::bail!("status: step must say something (a verb phrase, six words or less)");
+            }
+            let shown = arbos_core::status::clip(&step);
+            hooks.set_status(cx.agent.id.as_str(), &shown, "agent")?;
+            Ok(ToolOut::text(format!("Status: {shown}")))
+        })
+    }
+}
 pub struct Browser(pub Arc<KernelHooks>);
 pub struct Terminal {
     pub hooks: Arc<KernelHooks>,
@@ -127,6 +158,19 @@ impl Tool for Spawn {
             let name = opt_str(&args, "name")
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
+            // The user's "show me" travels with the brief: a kickoff that
+            // says "run … and report" lost it, and no image was made.
+            // Judged on the user's words that opened this turn, unless
+            // the brief already asks for an image itself.
+            let show = arbos_core::store::turn_user_text(&cx.place, cx.agent.id.as_str())
+                .is_some_and(|t| arbos_core::store::asks_to_see(&t))
+                && !["task", "do", "brief"]
+                    .iter()
+                    .filter_map(|k| opt_str(&args, k))
+                    .any(|t| {
+                        let t = t.to_ascii_lowercase();
+                        t.contains("screenshot") || t.contains("image") || t.contains("capture")
+                    });
             // The template wins when a task is given; a raw brief is the
             // fallback. Neither is an error the model can act on.
             let rendered = match (opt_str(&args, "task"), opt_str(&args, "brief")) {
@@ -138,8 +182,12 @@ impl Tool for Spawn {
                     output: opt_str(&args, "output"),
                     report: opt_str(&args, "report"),
                     base_branch: arbos_core::store::current_branch(cx.place.path()),
+                    show,
                 }
                 .render(),
+                (None, Some(brief)) if show => {
+                    format!("{brief}\n\nShow: {}\n", arbos_core::store::KICKOFF_SHOW)
+                }
                 (None, Some(brief)) => brief.to_string(),
                 (None, None) => {
                     anyhow::bail!("spawn: give `task` (with the template fields) or a raw `brief`")
@@ -235,7 +283,7 @@ impl Tool for Spawn {
             let mut paths = vec![format!(".arbos/agents/{id}")];
             if let Some(w) = &worktree {
                 body.push_str(&format!(
-                    "\nIt works in its own worktree {} on branch {} (cut from {}). Your checkout is untouched. When its branch is merged or abandoned, remove it: {}",
+                    "\nIt works in its own worktree {} on branch {} (cut from {}). Your checkout is untouched. The worktree is removed when the worker is archived and has nothing uncommitted (its commits stay on the branch); to take it down yourself: {}",
                     w.path.display(),
                     w.branch,
                     w.base,
@@ -286,7 +334,11 @@ impl Tool for Say {
             &[
                 ("to", "Agent id or name, user, or <machine>/<agent>.", true),
                 ("text", "The message; the recipient sees only this.", true),
-                ("mode", "note (default), request, or steer.", false),
+                (
+                    "mode",
+                    "note (default), request, steer, or stop (end a worker's turn now; its done brings what it had).",
+                    false,
+                ),
             ],
         )
     }
@@ -303,7 +355,9 @@ impl Tool for Say {
                 Some(m) => m,
                 // The old wire: wake:true meant request.
                 None if opt_bool(&args, "wake") == Some(true) => SayMode::Request,
-                None => anyhow::bail!("say: mode must be note, request, or steer, not {raw:?}"),
+                None => {
+                    anyhow::bail!("say: mode must be note, request, steer, or stop, not {raw:?}")
+                }
             };
             // `<machine>/<agent>`: an agent on another machine of the hub.
             // Only when that machine is on the roster; a local agent may
@@ -511,21 +565,23 @@ impl Tool for SubscribeTool {
             "type": "function",
             "function": {
                 "name": "subscribe",
-                "description": "The only clock; a firing arrives as a message from subscription:N. add kind: timer (every|after, prompt); shell (cmd, every: no model turn, wakes you on failure; deliver_to user + notify \"…{output}\" sends the reading to the user); github_pr|github_ci (repo, pr); inbox (path, every). list; remove|pause|resume id.",
+                "description": "The only clock; a firing arrives as a message from subscription:N. add kind: timer (every|after, prompt); shell (cmd, every: no model turn, wakes you on failure; deliver_to user + notify \"…{output}\" sends the reading to the user); goal (prompt = what must become true, cmd = the check, exit 0 closes it; you are woken with the goal while it fails, every 30m unless every says otherwise); github_pr (repo, pr); github_ci (repo, pr | branch: a branch's workflow runs); inbox (path, every). list; remove|pause|resume id.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "op": {"type": "string", "enum": ["add", "list", "remove", "pause", "resume"]},
                         "id": {"type": "integer", "description": "remove/pause/resume."},
-                        "kind": {"type": "string", "enum": ["timer", "shell", "github_pr", "github_ci", "inbox"]},
+                        "kind": {"type": "string", "enum": ["timer", "shell", "goal", "github_pr", "github_ci", "inbox"]},
                         "prompt": {"type": "string", "description": "what you are told."},
                         "every": {"type": "string", "description": "e.g. 1h, 10m."},
                         "after": {"type": "string", "description": "once, e.g. 30m."},
                         "cmd": {"type": "string", "description": "shell command."},
                         "deliver_to": {"type": "string", "enum": ["agent", "user", "none"], "description": "shell: default agent."},
-                        "notify": {"type": "string", "description": "deliver_to user: line with {output}."},
+                        "notify": {"type": "string", "description": "deliver_to user: line with {output} (and {previous} with continuity)."},
+                        "continuity": {"type": "boolean", "description": "timer|shell: each firing carries the last one's output (or your last words), so you can compare."},
                         "repo": {"type": "string", "description": "owner/name."},
                         "pr": {"type": "integer", "description": "PR number."},
+                        "branch": {"type": "string", "description": "github_ci: watch this branch's runs instead of a PR."},
                         "path": {"type": "string", "description": "inbox: folder."}
                     },
                     "required": ["op"]
@@ -561,10 +617,15 @@ impl Tool for SubscribeTool {
                         path: opt_str(&args, "path").map(str::to_string),
                         repo: opt_str(&args, "repo").map(str::to_string),
                         pr: args.get("pr").and_then(|v| v.as_u64()).filter(|n| *n > 0),
+                        branch: opt_str(&args, "branch")
+                            .map(str::trim)
+                            .filter(|b| !b.is_empty())
+                            .map(str::to_string),
                         deliver_to: opt_str(&args, "deliver_to").unwrap_or("agent").to_string(),
                         notify: opt_str(&args, "notify").map(str::to_string),
                         expires: opt_str(&args, "expires").map(str::to_string),
                         paused: false,
+                        continuity: opt_bool(&args, "continuity").unwrap_or(false),
                         internal: false,
                         created: String::new(),
                         next_due: None,
@@ -632,31 +693,51 @@ impl Tool for Ask {
     fn schema(&self) -> Value {
         typed_schema(
             "ask",
-            "Ask the user a question.",
+            "Ask the user a question. Default: your turn parks until they answer. wait:false: keep working; the answer lands at your next tool boundary, or opens your next turn.",
             &[
                 ("question", "", true, "string"),
                 ("options", "Choices.", false, "array"),
+                (
+                    "wait",
+                    "false = do not park (default true).",
+                    false,
+                    "boolean",
+                ),
             ],
         )
     }
-    fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
-        Ok(Plan::access(Access::exclusive()).interactive())
+    fn plan(&self, _cx: &PlanCx, args: &Value) -> Result<Plan> {
+        // A non-blocking ask is a message out, nothing more: it runs with
+        // the batch and holds nothing.
+        Ok(if opt_bool(args, "wait").unwrap_or(true) {
+            Plan::access(Access::exclusive()).interactive()
+        } else {
+            Plan::access(Access::none())
+        })
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         let hooks = Arc::clone(&self.0);
         Box::pin(async move {
             let q = req(&args, "question")?;
             let options = opt_strings(&args, "options");
-            // Park: the question is a file, the turn ends after this call,
-            // and the user's answer starts the next turn as a message
-            // (Cursor's shape; restart-safe).
+            let wait = opt_bool(&args, "wait").unwrap_or(true);
+            // The question is a file either way (restart-safe). Parked: the
+            // turn ends after this call and the answer starts the next one
+            // (Cursor's shape). Not parked: the turn goes on, and the
+            // answer is read at the next tool boundary — or opens the next
+            // turn if this one ends first (Codex's inline answers).
             let id = hooks.ask(&cx.agent.id, q, &options, &cx.call_id)?;
-            Ok(ToolOut::parked(
-                format!(
-                    "Question {id} is with the user. This turn ends here; their answer arrives as your next message."
-                ),
-                "Waiting for your answer",
-            ))
+            if wait {
+                return Ok(ToolOut::parked(
+                    format!(
+                        "Question {id} is with the user. This turn ends here; their answer arrives as your next message."
+                    ),
+                    "Waiting for your answer",
+                ));
+            }
+            Ok(ToolOut::text(format!(
+                "Question {id} is with the user; keep working on what does not depend on it. Their answer arrives as a user message at your next tool call, or opens your next turn."
+            )))
         })
     }
 }

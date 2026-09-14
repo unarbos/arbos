@@ -26,6 +26,7 @@ const AGENT_FILES: &[&str] = &[
     "feedback.jsonl",
     "checkpoints.jsonl",
     "instructions.md",
+    "status.toml",
 ];
 /// At the place's root, relative to `.arbos/`. The project store's
 /// status page and context file are here so a window redraws "Project"

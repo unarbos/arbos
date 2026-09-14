@@ -14,7 +14,7 @@ impl Tool for Secret {
     fn schema(&self) -> Value {
         typed_schema(
             "secret",
-            "Keys without seeing them: list names (.arbos/secrets.toml); use NAME sets $NAME in bash's env from now on (value redacted everywhere); revoke NAME. Never print a value.",
+            "Keys without seeing them: list names (.arbos/secrets.toml); use NAME sets $NAME in bash's env for you and your workers from now on (value redacted everywhere); revoke NAME. Never print a value.",
             &[
                 ("action", "list (default), use, or revoke.", false, "string"),
                 ("name", "Secret name.", false, "string"),
@@ -39,11 +39,13 @@ impl Tool for Secret {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
             let place = cx.place.path().to_path_buf();
+            let core_place = cx.place.clone();
+            let agent_id = cx.agent.id.to_string();
             let readonly = cx.agent.readonly;
             let text = tokio::task::spawn_blocking(move || -> Result<String> {
                 let config = Config::load(&place)?;
                 match action.as_str() {
-                    "list" => Ok(list(&config)),
+                    "list" => Ok(list(&config, &agent_id)),
                     "use" => {
                         if readonly {
                             bail!("secret use: a readonly agent may not take secrets into its environment");
@@ -67,18 +69,25 @@ impl Tool for Secret {
                         };
                         let value = resolve(&source)?;
                         let len = value.len();
-                        store().grant(&name, value);
+                        store().grant_to(&name, value, &agent_id);
                         Ok(format!(
-                            "{name} is now set in the environment of every bash command ({len} characters, from {}). Its value is redacted from tool results as [REDACTED:{name}]. Use it as ${name}; never print it.",
+                            "{name} is now set in the environment of your bash commands and your workers' ({len} characters, from {}); other agents' commands do not get it. Its value is redacted from tool results as [REDACTED:{name}]. Use it as ${name}; never print it.",
                             arbos_engine::secrets::kind_of(&source)
                         ))
                     }
                     "revoke" => {
                         let name = name.ok_or_else(|| anyhow::anyhow!("secret revoke needs name"))?;
-                        Ok(if store().revoke(&name) {
-                            format!("{name} is no longer provided to bash commands.")
+                        let subtree = arbos_core::subtree(&core_place, &agent_id);
+                        Ok(if store().revoke_for(&name, &subtree) {
+                            match store().holders(&name) {
+                                Some(left) if !left.is_empty() => format!(
+                                    "{name} is no longer provided to your bash commands or your workers'. Still in use by: {}.",
+                                    left.join(", ")
+                                ),
+                                _ => format!("{name} is no longer provided to bash commands."),
+                            }
                         } else {
-                            format!("{name} was not in use.")
+                            format!("{name} was not in use by you or your workers.")
                         })
                     }
                     other => bail!("secret: action must be list, use, or revoke, not {other:?}"),
@@ -91,22 +100,23 @@ impl Tool for Secret {
     }
 }
 
-fn list(config: &Config) -> String {
+fn list(config: &Config, me: &str) -> String {
     let granted = store().granted_names();
+    let in_use = |name: &str| -> String {
+        match store().holders(name) {
+            None => String::new(),
+            Some(h) if h.is_empty() => " (in use, every agent)".to_string(),
+            Some(h) if h.iter().any(|x| x == me) => " (in use by you)".to_string(),
+            Some(h) => format!(" (in use by {})", h.join(", ")),
+        }
+    };
     let mut lines = Vec::new();
     for (name, kind) in config.describe() {
-        lines.push(format!(
-            "{name} — {kind}{}",
-            if granted.contains(&name) {
-                " (in use)"
-            } else {
-                ""
-            }
-        ));
+        lines.push(format!("{name} — {kind}{}", in_use(&name)));
     }
     for name in &granted {
         if !config.secrets.contains_key(name) {
-            lines.push(format!("{name} — kernel environment (in use)"));
+            lines.push(format!("{name} — kernel environment{}", in_use(name)));
         }
     }
     if lines.is_empty() {

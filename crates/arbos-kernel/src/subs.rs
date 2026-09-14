@@ -66,10 +66,13 @@ pub fn ensure_chores(place: &arbos_core::Place) {
         path: None,
         repo: None,
         pr: None,
+
+        branch: None,
         deliver_to: "none".into(),
         notify: None,
         expires: None,
         paused: false,
+        continuity: false,
         internal: true,
         created: String::new(),
         next_due: None,
@@ -257,7 +260,16 @@ fn fire_with_note(
     };
     match sub.kind.as_str() {
         "timer" => {
-            let body = sub.prompt.clone();
+            // With continuity, the last words of the turn the previous
+            // firing opened ride along (close_turn_folder stores them).
+            let body = match (&sub.continuity, sub.seen.as_deref()) {
+                (true, Some(prev)) if !prev.trim().is_empty() => format!(
+                    "{}\n\nLast time this fired, your turn ended with:\n{}",
+                    sub.prompt,
+                    text::clip(prev, CONTINUITY_CAP)
+                ),
+                _ => sub.prompt.clone(),
+            };
             let outcome = match inbox::deliver(&hooks.place, id, &message(&sub, true, noted(body)))
             {
                 Ok(_) => "fired".to_string(),
@@ -312,6 +324,107 @@ fn fire_with_note(
             };
             settle(hooks, id, sub, now, outcome);
         }
+        // A goal: run its check (when it has one); exit 0 closes the goal
+        // and tells the agent and the user; anything else wakes the agent
+        // with the goal, the check's output, and what changed since last
+        // time. Without a check, the agent is woken each period until it
+        // removes the goal.
+        "goal" => {
+            let key = format!("{id}#{}", sub.id);
+            {
+                let mut set = in_flight().lock().unwrap();
+                if set.len() >= MAX_SHELL || set.contains(&key) {
+                    return;
+                }
+                set.insert(key.clone());
+            }
+            let mut scheduled = sub.clone();
+            scheduled.schedule_next(now);
+            if scheduled.next_due.is_some() {
+                let _ = subscription::save(&hooks.place, id, &scheduled);
+            }
+            let hooks = Arc::clone(hooks);
+            let agent = agent.clone();
+            tokio::spawn(async move {
+                let id = agent.id.as_str();
+                let goal = sub.prompt.trim().to_string();
+                let (met, detail) =
+                    match sub.cmd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+                        Some(cmd) => {
+                            let (_job, code, tail) = run_job(&hooks, &agent, cmd).await;
+                            let tail = tail.trim().to_string();
+                            (
+                                code == 0,
+                                format!(
+                                    "The check `{cmd}` exited {code}.{}",
+                                    if tail.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" Output tail:\n{tail}")
+                                    }
+                                ),
+                            )
+                        }
+                        None => (
+                            false,
+                            "No check is set: you decide when it is met.".to_string(),
+                        ),
+                    };
+                let previous = sub.seen.clone().unwrap_or_default();
+                let outcome = if met {
+                    let body = noted(format!(
+                        "Goal met: {goal}\n{detail}\nGoal #{} is closed. Say so to the user in one line, with what made it true.",
+                        sub.id
+                    ));
+                    let _ = inbox::deliver(&hooks.place, id, &message(&sub, true, body));
+                    let _ = hooks.notify_user(id, &format!("goal met: {goal}"));
+                    crate::klog::info(
+                        "goal_met",
+                        Some(id),
+                        format!("#{} {}", sub.id, text::clip(&goal, 80)),
+                    );
+                    format!("met — {}", text::clip(&detail, 120))
+                } else {
+                    let since = if previous.is_empty() || previous == detail {
+                        String::new()
+                    } else {
+                        format!(
+                            "\nLast time the check said:\n{}",
+                            text::clip(&previous, 1200)
+                        )
+                    };
+                    let body = noted(format!(
+                        "Goal not yet met: {goal}\n{detail}{since}\nWork toward it now. When you believe it is met, end your turn: the check runs again in {} (subscribe remove {} closes the goal without it{}).",
+                        subscription::human_ms(
+                            sub.every_ms()
+                                .unwrap_or(subscription::GOAL_DEFAULT_EVERY_MS)
+                        ),
+                        sub.id,
+                        if sub.cmd.is_none() {
+                            "; that is how a goal with no check is closed"
+                        } else {
+                            ""
+                        }
+                    ));
+                    let _ = inbox::deliver(&hooks.place, id, &message(&sub, true, body));
+                    format!("not met — {}", text::clip(&detail, 120))
+                };
+                if let Some(current) = subscription::get(&hooks.place, id, sub.id) {
+                    let mut current = current;
+                    current.last = text::clip(&outcome, 200);
+                    current.last_fired = Some(inbox::rfc3339(arbos_core::now_ms()));
+                    current.seen = Some(text::clip(&detail, 4000));
+                    if met || current.once {
+                        let _ = subscription::remove(&hooks.place, id, sub.id);
+                    } else {
+                        let _ = subscription::save(&hooks.place, id, &current);
+                    }
+                }
+                in_flight().lock().unwrap().remove(&key);
+                hooks.plan_changed(id);
+                hooks.kick();
+            });
+        }
         "shell" => {
             let key = format!("{id}#{}", sub.id);
             {
@@ -335,6 +448,22 @@ fn fire_with_note(
                 let (job, code, tail) = run_job(&hooks, &agent, &cmd).await;
                 let id = agent.id.as_str();
                 let to_user = sub.deliver_to == "user";
+                // What the command printed last time, for a message or a
+                // notice that compares instead of starting over.
+                let previous = sub
+                    .continuity
+                    .then(|| sub.seen.clone())
+                    .flatten()
+                    .filter(|p| !p.trim().is_empty());
+                let last_time = previous
+                    .as_deref()
+                    .map(|p| {
+                        format!(
+                            "\n\nLast time it printed:\n{}",
+                            text::clip(p, CONTINUITY_CAP)
+                        )
+                    })
+                    .unwrap_or_default();
                 // A reading with nothing to read is a failure too (`curl |
                 // jq` with a dead endpoint exits 0 on some shells).
                 let silent = to_user && tail.trim().is_empty();
@@ -351,14 +480,20 @@ fn fire_with_note(
                         )
                     } else if to_user {
                         let template = sub.notify.clone().unwrap_or_else(|| "{output}".into());
-                        let line = template.replace("{output}", tail.trim());
+                        let line = template.replace("{output}", tail.trim()).replace(
+                            "{previous}",
+                            previous
+                                .as_deref()
+                                .map(str::trim)
+                                .unwrap_or("(nothing yet)"),
+                        );
                         match hooks.notify_user(id, &line) {
                             Ok(()) => format!("exit 0 — told the user: {}", text::clip(&line, 120)),
                             Err(e) => format!("exit 0 — could not tell the user: {e:#}"),
                         }
                     } else {
                         let body = format!(
-                            "{}\n\nSubscription #{} ran `{}` (exit 0). Output:\n{}",
+                            "{}\n\nSubscription #{} ran `{}` (exit 0). Output:\n{}{last_time}",
                             sub.prompt,
                             sub.id,
                             cmd,
@@ -376,7 +511,7 @@ fn fire_with_note(
                         format!("exit {code}")
                     };
                     let body = format!(
-                        "Subscription #{} (`{}`) failed: {why}. Output tail:\n{}\nDiagnose and act: fix the cause, change the command (subscribe remove {} and add a new one), or remove it and say so.",
+                        "Subscription #{} (`{}`) failed: {why}. Output tail:\n{}{last_time}\nDiagnose and act: fix the cause, change the command (subscribe remove {} and add a new one), or remove it and say so.",
                         sub.id,
                         cmd,
                         if tail.is_empty() {
@@ -394,6 +529,9 @@ fn fire_with_note(
                     let mut current = current;
                     current.last = text::clip(&outcome, 200);
                     current.last_fired = Some(inbox::rfc3339(arbos_core::now_ms()));
+                    if current.continuity {
+                        current.seen = Some(text::clip(tail.trim(), CONTINUITY_CAP));
+                    }
                     if current.once || current.every_ms().is_none() {
                         let _ = subscription::remove(&hooks.place, id, sub.id);
                     } else {
@@ -428,6 +566,16 @@ fn fire_with_note(
                     let mut current = current;
                     current.seen = outcome.seen.or(current.seen);
                     current.error = outcome.error;
+                    // A merged or closed pull request has nothing more to
+                    // watch: the subscription goes with this firing.
+                    if outcome.closed {
+                        current.once = true;
+                        crate::klog::info(
+                            "subscription_closed",
+                            Some(&agent_id),
+                            format!("#{}: the pull request is {}", current.id, outcome.last),
+                        );
+                    }
                     settle(
                         &hooks,
                         &agent_id,
@@ -452,10 +600,15 @@ fn fire_with_note(
     }
 }
 
+/// Most of a previous output a continuity firing carries.
+const CONTINUITY_CAP: usize = 4000;
+
 struct Polled {
     seen: Option<String>,
     error: Option<String>,
     last: String,
+    /// The pull request is merged or closed: stop watching.
+    closed: bool,
 }
 
 /// One look at the pull request; the diff against `seen` is the message.
@@ -463,7 +616,22 @@ struct Polled {
 fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
     let repo = sub.repo.clone().unwrap_or_default();
     let pr = sub.pr.unwrap_or(0);
-    match crate::github::snapshot(&repo, pr) {
+    let branch = sub
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty() && sub.pr.is_none());
+    let subject = match branch {
+        Some(b) => format!("{repo}@{b}"),
+        None => format!("{repo}#{pr}"),
+    };
+    // `gh` runs with the grants this agent (or one above it) holds.
+    let env = arbos_engine::secrets::store().env_for(&arbos_core::lineage(&hooks.place, agent));
+    let looked = match branch {
+        Some(b) => crate::github::branch_snapshot(&repo, b, &env),
+        None => crate::github::snapshot(&repo, pr, &env),
+    };
+    match looked {
         Ok(now) => {
             let prev: Option<crate::github::Snapshot> = sub
                 .seen
@@ -474,7 +642,11 @@ fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
                     .into_iter()
                     .filter(|l| {
                         let is_check = l.starts_with("check ");
-                        if sub.kind == "github_ci" {
+                        if branch.is_some() {
+                            // Branch runs: checks and the new-commit line;
+                            // the overall state line repeats the checks.
+                            is_check || l.starts_with("new commits")
+                        } else if sub.kind == "github_ci" {
                             is_check
                         } else {
                             !is_check
@@ -487,8 +659,12 @@ fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
                 "no change".to_string()
             } else {
                 let text = format!(
-                    "{repo}#{pr} ({}): {}{}",
-                    now.title,
+                    "{subject} ({}): {}{}",
+                    if branch.is_some() {
+                        now.state.clone()
+                    } else {
+                        now.title.clone()
+                    },
                     lines.join("; "),
                     if sub.prompt.is_empty() {
                         String::new()
@@ -503,17 +679,24 @@ fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
                     Err(e) => format!("could not deliver: {e:#}"),
                 }
             };
+            let closed = branch.is_none()
+                && matches!(now.state.to_ascii_uppercase().as_str(), "MERGED" | "CLOSED");
             Polled {
                 seen: serde_json::to_string(&now).ok(),
                 error: None,
-                last,
+                last: if closed {
+                    now.state.to_ascii_lowercase()
+                } else {
+                    last
+                },
+                closed,
             }
         }
         Err(e) => {
             let msg = format!("{e:#}");
             if sub.error.as_deref() != Some(&msg) {
                 let text = format!(
-                    "{repo}#{pr}: the subscription cannot be checked: {msg}. It stays until you remove it (subscribe remove {}).",
+                    "{subject}: the subscription cannot be checked: {msg}. It stays until you remove it (subscribe remove {}).",
                     sub.id
                 );
                 let mut m = message(sub, true, text);
@@ -524,6 +707,7 @@ fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
                 seen: None,
                 error: Some(msg.clone()),
                 last: format!("error: {}", text::clip(&msg, 160)),
+                closed: false,
             }
         }
     }
@@ -536,7 +720,15 @@ async fn run_job(hooks: &KernelHooks, agent: &Agent, cmd: &str) -> (Option<Strin
         .clone()
         .unwrap_or_else(|| hooks.place.path.clone());
     let root = JobsRoot::for_agent(&hooks.place, &agent.id);
-    let (job, mut child) = match root.spawn(cmd, &cwd, Some(CMD_TIMEOUT.as_millis() as u64), None) {
+    let granted = arbos_engine::secrets::store()
+        .env_for(&arbos_core::lineage(&hooks.place, agent.id.as_str()));
+    let (job, mut child) = match root.spawn(
+        cmd,
+        &cwd,
+        Some(CMD_TIMEOUT.as_millis() as u64),
+        None,
+        granted,
+    ) {
         Ok(x) => x,
         Err(e) => return (None, -1, format!("could not start: {e}")),
     };
@@ -554,7 +746,10 @@ async fn run_job(hooks: &KernelHooks, agent: &Agent, cmd: &str) -> (Option<Strin
         },
         Err(_) => -1,
     };
-    let out = journal_tail(&job.journal(), 256 * 1024);
+    // What leaves the journal for a message or a notice is redacted like
+    // a tool result: a command that echoes a key does not put it in the
+    // user's line or the agent's inbox.
+    let out = arbos_engine::secrets::store().redact(&journal_tail(&job.journal(), 256 * 1024));
     let mut tail = text::tail(&out);
     if timed_out {
         tail = format!("timed out after {}s\n{tail}", CMD_TIMEOUT.as_secs());

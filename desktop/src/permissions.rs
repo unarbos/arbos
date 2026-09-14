@@ -6,8 +6,11 @@
 //!
 //! On macOS every status is read from the system (TCC) and every request
 //! is the real prompt, raised from inside this process so the grant is
-//! filed under this bundle. Where macOS will not prompt again, the row
-//! offers the System Settings pane instead. On Linux the rows that apply
+//! filed under this bundle. Where macOS will not prompt — a second ask, or
+//! an ad-hoc bundle, where `CGRequestScreenCaptureAccess` returns false
+//! with no dialog — the request says so and the row offers the System
+//! Settings pane; `model::permission_center` runs the rows, off the UI
+//! thread, and keeps re-reading. On Linux the rows that apply
 //! are the microphone (a capture program and a device), the screen (the
 //! portal asks on first use under Wayland; X11 has no gate) and the
 //! folder; the rest are hidden.
@@ -153,6 +156,13 @@ impl Permission {
     }
 }
 
+/// A real screen capture attempt: on Sequoia an app appears in the Screen
+/// Recording list only after it has tried, so this is what puts Arbos
+/// there. True when an image came back (the grant is in).
+pub fn try_screen_capture() -> bool {
+    platform::try_screen_capture()
+}
+
 /// Reading the folder is the test: a list comes back, or the system says no.
 fn folder_status(project: Option<&Path>) -> Status {
     let Some(project) = project else {
@@ -181,7 +191,11 @@ mod platform {
     };
     use std::{
         ffi::c_void,
-        sync::atomic::{AtomicI64, Ordering},
+        sync::{
+            Mutex, mpsc,
+            atomic::{AtomicI64, Ordering},
+        },
+        time::Duration,
     };
 
     #[link(name = "UserNotifications", kind = "framework")]
@@ -191,6 +205,38 @@ mod platform {
     unsafe extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
         fn CGRequestScreenCaptureAccess() -> bool;
+    }
+
+    #[link(name = "ScreenCaptureKit", kind = "framework")]
+    unsafe extern "C" {}
+
+    /// How long the shareable-content call gets to answer. It returns at
+    /// once when the grant is in or refused; a prompt keeps it open until
+    /// the user answers, and the row is polling by then anyway.
+    const CAPTURE_WAIT: Duration = Duration::from_secs(3);
+
+    /// A real capture attempt through ScreenCaptureKit:
+    /// `SCShareableContent.getShareableContentWithCompletionHandler:` is
+    /// what puts an app into Screen & System Audio Recording on macOS 15
+    /// and later and raises the dialog; `CGWindowListCreateImage` does
+    /// neither there (Mac worker, macOS 26). True when content came back
+    /// with no error, which is the grant.
+    pub fn try_screen_capture() -> bool {
+        let (tx, rx) = mpsc::channel::<bool>();
+        unsafe {
+            let handler = ConcreteBlock::new(move |content: *mut Object, error: *mut Object| {
+                let _ = tx.send(!content.is_null() && error.is_null());
+            })
+            .copy();
+            let () = msg_send![
+                class!(SCShareableContent),
+                getShareableContentWithCompletionHandler: &*handler
+            ];
+        }
+        match rx.recv_timeout(CAPTURE_WAIT) {
+            Ok(granted) => granted,
+            Err(_) => unsafe { CGPreflightScreenCaptureAccess() },
+        }
     }
 
     #[link(name = "ApplicationServices", kind = "framework")]
@@ -260,6 +306,32 @@ mod platform {
     /// 2 authorized, 3 provisional, 4 ephemeral). The centre answers on
     /// its own thread; the row polls this.
     static NOTIFICATION_STATUS: AtomicI64 = AtomicI64::new(-1);
+    /// The error the last `requestAuthorization` came back with. The
+    /// centre refuses an ad-hoc-signed bundle outright, in /Applications or
+    /// not — no dialog, "denied" within a moment — and that is not the
+    /// user's no.
+    static NOTIFICATION_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+    fn notification_error() -> Option<String> {
+        NOTIFICATION_ERROR
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    fn describe(error: *mut Object) -> String {
+        unsafe {
+            let text: *mut Object = msg_send![error, localizedDescription];
+            if text.is_null() {
+                return "the notification centre refused the request".into();
+            }
+            let utf8: *const std::os::raw::c_char = msg_send![text, UTF8String];
+            if utf8.is_null() {
+                return "the notification centre refused the request".into();
+            }
+            std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+        }
+    }
 
     /// A bare binary has no bundle proxy and the notification centre
     /// aborts on it; only a bundle may ask.
@@ -287,7 +359,15 @@ mod platform {
         }
         match NOTIFICATION_STATUS.load(Ordering::SeqCst) {
             2 | 3 | 4 => Status::Granted,
-            1 => Status::Denied,
+            1 => match notification_error() {
+                // Refused by the system, not by the user: the centre does
+                // not register an ad-hoc-signed bundle, wherever it sits.
+                // Nothing to flip in a pane; say what would work.
+                Some(why) => Status::Unavailable(format!(
+                    "Needs a Developer ID-signed build of Arbos.app; this ad-hoc build cannot register. ({why})"
+                )),
+                None => Status::Denied,
+            },
             0 => Status::NotAsked,
             _ => Status::NotAsked,
         }
@@ -302,7 +382,11 @@ mod platform {
                 msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
             // badge | sound | alert
             let options: u64 = 1 | 2 | 4;
-            let handler = ConcreteBlock::new(move |_granted: BOOL, _error: *mut Object| {}).copy();
+            let handler = ConcreteBlock::new(move |_granted: BOOL, error: *mut Object| {
+                let why = (!error.is_null()).then(|| describe(error));
+                *NOTIFICATION_ERROR.lock().unwrap_or_else(|p| p.into_inner()) = why;
+            })
+            .copy();
             let () = msg_send![
                 center,
                 requestAuthorizationWithOptions: options
@@ -320,6 +404,12 @@ mod platform {
     //! capture; the rest do not apply and are not listed.
 
     use super::{Requested, Status};
+
+    /// No gate to try against: the portal asks on first use under Wayland,
+    /// X11 has none. The preflight's answer stands.
+    pub fn try_screen_capture() -> bool {
+        matches!(screen_status(), Status::Granted)
+    }
 
     pub fn microphone_status() -> Status {
         match crate::voice_ws::mic_program() {

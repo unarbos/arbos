@@ -1560,6 +1560,14 @@ impl Workspace {
         let Some(chat) = found else {
             return;
         };
+        // A worker the kernel archived has no agent to speak to; its
+        // transcript stays to read. Say so instead of holding the words.
+        if chat.agent_gone() {
+            chat.notice(true, "this agent is archived: its history stays, but it takes no more messages");
+            chat.flush();
+            cx.notify();
+            return;
+        }
         if chat.closed {
             chat.closed = false;
         }
@@ -2232,6 +2240,14 @@ impl Workspace {
             chat.reconnect_attempt = 0;
             chat.reconnect_at = None;
             chat.sync_kernel_history();
+            // What the agent is on right now, from its status file, so a
+            // fresh attach draws the line without waiting for a frame.
+            if chat.host.is_none()
+                && let Some(sid) = chat.agent_session.as_deref()
+            {
+                chat.status = arbos_core::status::read(&arbos_core::Place::new(&chat.cwd), sid)
+                    .map(|s| s.step);
+            }
             // Whatever was typed while the connection was down goes now, in order.
             chat.drain();
             chat.flush();
@@ -2414,9 +2430,18 @@ impl Workspace {
                 _ => false,
             },
         );
-        self.projects[ix].focus_surface(owner, id);
-        if self.active == Some(ix) {
-            cx.emit(PaneRequest::Surface(id));
+        // The surface comes to the column for the chat that is in front. A
+        // worker's terminal or job opening under its parent's turn goes to
+        // the panel's Processes and stays there: the view does not jump
+        // from the conversation to a sub-agent's shell.
+        let in_front = self.projects[ix]
+            .focused_agent()
+            .is_none_or(|focused| focused == owner);
+        if in_front {
+            self.projects[ix].focus_surface(owner, id);
+            if self.active == Some(ix) {
+                cx.emit(PaneRequest::Surface(id));
+            }
         }
         self.push_snapshot(ix);
         cx.notify();
@@ -2444,6 +2469,57 @@ impl Workspace {
         if was_front && self.active == Some(ix) {
             cx.emit(PaneRequest::Chat);
         }
+    }
+
+    /// A detached job ended: the kernel closes its board row, but the
+    /// output stays readable here. The row keeps its streamed tail and
+    /// exit status until the user closes it; only the oldest finished rows
+    /// go when more than `KEEP_FINISHED` of an owner's have piled up.
+    pub fn finish_shown_process(&mut self, owner: u64, kernel_id: &str, cx: &mut Context<Self>) {
+        const KEEP_FINISHED: usize = 3;
+        let Some(ix) = self.project_of(owner) else {
+            return;
+        };
+        let project = &mut self.projects[ix];
+        let Some(pos) = project
+            .surfaces
+            .iter()
+            .position(|surface| surface.owner == Some(owner) && surface.kernel_id() == Some(kernel_id))
+        else {
+            return;
+        };
+        if let Bind::Process { done, log, .. } = &mut project.surfaces[pos].bind
+            && done.is_none()
+        {
+            // The job frame with `running: false` usually came first; when
+            // it did not (a remote place, a missed tick), read the exit the
+            // wrapper shell wrote.
+            let code = log
+                .parent()
+                .and_then(|dir| std::fs::read_to_string(dir.join("exit")).ok())
+                .and_then(|s| s.trim().parse::<i32>().ok());
+            *done = Some(code);
+        }
+        let mut finished: Vec<(u128, SurfaceId)> = project
+            .surfaces
+            .iter()
+            .filter(|s| s.owner == Some(owner))
+            .filter_map(|s| match &s.bind {
+                Bind::Process { done: Some(_), .. } => Some((s.touched, s.id)),
+                _ => None,
+            })
+            .collect();
+        finished.sort_by_key(|(touched, _)| *touched);
+        let extra: Vec<SurfaceId> = finished
+            .iter()
+            .take(finished.len().saturating_sub(KEEP_FINISHED))
+            .map(|(_, id)| *id)
+            .collect();
+        for id in extra {
+            self.close_surface(id, cx);
+        }
+        self.push_snapshot(ix);
+        cx.notify();
     }
 
     /// The agent's browser page moved, or sent a picture. Creates the row
@@ -2717,6 +2793,7 @@ impl Workspace {
                 kernel_id: chat.agent_session.clone(),
                 title: self.display_label(chat.id),
                 state: chat.child_state(),
+                step: chat.current_step(),
             })
             .collect()
     }

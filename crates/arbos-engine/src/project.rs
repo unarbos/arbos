@@ -34,6 +34,10 @@ use crate::provider::{ChatMessage, ImagePart, ToolCall};
 pub const COMPACTION_HEADER: &str = "[context checkpoint — earlier turns summarised]";
 /// First line of the user message that carries a tool step's images.
 const IMAGES_HEADER: &str = "[images from tool results]";
+/// Prefix on a user line that came in as speech (`channel = "voice"`):
+/// the words are a transcript, not typing.
+pub const VOICE_MARK: &str = "[spoken — transcribed speech, may hold transcription errors] ";
+
 /// Characters of a folded tool body kept as a preview.
 const PREVIEW_CHARS: usize = 120;
 /// Most bytes one step's fresh tool results may add to the prompt together
@@ -379,13 +383,23 @@ pub fn project(
                         &cite,
                         &superseded,
                         step_bytes,
+                        &place.agent_dir(agent.id.as_str()),
                     );
                 }
                 EventKind::User {
-                    text, attachments, ..
+                    text,
+                    attachments,
+                    channel,
+                    ..
                 } => {
                     flush(&mut out, &mut pending);
                     let mut t = text.clone();
+                    // Spoken, not typed (dictation or a call): the model is
+                    // told, or "can you hear me" reads as a question about
+                    // its ears and gets "I have no audio capabilities".
+                    if channel == "voice" {
+                        t = format!("{VOICE_MARK}{t}");
+                    }
                     // `/name args` names a skill: the transcript keeps what
                     // was typed; the model reads the skill's body under it.
                     if text.trim_start().starts_with('/') {
@@ -460,7 +474,27 @@ fn tool_step(
     cite: &str,
     superseded: &std::collections::HashSet<usize>,
     step_bytes: usize,
+    agent_dir: &std::path::Path,
 ) -> usize {
+    // A result spilled to `results/<call>.txt` is cited by that file: a
+    // path `read` takes with an offset, instead of a transcript line.
+    let result_cite = |r: &ToolRec, seq: u64| -> String {
+        // A `read` is cited by the file it read: `read` it again with an
+        // offset past what was shown.
+        if r.name == "read"
+            && let Some(source) = r.paths.first()
+            && r.error.is_none()
+        {
+            return source.clone();
+        }
+        let name = crate::evict::spill_name(&r.call_id);
+        if agent_dir.join("results").join(&name).exists() {
+            let agent_rel = cite.trim_end_matches("/transcript.jsonl");
+            format!("{agent_rel}/results/{name}")
+        } else {
+            format!("{cite}:{seq}")
+        }
+    };
     let mut end = first;
     while let Some(Item::Event { event, .. }) = items.get(end) {
         if !matches!(event.kind, EventKind::Tool(_)) {
@@ -533,7 +567,7 @@ fn tool_step(
             )
         } else if squeeze {
             let full = r.body.as_deref().unwrap_or("");
-            let cite = format!("{cite}:{seq}");
+            let cite = result_cite(r, seq);
             match crate::evict::keep_for(&r.name) {
                 crate::evict::Keep::Head => {
                     crate::evict::evict_head_to(full, &cite, per_result, crate::evict::READ_LINES)
@@ -546,7 +580,7 @@ fn tool_step(
             evict_tool_body(
                 &r.name,
                 r.body.as_deref().unwrap_or(""),
-                &format!("{cite}:{seq}"),
+                &result_cite(r, seq),
             )
         };
         let mut m = ChatMessage::plain("tool", Some(body));
@@ -597,5 +631,158 @@ fn resolve_attachment(cwd: &Path, a: &str) -> PathBuf {
         p.to_path_buf()
     } else {
         cwd.join(p)
+    }
+}
+
+#[cfg(test)]
+mod spill_cite_tests {
+    use super::*;
+
+    #[test]
+    fn an_evicted_result_cites_its_spilled_file_when_there_is_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-spill-cite-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join(".arbos/agents/root/results")).unwrap();
+        let place = Place::new(&dir);
+        arbos_core::bootstrap(&place).unwrap();
+        let agent = arbos_core::Agent::root("root");
+        let body: String = (1..=400).map(|i| format!("line-{i}\n")).collect();
+        let mut events = vec![Event::new(EventKind::User {
+            text: "list a lot".into(),
+            attachments: vec![],
+            channel: String::new(),
+            device: String::new(),
+        })];
+        let rec = ToolRec {
+            name: "bash".into(),
+            call_id: "call_1".into(),
+            paths: vec![],
+            started: None,
+            ended: None,
+            result_size: None,
+            error: None,
+            body: Some(body.clone()),
+            args: None,
+            child: None,
+            images: vec![],
+            diff: None,
+        };
+        events.push(Event::new(EventKind::Tool(rec)));
+        for (i, e) in events.iter_mut().enumerate() {
+            e.seq = i as u64 + 1;
+        }
+        let items = crate::compact::visible(&events);
+        let tool_text = |p: &Projection| -> String {
+            p.messages
+                .iter()
+                .find(|m| m.role == "tool")
+                .and_then(|m| m.content.clone())
+                .unwrap_or_default()
+        };
+        // No spill file: the transcript line is the cite.
+        let before = project(&place, &agent, &items, &[], STEP_BYTES);
+        let t = tool_text(&before);
+        assert!(
+            t.contains("…evicted (.arbos/agents/root/transcript.jsonl:2;"),
+            "{t}"
+        );
+        // The spill file exists: the cite is the file, which `read` takes.
+        std::fs::write(
+            dir.join(".arbos/agents/root/results")
+                .join(crate::evict::spill_name("call_1")),
+            &body,
+        )
+        .unwrap();
+        let after = project(&place, &agent, &items, &[], STEP_BYTES);
+        let t = tool_text(&after);
+        assert!(
+            t.contains("…evicted (.arbos/agents/root/results/call_1.txt;"),
+            "{t}"
+        );
+        assert!(t.contains("line-400"), "the tail is still shown: {t}");
+        assert!(crate::evict::spills(&body) && !crate::evict::spills("short"));
+        // A `read` is cited by the file it read, never by a copy (its view
+        // is a longer head: 600 lines).
+        let long: String = (1..=700).map(|i| format!("{i:>6}:aa|line-{i}\n")).collect();
+        let read_rec = ToolRec {
+            name: "read".into(),
+            call_id: "call_2".into(),
+            paths: vec!["/src/big.rs".into()],
+            started: None,
+            ended: None,
+            result_size: None,
+            error: None,
+            body: Some(long),
+            args: None,
+            child: None,
+            images: vec![],
+            diff: None,
+        };
+        let mut read_event = Event::new(EventKind::Tool(read_rec));
+        read_event.seq = 3;
+        let mut with_read = events.clone();
+        with_read.push(read_event);
+        let items = crate::compact::visible(&with_read);
+        let p = project(&place, &agent, &items, &[], STEP_BYTES);
+        let read_text = p
+            .messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .nth(1)
+            .and_then(|m| m.content.clone())
+            .unwrap_or_default();
+        assert!(read_text.contains("…evicted (/src/big.rs;"), "{read_text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod voice_mark_tests {
+    use super::*;
+
+    #[test]
+    fn a_spoken_line_is_marked_for_the_model_and_a_typed_one_is_not() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-voice-mark-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join(".arbos/agents/root")).unwrap();
+        let place = Place::new(&dir);
+        arbos_core::bootstrap(&place).unwrap();
+        let agent = arbos_core::Agent::root("root");
+        let user = |text: &str, channel: &str| {
+            Event::new(EventKind::User {
+                text: text.into(),
+                attachments: vec![],
+                channel: channel.into(),
+                device: String::new(),
+            })
+        };
+        let mut events = vec![
+            user("Hello, can you hear", "voice"),
+            user("now typed", "text"),
+        ];
+        for (i, e) in events.iter_mut().enumerate() {
+            e.seq = i as u64 + 1;
+        }
+        let items = crate::compact::visible(&events);
+        let p = project(&place, &agent, &items, &[], STEP_BYTES);
+        let users: Vec<String> = p
+            .messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .filter_map(|m| m.content.clone())
+            .collect();
+        assert_eq!(users.len(), 2, "{users:?}");
+        assert!(users[0].starts_with(VOICE_MARK), "{}", users[0]);
+        assert!(users[0].ends_with("Hello, can you hear"), "{}", users[0]);
+        assert!(!users[1].contains("[spoken"), "{}", users[1]);
+        // The contract tells the model what the mark means.
+        assert!(CONTRACT.contains("Voice: a user line marked [spoken"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

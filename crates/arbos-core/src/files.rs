@@ -316,6 +316,8 @@ pub fn fork_chat(place: &Place, source_id: &str) -> Result<Agent> {
     let mut agent = create_chat(place)?;
     agent.model = source.model.clone();
     agent.allowlist = source.allowlist.clone();
+    // A pinned mode is part of what the chat is for: the fork keeps it.
+    agent.skill = source.skill.clone();
     agent.title = if source.title.is_empty() {
         String::new()
     } else {
@@ -421,8 +423,17 @@ pub fn append_events(path: &Path, events: &[Event]) -> Result<usize> {
     if events.is_empty() {
         return Ok(0);
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    // The folder is made once, by bootstrap/create_chat/spawn. An append
+    // never recreates it: a chat deleted with `rm -rf` while a turn ran
+    // came back as a ghost (a transcript with no agent.md) on the model's
+    // late reply (qa-017). A missing folder is the end of that transcript.
+    if let Some(parent) = path.parent()
+        && !parent.is_dir()
+    {
+        bail!(
+            "agent folder is gone; nothing more is written to {}",
+            path.display()
+        );
     }
     let mut buf = Vec::with_capacity(events.len() * 256);
     for event in events {
@@ -670,6 +681,43 @@ pub fn load_agent(place: &Place, id: &AgentId) -> Result<Agent> {
 /// answer for an unknown id cannot mint a ghost folder (qa-005).
 pub fn agent_exists(place: &Place, id: &str) -> bool {
     crate::validate_id(id).is_ok() && Agent::load(&place.agent_dir(id)).is_ok()
+}
+
+/// `id`, its parent, grandparent, … up to the top (or an unreadable or
+/// looping link). What a scoped grant is checked against.
+pub fn lineage(place: &Place, id: &str) -> Vec<String> {
+    let mut out = vec![id.to_string()];
+    let mut cur = id.to_string();
+    while let Ok(a) = Agent::load(&place.agent_dir(&cur)) {
+        let Some(p) = a.parent else {
+            break;
+        };
+        let p = p.to_string();
+        if out.contains(&p) || out.len() > 64 {
+            break;
+        }
+        out.push(p.clone());
+        cur = p;
+    }
+    out
+}
+
+/// `id` and every agent under it, by the parent links on disk.
+pub fn subtree(place: &Place, id: &str) -> Vec<String> {
+    let agents = list_agents(place).unwrap_or_default();
+    let mut out = vec![id.to_string()];
+    let mut i = 0;
+    while i < out.len() {
+        for a in &agents {
+            if a.parent.as_ref().is_some_and(|p| p.as_str() == out[i])
+                && !out.iter().any(|x| x == a.id.as_str())
+            {
+                out.push(a.id.to_string());
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 fn touch(path: &Path) -> Result<()> {

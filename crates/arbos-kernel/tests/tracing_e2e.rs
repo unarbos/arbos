@@ -150,7 +150,9 @@ fn the_kernel_log_traces_and_kernel_json_tell_a_rollout_what_happened() {
     // that names the agent and the transcript line of its assistant event.
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "say hello"}));
     assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
-    std::thread::sleep(Duration::from_millis(300));
+    common::wait_for(Duration::from_secs(5), || {
+        has(&log_lines(&k.place), "turn_end", Some("root")).is_some()
+    });
     let lines = log_lines(&k.place);
     assert!(
         has(&lines, "turn_start", Some("root")).is_some(),

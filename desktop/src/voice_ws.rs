@@ -33,7 +33,20 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 /// After a reply ends, how long the mic still counts as hearing the speaker.
 const ECHO_TAIL: Duration = Duration::from_millis(400);
 /// After Stop, how long the final transcript may take to arrive.
-const FINAL_WAIT: Duration = Duration::from_millis(2_000);
+/// How long a release waits for the server's `transcript.final` before the
+/// partial stands. The recogniser is a beat behind the voice, so a partial
+/// at release can be missing the last words (a Mac run lost two); the final
+/// is what has them, and it comes well inside this on a healthy link.
+const FINAL_WAIT: Duration = Duration::from_millis(700);
+/// A reply with no sign of life — no audio frame and no done frame — for
+/// this long is over: the phase goes back to ready instead of reading
+/// "speaking" until the next take. Armed when a reply starts, when a take
+/// ends into a reply, and re-armed by every audio frame that arrives.
+const REPLY_STALL: Duration = Duration::from_secs(5);
+/// After a release the microphone stays open, its frames dropped, so the
+/// next press streams in the same instant instead of paying the device's
+/// open again.
+const MIC_WARM: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoiceCfg {
@@ -120,6 +133,10 @@ pub struct Peek {
     /// `session.ready.reply`: who answers dictation on the server (`none`
     /// = nobody there; this window's kernel does).
     pub reply_backend: String,
+    /// Press to first partial, for the take in flight or the last one.
+    pub first_partial_ms: Option<u64>,
+    /// How old the latest partial is.
+    pub partial_age_ms: Option<u64>,
     /// `session.ready.text`: who answers the text channel (`none` = nobody).
     pub text_backend: String,
     /// A call is live (`session.start {mode: "call"}` was answered with a
@@ -149,6 +166,11 @@ struct Shared {
     partial: String,
     /// Set when the server closed the take (`transcript.final`).
     take_done: bool,
+    /// When the take opened (MicStart), and when its first and latest
+    /// partials came — the numbers behind "does it feel instant".
+    take_started: Option<Instant>,
+    first_partial: Option<Instant>,
+    partial_at: Option<Instant>,
     reply: String,
     level: f32,
     mic_device: String,
@@ -215,6 +237,11 @@ pub fn status() -> Peek {
         engine: s.engine.clone(),
         kernel: s.kernel,
         reply_backend: s.reply_backend.clone(),
+        first_partial_ms: match (s.take_started, s.first_partial) {
+            (Some(start), Some(first)) => Some(first.saturating_duration_since(start).as_millis() as u64),
+            _ => None,
+        },
+        partial_age_ms: s.partial_at.map(|at| at.elapsed().as_millis() as u64),
         text_backend: s.text_backend.clone(),
         call: s.call,
         muted: s.muted,
@@ -375,6 +402,9 @@ pub fn start() -> Result<()> {
         s.finals.clear();
         s.partial.clear();
         s.take_done = false;
+        s.take_started = Some(Instant::now());
+        s.first_partial = None;
+        s.partial_at = None;
         s.error = None;
         // Speaking into a reply is barge-in: the reply stops.
         if s.phase == Some(Phase::Speaking) {
@@ -390,6 +420,16 @@ pub fn start() -> Result<()> {
     Ok(())
 }
 
+/// Open the dictation session without opening the mic, so the first take
+/// pays no connect. Nothing to do when one is live, or during a call.
+pub fn warm() -> Result<()> {
+    let cfg = crate::kernel::voice_config().ok_or_else(|| anyhow!("no voice_url in config"))?;
+    if in_call() {
+        return Ok(());
+    }
+    ensure_session(&cfg, &SessionKind::Dictation)
+}
+
 /// The words so far, for the composer's ghost text.
 pub fn peek() -> Result<String> {
     let p = status();
@@ -399,8 +439,9 @@ pub fn peek() -> Result<String> {
     Ok(p.text)
 }
 
-/// Close the mic and return the take. Waits a moment for the server's
-/// final transcript; the partial stands when it does not come.
+/// Close the mic and return the take. Waits up to `FINAL_WAIT` for the
+/// server's final transcript — the partial can be short of the last words
+/// — and lets the partial stand when the final does not come.
 pub fn stop() -> Result<String> {
     let (tx, shared) = {
         let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
@@ -412,11 +453,11 @@ pub fn stop() -> Result<String> {
     loop {
         {
             let s = shared.lock().unwrap_or_else(|p| p.into_inner());
-            if s.take_done || s.error.is_some() || Instant::now() > deadline {
+            if s.take_done || s.error.is_some() || Instant::now() >= deadline {
                 break;
             }
         }
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(20));
     }
     let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(e) = s.error.take() {
@@ -453,15 +494,16 @@ pub fn speak(text: &str) -> Result<()> {
     let session = hold
         .as_ref()
         .ok_or_else(|| anyhow!("voice session closed"))?;
-    {
-        let mut s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
-        s.reply.clear();
-        s.phase = Some(Phase::Speaking);
-    }
     session
         .tx
         .send(Cmd::Speak(text.to_string()))
-        .map_err(|_| anyhow!("voice session closed"))
+        .map_err(|_| anyhow!("voice session closed"))?;
+    // Only a command on its way marks the phase: a closed session must
+    // not leave it reading "speaking".
+    let mut s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
+    s.reply.clear();
+    s.phase = Some(Phase::Speaking);
+    Ok(())
 }
 
 /// Stop the reply audio now. Harmless when nothing plays.
@@ -627,9 +669,16 @@ async fn run(
 
     let (mic_tx, mut mic_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let mut mic: Option<Mic> = None;
+    // Between takes the microphone stays open for a while with its frames
+    // dropped; `warm_until` is when it is finally released.
+    let mut mic_held = false;
+    let mut warm_until: Option<Instant> = None;
     let mut player: Option<Player> = None;
     let mut ready_sent = false;
     let mut speaking = false;
+    // The last sign of life from the reply now playing — its start, or its
+    // latest audio frame — for the stall guard.
+    let mut reply_alive_at: Option<Instant> = None;
     let mut muted = false;
     // Client-side echo gate state: when playback last ended, and how loud the
     // mic runs while we play (our own voice coming back).
@@ -642,6 +691,8 @@ async fn run(
                 let Some(cmd) = cmd else { break };
                 match cmd {
                     Cmd::MicStart => {
+                        mic_held = false;
+                        warm_until = None;
                         if mic.is_none() {
                             match Mic::spawn(mic_tx.clone(), Arc::clone(&shared)) {
                                 Ok(m) => {
@@ -658,17 +709,27 @@ async fn run(
                         }
                     }
                     Cmd::MicStop => {
-                        if let Some(m) = mic.take() {
-                            m.stop();
+                        // Keep the device open, drop its frames: the next
+                        // press streams at once.
+                        if mic.is_some() {
+                            mic_held = true;
+                            warm_until = Some(Instant::now() + MIC_WARM);
                         }
                         let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
                         s.level = 0.0;
+                        // A take ending into a reply the guard is not
+                        // watching: watch it, so a reply that never plays
+                        // cannot hold the phase at speaking.
+                        if s.phase == Some(Phase::Speaking) && reply_alive_at.is_none() {
+                            reply_alive_at = Some(Instant::now());
+                        }
                     }
                     Cmd::Speak(text) => {
                         if let Some(p) = player.take() {
                             p.stop();
                         }
                         speaking = true;
+                        reply_alive_at = Some(Instant::now());
                         sink.send(text_frame(json!({ "type": "speak", "text": text }))).await?;
                     }
                     Cmd::Text(text) => {
@@ -680,6 +741,7 @@ async fn run(
                             p.stop();
                         }
                         speaking = false;
+                        reply_alive_at = None;
                         sink.send(text_frame(json!({ "type": "interrupt" }))).await?;
                     }
                     Cmd::Mute(on) => {
@@ -694,8 +756,29 @@ async fn run(
                     }
                 }
             }
+            _ = tokio::time::sleep_until(warm_until.map(tokio::time::Instant::from_std).unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))), if warm_until.is_some() => {
+                warm_until = None;
+                mic_held = false;
+                if let Some(m) = mic.take() {
+                    m.stop();
+                }
+            }
+            // A reply announced with nothing played and no done frame — a
+            // text-only reply backend, or a dropped frame — must not leave
+            // the phase reading "speaking" until the next take.
+            _ = tokio::time::sleep_until(reply_alive_at.map(|at| tokio::time::Instant::from_std(at + REPLY_STALL)).unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))), if reply_alive_at.is_some() => {
+                reply_alive_at = None;
+                speaking = false;
+                let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
+                if s.phase == Some(Phase::Speaking) {
+                    s.phase = Some(if mic.is_some() && !mic_held { Phase::Listening } else { Phase::Ready });
+                }
+            }
             chunk = mic_rx.recv() => {
                 let Some(chunk) = chunk else { continue };
+                if mic_held {
+                    continue;
+                }
                 if mic.is_some() {
                     // Muted: the stream keeps its clock, the words stay home.
                     // Playing: a bare speaker feeds the mic our own reply (no
@@ -721,6 +804,7 @@ async fn run(
                         if !speaking {
                             continue;
                         }
+                        reply_alive_at = Some(Instant::now());
                         if player.is_none() {
                             match Player::spawn(&shared) {
                                 Ok(p) => player = Some(p),
@@ -771,6 +855,7 @@ async fn run(
                                 // The user talks over the reply: cut it.
                                 if speaking {
                                     speaking = false;
+                                    reply_alive_at = None;
                                     s.interrupts += 1;
                                     if let Some(p) = player.take() { p.stop(); }
                                     if s.phase == Some(Phase::Speaking) {
@@ -783,7 +868,14 @@ async fn run(
                             // An increment: append. (The Swift comment reads
                             // as a replacement; the server's protocol text says
                             // increment, and the live server sends increments.)
-                            "transcript.delta" => s.partial.push_str(&field("text")),
+                            "transcript.delta" => {
+                                s.partial.push_str(&field("text"));
+                                let now = Instant::now();
+                                s.partial_at = Some(now);
+                                if s.first_partial.is_none() {
+                                    s.first_partial = Some(now);
+                                }
+                            }
                             // The whole line, replacing the open one. Empty =
                             // nothing was said; back to listening.
                             "transcript.final" => {
@@ -805,7 +897,12 @@ async fn run(
                                     speaking = true;
                                     s.reply.clear();
                                 }
-                                s.phase = Some(Phase::Speaking);
+                                reply_alive_at = Some(Instant::now());
+                                // A reply backend of "none" plays nothing:
+                                // the phase would say speaking for no sound.
+                                if s.reply_backend != "none" {
+                                    s.phase = Some(Phase::Speaking);
+                                }
                                 // The gateway's echo gate tightens while we play.
                                 say_speaking = Some(true);
                             }
@@ -813,13 +910,15 @@ async fn run(
                             "response.transcript" => s.reply.push_str(&field("text")),
                             "response.done" => {
                                 speaking = false;
+                                reply_alive_at = None;
                                 let interrupted = v.get("interrupted").and_then(Value::as_bool).unwrap_or(false);
                                 if let Some(p) = player.take() {
                                     // Cut short: nothing queued should still be heard.
                                     if interrupted { p.stop() } else { p.finish() }
                                 }
                                 if s.phase == Some(Phase::Speaking) {
-                                    s.phase = Some(if mic.is_some() { Phase::Listening } else { Phase::Ready });
+                                    // A held mic between takes is not listening.
+                                    s.phase = Some(if mic.is_some() && !mic_held { Phase::Listening } else { Phase::Ready });
                                 }
                                 gate_until = Instant::now() + ECHO_TAIL;
                                 say_speaking = Some(false);

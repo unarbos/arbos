@@ -18,15 +18,22 @@ use crate::Place;
 pub const MIN_EVERY_MS: u64 = 30_000;
 /// Poll period for the GitHub kinds when `every` is absent.
 pub const GITHUB_DEFAULT_EVERY_MS: u64 = 60_000;
+/// How often a goal's check runs when `every` is absent.
+pub const GOAL_DEFAULT_EVERY_MS: u64 = 30 * 60_000;
 
-pub const KINDS: &[&str] = &["timer", "shell", "github_pr", "github_ci", "inbox"];
+pub const KINDS: &[&str] = &["timer", "shell", "github_pr", "github_ci", "inbox", "goal"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Subscription {
     /// 0 in a hand-written file: `read` fills it from the `NNNN-` prefix.
     #[serde(default)]
     pub id: u32,
-    /// `timer` | `shell` | `github_pr` | `github_ci` | `inbox`.
+    /// `timer` | `shell` | `github_pr` | `github_ci` | `inbox` | `goal`.
+    /// A `goal` is an objective held until met: `prompt` says what, `cmd`
+    /// (optional) is the check that says when — exit 0 closes the goal;
+    /// while it fails the agent is woken with the goal and the check's
+    /// output, every `every` (default 30m). Without `cmd` the agent is
+    /// woken each period until it removes the goal itself.
     pub kind: String,
     /// What the agent is told when it fires. For `shell`, the output and
     /// exit follow it. Empty is allowed for the GitHub kinds (the diff is
@@ -54,6 +61,10 @@ pub struct Subscription {
     pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<u64>,
+    /// `github_ci` without a PR: the branch whose workflow runs are
+    /// watched (`gh run list --branch`). A "keep main green" loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// `agent` (an inbox file, a turn), `user` (a line to the user, no
     /// model turn), or `none` (a quiet chore: nothing on success). `user`
     /// and `none` are for `shell`; a failure always wakes the agent.
@@ -67,6 +78,12 @@ pub struct Subscription {
     pub expires: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub paused: bool,
+    /// `timer` / `shell`: each firing carries what the last one produced
+    /// — the command's output, or the last words of the turn the timer
+    /// opened — so a monitor can compare instead of starting over
+    /// (Hermes cron `continuity`). Kept in `seen`, capped.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continuity: bool,
     /// A kernel chore (the weekly `git gc`): fires like any other but stays
     /// out of every user-facing list — the plan strip, the prompt's
     /// standing section, `subscribe list`. `check` still sees it.
@@ -109,6 +126,7 @@ impl Subscription {
             Some(e) => parse_duration_ms(e),
             None => match self.kind.as_str() {
                 "github_pr" | "github_ci" => Some(GITHUB_DEFAULT_EVERY_MS),
+                "goal" => Some(GOAL_DEFAULT_EVERY_MS),
                 _ => None,
             },
         }
@@ -179,6 +197,8 @@ impl Subscription {
             c.clone()
         } else if let (Some(r), Some(n)) = (&self.repo, self.pr) {
             format!("{r}#{n}")
+        } else if let (Some(r), Some(b)) = (&self.repo, &self.branch) {
+            format!("{r}@{b}")
         } else if let Some(p) = &self.path {
             p.clone()
         } else {
@@ -204,6 +224,10 @@ impl Subscription {
                     "github_pr" | "github_ci" => format!(
                         "every {}{next}",
                         human_ms(self.every_ms().unwrap_or(GITHUB_DEFAULT_EVERY_MS))
+                    ),
+                    "goal" => format!(
+                        "until met · checked every {}{next}",
+                        human_ms(self.every_ms().unwrap_or(GOAL_DEFAULT_EVERY_MS))
                     ),
                     _ => String::new(),
                 },
@@ -249,9 +273,25 @@ impl Subscription {
                     bail!("notify must contain {{output}}, or the reading never reaches the user");
                 }
             }
-            "github_pr" | "github_ci" => {
+            "github_pr" => {
                 if self.repo.as_deref().unwrap_or("").trim().is_empty() || self.pr.is_none() {
-                    bail!("{} needs repo (owner/name) and pr", self.kind);
+                    bail!("github_pr needs repo (owner/name) and pr");
+                }
+            }
+            "github_ci" => {
+                let has_branch = self.branch.as_deref().is_some_and(|b| !b.trim().is_empty());
+                if self.repo.as_deref().unwrap_or("").trim().is_empty()
+                    || (self.pr.is_none() && !has_branch)
+                {
+                    bail!("github_ci needs repo (owner/name) and pr or branch");
+                }
+            }
+            "goal" => {
+                if self.prompt.trim().is_empty() {
+                    bail!("goal needs prompt: what is to be true when it is met");
+                }
+                if self.deliver_to != "agent" {
+                    bail!("goal delivers to the agent; deliver_to must be agent");
                 }
             }
             "inbox" => {
@@ -263,6 +303,9 @@ impl Subscription {
                 }
             }
             _ => {}
+        }
+        if self.continuity && !matches!(self.kind.as_str(), "timer" | "shell") {
+            bail!("continuity is for timer and shell subscriptions");
         }
         if !matches!(self.deliver_to.as_str(), "agent" | "user" | "none") {
             bail!("deliver_to must be agent, user, or none");
@@ -453,6 +496,9 @@ pub fn add(
                     .with_context(|| format!("after {a:?} is not a duration"))?;
                 now + ms as i64
             }
+            // A goal's first check runs now: the agent starts on it at
+            // once instead of after the first period.
+            None if sub.kind == "goal" => now,
             None => match sub.every_ms() {
                 Some(e) => now + e as i64,
                 None => now,
@@ -588,10 +634,13 @@ mod tests {
             path: None,
             repo: None,
             pr: None,
+
+            branch: None,
             deliver_to: "agent".into(),
             notify: None,
             expires: None,
             paused: false,
+            continuity: false,
             internal: false,
             created: String::new(),
             next_due: None,
@@ -716,5 +765,52 @@ mod tests {
             t + 3_600_000 + 15 * 60_000
         );
         assert_eq!(align_at(t, None), t);
+    }
+}
+
+#[cfg(test)]
+mod branch_tests {
+    use super::*;
+
+    #[test]
+    fn github_ci_takes_a_branch_in_place_of_a_pr() {
+        let mut sub = Subscription {
+            id: 0,
+            kind: "github_ci".into(),
+            prompt: String::new(),
+            every: None,
+            at: None,
+            once: false,
+            cmd: None,
+            path: None,
+            repo: Some("o/r".into()),
+            pr: None,
+            branch: Some("main".into()),
+            deliver_to: "agent".into(),
+            notify: None,
+            expires: None,
+            paused: false,
+            continuity: false,
+            internal: false,
+            created: String::new(),
+            next_due: None,
+            last_fired: None,
+            last: String::new(),
+            error: None,
+            seen: None,
+        };
+        sub.validate().unwrap();
+        assert_eq!(sub.label(), "o/r@main");
+        sub.branch = None;
+        assert!(sub.validate().is_err());
+        sub.kind = "github_pr".into();
+        sub.branch = Some("main".into());
+        assert!(sub.validate().is_err(), "github_pr still needs a pr");
+        // The line round-trips through TOML.
+        sub.kind = "github_ci".into();
+        let text = toml::to_string(&sub).unwrap();
+        assert!(text.contains("branch = \"main\""), "{text}");
+        let back: Subscription = toml::from_str(&text).unwrap();
+        assert_eq!(back.branch.as_deref(), Some("main"));
     }
 }

@@ -48,6 +48,7 @@ pub const COORDINATOR_TOOLS: &[&str] = &[
     // `secret list` answers "do we have a key for X" without a value ever
     // showing; `use` arms a worker's bash through the kernel.
     "secret",
+    "status",
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,8 +57,20 @@ pub struct ProjectConfig {
     pub schema: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// An agent that opens a pull request follows it: the kernel adds a
+    /// `github_pr` and a `github_ci` subscription for it, so a failing
+    /// check or a review comment wakes the agent that made the change.
+    /// On unless `follow_prs = false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_prs: Option<bool>,
     #[serde(default)]
     pub root: RootConfig,
+}
+
+impl ProjectConfig {
+    pub fn follows_prs(&self) -> bool {
+        self.follow_prs.unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -67,10 +80,18 @@ pub struct RootConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     /// Move a finished worker's folder to `.arbos/archive/agents/<id>/`
-    /// once its parent has read its done message. Off by default: a
-    /// window showing that worker must know to look in the archive first.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub archive_children: bool,
+    /// once its parent has read its done message. On unless the file says
+    /// `archive_children = false` (since 2026-09-14: the window closes a
+    /// chat whose agent is gone instead of reconnecting to it, #129/#138).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_children: Option<bool>,
+}
+
+impl RootConfig {
+    /// Whether finished workers are archived: the line, or on.
+    pub fn archives_children(&self) -> bool {
+        self.archive_children.unwrap_or(true)
+    }
 }
 
 /// Where finished workers go when `archive_children` is on.
@@ -110,9 +131,10 @@ pub fn write_for_new_place(place: &Place, name: &str) -> Result<()> {
     let cfg = ProjectConfig {
         schema: Some(2),
         name: Some(name.to_string()),
+        follow_prs: None,
         root: RootConfig {
             role: Some(COORDINATOR.into()),
-            archive_children: false,
+            archive_children: Some(true),
         },
     };
     save(place, &cfg)
@@ -170,6 +192,29 @@ mod tests {
         std::fs::write(path(&p), "[root]\n").unwrap();
         write_for_new_place(&p, "demo").unwrap();
         assert!(!root_is_coordinator(&p));
+    }
+
+    #[test]
+    fn finished_workers_are_archived_unless_the_file_says_no() {
+        let p = place("archive");
+        // No file, or a file without the line: on.
+        assert!(load(&p).root.archives_children());
+        write_for_new_place(&p, "demo").unwrap();
+        assert!(load(&p).root.archives_children());
+        assert!(
+            std::fs::read_to_string(path(&p))
+                .unwrap()
+                .contains("archive_children = true")
+        );
+        std::fs::write(
+            path(&p),
+            "schema = 2\nname = \"old\"\n[root]\nrole = \"coordinator\"\n",
+        )
+        .unwrap();
+        assert!(load(&p).root.archives_children());
+        // The line off: off.
+        std::fs::write(path(&p), "schema = 2\n[root]\narchive_children = false\n").unwrap();
+        assert!(!load(&p).root.archives_children());
     }
 
     #[test]

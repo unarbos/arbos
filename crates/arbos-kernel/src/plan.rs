@@ -141,6 +141,21 @@ fn close_turn_folder(hooks: &KernelHooks, agent: &str, forced: Option<&str>) -> 
         Some(why) => (why.to_string(), false),
         None => turn_outcome(&events, lo),
     };
+    // A timer with continuity: the words this turn ended with ride on its
+    // next firing.
+    if let Ok(cause) = std::fs::read_to_string(dir.join("cause.md"))
+        && let Ok(msg) = inbox::Message::parse(&cause)
+        && let Some(n) = msg
+            .from
+            .strip_prefix("subscription:")
+            .and_then(|n| n.parse::<u32>().ok())
+        && let Some(mut sub) = arbos_core::subscription::get(&hooks.place, agent, n)
+        && sub.continuity
+        && sub.kind == "timer"
+    {
+        sub.seen = Some(arbos_core::text::clip(outcome.trim(), 4000));
+        let _ = arbos_core::subscription::save(&hooks.place, agent, &sub);
+    }
     let verdict = if ok { "success" } else { "failed" };
     let line: String = outcome
         .lines()
@@ -188,7 +203,7 @@ fn wake_from_message(
             (
                 WakeKind::Plan,
                 Some(format!(
-                    "You were spawned by agent {parent} for this mission:\n\n{}\n\nDo it now. If it has several steps, write them as your checklist with plan set and work them. Standing work (\"every N\", \"keep watching\") is a subscription (subscribe add), never a loop held open. When your turn ends, {parent} is told your last words automatically: end with a short report (outcome, paths, open questions) as your final words, and do not also say it to {parent}. Use say to={parent} mode request only for a question you need answered mid-task. The project context is in your prompt; project status is .arbos/notes.md; earlier workers' transcripts are greppable with grep path=.arbos/agents. Your own folder is .arbos/agents/{}/.{}",
+                    "You were spawned by agent {parent} for this mission:\n\n{}\n\nDo it now. Say what you are doing with status at each major step (a verb phrase, six words or less): it is the line {parent} and the user see beside your name. If it has several steps, write them as your checklist with plan set and work them. Standing work (\"every N\", \"keep watching\") is a subscription (subscribe add), never a loop held open. When your turn ends, {parent} is told your last words automatically: end with a short report (outcome, paths, open questions) as your final words, and do not also say it to {parent}. Use say to={parent} mode request only for a question you need answered mid-task. The project context is in your prompt; project status is .arbos/notes.md; earlier workers' transcripts (live or archived) are greppable with grep scope=history. Your own folder is .arbos/agents/{}/.{}",
                     msg.body,
                     agent.id,
                     worktree_note(hooks.place.path(), agent)
@@ -306,14 +321,15 @@ fn batch_done_files(
     senders
 }
 
-/// With `[root] archive_children = true` in project.toml: a worker whose
-/// done message its parent has just read, and that is not live (no turn,
-/// no waiting message, no parked ask, no live children of its own), moves
-/// to `.arbos/archive/agents/<id>/`. The tree frame tells every window.
+/// Unless project.toml says `[root] archive_children = false`: a worker
+/// whose done message its parent has just read, and that is not live (no
+/// turn, no waiting message, no parked ask, no live children of its own),
+/// moves to `.arbos/archive/agents/<id>/`. The tree frame tells every
+/// window.
 fn archive_finished(hooks: &KernelHooks, reported: &[String]) {
     if !arbos_core::project::load(&hooks.place)
         .root
-        .archive_children
+        .archives_children()
     {
         return;
     }
@@ -341,6 +357,48 @@ fn archive_finished(hooks: &KernelHooks, reported: &[String]) {
             Ok(()) => {
                 moved = true;
                 crate::klog::info("child_archived", Some(id), dest.display().to_string());
+                // Its worktree goes with it when nothing would be lost
+                // (K-01c); commits stay on the branch.
+                match crate::worktree::remove_if_clean(hooks.place.path(), id) {
+                    Ok(crate::worktree::Removed::Nothing) => {}
+                    Ok(crate::worktree::Removed::Removed {
+                        branch,
+                        ahead,
+                        branch_kept,
+                    }) => crate::klog::info(
+                        "worktree_removed",
+                        Some(id),
+                        if branch_kept {
+                            format!("{branch} keeps {ahead} commit(s)")
+                        } else {
+                            format!("{branch} had no commits; deleted")
+                        },
+                    ),
+                    Ok(crate::worktree::Removed::KeptDirty { path, dirty }) => crate::klog::warn(
+                        "worktree_kept",
+                        Some(id),
+                        format!(
+                            "{} has {dirty} uncommitted path(s); left as is",
+                            path.display()
+                        ),
+                    ),
+                    Err(e) => {
+                        crate::klog::warn("worktree_remove_failed", Some(id), format!("{e:#}"))
+                    }
+                }
+                // Two `changed` frames for clients that mirror folders
+                // (the watcher sees files, not a folder rename); the
+                // `tree` frame below is the list itself.
+                hooks.broadcast(arbos_core::wire::Frame::Changed {
+                    path: format!("agents/{id}"),
+                    kind: "removed".into(),
+                    size: 0,
+                });
+                hooks.broadcast(arbos_core::wire::Frame::Changed {
+                    path: format!("archive/agents/{id}"),
+                    kind: "created".into(),
+                    size: 0,
+                });
             }
             Err(e) => crate::klog::warn("child_archive_failed", Some(id), format!("{e:#}")),
         }
@@ -364,6 +422,18 @@ fn notify_parent_done(hooks: &KernelHooks, agent: &str) {
         return;
     };
     if hooks.waited.lock().unwrap().remove(agent) {
+        // The parent has the report as its tool result; no done file, so
+        // the archive step must come from here — once the parent's turn
+        // ends (it may still read the folder), or now if it already has.
+        if hooks.is_running(parent.as_str()) {
+            hooks
+                .archive_after
+                .lock()
+                .unwrap()
+                .insert(agent.to_string(), parent.to_string());
+        } else {
+            archive_finished(hooks, &[format!("agent:{agent}")]);
+        }
         return;
     }
     if !arbos_core::agent_exists(&hooks.place, parent.as_str()) {
@@ -394,9 +464,27 @@ fn notify_parent_done(hooks: &KernelHooks, agent: &str) {
 /// A turn ended: its folder closes with what the transcript says, and a
 /// child's parent hears about it.
 pub fn finish_turn(hooks: &KernelHooks, agent: &str) {
+    crate::chatdoor::reply_if_door_turn(hooks, agent);
     notify_parent_done(hooks, agent);
     close_turn_folder(hooks, agent, None);
     hooks.broadcast(hooks.plan_frame(agent));
+    // Waited-for children that finished during this turn go to the
+    // archive now that the parent is done with them.
+    let waited: Vec<String> = {
+        let mut map = hooks.archive_after.lock().unwrap();
+        let ids: Vec<String> = map
+            .iter()
+            .filter(|(_, parent)| parent.as_str() == agent)
+            .map(|(child, _)| child.clone())
+            .collect();
+        for id in &ids {
+            map.remove(id);
+        }
+        ids.into_iter().map(|id| format!("agent:{id}")).collect()
+    };
+    if !waited.is_empty() {
+        archive_finished(hooks, &waited);
+    }
 }
 
 /// The turn's last words and whether it ended well, from the transcript
@@ -416,7 +504,19 @@ pub fn turn_outcome(events: &[Event], lo: u64) -> (String, bool) {
         }
     }
     if let Some(why) = stopped {
-        return (format!("stopped: {why}"), false);
+        // What it had before the stop rides along: a parent that stopped a
+        // worker early wants the partial result, not only the reason.
+        return (
+            if last_text.is_empty() {
+                format!("stopped: {why}")
+            } else {
+                format!(
+                    "stopped: {why}\nLast words before the stop: {}",
+                    arbos_core::text::clip(&last_text, 300)
+                )
+            },
+            false,
+        );
     }
     if last_text.is_empty() {
         if let Some(f) = failed {

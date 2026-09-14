@@ -34,12 +34,20 @@ pub struct AgentDef {
     pub path: PathBuf,
 }
 
-/// Directories searched, in order. The first file to claim a name wins.
+/// Directories searched, in order. The first file to claim a name wins:
+/// the place's own kinds, then Cursor's, then the host's
+/// (`~/.config/arbos/agents-defs/`, the same kinds in every place).
 pub fn def_dirs(place: &Place) -> Vec<PathBuf> {
     vec![
         place.arbos().join("agents-defs"),
         place.path.join(".cursor").join("agents"),
+        host_def_dir(),
     ]
+}
+
+/// The host's kinds: `~/.config/arbos/agents-defs/`.
+pub fn host_def_dir() -> PathBuf {
+    crate::host_dir().join("agents-defs")
 }
 
 /// Every definition in the place, sorted by name, one per name.
@@ -170,4 +178,56 @@ fn split_front_matter(text: &str) -> (&str, &str) {
         offset += line.len();
     }
     ("", t)
+}
+
+#[cfg(test)]
+mod host_dir_tests {
+    use super::*;
+
+    #[test]
+    fn host_kinds_load_after_the_places_and_a_place_kind_of_the_same_name_wins() {
+        let root = std::env::temp_dir().join(format!(
+            "arbos-agent-def-host-{}-{}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        let place_dir = root.join("place");
+        let xdg = root.join("xdg");
+        std::fs::create_dir_all(place_dir.join(".arbos/agents-defs")).unwrap();
+        std::fs::create_dir_all(xdg.join("arbos/agents-defs")).unwrap();
+        // The test owns XDG_CONFIG_HOME for its length; tests in this
+        // crate that read host_dir() run under the same variable, so it is
+        // set to a folder with nothing else in it.
+        let saved = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &xdg) };
+        std::fs::write(
+            xdg.join("arbos/agents-defs/reviewer.md"),
+            "---\nname: reviewer\ndescription: host reviewer\nreadonly: true\n---\nReview.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            xdg.join("arbos/agents-defs/tester.md"),
+            "---\nname: tester\ndescription: host tester\n---\nTest.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            place_dir.join(".arbos/agents-defs/tester.md"),
+            "---\nname: tester\ndescription: place tester\n---\nTest here.\n",
+        )
+        .unwrap();
+        let place = Place::new(&place_dir);
+        let defs = load_defs(&place);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["reviewer", "tester"], "{names:?}");
+        let tester = defs.iter().find(|d| d.name == "tester").unwrap();
+        assert_eq!(tester.description, "place tester", "the place's file wins");
+        assert!(tester.path.starts_with(&place_dir));
+        let reviewer = defs.iter().find(|d| d.name == "reviewer").unwrap();
+        assert!(reviewer.readonly && reviewer.path.starts_with(&xdg));
+        match saved {
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

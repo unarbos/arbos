@@ -8,11 +8,15 @@
 //! reaches the transcript. The kernel's own model API key is protected the
 //! same way from the start, since bash inherits the kernel's environment.
 //!
-//! One store per kernel process: grants are not scoped per agent yet.
+//! One store per kernel process. A grant is scoped: it names the agent
+//! that asked, and reaches that agent's jobs and its descendants' (a
+//! coordinator's `secret use` serves the workers it spawns); a sibling's
+//! jobs never see it. Redaction is not scoped: every value ever granted or
+//! protected is replaced wherever it shows up.
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -25,10 +29,18 @@ const MIN_LEN: usize = 8;
 /// prefix ("sk-or-v1-") is eight and appears in ordinary text about keys.
 const PIECE: usize = 12;
 
+/// One granted secret: its value and the agents that asked for it.
+#[derive(Debug, Clone)]
+struct Grant {
+    value: String,
+    /// Agent ids. Empty means every agent (a grant made without one).
+    holders: BTreeSet<String>,
+}
+
 #[derive(Default)]
 pub struct Store {
-    /// name → value, for the job environment and for redaction.
-    granted: Mutex<BTreeMap<String, String>>,
+    /// name → the grant, for the job environment and for redaction.
+    granted: Mutex<BTreeMap<String, Grant>>,
     /// name → value, redaction only (the kernel's own key).
     protected: Mutex<BTreeMap<String, String>>,
 }
@@ -39,8 +51,28 @@ pub fn store() -> &'static Store {
 }
 
 impl Store {
+    /// Grant to every agent (no holder): the kernel's own use.
     pub fn grant(&self, name: &str, value: String) {
-        self.granted.lock().unwrap().insert(name.to_string(), value);
+        self.granted.lock().unwrap().insert(
+            name.to_string(),
+            Grant {
+                value,
+                holders: BTreeSet::new(),
+            },
+        );
+    }
+
+    /// Grant to `agent` (and, through `env_for`, its descendants). A second
+    /// agent asking for the same name joins the holders; the newer value
+    /// wins if the source changed.
+    pub fn grant_to(&self, name: &str, value: String, agent: &str) {
+        let mut map = self.granted.lock().unwrap();
+        let entry = map.entry(name.to_string()).or_insert_with(|| Grant {
+            value: String::new(),
+            holders: BTreeSet::new(),
+        });
+        entry.value = value;
+        entry.holders.insert(agent.to_string());
     }
 
     /// Stop providing it to jobs. The value stays tracked for redaction:
@@ -48,12 +80,59 @@ impl Store {
     pub fn revoke(&self, name: &str) -> bool {
         let taken = self.granted.lock().unwrap().remove(name);
         match taken {
-            Some(value) => {
-                self.protect(name, value);
+            Some(g) => {
+                self.protect(name, g.value);
                 true
             }
             None => false,
         }
+    }
+
+    /// `agent` (and everything under it, by the ids in `subtree`) stops
+    /// holding `name`. The grant goes when no holder is left; a grant to
+    /// every agent goes outright. Returns whether anything changed.
+    pub fn revoke_for(&self, name: &str, subtree: &[String]) -> bool {
+        let mut map = self.granted.lock().unwrap();
+        let Some(g) = map.get_mut(name) else {
+            return false;
+        };
+        if g.holders.is_empty() {
+            let g = map.remove(name).expect("present");
+            drop(map);
+            self.protect(name, g.value);
+            return true;
+        }
+        let before = g.holders.len();
+        g.holders.retain(|h| !subtree.contains(h));
+        let changed = g.holders.len() != before;
+        if g.holders.is_empty() {
+            let g = map.remove(name).expect("present");
+            drop(map);
+            self.protect(name, g.value);
+        }
+        changed
+    }
+
+    /// Who holds `name`: the agent ids, or empty for a grant to every agent.
+    pub fn holders(&self, name: &str) -> Option<Vec<String>> {
+        self.granted
+            .lock()
+            .unwrap()
+            .get(name)
+            .map(|g| g.holders.iter().cloned().collect())
+    }
+
+    /// The environment for a job of the agent whose id is `lineage[0]`,
+    /// `lineage[1..]` being its parent, grandparent, and so on: every grant
+    /// held by one of them, or by nobody in particular.
+    pub fn env_for(&self, lineage: &[String]) -> Vec<(String, String)> {
+        self.granted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, g)| g.holders.is_empty() || g.holders.iter().any(|h| lineage.contains(h)))
+            .map(|(k, g)| (k.clone(), g.value.clone()))
+            .collect()
     }
 
     /// Track a value for redaction without exposing it to jobs.
@@ -70,13 +149,14 @@ impl Store {
         self.granted.lock().unwrap().keys().cloned().collect()
     }
 
-    /// The environment every job gets.
+    /// Every grant, whoever holds it: the kernel's own commands (`gh` for a
+    /// subscription without an agent behind it). Jobs use `env_for`.
     pub fn env(&self) -> Vec<(String, String)> {
         self.granted
             .lock()
             .unwrap()
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, g)| (k.clone(), g.value.clone()))
             .collect()
     }
 
@@ -86,9 +166,9 @@ impl Store {
     /// by a command is not caught.
     pub fn redact(&self, text: &str) -> String {
         let mut pairs: Vec<(String, String)> = Vec::new();
-        for (k, v) in self.granted.lock().unwrap().iter() {
-            if v.len() >= MIN_LEN {
-                pairs.push((k.clone(), v.clone()));
+        for (k, g) in self.granted.lock().unwrap().iter() {
+            if g.value.len() >= MIN_LEN {
+                pairs.push((k.clone(), g.value.clone()));
             }
         }
         for (k, v) in self.protected.lock().unwrap().iter() {
@@ -307,6 +387,37 @@ mod tests {
             "first [REDACTED:KEY part] then [REDACTED:KEY part] end"
         );
         assert_eq!(s.redact("sk-or-v1-01 alone"), "sk-or-v1-01 alone");
+    }
+
+    #[test]
+    fn a_grant_reaches_the_holder_and_its_descendants_only() {
+        let s = Store::default();
+        s.grant_to("A", "aaaaaaaaaa".into(), "root");
+        s.grant_to("B", "bbbbbbbbbb".into(), "w1");
+        s.grant("K", "kkkkkkkkkk".into());
+        let names = |lineage: &[&str]| -> Vec<String> {
+            let l: Vec<String> = lineage.iter().map(|s| s.to_string()).collect();
+            s.env_for(&l).into_iter().map(|(k, _)| k).collect()
+        };
+        // root holds A; every job gets K.
+        assert_eq!(names(&["root"]), vec!["A", "K"]);
+        // w1 under root: root's A, its own B.
+        assert_eq!(names(&["w1", "root"]), vec!["A", "B", "K"]);
+        // w2, a sibling of w1: not B.
+        assert_eq!(names(&["w2", "root"]), vec!["A", "K"]);
+        // A worker with no lineage to root sees only the global grant.
+        assert_eq!(names(&["other"]), vec!["K"]);
+        assert_eq!(s.holders("B"), Some(vec!["w1".to_string()]));
+        // Revoking for w1's subtree drops B; the value stays redacted.
+        assert!(s.revoke_for("B", &["w1".to_string()]));
+        assert_eq!(names(&["w1", "root"]), vec!["A", "K"]);
+        assert_eq!(s.redact("x bbbbbbbbbb y"), "x [REDACTED:B] y");
+        // Two holders: revoking one keeps the grant for the other.
+        s.grant_to("A", "aaaaaaaaaa".into(), "w2");
+        assert!(s.revoke_for("A", &["root".to_string()]));
+        assert_eq!(names(&["root"]), vec!["K"]);
+        assert_eq!(names(&["w2", "root"]), vec!["A", "K"]);
+        assert!(!s.revoke_for("A", &["nobody".to_string()]));
     }
 }
 

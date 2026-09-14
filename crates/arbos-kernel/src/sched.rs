@@ -174,6 +174,16 @@ impl arbos_engine::Hooks for TurnHooks {
 
     fn emit(&self, event: &arbos_core::Event) {
         use arbos_core::{EventKind, wire::Frame};
+        // A tool call starting: the kernel's guess at the live line, for
+        // an agent that has not said what it is doing this turn.
+        if let EventKind::Tool(rec) = &event.kind
+            && event.seq == 0
+            && rec.ended.is_none()
+            && rec.name != "status"
+        {
+            let step = arbos_core::status::derived(&rec.name, rec.args.as_ref());
+            let _ = self.inner.set_status(self.agent.as_str(), &step, "derived");
+        }
         // Streamed text goes out as deltas: one frame per chunk, no seq.
         // The whole step follows from the transcript tail as an `event`
         // with its line number, which older clients already render.
@@ -209,7 +219,8 @@ impl arbos_engine::Hooks for TurnHooks {
             "prompt_size",
             Some(self.agent.as_str()),
             format!(
-                "system={} tools={} conversation={} total={} (estimated tokens)",
+                "model={} system={} tools={} conversation={} total={} (estimated tokens)",
+                size.model,
                 size.system,
                 size.tools,
                 size.conversation,

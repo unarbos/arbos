@@ -117,6 +117,105 @@ pub fn create(place: &Path, id: &str) -> Result<Worktree> {
     Ok(Worktree { path, branch, base })
 }
 
+/// What is left in a child's worktree once the child is done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Leftover {
+    pub path: PathBuf,
+    pub branch: String,
+    /// Uncommitted changes (modified or untracked paths), from `git status`.
+    pub dirty: usize,
+    /// Commits on the branch that the place's HEAD does not have.
+    pub ahead: usize,
+}
+
+/// Look at `id`'s worktree, if the folder is there. None when it is not.
+pub fn leftover(place: &Path, id: &str) -> Option<Leftover> {
+    let path = Worktree::path_for(place, id);
+    if !path.is_dir() {
+        return None;
+    }
+    let branch = branch_of(&path).unwrap_or_else(|| Worktree::branch_for(id));
+    let dirty = git(&path, &["status", "--porcelain"])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+        .unwrap_or(usize::MAX);
+    let ahead = git(place, &["rev-list", "--count", &format!("HEAD..{branch}")])
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+        .unwrap_or(usize::MAX);
+    Some(Leftover {
+        path,
+        branch,
+        dirty,
+        ahead,
+    })
+}
+
+/// What `remove_if_clean` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Removed {
+    /// No worktree folder for this id.
+    Nothing,
+    /// Uncommitted changes: the folder stays, with how many paths.
+    KeptDirty { path: PathBuf, dirty: usize },
+    /// The folder is gone. The branch stays when it holds commits the
+    /// place does not have (`ahead` > 0); a branch with none goes too.
+    Removed {
+        branch: String,
+        ahead: usize,
+        branch_kept: bool,
+    },
+}
+
+/// Take down a finished child's worktree when nothing would be lost: no
+/// uncommitted changes. Commits stay on the branch; an empty branch (no
+/// commit beyond the place's HEAD) is deleted with the folder. A dirty
+/// tree is left where it is and named, never forced.
+pub fn remove_if_clean(place: &Path, id: &str) -> Result<Removed> {
+    let Some(left) = leftover(place, id) else {
+        return Ok(Removed::Nothing);
+    };
+    if left.dirty > 0 {
+        return Ok(Removed::KeptDirty {
+            path: left.path,
+            dirty: left.dirty,
+        });
+    }
+    let path_s = left.path.to_string_lossy().into_owned();
+    let out = git(place, &["worktree", "remove", &path_s])?;
+    if !out.status.success() {
+        bail!(
+            "git worktree remove {}: {}",
+            left.path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let branch_kept = left.ahead > 0;
+    if !branch_kept {
+        let _ = git(place, &["branch", "-D", &left.branch]);
+    }
+    Ok(Removed::Removed {
+        branch: left.branch,
+        ahead: left.ahead,
+        branch_kept,
+    })
+}
+
+/// Every worktree folder under `.arbos/worktrees/`, by id.
+pub fn ids(place: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(place.join(".arbos").join(DIR))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    out
+}
+
 /// `.arbos/` is usually in the project's `.gitignore`. When it is not, the
 /// worktree would show up as an untracked folder in the parent's status;
 /// `.git/info/exclude` hides it locally without editing a tracked file.
@@ -160,4 +259,116 @@ fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
         .current_dir(dir)
         .output()
         .with_context(|| format!("run git {} in {}", args.join(" "), dir.display()))
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    fn repo(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-worktree-{tag}-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "start",
+            ],
+        ] {
+            assert!(git(&dir, &args).unwrap().status.success(), "git {args:?}");
+        }
+        dir
+    }
+
+    fn branch_exists(place: &Path, branch: &str) -> bool {
+        git(
+            place,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .unwrap()
+        .status
+        .success()
+    }
+
+    #[test]
+    fn a_clean_empty_worktree_goes_with_its_branch() {
+        let place = repo("clean");
+        let wt = create(&place, "w1").unwrap();
+        assert!(wt.path.is_dir());
+        assert_eq!(ids(&place), vec!["w1"]);
+        let done = remove_if_clean(&place, "w1").unwrap();
+        assert_eq!(
+            done,
+            Removed::Removed {
+                branch: "arbos/w1".into(),
+                ahead: 0,
+                branch_kept: false
+            }
+        );
+        assert!(!wt.path.exists());
+        assert!(!branch_exists(&place, "arbos/w1"));
+        assert_eq!(remove_if_clean(&place, "w1").unwrap(), Removed::Nothing);
+        let _ = std::fs::remove_dir_all(&place);
+    }
+
+    #[test]
+    fn commits_keep_the_branch_and_uncommitted_work_keeps_the_folder() {
+        let place = repo("kept");
+        let wt = create(&place, "w2").unwrap();
+        std::fs::write(wt.path.join("a.txt"), "a\n").unwrap();
+        // Dirty: nothing is touched.
+        let left = leftover(&place, "w2").unwrap();
+        assert_eq!((left.dirty, left.ahead), (1, 0));
+        assert_eq!(
+            remove_if_clean(&place, "w2").unwrap(),
+            Removed::KeptDirty {
+                path: wt.path.clone(),
+                dirty: 1
+            }
+        );
+        assert!(wt.path.is_dir());
+        // Committed: the folder goes, the branch and its commit stay.
+        for args in [
+            vec!["add", "a.txt"],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "work",
+            ],
+        ] {
+            assert!(git(&wt.path, &args).unwrap().status.success());
+        }
+        assert_eq!(
+            remove_if_clean(&place, "w2").unwrap(),
+            Removed::Removed {
+                branch: "arbos/w2".into(),
+                ahead: 1,
+                branch_kept: true
+            }
+        );
+        assert!(!wt.path.exists());
+        assert!(branch_exists(&place, "arbos/w2"));
+        let _ = std::fs::remove_dir_all(&place);
+    }
 }

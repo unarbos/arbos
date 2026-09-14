@@ -131,6 +131,7 @@ pub async fn model_step(
                         used,
                         size: s.window,
                         cost: done.cost,
+                        cached: done.cached,
                     }),
                     outcomes,
                     reasoning_details: done.reasoning_details,

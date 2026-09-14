@@ -157,6 +157,11 @@ pub struct HostConfig {
     pub voice_token_env: Option<String>,
     /// Inception Mercury: instant | low | medium | high. Empty = omit.
     pub reasoning_effort: Option<String>,
+    /// How long a Claude cache breakpoint lives: "5m" (default, absent) or
+    /// "1h". The hour costs more to write (2x input vs 1.25x) and pays off
+    /// in a session with long pauses between turns. Claude only; other
+    /// vendors take the default.
+    pub cache_ttl: Option<String>,
     /// `max_tokens` on every call: the model's own completion limit from the
     /// provider's model list, but never more than this. 0 = do not send.
     /// A runaway model otherwise streams until the provider stops it.
@@ -197,8 +202,20 @@ pub struct HostConfig {
     pub max_server_delay_ms: u64,
     /// Silence mid-stream that counts as a lost connection.
     pub stream_idle_ms: u64,
+    /// What the provider may do with prompts, for OpenRouter routing:
+    /// "" (account default), "deny" (only providers that do not store or
+    /// train on prompts: `provider.data_collection = "deny"`), or "zdr"
+    /// (that, plus only zero-data-retention endpoints: `provider.zdr`).
+    /// A model with no compliant endpoint is refused by OpenRouter with a
+    /// clear error rather than routed anyway.
+    pub data_policy: String,
     /// Model that writes compaction summaries. Empty = the turn's model.
     pub compact_model: String,
+    /// Model every spawned child runs, whatever its spawn call or kind
+    /// asked for (Claude Code's `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`): one
+    /// knob to keep a fleet of workers on a cheap or an approved model.
+    /// Empty = as asked. A per-turn switch the user makes still wins.
+    pub child_model: String,
     /// Vision-capable model that describes an attached image in words when
     /// the turn's model cannot see it. Empty = the first vision-capable
     /// fallback, else a cheap OpenRouter vision model.
@@ -245,6 +262,7 @@ impl Default for HostConfig {
             voice_token: None,
             voice_token_env: None,
             reasoning_effort: None,
+            cache_ttl: None,
             max_output_tokens: 32_000,
             max_parallel_tools: 8,
             speculate: true,
@@ -263,6 +281,8 @@ impl Default for HostConfig {
             max_server_delay_ms: 60_000,
             stream_idle_ms: 120_000,
             compact_model: String::new(),
+            data_policy: String::new(),
+            child_model: String::new(),
             vision_model: String::new(),
             compact_window_tokens: 0,
             // Folding at half the window made models re-read what had

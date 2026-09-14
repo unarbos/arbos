@@ -83,6 +83,10 @@ pub enum Event {
     /// The model call is alive and has been silent for this many seconds
     /// (`working` frame). Live only.
     Working(u64),
+    /// The agent's own word on what it is doing now — the kernel's `status`
+    /// event, one line, replaced by the next. Drawn on the parent's
+    /// "1 Working  …" line for a worker.
+    Status(String),
     /// The kernel's model provider and whether it holds a key (`provider`
     /// frame). `key: false` is the cue to offer this window's own key.
     Provider {
@@ -356,8 +360,8 @@ impl Session {
                         .to_string()
                 })
                 .collect(),
-            channel: String::new(),
-            device: String::new(),
+            channel: content.channel.clone(),
+            device: content.device.clone(),
             model: content.model.clone().unwrap_or_default(),
         })
     }
@@ -642,6 +646,9 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             detail,
         } if id == agent => vec![Event::Refused(detail)],
         Frame::Plan { agent: id, nodes } if id == agent => vec![Event::Plan(nodes)],
+        // The agent's own line on what it is doing (or the kernel's guess
+        // from the tool in flight); an empty step means idle.
+        Frame::Status { agent: id, step, .. } if id == agent => vec![Event::Status(step)],
         // Not agent-scoped: every attached chat hears it, and the
         // workspace's re-read is idempotent.
         Frame::Changed { path, .. } if store_file(&path) => vec![Event::StoreChanged(path)],

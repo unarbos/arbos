@@ -35,6 +35,11 @@ pub enum SayMode {
     Request,
     /// Into their running turn at the next tool boundary; a turn if idle.
     Steer,
+    /// End their running turn now and keep what they had: the turn is
+    /// interrupted with the parent's words as the reason, its jobs are
+    /// killed, and the done message carries the last words before the
+    /// stop. Parents (ancestors) only.
+    Stop,
 }
 
 impl SayMode {
@@ -43,6 +48,7 @@ impl SayMode {
             "note" => Some(Self::Note),
             "request" => Some(Self::Request),
             "steer" => Some(Self::Steer),
+            "stop" => Some(Self::Stop),
             _ => None,
         }
     }
@@ -131,6 +137,10 @@ impl Caps {
 
 /// What a coordinator reads when it left the project page alone after
 /// dispatching or receiving work.
+/// Derived status frames are sent at most this often per agent; the file
+/// always holds the latest, and one trailing frame closes a burst.
+pub const STATUS_DEBOUNCE_MS: i64 = 300;
+
 pub const NOTES_NUDGE: &str = "project page not updated last turn: a worker was started or reported and .arbos/notes.md did not change — update it (plan add/check) before or with your reply";
 
 pub struct KernelHooks {
@@ -154,6 +164,19 @@ pub struct KernelHooks {
     /// Children whose turn end already reached a parent blocked in `wait`:
     /// no `done` message for that turn (it would say the same thing twice).
     pub waited: Mutex<HashSet<String>>,
+    /// Children reported through `spawn wait=true` whose folder is to be
+    /// archived once the parent's turn ends (no `done` file will do it):
+    /// child id → parent id.
+    pub archive_after: Mutex<HashMap<String, String>>,
+    /// Turns a parent asked the kernel to stop (`say mode=stop`): agent
+    /// id and the reason the transcript records. The scheduler drains it.
+    pub stop_requests: Mutex<Vec<(String, String)>>,
+    /// Agents that called `status` this turn: the kernel's derived guess
+    /// stays out of their way until the turn ends.
+    pub status_said: Mutex<HashSet<String>>,
+    /// When a derived status frame was last sent per agent, for the
+    /// debounce; cleared by an agent's own line or the turn's end.
+    pub status_pending: Arc<Mutex<HashMap<String, i64>>>,
     /// Transcript length when each running turn began, for the `done`
     /// message's summary of what the turn said.
     pub turn_lo: Mutex<HashMap<String, u64>>,
@@ -215,6 +238,10 @@ impl KernelHooks {
             approve_seq: std::sync::atomic::AtomicU64::new(1),
             waits: Mutex::new(HashMap::new()),
             waited: Mutex::new(HashSet::new()),
+            archive_after: Mutex::new(HashMap::new()),
+            stop_requests: Mutex::new(Vec::new()),
+            status_said: Mutex::new(HashSet::new()),
+            status_pending: Arc::new(Mutex::new(HashMap::new())),
             turn_lo: Mutex::new(HashMap::new()),
             notes_at_start: Mutex::new(HashMap::new()),
             notes_nudge: Mutex::new(HashSet::new()),
@@ -255,6 +282,7 @@ impl KernelHooks {
                 kind: "agent".into(),
                 mode: a.mode.as_str().into(),
                 prs: arbos_core::prs::prs_of_tree(&prs, a.id.as_str(), &agents).len() as u32,
+                step: arbos_core::status::read(&self.place, a.id.as_str()).map(|s| s.step),
             })
             .collect();
         self.broadcast(Frame::Tree { tree });
@@ -283,6 +311,7 @@ impl KernelHooks {
 
     pub fn turn_started(&self, agent: &str) {
         self.running.lock().unwrap().insert(agent.to_string());
+        self.status_said.lock().unwrap().remove(agent);
         self.sent.lock().unwrap().remove(agent);
         let lo = count_lines(&self.layout(agent).transcript());
         self.turn_lo.lock().unwrap().insert(agent.to_string(), lo);
@@ -294,6 +323,17 @@ impl KernelHooks {
 
     pub fn turn_ended(&self, agent: &str) {
         self.running.lock().unwrap().remove(agent);
+        // Nothing is being done now: the live line goes.
+        self.status_said.lock().unwrap().remove(agent);
+        self.status_pending.lock().unwrap().remove(agent);
+        if arbos_core::status::clear(&self.place, agent) {
+            self.broadcast(Frame::Status {
+                agent: agent.to_string(),
+                step: String::new(),
+                since: String::new(),
+                source: String::new(),
+            });
+        }
         // The status page moved during this turn: tell every window now,
         // not at the watch's next second. Root is the only writer, so a
         // change seen at a child's turn end is root's, and still worth
@@ -456,7 +496,7 @@ impl KernelHooks {
                 } else {
                     "waits".into()
                 },
-                do_kind: if arbos_core::inbox::is_steer_kind(&filed.msg.kind) {
+                do_kind: if matches!(filed.msg.kind.as_str(), "steer" | "wake") {
                     "steer".into()
                 } else {
                     "agent".into()
@@ -659,6 +699,145 @@ impl KernelHooks {
             i += 1;
         }
         out
+    }
+
+    /// What `agent` is doing, in a few words. `source` is `agent` (the
+    /// `status` tool) or `derived` (the kernel's guess from the tool in
+    /// flight); a guess never overwrites what the agent said this turn.
+    /// Written to `status.toml`, sent as a `status` frame.
+    pub fn set_status(&self, agent: &str, step: &str, source: &str) -> Result<()> {
+        if source == "derived" && self.status_said.lock().unwrap().contains(agent) {
+            return Ok(());
+        }
+        if source == "agent" {
+            self.status_said.lock().unwrap().insert(agent.to_string());
+        }
+        let s = arbos_core::status::write(&self.place, agent, step, source)?;
+        let frame = Frame::Status {
+            agent: agent.to_string(),
+            step: s.step,
+            since: s.since,
+            source: s.source,
+        };
+        if source != "derived" {
+            self.status_pending.lock().unwrap().remove(agent);
+            self.broadcast(frame);
+            return Ok(());
+        }
+        // Derived lines come in bursts (eight parallel reads start at
+        // once): the file always holds the latest; the frame is sent at
+        // most once per STATUS_DEBOUNCE, with whatever the file says then.
+        let now = arbos_core::now_ms();
+        let hold = {
+            let mut pending = self.status_pending.lock().unwrap();
+            match pending.get(agent) {
+                Some(&last) if now - last < STATUS_DEBOUNCE_MS => true,
+                _ => {
+                    pending.insert(agent.to_string(), now);
+                    false
+                }
+            }
+        };
+        if !hold {
+            self.broadcast(frame);
+            return Ok(());
+        }
+        // One trailing send for the burst, with the latest line.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let pending = Arc::clone(&self.status_pending);
+            let place = self.place.clone();
+            let senders: Vec<mpsc::UnboundedSender<Frame>> = self.frames.lock().unwrap().clone();
+            let agent = agent.to_string();
+            handle.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(STATUS_DEBOUNCE_MS as u64))
+                    .await;
+                // Only if nothing else went out since (an agent line, or
+                // the turn's end, both clear the entry) and the latest is
+                // still a guess.
+                let due = {
+                    let mut pending = pending.lock().unwrap();
+                    match pending.get(&agent) {
+                        Some(&last) if arbos_core::now_ms() - last >= STATUS_DEBOUNCE_MS => {
+                            pending.insert(agent.clone(), arbos_core::now_ms());
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if due
+                    && let Some(s) = arbos_core::status::read(&place, &agent)
+                    && s.source == "derived"
+                {
+                    let frame = Frame::Status {
+                        agent,
+                        step: s.step,
+                        since: s.since,
+                        source: s.source,
+                    };
+                    for tx in &senders {
+                        let _ = tx.send(frame.clone());
+                    }
+                }
+            });
+        }
+        Ok(())
+    }
+
+    /// `/mode <skill>` | `/mode off` | `/mode`: pin a skill to the chat as
+    /// its mode, clear it, or say what is pinned. Returns the line for
+    /// the transcript.
+    pub fn set_mode_skill(&self, agent: &str, arg: &str) -> Result<String> {
+        let dir = self.place.agent_dir(agent);
+        let mut a = Agent::load(&dir)?;
+        let arg = arg.trim();
+        if arg.is_empty() {
+            return Ok(match &a.skill {
+                Some(s) => format!("Mode: {s} is pinned to this chat. `/mode off` ends it."),
+                None => {
+                    let names: Vec<String> = arbos_core::load_skills(&self.place)
+                        .iter()
+                        .map(|s| s.name.clone())
+                        .collect();
+                    format!(
+                        "No mode is pinned. `/mode <skill>` pins one of: {}.",
+                        if names.is_empty() {
+                            "(no skills here)".to_string()
+                        } else {
+                            names.join(", ")
+                        }
+                    )
+                }
+            });
+        }
+        if matches!(arg.to_ascii_lowercase().as_str(), "off" | "none" | "clear") {
+            let was = a.skill.take();
+            a.save(&dir)?;
+            return Ok(match was {
+                Some(s) => format!("Mode off: {s} is no longer pinned to this chat."),
+                None => "No mode was pinned.".to_string(),
+            });
+        }
+        let name = arg.trim_start_matches('/');
+        let Some(skill) = arbos_core::skills::find_skill(&self.place, name) else {
+            let names: Vec<String> = arbos_core::load_skills(&self.place)
+                .iter()
+                .map(|s| s.name.clone())
+                .collect();
+            bail!(
+                "no skill named {name:?} here{}",
+                if names.is_empty() {
+                    String::new()
+                } else {
+                    format!("; skills: {}", names.join(", "))
+                }
+            );
+        };
+        a.skill = Some(skill.name.clone());
+        a.save(&dir)?;
+        Ok(format!(
+            "Mode: {} is pinned to this chat — its SKILL.md applies to every turn until `/mode off`.",
+            skill.name
+        ))
     }
 
     /// The user pressed stop on `agent`: every standing or scheduled node
@@ -1049,6 +1228,53 @@ impl KernelHooks {
             ));
         }
         let label = format!("{} ({})", target.name, tid);
+        // A stop: only for a child of the sender's (any depth). The turn
+        // ends now with these words as the reason; its jobs die with it;
+        // the done message that follows carries what it had so far.
+        if mode == SayMode::Stop {
+            let mine = self.descendants(from.as_str());
+            if tid == from.as_str() || !mine.iter().any(|a| a == tid) {
+                bail!(
+                    "say mode=stop: {label} is not a worker of yours; only a parent may stop a turn"
+                );
+            }
+            let root = arbos_engine::JobsRoot::for_agent(&self.place, &AgentId::new(tid));
+            let mut killed = 0;
+            for job in root.list() {
+                if job.running() {
+                    root.kill(&job);
+                    killed += 1;
+                }
+            }
+            let reason = format!("stopped by {from}: {text}");
+            if self.is_running(tid) {
+                self.stop_requests
+                    .lock()
+                    .unwrap()
+                    .push((tid.to_string(), reason));
+                self.kick();
+                return Ok(format!(
+                    "Stopping {label} now{}; its turn ends with your words as the reason and its done message brings what it had so far.",
+                    if killed > 0 {
+                        format!(" ({killed} running job(s) killed)")
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+            // Idle: nothing runs; the words wait on its transcript.
+            let mut msg = inbox::Message::new(format!("agent:{from}"), "note", text);
+            msg.wake = false;
+            inbox::deliver(&self.place, tid, &msg)?;
+            return Ok(format!(
+                "{label} was not running{}; nothing to stop. Your words are on its transcript for its next turn.",
+                if killed > 0 {
+                    format!(" ({killed} running job(s) killed)")
+                } else {
+                    String::new()
+                }
+            ));
+        }
         // A steer is an inbox file of kind `steer`: a running turn takes it
         // at its next tool boundary; an idle one wakes on it.
         if mode == SayMode::Steer {
@@ -1101,6 +1327,8 @@ impl KernelHooks {
             SayMode::Request => true,
             // Idle, so there is no turn to steer: start one.
             SayMode::Steer => true,
+            // Handled above; never reaches here.
+            SayMode::Stop => unreachable!("stop is answered before this point"),
         };
         // A note is an inbox file the peer reads at the start of its next
         // turn; a request is one that starts a turn. Nothing is written into
@@ -1152,6 +1380,7 @@ impl KernelHooks {
             (SayMode::Request | SayMode::Note, false) => format!(
                 "Sent to {label} as a request; a turn is queued for it. Its reply will arrive here as a message from it."
             ),
+            (SayMode::Stop, _) => unreachable!("stop is answered before this point"),
         })
     }
 

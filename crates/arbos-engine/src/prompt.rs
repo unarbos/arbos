@@ -18,6 +18,8 @@ Verify with the tests that cover the changed module (its test file or directory,
 A coding task is done when the request as written is covered, not when your own check passes: before the final reply, re-read the request, list each claim (symptom, example, edge), confirm each has code and a test; fix gaps first, name what is out of scope.
 Before the final reply, check the request once more: asked to see or be shown something (a page, a run, a result) → an image exists (browser screenshot, screenshot, or a saved file) and its path is in the reply; asked to research or find sources → search or fetch was used and the writeup links every source; asked for a file → it exists at the path named. A missing one is done now, not mentioned.
 A fix on a branch is committed there (git log <base>..HEAD shows it) before the turn ends; never leave your branch dirty; never merge unless told. Do the work in this turn: no plans or promises in a reply — call the tools; stop only when verified done or blocked on the user; a failed call is read and fixed, not repeated.
+Voice: a user line marked [spoken …] came through dictation or a call and is a transcript of speech: expect transcription errors and read for intent; "can you hear me" or "is this working" asks whether dictation reached you — answer yes, briefly (you never hear audio; the words arrive as text); reply short and conversational to spoken lines unless asked for detail.
+Say what you are doing: status "<verb phrase, six words or less>" at each major step ("Reading project context", "Running the test suite"); it is the live line beside your name, replaced each time. Without it the kernel shows the tool you are running.
 Context is managed for you: big outputs show head/tail plus a cite, old ones fold to a cite, full windows become a [context checkpoint]; everything stays in transcript.jsonl. Keep decisions and verified facts in your replies."#;
 
 /// The coordinator's directive: how the main chat of a project runs it,
@@ -90,7 +92,7 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
     };
     let environment = crate::envprobe::line(Path::new(&cwd));
     format!(
-        "You: {id}\nName: {name}\n{kind}{role}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\n{sandbox}Project: {project}\nCwd: {cwd}\nEnvironment: {environment}\nFocus: {focus}\nSkills (/name <args> brings its SKILL.md; .arbos/skills/<name>/): {skills}\n{git}\n{machines}\n{kinds}{instructions}{agents}{memory}",
+        "You: {id}\nName: {name}\n{kind}{role}{mode_skill}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\n{sandbox}Project: {project}\nCwd: {cwd}\nEnvironment: {environment}\nFocus: {focus}\nSkills (/name <args> brings its SKILL.md; .arbos/skills/<name>/): {skills}\n{git}\n{machines}\n{kinds}{instructions}{agents}{memory}",
         id = agent.id,
         name = agent.name,
         parent = agent.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),
@@ -101,6 +103,7 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
         mode = agent.mode.describe(),
         kinds = kinds_segment(place, agent),
         instructions = instructions_segment(place, agent),
+        mode_skill = mode_segment(place, agent),
         agents = agents_md,
         memory = memory,
     )
@@ -117,7 +120,7 @@ fn kinds_segment(place: &Place, agent: &Agent) -> String {
         return String::new();
     }
     format!(
-        "Kinds (spawn kind=<name>; each is described in .arbos/agents-defs/<name>.md): {}\n",
+        "Kinds (spawn kind=<name>; each is described in .arbos/agents-defs/<name>.md or ~/.config/arbos/agents-defs/): {}\n",
         defs.iter()
             .map(AgentDef::roster_line)
             .collect::<Vec<_>>()
@@ -143,6 +146,25 @@ fn memory_segments(place: &Place) -> String {
         out.push_str(&format!("\n{label} ({}):\n{brief}\n", path.display()));
     }
     out
+}
+
+/// The skill pinned to this chat as its mode (`/mode <name>`): a line
+/// naming it, and its body in full, every turn — Cursor's custom modes,
+/// "a skill that stays pinned in the chat".
+fn mode_segment(place: &Place, agent: &Agent) -> String {
+    let Some(name) = agent.skill.as_deref().filter(|s| !s.is_empty()) else {
+        return String::new();
+    };
+    match arbos_core::skills::find_skill(place, name) {
+        Some(skill) => format!(
+            "Mode: {name} (this skill is pinned to this chat and applies to every turn; /mode off ends it)\n[skill {name} — {}]\n{}\n",
+            skill.path.display(),
+            skill.render("")
+        ),
+        None => {
+            format!("Mode: {name} (pinned, but no skill of that name is here now; say so once)\n")
+        }
+    }
 }
 
 /// `instructions.md` in the agent folder: the standing brief a definition
