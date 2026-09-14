@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{Attach, start_kernel_replay};
+use common::{Attach, start_kernel_replay_prepared};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -43,7 +43,16 @@ fn run(name: &str, user: &str, task: &str) -> String {
         ),
         task = task
     );
-    let mut k = start_kernel_replay(name, &replies);
+    // The test reads w1's folder after root's turns; keep it in place
+    // (finished workers are archived by default once #144 lands).
+    let mut k = start_kernel_replay_prepared(name, &replies, "", |place| {
+        std::fs::create_dir_all(place.join(".arbos")).unwrap();
+        std::fs::write(
+            place.join(".arbos/project.toml"),
+            "schema = 2\n[root]\nrole = \"coordinator\"\narchive_children = false\n",
+        )
+        .unwrap();
+    });
     let mut a = Attach::connect(&k.url);
     assert!(
         a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
