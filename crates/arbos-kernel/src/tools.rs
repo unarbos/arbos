@@ -509,9 +509,16 @@ impl Tool for PlanTool {
                                 arbos_core::notes::SHAPES
                             )
                         })?;
-                    let k = notes.add(opt_str(&args, "section").unwrap_or(""), text);
+                    let added = notes.add(opt_str(&args, "section").unwrap_or(""), text);
                     hooks.save_notes(agent, &notes)?;
-                    format!("Added item {k}.")
+                    if added.replaced {
+                        format!(
+                            "Rewrote item {} (it already named that target); nothing was added.",
+                            added.n
+                        )
+                    } else {
+                        format!("Added item {}.", added.n)
+                    }
                 }
                 "check" => {
                     let k = n()?;
