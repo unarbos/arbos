@@ -146,29 +146,25 @@ pub(crate) fn summarise_call(_name: &str, args: &serde_json::Value) -> String {
 pub const BODY_CAP: usize = 1024 * 1024;
 const BODY_HEAD: usize = 64 * 1024;
 
-/// Spill an oversized body to `<agent dir>/results/<call_id>.txt` and put a
-/// head plus the cite on the transcript line instead.
+/// A body larger than the model's view of it (the eviction limits) is
+/// written whole to `<agent dir>/results/<call_id>.txt`, so the model can
+/// `read` it in slices by the path the evicted view cites; the transcript
+/// keeps it whole too, up to `BODY_CAP`. Past that the transcript line
+/// holds a head plus the path instead.
 pub fn cap_body(cx: &RunCx, call_id: &str, body: String) -> String {
-    if body.len() <= BODY_CAP {
+    if !crate::evict::spills(&body) {
         return body;
     }
     let dir = arbos_core::Layout::new(&cx.place, cx.agent.id.as_str())
         .dir
         .join("results");
-    let safe: String = call_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let path = dir.join(format!("{safe}.txt"));
+    let path = dir.join(crate::evict::spill_name(call_id));
     let spilled = std::fs::create_dir_all(&dir)
         .and_then(|_| std::fs::write(&path, &body))
         .is_ok();
+    if body.len() <= BODY_CAP {
+        return body;
+    }
     let cut = body
         .char_indices()
         .map(|(i, _)| i)
