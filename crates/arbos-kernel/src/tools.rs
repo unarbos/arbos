@@ -133,7 +133,12 @@ impl Tool for Spawn {
                     "string",
                 ),
                 ("kind", "Leave out unless a Kind fits.", false, "string"),
-                ("isolate", "Leave out, or worktree.", false, "string"),
+                (
+                    "isolate",
+                    "Leave out: the worker edits the checkout in place. worktree only when another worker edits code at the same time.",
+                    false,
+                    "string",
+                ),
                 (
                     "host",
                     "Leave out to run here. Else a name from Machines.",
