@@ -76,6 +76,7 @@ fn main() -> Result<()> {
         composer::init(cx);
         opener::init(cx);
         tab_sheet::init(cx);
+        bezel::ui::palette::init(cx);
         editor::init(cx);
         root::init(cx);
         // Last: it reads every binding above off the keymap to put the
