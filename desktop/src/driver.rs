@@ -1215,6 +1215,10 @@ fn item_json(item: &ChatItem) -> Value {
             "text": cut(text),
             "failed": failed,
         }),
+        ChatItem::Nudge(text) => json!({
+            "kind": "nudge",
+            "text": cut(text),
+        }),
         ChatItem::Artifacts(files) => json!({
             "kind": "artifacts",
             "files": files.iter().map(|file| json!({

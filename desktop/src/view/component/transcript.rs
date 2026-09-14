@@ -506,6 +506,20 @@ fn turn_answer(items: &[ChatItem], turn: &Turn) -> Option<String> {
 /// What the session has to say for itself. Cursor keeps failures as a
 /// muted line, not a full-width danger banner. ChatView ErrorCard puts
 /// Retry on a failed turn — same resend of the last user prompt.
+/// A kernel reminder for the model: one dim caption line, no strip, no
+/// retry — the user sees why the next reply opens with a page update.
+fn nudge(text: &str, theme: &Theme) -> AnyElement {
+    let short = text.split(':').next().unwrap_or(text).trim().to_owned();
+    div()
+        .self_start()
+        .w_full()
+        .max_w(px(root::CHAT_MAX_WIDTH))
+        .text_style(TextStyle::Caption)
+        .text_color(theme.text_faint)
+        .child(SharedString::from(format!("kernel · {short}")))
+        .into_any_element()
+}
+
 fn notice(
     chat: &ChatSession,
     ix: usize,
@@ -2966,6 +2980,7 @@ fn zone(
                 from_block(chat, ix, who, text, images, &theme, window, cx)
             }
             ChatItem::Notice { text, failed } => notice(chat, ix, text, *failed, &theme, cx),
+            ChatItem::Nudge(text) => nudge(text, &theme),
             ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, &theme, cx),
             _ => div().into_any_element(),
         });

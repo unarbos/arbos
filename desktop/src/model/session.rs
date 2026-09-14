@@ -99,6 +99,9 @@ pub enum ChatItem {
         text: String,
         failed: bool,
     },
+    /// A kernel reminder addressed to the model, shown dim so the user
+    /// knows why the next reply starts with a page update.
+    Nudge(String),
     /// Files a tool produced for the user to look at: screenshots and
     /// screen recordings. One row per tool call; click opens the file.
     Artifacts(Vec<Artifact>),
@@ -1895,6 +1898,15 @@ impl ChatSession {
             }
             Event::Aside(text) => {
                 self.notice(false, &text);
+                self.flush();
+            }
+            Event::Nudge(text) => {
+                // Once per idle period from the kernel; the same line twice
+                // in a row (a tail replay) is not two rows.
+                let dup = matches!(self.items.last(), Some(ChatItem::Nudge(t)) if *t == text);
+                if !dup {
+                    self.items.push(ChatItem::Nudge(text));
+                }
                 self.flush();
             }
             Event::ImageDescribed { path, model, text } => {

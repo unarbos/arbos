@@ -63,6 +63,9 @@ pub enum Event {
     /// The agent spoke between turns: a callback fired, or background work
     /// finished. Not a turn, and not a failure.
     Aside(String),
+    /// A kernel reminder for the model ("project page not updated"): a
+    /// dim aside in the transcript, never a failure or a strip.
+    Nudge(String),
     /// An attached image the turn's model could not see was described in
     /// words by `model`. Belongs to the user card that carried the image.
     ImageDescribed {
@@ -722,6 +725,7 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
         EventKind::ImageDescribed { path, model, text } => {
             vec![Event::ImageDescribed { path, model, text }]
         }
+        EventKind::Nudge { text } => vec![Event::Nudge(text)],
         // The turn was cut short; the pane says by whom (the fold line
         // picks the same text up).
         EventKind::Interrupted { detail } => vec![Event::Aside(
