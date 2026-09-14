@@ -8,6 +8,7 @@ mod agent;
 pub mod agent_def;
 pub mod chattitle;
 pub mod cloudsync;
+pub mod containment;
 pub mod envsafe;
 mod event;
 pub mod files;

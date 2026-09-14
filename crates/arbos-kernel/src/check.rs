@@ -320,6 +320,24 @@ pub fn check(place: &Place) -> Result<Report> {
             r.warn(rel(&notes), Some(p.line), p.what);
         }
     }
+    // Jobs whose command reached for the cloud metadata service, the
+    // container runtime, or credential files: named, so a run that was
+    // led there is visible after the fact (the guard asked at the time).
+    for agent in &agents {
+        let root = arbos_engine::JobsRoot::for_agent(place, &agent.id);
+        for job in root.list() {
+            if let Some(risk) = arbos_core::containment::risk_of(&job.meta.command) {
+                r.warn(
+                    format!(".arbos/agents/{}/jobs/{}", agent.id, job.id),
+                    None,
+                    format!(
+                        "this job reached for {risk}: {}",
+                        arbos_core::text::clip(job.meta.command.trim(), 100)
+                    ),
+                );
+            }
+        }
+    }
     // Processes still writing into .arbos/: a job from an earlier kernel
     // run (the kernel reaps these at start; a `check` between runs sees
     // them), and, on Linux, any process holding a file under .arbos/ open

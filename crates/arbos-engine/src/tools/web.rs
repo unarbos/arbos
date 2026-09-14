@@ -77,6 +77,13 @@ pub async fn fetch(url: &str) -> Result<ToolOut> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         bail!("fetch only http(s)");
     }
+    // The cloud metadata service hands out the instance's credentials;
+    // fetch has no reason to read it, whatever the page said.
+    if arbos_core::containment::url_is_metadata(url) {
+        bail!(
+            "fetch refuses the cloud metadata service ({url}): it serves instance credentials, not pages"
+        );
+    }
     let client = reqwest::Client::builder()
         .user_agent("arbos/0.1")
         .redirect(reqwest::redirect::Policy::limited(8))

@@ -215,8 +215,20 @@ pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Res
     // writes; asking permission to ask would be absurd. A before-tool
     // hook's own question wins when it set one.
     let ask_first = writes && cx.agent.mode == arbos_core::Mode::Ask && decided.tool != "ask";
+    // A command that reaches past this machine — the cloud metadata
+    // service, the container runtime, credential files — asks in every
+    // mode (T3-06), unless sandbox.toml says the metadata reach is
+    // expected here.
+    let reach = matches!(decided.tool.as_str(), "bash" | "terminal")
+        .then(|| crate::tool::opt_str(&decided.args, "command"))
+        .flatten()
+        .and_then(arbos_core::containment::risk_of)
+        .filter(|risk| {
+            !(risk.starts_with("the cloud metadata") && crate::sandbox::metadata_allowed(&cx.place))
+        });
     let ask = decided
         .ask
+        .or_else(|| reach.map(|risk| arbos_core::containment::question(&decided.tool, risk)))
         .or_else(|| ask_first.then(|| crate::batch::summarise_call(&decided.tool, &decided.args)));
     let plan = if ask.is_some() {
         plan.interactive()
