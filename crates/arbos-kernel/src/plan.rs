@@ -424,6 +424,7 @@ fn notify_parent_done(hooks: &KernelHooks, agent: &str) {
 /// A turn ended: its folder closes with what the transcript says, and a
 /// child's parent hears about it.
 pub fn finish_turn(hooks: &KernelHooks, agent: &str) {
+    crate::chatdoor::reply_if_door_turn(hooks, agent);
     notify_parent_done(hooks, agent);
     close_turn_folder(hooks, agent, None);
     hooks.broadcast(hooks.plan_frame(agent));

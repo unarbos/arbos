@@ -535,6 +535,52 @@ pub fn check(place: &Place) -> Result<Report> {
         r.warn(rel(&left.path), None, what);
     }
 
+    // doors.toml: a chat door the kernel could not open is a warning; a
+    // file it cannot read is an error (no door opens then).
+    match crate::chatdoor::load(place) {
+        Ok(doors) => {
+            for d in doors {
+                let source = arbos_engine::secrets::Config::load(place.path())
+                    .ok()
+                    .and_then(|c| c.secrets.get(d.token.trim()).cloned())
+                    .unwrap_or_else(|| d.token.trim().to_string());
+                let kind = arbos_engine::secrets::kind_of(&source);
+                let reachable = if let Some(v) = source.strip_prefix("env:") {
+                    std::env::var_os(v.trim()).is_some()
+                } else if let Some(p) = source.strip_prefix("file:") {
+                    Path::new(p.trim()).exists()
+                } else if source.starts_with("op://") {
+                    std::env::var_os("OP_SERVICE_ACCOUNT_TOKEN").is_some()
+                        || std::env::var_os("OP_SESSION").is_some()
+                } else {
+                    false
+                };
+                if !reachable {
+                    r.warn(
+                        format!(".arbos/{}", crate::chatdoor::FILE),
+                        None,
+                        format!(
+                            "{} door: token {:?} ({kind}) cannot be read from here; the kernel logs door_token and leaves the door closed",
+                            d.kind, d.token
+                        ),
+                    );
+                }
+                if !arbos_core::agent_exists(place, &d.agent) {
+                    r.warn(
+                        format!(".arbos/{}", crate::chatdoor::FILE),
+                        None,
+                        format!("{} door: agent {:?} does not exist here", d.kind, d.agent),
+                    );
+                }
+            }
+        }
+        Err(e) => r.error(
+            format!(".arbos/{}", crate::chatdoor::FILE),
+            None,
+            format!("{e:#}"),
+        ),
+    }
+
     // kernel.json: a live kernel, or a stale file.
     let kj = place.kernel_json();
     if kj.exists() {
