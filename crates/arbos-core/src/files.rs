@@ -421,8 +421,17 @@ pub fn append_events(path: &Path, events: &[Event]) -> Result<usize> {
     if events.is_empty() {
         return Ok(0);
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    // The folder is made once, by bootstrap/create_chat/spawn. An append
+    // never recreates it: a chat deleted with `rm -rf` while a turn ran
+    // came back as a ghost (a transcript with no agent.md) on the model's
+    // late reply (qa-017). A missing folder is the end of that transcript.
+    if let Some(parent) = path.parent()
+        && !parent.is_dir()
+    {
+        bail!(
+            "agent folder is gone; nothing more is written to {}",
+            path.display()
+        );
     }
     let mut buf = Vec::with_capacity(events.len() * 256);
     for event in events {

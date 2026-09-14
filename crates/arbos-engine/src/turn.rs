@@ -468,6 +468,15 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             tools,
         )
         .await?;
+        // The model call took seconds; the chat may have been deleted
+        // meanwhile (qa-017). Its reply is not written anywhere.
+        if gone() {
+            eprintln!(
+                "turn {}: agent folder was deleted during the model call; ending without writing",
+                agent.id
+            );
+            return Ok(());
+        }
         let (content, calls, usage, outcomes, reasoning_details) = match step {
             Step::Done {
                 content,

@@ -269,6 +269,11 @@ impl Trace {
     fn write(&mut self, dir: &Option<std::path::PathBuf>) {
         let Some(dir) = dir else { return };
         self.ended_ms = now_ms();
+        // `trace/` lives in the agent folder; a folder deleted mid-call is
+        // not recreated for its trace (qa-017).
+        if !dir.parent().is_some_and(|agent| agent.is_dir()) {
+            return;
+        }
         if std::fs::create_dir_all(dir).is_err() {
             return;
         }
