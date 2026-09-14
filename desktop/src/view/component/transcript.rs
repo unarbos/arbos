@@ -2536,6 +2536,11 @@ struct WorkStats {
     edits: usize,
     searches: usize,
     commands: usize,
+    /// The kernel's own calls — plan items added or checked, workers
+    /// spawned — which Cursor would fold into the run line rather than
+    /// list as rows.
+    plans: usize,
+    spawns: usize,
     add: usize,
     del: usize,
     first_file: Option<String>,
@@ -2572,6 +2577,8 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
         last_kind: None,
         secs: 0,
         last_label: None,
+        plans: 0,
+        spawns: 0,
     };
     let mut edited: HashSet<String> = HashSet::new();
     for item in &items[body] {
@@ -2621,7 +2628,11 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
                 }
                 ToolKind::Search => stats.searches += 1,
                 ToolKind::Execute => stats.commands += 1,
-                _ => {}
+                _ => match label.split_whitespace().next().unwrap_or(label) {
+                    "plan" => stats.plans += 1,
+                    "spawn" => stats.spawns += 1,
+                    _ => {}
+                },
             }
         }
     }
@@ -2738,10 +2749,16 @@ pub fn render(
     // working tree's uncommitted files with their line counts, while the
     // chat is idle. The main chat of a local repository only.
     let workers_busy = chat.children.iter().any(|c| c.state == crate::model::session::ChildState::Working);
+    // Cursor's card follows a turn that changed files: an edit of its own,
+    // or a worker (whose edits land in the tree, not in this chat's items).
+    // A turn that only ran a test or read a file gets none.
     let newest_worked = turns.last().is_some_and(|turn| {
-        chat.items[turn.range.clone()]
-            .iter()
-            .any(|item| matches!(item, ChatItem::Tool { .. } | ChatItem::From { .. }))
+        let stats = work_stats(&chat.items, turn.range.clone());
+        stats.edits > 0
+            || stats.spawns > 0
+            || chat.items[turn.range.clone()]
+                .iter()
+                .any(|item| matches!(item, ChatItem::From { .. }))
             || !spawned_in(&chat.items, turn.range.clone()).is_empty()
     });
     if !chat.busy()
@@ -3991,6 +4008,21 @@ fn work_summary(
             count_word(stats.commands, "command", "commands")
         ));
     }
+    if stats.spawns > 0 {
+        parts.push(format!(
+            "started {} {}",
+            stats.spawns,
+            count_word(stats.spawns, "worker", "workers")
+        ));
+    }
+    if stats.plans > 0 {
+        parts.push(format!(
+            "updated the project page {}",
+            if stats.plans == 1 { String::new() } else { format!("{} times", stats.plans) }
+        )
+        .trim_end()
+        .to_string());
+    }
     if parts.is_empty() {
         return if running {
             match stats.last_label.as_deref() {
@@ -4017,6 +4049,10 @@ fn work_summary(
         ("searched", false) => "Searched",
         ("ran", true) => "Running",
         ("ran", false) => "Ran",
+        ("started", true) => "Starting",
+        ("started", false) => "Started",
+        ("updated", true) => "Updating",
+        ("updated", false) => "Updated",
         (other, _) => other,
     };
     let mut rest = arg.to_owned();
