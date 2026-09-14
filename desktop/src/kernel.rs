@@ -2203,6 +2203,16 @@ fn arbos_bin() -> Result<PathBuf> {
             path.display()
         ));
     }
+    // A shipped app carries its kernel: `Arbos.app/Contents/MacOS/arbos-kernel`,
+    // signed with the bundle (desktop/Makefile). It wins over any development
+    // tree so a copy dragged out of the DMG works on a Mac with no checkout.
+    if let Some(beside) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("arbos-kernel")))
+        .filter(|path| path.is_file())
+    {
+        return Ok(beside);
+    }
     if let Ok(path) = std::env::var("CARGO_MANIFEST_DIR") {
         let debug = PathBuf::from(path).join("../target/debug/arbos-kernel");
         if debug.is_file() {
