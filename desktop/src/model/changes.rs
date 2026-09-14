@@ -22,6 +22,22 @@ pub struct FileChange {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GitChanges {
     pub files: Vec<FileChange>,
+    /// Commits on this branch not yet on its upstream — Cursor's "Push"
+    /// pill once the tree is clean. Zero when there is no upstream.
+    pub ahead: u32,
+}
+
+/// Untracked paths nobody means as a change: caches, virtual
+/// environments, build output, the app's own store.
+fn junk(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    path.split('/').any(|part| {
+        matches!(
+            part,
+            "__pycache__" | ".venv" | "venv" | "node_modules" | "target" | ".arbos" | ".git" | ".mypy_cache" | ".pytest_cache" | "dist" | "build"
+        )
+    }) || name.ends_with(".pyc")
+        || name == ".DS_Store"
 }
 
 impl GitChanges {
@@ -60,6 +76,9 @@ impl GitChanges {
             .collect();
         if let Some(untracked) = git(root, &["ls-files", "--others", "--exclude-standard"]) {
             for path in untracked.lines().map(str::trim).filter(|p| !p.is_empty()) {
+                if junk(path) || root.join(path).is_symlink() {
+                    continue;
+                }
                 let lines = std::fs::read_to_string(root.join(path))
                     .map(|text| text.lines().count() as u32)
                     .unwrap_or(1);
@@ -71,7 +90,10 @@ impl GitChanges {
                 });
             }
         }
-        Some(GitChanges { files })
+        let ahead = git(root, &["rev-list", "--count", "@{u}..HEAD"])
+            .and_then(|out| out.trim().parse().ok())
+            .unwrap_or(0);
+        Some(GitChanges { files, ahead })
     }
 
     /// The diff of one file (or the whole tree when `path` is `None`) as
@@ -84,7 +106,7 @@ impl GitChanges {
         let mut out = git(root, &args).unwrap_or_default();
         let untracked = git(root, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
         for file in untracked.lines().map(str::trim).filter(|p| !p.is_empty()) {
-            if path.is_some_and(|wanted| wanted != file) {
+            if path.is_some_and(|wanted| wanted != file) || junk(file) || root.join(file).is_symlink() {
                 continue;
             }
             if let Ok(text) = std::fs::read_to_string(root.join(file)) {
