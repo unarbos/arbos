@@ -149,6 +149,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         if wake.kind == WakeKind::User {
             // A new task: the mechanism line belongs to the last one.
             crate::mechanism::reset(&place, &agent.id);
+            crate::repro::reset(&place, &agent.id);
             if let Some(text) = &wake.text {
                 batch.push(Event::new(EventKind::User {
                     text: text.clone(),
