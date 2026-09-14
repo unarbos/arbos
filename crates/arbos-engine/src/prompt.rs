@@ -115,7 +115,7 @@ fn kinds_segment(place: &Place, agent: &Agent) -> String {
         return String::new();
     }
     format!(
-        "Kinds (spawn kind=<name>; each is described in .arbos/agents-defs/<name>.md): {}\n",
+        "Kinds (spawn kind=<name>; each is described in .arbos/agents-defs/<name>.md or ~/.config/arbos/agents-defs/): {}\n",
         defs.iter()
             .map(AgentDef::roster_line)
             .collect::<Vec<_>>()
