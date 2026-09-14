@@ -1507,12 +1507,27 @@ impl Workspace {
             .iter()
             .filter_map(|chat| chat.agent_session.clone().map(|sid| (sid, chat.id)))
             .collect();
-        for chat in &mut self.projects[ix].sessions {
-            if chat.parent.is_none() {
-                chat.parent = chat
+        let wanted: Vec<(u64, u64)> = self.projects[ix]
+            .sessions
+            .iter()
+            .filter(|chat| chat.parent.is_none())
+            .filter_map(|chat| {
+                let parent = chat
                     .parent_kernel
                     .as_ref()
-                    .and_then(|sid| by_kernel.get(sid).copied());
+                    .and_then(|sid| by_kernel.get(sid).copied())?;
+                Some((chat.id, parent))
+            })
+            .collect();
+        for (id, parent) in wanted {
+            // A filed parent that is this chat's own descendant would close
+            // the tree into a ring; the file is wrong, the link stays off.
+            if !self.projects[ix].can_parent(id, parent) {
+                eprintln!("session {id}: parent {parent} would make a ring; left unparented");
+                continue;
+            }
+            if let Some(chat) = self.projects[ix].session_mut(id) {
+                chat.parent = Some(parent);
             }
         }
         self.number_delegates(ix);
@@ -2530,8 +2545,14 @@ impl Workspace {
                 .session(owner)
                 .and_then(|chat| chat.agent_session.clone());
             let mut dirty = false;
+            let ring = !self.projects[ix].can_parent(id, owner);
+            if ring {
+                eprintln!(
+                    "session {id} ({kernel_id}) listed as a child of {owner}, its own descendant; the link stays as it was"
+                );
+            }
             if let Some(chat) = self.projects[ix].session_mut(id) {
-                if chat.parent != Some(owner) {
+                if !ring && chat.parent != Some(owner) {
                     chat.parent = Some(owner);
                     dirty = true;
                 }
