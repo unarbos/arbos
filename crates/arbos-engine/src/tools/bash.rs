@@ -71,6 +71,12 @@ impl Tool for Bash {
                     false,
                     "integer",
                 ),
+                (
+                    "repro",
+                    "This command is a reproduction of the reported failure, derived from the request. Recorded with its exit code (it must be non-zero now); changes re-runs it after your edits.",
+                    false,
+                    "boolean",
+                ),
             ],
         )
     }
@@ -222,6 +228,20 @@ impl Tool for Bash {
                     ));
                 }
                 Status::Running => unreachable!(),
+            }
+            if crate::repro::marked(&args) {
+                let exit = match job.status {
+                    Status::Exited(code) => Some(code),
+                    _ => None,
+                };
+                body.push('\n');
+                body.push_str(&crate::repro::record(
+                    &cx.place,
+                    &cx.agent.id,
+                    cmd,
+                    &dir,
+                    exit,
+                ));
             }
             Ok(ToolOut::with_paths(body, vec![journal]))
         })

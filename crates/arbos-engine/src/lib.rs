@@ -16,6 +16,7 @@ pub mod project;
 mod prompt;
 mod provider;
 pub mod replay;
+pub mod repro;
 mod retry;
 pub mod sandbox;
 pub mod secrets;

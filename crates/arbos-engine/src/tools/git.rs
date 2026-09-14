@@ -275,6 +275,9 @@ pub fn changes(cwd: &Path, agent_dir: Option<&Path>) -> Result<ToolOut> {
     if let Some(note) = test_files_note(&status) {
         body.push_str(&note);
     }
+    if let Some(report) = agent_dir.and_then(crate::repro::rerun_report) {
+        body.push_str(&report);
+    }
     if let Some(line) = agent_dir.and_then(crate::mechanism::current_in) {
         body.push_str(&format!(
             "\nMechanism stated at the first edit: {line}\nBefore the final reply: does this line explain every symptom the request names? If one is not explained, the fix is not done.\n"
