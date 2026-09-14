@@ -36,6 +36,37 @@ fn board(owner: &str, action: &str, panel: &str, ids: Vec<String>) -> Frame {
 pub struct Spawn(pub Arc<KernelHooks>);
 pub struct Say(pub Arc<KernelHooks>);
 pub struct Ask(pub Arc<KernelHooks>);
+/// `status "Reading project context"`: the live line beside the agent's
+/// name in every window (Cursor's UpdateCurrentStep).
+pub struct StatusTool(pub Arc<KernelHooks>);
+
+impl Tool for StatusTool {
+    fn name(&self) -> &'static str {
+        "status"
+    }
+    fn schema(&self) -> Value {
+        typed_schema(
+            "status",
+            "Say what you are doing now, for the line beside your name: a verb phrase, six words or less (\"Reading project context\"). Call it at each major step; it replaces the last one.",
+            &[("step", "", true, "string")],
+        )
+    }
+    fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
+        Ok(Plan::access(Access::none()))
+    }
+    fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
+        let hooks = Arc::clone(&self.0);
+        Box::pin(async move {
+            let step = req(&args, "step")?.trim().to_string();
+            if step.is_empty() {
+                anyhow::bail!("status: step must say something (a verb phrase, six words or less)");
+            }
+            let shown = arbos_core::status::clip(&step);
+            hooks.set_status(cx.agent.id.as_str(), &shown, "agent")?;
+            Ok(ToolOut::text(format!("Status: {shown}")))
+        })
+    }
+}
 pub struct Browser(pub Arc<KernelHooks>);
 pub struct Terminal {
     pub hooks: Arc<KernelHooks>,
