@@ -132,3 +132,59 @@ fn archive_children_false_keeps_the_folder_where_it_was() {
     assert!(!k.place.join(".arbos/archive/agents/w1").exists());
     let _ = k.child.kill();
 }
+
+/// A `wait=true` worker's report is the spawn result; no done file
+/// follows, so the archive must come from the turn end instead. The
+/// window hears about the move as `changed` frames and a fresh `tree`.
+#[test]
+fn a_waited_worker_is_archived_once_its_parents_turn_ends() {
+    let replies = concat!(
+        "{\"agent\":\"root\",\"content\":\"asking\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"oracle\",\"task\":\"say the codeword\",\"wait\":true}}]}\n",
+        "{\"content\":\"the codeword is xylophone\"}\n",
+        "{\"agent\":\"root\",\"content\":\"got it\"}\n",
+    );
+    let mut k = start_kernel_replay("archive-waited", replies);
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "ask the oracle"}));
+    // The frames the window can act on, in order: the folder leaves
+    // agents/, appears under archive/, and the tree no longer lists it.
+    let removed = a.wait(Duration::from_secs(40), |f| {
+        f["type"] == "changed" && f["path"] == "agents/oracle" && f["kind"] == "removed"
+    });
+    assert!(
+        removed.is_some(),
+        "a changed frame says the folder left agents/"
+    );
+    let tree = a
+        .wait(Duration::from_secs(10), |f| f["type"] == "tree")
+        .expect("a tree frame follows the archive");
+    let ids: Vec<&str> = tree["tree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["root"], "{ids:?}");
+    assert!(
+        k.place
+            .join(".arbos/archive/agents/oracle/transcript.jsonl")
+            .exists()
+    );
+    assert!(!k.place.join(".arbos/agents/oracle").exists());
+    // Root's turn had ended first: the report was its tool result.
+    let root = transcript(&k.place, "root");
+    let spawn = root
+        .iter()
+        .find(|e| e["kind"] == "tool" && e["name"] == "spawn")
+        .expect("spawn record");
+    assert!(
+        spawn["body"].as_str().unwrap_or("").contains("xylophone"),
+        "{spawn:#?}"
+    );
+    assert!(root.iter().any(|e| e["kind"] == "turn_complete"));
+    let _ = k.child.kill();
+}

@@ -371,6 +371,19 @@ fn archive_finished(hooks: &KernelHooks, reported: &[String]) {
                         crate::klog::warn("worktree_remove_failed", Some(id), format!("{e:#}"))
                     }
                 }
+                // Two `changed` frames for clients that mirror folders
+                // (the watcher sees files, not a folder rename); the
+                // `tree` frame below is the list itself.
+                hooks.broadcast(arbos_core::wire::Frame::Changed {
+                    path: format!("agents/{id}"),
+                    kind: "removed".into(),
+                    size: 0,
+                });
+                hooks.broadcast(arbos_core::wire::Frame::Changed {
+                    path: format!("archive/agents/{id}"),
+                    kind: "created".into(),
+                    size: 0,
+                });
             }
             Err(e) => crate::klog::warn("child_archive_failed", Some(id), format!("{e:#}")),
         }
@@ -394,6 +407,18 @@ fn notify_parent_done(hooks: &KernelHooks, agent: &str) {
         return;
     };
     if hooks.waited.lock().unwrap().remove(agent) {
+        // The parent has the report as its tool result; no done file, so
+        // the archive step must come from here — once the parent's turn
+        // ends (it may still read the folder), or now if it already has.
+        if hooks.is_running(parent.as_str()) {
+            hooks
+                .archive_after
+                .lock()
+                .unwrap()
+                .insert(agent.to_string(), parent.to_string());
+        } else {
+            archive_finished(hooks, &[format!("agent:{agent}")]);
+        }
         return;
     }
     if !arbos_core::agent_exists(&hooks.place, parent.as_str()) {
@@ -427,6 +452,23 @@ pub fn finish_turn(hooks: &KernelHooks, agent: &str) {
     notify_parent_done(hooks, agent);
     close_turn_folder(hooks, agent, None);
     hooks.broadcast(hooks.plan_frame(agent));
+    // Waited-for children that finished during this turn go to the
+    // archive now that the parent is done with them.
+    let waited: Vec<String> = {
+        let mut map = hooks.archive_after.lock().unwrap();
+        let ids: Vec<String> = map
+            .iter()
+            .filter(|(_, parent)| parent.as_str() == agent)
+            .map(|(child, _)| child.clone())
+            .collect();
+        for id in &ids {
+            map.remove(id);
+        }
+        ids.into_iter().map(|id| format!("agent:{id}")).collect()
+    };
+    if !waited.is_empty() {
+        archive_finished(hooks, &waited);
+    }
 }
 
 /// The turn's last words and whether it ended well, from the transcript
