@@ -430,6 +430,16 @@ fn fire_with_note(
                     let mut current = current;
                     current.seen = outcome.seen.or(current.seen);
                     current.error = outcome.error;
+                    // A merged or closed pull request has nothing more to
+                    // watch: the subscription goes with this firing.
+                    if outcome.closed {
+                        current.once = true;
+                        crate::klog::info(
+                            "subscription_closed",
+                            Some(&agent_id),
+                            format!("#{}: the pull request is {}", current.id, outcome.last),
+                        );
+                    }
                     settle(
                         &hooks,
                         &agent_id,
@@ -458,6 +468,8 @@ struct Polled {
     seen: Option<String>,
     error: Option<String>,
     last: String,
+    /// The pull request is merged or closed: stop watching.
+    closed: bool,
 }
 
 /// One look at the pull request; the diff against `seen` is the message.
@@ -528,10 +540,17 @@ fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
                     Err(e) => format!("could not deliver: {e:#}"),
                 }
             };
+            let closed = branch.is_none()
+                && matches!(now.state.to_ascii_uppercase().as_str(), "MERGED" | "CLOSED");
             Polled {
                 seen: serde_json::to_string(&now).ok(),
                 error: None,
-                last,
+                last: if closed {
+                    now.state.to_ascii_lowercase()
+                } else {
+                    last
+                },
+                closed,
             }
         }
         Err(e) => {
@@ -549,6 +568,7 @@ fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
                 seen: None,
                 error: Some(msg.clone()),
                 last: format!("error: {}", text::clip(&msg, 160)),
+                closed: false,
             }
         }
     }

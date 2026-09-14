@@ -545,8 +545,10 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                     let path = Layout::new(&place, agent.id.as_str()).transcript();
                     let tail = tails.entry(agent.id.to_string()).or_default();
                     for mut ev in tail.read_new(&path).unwrap_or_default() {
-                        if record_prs(&place, agent.id.as_str(), &ev) {
+                        let opened = record_prs(&place, agent.id.as_str(), &ev);
+                        if !opened.is_empty() {
                             hooks.broadcast(Frame::Tree { tree: tree_nodes(&place) });
+                            follow_prs(&hooks, agent.id.as_str(), &opened);
                         }
                         arbos_core::files::scrub_child_claims(&place, agent.id.as_str(), &mut ev);
                         hooks.broadcast(Frame::Event {
@@ -1217,13 +1219,13 @@ fn sane_parent(agents: &[arbos_core::Agent], a: &arbos_core::Agent) -> Option<St
 
 /// A finished `bash` whose command ran `gh pr create` and whose output
 /// names the pull request: one record per new URL in `.arbos/prs.jsonl`.
-/// Returns whether anything new was recorded.
-fn record_prs(place: &Place, agent: &str, ev: &Event) -> bool {
+/// Returns the records that were new.
+fn record_prs(place: &Place, agent: &str, ev: &Event) -> Vec<arbos_core::PrRec> {
     let EventKind::Tool(rec) = &ev.kind else {
-        return false;
+        return Vec::new();
     };
     if !matches!(rec.name.as_str(), "bash" | "terminal") || rec.error.is_some() {
-        return false;
+        return Vec::new();
     }
     let Some(command) = rec
         .args
@@ -1231,16 +1233,16 @@ fn record_prs(place: &Place, agent: &str, ev: &Event) -> bool {
         .and_then(|a| a.get("command"))
         .and_then(|c| c.as_str())
     else {
-        return false;
+        return Vec::new();
     };
     if !arbos_core::prs::opens_pr(command) {
-        return false;
+        return Vec::new();
     }
     let Some(body) = rec.body.as_deref() else {
-        return false;
+        return Vec::new();
     };
     let branch = arbos_core::prs::head_branch(command);
-    let mut new = false;
+    let mut new = Vec::new();
     for (url, repo, number) in arbos_core::prs::pr_urls(body) {
         let pr = arbos_core::PrRec {
             ts: arbos_core::now_ms(),
@@ -1251,12 +1253,78 @@ fn record_prs(place: &Place, agent: &str, ev: &Event) -> bool {
             branch: branch.clone(),
         };
         match arbos_core::record_pr(place, &pr) {
-            Ok(true) => new = true,
+            Ok(true) => new.push(pr),
             Ok(false) => {}
             Err(e) => eprintln!("prs: {e:#}"),
         }
     }
     new
+}
+
+/// The agent that opened a pull request follows it (Cursor: "cloud agents
+/// automatically subscribe to PRs they create and drive them to
+/// completion"): one `github_pr` and one `github_ci` subscription per new
+/// PR, unless `project.toml` says `follow_prs = false` or the agent
+/// already has them. Both go when the PR is merged or closed.
+fn follow_prs(hooks: &Arc<KernelHooks>, agent: &str, opened: &[arbos_core::PrRec]) {
+    if !arbos_core::project::load(&hooks.place).follows_prs() {
+        return;
+    }
+    let existing = arbos_core::subscription::list(&hooks.place, agent);
+    for pr in opened {
+        for kind in ["github_pr", "github_ci"] {
+            let dup = existing.iter().any(|s| {
+                s.kind == kind
+                    && s.repo.as_deref() == Some(pr.repo.as_str())
+                    && s.pr == Some(pr.number)
+            });
+            if dup {
+                continue;
+            }
+            let prompt = match kind {
+                "github_pr" => format!(
+                    "You opened {}. A review comment or a new commit landed: read it (gh pr view {} --repo {} --comments), address it or answer it, and push; if it was merged or closed there is nothing left to do.",
+                    pr.url, pr.number, pr.repo
+                ),
+                _ => format!(
+                    "You opened {}. A check changed: when one failed, read its log (gh run view --log-failed), fix the cause on the branch, push, and say what it was; when all are green, say so briefly.",
+                    pr.url
+                ),
+            };
+            let sub = arbos_core::subscription::Subscription {
+                id: 0,
+                kind: kind.into(),
+                prompt,
+                every: None,
+                at: None,
+                once: false,
+                cmd: None,
+                path: None,
+                repo: Some(pr.repo.clone()),
+                pr: Some(pr.number),
+                branch: None,
+                deliver_to: "agent".into(),
+                notify: None,
+                expires: None,
+                paused: false,
+                internal: false,
+                created: String::new(),
+                next_due: None,
+                last_fired: None,
+                last: String::new(),
+                error: None,
+                seen: None,
+            };
+            match hooks.subscribe(agent, sub, None) {
+                Ok(s) => klog::info(
+                    "pr_followed",
+                    Some(agent),
+                    format!("#{} {kind} {}#{}", s.id, pr.repo, pr.number),
+                ),
+                Err(e) => klog::warn("pr_follow_failed", Some(agent), format!("{e:#}")),
+            }
+        }
+    }
 }
 
 /// Secret-looking variable names in this process's environment that the
