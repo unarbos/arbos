@@ -410,6 +410,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                             line: 1,
                             dropped: rolled.lines,
                             restored: None,
+                            pending: false,
                         });
                     }
                     Ok(None) => {}
@@ -542,10 +543,11 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                     }
                     let path = Layout::new(&place, agent.id.as_str()).transcript();
                     let tail = tails.entry(agent.id.to_string()).or_default();
-                    for ev in tail.read_new(&path).unwrap_or_default() {
+                    for mut ev in tail.read_new(&path).unwrap_or_default() {
                         if record_prs(&place, agent.id.as_str(), &ev) {
                             hooks.broadcast(Frame::Tree { tree: tree_nodes(&place) });
                         }
+                        arbos_core::files::scrub_child_claims(&place, agent.id.as_str(), &mut ev);
                         hooks.broadcast(Frame::Event {
                             agent: agent.id.to_string(),
                             event: ev,
@@ -1060,9 +1062,11 @@ fn replay(
     let from = picked.first().map(|e| e.seq).unwrap_or(since.unwrap_or(0));
     let to = picked.last().map(|e| e.seq).unwrap_or(since.unwrap_or(0));
     for ev in picked {
+        let mut event = ev.clone();
+        arbos_core::files::scrub_child_claims(place, agent, &mut event);
         let _ = out.send(Frame::Replayed {
             agent: agent.to_string(),
-            event: ev.clone(),
+            event,
         });
     }
     let _ = out.send(Frame::HistoryEnd {
@@ -1168,7 +1172,9 @@ fn tree_nodes(place: &Place) -> Vec<TreeNode> {
         .map(|a| TreeNode {
             id: a.id.to_string(),
             name: a.name.clone(),
-            parent: a.parent.as_ref().map(|p| p.to_string()),
+            // Never an agent as its own ancestor: a parent that is itself,
+            // is missing, or leads back around reads as top-level.
+            parent: sane_parent(&agents, a),
             paused: a.paused,
             model: a.model.clone(),
             kind: "agent".into(),
@@ -1176,6 +1182,28 @@ fn tree_nodes(place: &Place) -> Vec<TreeNode> {
             prs: arbos_core::prs::prs_of_tree(&prs, a.id.as_str(), &agents).len() as u32,
         })
         .collect()
+}
+
+/// `a.parent` unless it is `a` itself, names no agent here, or the chain
+/// of parents from it comes back to `a` (or never ends). A window that
+/// walks the tree must never loop (#138).
+fn sane_parent(agents: &[arbos_core::Agent], a: &arbos_core::Agent) -> Option<String> {
+    let parent = a.parent.as_ref()?;
+    if parent == &a.id {
+        return None;
+    }
+    let mut cur = parent.clone();
+    for _ in 0..agents.len() + 1 {
+        let Some(node) = agents.iter().find(|x| x.id == cur) else {
+            return None;
+        };
+        match &node.parent {
+            None => return Some(parent.to_string()),
+            Some(p) if p == &a.id || p == &node.id => return None,
+            Some(p) => cur = p.clone(),
+        }
+    }
+    None
 }
 
 /// A finished `bash` whose command ran `gh pr create` and whose output
@@ -1719,6 +1747,21 @@ fn rewind_live(
             done.archive.display()
         ),
     );
+    // The transcript is cut now: say so now. Windows reload from the
+    // shorter file at once instead of after the file restore below, which
+    // runs git and took seconds on a large store (the layout pass needed a
+    // 6 s settle). A second `rewound` follows with what was restored.
+    hooks.broadcast(Frame::Rewound {
+        agent: agent.to_string(),
+        line: done.checkpoint.line,
+        dropped: done.dropped,
+        restored: None,
+        pending: files,
+    });
+    hooks.broadcast(hooks.plan_frame(agent));
+    if !files {
+        return;
+    }
     let hooks = Arc::clone(hooks);
     let place = place.clone();
     let agent = agent.to_string();
@@ -1737,13 +1780,15 @@ fn rewind_live(
         } else {
             None
         };
-        hooks.broadcast(Frame::Rewound {
-            agent: agent.clone(),
-            line: done.checkpoint.line,
-            dropped: done.dropped,
-            restored,
-        });
-        hooks.broadcast(hooks.plan_frame(&agent));
+        if restored.is_some() {
+            hooks.broadcast(Frame::Rewound {
+                agent: agent.clone(),
+                line: done.checkpoint.line,
+                dropped: done.dropped,
+                restored,
+                pending: false,
+            });
+        }
     });
 }
 
