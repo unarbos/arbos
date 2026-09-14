@@ -1343,7 +1343,17 @@ fn children_lines(
                             spaced_label(label, tone, theme)
                         }),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| this.select_session(id, cx)))
+                // On the press, as a source list selects: while the turn
+                // streams, the transcript grows and scrolls between a press
+                // and its release, so a click's two halves land on
+                // different rows and the row never opens.
+                .on_mouse_down(
+                    bezel::gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.select_session(id, cx)
+                    }),
+                )
                 .into_any_element()
         })
         .collect();

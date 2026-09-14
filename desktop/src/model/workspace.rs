@@ -550,6 +550,11 @@ impl Workspace {
         dirs::home_dir().map(|home| Place::local(home.join(".arbos")))
     }
 
+    /// The Home tab's index, when it is open.
+    pub fn home_index(&self) -> Option<usize> {
+        self.projects.iter().position(Self::is_home)
+    }
+
     /// Whether this project is the home tab.
     pub fn is_home(project: &Project) -> bool {
         Self::home_place().is_some_and(|home| home == project.place())
