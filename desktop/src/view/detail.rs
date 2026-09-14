@@ -832,9 +832,17 @@ impl Arbos {
         let host = workspace
             .active_project()
             .and_then(|project| project.host.clone());
+        // Cursor's two pills under the composer: the branch checked out in the
+        // project, and where the agent runs — "This Mac" on a Mac, "This
+        // Computer" elsewhere, the remote's alias when it is one.
+        let branch = workspace
+            .active_project()
+            .filter(|project| !project.is_remote())
+            .and_then(|project| self.branch_of(&project.path));
+        let here = if cfg!(target_os = "macos") { "This Mac" } else { "This Computer" };
         let (glyph, mut machine) = match host {
             Some(alias) => (icons::devices::CLOUD, alias),
-            None => (icons::devices::LAPTOP, "Local".to_owned()),
+            None => (icons::devices::LAPTOP, here.to_owned()),
         };
         // A kernel that dropped, or a start still being tried: say what the
         // window is doing about it.
@@ -868,25 +876,66 @@ impl Arbos {
             .ml(px(-root::COMPOSER_PAD_X + 2.))
             .mr(px(-root::COMPOSER_PAD_X))
             .h(px(24.))
-            // A label, as Cursor's "Cloud" is: where the agent runs is the
-            // tab's to choose, so there is nothing here to click.
-            .child(
+            // Cursor's pills: `⑂ master ⌄` then `▭ This Mac ⌄`. The branch is
+            // the project's to change (a terminal, a tool call); the machine
+            // is the tab's — the pill opens the picker for a new one.
+            .children(branch.map(|branch| {
                 div()
+                    .id("composer-branch")
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(5.))
+                    .gap(px(4.))
                     .pl(px(8.))
-                    .max_w(px(200.))
+                    .pr(px(4.))
+                    .max_w(px(220.))
                     .text_style(TextStyle::Caption)
                     .text_color(theme.text_faint)
+                    .tooltip(|window, cx| Tooltip::text("Branch checked out in this project", window, cx))
+                    .child(
+                        icons::icon(icons::editing::GIT_BRANCH)
+                            .size(px(11.))
+                            .flex_none()
+                            .text_color(theme.text_faint),
+                    )
+                    .child(div().truncate().child(SharedString::from(branch)))
+                    .child(
+                        icons::icon(icons::arrows::ALT_ARROW_DOWN)
+                            .size(px(9.))
+                            .flex_none()
+                            .text_color(theme.text_faint),
+                    )
+            }))
+            .child(
+                div()
+                    .id("composer-machine")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.))
+                    .pl(px(8.))
+                    .pr(px(4.))
+                    .max_w(px(260.))
+                    .rounded(px(Theme::control_radius()))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(theme.element_hover))
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .tooltip(|window, cx| Tooltip::with_keystroke("Where the agent runs. Open another machine or folder", "⌘T", window, cx))
+                    .on_click(cx.listener(|this, _, window, cx| this.new_tab_action(&crate::view::root::NewTab, window, cx)))
                     .child(
                         icons::icon(glyph)
                             .size(px(11.))
                             .flex_none()
                             .text_color(theme.text_faint),
                     )
-                    .child(div().truncate().child(SharedString::from(machine))),
+                    .child(div().truncate().child(SharedString::from(machine)))
+                    .child(
+                        icons::icon(icons::arrows::ALT_ARROW_DOWN)
+                            .size(px(9.))
+                            .flex_none()
+                            .text_color(theme.text_faint),
+                    ),
             )
             .children(self.try_live_button(theme, cx))
             .children(if self.call.is_some() {

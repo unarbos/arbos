@@ -27,7 +27,7 @@ use crate::{
 };
 
 /// Space between two ordinary blocks, and the tighter space inside a list.
-const BLOCK_GAP: f32 = 12.0;
+const BLOCK_GAP: f32 = 16.0;
 const LIST_GAP: f32 = 8.0;
 /// One indent level. Wide enough to clear a marker and read as a level.
 const INDENT_WIDTH: f32 = 22.0;
@@ -1489,20 +1489,25 @@ fn code_block(
 
     // Bleed by the card's own pad so the plate shares edges with a
     // composer / prompt that does the same (`-mx` + matching `px`).
+    let band = code_band(cx);
     div()
         .w_full()
         .ml(px(-CODE_PADDING_X))
         .mr(px(-CODE_PADDING_X))
+        .group(SharedString::from(format!("md-code-{ix}")))
         .rounded(px(Theme::panel_radius()))
-        .bg(theme.ink(0.035))
+        // With the band the plate is a shade up from the page; bare, it is
+        // Cursor's — barely off the page, the border doing the work.
+        .bg(theme.ink(if band { 0.035 } else { 0.015 }))
         .border_1()
         .border_color(theme.border)
         .overflow_hidden()
         .relative()
-        // The band is unconditional: it is where the copy button already floats,
-        // and where a host puts its language control — which needs somewhere to
-        // sit on a block that has no language yet.
-        .child(
+        // The band carries the language label and gives a host's language
+        // control somewhere to sit. A host that wants Cursor's bare block —
+        // code in a plate, the copy control on hover — turns it off with
+        // [`crate::set_code_band`]; the copy button then floats over the code.
+        .when(code_band(cx), |el| el.child(
             div()
                 .relative()
                 .flex()
@@ -1537,7 +1542,7 @@ fn code_block(
                             language.unwrap_or("text").to_string(),
                         )),
                 ),
-        )
+        ))
         .child(
             div()
                 .id(ElementId::named_usize("md-code", ix))
@@ -1604,8 +1609,15 @@ fn copy_button(
     let showing = *copied.read(cx);
     let text: SharedString = code.to_string().into();
 
+    let group = SharedString::from(format!("md-code-{ix}"));
     div()
         .id(ElementId::named_usize("md-copy", ix))
+        // Without the band the control appears when the pointer is over
+        // the block (or right after a copy), as Cursor's does.
+        .when(!code_band(cx), |el| {
+            let group = group.clone();
+            el.when(!showing, |el| el.invisible().group_hover(group, |el| el.visible()))
+        })
         .absolute()
         .top(px(3.0))
         .right(px(5.0))
@@ -2062,4 +2074,18 @@ fn table(
         .restrict_scroll_to_axis()
         .child(inner)
         .into_any_element()
+}
+
+/// Whether fenced code blocks wear the language band. On by default; a host
+/// that wants a bare plate turns it off once at boot.
+struct CodeBand(bool);
+
+impl gpui::Global for CodeBand {}
+
+pub fn set_code_band(cx: &mut App, on: bool) {
+    cx.set_global(CodeBand(on));
+}
+
+fn code_band(cx: &App) -> bool {
+    cx.try_global::<CodeBand>().is_none_or(|band| band.0)
 }

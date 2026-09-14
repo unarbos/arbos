@@ -871,11 +871,9 @@ fn user_prompt(
         .px(px(root::COMPOSER_PAD_X))
         .py(px(PROMPT_PAD_Y))
         .rounded(px(PROMPT_RADIUS))
-        // The card plane: white in light, one step up in dark.
-        .bg(theme.surface_card)
-        .border_1()
-        .border_color(theme.border.opacity(0.7))
-        .shadow_sm()
+        // Cursor's prompt card: one step up from the page (#212121 on its
+        // #161514), no border, no shadow.
+        .bg(theme.ink(0.06))
         .flex()
         .flex_row()
         .items_end()
@@ -2677,14 +2675,16 @@ pub fn render(
     for (position, turn) in turns.iter().enumerate() {
         let running = position == last && chat.busy();
         let footer = footer_at[position];
-        // Cursor's date divider: "Today 4:22 PM" over the first turn, and
-        // again wherever the conversation crosses into another day.
+        // Cursor's Agents chat draws no date line over a turn; the footer's
+        // "2m ago" is the only clock. The divider stays for a day crossing
+        // inside one conversation, where "Yesterday" earns its line.
         if let Some(ChatItem::User(message)) = chat.items.get(turn.range.start)
             && let Some(at) = message.sent_at.filter(|at| *at > 0)
         {
             let day = local_day(at);
-            if last_day != Some(day) {
-                last_day = Some(day);
+            if let Some(previous) = last_day
+                && previous != day
+            {
                 zones.push(
                     div()
                         .w_full()
@@ -2694,6 +2694,7 @@ pub fn render(
                         .into_any_element(),
                 );
             }
+            last_day = Some(day);
         }
         zones.push(
             div()
@@ -3445,8 +3446,8 @@ fn turn_footer(
         .justify_start()
         .gap(px(6.))
         .pt(px(6.))
-        .pb(px(2.))
-        .child(
+        .pb(px(2.));
+    let copy = 
             div()
                 .id(SharedString::from(format!("copy-turn-{id}-{turn}")))
                 .cursor_pointer()
@@ -3480,9 +3481,8 @@ fn turn_footer(
                     icons::icon(glyph)
                         .size(px(12.))
                         .text_color(theme.text_faint),
-                ),
-        )
-        .child(
+                );
+    let fork = 
             div()
                 .id(SharedString::from(format!("fork-turn-{id}-{turn}")))
                 .cursor_pointer()
@@ -3496,11 +3496,15 @@ fn turn_footer(
                     icons::icon(icons::editing::GIT_BRANCH)
                         .size(px(12.))
                         .text_color(theme.text_faint),
-                ),
-        )
-        .child(
+                );
+    // Cursor keeps the checkpoint restore on the prompt card, not here; the
+    // footer's copy shows only while the pointer is over the answer.
+    let msg = SharedString::from(format!("msg-{turn}"));
+    let rewind = 
             div()
                 .id(SharedString::from(format!("rewind-turn-{id}-{turn}")))
+                .invisible()
+                .group_hover(msg, |el| el.visible())
                 .cursor_pointer()
                 .rounded(px(4.))
                 .p(px(3.))
@@ -3518,9 +3522,8 @@ fn turn_footer(
                     icons::icon(icons::system::RESTART)
                         .size(px(12.))
                         .text_color(theme.text_faint),
-                ),
-        );
-    // Cursor: thumbs up, thumbs down, then "Just now" / "2m ago".
+                );
+    // Cursor's order: thumbs up, thumbs down, copy, fork, then "Just now".
     let (vote, sent_at) = match chat.items.get(turn) {
         Some(ChatItem::User(message)) => (message.feedback, message.sent_at),
         _ => (None, None),
@@ -3551,6 +3554,9 @@ fn turn_footer(
     let row = row
         .child(thumb(true, cx))
         .child(thumb(false, cx))
+        .child(copy)
+        .child(fork)
+        .child(rewind)
         .when_some(sent_at.and_then(relative_time), |row, when| {
             row.child(
                 div()
@@ -3788,6 +3794,9 @@ fn fold_row(
     cx: &mut Context<Workspace>,
 ) -> bezel::gpui::Stateful<bezel::gpui::Div> {
     let group = SharedString::from(format!("{name}-{key}"));
+    // Cursor sets "Worked 23s" in the prose size; the runs inside a fold
+    // stay a step smaller.
+    let style = if name == "work" { TextStyle::Body } else { TextStyle::Callout };
     div()
         .id((name, key))
         .group(group.clone())
@@ -3803,13 +3812,14 @@ fn fold_row(
         .hover(|el| el.bg(theme.element_hover))
         .child(
             div()
-                .text_style(TextStyle::Callout)
+                .text_style(style)
                 .text_color(theme.text_muted)
                 .child(if live {
                     shimmer_label(verb, live_phase(), theme, cx)
                 } else {
-                    // Settled, the whole line is one faint colour.
-                    spaced_label(verb, theme.text_faint, theme)
+                    // Settled: Cursor paints "Worked" a shade brighter than
+                    // the "23s" after it.
+                    spaced_label(verb, theme.text_muted, theme)
                 }),
         )
         .when(!rest.is_empty(), |el| {
@@ -3819,16 +3829,17 @@ fn fold_row(
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_style(TextStyle::Callout)
+                    .text_style(style)
                     .text_color(theme.text_faint)
                     .child(spaced_label(rest, theme.text_faint, theme)),
             )
         })
         .when_some(diff, |el, (add, del)| el.child(diff_badge(theme, add, del)))
         .child(
+            // The turn's headline wears its chevron ("Worked 6m 44s ›"); a run
+            // inside the opened timeline shows one on hover.
             div()
-                .invisible()
-                .group_hover(group, |el| el.visible())
+                .when(name != "work", |el| el.invisible().group_hover(group, |el| el.visible()))
                 .child(Layout::disclosure(theme, open)),
         )
 }
@@ -4652,9 +4663,10 @@ fn thought_label(done: bool, secs: Option<u32>, _live: Duration) -> (String, Str
     if !done {
         return ("Thinking".to_owned(), String::new());
     }
+    // Cursor: "Thought briefly" under a few seconds, "Thought for 12s" past.
     let time = match secs {
-        Some(s) if s > 0 => format!("for {}", since(Duration::from_secs(u64::from(s)))),
-        _ => String::new(),
+        Some(s) if s > 5 => format!("for {}", since(Duration::from_secs(u64::from(s)))),
+        _ => "briefly".to_owned(),
     };
     ("Thought".to_owned(), time)
 }
