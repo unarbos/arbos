@@ -27,12 +27,13 @@ pub struct Snapshot {
     pub urls: BTreeMap<String, String>,
 }
 
-/// `gh` with the kernel's environment plus granted secrets.
-fn gh(args: &[&str]) -> Result<Value> {
+/// `gh` with the kernel's environment plus the grants the asking agent
+/// holds (`env`).
+fn gh(args: &[&str], env: &[(String, String)]) -> Result<Value> {
     let mut cmd = Command::new("gh");
     cmd.args(args)
         .stdin(std::process::Stdio::null())
-        .envs(arbos_engine::secrets::store().env());
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     let out = cmd
         .output()
         .context("run gh (is the GitHub CLI installed?)")?;
@@ -49,16 +50,19 @@ fn gh(args: &[&str]) -> Result<Value> {
 }
 
 /// One look at a pull request.
-pub fn snapshot(repo: &str, pr: u64) -> Result<Snapshot> {
-    let v = gh(&[
-        "pr",
-        "view",
-        &pr.to_string(),
-        "--repo",
-        repo,
-        "--json",
-        "state,title,headRefOid,reviews,comments,statusCheckRollup",
-    ])?;
+pub fn snapshot(repo: &str, pr: u64, env: &[(String, String)]) -> Result<Snapshot> {
+    let v = gh(
+        &[
+            "pr",
+            "view",
+            &pr.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "state,title,headRefOid,reviews,comments,statusCheckRollup",
+        ],
+        env,
+    )?;
     let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let reviews = v
         .get("reviews")
@@ -122,19 +126,22 @@ pub fn snapshot(repo: &str, pr: u64) -> Result<Snapshot> {
 /// One look at a branch's workflow runs: the newest run per workflow on
 /// the branch's latest commit. `state` is `green`, `red`, or `pending`
 /// over those; `head` the commit they ran on.
-pub fn branch_snapshot(repo: &str, branch: &str) -> Result<Snapshot> {
-    let v = gh(&[
-        "run",
-        "list",
-        "--repo",
-        repo,
-        "--branch",
-        branch,
-        "--limit",
-        "30",
-        "--json",
-        "databaseId,workflowName,name,status,conclusion,headSha,url,createdAt",
-    ])?;
+pub fn branch_snapshot(repo: &str, branch: &str, env: &[(String, String)]) -> Result<Snapshot> {
+    let v = gh(
+        &[
+            "run",
+            "list",
+            "--repo",
+            repo,
+            "--branch",
+            branch,
+            "--limit",
+            "30",
+            "--json",
+            "databaseId,workflowName,name,status,conclusion,headSha,url,createdAt",
+        ],
+        env,
+    )?;
     Ok(runs_snapshot(&v, branch))
 }
 

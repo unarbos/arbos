@@ -1152,6 +1152,14 @@ fn job_delta(
     if !running {
         offsets.insert(key.to_string(), (size.max(seen), true));
     }
+    // The process row shows the journal live; it gets the same redaction
+    // as the transcript, or a key echoed by a job would sit on screen.
+    let secrets = arbos_engine::secrets::store();
+    let delta = if secrets.has_any() {
+        secrets.redact(&delta)
+    } else {
+        delta
+    };
     let exit = match job.status {
         arbos_engine::JobStatus::Exited(code) => Some(code),
         arbos_engine::JobStatus::Running | arbos_engine::JobStatus::Killed => None,
