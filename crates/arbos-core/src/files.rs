@@ -135,6 +135,10 @@ pub fn init_arbos_repo(place: &Place) -> Result<bool> {
             std::fs::write(&ignore, text)?;
         }
     }
+    // Every start, not only the first: a place that moved its store to
+    // .arbos.nosync (cloudsync) needs that name excluded too, or a
+    // `git add -A` in the project records the nested repository.
+    exclude_locally(&place.path, &[".arbos/", ".arbos.nosync/"]);
     if place.arbos_repo().exists() {
         return Ok(false);
     }
@@ -158,33 +162,50 @@ pub fn init_arbos_repo(place: &Place) -> Result<bool> {
     if !ok {
         return Ok(false);
     }
-    // The project must never track the nested repository as a gitlink.
-    // `.git/info/exclude` is the local, uncommitted ignore list.
-    if place.path.join(".git").exists() {
+    Ok(true)
+}
+
+/// The project must never track the nested repository as a gitlink.
+/// `.git/info/exclude` is the local, uncommitted ignore list: each of
+/// `patterns` (a folder name with its slash) goes there unless git already
+/// ignores it. Quiet when the project is not a repository.
+pub fn exclude_locally(project: &Path, patterns: &[&str]) {
+    let git_dir = project.join(".git");
+    if !git_dir.exists() {
+        return;
+    }
+    let exclude = git_dir.join("info").join("exclude");
+    let _ = std::fs::create_dir_all(exclude.parent().unwrap());
+    let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    let mut changed = false;
+    for pattern in patterns {
+        let bare = pattern.trim_end_matches('/');
+        let listed = text
+            .lines()
+            .any(|l| l.trim() == *pattern || l.trim() == bare);
+        if listed {
+            continue;
+        }
         let ignored = std::process::Command::new("git")
-            .args(["check-ignore", "-q", ".arbos"])
-            .current_dir(&place.path)
+            .args(["check-ignore", "-q", bare])
+            .current_dir(project)
             .stdin(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
-            .unwrap_or(true);
-        if !ignored {
-            let exclude = place.path.join(".git").join("info").join("exclude");
-            let _ = std::fs::create_dir_all(exclude.parent().unwrap());
-            let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
-            if !text
-                .lines()
-                .any(|l| l.trim() == ".arbos/" || l.trim() == ".arbos")
-            {
-                if !text.is_empty() && !text.ends_with('\n') {
-                    text.push('\n');
-                }
-                text.push_str(".arbos/\n");
-                let _ = std::fs::write(&exclude, text);
-            }
+            .unwrap_or(false);
+        if ignored {
+            continue;
         }
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(pattern);
+        text.push('\n');
+        changed = true;
     }
-    Ok(true)
+    if changed {
+        let _ = std::fs::write(&exclude, text);
+    }
 }
 
 pub fn bootstrap(place: &Place) -> Result<Agent> {
