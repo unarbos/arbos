@@ -9,3 +9,6 @@ __pycache__/
 
 # website
 www/static/og.png
+
+# Release signing and notarization credentials (desktop/Makefile).
+.env.release
