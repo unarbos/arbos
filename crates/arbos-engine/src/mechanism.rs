@@ -21,6 +21,15 @@ pub const ARG: &str = "mechanism";
 pub const GATED: &[&str] = &["edit", "write", "apply_patch"];
 /// Fewer characters than this is a label, not a mechanism.
 const MIN_LEN: usize = 24;
+/// Set to `1` to refuse the first edit without a line. Measured on
+/// SWE-bench (cycle 4): the refusal made every rollout state a mechanism
+/// and moved no outcome, so by default the line is optional and recorded
+/// when given; a harness turns the refusal on.
+pub const REQUIRED_ENV: &str = "ARBOS_MECHANISM_REQUIRED";
+
+fn required() -> bool {
+    std::env::var(REQUIRED_ENV).is_ok_and(|v| v == "1" || v == "true")
+}
 
 fn path(place: &Place, agent: &AgentId) -> PathBuf {
     Layout::new(place, agent.as_str()).dir.join("mechanism.md")
@@ -69,6 +78,8 @@ pub fn gate(place: &Place, agent: &AgentId, tool: &str, args: &Value) -> Result<
         return Ok(None);
     }
     match given {
+        None if !required() => Ok(None),
+        Some(short) if !required() && short.len() < MIN_LEN => Ok(None),
         Some(line) if line.len() >= MIN_LEN => {
             if let Some(dir) = file.parent() {
                 let _ = std::fs::create_dir_all(dir);
@@ -106,6 +117,8 @@ mod tests {
 
     #[test]
     fn first_edit_needs_a_line_then_later_edits_do_not() {
+        // SAFETY: test-local; no other thread reads this variable.
+        unsafe { std::env::set_var(REQUIRED_ENV, "1") };
         let (place, agent) = place();
         let none = serde_json::json!({"path": "a.py"});
         let err = gate(&place, &agent, "edit", &none).unwrap_err().to_string();
