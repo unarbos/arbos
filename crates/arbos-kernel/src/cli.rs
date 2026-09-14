@@ -608,7 +608,7 @@ fn print_event(event: &Event, json: bool) {
             println!("  ? {question} {}", options.join(" / "))
         }
         EventKind::Interrupted { detail } => println!("  [interrupted] {detail}"),
-        EventKind::Nudge { text } => println!("  [kernel] {text}"),
+        EventKind::Nudge { text, .. } => println!("  [kernel] {text}"),
         EventKind::ImageDescribed { path, model, .. } => {
             println!("  [image {path} described by {model}]")
         }

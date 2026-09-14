@@ -177,7 +177,7 @@ pub fn user_line(e: &Event) -> Option<String> {
         EventKind::Say { from, text } => Some(format!("[{from}] {text}")),
         EventKind::Answer { text } => Some(format!("[user answer] {text}")),
         EventKind::Notice { text, .. } => Some(format!("[kernel] {text}")),
-        EventKind::Nudge { text } => Some(format!("[kernel] {text}")),
+        EventKind::Nudge { text, .. } => Some(format!("[kernel] {text}")),
         _ => None,
     }
 }

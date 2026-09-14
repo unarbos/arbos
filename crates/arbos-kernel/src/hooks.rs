@@ -142,6 +142,8 @@ impl Caps {
 pub const STATUS_DEBOUNCE_MS: i64 = 300;
 
 pub const NOTES_NUDGE: &str = "project page not updated last turn: a worker was started or reported and .arbos/notes.md did not change — update it (plan add/check) before or with your reply";
+/// The same, in the few words a window's notice line has room for.
+pub const NOTES_NUDGE_REASON: &str = "project page not updated";
 
 pub struct KernelHooks {
     pub place: Place,
@@ -416,6 +418,7 @@ impl KernelHooks {
         }
         let nudge = Event::new(EventKind::Nudge {
             text: NOTES_NUDGE.to_string(),
+            reason: NOTES_NUDGE_REASON.to_string(),
         });
         let _ = append_event(&self.layout(agent).transcript(), &nudge);
     }
