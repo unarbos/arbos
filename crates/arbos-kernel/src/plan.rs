@@ -188,7 +188,7 @@ fn wake_from_message(
             (
                 WakeKind::Plan,
                 Some(format!(
-                    "You were spawned by agent {parent} for this mission:\n\n{}\n\nDo it now. If it has several steps, write them as your checklist with plan set and work them. Standing work (\"every N\", \"keep watching\") is a subscription (subscribe add), never a loop held open. When your turn ends, {parent} is told your last words automatically: end with a short report (outcome, paths, open questions) as your final words, and do not also say it to {parent}. Use say to={parent} mode request only for a question you need answered mid-task. The project context is in your prompt; project status is .arbos/notes.md; earlier workers' transcripts are greppable with grep path=.arbos/agents. Your own folder is .arbos/agents/{}/.{}",
+                    "You were spawned by agent {parent} for this mission:\n\n{}\n\nDo it now. If it has several steps, write them as your checklist with plan set and work them. Standing work (\"every N\", \"keep watching\") is a subscription (subscribe add), never a loop held open. When your turn ends, {parent} is told your last words automatically: end with a short report (outcome, paths, open questions) as your final words, and do not also say it to {parent}. Use say to={parent} mode request only for a question you need answered mid-task. The project context is in your prompt; project status is .arbos/notes.md; earlier workers' transcripts (live or archived) are greppable with grep scope=history. Your own folder is .arbos/agents/{}/.{}",
                     msg.body,
                     agent.id,
                     worktree_note(hooks.place.path(), agent)
@@ -306,14 +306,15 @@ fn batch_done_files(
     senders
 }
 
-/// With `[root] archive_children = true` in project.toml: a worker whose
-/// done message its parent has just read, and that is not live (no turn,
-/// no waiting message, no parked ask, no live children of its own), moves
-/// to `.arbos/archive/agents/<id>/`. The tree frame tells every window.
+/// Unless project.toml says `[root] archive_children = false`: a worker
+/// whose done message its parent has just read, and that is not live (no
+/// turn, no waiting message, no parked ask, no live children of its own),
+/// moves to `.arbos/archive/agents/<id>/`. The tree frame tells every
+/// window.
 fn archive_finished(hooks: &KernelHooks, reported: &[String]) {
     if !arbos_core::project::load(&hooks.place)
         .root
-        .archive_children
+        .archives_children()
     {
         return;
     }
