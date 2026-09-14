@@ -2240,6 +2240,14 @@ impl Workspace {
             chat.reconnect_attempt = 0;
             chat.reconnect_at = None;
             chat.sync_kernel_history();
+            // What the agent is on right now, from its status file, so a
+            // fresh attach draws the line without waiting for a frame.
+            if chat.host.is_none()
+                && let Some(sid) = chat.agent_session.as_deref()
+            {
+                chat.status = arbos_core::status::read(&arbos_core::Place::new(&chat.cwd), sid)
+                    .map(|s| s.step);
+            }
             // Whatever was typed while the connection was down goes now, in order.
             chat.drain();
             chat.flush();
@@ -2422,9 +2430,18 @@ impl Workspace {
                 _ => false,
             },
         );
-        self.projects[ix].focus_surface(owner, id);
-        if self.active == Some(ix) {
-            cx.emit(PaneRequest::Surface(id));
+        // The surface comes to the column for the chat that is in front. A
+        // worker's terminal or job opening under its parent's turn goes to
+        // the panel's Processes and stays there: the view does not jump
+        // from the conversation to a sub-agent's shell.
+        let in_front = self.projects[ix]
+            .focused_agent()
+            .is_none_or(|focused| focused == owner);
+        if in_front {
+            self.projects[ix].focus_surface(owner, id);
+            if self.active == Some(ix) {
+                cx.emit(PaneRequest::Surface(id));
+            }
         }
         self.push_snapshot(ix);
         cx.notify();
@@ -2776,6 +2793,7 @@ impl Workspace {
                 kernel_id: chat.agent_session.clone(),
                 title: self.display_label(chat.id),
                 state: chat.child_state(),
+                step: chat.current_step(),
             })
             .collect()
     }

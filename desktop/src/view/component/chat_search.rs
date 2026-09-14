@@ -5,7 +5,7 @@
 
 use bezel::{
     gpui::{
-        AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, MouseButton,
+        App, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, MouseButton,
         Render, SharedString, Window, div, prelude::*, px,
     },
     ui::palette::{CommandPalette, PaletteEvent},

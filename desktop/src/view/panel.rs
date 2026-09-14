@@ -995,7 +995,7 @@ impl Arbos {
                         }
                     }))
             })
-            .child(SharedString::from(item.label.clone()));
+            .child(SharedString::from(chip_label(item)));
         div()
             .id(id)
             .flex_none()
@@ -1284,6 +1284,23 @@ fn archived_only_row(line: ArchivedOnly, theme: &Theme) -> AnyElement {
                 .child(SharedString::from(line.title)),
         )
         .into_any_element()
+}
+
+/// A page item's label as prose shows it: the chip glyph for what it
+/// points at (`⚙` a worker, `⛓` a pull request, `📄` a document), then
+/// the words.
+fn chip_label(item: &PageItem) -> String {
+    use crate::view::chips::{self, Kind};
+    let kind = match &item.target {
+        Some(Target::Worker(_)) => Kind::Agent,
+        Some(Target::Url(url)) => chips::classify(url),
+        Some(Target::File(path)) => chips::classify(&path.to_string_lossy()),
+        None => Kind::Other,
+    };
+    match chips::glyph(kind) {
+        Some(glyph) if !item.label.starts_with(glyph) => format!("{glyph} {}", item.label),
+        _ => item.label.clone(),
+    }
 }
 
 /// A section's label line, with a count or state at its right edge.
