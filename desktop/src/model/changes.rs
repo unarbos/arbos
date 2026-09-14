@@ -65,6 +65,11 @@ impl GitChanges {
                 let add = parts.next()?.trim();
                 let del = parts.next()?.trim();
                 let path = parts.next()?.trim().to_string();
+                // A tracked cache file (a committed __pycache__) changing
+                // is noise nobody means as a change either.
+                if junk(&path) {
+                    return None;
+                }
                 // Binary files print "-"; count them as one change each way.
                 Some(FileChange {
                     path,
@@ -104,6 +109,9 @@ impl GitChanges {
             args.push(path);
         }
         let mut out = git(root, &args).unwrap_or_default();
+        if path.is_none() {
+            out = strip_junk_hunks(&out);
+        }
         let untracked = git(root, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
         for file in untracked.lines().map(str::trim).filter(|p| !p.is_empty()) {
             if path.is_some_and(|wanted| wanted != file) || junk(file) || root.join(file).is_symlink() {
@@ -143,4 +151,20 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// A whole-tree diff without the file sections the card does not list.
+fn strip_junk_hunks(diff: &str) -> String {
+    let mut out = String::with_capacity(diff.len());
+    let mut skipping = false;
+    for line in diff.split_inclusive('\n') {
+        if let Some(rest) = line.strip_prefix("diff --git a/") {
+            let path = rest.split(' ').next().unwrap_or("");
+            skipping = junk(path);
+        }
+        if !skipping {
+            out.push_str(line);
+        }
+    }
+    out
 }
