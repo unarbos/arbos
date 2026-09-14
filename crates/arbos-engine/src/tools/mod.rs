@@ -243,6 +243,17 @@ pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Res
     let protected = (writes && decided.tool != "remember")
         .then(|| protected_target(cx.root(), &decided.tool, &plan, &decided.args))
         .flatten();
+    // A command that reaches past this machine — the cloud metadata
+    // service, the container runtime, credential files — asks in every
+    // mode (T3-06), unless sandbox.toml says the metadata reach is
+    // expected here.
+    let reach = matches!(decided.tool.as_str(), "bash" | "terminal")
+        .then(|| crate::tool::opt_str(&decided.args, "command"))
+        .flatten()
+        .and_then(arbos_core::containment::risk_of)
+        .filter(|risk| {
+            !(risk.starts_with("the cloud metadata") && crate::sandbox::metadata_allowed(&cx.place))
+        });
     let ask = decided
         .ask
         .or_else(|| {
@@ -250,6 +261,7 @@ pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Res
                 .as_deref()
                 .map(|entry| arbos_core::store::protected_question(&decided.tool, entry))
         })
+        .or_else(|| reach.map(|risk| arbos_core::containment::question(&decided.tool, risk)))
         .or_else(|| ask_first.then(|| crate::batch::summarise_call(&decided.tool, &decided.args)));
     let plan = if ask.is_some() {
         plan.interactive()
