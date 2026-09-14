@@ -196,6 +196,7 @@ pub fn run(args: Args) -> Result<()> {
         model: model.clone(),
         reasoning_effort: host.config.reasoning_effort.clone(),
         cache_ttl: None,
+        data_policy: host.config.data_policy.clone(),
         stream_idle: Duration::from_secs(60),
         // Reasoning models spend tokens thinking before the word.
         max_tokens: Some(512),

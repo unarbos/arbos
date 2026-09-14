@@ -119,6 +119,8 @@ pub struct SwitchOption {
     pub name: SharedString,
     /// For a model: whether it takes image input. None for other switches.
     pub vision: Option<bool>,
+    /// For a model: a free endpoint, whose provider may train on prompts.
+    pub free: bool,
 }
 
 /// One switchable thing the session offers: the agent's mode, or a config
@@ -1709,6 +1711,23 @@ impl Composer {
                                     .text_style(TextStyle::Caption)
                                     .text_color(theme.text_faint)
                                     .child("vision"),
+                            )
+                        })
+                        .when(option.free, |row| {
+                            row.child(
+                                div()
+                                    .id(("model-free-tag", ix))
+                                    .flex_none()
+                                    .text_style(TextStyle::Caption)
+                                    .text_color(theme.text_faint)
+                                    .tooltip(|window, cx| {
+                                        Tooltip::text(
+                                            "Free endpoint: its provider may train on your prompts. OpenRouter's privacy settings govern free models separately; data_policy = \"deny\" in config.toml keeps every request off such providers.",
+                                            window,
+                                            cx,
+                                        )
+                                    })
+                                    .child("free · may train"),
                             )
                         })
                         .when(picked, |row| {

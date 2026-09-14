@@ -202,6 +202,13 @@ pub struct HostConfig {
     pub max_server_delay_ms: u64,
     /// Silence mid-stream that counts as a lost connection.
     pub stream_idle_ms: u64,
+    /// What the provider may do with prompts, for OpenRouter routing:
+    /// "" (account default), "deny" (only providers that do not store or
+    /// train on prompts: `provider.data_collection = "deny"`), or "zdr"
+    /// (that, plus only zero-data-retention endpoints: `provider.zdr`).
+    /// A model with no compliant endpoint is refused by OpenRouter with a
+    /// clear error rather than routed anyway.
+    pub data_policy: String,
     /// Model that writes compaction summaries. Empty = the turn's model.
     pub compact_model: String,
     /// Vision-capable model that describes an attached image in words when
@@ -269,6 +276,7 @@ impl Default for HostConfig {
             max_server_delay_ms: 60_000,
             stream_idle_ms: 120_000,
             compact_model: String::new(),
+            data_policy: String::new(),
             vision_model: String::new(),
             compact_window_tokens: 0,
             // Folding at half the window made models re-read what had
