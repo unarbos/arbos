@@ -27,14 +27,11 @@ const CONTEXT: &[&str] = &[
     "Goals.md",
 ];
 
-/// Folders in `.arbos/` the panel counts, with the label it gives one
-/// entry and many.
-const FOLDERS: &[(&str, &str, &str)] = &[
-    ("agents", "agent", "agents"),
-    ("skills", "skill", "skills"),
-    ("hooks", "hook", "hooks"),
-    ("archive", "archived chat", "archived chats"),
-];
+/// Folders in `.arbos/` the panel counts under Resources, with the label
+/// it gives one entry and many. Agents and the archive are not here: the
+/// Agents section above already shows every worker and its "N archived"
+/// row, and a second count of the same things read as something else.
+const FOLDERS: &[(&str, &str, &str)] = &[("skills", "skill", "skills"), ("hooks", "hook", "hooks")];
 
 /// Where an item's link points.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,7 +268,10 @@ fn prune_template(body: &str) -> Option<String> {
         .collect();
     if kept.is_empty() {
         // No sections at all: a plain document is its own content.
-        let plain = sections.first().map(|(_, lines)| lines).filter(|_| sections.len() == 1)?;
+        let plain = sections
+            .first()
+            .map(|(_, lines)| lines)
+            .filter(|_| sections.len() == 1)?;
         if plain.iter().any(|l| !template_line(l)) {
             return Some(plain.join("\n").trim_matches('\n').to_string());
         }
@@ -738,7 +738,10 @@ mod tests {
         assert_eq!(first.done, Some(true));
         assert_eq!(first.label, "rewrite-readme");
         assert_eq!(first.readout, "worker reported README.md recreated");
-        assert_eq!(first.target, Some(Target::File(PathBuf::from("/p/.arbos/README.md"))));
+        assert_eq!(
+            first.target,
+            Some(Target::File(PathBuf::from("/p/.arbos/README.md")))
+        );
         let PageBlock::Item(second) = &page.blocks[2] else {
             panic!("item")
         };

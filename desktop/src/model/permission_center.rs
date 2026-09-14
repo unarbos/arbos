@@ -94,7 +94,9 @@ impl PermissionCenter {
     }
 
     fn row_mut(&mut self, permission: Permission) -> Option<&mut Row> {
-        self.rows.iter_mut().find(|row| row.permission == permission)
+        self.rows
+            .iter_mut()
+            .find(|row| row.permission == permission)
     }
 
     /// Every applicable permission stands granted (or cannot be asked here).
@@ -209,7 +211,9 @@ impl PermissionCenter {
         if matches!(row.phase, Phase::Requesting { .. }) {
             return;
         }
-        row.phase = Phase::Requesting { since: Instant::now() };
+        row.phase = Phase::Requesting {
+            since: Instant::now(),
+        };
         let project = self.project.clone();
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -227,7 +231,9 @@ impl PermissionCenter {
                 if let Some(row) = this.row_mut(permission) {
                     row.opened = opened;
                     row.phase = match requested {
-                        Requested::Prompted => Phase::Prompted { since: Instant::now() },
+                        Requested::Prompted => Phase::Prompted {
+                            since: Instant::now(),
+                        },
                         Requested::OpenedSettings | Requested::Unsupported => Phase::NeedsSettings,
                     };
                 }
@@ -294,7 +300,9 @@ impl PermissionCenter {
     /// the row's "Try a capture now" is that attempt, off the UI thread.
     pub fn try_capture(&mut self, cx: &mut Context<Self>) {
         if let Some(row) = self.row_mut(Permission::ScreenRecording) {
-            row.phase = Phase::Requesting { since: Instant::now() };
+            row.phase = Phase::Requesting {
+                since: Instant::now(),
+            };
         }
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -309,7 +317,9 @@ impl PermissionCenter {
                     row.phase = if captured {
                         Phase::Idle
                     } else {
-                        Phase::Prompted { since: Instant::now() }
+                        Phase::Prompted {
+                            since: Instant::now(),
+                        }
                     };
                 }
                 this.refresh(cx);

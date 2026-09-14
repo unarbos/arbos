@@ -43,11 +43,18 @@ pub fn classify(target: &str) -> Kind {
     }
     let rel = t.strip_prefix("./").unwrap_or(t);
     let rel = rel.strip_prefix(".arbos/").unwrap_or(rel);
-    if rel.starts_with("agents/") || t.starts_with("arbos://chat/") || t.starts_with("arbos://agent/") {
+    if rel.starts_with("agents/")
+        || t.starts_with("arbos://chat/")
+        || t.starts_with("arbos://agent/")
+    {
         return Kind::Agent;
     }
     let path = rel.split(['?', '#']).next().unwrap_or(rel);
-    if path.ends_with(".md") || path.ends_with(".txt") || path.starts_with("docs/") || path.contains("/docs/") {
+    if path.ends_with(".md")
+        || path.ends_with(".txt")
+        || path.starts_with("docs/")
+        || path.contains("/docs/")
+    {
         return Kind::Doc;
     }
     Kind::Other
@@ -70,7 +77,9 @@ pub fn pr_number(url: &str) -> Option<u64> {
 
 /// Whether a label already carries a chip glyph.
 fn chipped(label: &str) -> bool {
-    [PR, AGENT, DOC].iter().any(|g| label.trim_start().starts_with(g))
+    [PR, AGENT, DOC]
+        .iter()
+        .any(|g| label.trim_start().starts_with(g))
 }
 
 /// The label a link should show: the glyph, then the words — or `#N` for a
@@ -268,8 +277,17 @@ mod tests {
             dress("`https://github.com/o/r/pull/7` stays"),
             "`https://github.com/o/r/pull/7` stays"
         );
-        assert_eq!(dress("```\nhttps://github.com/o/r/pull/7\n```"), "```\nhttps://github.com/o/r/pull/7\n```");
-        assert_eq!(dress("[⛓ #7](https://github.com/o/r/pull/7)"), "[⛓ #7](https://github.com/o/r/pull/7)");
-        assert_eq!(dress("[plain](https://example.com/x)"), "[plain](https://example.com/x)");
+        assert_eq!(
+            dress("```\nhttps://github.com/o/r/pull/7\n```"),
+            "```\nhttps://github.com/o/r/pull/7\n```"
+        );
+        assert_eq!(
+            dress("[⛓ #7](https://github.com/o/r/pull/7)"),
+            "[⛓ #7](https://github.com/o/r/pull/7)"
+        );
+        assert_eq!(
+            dress("[plain](https://example.com/x)"),
+            "[plain](https://example.com/x)"
+        );
     }
 }

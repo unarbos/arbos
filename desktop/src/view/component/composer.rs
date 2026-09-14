@@ -1148,7 +1148,8 @@ impl Composer {
         self.attachments.get_mut(id).error = None;
         self.chat_links.clear();
         self.command = None;
-        cx.emit(ComposerEvent::Queue(prompt));        cx.notify();
+        cx.emit(ComposerEvent::Queue(prompt));
+        cx.notify();
     }
 
     fn queue_next(&mut self, _: &QueueNext, _: &mut Window, cx: &mut Context<Self>) {
@@ -1449,7 +1450,9 @@ impl Composer {
         }
         let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for option in &switch.options {
-            *counts.entry(model_provider(&option.id).to_string()).or_default() += 1;
+            *counts
+                .entry(model_provider(&option.id).to_string())
+                .or_default() += 1;
         }
         let current_vendor = switch
             .current
@@ -1517,18 +1520,17 @@ impl Composer {
             let on = self.model_provider.as_deref() == Some(vendor.as_str());
             let id: SharedString = format!("composer-model-provider-{vendor}").into();
             let picked = vendor.clone();
-            row = row.child(
-                chip(id, vendor_label(&vendor).into(), on, theme).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        this.model_provider = if this.model_provider.as_deref() == Some(picked.as_str()) {
-                            None
-                        } else {
-                            Some(picked.clone())
-                        };
-                        this.refilter_models(cx);
-                    },
-                )),
-            );
+            row = row.child(chip(id, vendor_label(&vendor).into(), on, theme).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.model_provider = if this.model_provider.as_deref() == Some(picked.as_str())
+                    {
+                        None
+                    } else {
+                        Some(picked.clone())
+                    };
+                    this.refilter_models(cx);
+                }),
+            ));
         }
         if has_vision {
             row = row.child(
@@ -1668,10 +1670,16 @@ impl Composer {
     /// press opens a short list — the place's skills and Off — and a pick
     /// becomes `/mode <skill>` or `/mode off` for the kernel. No chip when
     /// nothing is pinned (the `/mode` command still works).
-    fn mode_chip(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn mode_chip(
+        &self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let pinned = self.mode_skill.clone()?;
         let label: SharedString = format!("◆ {pinned}").into();
-        let tip: SharedString = format!("Mode: {pinned} is pinned to this chat. Click to change or turn off.").into();
+        let tip: SharedString =
+            format!("Mode: {pinned} is pinned to this chat. Click to change or turn off.").into();
         let chip = div()
             .id("composer-mode")
             .relative()
@@ -1697,7 +1705,12 @@ impl Composer {
         Some(chip.into_any_element())
     }
 
-    fn mode_menu_card(&self, theme: &Theme, _window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn mode_menu_card(
+        &self,
+        theme: &Theme,
+        _window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.mode_menu {
             return None;
         }
@@ -1720,7 +1733,14 @@ impl Composer {
                         cx.emit(ComposerEvent::Mode(Some(choice.clone())));
                         cx.notify();
                     }))
-                    .child(div().flex_1().min_w_0().truncate().text_color(theme.text).child(name.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text)
+                            .child(name.clone()),
+                    )
                     .when(picked, |row| {
                         row.child(div().flex_none().text_color(theme.text_muted).child("✓"))
                     })
@@ -1739,7 +1759,12 @@ impl Composer {
                     cx.emit(ComposerEvent::Mode(None));
                     cx.notify();
                 }))
-                .child(div().flex_1().text_color(theme.text_muted).child("Off — no mode pinned"))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme.text_muted)
+                        .child("Off — no mode pinned"),
+                )
                 .into_any_element(),
         );
         let card = popover::popover_card(theme)

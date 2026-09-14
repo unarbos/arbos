@@ -4,11 +4,11 @@
 
 pub mod article;
 pub mod attachment;
-pub mod permission_center;
 pub mod board;
 pub mod cover;
 pub mod history;
 pub mod identity;
+pub mod permission_center;
 pub mod place;
 pub mod project;
 pub mod properties;

@@ -343,7 +343,15 @@ impl Arbos {
             .pb(px(SECTION_GAP))
             .flex()
             .flex_col()
-            .child(self.panel_head(&name, &where_, branch.as_deref(), glyph, tint, call_btn, &theme))
+            .child(self.panel_head(
+                &name,
+                &where_,
+                branch.as_deref(),
+                glyph,
+                tint,
+                call_btn,
+                &theme,
+            ))
             .child(section_head(
                 "Agents",
                 (working > 0).then(|| format!("{working} working")),
@@ -484,12 +492,12 @@ impl Arbos {
         let connecting = self.call.as_ref().is_some_and(|call| call.connecting);
         let can = self.can_call(cx);
         let (path, tip, tint) = match (live, can) {
-            (true, _) => (
-                crate::assets::PHONE_OFF_ICON,
-                "End call",
-                theme.danger,
+            (true, _) => (crate::assets::PHONE_OFF_ICON, "End call", theme.danger),
+            (false, true) => (
+                crate::assets::PHONE_ICON,
+                "Call this project",
+                theme.text_muted,
             ),
-            (false, true) => (crate::assets::PHONE_ICON, "Call this project", theme.text_muted),
             (false, false) => (
                 crate::assets::PHONE_ICON,
                 "Call needs a speech server: set voice_url in config.toml",
@@ -498,12 +506,19 @@ impl Arbos {
         };
         let glyph: AnyElement = if connecting {
             transcript::spinner(
-                self.call.as_ref().map(|call| call.since.elapsed()).unwrap_or_default(),
+                self.call
+                    .as_ref()
+                    .map(|call| call.since.elapsed())
+                    .unwrap_or_default(),
                 theme.text_muted,
                 cx,
             )
         } else {
-            svg().path(path).size(px(13.)).text_color(tint).into_any_element()
+            svg()
+                .path(path)
+                .size(px(13.))
+                .text_color(tint)
+                .into_any_element()
         };
         theme
             .ghost("panel-call")
@@ -549,9 +564,7 @@ impl Arbos {
                     .min_w_0()
                     .truncate()
                     .text_color(theme.text_faint)
-                    .child(SharedString::from(format!(
-                        "{count} archived"
-                    ))),
+                    .child(SharedString::from(format!("{count} archived"))),
             )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.archived_open = !this.archived_open;
@@ -767,7 +780,9 @@ impl Arbos {
                 theme.text_faint
             })
             .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-            .tooltip(|window, cx| Tooltip::with_keystroke("Open the project page", "⌘2", window, cx))
+            .tooltip(|window, cx| {
+                Tooltip::with_keystroke("Open the project page", "⌘2", window, cx)
+            })
             .child("Project")
             .child(div().flex_1())
             .child(
@@ -937,7 +952,9 @@ impl Arbos {
                 PageBlock::Heading { level, text } => {
                     page_heading(*level, text, n > 0, scale, theme)
                 }
-                PageBlock::Item(item) => self.page_item((item_id, n as u64), item, scale, theme, cx),
+                PageBlock::Item(item) => {
+                    self.page_item((item_id, n as u64), item, scale, theme, cx)
+                }
             });
         }
         body.into_any_element()
@@ -985,7 +1002,9 @@ impl Arbos {
             .truncate()
             .text_color(label_tint)
             // Cursor's page: the label in bold, the readout plain and dim.
-            .when(scale == PageScale::Page && item.done.is_some(), |el| el.font_weight(FontWeight::SEMIBOLD))
+            .when(scale == PageScale::Page && item.done.is_some(), |el| {
+                el.font_weight(FontWeight::SEMIBOLD)
+            })
             .when(target.is_some(), |el| {
                 el.cursor_pointer()
                     .hover(|el| el.text_color(theme.accent))
@@ -1247,7 +1266,10 @@ fn archived_title(path: &std::path::Path, id: &str) -> Option<String> {
 /// `.arbos/archive/agents/` whose id no session here carries. Titled from
 /// their `agent.md` (`title:`, else `name:`, else the folder).
 fn archived_only(path: &std::path::Path, sessions: &[ChatSession]) -> Vec<ArchivedOnly> {
-    let dir = arbos_core::Place::new(path).arbos().join("archive").join("agents");
+    let dir = arbos_core::Place::new(path)
+        .arbos()
+        .join("archive")
+        .join("agents");
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -1262,7 +1284,8 @@ fn archived_only(path: &std::path::Path, sessions: &[ChatSession]) -> Vec<Archiv
             {
                 return None;
             }
-            let agent_md = std::fs::read_to_string(entry.path().join("agent.md")).unwrap_or_default();
+            let agent_md =
+                std::fs::read_to_string(entry.path().join("agent.md")).unwrap_or_default();
             let field = |key: &str| {
                 agent_md
                     .lines()
@@ -1271,7 +1294,9 @@ fn archived_only(path: &std::path::Path, sessions: &[ChatSession]) -> Vec<Archiv
                     .filter(|v| !v.is_empty())
                     .map(str::to_owned)
             };
-            let title = field("title:").or_else(|| field("name:")).unwrap_or_else(|| id.clone());
+            let title = field("title:")
+                .or_else(|| field("name:"))
+                .unwrap_or_else(|| id.clone());
             Some(ArchivedOnly { id, title })
         })
         .collect();

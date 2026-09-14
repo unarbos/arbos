@@ -144,9 +144,7 @@ fn ours(dir: &Path, path: &Path) -> bool {
     let head = head.as_os_str().to_string_lossy();
     match head.as_ref() {
         "skills" | "prompts" | "hooks" | "archive" | "project.toml" | "docs" | "media"
-        | "archived.md" => {
-            true
-        }
+        | "archived.md" => true,
         // The project page and the old goals file the panel shows,
         // whatever their case.
         _ if head.eq_ignore_ascii_case("goals.md") || head.eq_ignore_ascii_case("notes.md") => true,

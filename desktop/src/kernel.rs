@@ -1328,11 +1328,10 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
     items.retain(|item| {
         ix += 1;
         match item {
-            crate::model::session::ChatItem::Notice { text, failed: false }
-                if text.trim() == "Waiting for your answer" && ix < n =>
-            {
-                false
-            }
+            crate::model::session::ChatItem::Notice {
+                text,
+                failed: false,
+            } if text.trim() == "Waiting for your answer" && ix < n => false,
             crate::model::session::ChatItem::Agent(text) => {
                 let line = text.trim();
                 !(line.starts_with("status:") && !line.contains('\n'))

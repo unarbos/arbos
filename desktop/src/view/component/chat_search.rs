@@ -5,8 +5,8 @@
 
 use bezel::{
     gpui::{
-        App, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, MouseButton,
-        Render, SharedString, Window, div, prelude::*, px,
+        App, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, MouseButton, Render,
+        SharedString, Window, div, prelude::*, px,
     },
     ui::palette::{CommandPalette, PaletteEvent},
 };
@@ -22,7 +22,10 @@ pub struct Hit {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatSearchEvent {
     /// Open this chat: switch to its tab and select it.
-    Open { project: usize, session: u64 },
+    Open {
+        project: usize,
+        session: u64,
+    },
     Dismiss,
 }
 

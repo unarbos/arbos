@@ -238,7 +238,9 @@ pub fn status() -> Peek {
         kernel: s.kernel,
         reply_backend: s.reply_backend.clone(),
         first_partial_ms: match (s.take_started, s.first_partial) {
-            (Some(start), Some(first)) => Some(first.saturating_duration_since(start).as_millis() as u64),
+            (Some(start), Some(first)) => {
+                Some(first.saturating_duration_since(start).as_millis() as u64)
+            }
             _ => None,
         },
         partial_age_ms: s.partial_at.map(|at| at.elapsed().as_millis() as u64),
@@ -273,11 +275,15 @@ pub fn call_start(project: &str) -> Result<()> {
     };
     ensure_session(&cfg, &kind)?;
     let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
-    let session = hold.as_ref().ok_or_else(|| anyhow!("voice session closed"))?;
+    let session = hold
+        .as_ref()
+        .ok_or_else(|| anyhow!("voice session closed"))?;
     {
         let mut s = session.shared.lock().unwrap_or_else(|p| p.into_inner());
         if !s.call {
-            bail!("the speech server did not open a call (session.ready.mode != call); does it have a kernel?");
+            bail!(
+                "the speech server did not open a call (session.ready.mode != call); does it have a kernel?"
+            );
         }
         s.finals.clear();
         s.partial.clear();
@@ -1155,7 +1161,10 @@ mod native {
     }
 
     impl Capture {
-        pub fn start(tx: mpsc::UnboundedSender<Vec<u8>>, shared: Arc<Mutex<Shared>>) -> Result<Self> {
+        pub fn start(
+            tx: mpsc::UnboundedSender<Vec<u8>>,
+            shared: Arc<Mutex<Shared>>,
+        ) -> Result<Self> {
             let (stop, stop_rx) = sync_mpsc::channel::<()>();
             let (ready, ready_rx) = sync_mpsc::channel::<Result<String>>();
             let thread_shared = Arc::clone(&shared);
@@ -1222,7 +1231,12 @@ mod native {
         let config = device
             .default_input_config()
             .map_err(|e| anyhow!("{name}: no input format: {e}"))?;
-        let mut conv = Converter::new(config.channels() as usize, config.sample_rate().0, tx, Arc::clone(&shared));
+        let mut conv = Converter::new(
+            config.channels() as usize,
+            config.sample_rate().0,
+            tx,
+            Arc::clone(&shared),
+        );
         let on_error = move |e: cpal::StreamError| {
             let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
             s.mic_error = Some(format!("microphone stream: {e}"));
@@ -1439,7 +1453,11 @@ mod permission {
         let block = ConcreteBlock::new(move |granted: BOOL| {
             eprintln!(
                 "voice: microphone permission {}",
-                if granted == objc::runtime::YES { "granted" } else { "denied" }
+                if granted == objc::runtime::YES {
+                    "granted"
+                } else {
+                    "denied"
+                }
             );
         })
         .copy();
@@ -1493,12 +1511,15 @@ pub fn mic_test_start() {
             None
         }
     };
-    let previous = probe().lock().unwrap_or_else(|p| p.into_inner()).replace(MicProbe {
-        mic,
-        shared,
-        rx,
-        since: Instant::now(),
-    });
+    let previous = probe()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .replace(MicProbe {
+            mic,
+            shared,
+            rx,
+            since: Instant::now(),
+        });
     if let Some(p) = previous.and_then(|p| p.mic) {
         p.stop();
     }
@@ -1537,7 +1558,8 @@ pub fn mic_test() -> Option<MicTest> {
 /// command reading raw PCM16 mono 24 kHz from stdin.
 enum Player {
     Device(DeviceOut),
-    Process(Child),}
+    Process(Child),
+}
 
 /// Reply audio arrives as PCM16 mono 24 kHz; the device wants its own rate
 /// and channel count. Samples are resampled linearly into a queue the
@@ -1562,7 +1584,8 @@ struct DeviceOut {
 impl Drop for DeviceOut {
     fn drop(&mut self) {
         // Whatever path let go of the speaker, the thread must not outlive it.
-        self.alive.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.alive
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1584,12 +1607,18 @@ impl Player {
                 .stderr(Stdio::null())
                 .spawn()
                 .map_err(|e| anyhow!("start {}: {e}", cmd.get_program().to_string_lossy()))?;
-            shared.lock().unwrap_or_else(|p| p.into_inner()).speaker_device = "command".into();
+            shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .speaker_device = "command".into();
             return Ok(Self::Process(child));
         }
         match DeviceOut::open() {
             Ok((out, name)) => {
-                shared.lock().unwrap_or_else(|p| p.into_inner()).speaker_device = name;
+                shared
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .speaker_device = name;
                 Ok(Self::Device(out))
             }
             Err(e) => {
@@ -1601,11 +1630,13 @@ impl Player {
                     .stderr(Stdio::null())
                     .spawn()
                     .map_err(|e| anyhow!("start {}: {e}", cmd.get_program().to_string_lossy()))?;
-                shared.lock().unwrap_or_else(|p| p.into_inner()).speaker_device =
-                    std::path::Path::new(cmd.get_program())
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
+                shared
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .speaker_device = std::path::Path::new(cmd.get_program())
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 Ok(Self::Process(child))
             }
         }
@@ -1638,7 +1669,9 @@ impl Player {
                         if left == 0 {
                             break;
                         }
-                        std::thread::sleep(Duration::from_secs_f64((left as f64 / per_second).min(0.25)));
+                        std::thread::sleep(Duration::from_secs_f64(
+                            (left as f64 / per_second).min(0.25),
+                        ));
                     }
                     alive.store(false, std::sync::atomic::Ordering::Relaxed);
                 });
@@ -1669,8 +1702,9 @@ impl Player {
 
 impl DeviceOut {
     fn open() -> Result<(Self, String)> {
-        let queue: Arc<Mutex<std::collections::VecDeque<f32>>> =
-            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(48_000)));
+        let queue: Arc<Mutex<std::collections::VecDeque<f32>>> = Arc::new(Mutex::new(
+            std::collections::VecDeque::with_capacity(48_000),
+        ));
         let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(String, u32, u16)>>();
         let q = Arc::clone(&queue);

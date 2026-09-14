@@ -11,9 +11,9 @@ use crate::{
 };
 use bezel::{
     gpui::{
-        self, App, Bounds, Context, Entity, FocusHandle, Focusable, KeyBinding, Render, TitlebarOptions,
-        Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div,
-        point, prelude::*, px, size,
+        self, App, Bounds, Context, Entity, FocusHandle, Focusable, KeyBinding, Render,
+        TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
+        WindowOptions, actions, div, point, prelude::*, px, size,
     },
     motion::{Fade, Painter},
     theme::{TextStyle, Theme, Typeset, appearance},
@@ -94,7 +94,9 @@ impl Section {
     fn subtitle(self) -> Option<&'static str> {
         match self {
             Self::Model => Some("Who answers the chat, and with which key."),
-            Self::Permissions => Some("What the system lets Arbos do here. Each row asks for itself."),
+            Self::Permissions => {
+                Some("What the system lets Arbos do here. Each row asks for itself.")
+            }
             Self::General | Self::Appearance | Self::Performance => None,
         }
     }
@@ -163,7 +165,10 @@ pub fn open(
             appearance::observe_window(window, cx).detach();
             let view = cx.new(|cx| {
                 // The permission rows are the centre's; follow it.
-                let center = cx.global::<crate::model::permission_center::Permissions>().0.clone();
+                let center = cx
+                    .global::<crate::model::permission_center::Permissions>()
+                    .0
+                    .clone();
                 cx.observe(&center, |_, _, cx| cx.notify()).detach();
                 SettingsWindow {
                     workspace,

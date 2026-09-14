@@ -101,7 +101,8 @@ impl Project {
         let store = root(&place.store());
         let saved = Identity::load(&store);
         let identity_saved = saved.is_some();
-        let home = dirs::home_dir().is_some_and(|h| place.host.is_none() && h.join(STORE) == place.path);
+        let home =
+            dirs::home_dir().is_some_and(|h| place.host.is_none() && h.join(STORE) == place.path);
         let identity = saved.unwrap_or_else(|| Identity::defaults(&place, home));
         Self {
             boards: Vec::new(),

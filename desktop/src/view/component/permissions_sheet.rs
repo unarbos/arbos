@@ -35,7 +35,11 @@ const LEVEL_WIDTH: f32 = 96.;
 const LEVEL_FPS: f32 = 20.;
 
 pub fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("escape", SkipPermissions, Some(KEY_CONTEXT))]);
+    cx.bind_keys([KeyBinding::new(
+        "escape",
+        SkipPermissions,
+        Some(KEY_CONTEXT),
+    )]);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -345,7 +349,11 @@ pub fn permission_row(
                     div()
                         .mt(px(2.))
                         .text_style(TextStyle::Caption)
-                        .text_color(if unavailable { theme.text_faint } else { theme.warning })
+                        .text_color(if unavailable {
+                            theme.text_faint
+                        } else {
+                            theme.warning
+                        })
                         .child(SharedString::from(note))
                 })),
         )
@@ -399,7 +407,11 @@ pub fn mic_test_row(painter: Painter, theme: &Theme, cx: &mut App) -> AnyElement
                             div()
                                 .mt(px(2.))
                                 .text_style(TextStyle::Subheadline)
-                                .text_color(if error.is_some() { theme.danger } else { theme.text_muted })
+                                .text_color(if error.is_some() {
+                                    theme.danger
+                                } else {
+                                    theme.text_muted
+                                })
                                 .child(SharedString::from(detail)),
                         ),
                 )
@@ -418,15 +430,13 @@ pub fn mic_test_row(painter: Painter, theme: &Theme, cx: &mut App) -> AnyElement
                                 .rounded_full()
                                 .bg(theme.element_hover)
                                 .child(
-                                    div()
-                                        .h_full()
-                                        .rounded_full()
-                                        .w(px(LEVEL_WIDTH * level))
-                                        .bg(if live && level > 0.02 {
+                                    div().h_full().rounded_full().w(px(LEVEL_WIDTH * level)).bg(
+                                        if live && level > 0.02 {
                                             theme.success
                                         } else {
                                             theme.text_faint
-                                        }),
+                                        },
+                                    ),
                                 ),
                         )
                         .child(

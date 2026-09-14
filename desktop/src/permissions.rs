@@ -192,8 +192,9 @@ mod platform {
     use std::{
         ffi::c_void,
         sync::{
-            Mutex, mpsc,
+            Mutex,
             atomic::{AtomicI64, Ordering},
+            mpsc,
         },
         time::Duration,
     };
@@ -329,7 +330,9 @@ mod platform {
             if utf8.is_null() {
                 return "the notification centre refused the request".into();
             }
-            std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()
+            std::ffi::CStr::from_ptr(utf8)
+                .to_string_lossy()
+                .into_owned()
         }
     }
 
@@ -345,7 +348,9 @@ mod platform {
 
     pub fn notifications_status() -> Status {
         if !bundled() {
-            return Status::Unavailable("Needs the app bundle (Arbos.app), not a bare binary.".into());
+            return Status::Unavailable(
+                "Needs the app bundle (Arbos.app), not a bare binary.".into(),
+            );
         }
         unsafe {
             let center: *mut Object =
@@ -414,13 +419,17 @@ mod platform {
     pub fn microphone_status() -> Status {
         match crate::voice_ws::mic_program() {
             Ok(program) => {
-                if std::path::Path::new("/dev/snd").read_dir().is_ok_and(|mut d| d.next().is_some())
+                if std::path::Path::new("/dev/snd")
+                    .read_dir()
+                    .is_ok_and(|mut d| d.next().is_some())
                     || std::env::var_os("PULSE_SERVER").is_some()
                     || std::env::var_os("PIPEWIRE_RUNTIME_DIR").is_some()
                 {
                     Status::Granted
                 } else {
-                    Status::Unavailable(format!("{program} is installed, but no capture device is present."))
+                    Status::Unavailable(format!(
+                        "{program} is installed, but no capture device is present."
+                    ))
                 }
             }
             Err(e) => Status::Unavailable(e.to_string()),
