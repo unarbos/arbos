@@ -640,8 +640,6 @@ impl Arbos {
                                         .children(self.pills(cx))
                                         .children(self.provider_offer(cx).map(bleed))
                                         .children(self.held(cx).map(bleed))
-                                        .children(self.permission(cx).map(bleed))
-                                        .children(self.questions(cx).map(bleed))
                                         .children(self.queue(cx).map(bleed))
                                         .children(self.live_view(cx).map(bleed))
                                         .child(self.composer.clone())
@@ -1643,13 +1641,22 @@ impl Arbos {
                 .into_any_element()
         } else {
             let id = chat.id;
+            // What the agent is asking of the user right now goes at the end
+            // of the conversation, where it was asked.
+            let tail: Vec<AnyElement> = [
+                self.permission(cx).map(IntoElement::into_any_element),
+                self.questions(cx).map(IntoElement::into_any_element),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
             // A tool-list panic must not skip the composer sibling. The
             // transcript is inline in this render; catch it here.
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.workspace.update(cx, |workspace, cx| {
                     workspace.refresh_children(id);
                     match workspace.session(id) {
-                        Some(chat) => transcript::render(chat, window, cx),
+                        Some(chat) => transcript::render(chat, tail, window, cx),
                         None => div().flex_1().into_any_element(),
                     }
                 })
@@ -1885,7 +1892,7 @@ impl Arbos {
         let queued: Vec<PlanNode> = chat
             .plan
             .iter()
-            .filter(|n| n.inbox && n.status == "pending")
+            .filter(|n| n.inbox && n.status == "pending" && n.do_kind != "steer")
             .cloned()
             .collect();
         self.followups(id, &queued, &theme, cx)
@@ -2132,6 +2139,9 @@ impl Arbos {
         Some(
             div()
                 .rounded(px(Theme::surface_radius()))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.surface_raised)
                 .px(px(root::COMPOSER_PAD_X))
                 .py(px(12.))
                 .flex()
@@ -2161,8 +2171,7 @@ impl Arbos {
                                 .child(prompt.title.clone()),
                         ),
                 )
-                .child(body)
-                .surface(&theme, composer::SURFACE),
+                .child(body),
         )
     }
 
@@ -2272,6 +2281,9 @@ impl Arbos {
         Some(
             div()
                 .rounded(px(Theme::surface_radius()))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.surface_raised)
                 .px(px(14.))
                 .py(px(12.))
                 .flex()
@@ -2381,8 +2393,7 @@ impl Arbos {
                                     });
                                 })),
                         ),
-                )
-                .surface(&theme, composer::SURFACE),
+                ),
         )
     }
 

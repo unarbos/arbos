@@ -550,6 +550,11 @@ impl Workspace {
         dirs::home_dir().map(|home| Place::local(home.join(".arbos")))
     }
 
+    /// The Home tab's index, when it is open.
+    pub fn home_index(&self) -> Option<usize> {
+        self.projects.iter().position(Self::is_home)
+    }
+
     /// Whether this project is the home tab.
     pub fn is_home(project: &Project) -> bool {
         Self::home_place().is_some_and(|home| home == project.place())
@@ -2166,6 +2171,18 @@ impl Workspace {
     /// See [`ChatSession::set_mode`].
     pub fn set_session_mode(&mut self, id: u64, mode_id: String, cx: &mut Context<Self>) {
         self.with_session(id, cx, |chat| chat.set_mode(&mode_id));
+    }
+
+    /// Plan mode with approval (P-10): the agent wrote its checklist in
+    /// plan mode (read-only); the user approves, so the mode becomes auto
+    /// and the next turn executes the list.
+    pub fn approve_plan(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.with_session(id, cx, |chat| chat.set_mode("auto"));
+        self.send(
+            id,
+            "Plan approved. Execute your checklist now: work the open items in order, check each off with plan check and a one-line readout as you go, and report when done.".to_string(),
+            cx,
+        );
     }
 
     /// Switch the model later turns run on. See [`ChatSession::set_model`].

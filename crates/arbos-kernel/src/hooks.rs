@@ -438,7 +438,9 @@ impl KernelHooks {
     pub fn plan_frame(&self, agent: &str) -> Frame {
         let mut nodes = crate::plan::wire_rows(&self.place, agent);
         // Inbox files ride along as the queued rows the window already
-        // draws (`inbox: true`).
+        // draws (`inbox: true`). A steer is not a follow-up — the running
+        // turn reads it at its next step — so the row carries the file's
+        // kind and the window leaves steers out of "queued".
         for filed in inbox::list(&self.place, agent) {
             nodes.push(arbos_core::wire::PlanNode {
                 id: inbox_id(&filed.name),
@@ -450,7 +452,11 @@ impl KernelHooks {
                 } else {
                     "waits".into()
                 },
-                do_kind: "agent".into(),
+                do_kind: if arbos_core::inbox::is_steer_kind(&filed.msg.kind) {
+                    "steer".into()
+                } else {
+                    "agent".into()
+                },
                 last: String::new(),
                 origin: filed.msg.from.clone(),
                 standing: false,

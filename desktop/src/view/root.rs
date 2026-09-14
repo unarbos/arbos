@@ -558,6 +558,9 @@ pub struct Arbos {
     voice_mirror_on: bool,
     /// The call in progress: which project it is for, and since when.
     pub(crate) call: Option<Call>,
+    /// The tab sheet is up for the Home tab's first-launch offer; when it
+    /// closes, the permissions sheet follows.
+    home_offer: bool,
     /// Native Fn monitor. Lives with the window so Drop removes it.
     #[cfg(target_os = "macos")]
     _fn_monitor: Option<crate::view::fn_key::Monitor>,
@@ -620,13 +623,33 @@ impl Arbos {
             },
         )
         .detach();
-        cx.subscribe(&tab_sheet, |this, _, event: &TabSheetEvent, cx| match event {
-            TabSheetEvent::Keep(ix, identity) => {
-                let (ix, identity) = (*ix, identity.clone());
-                this.workspace
-                    .update(cx, |workspace, cx| workspace.set_identity(ix, identity, cx));
+        cx.subscribe(&tab_sheet, |this, _, event: &TabSheetEvent, cx| {
+            match event {
+                TabSheetEvent::Keep(ix, identity) => {
+                    let (ix, identity) = (*ix, identity.clone());
+                    this.workspace
+                        .update(cx, |workspace, cx| workspace.set_identity(ix, identity, cx));
+                }
+                // Skipped on the Home tab's one offer: the defaults are kept
+                // as its face, so the sheet is not offered again.
+                TabSheetEvent::Dismiss => {
+                    if this.home_offer {
+                        this.workspace.update(cx, |workspace, cx| {
+                            if let Some(ix) = workspace.home_index()
+                                && let Some(project) = workspace.projects.get(ix)
+                                && !project.identity_saved
+                            {
+                                let mut identity = project.identity.clone();
+                                identity.name = Some("Home".into());
+                                workspace.set_identity(ix, identity, cx);
+                            }
+                        });
+                    }
+                }
             }
-            TabSheetEvent::Dismiss => {}
+            if std::mem::take(&mut this.home_offer) {
+                this.permissions_once(cx);
+            }
         })
         .detach();
         cx.subscribe_in(
@@ -721,6 +744,7 @@ impl Arbos {
             voice_want_stop: false,
             voice_mirror_on: false,
             call: None,
+            home_offer: false,
             #[cfg(target_os = "macos")]
             _fn_monitor: None,
             draft_flush: Task::ready(()),
@@ -769,17 +793,29 @@ impl Arbos {
         .detach();
         keep_macos_glass(window);
         this.sync_composer(cx);
-        // First launch: the permissions sheet, once. After the window has
-        // painted, so it opens over something rather than before it.
-        if !this.workspace.read(cx).permissions_seen {
-            cx.spawn(async move |this, cx| {
+        // First launch: the Home tab's face — name, glyph, colour, prefilled
+        // "Home", skippable — then the permissions sheet, each once. After
+        // the window has painted, so they open over something rather than
+        // before it.
+        let home_fresh = this.workspace.read(cx).home_index().is_some_and(|ix| {
+            this.workspace
+                .read(cx)
+                .projects
+                .get(ix)
+                .is_some_and(|project| !project.identity_saved)
+        });
+        if home_fresh || !this.workspace.read(cx).permissions_seen {
+            cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor()
                     .timer(Duration::from_millis(600))
                     .await;
-                let _ = this.update(cx, |this, cx| {
-                    this.workspace
-                        .update(cx, |workspace, _| workspace.mark_permissions_seen());
-                    this.open_settings(Section::Permissions, cx);
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if home_fresh && let Some(ix) = this.workspace.read(cx).home_index() {
+                        this.home_offer = true;
+                        this.edit_tab(ix, window, cx);
+                    } else {
+                        this.permissions_once(cx);
+                    }
                 });
             })
             .detach();
@@ -1652,6 +1688,16 @@ impl Arbos {
     /// A folder opened for the first time has no `project.toml`: offer the
     /// sheet with the folder's own defaults filled in. A folder that has
     /// one comes back wearing it, no questions.
+    /// Settings › Permissions, the first time only.
+    fn permissions_once(&mut self, cx: &mut Context<Self>) {
+        if self.workspace.read(cx).permissions_seen {
+            return;
+        }
+        self.workspace
+            .update(cx, |workspace, _| workspace.mark_permissions_seen());
+        self.open_settings(Section::Permissions, cx);
+    }
+
     fn offer_tab_face(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let fresh = self
             .workspace
@@ -1670,7 +1716,15 @@ impl Arbos {
             .read(cx)
             .projects
             .get(ix)
-            .map(|project| (project.identity.clone(), project.place().title()))
+            .map(|project| {
+                let mut identity = project.identity.clone();
+                // The Home tab's first offer comes prefilled, so Keep as-is
+                // names it "Home" in its project.toml.
+                if Workspace::is_home(project) && !project.identity_saved && identity.name.is_none() {
+                    identity.name = Some("Home".into());
+                }
+                (identity, Workspace::tab_label(project))
+            })
         else {
             return;
         };

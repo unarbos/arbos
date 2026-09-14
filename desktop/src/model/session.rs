@@ -103,6 +103,9 @@ pub enum ChatItem {
     /// Files a tool produced for the user to look at: screenshots and
     /// screen recordings. One row per tool call; click opens the file.
     Artifacts(Vec<Artifact>),
+    /// A question the agent asked, answered: the card folded to one line.
+    /// An empty `answer` is a skip.
+    Asked { question: String, answer: String },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1701,11 +1704,23 @@ impl ChatSession {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
+                // The card folds to one line; the answer is a line of yours
+                // under it.
+                let question = prompt
+                    .questions
+                    .first()
+                    .map(|q| q.prompt.clone())
+                    .filter(|q| !q.trim().is_empty())
+                    .unwrap_or_else(|| prompt.title.clone());
+                self.items.push(ChatItem::Asked {
+                    question,
+                    answer: said.clone(),
+                });
                 if !said.is_empty() {
                     self.items.push(ChatItem::User(UserMessage::from(said)));
-                    self.updated = SystemTime::now();
-                    self.flush();
                 }
+                self.updated = SystemTime::now();
+                self.flush();
             }
             _ => self.notice(true, "the agent asked a question; not connected"),
         }
@@ -2140,11 +2155,13 @@ impl ChatSession {
         })
     }
 
-    /// Prompts the kernel holds for this agent that have not run yet.
+    /// Prompts the kernel holds for this agent that have not run yet. A
+    /// steer in the inbox is not one: the running turn takes it at its
+    /// next step.
     pub fn plan_queued(&self) -> usize {
         self.plan
             .iter()
-            .filter(|n| n.inbox && n.status == "pending")
+            .filter(|n| n.inbox && n.status == "pending" && n.do_kind != "steer")
             .count()
     }
 
@@ -2434,6 +2451,13 @@ impl ChatSession {
     }
 
     pub(crate) fn notice(&mut self, failed: bool, text: &str) {
+        // The kernel's page nudge is a standing state, not news each turn:
+        // one line, at the latest turn it applies to. An earlier copy goes.
+        if !failed && is_page_nudge(text) {
+            self.items.retain(|item| {
+                !matches!(item, ChatItem::Notice { text: t, failed: false } if is_page_nudge(t))
+            });
+        }
         self.items.push(ChatItem::Notice {
             text: text.to_owned(),
             failed,
@@ -2859,6 +2883,12 @@ fn pump(
             cx.notify();
         });
     })
+}
+
+/// The kernel's turn-end reminder that `.arbos/notes.md` did not change
+/// after a worker started or reported.
+pub fn is_page_nudge(text: &str) -> bool {
+    text.trim_start().starts_with("project page not updated")
 }
 
 /// A standing node the kernel keeps for itself: it marks the prompt so and

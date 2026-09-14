@@ -506,6 +506,38 @@ fn turn_answer(items: &[ChatItem], turn: &Turn) -> Option<String> {
 /// What the session has to say for itself. Cursor keeps failures as a
 /// muted line, not a full-width danger banner. ChatView ErrorCard puts
 /// Retry on a failed turn — same resend of the last user prompt.
+/// The kernel's "project page not updated" reminder: one dim line with a
+/// ↻ glyph, the reason only — the instruction half is the agent's to act
+/// on, not the reader's.
+fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
+    let shown = text
+        .split(" — ")
+        .next()
+        .unwrap_or(text)
+        .trim()
+        .to_string();
+    div()
+        .self_start()
+        .w_full()
+        .max_w(px(root::CHAT_MAX_WIDTH))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            icons::icon(icons::media::REPEAT)
+                .size(px(11.))
+                .text_color(theme.text_faint),
+        )
+        .child(
+            div()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child(SharedString::from(shown)),
+        )
+        .into_any_element()
+}
+
 fn notice(
     chat: &ChatSession,
     ix: usize,
@@ -516,6 +548,9 @@ fn notice(
 ) -> AnyElement {
     if !failed && text == "done" {
         return div().into_any_element();
+    }
+    if !failed && crate::model::session::is_page_nudge(text) {
+        return page_nudge(text, theme);
     }
     let shown = if failed {
         short_error(text)
@@ -1007,6 +1042,9 @@ fn from_block(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
+    if let Some((ok, words)) = done_report(text) {
+        return worker_card(chat, ix, who, ok, &words, theme, window, cx);
+    }
     div()
         .self_start()
         .max_w(px(520.))
@@ -1028,6 +1066,172 @@ fn from_block(
         )
         .children(message_images(images))
         .into_any_element()
+}
+
+/// The kernel's done file for a worker, as it lands in the parent's chat:
+/// `Turn ended. Last words: … (transcript: …)`, or `Turn ended badly.
+/// …`. The verdict and the words, without the file pointer.
+fn done_report(text: &str) -> Option<(bool, String)> {
+    let text = text.trim();
+    let (ok, rest) = if let Some(rest) = text.strip_prefix("Turn ended. Last words:") {
+        (true, rest)
+    } else if let Some(rest) = text.strip_prefix("Turn ended badly. Last words:") {
+        (false, rest)
+    } else {
+        return None;
+    };
+    let mut words = rest.trim().to_string();
+    if let Some(at) = words.rfind("(transcript:") {
+        words.truncate(at);
+    }
+    Some((ok, words.trim().trim_end_matches('…').trim().to_string()))
+}
+
+/// A worker's completion as a compact card at the turn it came back to —
+/// name, verdict, its last words — instead of the done file's raw body.
+/// Click opens the worker's chat.
+fn worker_card(
+    chat: &ChatSession,
+    ix: usize,
+    who: &str,
+    ok: bool,
+    words: &str,
+    theme: &Theme,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let name = chat.who_label(who);
+    let child = chat
+        .children
+        .iter()
+        .find(|c| c.kernel_id.as_deref() == Some(who))
+        .map(|c| c.id);
+    let (glyph, verdict, tone) = if ok {
+        (icons::status::CHECK, "done", theme.success)
+    } else {
+        (icons::status::DANGER_TRIANGLE, "ended badly", theme.danger)
+    };
+    let head = div()
+        .id(("worker-card-head", chat.id * 100_000 + ix as u64))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .when(child.is_some(), |el| el.cursor_pointer())
+        .child(icons::icon(glyph).size(px(12.)).text_color(tone))
+        .child(
+            div()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child("worker"),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_muted)
+                .child(SharedString::from(name)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_style(TextStyle::Caption)
+                .text_color(tone)
+                .child(verdict),
+        )
+        .when_some(child, |el, id| {
+            el.on_click(cx.listener(move |this, _, _, cx| this.select_session(id, cx)))
+        });
+    div()
+        .self_start()
+        .w_full()
+        .max_w(px(520.))
+        .rounded(px(Theme::surface_radius()))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
+        .px(px(12.))
+        .py(px(8.))
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(head)
+        .when(!words.is_empty(), |el| {
+            el.child(
+                div()
+                    .text_style(TextStyle::Callout)
+                    .text_color(theme.text)
+                    .child(prose(chat, ix, words, window, cx)),
+            )
+        })
+        .into_any_element()
+}
+
+/// A subscription the agent set up in this turn, as a small card under
+/// the work: what stands now and when it fires. The Project panel keeps
+/// the full list; this is the moment it was made.
+fn subscription_cards(
+    chat: &ChatSession,
+    body: Range<usize>,
+    theme: &Theme,
+) -> Vec<AnyElement> {
+    chat.items[body]
+        .iter()
+        .filter_map(|item| match item {
+            ChatItem::Tool {
+                label,
+                status: ToolStatus::Success,
+                output,
+                ..
+            } if label.starts_with("subscribe") && !label.starts_with("subscribe remove") => {
+                let line = output
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("")
+                    .split(". ")
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('.')
+                    .to_string();
+                (!line.is_empty() && line.starts_with("Subscribed")).then_some(line)
+            }
+            _ => None,
+        })
+        .map(|line| {
+            div()
+                .self_start()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .rounded(px(Theme::surface_radius()))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.surface_raised)
+                .px(px(10.))
+                .py(px(6.))
+                .child(
+                    icons::icon(icons::media::REPEAT)
+                        .size(px(12.))
+                        .text_color(theme.text_muted),
+                )
+                .child(
+                    div()
+                        .text_style(TextStyle::Caption)
+                        .text_color(theme.text_faint)
+                        .child("standing"),
+                )
+                .child(
+                    div()
+                        .text_style(TextStyle::Callout)
+                        .text_color(theme.text)
+                        .child(SharedString::from(line)),
+                )
+                .into_any_element()
+        })
+        .collect()
 }
 
 /// The kernel ids of the sub-agents a turn's body spawned — the `spawn`
@@ -1139,7 +1343,17 @@ fn children_lines(
                             spaced_label(label, tone, theme)
                         }),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| this.select_session(id, cx)))
+                // On the press, as a source list selects: while the turn
+                // streams, the transcript grows and scrolls between a press
+                // and its release, so a click's two halves land on
+                // different rows and the row never opens.
+                .on_mouse_down(
+                    bezel::gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.select_session(id, cx)
+                    }),
+                )
                 .into_any_element()
         })
         .collect();
@@ -2439,7 +2653,15 @@ fn tool_icon(kind: ToolKind) -> &'static str {
 
 /// The transcript of one session, rendered from the model that owns it —
 /// expanding a work section or a tool's output writes back through `cx`.
-pub fn render(chat: &ChatSession, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
+/// `tail` is what belongs at the end of the conversation right now — a
+/// question the agent is asking, an approval it needs — drawn as cards in
+/// the flow, in the reading column, not pinned over the composer.
+pub fn render(
+    chat: &ChatSession,
+    tail: Vec<AnyElement>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
     let id = chat.id;
     let turns = turns(&chat.items);
     let last = turns.len().saturating_sub(1);
@@ -2466,6 +2688,27 @@ pub fn render(chat: &ChatSession, window: &mut Window, cx: &mut Context<Workspac
                 .max_w(px(column))
                 .self_center()
                 .child(ask_card(chat, node, &theme, cx))
+                .into_any_element(),
+        );
+    }
+    if let Some(card) = approve_card(chat, &theme, cx) {
+        zones.push(
+            div()
+                .w_full()
+                .max_w(px(column))
+                .self_center()
+                .child(card)
+                .into_any_element(),
+        );
+    }
+    for card in tail {
+        zones.push(
+            div()
+                .w_full()
+                .max_w(px(column))
+                .self_center()
+                .mt(px(8.))
+                .child(card)
                 .into_any_element(),
         );
     }
@@ -2518,6 +2761,135 @@ pub fn render(chat: &ChatSession, window: &mut Window, cx: &mut Context<Workspac
             )
         })
         .into_any_element()
+}
+
+/// A question once answered: the card folded to one faint line, the
+/// answer (or "skipped") after it. The user's own line sits below.
+fn asked_line(question: &str, answer: &str, theme: &Theme) -> AnyElement {
+    div()
+        .self_start()
+        .w_full()
+        .max_w(px(520.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            icons::icon(icons::system::CHAT_ROUND_LINE)
+                .size(px(11.))
+                .text_color(theme.text_faint),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child(SharedString::from(format!("Question · {}", question.trim()))),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_style(TextStyle::Caption)
+                .text_color(if answer.is_empty() {
+                    theme.text_faint
+                } else {
+                    theme.text_muted
+                })
+                .child(if answer.is_empty() {
+                    "skipped".to_string()
+                } else {
+                    "answered".to_string()
+                }),
+        )
+        .into_any_element()
+}
+
+/// Plan mode with approval: the agent wrote its checklist read-only and
+/// the turn is over. One card at the end of the conversation — how many
+/// steps stand — with Approve and run, which switches the chat to auto and
+/// starts the work.
+fn approve_card(chat: &ChatSession, theme: &Theme, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let plan_mode = chat
+        .modes
+        .as_ref()
+        .is_some_and(|m| m.current_mode_id.to_string() == "plan");
+    if !plan_mode || chat.busy() {
+        return None;
+    }
+    let steps = chat
+        .plan_open()
+        .filter(|n| !n.standing && n.do_kind != "ask")
+        .count();
+    if steps == 0 {
+        return None;
+    }
+    let id = chat.id;
+    Some(
+        div()
+            .mt(px(8.))
+            .rounded(px(Theme::surface_radius()))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .px(px(12.))
+            .py(px(10.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                icons::icon(icons::editing::CHECKLIST)
+                    .size(px(12.))
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_style(TextStyle::Callout)
+                    .text_color(theme.text)
+                    .child(SharedString::from(format!(
+                        "Plan ready · {}",
+                        plural(steps, "step", "steps")
+                    ))),
+            )
+            .child(
+                theme
+                    .ghost(SharedString::from(format!("plan-approve-{id}")))
+                    .flex_none()
+                    .px(px(8.))
+                    .h(px(22.))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .rounded(px(Theme::control_radius()))
+                    .border_1()
+                    .border_color(theme.border)
+                    .tooltip(|window, cx| {
+                        Tooltip::text("Switch to auto and run the checklist", window, cx)
+                    })
+                    .child(
+                        icons::icon(icons::media::PLAY)
+                            .size(px(10.))
+                            .text_color(theme.text),
+                    )
+                    .child(
+                        div()
+                            .text_style(TextStyle::Caption)
+                            .text_color(theme.text)
+                            .child("Approve and run"),
+                    )
+                    .on_click(cx.listener(move |workspace, _, _, cx| {
+                        workspace.approve_plan(id, cx);
+                    })),
+            )
+            .into_any_element(),
+    )
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// A question the agent parked for you — an `ask` node — as a card at the
@@ -2906,6 +3278,8 @@ fn zone(
     if !spawned.is_empty() && !chat.children.is_empty() {
         zone = zone.child(children_lines(chat, &spawned, &theme, cx));
     }
+    // Standing work the turn set up: a small card at the moment it was made.
+    zone = zone.children(subscription_cards(chat, body.clone(), &theme));
     // Screenshots and clips the work produced stay in view when the work
     // folds: they are what the user asked to see.
     for ix in body.clone() {
@@ -2967,6 +3341,7 @@ fn zone(
             }
             ChatItem::Notice { text, failed } => notice(chat, ix, text, *failed, &theme, cx),
             ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, &theme, cx),
+            ChatItem::Asked { question, answer } => asked_line(question, answer, &theme),
             _ => div().into_any_element(),
         });
     }
@@ -3479,6 +3854,7 @@ fn work_other(
         }
         ChatItem::Notice { text, failed } => notice(chat, ix, text, *failed, theme, cx),
         ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, theme, cx),
+        ChatItem::Asked { question, answer } => asked_line(question, answer, theme),
         _ => div().into_any_element(),
     }
 }
