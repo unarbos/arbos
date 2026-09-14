@@ -357,6 +357,7 @@ fn archive_finished(hooks: &KernelHooks, reported: &[String]) {
             Ok(()) => {
                 moved = true;
                 crate::klog::info("child_archived", Some(id), dest.display().to_string());
+                retire_page_rows(hooks, id, &dest);
                 // Its worktree goes with it when nothing would be lost
                 // (K-01c); commits stay on the branch.
                 match crate::worktree::remove_if_clean(hooks.place.path(), id) {
@@ -405,6 +406,53 @@ fn archive_finished(hooks: &KernelHooks, reported: &[String]) {
     }
     if moved {
         hooks.broadcast_tree();
+    }
+}
+
+/// The project page's rows for an archived worker stop saying "worker
+/// running". While a worker runs its row targets `agents/<id>`; once the
+/// folder has moved that link is dead and the readout is stale. A turn
+/// that ended well checks the row (readout: the worker's last words); a
+/// stopped or failed one stays open and says so. Either way the link
+/// follows the folder into the archive. Root rewrites the row again when
+/// it files the result (`plan check n readout target`).
+fn retire_page_rows(hooks: &KernelHooks, id: &str, archived: &std::path::Path) {
+    let mut page = arbos_core::notes::load(&hooks.place, arbos_core::ROOT_ID);
+    let rows = page.worker_items(id);
+    if rows.is_empty() {
+        return;
+    }
+    let events = load_transcript(&archived.join("transcript.jsonl")).unwrap_or_default();
+    let lo = events
+        .iter()
+        .rev()
+        .find(|e| matches!(e.kind, EventKind::Wake { .. }))
+        .map_or(0, |e| e.seq);
+    let (outcome, ok) = turn_outcome(&events, lo);
+    let readout = if ok {
+        format!("worker finished: {}", arbos_core::text::clip(&outcome, 100))
+    } else {
+        format!("worker stopped: {}", arbos_core::text::clip(&outcome, 100))
+    };
+    let target = format!("archive/agents/{id}");
+    // Numbers shift as rows are checked (done ones sink), so each pass
+    // looks the row up again by its target.
+    for _ in 0..rows.len() {
+        let Some(row) = page.worker_items(id).into_iter().next() else {
+            break;
+        };
+        if let Err(e) = page.check_with_target(row.n, ok, Some(&readout), Some(&target)) {
+            crate::klog::warn("page_row_retire_failed", Some(id), format!("{e:#}"));
+            return;
+        }
+    }
+    match hooks.save_notes(arbos_core::ROOT_ID, &page) {
+        Ok(()) => crate::klog::info(
+            "page_rows_retired",
+            Some(id),
+            format!("{} row(s): {readout}", rows.len()),
+        ),
+        Err(e) => crate::klog::warn("page_row_retire_failed", Some(id), format!("{e:#}")),
     }
 }
 
