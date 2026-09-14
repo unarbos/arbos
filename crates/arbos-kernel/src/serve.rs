@@ -190,6 +190,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     }
 
     doors::spawn_telegram_if_configured(Arc::clone(&hooks));
+    crate::chatdoor::spawn_if_configured(Arc::clone(&hooks));
     // `--hub`: register outbound so clients and other kernels reach this
     // one by machine name, with no port open here.
     match crate::hub_link::config_from_env() {
