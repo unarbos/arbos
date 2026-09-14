@@ -346,6 +346,8 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let mut cuts = 0u32;
     // Dollars over every model call of this turn, when the provider prices them.
     let mut turn_cost: Option<f64> = None;
+    // Prompt tokens the provider served from cache, summed the same way.
+    let mut turn_cached: Option<u64> = None;
     // Same tool, same arguments, same failure, again and again: name it.
     let mut last_failure: Option<String> = None;
     let mut failure_streak = 0u32;
@@ -551,6 +553,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         if let Some(c) = usage.and_then(|u| u.cost) {
             turn_cost = Some(turn_cost.unwrap_or(0.0) + c);
         }
+        if let Some(n) = usage.and_then(|u| u.cached) {
+            turn_cached = Some(turn_cached.unwrap_or(0) + n);
+        }
         if let Some(u) = usage {
             let ours = managed.raw + if tools.is_empty() { 0 } else { tool_tokens };
             if u.used > 0 && ours > 0 {
@@ -607,6 +612,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             end(
                 usage.map(|mut u| {
                     u.cost = turn_cost;
+                    u.cached = turn_cached;
                     u
                 }),
                 None,

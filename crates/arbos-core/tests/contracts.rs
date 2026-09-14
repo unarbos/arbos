@@ -51,6 +51,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                     used: 1,
                     size: 2,
                     cost: None,
+                    cached: None,
                 }),
             },
             "snapshot",
