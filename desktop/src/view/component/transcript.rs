@@ -4496,6 +4496,17 @@ pub fn spinner<V: 'static>(since: Duration, color: Hsla, cx: &mut Context<V>) ->
         .into_any_element()
 }
 
+/// The same cell for a row drawn from another view's state: the caller's
+/// painter keeps that view ticking.
+pub fn spinner_with(painter: Painter, since: Duration, color: Hsla, cx: &mut bezel::gpui::App) -> AnyElement {
+    painter.lease(BRAILLE_FPS, BRAILLE_LEASE, cx);
+    div()
+        .text_style(TextStyle::Callout)
+        .text_color(color)
+        .child(spinner_frame(since, cx.reduce_motion()))
+        .into_any_element()
+}
+
 /// How long a streaming tail may sit still before the heartbeat comes
 /// back. Web `STALE_TAIL_MS`: long enough to ignore between-token
 /// pauses, short enough that a tool-argument gap does not look frozen.

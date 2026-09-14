@@ -1078,6 +1078,27 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         "settings_open": cx.windows().iter().any(|w| w.downcast::<SettingsWindow>().is_some()),
         "opener_open": this.opener.read(cx).open,
         "search_open": this.chat_search.read(cx).is_open(),
+        "permissions": {
+            "open": this.permissions_sheet.read(cx).is_open(),
+            "seen": workspace.permissions_seen,
+            "wants_attention": this.permission_center.read(cx).wants_attention(),
+            "enabling_all": this.permission_center.read(cx).enabling_all,
+            "rows": this.permission_center.read(cx).rows.iter().map(|row| json!({
+                "permission": row.permission.title(),
+                "status": match &row.status {
+                    crate::permissions::Status::Granted => "granted",
+                    crate::permissions::Status::NotAsked => "not_asked",
+                    crate::permissions::Status::Denied => "denied",
+                    crate::permissions::Status::Unavailable(_) => "unavailable",
+                },
+                "phase": match &row.phase {
+                    crate::model::permission_center::Phase::Idle => "idle",
+                    crate::model::permission_center::Phase::Requesting { .. } => "requesting",
+                    crate::model::permission_center::Phase::Prompted { .. } => "prompted",
+                    crate::model::permission_center::Phase::NeedsSettings => "needs_settings",
+                },
+            })).collect::<Vec<_>>(),
+        },
         "menu_open": this.menu.is_some(),
         "renaming": this.renaming.is_some(),
         "composer": {

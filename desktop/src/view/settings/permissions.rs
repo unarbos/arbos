@@ -1,55 +1,70 @@
-//! Settings › Permissions: one row per thing the system must allow, with
-//! what it is for, where it stands, and a button that raises the real
-//! prompt — or opens the pane when the system will not ask again. Shown on
-//! first launch too. The rows re-read their status every second while the
-//! section is up, so a grant made in System Settings shows without a
-//! restart.
+//! Settings › Permissions: the same rows the first-run sheet shows, drawn
+//! from the shared [`PermissionCenter`] — one row per thing the system
+//! must allow, with what it is for, where it stands, and the one thing to
+//! press: the real prompt, or the System Settings pane where the system
+//! will not ask again. **Enable all** asks for them in sequence. The rows
+//! re-read their status every second while the section is up, so a grant
+//! made in System Settings shows without a restart.
 
 use crate::{
-    permissions::{Permission, Requested, Status},
-    view::settings::{self, SettingsWindow},
+    model::permission_center::Permissions,
+    view::{
+        component::permissions_sheet::{mic_test_row, permission_row},
+        settings::{self, SettingsWindow},
+    },
     voice_ws,
 };
 use bezel::{
-    gpui::{AnyElement, Context, Hsla, SharedString, div, prelude::*, px},
+    gpui::{AnyElement, Context, div, prelude::*, px},
     motion::Painter,
     theme::{TextStyle, Theme, Typeset},
-    ui::widgets::{ButtonStyle, Buttons, Content, Scaffolding},
+    ui::widgets::{ButtonStyle, Buttons, Scaffolding},
 };
-use std::time::Duration;
-
-/// How often the rows re-read the system while the section shows.
-const RECHECK: Duration = Duration::from_secs(1);
-
-/// The level bar's width and the frame rate it moves at while the mic
-/// test runs.
-const LEVEL_WIDTH: f32 = 120.;
-const LEVEL_FPS: f32 = 20.;
 
 impl SettingsWindow {
     pub(super) fn permissions_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         self.keep_rechecking(cx);
+        let center = cx.global::<Permissions>().0.clone();
         let project = self
             .workspace
             .read(cx)
             .active_project()
             .filter(|project| !project.is_remote())
             .map(|project| project.path.clone());
-        let rows: Vec<(Permission, Status)> = Permission::applicable()
-            .iter()
-            .map(|permission| (*permission, permission.status(project.as_deref())))
-            .collect();
+        center.update(cx, |center, cx| center.set_project(project, cx));
+        let painter = Painter::of(cx);
+        let (rows, settled, enabling) = {
+            let c = center.read(cx);
+            (c.rows.clone(), c.all_settled(), c.enabling_all)
+        };
         let mut group = theme.group_box();
-        for (n, (permission, status)) in rows.iter().enumerate() {
-            group = group.child(self.permission_row(n, *permission, status, &theme, cx));
+        for (n, row) in rows.iter().enumerate() {
+            group = group.child(permission_row(n, row, &center, painter, &theme, cx));
         }
+        let enable_all = (!settled).then(|| {
+            let center = center.clone();
+            div().flex().flex_row().justify_end().child(
+                theme
+                    .button(
+                        if enabling { "Enabling…" } else { "Enable all" },
+                        ButtonStyle::Prominent,
+                        None,
+                    )
+                    .id("permissions-enable-all")
+                    .when(enabling, |el| el.opacity(0.6))
+                    .on_click(move |_, _, cx| {
+                        center.update(cx, |center, cx| center.enable_all(cx));
+                    }),
+            )
+        });
         div()
             .flex()
             .flex_col()
             .gap(px(settings::GROUP_GAP))
             .child(group)
-            .child(self.mic_test_group(&theme, cx))
+            .children(enable_all)
+            .child(mic_test_row(painter, &theme, cx))
             .child(
                 div()
                     .text_style(TextStyle::Subheadline)
@@ -63,116 +78,26 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    /// One row: title and purpose on the left; the status badge and the
-    /// button on the right. Granted rows carry no button.
-    fn permission_row(
-        &self,
-        n: usize,
-        permission: Permission,
-        status: &Status,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let (label, tint): (String, Hsla) = match status {
-            Status::Granted => ("Granted".into(), theme.success),
-            Status::NotAsked => ("Not asked".into(), theme.text_muted),
-            Status::Denied => ("Denied".into(), theme.danger),
-            Status::Unavailable(_) => ("Unavailable".into(), theme.text_faint),
-        };
-        let note = match status {
-            Status::Unavailable(why) => Some(why.clone()),
-            Status::Denied => permission
-                .settings_url()
-                .map(|_| "The system will not ask again; the switch is in System Settings.".to_string()),
-            Status::Granted | Status::NotAsked => None,
-        };
-        let button_label = match status {
-            Status::Granted => None,
-            Status::Denied => permission.settings_url().map(|_| "Open System Settings…"),
-            Status::NotAsked => Some("Request"),
-            Status::Unavailable(_) => permission.settings_url().map(|_| "Open System Settings…"),
-        };
-        theme
-            .card_row(n == 0)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(theme.row_title(permission.title()))
-                    .child(
-                        div()
-                            .mt(px(4.))
-                            .text_style(TextStyle::Subheadline)
-                            .text_color(theme.text_muted)
-                            .child(permission.purpose()),
-                    )
-                    .children(note.map(|note| {
-                        div()
-                            .mt(px(2.))
-                            .text_style(TextStyle::Caption)
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(note))
-                    })),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .id(("permission-status", n))
-                            .text_color(tint)
-                            .child(theme.badge(label)),
-                    )
-                    .children(button_label.map(|label| {
-                        theme
-                            .button(label, ButtonStyle::Prominent, None)
-                            .id(("permission-request", n))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.request(permission, cx);
-                            }))
-                    })),
-            )
-            .into_any_element()
-    }
-
-    /// Raise the prompt, or open the pane; the next re-check shows the result.
-    fn request(&mut self, permission: Permission, cx: &mut Context<Self>) {
-        let project = self
-            .workspace
-            .read(cx)
-            .active_project()
-            .filter(|project| !project.is_remote())
-            .map(|project| project.path.clone());
-        let mut opened: Option<String> = None;
-        let outcome = permission.request(project.as_deref(), &mut |url| opened = Some(url.to_owned()));
-        if let (Requested::OpenedSettings, Some(url)) = (&outcome, opened) {
-            cx.open_url(&url);
-        }
-        cx.notify();
-    }
-
-    /// While this section shows, re-read every second: a grant made in
-    /// System Settings, or a prompt answered, lands without a restart.
+    /// While this section shows, the centre re-reads every second; this
+    /// window follows it. Leaving the section stops the microphone test.
     fn keep_rechecking(&mut self, cx: &mut Context<Self>) {
         if self.rechecking {
             return;
         }
         self.rechecking = true;
+        let center = cx.global::<Permissions>().0.clone();
+        center.update(cx, |center, cx| center.watch(cx));
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(RECHECK).await;
+                cx.background_executor()
+                    .timer(crate::model::permission_center::POLL)
+                    .await;
                 let live = this.update(cx, |this, cx| {
                     let on = this.section == settings::Section::Permissions;
-                    if on {
-                        cx.notify();
-                    } else {
+                    if !on {
                         this.rechecking = false;
+                        voice_ws::mic_test_stop();
+                        center.update(cx, |center, _| center.unwatch());
                     }
                     on
                 });
@@ -182,105 +107,5 @@ impl SettingsWindow {
             }
         })
         .detach();
-    }
-
-    /// The microphone, heard: the same in-process capture a take, a call
-    /// and hold-Fn dictation open, with nobody listening to the audio — a
-    /// level bar shows what it hears. On macOS the first run is also when
-    /// the system asks for the microphone, so the Request above and this
-    /// row lead to the same dialog.
-    fn mic_test_group(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let test = voice_ws::mic_test();
-        let live = test.is_some();
-        if live {
-            Painter::of(cx).lease(LEVEL_FPS, Duration::from_millis(300), cx);
-        }
-        let error = test.as_ref().and_then(|t| t.error.clone());
-        let detail: String = match &test {
-            Some(t) => match &t.error {
-                Some(err) => format!("Not hearing: {err}"),
-                None if t.device.is_empty() => "Opening the microphone…".into(),
-                None => format!("Listening on {}.", t.device),
-            },
-            None => match voice_ws::mic_permission().advice() {
-                Some(advice) => advice.to_string(),
-                None => "Press Test and say something; the bar shows what the mic hears.".into(),
-            },
-        };
-        let level = test.as_ref().map(|t| t.level).unwrap_or(0.).clamp(0., 1.);
-        theme
-            .group_box()
-            .child(
-                theme
-                    .card_row(true)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(theme.row_title("Test the microphone"))
-                            .child(
-                                div()
-                                    .mt(px(4.))
-                                    .text_style(TextStyle::Subheadline)
-                                    .text_color(if error.is_some() {
-                                        theme.danger
-                                    } else {
-                                        theme.text_muted
-                                    })
-                                    .child(SharedString::from(detail)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(12.))
-                            .child(
-                                div()
-                                    .id("mic-level")
-                                    .w(px(LEVEL_WIDTH))
-                                    .h(px(6.))
-                                    .rounded_full()
-                                    .bg(theme.element_hover)
-                                    .child(
-                                        div()
-                                            .h_full()
-                                            .rounded_full()
-                                            .w(px(LEVEL_WIDTH * level))
-                                            .bg(if live && level > 0.02 {
-                                                theme.success
-                                            } else {
-                                                theme.text_faint
-                                            }),
-                                    ),
-                            )
-                            .child(
-                                theme
-                                    .button(
-                                        if live { "Stop" } else { "Test" },
-                                        if live {
-                                            ButtonStyle::Ghost
-                                        } else {
-                                            ButtonStyle::Prominent
-                                        },
-                                        None,
-                                    )
-                                    .id("mic-test")
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        if live {
-                                            voice_ws::mic_test_stop();
-                                        } else {
-                                            voice_ws::mic_test_start();
-                                        }
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
-            )
-            .into_any_element()
     }
 }

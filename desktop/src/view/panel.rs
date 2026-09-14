@@ -1095,6 +1095,9 @@ impl Arbos {
 
     /// The bottom strip: settings on the left, a sub-chat on the right.
     fn panel_foot(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        // Something the user tried needed a permission that is not granted:
+        // a dot on the gear, and nothing louder, after "Skip for now".
+        let wants_permission = self.permission_center.read(cx).wants_attention();
         div()
             .flex_none()
             .h(px(40.))
@@ -1119,13 +1122,33 @@ impl Arbos {
                         )
                     })
                     .child(
-                        icons::icon(icons::system::SETTINGS_MINIMALISTIC)
-                            .size(px(14.))
-                            .text_color(theme.text_muted),
+                        div()
+                            .relative()
+                            .child(
+                                icons::icon(icons::system::SETTINGS_MINIMALISTIC)
+                                    .size(px(14.))
+                                    .text_color(theme.text_muted),
+                            )
+                            .when(wants_permission, |el| {
+                                el.child(
+                                    div()
+                                        .id("settings-dot")
+                                        .absolute()
+                                        .top(px(-2.))
+                                        .right(px(-3.))
+                                        .size(px(6.))
+                                        .rounded_full()
+                                        .bg(theme.warning),
+                                )
+                            }),
                     )
-                    .on_click(
-                        cx.listener(|this, _, _, cx| this.open_settings(Section::General, cx)),
-                    ),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if wants_permission {
+                            this.show_permissions(window, cx);
+                        } else {
+                            this.open_settings(Section::General, cx);
+                        }
+                    })),
             )
             .child(
                 theme

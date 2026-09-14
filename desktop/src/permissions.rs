@@ -6,8 +6,11 @@
 //!
 //! On macOS every status is read from the system (TCC) and every request
 //! is the real prompt, raised from inside this process so the grant is
-//! filed under this bundle. Where macOS will not prompt again, the row
-//! offers the System Settings pane instead. On Linux the rows that apply
+//! filed under this bundle. Where macOS will not prompt — a second ask, or
+//! an ad-hoc bundle, where `CGRequestScreenCaptureAccess` returns false
+//! with no dialog — the request says so and the row offers the System
+//! Settings pane; `model::permission_center` runs the rows, off the UI
+//! thread, and keeps re-reading. On Linux the rows that apply
 //! are the microphone (a capture program and a device), the screen (the
 //! portal asks on first use under Wayland; X11 has no gate) and the
 //! folder; the rest are hidden.
@@ -153,6 +156,13 @@ impl Permission {
     }
 }
 
+/// A real screen capture attempt: on Sequoia an app appears in the Screen
+/// Recording list only after it has tried, so this is what puts Arbos
+/// there. True when an image came back (the grant is in).
+pub fn try_screen_capture() -> bool {
+    platform::try_screen_capture()
+}
+
 /// Reading the folder is the test: a list comes back, or the system says no.
 fn folder_status(project: Option<&Path>) -> Status {
     let Some(project) = project else {
@@ -191,6 +201,43 @@ mod platform {
     unsafe extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
         fn CGRequestScreenCaptureAccess() -> bool;
+        fn CGWindowListCreateImage(
+            rect: CGRect,
+            option: u32,
+            window_id: u32,
+            image_option: u32,
+        ) -> *mut c_void;
+        fn CGImageRelease(image: *mut c_void);
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGRect {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    }
+
+    /// `CGWindowListCreateImage` over the whole screen: the capture the
+    /// screenshot tool would make. Null without the grant; on Sequoia the
+    /// attempt is what lists the app under Screen Recording.
+    pub fn try_screen_capture() -> bool {
+        const ON_SCREEN_ONLY: u32 = 1;
+        let infinite = CGRect {
+            x: f64::NEG_INFINITY / 2.0,
+            y: f64::NEG_INFINITY / 2.0,
+            w: f64::INFINITY,
+            h: f64::INFINITY,
+        };
+        unsafe {
+            let image = CGWindowListCreateImage(infinite, ON_SCREEN_ONLY, 0, 0);
+            if image.is_null() {
+                return false;
+            }
+            CGImageRelease(image);
+        }
+        CGPreflightScreenCaptureAccess()
     }
 
     #[link(name = "ApplicationServices", kind = "framework")]
@@ -320,6 +367,12 @@ mod platform {
     //! capture; the rest do not apply and are not listed.
 
     use super::{Requested, Status};
+
+    /// No gate to try against: the portal asks on first use under Wayland,
+    /// X11 has none. The preflight's answer stands.
+    pub fn try_screen_capture() -> bool {
+        matches!(screen_status(), Status::Granted)
+    }
 
     pub fn microphone_status() -> Status {
         match crate::voice_ws::mic_program() {
