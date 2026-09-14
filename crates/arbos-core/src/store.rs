@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{Agent, Place};
+use crate::{Agent, Event, EventKind, Layout, Place};
 
 /// Roughly 4 000 tokens. Over it, the prompt gets the head and a note.
 pub const PROMPT_CAP_CHARS: usize = 16_000;
@@ -249,6 +249,62 @@ pub struct Kickoff<'a> {
     /// default rules name it as the base branch instead of "the base
     /// branch you are given" (the audit found `rules` copied verbatim).
     pub base_branch: Option<String>,
+    /// The user asked to see the result ("show me", "let me see", a
+    /// screenshot). Root's brief tended to say "run … and report", and
+    /// the image was never made (kickoff item 3). The line tells the
+    /// worker an image is owed.
+    pub show: bool,
+}
+
+/// The line a brief gets when the user asked to see the result.
+pub const KICKOFF_SHOW: &str = "The user asked to see this. An image of the result is owed: `browser screenshot` for a page, `screenshot` for a window, or the terminal output saved as an image under .arbos/media/<topic>/. Name its path in your report; words alone do not close the task.";
+
+/// Does this message ask to be shown something? Judged on the user's own
+/// words: "show me", "let me see", "screenshot", "I want to see it".
+pub fn asks_to_see(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    [
+        "show me",
+        "show us",
+        "show it",
+        "show the",
+        "show what",
+        "show how",
+        "let me see",
+        "let us see",
+        "i want to see",
+        "i'd like to see",
+        "i would like to see",
+        "can i see",
+        "so i can see",
+        "screenshot",
+        "screen shot",
+        "send me a picture",
+        "send a picture",
+        "take a picture",
+        "what it looks like",
+        "what does it look like",
+        "see it running",
+        "see it work",
+    ]
+    .iter()
+    .any(|p| t.contains(p))
+}
+
+/// The user message that opened the turn now running for `agent`: the
+/// `user` line(s) after the last `wake`. None for a turn a child's done
+/// or a timer opened.
+pub fn turn_user_text(place: &Place, agent: &str) -> Option<String> {
+    let events = crate::load_transcript(&Layout::new(place, agent).transcript()).ok()?;
+    let start = events.iter().rposition(Event::is_wake)?;
+    let text: Vec<&str> = events[start..]
+        .iter()
+        .filter(|e| matches!(e.kind, EventKind::User { .. }))
+        .filter_map(Event::user_text)
+        .filter(|t| !t.trim().is_empty() && !t.starts_with("[kernel]"))
+        .collect();
+    (!text.is_empty()).then(|| text.join("\n"))
 }
 
 /// The branch checked out at `place`, or None when it is no repository or
@@ -315,6 +371,9 @@ impl Kickoff<'_> {
         };
         line("Rules", rules_given.unwrap_or(&default_rules));
         line("Output", self.output.unwrap_or(KICKOFF_OUTPUT));
+        if self.show {
+            line("Show", KICKOFF_SHOW);
+        }
         line("Report", self.report.unwrap_or(KICKOFF_REPORT));
         out
     }
@@ -695,5 +754,93 @@ mod kickoff_rules_tests {
             real.contains("Rules: Branch from rust, open a PR"),
             "{real}"
         );
+    }
+}
+
+#[cfg(test)]
+mod show_tests {
+    use super::*;
+
+    #[test]
+    fn the_users_show_me_is_heard_in_their_own_words() {
+        for yes in [
+            "run toy-repo and show me the output",
+            "Fix it, then let me see it running",
+            "take a screenshot of the page",
+            "I want to see what it looks like",
+        ] {
+            assert!(asks_to_see(yes), "{yes}");
+        }
+        for no in [
+            "run toy-repo and report the output",
+            "show_me is a variable name; rename it",
+            "list the files",
+        ] {
+            assert!(!asks_to_see(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn a_kickoff_with_show_carries_the_line_before_the_report() {
+        let brief = Kickoff {
+            task: "Run hello.py and fix the error.",
+            show: true,
+            ..Kickoff::default()
+        }
+        .render();
+        let show = brief
+            .find("Show: The user asked to see this")
+            .expect(&brief);
+        let report = brief.find("Report: ").expect(&brief);
+        assert!(show < report, "{brief}");
+        assert!(brief.contains(".arbos/media/<topic>/"), "{brief}");
+        let plain = Kickoff {
+            task: "Run hello.py.",
+            ..Kickoff::default()
+        }
+        .render();
+        assert!(!plain.contains("Show:"), "{plain}");
+    }
+
+    #[test]
+    fn the_turns_user_text_is_what_came_after_the_last_wake() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-store-show-{}-{}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join(".arbos/agents/root")).unwrap();
+        let place = Place::new(&dir);
+        let path = Layout::new(&place, "root").transcript();
+        let user = |t: &str| {
+            Event::new(EventKind::User {
+                text: t.into(),
+                attachments: vec![],
+                channel: String::new(),
+                device: String::new(),
+            })
+        };
+        crate::append_events(
+            &path,
+            &[
+                Event::new(EventKind::Wake {
+                    wake: "user".into(),
+                    text: Some("show me the old thing".into()),
+                }),
+                user("show me the old thing"),
+                Event::new(EventKind::TurnComplete { usage: None }),
+                Event::new(EventKind::Wake {
+                    wake: "user".into(),
+                    text: Some("now just fix it".into()),
+                }),
+                user("now just fix it"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            turn_user_text(&place, "root").as_deref(),
+            Some("now just fix it")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
