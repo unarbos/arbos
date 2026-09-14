@@ -285,6 +285,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         key,
         model,
         reasoning_effort: host.config.reasoning_effort.clone(),
+        cache_ttl: host.config.cache_ttl.clone(),
         stream_idle: std::time::Duration::from_millis(host.config.stream_idle_ms.max(1_000)),
         max_tokens: output_cap,
         trace: host.config.trace.then(|| layout.dir.join("trace")),

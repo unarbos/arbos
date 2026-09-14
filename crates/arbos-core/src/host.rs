@@ -157,6 +157,11 @@ pub struct HostConfig {
     pub voice_token_env: Option<String>,
     /// Inception Mercury: instant | low | medium | high. Empty = omit.
     pub reasoning_effort: Option<String>,
+    /// How long a Claude cache breakpoint lives: "5m" (default, absent) or
+    /// "1h". The hour costs more to write (2x input vs 1.25x) and pays off
+    /// in a session with long pauses between turns. Claude only; other
+    /// vendors take the default.
+    pub cache_ttl: Option<String>,
     /// `max_tokens` on every call: the model's own completion limit from the
     /// provider's model list, but never more than this. 0 = do not send.
     /// A runaway model otherwise streams until the provider stops it.
@@ -245,6 +250,7 @@ impl Default for HostConfig {
             voice_token: None,
             voice_token_env: None,
             reasoning_effort: None,
+            cache_ttl: None,
             max_output_tokens: 32_000,
             max_parallel_tools: 8,
             speculate: true,
