@@ -25,8 +25,15 @@ pub const WORKER: &str = "worker";
 /// delegates, or talks, and `write`/`edit` for the project store only
 /// (`notes.md`, `docs/`, `internal/`, `media/`, `archived.md`; the write
 /// guard in `arbos_engine::PlanCx::resolve_write` refuses the rest).
-/// Nothing that runs a command.
+/// `bash` for the one quick command the user asks to see run — Cursor's
+/// coordinator runs those itself ("Ran 1 command"), and a coordinator
+/// without a shell answered "I can't run shell commands" to the same
+/// prompt (symmetry loop, cycle 3). The contract keeps it to that; a
+/// build, a test run, or an edit is a worker's. `terminal` and `secret`
+/// follow `bash` (`Agent::may`): the same quick command in a visible
+/// pane, and a key by name for it. No `undo`.
 pub const COORDINATOR_TOOLS: &[&str] = &[
+    "bash",
     "ls",
     "read",
     "find",
@@ -227,9 +234,11 @@ mod tests {
         assert!(root.may("spawn") && root.may("read") && root.may("say"));
         // The coordinator protocol (2026-09-13): root writes notes.md and
         // docs/project-context.md itself, so write and edit stay; the
-        // write guard confines them to the store. Commands never.
-        assert!(root.may("edit") && root.may("write"));
-        assert!(!root.may("bash") && !root.may("terminal") && !root.may("undo"));
+        // write guard confines them to the store. bash for one quick
+        // command the user asks to see run (symmetry cycle 3), and the
+        // pane that follows it; no undo.
+        assert!(root.may("edit") && root.may("write") && root.may("bash"));
+        assert!(root.may("terminal") && !root.may("undo"));
         assert!(!root.to_md().contains("coordinator"));
         // A kind-less child is a worker: it keeps every tool and gets the
         // worker line, never the coordinator's.
