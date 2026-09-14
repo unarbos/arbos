@@ -350,6 +350,8 @@ fn replay(bundle: &Path, out: Option<&Path>, timeout: Option<u64>) -> Result<i32
         steer: false,
         timeout: Some(std::time::Duration::from_secs(timeout.unwrap_or(600))),
         no_spawn: false,
+        // A replay has no one at the keyboard.
+        no_prompts: true,
         prompt: Some(prompt),
         follow: false,
         allow: None,
