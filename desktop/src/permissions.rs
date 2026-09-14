@@ -236,8 +236,8 @@ mod platform {
                 return false;
             }
             CGImageRelease(image);
+            CGPreflightScreenCaptureAccess()
         }
-        CGPreflightScreenCaptureAccess()
     }
 
     #[link(name = "ApplicationServices", kind = "framework")]
