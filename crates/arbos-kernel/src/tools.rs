@@ -127,6 +127,19 @@ impl Tool for Spawn {
             let name = opt_str(&args, "name")
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
+            // The user's "show me" travels with the brief: a kickoff that
+            // says "run … and report" lost it, and no image was made.
+            // Judged on the user's words that opened this turn, unless
+            // the brief already asks for an image itself.
+            let show = arbos_core::store::turn_user_text(&cx.place, cx.agent.id.as_str())
+                .is_some_and(|t| arbos_core::store::asks_to_see(&t))
+                && !["task", "do", "brief"]
+                    .iter()
+                    .filter_map(|k| opt_str(&args, k))
+                    .any(|t| {
+                        let t = t.to_ascii_lowercase();
+                        t.contains("screenshot") || t.contains("image") || t.contains("capture")
+                    });
             // The template wins when a task is given; a raw brief is the
             // fallback. Neither is an error the model can act on.
             let rendered = match (opt_str(&args, "task"), opt_str(&args, "brief")) {
@@ -138,8 +151,12 @@ impl Tool for Spawn {
                     output: opt_str(&args, "output"),
                     report: opt_str(&args, "report"),
                     base_branch: arbos_core::store::current_branch(cx.place.path()),
+                    show,
                 }
                 .render(),
+                (None, Some(brief)) if show => {
+                    format!("{brief}\n\nShow: {}\n", arbos_core::store::KICKOFF_SHOW)
+                }
                 (None, Some(brief)) => brief.to_string(),
                 (None, None) => {
                     anyhow::bail!("spawn: give `task` (with the template fields) or a raw `brief`")
