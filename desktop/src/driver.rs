@@ -146,16 +146,17 @@ pub fn start(handle: WindowHandle<Arbos>, cx: &mut App) -> Result<PathBuf> {
             let reply_on_error = reply.clone();
             let id_on_error = id.clone();
             let quitting = method == "quit";
-            // An action that closed its own window (CloseWindow on Settings)
-            // has nothing left to settle on: the request succeeded, and the
-            // reply says the window is gone rather than failing.
+            // A request that closed its own window (CloseWindow on
+            // Settings, Escape in it) has nothing left to settle on: the
+            // request succeeded, and the reply says the window is gone
+            // rather than failing.
             let still_open = cx.update(|cx| cx.windows().into_iter().any(|w| w == target));
-            if method == "action" && !still_open {
-                let _ = reply.send(json!({
-                    "id": id,
-                    "ok": true,
-                    "result": { "action": acted.get("action").cloned().unwrap_or(Value::Null), "window_closed": true }
-                }));
+            if !still_open {
+                let mut result = acted;
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("window_closed".into(), json!(true));
+                }
+                let _ = reply.send(json!({ "id": id, "ok": true, "result": result }));
                 continue;
             }
             let settled = cx.update_window(target, |_, window, _| {

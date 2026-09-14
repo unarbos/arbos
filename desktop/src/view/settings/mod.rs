@@ -11,8 +11,9 @@ use crate::{
 };
 use bezel::{
     gpui::{
-        App, Bounds, Context, Entity, Render, TitlebarOptions, Window, WindowBackgroundAppearance,
-        WindowBounds, WindowHandle, WindowOptions, div, point, prelude::*, px, size,
+        self, App, Bounds, Context, Entity, FocusHandle, Focusable, KeyBinding, Render, TitlebarOptions,
+        Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div,
+        point, prelude::*, px, size,
     },
     motion::{Fade, Painter},
     theme::{TextStyle, Theme, Typeset, appearance},
@@ -21,6 +22,21 @@ use bezel::{
         widgets::{Layout, Scaffolding},
     },
 };
+
+actions!(arbos_settings, [CloseSettings]);
+
+/// The key context the window claims, so Escape and ⌘W close it the way
+/// a sheet closes — a settings window with no way out but the title bar's
+/// button sat over the tabs on a first launch.
+const KEY_CONTEXT: &str = "ArbosSettings";
+
+pub fn init(cx: &mut App) {
+    let ctx = Some(KEY_CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("escape", CloseSettings, ctx),
+        KeyBinding::new("cmd-w", CloseSettings, ctx),
+    ]);
+}
 
 mod general;
 mod model;
@@ -100,6 +116,14 @@ pub struct SettingsWindow {
     host: model::HostPanel,
     /// The permissions rows' re-check loop is running.
     rechecking: bool,
+    /// Holds the keyboard for Escape / ⌘W.
+    focus: FocusHandle,
+}
+
+impl Focusable for SettingsWindow {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
 }
 
 /// Open the window, or bring the open one forward — a second settings window
@@ -137,12 +161,16 @@ pub fn open(
         },
         |window, cx| {
             appearance::observe_window(window, cx).detach();
-            cx.new(|cx| SettingsWindow {
+            let view = cx.new(|cx| SettingsWindow {
                 workspace,
                 section,
                 host: model::HostPanel::new(cx),
                 rechecking: false,
-            })
+                focus: cx.focus_handle(),
+            });
+            let focus = view.read(cx).focus.clone();
+            window.focus(&focus, cx);
+            view
         },
     )
     .ok()
@@ -198,6 +226,9 @@ impl Render for SettingsWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         div()
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(|_: &CloseSettings, window, _| window.remove_window())
             .size_full()
             .relative()
             .flex()
