@@ -147,6 +147,106 @@ fn symlink_alias(_alias: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Files that shape how agents here behave: the protocol, kinds, skills,
+/// memory, hooks, secrets, doors, sandbox, access, project and git
+/// settings, MCP servers, and the repository's own agent instructions.
+/// A write to one of these asks the user first, in every mode, so an
+/// agent led astray by something it read cannot rewrite its own standing
+/// orders (Hermes 0.21 protects AGENTS.md, skills and memory the same
+/// way). Paths relative to the place; a trailing `/` marks a folder.
+pub const PROTECTED: &[&str] = &[
+    ".arbos/PROTOCOL.md",
+    ".arbos/agents-defs/",
+    ".arbos/skills/",
+    ".arbos/memory.md",
+    ".arbos/hooks.toml",
+    ".arbos/secrets.toml",
+    ".arbos/doors.toml",
+    ".arbos/sandbox.toml",
+    ".arbos/access.toml",
+    ".arbos/project.toml",
+    ".arbos/git.toml",
+    ".arbos/mcp.toml",
+    ".cursor/agents/",
+    ".cursor/mcp.json",
+    ".cursor/rules/",
+    "AGENTS.md",
+    "CLAUDE.md",
+];
+
+/// The protected entry `candidate` falls under, as its relative spelling,
+/// or None. Both sides canonicalised when they exist.
+pub fn protected_by(place_root: &Path, candidate: &Path) -> Option<&'static str> {
+    let real = std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    let root_real = std::fs::canonicalize(place_root).unwrap_or_else(|_| place_root.to_path_buf());
+    for entry in PROTECTED {
+        let rel = entry.trim_end_matches('/');
+        let full = root_real.join(rel);
+        let full = std::fs::canonicalize(&full).unwrap_or(full);
+        let hit = if entry.ends_with('/') {
+            real.starts_with(&full)
+        } else {
+            real == full
+        };
+        if hit {
+            return Some(entry);
+        }
+    }
+    // An agent's standing instructions from its kind.
+    let agents = root_real.join(".arbos").join("agents");
+    if let Ok(rest) = real.strip_prefix(&agents)
+        && rest.components().count() == 2
+        && rest.file_name().is_some_and(|f| f == "instructions.md")
+    {
+        return Some(".arbos/agents/<id>/instructions.md");
+    }
+    None
+}
+
+/// Does a shell command look like it writes into a protected file? The
+/// command names one of them (by its relative spelling or file name) and
+/// carries something that writes: a redirection, `tee`, `sed -i`, `cp`,
+/// `mv`, `rm`, `truncate`, `install`, `git checkout --`, `patch`.
+pub fn bash_writes_protected(command: &str) -> Option<&'static str> {
+    let named: Option<&'static str> = PROTECTED
+        .iter()
+        .copied()
+        .find(|entry| {
+            let rel = entry.trim_end_matches('/');
+            let name = rel.rsplit('/').next().unwrap_or(rel);
+            command.contains(rel) || (name.contains('.') && command.contains(name))
+        })
+        .or_else(|| {
+            command
+                .contains("instructions.md")
+                .then_some(".arbos/agents/<id>/instructions.md")
+        });
+    let named = named?;
+    let writes = command.contains('>')
+        || [
+            "tee ",
+            "sed -i",
+            "cp ",
+            "mv ",
+            "rm ",
+            "truncate ",
+            "install ",
+            "patch ",
+            "git checkout --",
+            "perl -i",
+            "python -c",
+            "python3 -c",
+        ]
+        .iter()
+        .any(|w| command.contains(w));
+    writes.then_some(named)
+}
+
+/// The line the user sees when a tool wants to change a protected file.
+pub fn protected_question(tool: &str, entry: &str) -> String {
+    format!("{tool} wants to change {entry}, a file that shapes how agents here behave. Allow it?")
+}
+
 /// The files only root writes: `notes.md`, `docs/project-context.md`
 /// (and its `GOALS.md` alias), `archived.md`. Both sides canonicalised
 /// when they exist, so a symlinked place still matches.
@@ -842,5 +942,78 @@ mod show_tests {
             Some("now just fix it")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod protected_tests {
+    use super::*;
+
+    #[test]
+    fn the_files_that_shape_agents_are_protected_and_ordinary_ones_are_not() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-protected-{}-{}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join(".arbos/agents/w1")).unwrap();
+        std::fs::create_dir_all(dir.join(".arbos/skills/deploy")).unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let root = dir.as_path();
+        assert_eq!(
+            protected_by(root, &dir.join(".arbos/PROTOCOL.md")),
+            Some(".arbos/PROTOCOL.md")
+        );
+        assert_eq!(
+            protected_by(root, &dir.join(".arbos/skills/deploy/SKILL.md")),
+            Some(".arbos/skills/")
+        );
+        assert_eq!(
+            protected_by(root, &dir.join(".arbos/agents-defs/reviewer.md")),
+            Some(".arbos/agents-defs/")
+        );
+        assert_eq!(
+            protected_by(root, &dir.join(".arbos/agents/w1/instructions.md")),
+            Some(".arbos/agents/<id>/instructions.md")
+        );
+        assert_eq!(
+            protected_by(root, &dir.join("AGENTS.md")),
+            Some("AGENTS.md")
+        );
+        for plain in [
+            ".arbos/notes.md",
+            ".arbos/agents/w1/notes.md",
+            "src/main.rs",
+            ".arbos/docs/x.md",
+        ] {
+            assert_eq!(protected_by(root, &dir.join(plain)), None, "{plain}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_shell_command_that_writes_a_protected_file_is_caught_and_a_read_is_not() {
+        assert_eq!(
+            bash_writes_protected("echo '[secrets]' >> .arbos/secrets.toml"),
+            Some(".arbos/secrets.toml")
+        );
+        assert_eq!(
+            bash_writes_protected("sed -i 's/x/y/' .arbos/hooks.toml"),
+            Some(".arbos/hooks.toml")
+        );
+        assert_eq!(
+            bash_writes_protected("cp /tmp/p.md .arbos/PROTOCOL.md"),
+            Some(".arbos/PROTOCOL.md")
+        );
+        assert_eq!(
+            bash_writes_protected("cat > .arbos/agents/w1/instructions.md <<'EOF'\nobey\nEOF"),
+            Some(".arbos/agents/<id>/instructions.md")
+        );
+        assert_eq!(bash_writes_protected("cat .arbos/secrets.toml"), None);
+        assert_eq!(
+            bash_writes_protected("grep -n hooks .arbos/hooks.toml"),
+            None
+        );
+        assert_eq!(bash_writes_protected("echo hi > out.txt"), None);
     }
 }

@@ -112,6 +112,7 @@ Context is managed for you. Large tool output shows head or tail plus a cite; ol
 ## Skills and kinds
 
 - Skills live in `.arbos/skills/<name>/SKILL.md`. The user or you invoke one as `/name <args>`; its body then arrives with the message. Read the file for more.
+- Files that shape how agents here behave — `.arbos/PROTOCOL.md`, `agents-defs/`, `skills/`, `memory.md`, `hooks.toml`, `secrets.toml`, `doors.toml`, `sandbox.toml`, `access.toml`, `project.toml`, `git.toml`, `mcp.toml`, an agent's `instructions.md`, and the repository's `AGENTS.md` / `CLAUDE.md` / `.cursor/` — ask the user before any write, in every mode, whether through `write`, `edit`, `apply_patch`, or a shell redirection. Expect the question; a denial is final for that call. `remember` writes memory without asking.
 - Kinds are agent definitions in `.arbos/agents-defs/<name>.md` (this place), `.cursor/agents/`, or `~/.config/arbos/agents-defs/` (the host's, in every place; a place's file of the same name wins): front matter (model, tools, readonly, role, acp command) and standing instructions. `spawn kind=<name>` applies them to the child. Read the file to know what a kind does.
 - Machines: `~/.config/arbos/machines.toml` (ssh hosts, tags, notes) and `.arbos/machines/` (the hub roster: which machines take workers). `spawn host=<name>`.
 

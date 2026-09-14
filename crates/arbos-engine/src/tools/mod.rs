@@ -148,6 +148,29 @@ fn last_touched_path(
     None
 }
 
+/// The protected entry a call would write, if any: from the plan's write
+/// paths (file tools), or from the command text for `bash`/`terminal`.
+fn protected_target(
+    root: &std::path::Path,
+    tool: &str,
+    plan: &Plan,
+    args: &Value,
+) -> Option<String> {
+    for r in &plan.access.writes {
+        if let crate::access::Resource::Path(p) = r
+            && let Some(entry) = arbos_core::store::protected_by(root, p)
+        {
+            return Some(entry.to_string());
+        }
+    }
+    if matches!(tool, "bash" | "terminal")
+        && let Some(cmd) = crate::tool::opt_str(args, "command")
+    {
+        return arbos_core::store::bash_writes_protected(cmd).map(str::to_string);
+    }
+    None
+}
+
 pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Result<Prepared> {
     let Some(_) = view.get(name) else {
         anyhow::bail!("tool {name} not on allowlist");
@@ -215,8 +238,18 @@ pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Res
     // writes; asking permission to ask would be absurd. A before-tool
     // hook's own question wins when it set one.
     let ask_first = writes && cx.agent.mode == arbos_core::Mode::Ask && decided.tool != "ask";
+    // A write into a file that shapes how agents behave asks in every
+    // mode (T3-10). `remember` owns memory.md and is not asked.
+    let protected = (writes && decided.tool != "remember")
+        .then(|| protected_target(cx.root(), &decided.tool, &plan, &decided.args))
+        .flatten();
     let ask = decided
         .ask
+        .or_else(|| {
+            protected
+                .as_deref()
+                .map(|entry| arbos_core::store::protected_question(&decided.tool, entry))
+        })
         .or_else(|| ask_first.then(|| crate::batch::summarise_call(&decided.tool, &decided.args)));
     let plan = if ask.is_some() {
         plan.interactive()
