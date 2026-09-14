@@ -361,7 +361,7 @@ impl Session {
                 })
                 .collect(),
             channel: content.channel.clone(),
-            device: String::new(),
+            device: content.device.clone(),
             model: content.model.clone().unwrap_or_default(),
         })
     }

@@ -41,7 +41,7 @@ use bezel::{
         widgets::{ButtonStyle, Buttons, Content},
     },
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 actions!(
     arbos,
     [
@@ -561,6 +561,9 @@ pub struct Arbos {
     fn_held: bool,
     /// Stop was asked while start was still in flight. Finish start, then stop.
     voice_want_stop: bool,
+    /// The last dictated take's clock, for the driver: press → first
+    /// partial, release → send. What "does it feel instant" measures.
+    pub(crate) dictation: Dictation,
     /// The loop that carries the speech server's agent activity into the
     /// chat is running.
     voice_mirror_on: bool,
@@ -770,6 +773,7 @@ impl Arbos {
             voice_place: None,
             fn_held: false,
             voice_want_stop: false,
+            dictation: Dictation::default(),
             voice_mirror_on: false,
             call: None,
             home_offer: false,
@@ -864,6 +868,15 @@ impl Arbos {
             .is_some_and(ChatSession::resumable)
             .then(|| this.composer_focus_handle(cx));
         window.focus(composer.as_ref().unwrap_or(&this.focus), cx);
+        // A speech server is set up: open the session now, in the background,
+        // so the first Fn press has no connect to pay.
+        if crate::voice_ws::configured() {
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = crate::voice_ws::warm();
+                })
+                .detach();
+        }
         #[cfg(target_os = "macos")]
         {
             // A speech server is configured, so the mic will be wanted:
@@ -1322,6 +1335,10 @@ impl Arbos {
             return;
         }
         self.fn_held = true;
+        self.dictation = Dictation {
+            pressed_at: Some(Instant::now()),
+            ..Dictation::default()
+        };
         if self.composer.read(cx).is_recording() || self.composer.read(cx).voice_busy() {
             return;
         }
@@ -1333,6 +1350,7 @@ impl Arbos {
             return;
         }
         self.fn_held = false;
+        self.dictation.released_at = Some(Instant::now());
         self.stop_voice(cx);
     }
 
@@ -1417,13 +1435,21 @@ impl Arbos {
                         return;
                     }
                     if let Ok(text) = peeked {
+                        if !text.trim().is_empty() && this.dictation.first_partial_ms.is_none() {
+                            this.dictation.first_partial_ms = this
+                                .dictation
+                                .pressed_at
+                                .map(|at| at.elapsed().as_millis() as u64);
+                        }
                         this.composer.update(cx, |composer, cx| {
                             composer.set_voice_preview(&text, cx);
                         });
                     }
                 });
+                // Partials land within the first second; the poll keeps up
+                // with them.
                 cx.background_executor()
-                    .timer(Duration::from_millis(200))
+                    .timer(Duration::from_millis(80))
                     .await;
             }
         })
@@ -1478,6 +1504,7 @@ impl Arbos {
                         });
                     }
                 }
+                let sent = matches!(&text, Ok(t) if !t.trim().is_empty());
                 this.composer.update(cx, |composer, cx| {
                     composer.set_voice(VoiceState::Idle, cx);
                     if let Ok(text) = &text
@@ -1490,6 +1517,12 @@ impl Arbos {
                         }
                     }
                 });
+                if sent {
+                    this.dictation.release_to_send_ms = this
+                        .dictation
+                        .released_at
+                        .map(|at| at.elapsed().as_millis() as u64);
+                }
                 if let Err(e) = text {
                     this.voice_error(&format!("voice failed: {e:#}"), cx);
                 }
@@ -1945,6 +1978,17 @@ impl Render for Arbos {
             .child(self.tab_sheet.clone())
             .child(self.chat_search.clone())
     }
+}
+
+/// The last dictated take's clock. `pressed_at` is the Fn press; the
+/// first partial and the release-to-send times are what the driver shows
+/// as `voice_latency`, so QA can measure "instant" instead of feeling it.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Dictation {
+    pub pressed_at: Option<Instant>,
+    pub released_at: Option<Instant>,
+    pub first_partial_ms: Option<u64>,
+    pub release_to_send_ms: Option<u64>,
 }
 
 /// Native Spaces fullscreen is a black desktop, so the frost has nothing to

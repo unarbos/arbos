@@ -33,7 +33,17 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 /// After a reply ends, how long the mic still counts as hearing the speaker.
 const ECHO_TAIL: Duration = Duration::from_millis(400);
 /// After Stop, how long the final transcript may take to arrive.
-const FINAL_WAIT: Duration = Duration::from_millis(2_000);
+/// How long a release waits for the server's final when the last partial
+/// is stale — the recogniser is still catching up. A fresh partial goes at
+/// once instead.
+const FINAL_WAIT: Duration = Duration::from_millis(700);
+/// A partial younger than this is the words as they stand: the take is
+/// sent on release without waiting for the final.
+const FRESH_PARTIAL: Duration = Duration::from_millis(300);
+/// After a release the microphone stays open, its frames dropped, so the
+/// next press streams in the same instant instead of paying the device's
+/// open again.
+const MIC_WARM: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoiceCfg {
@@ -120,6 +130,10 @@ pub struct Peek {
     /// `session.ready.reply`: who answers dictation on the server (`none`
     /// = nobody there; this window's kernel does).
     pub reply_backend: String,
+    /// Press to first partial, for the take in flight or the last one.
+    pub first_partial_ms: Option<u64>,
+    /// How old the latest partial is.
+    pub partial_age_ms: Option<u64>,
     /// `session.ready.text`: who answers the text channel (`none` = nobody).
     pub text_backend: String,
     /// A call is live (`session.start {mode: "call"}` was answered with a
@@ -149,6 +163,11 @@ struct Shared {
     partial: String,
     /// Set when the server closed the take (`transcript.final`).
     take_done: bool,
+    /// When the take opened (MicStart), and when its first and latest
+    /// partials came — the numbers behind "does it feel instant".
+    take_started: Option<Instant>,
+    first_partial: Option<Instant>,
+    partial_at: Option<Instant>,
     reply: String,
     level: f32,
     mic_device: String,
@@ -215,6 +234,11 @@ pub fn status() -> Peek {
         engine: s.engine.clone(),
         kernel: s.kernel,
         reply_backend: s.reply_backend.clone(),
+        first_partial_ms: match (s.take_started, s.first_partial) {
+            (Some(start), Some(first)) => Some(first.saturating_duration_since(start).as_millis() as u64),
+            _ => None,
+        },
+        partial_age_ms: s.partial_at.map(|at| at.elapsed().as_millis() as u64),
         text_backend: s.text_backend.clone(),
         call: s.call,
         muted: s.muted,
@@ -375,6 +399,9 @@ pub fn start() -> Result<()> {
         s.finals.clear();
         s.partial.clear();
         s.take_done = false;
+        s.take_started = Some(Instant::now());
+        s.first_partial = None;
+        s.partial_at = None;
         s.error = None;
         // Speaking into a reply is barge-in: the reply stops.
         if s.phase == Some(Phase::Speaking) {
@@ -388,6 +415,16 @@ pub fn start() -> Result<()> {
         .send(Cmd::MicStart)
         .map_err(|_| anyhow!("voice session closed"))?;
     Ok(())
+}
+
+/// Open the dictation session without opening the mic, so the first take
+/// pays no connect. Nothing to do when one is live, or during a call.
+pub fn warm() -> Result<()> {
+    let cfg = crate::kernel::voice_config().ok_or_else(|| anyhow!("no voice_url in config"))?;
+    if in_call() {
+        return Ok(());
+    }
+    ensure_session(&cfg, &SessionKind::Dictation)
 }
 
 /// The words so far, for the composer's ghost text.
@@ -408,15 +445,22 @@ pub fn stop() -> Result<String> {
         (session.tx.clone(), Arc::clone(&session.shared))
     };
     let _ = tx.send(Cmd::MicStop);
-    let deadline = Instant::now() + FINAL_WAIT;
+    // A partial that just came is the words as they stand: go now. Only a
+    // stale one — the recogniser behind the voice — waits for the final,
+    // and not for long.
+    let fresh = {
+        let s = shared.lock().unwrap_or_else(|p| p.into_inner());
+        !s.partial.is_empty() && s.partial_at.is_some_and(|at| at.elapsed() < FRESH_PARTIAL)
+    };
+    let deadline = Instant::now() + if fresh { Duration::ZERO } else { FINAL_WAIT };
     loop {
         {
             let s = shared.lock().unwrap_or_else(|p| p.into_inner());
-            if s.take_done || s.error.is_some() || Instant::now() > deadline {
+            if s.take_done || s.error.is_some() || Instant::now() >= deadline {
                 break;
             }
         }
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(20));
     }
     let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(e) = s.error.take() {
@@ -627,6 +671,10 @@ async fn run(
 
     let (mic_tx, mut mic_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let mut mic: Option<Mic> = None;
+    // Between takes the microphone stays open for a while with its frames
+    // dropped; `warm_until` is when it is finally released.
+    let mut mic_held = false;
+    let mut warm_until: Option<Instant> = None;
     let mut player: Option<Player> = None;
     let mut ready_sent = false;
     let mut speaking = false;
@@ -642,6 +690,8 @@ async fn run(
                 let Some(cmd) = cmd else { break };
                 match cmd {
                     Cmd::MicStart => {
+                        mic_held = false;
+                        warm_until = None;
                         if mic.is_none() {
                             match Mic::spawn(mic_tx.clone(), Arc::clone(&shared)) {
                                 Ok(m) => {
@@ -658,8 +708,11 @@ async fn run(
                         }
                     }
                     Cmd::MicStop => {
-                        if let Some(m) = mic.take() {
-                            m.stop();
+                        // Keep the device open, drop its frames: the next
+                        // press streams at once.
+                        if mic.is_some() {
+                            mic_held = true;
+                            warm_until = Some(Instant::now() + MIC_WARM);
                         }
                         let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
                         s.level = 0.0;
@@ -694,8 +747,18 @@ async fn run(
                     }
                 }
             }
+            _ = tokio::time::sleep_until(warm_until.map(tokio::time::Instant::from_std).unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))), if warm_until.is_some() => {
+                warm_until = None;
+                mic_held = false;
+                if let Some(m) = mic.take() {
+                    m.stop();
+                }
+            }
             chunk = mic_rx.recv() => {
                 let Some(chunk) = chunk else { continue };
+                if mic_held {
+                    continue;
+                }
                 if mic.is_some() {
                     // Muted: the stream keeps its clock, the words stay home.
                     // Playing: a bare speaker feeds the mic our own reply (no
@@ -783,7 +846,14 @@ async fn run(
                             // An increment: append. (The Swift comment reads
                             // as a replacement; the server's protocol text says
                             // increment, and the live server sends increments.)
-                            "transcript.delta" => s.partial.push_str(&field("text")),
+                            "transcript.delta" => {
+                                s.partial.push_str(&field("text"));
+                                let now = Instant::now();
+                                s.partial_at = Some(now);
+                                if s.first_partial.is_none() {
+                                    s.first_partial = Some(now);
+                                }
+                            }
                             // The whole line, replacing the open one. Empty =
                             // nothing was said; back to listening.
                             "transcript.final" => {
