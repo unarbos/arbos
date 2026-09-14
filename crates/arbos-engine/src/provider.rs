@@ -470,6 +470,9 @@ pub struct Completion {
     /// This call's price in US dollars, when the provider reported it
     /// (OpenRouter `usage.cost`, asked for with `usage: {include: true}`).
     pub cost: Option<f64>,
+    /// Prompt tokens served from the provider's cache on this call
+    /// (`usage.prompt_tokens_details.cached_tokens`), when reported.
+    pub cached: Option<u64>,
     /// `reasoning_details` blocks, to be sent back with this assistant
     /// message on later calls. Gemini 3 stops thinking without its thought
     /// signatures; Anthropic rejects a broken thinking chain.
@@ -490,7 +493,7 @@ impl Provider {
         mut on_delta: impl FnMut(Delta),
     ) -> Result<Completion> {
         let mut msgs = messages_json(messages);
-        if wants_cache_control(&self.model) {
+        if wants_cache_control(&self.model, &self.base) {
             mark_cache_breakpoints(&mut msgs);
         }
         let mut body = json!({
@@ -685,6 +688,7 @@ impl Provider {
         let mut calls: Vec<PartialCall> = Vec::new();
         let mut usage = None;
         let mut cost = None;
+        let mut cached = None;
         let mut reasoning_details: Vec<Value> = Vec::new();
         // Time since the last delta that carried text, reasoning or tool
         // arguments. Keep-alive comments and empty deltas do not count: a
@@ -755,6 +759,7 @@ impl Provider {
                         calls: finish_calls(calls),
                         usage,
                         cost,
+                        cached,
                         reasoning_details,
                     });
                 }
@@ -794,6 +799,9 @@ impl Provider {
                 }
                 if let Some(c) = cost_of(&v) {
                     cost = Some(c);
+                }
+                if let Some(n) = cached_of(&v) {
+                    cached = Some(n);
                 }
                 let Some(choice) = v.get("choices").and_then(|c| c.get(0)) else {
                     continue;
@@ -837,6 +845,7 @@ impl Provider {
                             calls: finish_calls(calls),
                             usage,
                             cost,
+                            cached,
                             reasoning_details,
                         });
                     }
@@ -853,6 +862,7 @@ impl Provider {
             calls: finish_calls(calls),
             usage,
             cost,
+            cached,
             reasoning_details,
         })
     }
@@ -1151,18 +1161,43 @@ fn usage_of(v: &Value) -> Option<(u64, u64)> {
     Some((prompt, total))
 }
 
+/// Prompt tokens read from the cache, as OpenAI and OpenRouter report them
+/// (`usage.prompt_tokens_details.cached_tokens`); Anthropic's own field
+/// (`cache_read_input_tokens`) when a direct endpoint sends it.
+fn cached_of(v: &Value) -> Option<u64> {
+    let u = v.get("usage")?;
+    u.get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| u.get("cache_read_input_tokens").and_then(Value::as_u64))
+}
+
 /// OpenRouter puts the call's price in `usage.cost` (dollars). Absent
 /// elsewhere.
 fn cost_of(v: &Value) -> Option<f64> {
     v.get("usage")?.get("cost")?.as_f64()
 }
 
-/// Anthropic models cache nothing unless the request says where. OpenAI
-/// and most others cache the prefix automatically and reject or ignore the
-/// marker, so it is only sent to Claude.
-fn wants_cache_control(model: &str) -> bool {
+/// Who needs the `cache_control` marker. Anthropic models cache nothing
+/// unless the request says where. Through OpenRouter the same marker also
+/// drives Google's explicit caching (Gemini; the 2.5 line caches on its
+/// own too, the marker is harmless) and Alibaba's (Qwen, DeepSeek V3.2 on
+/// Alibaba). OpenAI, Grok, DeepSeek, Moonshot, Groq cache the prefix
+/// automatically; OpenRouter translates the marker for OpenAI but there
+/// is nothing to gain. A custom OpenAI-compatible endpoint may reject an
+/// unknown field, so off OpenRouter only Claude gets it.
+fn wants_cache_control(model: &str, base: &str) -> bool {
     let m = model.to_ascii_lowercase();
-    m.contains("claude") || m.starts_with("anthropic/")
+    if m.contains("claude") || m.starts_with("anthropic/") {
+        return true;
+    }
+    if !base.contains("openrouter.ai") {
+        return false;
+    }
+    m.starts_with("google/")
+        || m.starts_with("qwen/")
+        || m.starts_with("alibaba/")
+        || m.starts_with("deepseek/deepseek-v3.2")
 }
 
 /// Two breakpoints: after the system prompt (contract + tool list, the
@@ -1268,4 +1303,49 @@ pub fn messages_json(messages: &[ChatMessage]) -> Vec<Value> {
             v
         })
         .collect()
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    const OR: &str = "https://openrouter.ai/api/v1";
+    const CUSTOM: &str = "http://localhost:8080/v1";
+
+    #[test]
+    fn the_marker_goes_to_vendors_that_need_it_and_only_through_openrouter_beyond_claude() {
+        for m in ["anthropic/claude-sonnet-4.5", "claude-3-5-haiku"] {
+            assert!(wants_cache_control(m, OR), "{m}");
+            assert!(wants_cache_control(m, CUSTOM), "{m} direct");
+        }
+        for m in [
+            "google/gemini-2.5-pro",
+            "google/gemini-3-flash",
+            "qwen/qwen3-coder-plus",
+            "deepseek/deepseek-v3.2",
+        ] {
+            assert!(wants_cache_control(m, OR), "{m}");
+            assert!(
+                !wants_cache_control(m, CUSTOM),
+                "{m} direct: unknown field risk"
+            );
+        }
+        for m in [
+            "openai/gpt-5.4-mini",
+            "x-ai/grok-4",
+            "deepseek/deepseek-chat",
+            "moonshotai/kimi-k2",
+        ] {
+            assert!(!wants_cache_control(m, OR), "{m} caches on its own");
+        }
+    }
+
+    #[test]
+    fn cached_tokens_are_read_from_either_shape() {
+        let openai = json!({"usage": {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 64}}});
+        assert_eq!(cached_of(&openai), Some(64));
+        let anthropic = json!({"usage": {"prompt_tokens": 100, "cache_read_input_tokens": 80}});
+        assert_eq!(cached_of(&anthropic), Some(80));
+        assert_eq!(cached_of(&json!({"usage": {"prompt_tokens": 1}})), None);
+    }
 }
