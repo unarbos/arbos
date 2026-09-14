@@ -72,11 +72,37 @@ impl Isolate {
 pub struct Caps {
     pub depth: usize,
     pub children: usize,
+    /// `catch_up` from config: `once` | `skip`.
+    pub catch_up: CatchUp,
+    /// `transcript_roll_lines` from config; 0 = never.
+    pub transcript_roll_lines: u64,
+}
+
+/// What an overdue subscription does (Mac wake-up incident: a kernel
+/// start must not fire a pile of missed timers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CatchUp {
+    /// Fire once, with a "missed N" note in the message.
+    #[default]
+    Once,
+    /// Reschedule only; the next firing is one period from now.
+    Skip,
+}
+
+impl CatchUp {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "skip" | "none" | "drop" => Self::Skip,
+            _ => Self::Once,
+        }
+    }
 }
 
 impl Default for Caps {
     fn default() -> Self {
         Self {
+            catch_up: CatchUp::Once,
+            transcript_roll_lines: 10_000,
             depth: MAX_DEPTH,
             children: MAX_CHILDREN,
         }
@@ -97,6 +123,8 @@ impl Caps {
             } else {
                 MAX_CHILDREN
             },
+            catch_up: CatchUp::parse(&cfg.catch_up),
+            transcript_roll_lines: cfg.transcript_roll_lines,
         }
     }
 }

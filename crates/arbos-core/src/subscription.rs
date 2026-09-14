@@ -126,6 +126,31 @@ impl Subscription {
         !self.paused && self.next_due_ms().is_some_and(|d| d <= now_ms)
     }
 
+    /// Whole periods this subscription has missed beyond the one that is
+    /// due now: 0 when it is on time or has no period.
+    pub fn missed_periods(&self, now_ms: i64) -> u64 {
+        let (Some(due), Some(every)) = (self.next_due_ms(), self.every_ms()) else {
+            return 0;
+        };
+        if every == 0 || due > now_ms {
+            return 0;
+        }
+        ((now_ms - due) as u64 / every).min(1_000_000)
+    }
+
+    /// After a pause or a long stop: the next firing is one period from
+    /// `now`, not a pile of overdue ones. `last_fired` is left alone.
+    pub fn resume_at(&mut self, now_ms: i64) {
+        if let Some(every) = self.every_ms()
+            && !self.once
+        {
+            self.next_due = Some(crate::inbox::rfc3339(align_at(
+                now_ms + every as i64,
+                self.at.as_deref(),
+            )));
+        }
+    }
+
     pub fn expired(&self, now_ms: i64) -> bool {
         self.expires_ms().is_some_and(|e| e <= now_ms)
     }

@@ -173,6 +173,16 @@ pub struct HostConfig {
     pub max_depth: usize,
     /// Live children one agent may have at once. Default 8.
     pub max_children: usize,
+    /// What a subscription does when the kernel finds it overdue by more
+    /// than one period (the kernel was down, the agent was paused):
+    /// `once` fires one time with a "missed N" note (default); `skip` only
+    /// reschedules. Never a burst of one firing per missed period.
+    pub catch_up: String,
+    /// Lines a standing agent's transcript may reach before the kernel rolls
+    /// it into `transcript-archive/NNNN.jsonl` at a turn end and starts a
+    /// fresh file that opens with the latest compaction summary. 0 = never.
+    /// Default 10000.
+    pub transcript_roll_lines: u64,
     /// Models to try, in order, when the primary keeps failing or its
     /// provider errors out. A switch lasts one turn; the next turn tries
     /// the primary again. Accepts an array or a comma-separated string.
@@ -244,6 +254,8 @@ impl Default for HostConfig {
             bash_wait_ms: 600_000,
             max_depth: 3,
             max_children: 8,
+            catch_up: "once".into(),
+            transcript_roll_lines: 10_000,
             fallback_models: Vec::new(),
             max_attempts: 5,
             backoff_base_ms: 1_000,

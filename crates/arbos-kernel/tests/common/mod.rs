@@ -62,6 +62,34 @@ pub fn restart_replay(k: &mut Kernel, replies: &str) -> Kernel {
     )
 }
 
+/// `start_kernel_replay_with`, after `prepare` has written into the place
+/// (files the kernel must find at start: subscriptions, job folders).
+pub fn start_kernel_replay_prepared(
+    name: &str,
+    replies: &str,
+    config: &str,
+    prepare: impl FnOnce(&std::path::Path),
+) -> Kernel {
+    let scratch = scratch_dir(name);
+    prepare(&scratch.join("place"));
+    let file = scratch.join("replies.jsonl");
+    std::fs::write(&file, replies).unwrap();
+    std::fs::write(
+        scratch.join("xdg").join("arbos").join("config.toml"),
+        format!("trace = false\n{config}"),
+    )
+    .unwrap();
+    spawn_with(
+        scratch,
+        &[
+            "--provider",
+            "replay",
+            "--replies",
+            &file.display().to_string(),
+        ],
+    )
+}
+
 /// `start_kernel_replay` plus extra `config.toml` lines (caps, windows).
 pub fn start_kernel_replay_with(name: &str, replies: &str, config: &str) -> Kernel {
     let scratch = scratch_dir(name);

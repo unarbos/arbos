@@ -320,6 +320,73 @@ pub fn check(place: &Place) -> Result<Report> {
             r.warn(rel(&notes), Some(p.line), p.what);
         }
     }
+    // Processes still writing into .arbos/: a job from an earlier kernel
+    // run (the kernel reaps these at start; a `check` between runs sees
+    // them), and, on Linux, any process holding a file under .arbos/ open
+    // for writing that is not this one.
+    for agent in &agents {
+        let root = arbos_engine::JobsRoot::for_agent(place, &agent.id);
+        for (id, pid, command, who) in root.leftovers() {
+            let what = match who {
+                arbos_engine::PidIdentity::Ours => {
+                    "job still running from an earlier kernel run; the kernel ends it at its next start (add a `keep` file to the job folder to spare it)"
+                }
+                _ => {
+                    "a process holds this job's pid and this machine cannot tell whether it is the job; the kernel leaves it running — kill it by hand if it is"
+                }
+            };
+            r.warn(
+                format!(".arbos/agents/{}/jobs/{id}", agent.id),
+                None,
+                format!(
+                    "{what} (pid {pid}): {}",
+                    arbos_core::text::clip(command.trim(), 80)
+                ),
+            );
+        }
+    }
+    // Long transcripts and paused agents with timers due in the past: the
+    // Mac wake-up incident had a paused agent at 17,969 lines whose timer
+    // would have fired a backlog on resume.
+    for agent in &agents {
+        let transcript = Layout::new(place, agent.id.as_str()).transcript();
+        let lines = std::fs::read_to_string(&transcript)
+            .map(|t| t.lines().count())
+            .unwrap_or(0);
+        if lines > 10_000 {
+            r.warn(
+                rel(&transcript),
+                None,
+                format!(
+                    "{lines} lines; the kernel rolls it into transcript-archive/ at the next turn end (transcript_roll_lines in config.toml, default 10000)"
+                ),
+            );
+        }
+        if agent.paused {
+            let now = arbos_core::now_ms();
+            let overdue = subscription::list(place, agent.id.as_str())
+                .into_iter()
+                .filter(|s| s.next_due_ms().is_some_and(|d| d <= now))
+                .count();
+            if overdue > 0 {
+                r.warn(
+                    format!("agents/{}/subscriptions", agent.id),
+                    None,
+                    format!(
+                        "paused agent has {overdue} subscription(s) due in the past; they are rescheduled one period out on resume (nothing fires while paused)"
+                    ),
+                );
+            }
+        }
+    }
+    for (pid, args, file) in writers_into(place) {
+        r.warn(
+            rel(&file),
+            None,
+            format!("open for writing by pid {pid} ({}): a process outside the kernel is changing the store", arbos_core::text::clip(&args, 80)),
+        );
+    }
+
     // PROTOCOL.md: the long-form contract the prompt points at. The kernel
     // rewrites it at start; a stale copy means an older kernel wrote it.
     let protocol = arbos_core::protocol::path(place);
@@ -620,4 +687,65 @@ pub fn problems(place: &Path) -> Result<Vec<String>> {
             None => format!("{}: {}", f.path, f.what),
         })
         .collect())
+}
+
+/// Linux: every other process holding a file under `.arbos/` open for
+/// writing, from /proc. Elsewhere: nothing (lsof is slow and not always
+/// there). `(pid, command line, file)`.
+fn writers_into(place: &Place) -> Vec<(u32, String, std::path::PathBuf)> {
+    let mut out = Vec::new();
+    let arbos = place.arbos();
+    let arbos = std::fs::canonicalize(&arbos).unwrap_or(arbos);
+    let me = std::process::id();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for p in procs.flatten() {
+        let Some(pid) = p.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == me {
+            continue;
+        }
+        let Ok(fds) = std::fs::read_dir(p.path().join("fd")) else {
+            continue;
+        };
+        let mut seen_here = false;
+        for fd in fds.flatten() {
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            if !target.starts_with(&arbos) {
+                continue;
+            }
+            // fdinfo flags: octal; O_WRONLY = 1, O_RDWR = 2 in the low bits.
+            let flags = std::fs::read_to_string(p.path().join("fdinfo").join(fd.file_name()))
+                .ok()
+                .and_then(|t| {
+                    t.lines()
+                        .find_map(|l| l.strip_prefix("flags:"))
+                        .and_then(|f| u32::from_str_radix(f.trim(), 8).ok())
+                })
+                .unwrap_or(0);
+            if flags & 0o3 == 0 || seen_here {
+                continue;
+            }
+            seen_here = true;
+            let args = std::fs::read(format!("/proc/{pid}/cmdline"))
+                .map(|raw| {
+                    String::from_utf8_lossy(&raw)
+                        .replace('\0', " ")
+                        .trim()
+                        .to_string()
+                })
+                .unwrap_or_default();
+            // The kernel itself (another kernel of this place) writes here
+            // by design; a desktop's own files too.
+            if args.contains("arbos-kernel") || args.contains("arbos-desktop") {
+                continue;
+            }
+            out.push((pid, args, target));
+        }
+    }
+    out
 }
