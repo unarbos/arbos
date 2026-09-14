@@ -160,7 +160,7 @@ pub fn cut(place: &Place, agent: &str, target: Target) -> Result<Cut> {
         );
     }
     let checkpoint = resolve(&events, &cps, target)?;
-    let cut_from = checkpoint.line.saturating_sub(1) as usize;
+    let cut_from = open_wake(&events, checkpoint.line.saturating_sub(1) as usize);
     if cut_from >= events.len() {
         bail!(
             "line {} is at or past the end of the transcript ({} lines); nothing to rewind",
@@ -198,6 +198,23 @@ pub fn cut(place: &Place, agent: &str, target: Target) -> Result<Cut> {
         dropped: (lines.len() - at) as u64,
         archive,
     })
+}
+
+/// The index to cut at so the turn goes whole: the checkpoint names the
+/// turn's `user` line, but the `wake` that opened the turn sits just
+/// before it (qa-032: left behind, it read as an unfinished turn and
+/// fired an empty one at the next kernel start). Walk back from `at` to
+/// the previous `turn_complete`; the first wake after it is the cut.
+fn open_wake(events: &[arbos_core::Event], at: usize) -> usize {
+    let mut cut = at;
+    let mut i = at.min(events.len());
+    while i > 0 && !events[i - 1].is_turn_complete() {
+        i -= 1;
+        if events[i].is_wake() {
+            cut = i;
+        }
+    }
+    cut
 }
 
 /// Put the agent's working directory back to the checkpoint.

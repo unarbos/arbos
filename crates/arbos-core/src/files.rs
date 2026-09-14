@@ -305,6 +305,66 @@ pub fn create_chat(place: &Place) -> Result<Agent> {
     Ok(agent)
 }
 
+/// A fork: a new chat carrying `source`'s transcript. Spawn records in the
+/// copy are rewritten — their `child` link dropped and the body marked —
+/// so the fork never claims the original's workers as its own (a window
+/// listed them under the fork and, when the fork was itself one of them,
+/// looped; #138). The original's folder is untouched.
+pub fn fork_chat(place: &Place, source_id: &str) -> Result<Agent> {
+    let source = Agent::load(&place.agent_dir(source_id))
+        .with_context(|| format!("fork: no chat {source_id}"))?;
+    let mut agent = create_chat(place)?;
+    agent.model = source.model.clone();
+    agent.allowlist = source.allowlist.clone();
+    agent.title = if source.title.is_empty() {
+        String::new()
+    } else {
+        format!("{} (fork)", source.title)
+    };
+    agent.save(&place.agent_dir(agent.id.as_str()))?;
+    let from = Layout::new(place, source_id).transcript();
+    let to = Layout::new(place, agent.id.as_str()).transcript();
+    if from.exists() {
+        let events = load_transcript(&from)?;
+        let copied: Vec<Event> = events
+            .into_iter()
+            .map(|mut ev| {
+                if let EventKind::Tool(rec) = &mut ev.kind
+                    && rec.child.take().is_some()
+                {
+                    let note =
+                        "(spawned by the chat this one was forked from; not this chat's worker)";
+                    rec.body = Some(match rec.body.take() {
+                        Some(b) => format!("{note}\n{b}"),
+                        None => note.to_string(),
+                    });
+                }
+                ev
+            })
+            .collect();
+        std::fs::write(&to, "")?;
+        append_events(&to, &copied)?;
+    }
+    Ok(agent)
+}
+
+/// `child` on a spawn record, checked against disk: only when the named
+/// agent exists and calls `agent` its parent. An old fork's copied record,
+/// or a child since re-parented or removed, names nobody.
+pub fn scrub_child_claims(place: &Place, agent: &str, ev: &mut Event) {
+    if let EventKind::Tool(rec) = &mut ev.kind
+        && let Some(child) = rec.child.as_deref()
+    {
+        let ok = child != agent
+            && Agent::load(&place.agent_dir(child))
+                .ok()
+                .is_some_and(|c| c.parent.as_ref().is_some_and(|p| p.as_str() == agent));
+        if !ok {
+            rec.child = None;
+        }
+    }
+}
+
 /// The focus names one agent folder of this place, as `.arbos/agents/<id>`.
 /// Accepts that form or a bare `<id>`. Anything else is refused: the file
 /// is written by whoever can reach the attach socket and read back by every

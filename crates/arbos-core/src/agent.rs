@@ -119,8 +119,10 @@ pub struct Agent {
     pub model: String,
     pub allowlist: Vec<String>,
     pub readonly: bool,
-    /// Set for this turn only by `project::apply_role`; never written to
-    /// agent.md. `Some("coordinator")`: the main chat of a coordinator place.
+    /// `Some("coordinator")`: the main chat of a coordinator place, set for
+    /// the turn by `project::apply_role`, never saved. `Some("worker")`:
+    /// a child that does its own task and does not delegate — saved at
+    /// spawn, or applied in memory to any kind-less child without one.
     pub role: Option<String>,
     pub cwd: Option<PathBuf>,
     /// `machine:path` when this agent is a stand-in for a kernel on another
@@ -197,7 +199,7 @@ impl Agent {
             .unwrap_or_default();
         let remote = self.remote.clone().unwrap_or_default();
         format!(
-            "name: {}\ntitle: {}\nparent: {}\npaused: {}\nmodel: {}\nallowlist: {}\nreadonly: {}\ncwd: {}\nremote: {}\nmode: {}\nkind: {}\n",
+            "name: {}\ntitle: {}\nparent: {}\npaused: {}\nmodel: {}\nallowlist: {}\nreadonly: {}\ncwd: {}\nremote: {}\nmode: {}\nkind: {}\n{}",
             self.name,
             self.title,
             parent,
@@ -208,7 +210,12 @@ impl Agent {
             cwd,
             remote,
             self.mode.as_str(),
-            self.kind
+            self.kind,
+            match self.role.as_deref() {
+                // The coordinator role is per turn, never on disk.
+                Some(r) if r != crate::project::COORDINATOR => format!("role: {r}\n"),
+                _ => String::new(),
+            }
         )
     }
 
@@ -262,6 +269,7 @@ impl Agent {
                     agent.remote = (!value.is_empty()).then(|| value.to_string());
                 }
                 "kind" => agent.kind = value.to_string(),
+                "role" => agent.role = (!value.is_empty()).then(|| value.to_string()),
                 _ => {}
             }
         }

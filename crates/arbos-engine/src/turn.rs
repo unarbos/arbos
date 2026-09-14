@@ -569,14 +569,13 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             // right after a compile error) or a tool call written out as
             // JSON text (small models). One nudge, then the turn ends for
             // real if it happens again.
+            // A `nudge` line, not a `user` one: the model reads it as
+            // `[kernel] …` either way, and the window draws it dim instead
+            // of as a bubble the user never typed.
             let nudge = if content.trim().is_empty() {
-                Some(
-                    "[kernel] Your reply was empty. Continue the task, or say what is blocking you.",
-                )
+                Some("Your reply was empty. Continue the task, or say what is blocking you.")
             } else if looks_like_tool_call_text(&content) {
-                Some(
-                    "[kernel] That was a tool call written as text, so nothing ran. Call the tool itself.",
-                )
+                Some("That was a tool call written as text, so nothing ran. Call the tool itself.")
             } else {
                 None
             };
@@ -589,12 +588,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                         reasoning_details: None,
                     }));
                 }
-                batch.push(Event::new(EventKind::User {
-                    text: text.into(),
-                    attachments: vec![],
-                    channel: String::new(),
-                    device: String::new(),
-                }));
+                batch.push(Event::new(EventKind::Nudge { text: text.into() }));
                 append_events(&transcript, &batch)?;
                 events = load_transcript(&transcript)?;
                 continue;

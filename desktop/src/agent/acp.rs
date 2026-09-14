@@ -96,6 +96,8 @@ pub enum Event {
     Rewound {
         dropped: u64,
         restored: Option<String>,
+        /// Files are still being restored; a second `Rewound` follows.
+        pending: bool,
     },
     /// The first frame of a connection: the kernel's protocol (`hello`),
     /// or `None` when the kernel predates the handshake.
@@ -626,8 +628,13 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             agent: id,
             dropped,
             restored,
+            pending,
             ..
-        } if id == agent => vec![Event::Rewound { dropped, restored }],
+        } if id == agent => vec![Event::Rewound {
+            dropped,
+            restored,
+            pending,
+        }],
         // The kernel's answer to a bad ask (an unknown agent, a rewind it
         // cannot do): the reason belongs in the chat, not in a log.
         Frame::Error {

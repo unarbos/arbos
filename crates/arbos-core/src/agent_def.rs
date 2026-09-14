@@ -21,6 +21,10 @@ pub struct AgentDef {
     pub allowlist: Vec<String>,
     pub readonly: bool,
     pub cwd: Option<PathBuf>,
+    /// `role:` in the front matter. `worker` (the default for any child
+    /// without a kind) keeps the child to its own task; `none` gives a kind
+    /// no role line at all, e.g. for a kind that is meant to delegate.
+    pub role: Option<String>,
     /// An outside program that speaks the Agent Client Protocol runs this
     /// kind's turns (P-14): the command line, started in the agent's cwd,
     /// e.g. `npx -y @zed-industries/claude-code-acp`.
@@ -115,6 +119,7 @@ impl AgentDef {
                         .collect();
                 }
                 "readonly" => def.readonly = matches!(value, "true" | "yes" | "1"),
+                "role" if !value.is_empty() => def.role = Some(value.to_ascii_lowercase()),
                 "cwd" if !value.is_empty() => def.cwd = Some(PathBuf::from(value)),
                 "acp" | "acp_command" if !value.is_empty() => def.acp = Some(value.to_string()),
                 _ => {}

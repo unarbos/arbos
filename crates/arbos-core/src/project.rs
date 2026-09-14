@@ -15,6 +15,12 @@ use crate::{Agent, Place};
 
 pub const COORDINATOR: &str = "coordinator";
 
+/// The role every child gets unless its kind says otherwise: it does its
+/// own task and does not delegate. A coordinator's brief that describes
+/// several workers must not turn each worker into a coordinator (three
+/// workers spawned nine grandchildren from one ask).
+pub const WORKER: &str = "worker";
+
 /// What a coordinator keeps of the tool set: everything that reads,
 /// delegates, or talks, and `write`/`edit` for the project store only
 /// (`notes.md`, `docs/`, `internal/`, `media/`, `archived.md`; the write
@@ -122,7 +128,14 @@ pub fn root_is_coordinator(place: &Place) -> bool {
 /// saved — children inherit the parent's allowlist at spawn, and they are
 /// the ones that edit.
 pub fn apply_role(place: &Place, agent: &mut Agent) {
-    if agent.parent.is_some() || !root_is_coordinator(place) {
+    if agent.parent.is_some() {
+        // A child minted before roles were saved: kind-less means worker.
+        if agent.role.is_none() && agent.kind.is_empty() {
+            agent.role = Some(WORKER.into());
+        }
+        return;
+    }
+    if !root_is_coordinator(place) {
         return;
     }
     agent.role = Some(COORDINATOR.into());
@@ -173,9 +186,17 @@ mod tests {
         assert!(root.may("edit") && root.may("write"));
         assert!(!root.may("bash") && !root.may("terminal") && !root.may("undo"));
         assert!(!root.to_md().contains("coordinator"));
+        // A kind-less child is a worker: it keeps every tool and gets the
+        // worker line, never the coordinator's.
         let mut child = Agent::root("child");
         child.parent = Some(crate::AgentId::new("root"));
         apply_role(&p, &mut child);
-        assert!(child.role.is_none() && child.may("edit"));
+        assert_eq!(child.role.as_deref(), Some(WORKER));
+        assert!(child.may("edit") && child.may("bash"));
+        let mut kinded = Agent::root("reviewer-1");
+        kinded.parent = Some(crate::AgentId::new("root"));
+        kinded.kind = "reviewer".into();
+        apply_role(&p, &mut kinded);
+        assert!(kinded.role.is_none());
     }
 }
