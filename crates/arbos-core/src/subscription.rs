@@ -18,15 +18,22 @@ use crate::Place;
 pub const MIN_EVERY_MS: u64 = 30_000;
 /// Poll period for the GitHub kinds when `every` is absent.
 pub const GITHUB_DEFAULT_EVERY_MS: u64 = 60_000;
+/// How often a goal's check runs when `every` is absent.
+pub const GOAL_DEFAULT_EVERY_MS: u64 = 30 * 60_000;
 
-pub const KINDS: &[&str] = &["timer", "shell", "github_pr", "github_ci", "inbox"];
+pub const KINDS: &[&str] = &["timer", "shell", "github_pr", "github_ci", "inbox", "goal"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Subscription {
     /// 0 in a hand-written file: `read` fills it from the `NNNN-` prefix.
     #[serde(default)]
     pub id: u32,
-    /// `timer` | `shell` | `github_pr` | `github_ci` | `inbox`.
+    /// `timer` | `shell` | `github_pr` | `github_ci` | `inbox` | `goal`.
+    /// A `goal` is an objective held until met: `prompt` says what, `cmd`
+    /// (optional) is the check that says when — exit 0 closes the goal;
+    /// while it fails the agent is woken with the goal and the check's
+    /// output, every `every` (default 30m). Without `cmd` the agent is
+    /// woken each period until it removes the goal itself.
     pub kind: String,
     /// What the agent is told when it fires. For `shell`, the output and
     /// exit follow it. Empty is allowed for the GitHub kinds (the diff is
@@ -113,6 +120,7 @@ impl Subscription {
             Some(e) => parse_duration_ms(e),
             None => match self.kind.as_str() {
                 "github_pr" | "github_ci" => Some(GITHUB_DEFAULT_EVERY_MS),
+                "goal" => Some(GOAL_DEFAULT_EVERY_MS),
                 _ => None,
             },
         }
@@ -211,6 +219,10 @@ impl Subscription {
                         "every {}{next}",
                         human_ms(self.every_ms().unwrap_or(GITHUB_DEFAULT_EVERY_MS))
                     ),
+                    "goal" => format!(
+                        "until met · checked every {}{next}",
+                        human_ms(self.every_ms().unwrap_or(GOAL_DEFAULT_EVERY_MS))
+                    ),
                     _ => String::new(),
                 },
             },
@@ -266,6 +278,14 @@ impl Subscription {
                     || (self.pr.is_none() && !has_branch)
                 {
                     bail!("github_ci needs repo (owner/name) and pr or branch");
+                }
+            }
+            "goal" => {
+                if self.prompt.trim().is_empty() {
+                    bail!("goal needs prompt: what is to be true when it is met");
+                }
+                if self.deliver_to != "agent" {
+                    bail!("goal delivers to the agent; deliver_to must be agent");
                 }
             }
             "inbox" => {
@@ -467,6 +487,9 @@ pub fn add(
                     .with_context(|| format!("after {a:?} is not a duration"))?;
                 now + ms as i64
             }
+            // A goal's first check runs now: the agent starts on it at
+            // once instead of after the first period.
+            None if sub.kind == "goal" => now,
             None => match sub.every_ms() {
                 Some(e) => now + e as i64,
                 None => now,

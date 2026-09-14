@@ -314,6 +314,107 @@ fn fire_with_note(
             };
             settle(hooks, id, sub, now, outcome);
         }
+        // A goal: run its check (when it has one); exit 0 closes the goal
+        // and tells the agent and the user; anything else wakes the agent
+        // with the goal, the check's output, and what changed since last
+        // time. Without a check, the agent is woken each period until it
+        // removes the goal.
+        "goal" => {
+            let key = format!("{id}#{}", sub.id);
+            {
+                let mut set = in_flight().lock().unwrap();
+                if set.len() >= MAX_SHELL || set.contains(&key) {
+                    return;
+                }
+                set.insert(key.clone());
+            }
+            let mut scheduled = sub.clone();
+            scheduled.schedule_next(now);
+            if scheduled.next_due.is_some() {
+                let _ = subscription::save(&hooks.place, id, &scheduled);
+            }
+            let hooks = Arc::clone(hooks);
+            let agent = agent.clone();
+            tokio::spawn(async move {
+                let id = agent.id.as_str();
+                let goal = sub.prompt.trim().to_string();
+                let (met, detail) =
+                    match sub.cmd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+                        Some(cmd) => {
+                            let (_job, code, tail) = run_job(&hooks, &agent, cmd).await;
+                            let tail = tail.trim().to_string();
+                            (
+                                code == 0,
+                                format!(
+                                    "The check `{cmd}` exited {code}.{}",
+                                    if tail.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" Output tail:\n{tail}")
+                                    }
+                                ),
+                            )
+                        }
+                        None => (
+                            false,
+                            "No check is set: you decide when it is met.".to_string(),
+                        ),
+                    };
+                let previous = sub.seen.clone().unwrap_or_default();
+                let outcome = if met {
+                    let body = noted(format!(
+                        "Goal met: {goal}\n{detail}\nGoal #{} is closed. Say so to the user in one line, with what made it true.",
+                        sub.id
+                    ));
+                    let _ = inbox::deliver(&hooks.place, id, &message(&sub, true, body));
+                    let _ = hooks.notify_user(id, &format!("goal met: {goal}"));
+                    crate::klog::info(
+                        "goal_met",
+                        Some(id),
+                        format!("#{} {}", sub.id, text::clip(&goal, 80)),
+                    );
+                    format!("met — {}", text::clip(&detail, 120))
+                } else {
+                    let since = if previous.is_empty() || previous == detail {
+                        String::new()
+                    } else {
+                        format!(
+                            "\nLast time the check said:\n{}",
+                            text::clip(&previous, 1200)
+                        )
+                    };
+                    let body = noted(format!(
+                        "Goal not yet met: {goal}\n{detail}{since}\nWork toward it now. When you believe it is met, end your turn: the check runs again in {} (subscribe remove {} closes the goal without it{}).",
+                        subscription::human_ms(
+                            sub.every_ms()
+                                .unwrap_or(subscription::GOAL_DEFAULT_EVERY_MS)
+                        ),
+                        sub.id,
+                        if sub.cmd.is_none() {
+                            "; that is how a goal with no check is closed"
+                        } else {
+                            ""
+                        }
+                    ));
+                    let _ = inbox::deliver(&hooks.place, id, &message(&sub, true, body));
+                    format!("not met — {}", text::clip(&detail, 120))
+                };
+                if let Some(current) = subscription::get(&hooks.place, id, sub.id) {
+                    let mut current = current;
+                    current.last = text::clip(&outcome, 200);
+                    current.last_fired = Some(inbox::rfc3339(arbos_core::now_ms()));
+                    current.seen = Some(text::clip(&detail, 4000));
+                    if met || current.once {
+                        let _ = subscription::remove(&hooks.place, id, sub.id);
+                    } else {
+                        let _ = subscription::save(&hooks.place, id, &current);
+                    }
+                }
+                in_flight().lock().unwrap().remove(&key);
+                hooks.plan_changed(id);
+                hooks.kick();
+            });
+        }
         "shell" => {
             let key = format!("{id}#{}", sub.id);
             {
