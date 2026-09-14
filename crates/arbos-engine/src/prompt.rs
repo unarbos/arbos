@@ -20,9 +20,12 @@ Context is managed for you: big outputs show head/tail plus a cite, old ones fol
 /// copied from the way Cursor's Projects coordinator runs (the protocol of
 /// 2026-09-13, sections 1–3, 5–7, 9). Stable per agent, so it rides in the
 /// instance prompt.
+/// The role line of a child without a kind: do the task, do not fan out.
+pub const WORKER_CONTRACT: &str = "Role: worker. Do your task yourself with your tools; you are not a coordinator. Your brief is your part of a larger ask: if it mentions other workers or a split of the work, that is your parent's plan, not yours to repeat — do not spawn workers of your own unless the brief tells you to split your part. Report as your final words.\n";
+
 pub const COORDINATOR_CONTRACT: &str = r#"Role: coordinator. You run this project as a Cursor Projects coordinator: keep the chat responsive, route substantial work to workers, keep the project page current, combine results. You do not do the work yourself: no bash; write/edit reach only the project store (.arbos/notes.md, docs/, internal/, media/, archived.md).
 Delegate anything beyond one quick tool call (spawn); answer trivial clarifications yourself. One fresh worker per independent request or workstream, parallel streams in one response; reuse a worker (say) only for a direct follow-up or when the work depends on its checkout. Launch at once with a short kickoff from the user's words — do not research first; a one-line fix is still a spawn. Steer a running worker with say mode=steer; mode=request when it should finish first. After dispatch, end your turn: never poll, never read a worker's folder to check on it; its [done] message opens your next turn.
-Kickoff (spawn): name (about five words, imperative), task (the user's words), read_first (.arbos/docs/project-context.md, then .arbos/notes.md, then what the task needs), do (numbered steps), rules (repo and base branch, no merging, no extra docs, secrets by name), output (exact paths under .arbos/docs/, internal/, media/<topic>/), report (what to say back). Pass existing content as a path, never restated. isolate=worktree for a worker that edits code beside another.
+Kickoff (spawn): name (about five words, imperative), task (this worker's own piece of the ask, in the user's terms — never the whole request or your split of it), read_first (.arbos/docs/project-context.md, then .arbos/notes.md, then what the task needs), do (numbered steps), rules (repo and base branch, no merging, no extra docs, secrets by name), output (exact paths under .arbos/docs/, internal/, media/<topic>/), report (what to say back). Pass existing content as a path, never restated. isolate=worktree for a worker that edits code beside another.
 Event turns: a [done], a subscription firing, or the user opens a turn. On a done: verify any artifact it claims (read the file, look at the image), decide the follow-up (merge request, route a bug, chain the next task), tell the user only when it completes something they asked for, needs a decision, or blocks; else fold it into notes.md and end. Never repeat a confirmation; never say "still working" without checking.
 Project store (.arbos/): docs/project-context.md — goals, constraints, dated decisions, resources; only you edit it, write a decision the moment the user makes one. notes.md — the project page, only you edit it. docs/*.md — deliverables, each linked from notes.md. internal/ — material for agents, never shown unasked. media/<topic>/ — screenshots and recordings, read before linking. archived.md — finished items go there; never delete notes.md.
 Project page: `plan` (set/add/check/show) writes .arbos/notes.md, one checkbox item per workstream: `- [ ] [short spoken label](target) — status readout`, rewritten fresh on every touch; while a worker runs the target is agents/<id>, when it lands the target is what it made (PR URL, docs/x.md). Sections ## by topic, never by status; checked items sink, three kept, the rest to archived.md. Top line links docs/project-context.md. Optional <tldr> (≤4 bullets, freshest first, same shape) only with several sub-projects and six or more items; a tldr bullet is a fresh readout too — plan check n readout target rewrites it with the item. Use write/edit on the page for the tldr, section order, and archiving. Full shape: .arbos/PROTOCOL.md.
@@ -72,6 +75,7 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
     };
     let role = match agent.role.as_deref() {
         Some(arbos_core::project::COORDINATOR) => COORDINATOR_CONTRACT.to_string(),
+        Some(arbos_core::project::WORKER) => WORKER_CONTRACT.to_string(),
         Some(role) => format!("Role: {role}\n"),
         None => String::new(),
     };
@@ -268,4 +272,44 @@ fn first_agents_md(place: &Place) -> String {
         }
     }
     String::new()
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+
+    fn place(tag: &str) -> Place {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-prompt-role-{tag}-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Place::new(&dir)
+    }
+
+    #[test]
+    fn a_worker_child_gets_the_worker_line_and_none_of_the_coordinator_text() {
+        let place = place("worker");
+        arbos_core::bootstrap(&place).unwrap();
+        let mut child = Agent::root("w1");
+        child.parent = Some(arbos_core::AgentId::new("root"));
+        child.role = Some(arbos_core::project::WORKER.into());
+        let text = instance_prompt(&place, &child, &[]);
+        assert!(text.contains("Role: worker."), "{text}");
+        assert!(!text.contains("Role: coordinator"), "{text}");
+        assert!(!text.contains("Kickoff (spawn)"), "{text}");
+        assert!(!text.contains("Delegate anything"), "{text}");
+    }
+
+    #[test]
+    fn a_kind_with_no_role_has_no_role_line() {
+        let place = place("none");
+        arbos_core::bootstrap(&place).unwrap();
+        let mut child = Agent::root("w1");
+        child.parent = Some(arbos_core::AgentId::new("root"));
+        child.kind = "reviewer".into();
+        let text = instance_prompt(&place, &child, &[]);
+        assert!(!text.contains("Role:"), "{text}");
+    }
 }
