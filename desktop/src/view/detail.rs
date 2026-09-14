@@ -1787,7 +1787,10 @@ impl Arbos {
                 self.workspace.update(cx, |workspace, cx| {
                     workspace.refresh_children(id);
                     match workspace.session(id) {
-                        Some(chat) => transcript::render(chat, tail, window, cx),
+                        Some(chat) => {
+                            let changes = workspace.changes.get(&chat.cwd).cloned();
+                            transcript::render(chat, changes, tail, window, cx)
+                        }
                         None => div().flex_1().into_any_element(),
                     }
                 })
@@ -1837,9 +1840,18 @@ impl Arbos {
         let chat = workspace.active_session()?;
         let project = workspace.active_project()?;
         let (working, prs) = pill_counts(project, chat);
-        if working.is_empty() && prs.is_empty() {
+        // Cursor's Changes pill: the working tree's uncommitted lines, and
+        // beside it Commit & Push. Only for a local repository with changes.
+        let changes = (!project.is_remote())
+            .then(|| workspace.changes.get(&project.path))
+            .flatten()
+            .filter(|changes| !changes.is_empty())
+            .cloned();
+        if working.is_empty() && prs.is_empty() && changes.is_none() {
             return None;
         }
+        let root = project.path.clone();
+        let main_id = chat.id;
         let first_working = working.first().copied();
         let newest_pr = prs.last().cloned();
         let pr_list = prs.join("\n");
@@ -1892,6 +1904,64 @@ impl Arbos {
                         })),
                     )
                 })
+                .when_some(changes, |row, changes| {
+                    let (add, del) = (changes.add(), changes.del());
+                    let root_review = root.clone();
+                    let root_commit = root.clone();
+                    let files = changes.files.len();
+                    row.child(
+                        pill(
+                            "pill-changes",
+                            icons::icon(icons::editing::GIT_BRANCH)
+                                .size(px(12.))
+                                .flex_none()
+                                .text_color(theme.text_muted)
+                                .into_any_element(),
+                            "Changes".to_string(),
+                        )
+                        .child(diff_marks(&theme, add, del))
+                        .tooltip(move |window, cx| {
+                            Tooltip::text(
+                                format!("{files} file{} changed and not committed. Click to review the diff", if files == 1 { "" } else { "s" }),
+                                window,
+                                cx,
+                            )
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.review_changes(&root_review, None, cx);
+                        })),
+                    )
+                    .child(
+                        pill(
+                            "pill-commit",
+                            icons::icon(icons::status::CHECK)
+                                .size(px(12.))
+                                .flex_none()
+                                .text_color(theme.text_muted)
+                                .into_any_element(),
+                            "Commit & Push".to_string(),
+                        )
+                        .child(
+                            icons::icon(icons::arrows::ALT_ARROW_DOWN)
+                                .size(px(9.))
+                                .flex_none()
+                                .text_color(theme.text_faint),
+                        )
+                        .tooltip(|window, cx| {
+                            Tooltip::text("Ask the agent to commit every change with a clear message and push", window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let _ = &root_commit;
+                            this.workspace.update(cx, |workspace, cx| {
+                                workspace.send(
+                                    main_id,
+                                    "Commit all current changes with a clear, conventional commit message and push the branch.".to_string(),
+                                    cx,
+                                );
+                            });
+                        })),
+                    )
+                })
                 .when(!prs.is_empty(), |row| {
                     let list = pr_list.clone();
                     row.child(
@@ -1914,6 +1984,13 @@ impl Arbos {
                 })
                 .into_any_element(),
         )
+    }
+
+    /// Open the working tree's diff (one file, or all of it) in the column
+    /// as a code view — Cursor's Review.
+    pub(crate) fn review_changes(&mut self, root: &std::path::Path, file: Option<&str>, cx: &mut Context<Self>) {
+        self.workspace
+            .update(cx, |workspace, cx| workspace.review_changes(root, file, cx));
     }
 
     /// The kernel behind this chat has no model key, and this window has
@@ -2706,4 +2783,21 @@ mod tests {
         ];
         assert!(alert(&options).is_none());
     }
+}
+
+/// Cursor's `+6 −1`: added in green, removed in red, each only when nonzero.
+pub(crate) fn diff_marks(theme: &Theme, add: u32, del: u32) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.))
+        .text_style(TextStyle::Caption)
+        .when(add > 0, |el| {
+            el.child(div().text_color(theme.diff_add).child(SharedString::from(format!("+{add}"))))
+        })
+        .when(del > 0, |el| {
+            el.child(div().text_color(theme.diff_del).child(SharedString::from(format!("\u{2212}{del}"))))
+        })
+        .into_any_element()
 }
