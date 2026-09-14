@@ -783,6 +783,63 @@ impl KernelHooks {
         Ok(())
     }
 
+    /// `/mode <skill>` | `/mode off` | `/mode`: pin a skill to the chat as
+    /// its mode, clear it, or say what is pinned. Returns the line for
+    /// the transcript.
+    pub fn set_mode_skill(&self, agent: &str, arg: &str) -> Result<String> {
+        let dir = self.place.agent_dir(agent);
+        let mut a = Agent::load(&dir)?;
+        let arg = arg.trim();
+        if arg.is_empty() {
+            return Ok(match &a.skill {
+                Some(s) => format!("Mode: {s} is pinned to this chat. `/mode off` ends it."),
+                None => {
+                    let names: Vec<String> = arbos_core::load_skills(&self.place)
+                        .iter()
+                        .map(|s| s.name.clone())
+                        .collect();
+                    format!(
+                        "No mode is pinned. `/mode <skill>` pins one of: {}.",
+                        if names.is_empty() {
+                            "(no skills here)".to_string()
+                        } else {
+                            names.join(", ")
+                        }
+                    )
+                }
+            });
+        }
+        if matches!(arg.to_ascii_lowercase().as_str(), "off" | "none" | "clear") {
+            let was = a.skill.take();
+            a.save(&dir)?;
+            return Ok(match was {
+                Some(s) => format!("Mode off: {s} is no longer pinned to this chat."),
+                None => "No mode was pinned.".to_string(),
+            });
+        }
+        let name = arg.trim_start_matches('/');
+        let Some(skill) = arbos_core::skills::find_skill(&self.place, name) else {
+            let names: Vec<String> = arbos_core::load_skills(&self.place)
+                .iter()
+                .map(|s| s.name.clone())
+                .collect();
+            bail!(
+                "no skill named {name:?} here{}",
+                if names.is_empty() {
+                    String::new()
+                } else {
+                    format!("; skills: {}", names.join(", "))
+                }
+            );
+        };
+        a.skill = Some(skill.name.clone());
+        a.save(&dir)?;
+        Ok(format!(
+            "Mode: {} is pinned to this chat — its SKILL.md applies to every turn until `/mode off`.",
+            skill.name
+        ))
+    }
+
     /// The user pressed stop on `agent`: every standing or scheduled node
     /// of it and its children goes to blocked (run ▶ resumes one), and
     /// their running jobs are killed. Turns are the scheduler's to stop.

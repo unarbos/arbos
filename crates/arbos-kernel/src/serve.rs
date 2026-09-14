@@ -694,6 +694,27 @@ fn handle_frame(
                 eprintln!("inbox {agent}: empty prompt");
                 return;
             }
+            // `/mode <skill>` pins a skill to this chat as its mode (`/mode
+            // off` clears it): a setting, not a prompt. The transcript gets
+            // a notice; the next turn's prompt carries the skill.
+            if attachments.is_empty()
+                && let Some(rest) = text.trim().strip_prefix("/mode")
+                && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+            {
+                let line = match hooks.set_mode_skill(&agent, rest.trim()) {
+                    Ok(line) => line,
+                    Err(e) => format!("/mode: {e:#}"),
+                };
+                let _ = append_event(
+                    &Layout::new(place, &agent).transcript(),
+                    &Event::new(EventKind::Notice {
+                        text: line,
+                        failed: false,
+                    }),
+                );
+                hooks.broadcast_tree();
+                return;
+            }
             // "stop" typed at a running agent is the Stop button, not a
             // follow-up: the turn ends now and the transcript says who did it.
             if attachments.is_empty() && sched.has_job(&agent) && arbos_core::is_stop_word(&text) {
