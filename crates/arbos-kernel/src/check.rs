@@ -338,6 +338,29 @@ pub fn check(place: &Place) -> Result<Report> {
             }
         }
     }
+    // results/ grows with every long tool result and nothing prunes it:
+    // past 50 MB it is worth a look (delete what is old; archived workers
+    // take theirs with them).
+    for agent in &agents {
+        let dir = place.agent_dir(agent.id.as_str()).join("results");
+        let bytes: u64 = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.metadata().ok())
+            .map(|m| m.len())
+            .sum();
+        if bytes > 50 * 1024 * 1024 {
+            r.warn(
+                format!(".arbos/agents/{}/results", agent.id),
+                None,
+                format!(
+                    "{} MB of spilled tool results; nothing prunes this folder — delete what is old",
+                    bytes / (1024 * 1024)
+                ),
+            );
+        }
+    }
     // Processes still writing into .arbos/: a job from an earlier kernel
     // run (the kernel reaps these at start; a `check` between runs sees
     // them), and, on Linux, any process holding a file under .arbos/ open

@@ -379,6 +379,7 @@ pub fn project(
                         &cite,
                         &superseded,
                         step_bytes,
+                        &place.agent_dir(agent.id.as_str()),
                     );
                 }
                 EventKind::User {
@@ -460,7 +461,27 @@ fn tool_step(
     cite: &str,
     superseded: &std::collections::HashSet<usize>,
     step_bytes: usize,
+    agent_dir: &std::path::Path,
 ) -> usize {
+    // A result spilled to `results/<call>.txt` is cited by that file: a
+    // path `read` takes with an offset, instead of a transcript line.
+    let result_cite = |r: &ToolRec, seq: u64| -> String {
+        // A `read` is cited by the file it read: `read` it again with an
+        // offset past what was shown.
+        if r.name == "read"
+            && let Some(source) = r.paths.first()
+            && r.error.is_none()
+        {
+            return source.clone();
+        }
+        let name = crate::evict::spill_name(&r.call_id);
+        if agent_dir.join("results").join(&name).exists() {
+            let agent_rel = cite.trim_end_matches("/transcript.jsonl");
+            format!("{agent_rel}/results/{name}")
+        } else {
+            format!("{cite}:{seq}")
+        }
+    };
     let mut end = first;
     while let Some(Item::Event { event, .. }) = items.get(end) {
         if !matches!(event.kind, EventKind::Tool(_)) {
@@ -533,7 +554,7 @@ fn tool_step(
             )
         } else if squeeze {
             let full = r.body.as_deref().unwrap_or("");
-            let cite = format!("{cite}:{seq}");
+            let cite = result_cite(r, seq);
             match crate::evict::keep_for(&r.name) {
                 crate::evict::Keep::Head => {
                     crate::evict::evict_head_to(full, &cite, per_result, crate::evict::READ_LINES)
@@ -546,7 +567,7 @@ fn tool_step(
             evict_tool_body(
                 &r.name,
                 r.body.as_deref().unwrap_or(""),
-                &format!("{cite}:{seq}"),
+                &result_cite(r, seq),
             )
         };
         let mut m = ChatMessage::plain("tool", Some(body));
@@ -597,5 +618,110 @@ fn resolve_attachment(cwd: &Path, a: &str) -> PathBuf {
         p.to_path_buf()
     } else {
         cwd.join(p)
+    }
+}
+
+#[cfg(test)]
+mod spill_cite_tests {
+    use super::*;
+
+    #[test]
+    fn an_evicted_result_cites_its_spilled_file_when_there_is_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-spill-cite-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join(".arbos/agents/root/results")).unwrap();
+        let place = Place::new(&dir);
+        arbos_core::bootstrap(&place).unwrap();
+        let agent = arbos_core::Agent::root("root");
+        let body: String = (1..=400).map(|i| format!("line-{i}\n")).collect();
+        let mut events = vec![Event::new(EventKind::User {
+            text: "list a lot".into(),
+            attachments: vec![],
+            channel: String::new(),
+            device: String::new(),
+        })];
+        let rec = ToolRec {
+            name: "bash".into(),
+            call_id: "call_1".into(),
+            paths: vec![],
+            started: None,
+            ended: None,
+            result_size: None,
+            error: None,
+            body: Some(body.clone()),
+            args: None,
+            child: None,
+            images: vec![],
+            diff: None,
+        };
+        events.push(Event::new(EventKind::Tool(rec)));
+        for (i, e) in events.iter_mut().enumerate() {
+            e.seq = i as u64 + 1;
+        }
+        let items = crate::compact::visible(&events);
+        let tool_text = |p: &Projection| -> String {
+            p.messages
+                .iter()
+                .find(|m| m.role == "tool")
+                .and_then(|m| m.content.clone())
+                .unwrap_or_default()
+        };
+        // No spill file: the transcript line is the cite.
+        let before = project(&place, &agent, &items, &[], STEP_BYTES);
+        let t = tool_text(&before);
+        assert!(
+            t.contains("…evicted (.arbos/agents/root/transcript.jsonl:2;"),
+            "{t}"
+        );
+        // The spill file exists: the cite is the file, which `read` takes.
+        std::fs::write(
+            dir.join(".arbos/agents/root/results")
+                .join(crate::evict::spill_name("call_1")),
+            &body,
+        )
+        .unwrap();
+        let after = project(&place, &agent, &items, &[], STEP_BYTES);
+        let t = tool_text(&after);
+        assert!(
+            t.contains("…evicted (.arbos/agents/root/results/call_1.txt;"),
+            "{t}"
+        );
+        assert!(t.contains("line-400"), "the tail is still shown: {t}");
+        assert!(crate::evict::spills(&body) && !crate::evict::spills("short"));
+        // A `read` is cited by the file it read, never by a copy (its view
+        // is a longer head: 600 lines).
+        let long: String = (1..=700).map(|i| format!("{i:>6}:aa|line-{i}\n")).collect();
+        let read_rec = ToolRec {
+            name: "read".into(),
+            call_id: "call_2".into(),
+            paths: vec!["/src/big.rs".into()],
+            started: None,
+            ended: None,
+            result_size: None,
+            error: None,
+            body: Some(long),
+            args: None,
+            child: None,
+            images: vec![],
+            diff: None,
+        };
+        let mut read_event = Event::new(EventKind::Tool(read_rec));
+        read_event.seq = 3;
+        let mut with_read = events.clone();
+        with_read.push(read_event);
+        let items = crate::compact::visible(&with_read);
+        let p = project(&place, &agent, &items, &[], STEP_BYTES);
+        let read_text = p
+            .messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .nth(1)
+            .and_then(|m| m.content.clone())
+            .unwrap_or_default();
+        assert!(read_text.contains("…evicted (/src/big.rs;"), "{read_text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
