@@ -21,7 +21,10 @@ impl Tool for Changes {
         Ok(Plan::access(Access::read_path(cx.cwd)))
     }
     fn run(&self, cx: RunCx, _args: Value) -> BoxFuture<'static, Result<ToolOut>> {
-        blocking(move || changes(&cx.cwd))
+        blocking(move || {
+            let agent_dir = arbos_core::Layout::new(&cx.place, cx.agent.id.as_str()).dir;
+            changes(&cx.cwd, Some(&agent_dir))
+        })
     }
 }
 
@@ -250,7 +253,7 @@ pub fn snapshot(cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn changes(cwd: &Path) -> Result<ToolOut> {
+pub fn changes(cwd: &Path, agent_dir: Option<&Path>) -> Result<ToolOut> {
     let out = Command::new("git")
         .args(["status", "--short"])
         .current_dir(cwd)
@@ -271,6 +274,11 @@ pub fn changes(cwd: &Path) -> Result<ToolOut> {
     }
     if let Some(note) = test_files_note(&status) {
         body.push_str(&note);
+    }
+    if let Some(line) = agent_dir.and_then(crate::mechanism::current_in) {
+        body.push_str(&format!(
+            "\nMechanism stated at the first edit: {line}\nBefore the final reply: does this line explain every symptom the request names? If one is not explained, the fix is not done.\n"
+        ));
     }
     Ok(ToolOut::text(body))
 }
