@@ -62,6 +62,10 @@ fn a_coordinator_that_spawns_and_leaves_the_page_alone_is_nudged() {
         "{\"agent\":\"root\",\"content\":\"started a helper\"}\n",
         "{\"content\":\"one word\"}\n",
         "{\"agent\":\"root\",\"content\":\"noted\"}\n",
+        "{\"agent\":\"root\",\"content\":\"delegating again\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"helper-two\",\"task\":\"say one word\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"started another\"}\n",
+        "{\"content\":\"one word\"}\n",
+        "{\"agent\":\"root\",\"content\":\"noted again\"}\n",
     );
     let mut k = start_kernel_replay("nudge", replies);
     let mut a = Attach::connect(&k.url);
@@ -72,7 +76,7 @@ fn a_coordinator_that_spawns_and_leaves_the_page_alone_is_nudged() {
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "get a helper going"}));
     let evs = wait_transcript(&k.place, Duration::from_secs(40), |evs| {
         evs.iter().any(|e| {
-            e["kind"] == "notice"
+            e["kind"] == "nudge"
                 && e["text"]
                     .as_str()
                     .unwrap_or("")
@@ -82,16 +86,16 @@ fn a_coordinator_that_spawns_and_leaves_the_page_alone_is_nudged() {
     let nudges: Vec<&serde_json::Value> = evs
         .iter()
         .filter(|e| {
-            e["kind"] == "notice"
+            e["kind"] == "nudge"
                 && e["text"]
                     .as_str()
                     .unwrap_or("")
                     .starts_with("project page not updated")
         })
         .collect();
-    // One per turn that dispatched or received work and left the page
-    // alone: the spawn turn, and the done turn if it has run by now.
-    assert!((1..=2).contains(&nudges.len()), "{evs:#?}");
+    // Once per idle period: the spawn turn nudges; the done turn that may
+    // follow, also leaving the page alone, does not repeat it.
+    assert_eq!(nudges.len(), 1, "{evs:#?}");
     // The notice sits after the spawn turn's completion line, before
     // whatever comes next: the next turn's model reads it first.
     let done_ix = evs
@@ -101,10 +105,30 @@ fn a_coordinator_that_spawns_and_leaves_the_page_alone_is_nudged() {
     let nudge_ix = evs
         .iter()
         .position(|e| {
-            e["kind"] == "notice" && e["text"].as_str().unwrap_or("").starts_with("project page")
+            e["kind"] == "nudge" && e["text"].as_str().unwrap_or("").starts_with("project page")
         })
         .unwrap();
     assert!(nudge_ix > done_ix, "{evs:#?}");
+    // The done turn runs and leaves the page alone too: still one nudge.
+    let evs = wait_transcript(&k.place, Duration::from_secs(40), |evs| {
+        evs.iter().filter(|e| e["kind"] == "turn_complete").count() >= 2
+    });
+    assert_eq!(
+        evs.iter().filter(|e| e["kind"] == "nudge").count(),
+        1,
+        "{evs:#?}"
+    );
+    // The user's next words re-arm it: another spawn without a page
+    // change earns one more, and only one more.
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "another helper"}));
+    let evs = wait_transcript(&k.place, Duration::from_secs(40), |evs| {
+        evs.iter().filter(|e| e["kind"] == "turn_complete").count() >= 4
+    });
+    assert_eq!(
+        evs.iter().filter(|e| e["kind"] == "nudge").count(),
+        2,
+        "{evs:#?}"
+    );
     let _ = k.child.kill();
 }
 

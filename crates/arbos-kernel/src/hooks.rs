@@ -368,12 +368,16 @@ impl KernelHooks {
         if !dispatched {
             return;
         }
-        let notice = Event::new(EventKind::Notice {
+        // Once per idle period: a second turn that also leaves the page
+        // alone does not repeat it. The page changing, or the user's next
+        // message, re-arms it.
+        if !self.notes_nudge.lock().unwrap().insert(agent.to_string()) {
+            return;
+        }
+        let nudge = Event::new(EventKind::Nudge {
             text: NOTES_NUDGE.to_string(),
-            failed: false,
         });
-        let _ = append_event(&self.layout(agent).transcript(), &notice);
-        self.notes_nudge.lock().unwrap().insert(agent.to_string());
+        let _ = append_event(&self.layout(agent).transcript(), &nudge);
     }
 
     /// Whether a reminder is owed (for the window's status; cleared when

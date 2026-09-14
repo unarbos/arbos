@@ -503,12 +503,10 @@ fn turn_answer(items: &[ChatItem], turn: &Turn) -> Option<String> {
     Some(parts.join("\n\n"))
 }
 
-/// What the session has to say for itself. Cursor keeps failures as a
-/// muted line, not a full-width danger banner. ChatView ErrorCard puts
-/// Retry on a failed turn — same resend of the last user prompt.
-/// The kernel's "project page not updated" reminder: one dim line with a
-/// ↻ glyph, the reason only — the instruction half is the agent's to act
-/// on, not the reader's.
+/// The kernel's "project page not updated" reminder (a `nudge` event, or
+/// the notice older kernels wrote): one dim line with a ↻ glyph, the
+/// reason only — the instruction half is the agent's to act on, not the
+/// reader's. No strip, no retry.
 fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
     let shown = text
         .split(" — ")
@@ -538,6 +536,9 @@ fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// What the session has to say for itself. Cursor keeps failures as a
+/// muted line, not a full-width danger banner. ChatView ErrorCard puts
+/// Retry on a failed turn — same resend of the last user prompt.
 fn notice(
     chat: &ChatSession,
     ix: usize,
@@ -3340,6 +3341,7 @@ fn zone(
                 from_block(chat, ix, who, text, images, &theme, window, cx)
             }
             ChatItem::Notice { text, failed } => notice(chat, ix, text, *failed, &theme, cx),
+            ChatItem::Nudge(text) => page_nudge(text, &theme),
             ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, &theme, cx),
             ChatItem::Asked { question, answer } => asked_line(question, answer, &theme),
             _ => div().into_any_element(),
