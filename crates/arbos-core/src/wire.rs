@@ -172,6 +172,10 @@ pub enum Frame {
         dropped: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         restored: Option<String>,
+        /// The file restore is still running: a second `rewound` with
+        /// `restored` (or an `error`) follows. The cut itself is done.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pending: bool,
     },
     /// Live text as the model streams it, one frame per chunk. The whole
     /// step arrives later as an `event` with a `seq` (the transcript line).
