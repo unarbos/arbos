@@ -155,6 +155,11 @@ pub fn relocate(place: &Path, how: Relocation) -> Result<PathBuf> {
     #[cfg(unix)]
     std::os::unix::fs::symlink(&link_text, &link)
         .with_context(|| format!("link .arbos -> {}", link_text.display()))?;
+    // The moved store is a nested repository under a new name: the project
+    // must not record it either (steward's note on #134).
+    if how == Relocation::Nosync {
+        crate::files::exclude_locally(place, &[".arbos.nosync/"]);
+    }
     #[cfg(not(unix))]
     bail!("relocating the store needs symlinks (unix only)");
     Ok(target)
@@ -243,5 +248,30 @@ mod tests {
         assert_eq!(relocated(place), Some(place.join(".arbos.nosync")));
         // Twice is refused.
         assert!(relocate(place, Relocation::Nosync).is_err());
+    }
+
+    #[test]
+    fn nosync_relocation_excludes_the_new_name_from_the_projects_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = dir.path();
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(place)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("no git; skipping");
+            return;
+        }
+        std::fs::create_dir_all(place.join(".arbos")).unwrap();
+        relocate(place, Relocation::Nosync).unwrap();
+        let exclude = std::fs::read_to_string(place.join(".git/info/exclude")).unwrap();
+        assert!(exclude.lines().any(|l| l == ".arbos.nosync/"), "{exclude}");
+        // Idempotent.
+        crate::files::exclude_locally(place, &[".arbos.nosync/", ".arbos/"]);
+        let again = std::fs::read_to_string(place.join(".git/info/exclude")).unwrap();
+        assert_eq!(again.matches(".arbos.nosync/").count(), 1, "{again}");
+        assert!(again.lines().any(|l| l == ".arbos/"), "{again}");
     }
 }
