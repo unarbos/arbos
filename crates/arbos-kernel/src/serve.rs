@@ -385,6 +385,13 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             Some(()) = kick_rx.recv() => {
                 // Coalesce a burst of kicks into one scan.
                 while kick_rx.try_recv().is_ok() {}
+                // A parent's `say mode=stop`: end that turn with its words.
+                let stops: Vec<(String, String)> =
+                    std::mem::take(&mut *hooks.stop_requests.lock().unwrap());
+                for (id, reason) in stops {
+                    sched.stop_for(&id, &reason);
+                    klog::info("turn_stopped_by_parent", Some(&id), reason);
+                }
                 for wake in plan::scan(&hooks) {
                     start(wake);
                 }

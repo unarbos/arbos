@@ -35,6 +35,11 @@ pub enum SayMode {
     Request,
     /// Into their running turn at the next tool boundary; a turn if idle.
     Steer,
+    /// End their running turn now and keep what they had: the turn is
+    /// interrupted with the parent's words as the reason, its jobs are
+    /// killed, and the done message carries the last words before the
+    /// stop. Parents (ancestors) only.
+    Stop,
 }
 
 impl SayMode {
@@ -43,6 +48,7 @@ impl SayMode {
             "note" => Some(Self::Note),
             "request" => Some(Self::Request),
             "steer" => Some(Self::Steer),
+            "stop" => Some(Self::Stop),
             _ => None,
         }
     }
@@ -158,6 +164,9 @@ pub struct KernelHooks {
     /// archived once the parent's turn ends (no `done` file will do it):
     /// child id → parent id.
     pub archive_after: Mutex<HashMap<String, String>>,
+    /// Turns a parent asked the kernel to stop (`say mode=stop`): agent
+    /// id and the reason the transcript records. The scheduler drains it.
+    pub stop_requests: Mutex<Vec<(String, String)>>,
     /// Transcript length when each running turn began, for the `done`
     /// message's summary of what the turn said.
     pub turn_lo: Mutex<HashMap<String, u64>>,
@@ -220,6 +229,7 @@ impl KernelHooks {
             waits: Mutex::new(HashMap::new()),
             waited: Mutex::new(HashSet::new()),
             archive_after: Mutex::new(HashMap::new()),
+            stop_requests: Mutex::new(Vec::new()),
             turn_lo: Mutex::new(HashMap::new()),
             notes_at_start: Mutex::new(HashMap::new()),
             notes_nudge: Mutex::new(HashSet::new()),
@@ -1054,6 +1064,53 @@ impl KernelHooks {
             ));
         }
         let label = format!("{} ({})", target.name, tid);
+        // A stop: only for a child of the sender's (any depth). The turn
+        // ends now with these words as the reason; its jobs die with it;
+        // the done message that follows carries what it had so far.
+        if mode == SayMode::Stop {
+            let mine = self.descendants(from.as_str());
+            if tid == from.as_str() || !mine.iter().any(|a| a == tid) {
+                bail!(
+                    "say mode=stop: {label} is not a worker of yours; only a parent may stop a turn"
+                );
+            }
+            let root = arbos_engine::JobsRoot::for_agent(&self.place, &AgentId::new(tid));
+            let mut killed = 0;
+            for job in root.list() {
+                if job.running() {
+                    root.kill(&job);
+                    killed += 1;
+                }
+            }
+            let reason = format!("stopped by {from}: {text}");
+            if self.is_running(tid) {
+                self.stop_requests
+                    .lock()
+                    .unwrap()
+                    .push((tid.to_string(), reason));
+                self.kick();
+                return Ok(format!(
+                    "Stopping {label} now{}; its turn ends with your words as the reason and its done message brings what it had so far.",
+                    if killed > 0 {
+                        format!(" ({killed} running job(s) killed)")
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+            // Idle: nothing runs; the words wait on its transcript.
+            let mut msg = inbox::Message::new(format!("agent:{from}"), "note", text);
+            msg.wake = false;
+            inbox::deliver(&self.place, tid, &msg)?;
+            return Ok(format!(
+                "{label} was not running{}; nothing to stop. Your words are on its transcript for its next turn.",
+                if killed > 0 {
+                    format!(" ({killed} running job(s) killed)")
+                } else {
+                    String::new()
+                }
+            ));
+        }
         // A steer is an inbox file of kind `steer`: a running turn takes it
         // at its next tool boundary; an idle one wakes on it.
         if mode == SayMode::Steer {
@@ -1106,6 +1163,8 @@ impl KernelHooks {
             SayMode::Request => true,
             // Idle, so there is no turn to steer: start one.
             SayMode::Steer => true,
+            // Handled above; never reaches here.
+            SayMode::Stop => unreachable!("stop is answered before this point"),
         };
         // A note is an inbox file the peer reads at the start of its next
         // turn; a request is one that starts a turn. Nothing is written into
@@ -1157,6 +1216,7 @@ impl KernelHooks {
             (SayMode::Request | SayMode::Note, false) => format!(
                 "Sent to {label} as a request; a turn is queued for it. Its reply will arrive here as a message from it."
             ),
+            (SayMode::Stop, _) => unreachable!("stop is answered before this point"),
         })
     }
 
