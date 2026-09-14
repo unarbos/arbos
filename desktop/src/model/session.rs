@@ -1165,7 +1165,7 @@ impl ChatSession {
             ChildState::Working
         } else if self.answering.is_some() || self.plan_open().any(|n| n.do_kind == "ask") {
             ChildState::Asking
-        } else if self.closed || self.turn_ended.is_some() {
+        } else if self.closed || self.turn_ended.is_some() || self.agent_gone() {
             ChildState::Done
         } else {
             ChildState::Waiting
