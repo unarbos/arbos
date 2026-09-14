@@ -1493,27 +1493,12 @@ pub fn clone_session(place: &Place, source_id: &str) -> Result<String> {
 }
 
 fn fork_chat_folder(place: &Place, source_id: &str) -> Result<String> {
+    // The copy rewrites spawn records so the fork claims none of the
+    // original's workers (a fork listed under itself looped the window).
     let core_place = arbos_core::Place::new(&place.path);
-    let source_dir = core_place.agent_dir(source_id);
-    let source = arbos_core::Agent::load(&source_dir)
-        .with_context(|| format!("fork: no chat {source_id} in {}", place.path.display()))?;
-    let mut agent = arbos_core::create_chat(&core_place)?;
-    agent.model = source.model.clone();
-    agent.allowlist = source.allowlist.clone();
-    agent.title = if source.title.is_empty() {
-        String::new()
-    } else {
-        format!("{} (fork)", source.title)
-    };
-    let id = agent.id.to_string();
-    let dir = core_place.agent_dir(&id);
-    agent.save(&dir)?;
-    let from = arbos_core::files::Layout::new(&core_place, source_id).transcript();
-    if from.exists() {
-        let to = arbos_core::files::Layout::new(&core_place, &id).transcript();
-        std::fs::copy(&from, &to).with_context(|| format!("fork: copy {}", from.display()))?;
-    }
-    Ok(id)
+    let agent = arbos_core::files::fork_chat(&core_place, source_id)
+        .with_context(|| format!("fork {source_id} in {}", place.path.display()))?;
+    Ok(agent.id.to_string())
 }
 
 async fn clone_over_ws(url: &str, source_id: &str) -> Result<String> {

@@ -48,6 +48,8 @@ const TAIL_LAG: Duration = Duration::from_millis(1000);
 
 /// How often the poll may read a transcript tail for one chat.
 const PROBE_EVERY: Duration = Duration::from_secs(10);
+/// The tail of the rewind notice while the kernel is still restoring files.
+const RESTORING: &str = "restoring files\u{2026}";
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ToolStatus {
@@ -1843,7 +1845,25 @@ impl ChatSession {
                     self.provider_missing = Some(provider);
                 }
             }
-            Event::Rewound { dropped, restored } => {
+            Event::Rewound {
+                dropped,
+                restored,
+                pending,
+            } => {
+                // The second frame of a rewind with files: the restore is
+                // done. The chat was already cut on the first; only the
+                // line changes.
+                if let Some(r) = restored.as_deref()
+                    && matches!(self.items.last(), Some(ChatItem::Notice { text, .. }) if text.starts_with("rewound:") && text.ends_with(RESTORING))
+                {
+                    self.items.pop();
+                    self.notice(
+                        false,
+                        &format!("rewound: {dropped} transcript lines cut; project back to {r}"),
+                    );
+                    self.flush();
+                    return;
+                }
                 match self.rewind_to.take() {
                     Some(ix) if ix < self.items.len() => {
                         if let ChatItem::User(message) = &self.items[ix] {
@@ -1868,6 +1888,9 @@ impl ChatSession {
                 let what = match restored {
                     Some(r) => {
                         format!("rewound: {dropped} transcript lines cut; project back to {r}")
+                    }
+                    None if pending => {
+                        format!("rewound: {dropped} transcript lines cut; {RESTORING}")
                     }
                     None => format!("rewound: {dropped} transcript lines cut; files untouched"),
                 };

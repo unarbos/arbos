@@ -947,6 +947,12 @@ impl KernelHooks {
                 }
             })
             .or_else(|| worktree.as_ref().map(|w| w.path.clone()));
+        // Lean by default: a child without a kind is a worker. A kind
+        // sets `role:` itself; `role: none` means no role line.
+        child.role = match def.as_ref() {
+            None => Some(arbos_core::project::WORKER.into()),
+            Some(d) => d.role.clone().filter(|r| r != "none"),
+        };
         if let Some(d) = &def {
             child.kind = d.name.clone();
         }

@@ -71,7 +71,7 @@ impl Tool for Spawn {
                 ),
                 (
                     "task",
-                    "What to achieve, in the user's words (or give brief).",
+                    "This worker's own piece of the ask, in the user's terms (or give brief). Not the whole request.",
                     false,
                     "string",
                 ),
