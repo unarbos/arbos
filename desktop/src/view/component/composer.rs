@@ -459,6 +459,8 @@ pub struct Composer {
     voice_at: usize,
     /// A lost connection can be woken by an empty send.
     reconnect: bool,
+    /// The submit in progress carries dictated words.
+    spoken: bool,
     /// Provider filter for the model picker: the vendor prefix of the id
     /// (`openai/…` → `openai`). None: every provider.
     model_provider: Option<String>,
@@ -547,6 +549,7 @@ impl Composer {
             voice_note: None,
             voice_at: 0,
             reconnect: false,
+            spoken: false,
             hint: "Send follow-up".into(),
             painted_hint: "".into(),
             watching_focus: false,
@@ -804,7 +807,12 @@ impl Composer {
         if self.is_empty(cx) {
             return;
         }
+        // The words were spoken: the frame says so (`channel = "voice"`),
+        // so the model reads them as a transcript and the line gets the
+        // mic glyph.
+        self.spoken = true;
         self.submit(cx);
+        self.spoken = false;
     }
 
     /// Drop dictation at the caret. A space separates it from whatever was
@@ -1067,6 +1075,9 @@ impl Composer {
             std::mem::take(&mut self.attachments.get_mut(id).items),
         );
         prompt.model = self.turn_model.take().map(|m| m.to_string());
+        if self.spoken {
+            prompt.channel = "voice".into();
+        }
         self.field.update(cx, |field, cx| field.clear(cx));
         self.attachments.get_mut(id).error = None;
         self.voice_note = None;

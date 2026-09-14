@@ -447,6 +447,10 @@ pub struct Prompt {
     /// A model for this one turn ("switch to <vision model> for this
     /// turn"). None: the agent's own.
     pub model: Option<String>,
+    /// Where the words came from: "" for typed, "voice" for dictation
+    /// (the Fn take). The kernel marks a spoken line for the model and
+    /// the transcript draws the mic glyph.
+    pub channel: String,
 }
 
 impl From<String> for Prompt {
@@ -455,6 +459,7 @@ impl From<String> for Prompt {
             text,
             attachments: Vec::new(),
             model: None,
+            channel: String::new(),
         }
     }
 }
@@ -482,6 +487,7 @@ impl Prompt {
                 .join("\n\n"),
             attachments,
             model: None,
+            channel: String::new(),
         }
     }
 
@@ -494,6 +500,9 @@ impl Prompt {
         let mut text = Vec::new();
         let mut attachments = Vec::new();
         let mut model = None;
+        // Spoken if every part was: a typed follow-up joined to a take is
+        // typed.
+        let mut channel: Option<String> = None;
         for part in parts {
             if !part.text.trim().is_empty() {
                 text.push(part.text);
@@ -502,11 +511,17 @@ impl Prompt {
             if part.model.is_some() {
                 model = part.model;
             }
+            channel = match channel {
+                None => Some(part.channel),
+                Some(c) if c == part.channel => Some(c),
+                Some(_) => Some(String::new()),
+            };
         }
         Self {
             text: text.join("\n\n"),
             attachments,
             model,
+            channel: channel.unwrap_or_default(),
         }
     }
 
@@ -525,6 +540,7 @@ impl Prompt {
 
     pub fn message(&self) -> UserMessage {
         let mut message = UserMessage::from(self.text.clone());
+        message.channel = self.channel.clone();
         message.images = self
             .attachments
             .iter()
