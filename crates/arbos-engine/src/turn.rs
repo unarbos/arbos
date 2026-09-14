@@ -37,6 +37,25 @@ const MAX_CUTS: u32 = 2;
 
 /// A reply that is one JSON object naming a tool, or a tool's arguments
 /// (`{"path": "src/lib.rs"}`), instead of a function call.
+/// The model a turn runs: the wake's, when the user switched one turn
+/// ("switch to <vision model> for this turn"); else, for a child, the
+/// host's `child_model` when set (it beats the spawn call and the kind);
+/// else the agent's own; else the host's.
+pub fn pick_model(wake_model: &str, agent: &Agent, host_model: &str, child_model: &str) -> String {
+    let wake_model = wake_model.trim();
+    if !wake_model.is_empty() {
+        return wake_model.to_string();
+    }
+    if agent.parent.is_some() && !child_model.trim().is_empty() {
+        return child_model.trim().to_string();
+    }
+    if agent.model == "inherit" || agent.model.is_empty() {
+        host_model.to_string()
+    } else {
+        agent.model.clone()
+    }
+}
+
 fn looks_like_tool_call_text(content: &str) -> bool {
     let t = content
         .trim()
@@ -205,15 +224,12 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         (None, _) => return refuse(&transcript, &place, &agent, host.missing_key_hint()),
         (_, Err(e)) => return refuse(&transcript, &place, &agent, format!("{e:#}")),
     };
-    // The wake may name a model for this turn only ("switch to <vision
-    // model> for this turn"); otherwise the agent's, then the host's.
-    let model = if !wake.model.trim().is_empty() {
-        wake.model.trim().to_string()
-    } else if agent.model == "inherit" || agent.model.is_empty() {
-        host.config.model()
-    } else {
-        agent.model.clone()
-    };
+    let model = pick_model(
+        &wake.model,
+        &agent,
+        &host.config.model(),
+        &host.config.child_model,
+    );
     // The model's own context length, from the provider's model list.
     // `window_tokens = 0` uses it, capped so a 1M-token model does not turn
     // every step into a 1M-token prompt. A configured `window_tokens` is a
@@ -420,6 +436,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         if first_step {
             first_step = false;
             hooks.prompt_size(crate::tools::PromptSize {
+                model: provider.model.clone(),
                 system: managed.system,
                 tools: scaled_tools(tool_tokens, calib),
                 conversation: managed.estimated.saturating_sub(managed.system),
@@ -723,4 +740,58 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
 /// The tool schemas at the provider's rate, like the messages.
 fn scaled_tools(tokens: u64, calib: f64) -> u64 {
     (tokens as f64 * calib).round() as u64
+}
+
+#[cfg(test)]
+mod pick_model_tests {
+    use super::*;
+
+    fn agent(parent: Option<&str>, model: &str) -> Agent {
+        let mut a = Agent::root("x");
+        a.parent = parent.map(arbos_core::AgentId::new);
+        a.model = model.into();
+        a
+    }
+
+    #[test]
+    fn child_model_pins_every_child_but_not_root_and_not_a_users_one_turn_switch() {
+        let host = "openai/gpt-5.4-mini";
+        // Root: its own, else the host's; child_model never applies.
+        assert_eq!(
+            pick_model("", &agent(None, "inherit"), host, "cheap/x"),
+            host
+        );
+        assert_eq!(
+            pick_model("", &agent(None, "anthropic/claude"), host, "cheap/x"),
+            "anthropic/claude"
+        );
+        // A child: as asked when child_model is empty…
+        assert_eq!(
+            pick_model("", &agent(Some("root"), "inherit"), host, ""),
+            host
+        );
+        assert_eq!(
+            pick_model("", &agent(Some("root"), "kind/model"), host, ""),
+            "kind/model"
+        );
+        // …and child_model over the spawn call and the kind when set.
+        assert_eq!(
+            pick_model("", &agent(Some("root"), "kind/model"), host, "cheap/x"),
+            "cheap/x"
+        );
+        assert_eq!(
+            pick_model("", &agent(Some("root"), "inherit"), host, " cheap/x "),
+            "cheap/x"
+        );
+        // The user's per-turn switch beats everything.
+        assert_eq!(
+            pick_model(
+                "vision/y",
+                &agent(Some("root"), "kind/model"),
+                host,
+                "cheap/x"
+            ),
+            "vision/y"
+        );
+    }
 }
