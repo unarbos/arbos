@@ -387,7 +387,14 @@ impl State {
     /// collapsed without a drag behind it.
     pub fn copied(&self, chat: &ChatSession) -> Option<String> {
         let (ix, selection) = self.selection?;
-        let doc = self.doc(ix, item_text(chat.items.get(ix)?)?);
+        let item = chat.items.get(ix)?;
+        // The prompt card is set from the escaped text; copy from the same
+        // document, so the offsets line up (the escapes do not paste).
+        let shown: std::borrow::Cow<str> = match item {
+            ChatItem::User(message) => plain_markdown(&message.text).into(),
+            other => item_text(other)?.into(),
+        };
+        let doc = self.doc(ix, &shown);
         let text = selectable::copied(&doc, selection);
         (!text.is_empty()).then_some(text)
     }
@@ -928,7 +935,10 @@ fn user_prompt(
                                     .min_w_0()
                                     .text_style(TextStyle::Body)
                                     .text_color(theme.text)
-                                    .child(prose(chat, ix, body, window, cx)),
+                                    // Cursor shows the prompt as typed —
+                                    // backticks and stars stay characters,
+                                    // nothing is set as code or bold.
+                                    .child(prose(chat, ix, &plain_markdown(body), window, cx)),
                             ),
                     )
                 }),
@@ -1394,10 +1404,19 @@ fn prose(
         move |workspace, pointer, cx| {
             let mut url = None;
             workspace.with_session(id, cx, |chat| {
-                let Some(text) = chat.items.get(ix).and_then(item_text) else {
+                let Some(item) = chat.items.get(ix) else {
                     return;
                 };
-                url = chat.transcript.point(ix, text, pointer);
+                // The prompt card was set from the escaped text; the hit
+                // test must read the same document.
+                let shown: std::borrow::Cow<str> = match item {
+                    ChatItem::User(message) => plain_markdown(&message.text).into(),
+                    other => match item_text(other) {
+                        Some(text) => text.into(),
+                        None => return,
+                    },
+                };
+                url = chat.transcript.point(ix, &shown, pointer);
             });
             // `arbos://` stays in the app; anything else is the browser's.
             match url {
@@ -3812,18 +3831,24 @@ fn run_fold(
         }
     };
     let diff = (stats.add + stats.del > 0).then_some((stats.add, stats.del));
-    let open = chat.transcript.groups.contains(&key);
+    // A run with nothing to say for itself — a spawn, a call the stats do
+    // not count — has no line; Cursor shows the rows, never a bare
+    // "Worked" over them.
+    let bare = !live && verb == "Worked" && rest.is_empty();
+    let open = bare || chat.transcript.groups.contains(&key);
     div()
         .flex()
         .flex_col()
         .gap(px(ITEM_GAP))
-        .child(
-            fold_row(&theme, "run", key, verb, rest, diff, live, open, cx).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    this.with_session(id, cx, |chat| chat.transcript.toggle_group(key));
-                },
-            )),
-        )
+        .when(!bare, |el| {
+            el.child(
+                fold_row(&theme, "run", key, verb, rest, diff, live, open, cx).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.with_session(id, cx, |chat| chat.transcript.toggle_group(key));
+                    }),
+                ),
+            )
+        })
         .when(open, |el| {
             el.child(
                 div()
@@ -5112,4 +5137,47 @@ fn files_changed_card(
         );
     }
     card.into_any_element()
+}
+
+/// The text with markdown's marks escaped, so it renders as it was typed:
+/// a prompt is the user's words, not a document. Line breaks stay.
+pub(crate) fn plain_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for (n, line) in text.split('\n').enumerate() {
+        if n > 0 {
+            // Two spaces before the break: a hard line break in CommonMark.
+            out.push_str("  \n");
+        }
+        let trimmed = line.trim_start();
+        let lead = &line[..line.len() - trimmed.len()];
+        out.push_str(lead);
+        let mut chars = trimmed.chars().peekable();
+        let mut at_start = true;
+        while let Some(c) = chars.next() {
+            match c {
+                '`' | '*' | '_' | '~' | '[' | ']' | '\\' => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                '#' | '>' | '-' | '+' if at_start => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                '0'..='9' if at_start => {
+                    // "1. " would start a list; keep the digits, escape the dot.
+                    out.push(c);
+                    while let Some(d) = chars.peek().copied().filter(char::is_ascii_digit) {
+                        out.push(d);
+                        chars.next();
+                    }
+                    if chars.peek() == Some(&'.') {
+                        out.push('\\');
+                    }
+                }
+                _ => out.push(c),
+            }
+            at_start = false;
+        }
+    }
+    out
 }
