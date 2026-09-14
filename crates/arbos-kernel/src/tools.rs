@@ -528,13 +528,13 @@ impl Tool for SubscribeTool {
             "type": "function",
             "function": {
                 "name": "subscribe",
-                "description": "The only clock; a firing arrives as a message from subscription:N. add kind: timer (every|after, prompt); shell (cmd, every: no model turn, wakes you on failure; deliver_to user + notify \"…{output}\" sends the reading to the user); github_pr (repo, pr); github_ci (repo, pr | branch: a branch's workflow runs); inbox (path, every). list; remove|pause|resume id.",
+                "description": "The only clock; a firing arrives as a message from subscription:N. add kind: timer (every|after, prompt); shell (cmd, every: no model turn, wakes you on failure; deliver_to user + notify \"…{output}\" sends the reading to the user); goal (prompt = what must become true, cmd = the check, exit 0 closes it; you are woken with the goal while it fails, every 30m unless every says otherwise); github_pr (repo, pr); github_ci (repo, pr | branch: a branch's workflow runs); inbox (path, every). list; remove|pause|resume id.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "op": {"type": "string", "enum": ["add", "list", "remove", "pause", "resume"]},
                         "id": {"type": "integer", "description": "remove/pause/resume."},
-                        "kind": {"type": "string", "enum": ["timer", "shell", "github_pr", "github_ci", "inbox"]},
+                        "kind": {"type": "string", "enum": ["timer", "shell", "goal", "github_pr", "github_ci", "inbox"]},
                         "prompt": {"type": "string", "description": "what you are told."},
                         "every": {"type": "string", "description": "e.g. 1h, 10m."},
                         "after": {"type": "string", "description": "once, e.g. 30m."},
