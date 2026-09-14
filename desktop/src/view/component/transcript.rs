@@ -506,6 +506,38 @@ fn turn_answer(items: &[ChatItem], turn: &Turn) -> Option<String> {
 /// What the session has to say for itself. Cursor keeps failures as a
 /// muted line, not a full-width danger banner. ChatView ErrorCard puts
 /// Retry on a failed turn — same resend of the last user prompt.
+/// The kernel's "project page not updated" reminder: one dim line with a
+/// ↻ glyph, the reason only — the instruction half is the agent's to act
+/// on, not the reader's.
+fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
+    let shown = text
+        .split(" — ")
+        .next()
+        .unwrap_or(text)
+        .trim()
+        .to_string();
+    div()
+        .self_start()
+        .w_full()
+        .max_w(px(root::CHAT_MAX_WIDTH))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            icons::icon(icons::media::REPEAT)
+                .size(px(11.))
+                .text_color(theme.text_faint),
+        )
+        .child(
+            div()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child(SharedString::from(shown)),
+        )
+        .into_any_element()
+}
+
 fn notice(
     chat: &ChatSession,
     ix: usize,
@@ -516,6 +548,9 @@ fn notice(
 ) -> AnyElement {
     if !failed && text == "done" {
         return div().into_any_element();
+    }
+    if !failed && crate::model::session::is_page_nudge(text) {
+        return page_nudge(text, theme);
     }
     let shown = if failed {
         short_error(text)

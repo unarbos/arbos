@@ -2383,6 +2383,13 @@ impl ChatSession {
     }
 
     pub(crate) fn notice(&mut self, failed: bool, text: &str) {
+        // The kernel's page nudge is a standing state, not news each turn:
+        // one line, at the latest turn it applies to. An earlier copy goes.
+        if !failed && is_page_nudge(text) {
+            self.items.retain(|item| {
+                !matches!(item, ChatItem::Notice { text: t, failed: false } if is_page_nudge(t))
+            });
+        }
         self.items.push(ChatItem::Notice {
             text: text.to_owned(),
             failed,
@@ -2808,6 +2815,12 @@ fn pump(
             cx.notify();
         });
     })
+}
+
+/// The kernel's turn-end reminder that `.arbos/notes.md` did not change
+/// after a worker started or reported.
+pub fn is_page_nudge(text: &str) -> bool {
+    text.trim_start().starts_with("project page not updated")
 }
 
 /// A standing node the kernel keeps for itself: it marks the prompt so and

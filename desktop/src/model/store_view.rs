@@ -566,6 +566,29 @@ fn item(done: Option<bool>, depth: u8, text: &str, store: &Path) -> PageItem {
         target = Some(classify(t, store));
         readout = rest.to_owned();
     }
+    // A model sometimes hands the plan tool a whole checklist line as the
+    // label, and the kernel wraps it as written: `[- [ ] [name](agents/x)]
+    // (README.md)`. The row shows the name; the inner link is the better
+    // target when the outer one is missing.
+    let mut inner = label.trim();
+    loop {
+        let (_, after_box) = checkbox(bullet(inner).unwrap_or(inner));
+        let after_box = after_box.trim();
+        if after_box == inner {
+            break;
+        }
+        inner = after_box;
+    }
+    if let Some((l, t, rest)) = leading_link(inner) {
+        if target.is_none() {
+            target = Some(classify(t, store));
+        }
+        if readout.is_empty() {
+            readout = rest.to_owned();
+        }
+        inner = l;
+    }
+    let label = inner.to_owned();
     PageItem {
         done,
         depth,
@@ -575,10 +598,12 @@ fn item(done: Option<bool>, depth: u8, text: &str, store: &Path) -> PageItem {
     }
 }
 
-/// `[label](target) rest` at the start of `s`.
+/// `[label](target) rest` at the start of `s`. The label may itself hold
+/// brackets (a nested link): the close is the `](` that balances the first
+/// `[`.
 fn leading_link(s: &str) -> Option<(&str, &str, &str)> {
     let rest = s.strip_prefix('[')?;
-    let close = rest.find("](")?;
+    let close = balanced_close(rest)?;
     let label = &rest[..close];
     let after = &rest[close + 2..];
     let end = after.find(')')?;
@@ -592,6 +617,26 @@ fn leading_link(s: &str) -> Option<(&str, &str, &str)> {
         .map(str::trim_start)
         .unwrap_or(tail);
     (!label.trim().is_empty()).then_some((label.trim(), target, tail))
+}
+
+/// Byte offset in `rest` (the text after an opening `[`) of the `](` that
+/// closes it, counting nested brackets.
+fn balanced_close(rest: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let bytes = rest.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'[' => depth += 1,
+            b']' if depth == 0 => {
+                if bytes.get(i + 1) == Some(&b'(') {
+                    return Some(i);
+                }
+            }
+            b']' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 fn classify(target: &str, store: &Path) -> Target {
@@ -633,6 +678,25 @@ fn strip_front_matter(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_checklist_line_wrapped_as_a_label_shows_its_name() {
+        let store = Path::new("/p/.arbos");
+        let text = "## Tasks\n- [x] [- [ ] [rewrite-readme](.arbos/agents/rewrite-readme)](README.md) — worker reported README.md recreated\n- [ ] [- [ ] plain words](docs/x.md) — pending\n";
+        let page = ProjectPage::parse(Path::new("/p/.arbos/notes.md"), store, text);
+        let PageBlock::Item(first) = &page.blocks[1] else {
+            panic!("item")
+        };
+        assert_eq!(first.done, Some(true));
+        assert_eq!(first.label, "rewrite-readme");
+        assert_eq!(first.readout, "worker reported README.md recreated");
+        assert_eq!(first.target, Some(Target::File(PathBuf::from("/p/.arbos/README.md"))));
+        let PageBlock::Item(second) = &page.blocks[2] else {
+            panic!("item")
+        };
+        assert_eq!(second.label, "plain words");
+        assert_eq!(second.readout, "pending");
+    }
 
     #[test]
     fn a_protocol_page_parses_into_tldr_sections_and_items() {
