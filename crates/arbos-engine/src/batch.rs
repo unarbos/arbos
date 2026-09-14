@@ -464,8 +464,9 @@ async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Resu
         let place = cx.place.clone();
         let agent = cx.agent.clone();
         let name = name.clone();
+        let cwd = cx.cwd.clone();
         tokio::task::spawn_blocking(move || {
-            tools::file_hooks::after_tool(
+            let mut after = tools::file_hooks::after_tool(
                 &place,
                 &agent,
                 &name,
@@ -473,7 +474,15 @@ async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Resu
                 &body,
                 error.as_deref(),
                 &paths,
-            )
+            );
+            // A source edit reports which existing tests name what it
+            // changed; "none" is the wrong-layer signal (see git::coverage_note).
+            if error.is_none() && matches!(name.as_str(), "edit" | "write" | "apply_patch") {
+                if let Some(note) = tools::git::coverage_note(&cwd, &paths) {
+                    after.context.push(note);
+                }
+            }
+            after
         })
         .await
         .unwrap_or_default()

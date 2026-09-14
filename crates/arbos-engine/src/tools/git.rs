@@ -295,6 +295,144 @@ fn test_files_note(status: &str) -> Option<String> {
     ))
 }
 
+/// After an edit to a source file: which existing test files name the
+/// functions the diff touches. SWE-bench cycle 1: five of eight losses
+/// changed the layer the reporter saw the symptom in while the hidden tests
+/// exercise the shared helper underneath; "no existing test names this
+/// function" is the signal that the fix may sit at the wrong layer. Test
+/// files and non-code files are skipped; outside git there is nothing to
+/// say.
+pub fn coverage_note(cwd: &Path, paths: &[String]) -> Option<String> {
+    let mut lines = Vec::new();
+    for path in paths {
+        let rel = Path::new(path)
+            .strip_prefix(cwd)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| path.clone());
+        if is_test_path(&rel) || !is_code_path(&rel) {
+            continue;
+        }
+        let diff = git_out(cwd, &["diff", "HEAD", "--", &rel])?;
+        let names = changed_symbols(&diff);
+        if names.is_empty() {
+            continue;
+        }
+        let refs = test_files_naming(cwd, &names);
+        let shown: Vec<&str> = names.iter().take(4).map(String::as_str).collect();
+        if refs.is_empty() {
+            lines.push(format!(
+                "{rel}: no existing test names {}. If the wrong value comes from a helper this calls, the fix belongs in the helper that has tests (fix at the root); if this is the right level, add a test here.",
+                shown.join(", ")
+            ));
+        } else {
+            let list: Vec<&str> = refs.iter().take(5).map(String::as_str).collect();
+            lines.push(format!(
+                "{rel}: {} named in {}{}",
+                shown.join(", "),
+                list.join(", "),
+                if refs.len() > 5 {
+                    format!(" (+{} more)", refs.len() - 5)
+                } else {
+                    String::new()
+                }
+            ));
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!("Tests covering this edit — {}", lines.join(" | ")))
+}
+
+fn is_code_path(path: &str) -> bool {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "py" | "rs"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "go"
+            | "java"
+            | "rb"
+            | "c"
+            | "cc"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "cs"
+            | "kt"
+            | "swift"
+            | "php"
+            | "scala"
+    )
+}
+
+/// Function and class names a diff touches: the enclosing symbol git puts
+/// in each hunk header, plus definitions on the hunk's own lines.
+fn changed_symbols(diff: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in diff.lines() {
+        let text = if let Some(rest) = line.strip_prefix("@@") {
+            match rest.split_once("@@") {
+                Some((_, ctx)) => ctx,
+                None => continue,
+            }
+        } else if line.starts_with('+') || line.starts_with('-') || line.starts_with(' ') {
+            // Context lines count too: in a small file the enclosing def is
+            // inside the hunk, not in its header.
+            if line.starts_with("+++") || line.starts_with("---") {
+                continue;
+            }
+            &line[1..]
+        } else {
+            continue;
+        };
+        let mut words = text.split(|c: char| !c.is_alphanumeric() && c != '_');
+        while let Some(w) = words.next() {
+            if matches!(w, "def" | "fn" | "function" | "class" | "func" | "impl") {
+                if let Some(name) = words.next() {
+                    if name.len() > 1 && !out.iter().any(|n| n == name) {
+                        out.push(name.to_string());
+                    }
+                }
+            }
+        }
+        if out.len() >= 8 {
+            break;
+        }
+    }
+    out
+}
+
+/// Existing test files that mention any of `names` as a whole word.
+fn test_files_naming(cwd: &Path, names: &[String]) -> Vec<String> {
+    let mut args: Vec<&str> = vec!["grep", "-l", "-w", "-I"];
+    for n in names {
+        args.push("-e");
+        args.push(n);
+    }
+    args.push("--");
+    args.push(":(glob)**/test*");
+    args.push(":(glob)**/*test*");
+    args.push(":(glob)**/tests/**");
+    args.push(":(glob)**/testing/**");
+    args.push(":(glob)**/spec/**");
+    let Some(out) = git_out(cwd, &args) else {
+        return Vec::new();
+    };
+    let mut files: Vec<String> = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && is_test_path(l))
+        .map(str::to_string)
+        .collect();
+    files.sort();
+    files.dedup();
+    files
+}
+
 pub(crate) fn is_test_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(&lower);
@@ -420,6 +558,75 @@ pub fn undo(cwd: &Path) -> Result<ToolOut> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changed_symbols_come_from_hunk_headers_and_definitions() {
+        let diff = "@@ -10,3 +10,4 @@ def set_cmap(cmap):\n-    rc('image', cmap=cmap.name)\n+    rc('image', cmap=name)\n@@ -40,2 +41,5 @@ class Registry:\n+    def register(self, cmap, *, name=None):\n+        pass\n";
+        assert_eq!(
+            changed_symbols(diff),
+            vec!["set_cmap".to_string(), "Registry".into(), "register".into()]
+        );
+    }
+
+    #[test]
+    fn coverage_note_says_which_tests_name_the_change_or_none() {
+        let dir = std::env::temp_dir().join(format!("arbos-cov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("pkg")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(
+            dir.join("pkg/cm.py"),
+            "def register_cmap(c):\n    return c\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("pkg/pyplot.py"),
+            "def set_cmap(c):\n    return c\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("tests/test_cm.py"),
+            "from pkg.cm import register_cmap\n\ndef test_it():\n    assert register_cmap(1) == 1\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(
+            dir.join("pkg/pyplot.py"),
+            "def set_cmap(c):\n    return c.name\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("pkg/cm.py"),
+            "def register_cmap(c):\n    return c or 0\n",
+        )
+        .unwrap();
+        let pyplot = dir.join("pkg/pyplot.py").display().to_string();
+        let cm = dir.join("pkg/cm.py").display().to_string();
+        let note = coverage_note(&dir, &[pyplot]).unwrap();
+        assert!(note.contains("no existing test names set_cmap"), "{note}");
+        let note = coverage_note(&dir, &[cm]).unwrap();
+        assert!(
+            note.contains("register_cmap named in tests/test_cm.py"),
+            "{note}"
+        );
+        let test = dir.join("tests/test_cm.py").display().to_string();
+        assert!(coverage_note(&dir, &[test]).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_note_names_changed_existing_tests_only() {
