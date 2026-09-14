@@ -307,8 +307,9 @@ mod platform {
     /// its own thread; the row polls this.
     static NOTIFICATION_STATUS: AtomicI64 = AtomicI64::new(-1);
     /// The error the last `requestAuthorization` came back with. The
-    /// centre refuses an ad-hoc bundle outside /Applications outright — no
-    /// dialog, "denied" within a moment — and that is not the user's no.
+    /// centre refuses an ad-hoc-signed bundle outright, in /Applications or
+    /// not — no dialog, "denied" within a moment — and that is not the
+    /// user's no.
     static NOTIFICATION_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
     fn notification_error() -> Option<String> {
@@ -316,14 +317,6 @@ mod platform {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
-    }
-
-    /// The app is somewhere macOS registers notifications for; an ad-hoc
-    /// build launched from a build folder is not.
-    fn in_applications() -> bool {
-        std::env::current_exe()
-            .ok()
-            .is_some_and(|exe| exe.starts_with("/Applications") || exe.starts_with("/System/Applications"))
     }
 
     fn describe(error: *mut Object) -> String {
@@ -367,12 +360,12 @@ mod platform {
         match NOTIFICATION_STATUS.load(Ordering::SeqCst) {
             2 | 3 | 4 => Status::Granted,
             1 => match notification_error() {
-                // Refused by the system, not by the user: nothing to flip
-                // in a pane. Say what to do instead.
-                Some(why) if !in_applications() => Status::Unavailable(format!(
-                    "macOS registers notifications only for an app in /Applications; move Arbos.app there. ({why})"
+                // Refused by the system, not by the user: the centre does
+                // not register an ad-hoc-signed bundle, wherever it sits.
+                // Nothing to flip in a pane; say what would work.
+                Some(why) => Status::Unavailable(format!(
+                    "Needs a Developer ID-signed build of Arbos.app; this ad-hoc build cannot register. ({why})"
                 )),
-                Some(why) => Status::Unavailable(why),
                 None => Status::Denied,
             },
             0 => Status::NotAsked,
