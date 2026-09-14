@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -310,6 +311,17 @@ impl AskPrompt {
 }
 
 /// Whether the session has a live kernel socket.
+/// One frame of the screen an agent works on, for Try Live.
+#[derive(Clone)]
+pub struct LiveScreen {
+    pub image: Option<Arc<bezel::gpui::Image>>,
+    pub machine: String,
+    pub at: Instant,
+    pub width: u32,
+    pub height: u32,
+    pub error: Option<String>,
+}
+
 /// The kernel's own account of its provider, from its `provider` frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KernelProvider {
@@ -395,6 +407,10 @@ pub struct ChatSession {
     /// The last question answered or skipped from this window, and when:
     /// the transcript tail repeats it, and that repeat is not a new card.
     answered_ask: Option<(String, Instant)>,
+    /// Try Live (A-02): the latest screen frame from the agent's machine,
+    /// and whether the live view is open (the poll runs while it is).
+    pub live_screen: Option<LiveScreen>,
+    pub live_open: bool,
     /// A Stop was asked from this window (button, stop word, Force):
     /// the turn ending without an answer is then not a kernel failure.
     stop_requested: bool,
@@ -547,6 +563,8 @@ impl ChatSession {
             thought_at: None,
             streaming_agent: None,
             answered_ask: None,
+            live_screen: None,
+            live_open: false,
             stop_requested: false,
             draft_pushed: false,
             working: None,
@@ -617,6 +635,8 @@ impl ChatSession {
             thought_at: None,
             streaming_agent: None,
             answered_ask: None,
+            live_screen: None,
+            live_open: false,
             stop_requested: false,
             draft_pushed: false,
             working: None,
@@ -687,6 +707,8 @@ impl ChatSession {
             thought_at: None,
             streaming_agent: None,
             answered_ask: None,
+            live_screen: None,
+            live_open: false,
             stop_requested: false,
             draft_pushed: false,
             working: None,
@@ -2051,6 +2073,37 @@ impl ChatSession {
             | Event::Browser { .. }
             | Event::Job { .. }
             | Event::StoreChanged(_) => {}
+            Event::Screen {
+                machine,
+                png,
+                mime,
+                width,
+                height,
+                error,
+            } => {
+                let format = if mime == "image/jpeg" {
+                    bezel::gpui::ImageFormat::Jpeg
+                } else {
+                    bezel::gpui::ImageFormat::Png
+                };
+                let image = (!png.is_empty())
+                    .then(|| Arc::new(bezel::gpui::Image::from_bytes(format, png)));
+                self.live_screen = Some(LiveScreen {
+                    image,
+                    machine,
+                    at: Instant::now(),
+                    width,
+                    height,
+                    error,
+                });
+            }
+        }
+    }
+
+    /// Try Live: ask the kernel for the agent's screen now.
+    pub fn request_screen(&self) {
+        if let Connection::Live(session) = &self.connection {
+            session.request_screen();
         }
     }
 
