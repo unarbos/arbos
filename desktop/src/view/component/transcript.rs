@@ -268,7 +268,10 @@ impl<T> Memo<T> {
 impl State {
     /// The parsed markdown of item `ix`, whose prose is `text`.
     fn doc(&self, ix: usize, text: &str) -> Rc<Doc> {
-        self.docs.get(ix, text, markdown::parse)
+        // Links go in as chips — `⛓ #139`, `⚙ chat doors`, `📄 notes` — the
+        // targets as written, so a click still opens the same thing.
+        self.docs
+            .get(ix, text, |text| markdown::parse(&crate::view::chips::dress(text)))
     }
 
     /// The reveal for item `ix`: started while the item is `live` — the
@@ -1088,9 +1091,8 @@ fn done_report(text: &str) -> Option<(bool, String)> {
     Some((ok, words.trim().trim_end_matches('…').trim().to_string()))
 }
 
-/// A worker's completion as a compact card at the turn it came back to —
-/// name, verdict, its last words — instead of the done file's raw body.
-/// Click opens the worker's chat.
+/// A worker's completion, as Cursor draws it: the worker's last words as
+/// one dim line in the flow — no box, no header — that opens the worker.
 fn worker_card(
     chat: &ChatSession,
     ix: usize,
@@ -1101,69 +1103,36 @@ fn worker_card(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    let name = chat.who_label(who);
     let child = chat
         .children
         .iter()
         .find(|c| c.kernel_id.as_deref() == Some(who))
         .map(|c| c.id);
-    let (glyph, verdict, tone) = if ok {
-        (icons::status::CHECK, "done", theme.success)
+    let words = if words.is_empty() {
+        format!(
+            "{} {}",
+            chat.who_label(who),
+            if ok { "finished" } else { "ended badly" }
+        )
     } else {
-        (icons::status::DANGER_TRIANGLE, "ended badly", theme.danger)
+        words.to_string()
     };
-    let head = div()
-        .id(("worker-card-head", chat.id * 100_000 + ix as u64))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.))
-        .when(child.is_some(), |el| el.cursor_pointer())
-        .child(icons::icon(glyph).size(px(12.)).text_color(tone))
-        .child(
-            div()
-                .text_style(TextStyle::Caption)
-                .text_color(theme.text_faint)
-                .child("worker"),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_style(TextStyle::Caption)
-                .text_color(theme.text_muted)
-                .child(SharedString::from(name)),
-        )
-        .child(
-            div()
-                .flex_1()
-                .text_style(TextStyle::Caption)
-                .text_color(tone)
-                .child(verdict),
-        )
-        .when_some(child, |el, id| {
-            el.on_click(cx.listener(move |this, _, _, cx| this.select_session(id, cx)))
-        });
     div()
+        .id(("worker-line", chat.id * 100_000 + ix as u64))
         .self_start()
         .w_full()
-        .max_w(px(520.))
-        .rounded(px(Theme::surface_radius()))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface_raised)
-        .px(px(12.))
-        .py(px(8.))
-        .flex()
-        .flex_col()
-        .gap(px(6.))
-        .child(head)
-        .when(!words.is_empty(), |el| {
-            el.child(
-                div()
-                    .text_style(TextStyle::Callout)
-                    .text_color(theme.text)
-                    .child(prose(chat, ix, words, window, cx)),
+        .max_w(px(root::CHAT_MAX_WIDTH))
+        .text_style(TextStyle::Callout)
+        .text_color(if ok { theme.text_muted } else { theme.danger })
+        .when(child.is_some(), |el| el.cursor_pointer())
+        .child(prose(chat, ix, &words, window, cx))
+        .when_some(child, |el, id| {
+            el.on_mouse_down(
+                bezel::gpui::MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.select_session(id, cx)
+                }),
             )
         })
         .into_any_element()
@@ -1250,11 +1219,13 @@ fn spawned_in(items: &[ChatItem], body: Range<usize>) -> Vec<String> {
         .collect()
 }
 
-/// The parent's view of the sub-agents one turn spawned, one line each:
-/// Cursor's bold count and verb, then the task's title. Working ones
-/// shimmer; finished ones carry a check and stay, faint, so what was
-/// delegated is still on the page — under the turn that delegated it,
-/// and nowhere else. Click opens the sub-agent's chat.
+/// The parent's view of the sub-agents one turn spawned — Cursor's inline
+/// status lines, one per worker, in the flow of the conversation: `1 Working
+/// Reading project context and secrets inventory` while it runs, the step
+/// text moving as the worker moves; `Asking …`, `Waiting …`; a finished
+/// worker whose report is on the page below says nothing here, one without
+/// a report reads `Done  <title>`. Dim, no box, no glyph; the press opens
+/// the worker.
 fn children_lines(
     chat: &ChatSession,
     spawned: &[String],
@@ -1271,112 +1242,80 @@ fn children_lines(
         .iter()
         .filter(|c| c.state == ChildState::Working)
         .count();
-    let since = chat
-        .live_since
-        .and_then(|at| at.elapsed().ok())
-        .unwrap_or_default();
-    let rows: Vec<AnyElement> = children
+    let reported: Vec<&str> = chat
+        .items
         .iter()
-        .map(|child| {
-            let id = child.id;
-            let (glyph, verb, tone): (AnyElement, &str, Hsla) = match child.state {
-                ChildState::Working => {
-                    (spinner(since, theme.text_muted, cx), "Working", theme.text)
-                }
-                ChildState::Asking => (
-                    icons::icon(icons::system::CHAT_ROUND_LINE)
-                        .size(px(12.))
-                        .text_color(theme.accent)
-                        .into_any_element(),
-                    "Asking",
-                    theme.text_muted,
-                ),
-                ChildState::Waiting => (
-                    div()
-                        .size(px(9.))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(theme.text_faint)
-                        .into_any_element(),
-                    "Waiting",
-                    theme.text_muted,
-                ),
-                ChildState::Done => (
-                    icons::icon(icons::status::CHECK)
-                        .size(px(12.))
-                        .text_color(theme.success)
-                        .into_any_element(),
-                    "Done",
-                    theme.text_faint,
-                ),
-            };
-            let label = format!("{verb}  {}", child.title);
-            div()
-                .id(("child-line", id))
-                .self_start()
-                .max_w_full()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(ROW_GAP))
-                .py(px(2.))
-                .px(px(4.))
-                .rounded(px(Theme::control_radius()))
-                .cursor_pointer()
-                .hover(|el| el.bg(theme.element_hover))
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(14.))
-                        .flex()
-                        .justify_center()
-                        .child(glyph),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_style(TextStyle::Callout)
-                        .text_color(tone)
-                        .child(if child.state == ChildState::Working {
-                            shimmer_label(label, live_phase(), theme, cx)
-                        } else {
-                            spaced_label(label, tone, theme)
-                        }),
-                )
-                // On the press, as a source list selects: while the turn
-                // streams, the transcript grows and scrolls between a press
-                // and its release, so a click's two halves land on
-                // different rows and the row never opens.
-                .on_mouse_down(
-                    bezel::gpui::MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.select_session(id, cx)
-                    }),
-                )
-                .into_any_element()
+        .filter_map(|item| match item {
+            ChatItem::From { who, text, .. } if done_report(text).is_some() => Some(who.as_str()),
+            _ => None,
         })
         .collect();
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(2.))
-        .when(children.len() > 1, |el| {
-            el.child(
-                div()
-                    .px(px(4.))
-                    .text_style(TextStyle::Caption)
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(if working > 0 {
-                        format!("{working} of {} sub-agents working", children.len())
+    let mut first_working = true;
+    let rows: Vec<AnyElement> = children
+        .iter()
+        .filter_map(|child| {
+            let id = child.id;
+            let (verb, rest, tone) = match child.state {
+                ChildState::Working => {
+                    let verb = if first_working && working > 1 {
+                        format!("{working} Working")
+                    } else if first_working {
+                        "1 Working".to_string()
                     } else {
-                        format!("{} sub-agents", children.len())
-                    })),
+                        "Working".to_string()
+                    };
+                    first_working = false;
+                    (verb, child.step.clone().unwrap_or_else(|| child.title.clone()), theme.text_muted)
+                }
+                ChildState::Asking => ("Asking".to_string(), child.title.clone(), theme.accent),
+                ChildState::Waiting => ("Waiting".to_string(), child.title.clone(), theme.text_faint),
+                ChildState::Done => {
+                    if child.kernel_id.as_deref().is_some_and(|k| reported.contains(&k)) {
+                        return None;
+                    }
+                    ("Done".to_string(), child.title.clone(), theme.text_faint)
+                }
+            };
+            Some(
+                div()
+                    .id(("child-line", id))
+                    .self_start()
+                    .max_w_full()
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .gap(px(6.))
+                    .py(px(2.))
+                    .cursor_pointer()
+                    .text_style(TextStyle::Callout)
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(tone)
+                            .child(SharedString::from(verb)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(rest)),
+                    )
+                    // On the press, as a source list selects: while the turn
+                    // streams, the transcript grows and scrolls between a
+                    // press and its release.
+                    .on_mouse_down(
+                        bezel::gpui::MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.select_session(id, cx)
+                        }),
+                    )
+                    .into_any_element(),
             )
         })
-        .children(rows)
-        .into_any_element()
+        .collect();
+    div().flex().flex_col().children(rows).into_any_element()
 }
 
 /// One message, selectable. The transcript's two prose items — what you asked
@@ -3294,7 +3233,21 @@ fn zone(
     // Cursor's sub-agent lines under the status: "1 Working  <task>" per
     // live child, and a check for each one that finished. Under the turn
     // that spawned them, once; the panel keeps the whole tree.
-    let spawned = spawned_in(&chat.items, body.clone());
+    let mut spawned = spawned_in(&chat.items, body.clone());
+    // A `spawn wait=true` names its child only when it returns; until then
+    // the worker is running under this turn with no record to hang from.
+    // The running turn takes every child no turn has named yet.
+    if running {
+        let named = spawned_in(&chat.items, 0..chat.items.len());
+        for child in &chat.children {
+            if let Some(id) = &child.kernel_id
+                && !named.contains(id)
+                && !spawned.contains(id)
+            {
+                spawned.push(id.clone());
+            }
+        }
+    }
     if !spawned.is_empty() && !chat.children.is_empty() {
         zone = zone.child(children_lines(chat, &spawned, &theme, cx));
     }

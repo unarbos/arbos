@@ -815,11 +815,18 @@ impl Arbos {
         cx.observe_window_bounds(window, |_, window, cx| {
             appearance::reapply_window_background(cx);
             keep_macos_glass(window);
+            sync_macos_chrome(cx);
             restore_usable_bounds(window);
             cx.notify();
         })
         .detach();
+        // The palette moved (Settings › Appearance, or the OS at sunset):
+        // the window's own chrome follows it, so the title band the traffic
+        // lights sit in is the same surface as the tab strip.
+        cx.observe_global::<Theme>(|_, cx| sync_macos_chrome(cx))
+            .detach();
         keep_macos_glass(window);
+        sync_macos_chrome(cx);
         this.sync_composer(cx);
         // First launch: the Home tab's face — name, glyph, colour, prefilled
         // "Home", skippable — then the permissions sheet, each once. After
@@ -1977,6 +1984,63 @@ fn keep_macos_glass(_window: &Window) {
 
 #[cfg(not(target_os = "macos"))]
 fn keep_macos_glass(_window: &Window) {}
+
+/// The window's own chrome in the theme's colour. AppKit paints the title
+/// band (the traffic lights' strip) from the `NSWindow`'s background colour
+/// and its appearance, not from what we draw under it, so a dark palette
+/// over a window left at AppKit's defaults kept a white band across the
+/// top. Every window takes the chrome surface as its background — clear
+/// where glass is on, so the frost still shows — and the palette's
+/// appearance, so the lights and the band are drawn for dark.
+#[cfg(target_os = "macos")]
+fn sync_macos_chrome(cx: &App) {
+    use objc::{
+        class, msg_send,
+        runtime::{Object, YES},
+        sel, sel_impl,
+    };
+    let theme = Theme::of(cx);
+    let chrome = chrome_bg(theme);
+    let rgba = chrome.to_rgb();
+    let dark = theme.appearance == bezel::theme::Appearance::Dark;
+    unsafe {
+        let name: *mut Object = msg_send![
+            class!(NSString),
+            stringWithUTF8String: if dark {
+                c"NSAppearanceNameDarkAqua".as_ptr()
+            } else {
+                c"NSAppearanceNameAqua".as_ptr()
+            }
+        ];
+        let appearance: *mut Object = msg_send![class!(NSAppearance), appearanceNamed: name];
+        let color: *mut Object = if theme.vibrancy {
+            msg_send![class!(NSColor), clearColor]
+        } else {
+            msg_send![
+                class!(NSColor),
+                colorWithSRGBRed: rgba.r as f64
+                green: rgba.g as f64
+                blue: rgba.b as f64
+                alpha: 1.0f64
+            ]
+        };
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let windows: *mut Object = msg_send![app, windows];
+        let count: usize = msg_send![windows, count];
+        for i in 0..count {
+            let ns_window: *mut Object = msg_send![windows, objectAtIndex: i];
+            if ns_window.is_null() {
+                continue;
+            }
+            let _: () = msg_send![ns_window, setAppearance: appearance];
+            let _: () = msg_send![ns_window, setBackgroundColor: color];
+            let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: YES];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sync_macos_chrome(_cx: &App) {}
 
 /// One `voice ·` line for the chat during a call: what the narrator said,
 /// marked by kind so a question or a failure reads as one. Everything else
