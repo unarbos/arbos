@@ -654,31 +654,51 @@ impl Tool for Ask {
     fn schema(&self) -> Value {
         typed_schema(
             "ask",
-            "Ask the user a question.",
+            "Ask the user a question. Default: your turn parks until they answer. wait:false: keep working; the answer lands at your next tool boundary, or opens your next turn.",
             &[
                 ("question", "", true, "string"),
                 ("options", "Choices.", false, "array"),
+                (
+                    "wait",
+                    "false = do not park (default true).",
+                    false,
+                    "boolean",
+                ),
             ],
         )
     }
-    fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
-        Ok(Plan::access(Access::exclusive()).interactive())
+    fn plan(&self, _cx: &PlanCx, args: &Value) -> Result<Plan> {
+        // A non-blocking ask is a message out, nothing more: it runs with
+        // the batch and holds nothing.
+        Ok(if opt_bool(args, "wait").unwrap_or(true) {
+            Plan::access(Access::exclusive()).interactive()
+        } else {
+            Plan::access(Access::none())
+        })
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         let hooks = Arc::clone(&self.0);
         Box::pin(async move {
             let q = req(&args, "question")?;
             let options = opt_strings(&args, "options");
-            // Park: the question is a file, the turn ends after this call,
-            // and the user's answer starts the next turn as a message
-            // (Cursor's shape; restart-safe).
+            let wait = opt_bool(&args, "wait").unwrap_or(true);
+            // The question is a file either way (restart-safe). Parked: the
+            // turn ends after this call and the answer starts the next one
+            // (Cursor's shape). Not parked: the turn goes on, and the
+            // answer is read at the next tool boundary — or opens the next
+            // turn if this one ends first (Codex's inline answers).
             let id = hooks.ask(&cx.agent.id, q, &options, &cx.call_id)?;
-            Ok(ToolOut::parked(
-                format!(
-                    "Question {id} is with the user. This turn ends here; their answer arrives as your next message."
-                ),
-                "Waiting for your answer",
-            ))
+            if wait {
+                return Ok(ToolOut::parked(
+                    format!(
+                        "Question {id} is with the user. This turn ends here; their answer arrives as your next message."
+                    ),
+                    "Waiting for your answer",
+                ));
+            }
+            Ok(ToolOut::text(format!(
+                "Question {id} is with the user; keep working on what does not depend on it. Their answer arrives as a user message at your next tool call, or opens your next turn."
+            )))
         })
     }
 }

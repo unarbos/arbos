@@ -461,7 +461,7 @@ impl KernelHooks {
                 } else {
                     "waits".into()
                 },
-                do_kind: if arbos_core::inbox::is_steer_kind(&filed.msg.kind) {
+                do_kind: if matches!(filed.msg.kind.as_str(), "steer" | "wake") {
                     "steer".into()
                 } else {
                     "agent".into()
