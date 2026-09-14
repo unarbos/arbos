@@ -589,6 +589,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 calib = (u.used as f64 / ours as f64).clamp(CALIB_MIN, CALIB_MAX);
             }
         }
+        if let Some(step) = arbos_core::status::spoken(&content) {
+            hooks.spoke_status(&step);
+        }
         if !content.trim().is_empty() || !calls.is_empty() {
             // The Assistant line is the step boundary the projection and the
             // fold units cut on. A step that called tools without saying
@@ -614,13 +617,19 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             // `[kernel] …` either way, and the window draws it dim instead
             // of as a bubble the user never typed.
             let nudge = if content.trim().is_empty() {
-                Some("Your reply was empty. Continue the task, or say what is blocking you.")
+                Some((
+                    "Your reply was empty. Continue the task, or say what is blocking you.",
+                    "empty reply",
+                ))
             } else if looks_like_tool_call_text(&content) {
-                Some("That was a tool call written as text, so nothing ran. Call the tool itself.")
+                Some((
+                    "That was a tool call written as text, so nothing ran. Call the tool itself.",
+                    "tool call written as text",
+                ))
             } else {
                 None
             };
-            if let Some(text) = nudge {
+            if let Some((text, reason)) = nudge {
                 nudged = true;
                 let mut batch = Vec::new();
                 if !content.trim().is_empty() {
@@ -629,7 +638,10 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                         reasoning_details: None,
                     }));
                 }
-                batch.push(Event::new(EventKind::Nudge { text: text.into() }));
+                batch.push(Event::new(EventKind::Nudge {
+                    text: text.into(),
+                    reason: reason.into(),
+                }));
                 append_events(&transcript, &batch)?;
                 events = load_transcript(&transcript)?;
                 continue;

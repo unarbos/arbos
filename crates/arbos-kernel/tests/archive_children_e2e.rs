@@ -133,6 +133,63 @@ fn archive_children_false_keeps_the_folder_where_it_was() {
     let _ = k.child.kill();
 }
 
+/// The project page's row for a worker (target `agents/<id>`) cannot say
+/// "worker running" once the folder is in the archive: the archive step
+/// checks it with the worker's last words and moves the link along. The
+/// worker's name reads as words even when the model passed a slug.
+#[test]
+fn archiving_a_worker_retires_its_row_on_the_project_page() {
+    let replies = concat!(
+        "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"plan\",\"arguments\":{\"op\":\"add\",\"section\":\"Work\",\"text\":\"[Codeword](agents/code-word) — worker running\"}},{\"name\":\"spawn\",\"arguments\":{\"name\":\"code-word\",\"task\":\"say the codeword\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"started\"}\n",
+        "{\"content\":\"the codeword is xylophone\"}\n",
+        "{\"agent\":\"root\",\"content\":\"noted\"}\n",
+    );
+    let mut k = start_kernel_replay("archive-page-row", replies);
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "get the codeword"}));
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    let page = k.place.join(".arbos/notes.md");
+    assert!(
+        wait_for(Duration::from_secs(10), || std::fs::read_to_string(&page)
+            .unwrap_or_default()
+            .contains("- [ ] [Codeword](agents/code-word) — worker running")),
+        "root's row while the worker runs: {}",
+        std::fs::read_to_string(&page).unwrap_or_default()
+    );
+    let agent_md = std::fs::read_to_string(k.place.join(".arbos/agents/code-word/agent.md"))
+        .unwrap_or_default();
+    assert!(
+        agent_md.contains("Code word"),
+        "the slug the model passed reads as words: {agent_md}"
+    );
+
+    let archived = k.place.join(".arbos/archive/agents/code-word");
+    assert!(
+        wait_for(Duration::from_secs(30), || archived
+            .join("transcript.jsonl")
+            .exists()),
+        "the worker moves to the archive once root has read its done"
+    );
+    let text = std::fs::read_to_string(&page).unwrap_or_default();
+    assert!(
+        text.contains(
+            "- [x] [Codeword](archive/agents/code-word) — worker finished: the codeword is xylophone"
+        ),
+        "the row is checked, says what the worker said, and links the archive: {text}"
+    );
+    assert_eq!(
+        text.matches("[Codeword]").count(),
+        1,
+        "one row, not two: {text}"
+    );
+    let _ = k.child.kill();
+}
+
 /// A `wait=true` worker's report is the spawn result; no done file
 /// follows, so the archive must come from the turn end instead. The
 /// window hears about the move as `changed` frames and a fresh `tree`.

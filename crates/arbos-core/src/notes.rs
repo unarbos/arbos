@@ -111,6 +111,61 @@ fn link_label(s: &str) -> Option<&str> {
     (!label.trim().is_empty()).then_some(label)
 }
 
+/// `[label](target) …` → `target`.
+fn link_target(s: &str) -> Option<&str> {
+    let rest = s.trim_start().strip_prefix('[')?;
+    let close = rest.find("](")?;
+    let after = &rest[close + 2..];
+    let end = after.find(')')?;
+    let target = after[..end].trim();
+    (!target.is_empty()).then_some(target)
+}
+
+/// The label of an item, linked or not, without its readout.
+fn item_label(s: &str) -> String {
+    if let Some(l) = link_label(s) {
+        return l.trim().to_string();
+    }
+    s.split_once(" — ")
+        .map(|(l, _)| l)
+        .unwrap_or(s)
+        .trim()
+        .to_string()
+}
+
+/// A target as compared: `./agents/x/` and `.arbos/agents/x` are
+/// `agents/x`; a URL loses only a trailing slash.
+fn norm_target(t: &str) -> String {
+    if t.contains("://") {
+        return t.trim_end_matches('/').to_string();
+    }
+    let mut t = t.trim();
+    for prefix in ["./", ".arbos/"] {
+        t = t.strip_prefix(prefix).unwrap_or(t);
+    }
+    t.trim_end_matches('/').to_string()
+}
+
+fn same_target(a: &str, b: &str) -> bool {
+    norm_target(a) == norm_target(b)
+}
+
+/// Does `target` point into worker `agent`'s folder (`agents/<id>`, or a
+/// file under it)?
+fn targets_worker(target: &str, agent: &str) -> bool {
+    let t = norm_target(target);
+    let dir = format!("agents/{agent}");
+    t == dir || t.starts_with(&format!("{dir}/"))
+}
+
+/// What `add` did: the item's number, and whether it rewrote an item
+/// that already named the same target instead of appending one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Added {
+    pub n: usize,
+    pub replaced: bool,
+}
+
 fn parse_item_line(line: &str) -> Option<(bool, &str)> {
     let t = line.trim_start();
     let rest = t.strip_prefix("- [")?;
@@ -233,8 +288,53 @@ impl Notes {
         out
     }
 
-    /// Append an item under `section` (created at the end when new).
-    pub fn add(&mut self, section: &str, text: &str) -> usize {
+    /// Add an item under `section` (created at the end when new). An
+    /// item that already names the same link target — or, with no link
+    /// on either side, the same label — is rewritten in place and
+    /// reopened instead of appended: a coordinator that retries a spawn
+    /// and adds its row again gets one row, not two.
+    pub fn add(&mut self, section: &str, text: &str) -> Added {
+        let text = text.trim();
+        if let Some(existing) = self.same_item(text) {
+            let ix = self.line_of(existing).expect("item line exists");
+            self.lines[ix] = format!("- [ ] {text}");
+            self.refresh_tldr(text);
+            return Added {
+                n: existing,
+                replaced: true,
+            };
+        }
+        Added {
+            n: self.append(section, text),
+            replaced: false,
+        }
+    }
+
+    /// The number of the item `text` would duplicate, if any.
+    fn same_item(&self, text: &str) -> Option<usize> {
+        let target = link_target(text);
+        let label = item_label(text);
+        self.items()
+            .into_iter()
+            .find(|i| match (target, link_target(&i.text)) {
+                (Some(a), Some(b)) => same_target(a, b),
+                (None, None) => item_label(&i.text).eq_ignore_ascii_case(&label),
+                _ => false,
+            })
+            .map(|i| i.n)
+    }
+
+    /// Every open item whose link target names the worker `agent` (the
+    /// protocol's shape while a worker runs: target `agents/<id>`).
+    pub fn worker_items(&self, agent: &str) -> Vec<Item> {
+        self.items()
+            .into_iter()
+            .filter(|i| !i.done)
+            .filter(|i| link_target(&i.text).is_some_and(|t| targets_worker(t, agent)))
+            .collect()
+    }
+
+    fn append(&mut self, section: &str, text: &str) -> usize {
         let section = section.trim();
         let heading = format!("## {section}");
         let insert_at = if section.is_empty() {
@@ -256,8 +356,11 @@ impl Notes {
                 })
         };
         let line = format!("- [ ] {}", text.trim());
-        match insert_at {
-            Some(ix) => self.lines.insert(ix, line),
+        let at = match insert_at {
+            Some(ix) => {
+                self.lines.insert(ix, line);
+                ix
+            }
             None => {
                 if !section.is_empty() {
                     if !self.lines.is_empty() {
@@ -266,9 +369,15 @@ impl Notes {
                     self.lines.push(heading);
                 }
                 self.lines.push(line);
+                self.lines.len() - 1
             }
-        }
-        self.items().len()
+        };
+        // The new item's number: items are numbered through the whole
+        // file, and a section in the middle puts it before later ones.
+        self.lines[..=at]
+            .iter()
+            .filter(|l| parse_item_line(l).is_some())
+            .count()
     }
 
     /// Rewrite item `n`'s text (the status readout is part of it).
@@ -728,7 +837,9 @@ mod tests {
             ("Verify".into(), "run tests".into()),
         ]);
         assert_eq!(n.items().len(), 3);
-        assert_eq!(n.add("Plan", "commit"), 4);
+        // Its number is its place in the file (Plan comes before Verify),
+        // not the count of items.
+        assert_eq!(n.add("Plan", "commit").n, 3);
         assert_eq!(n.items()[2].text, "commit");
         n.update(1, "read the issue — done reading").unwrap();
         assert_eq!(n.items()[0].readout(), Some("done reading"));
@@ -740,5 +851,54 @@ mod tests {
             n.show()
         );
         assert!(n.render().contains("## Plan\n- [ ] read the issue — done reading\n- [ ] commit\n\n## Verify\n- [ ] run tests\n"), "{}", n.render());
+    }
+
+    #[test]
+    fn adding_the_same_target_again_rewrites_the_row() {
+        let mut n = Notes::parse(SAMPLE);
+        let again = n.add(
+            "Kernel",
+            "[Edge review](agents/math-edge-review) — worker running",
+        );
+        assert!(!again.replaced);
+        let retry = n.add(
+            "Kernel",
+            "[Edge review](.arbos/agents/math-edge-review/) — pending retry with a fresh branch",
+        );
+        assert!(retry.replaced);
+        assert_eq!(retry.n, again.n);
+        let rows: Vec<_> = n
+            .items()
+            .into_iter()
+            .filter(|i| i.label() == "Edge review")
+            .collect();
+        assert_eq!(rows.len(), 1, "{}", n.render());
+        assert_eq!(rows[0].readout(), Some("pending retry with a fresh branch"));
+        // Same label, no link on either side: one row too.
+        let a = n.add("Desktop", "panel — waiting on layout");
+        assert!(a.replaced, "{}", n.render());
+        // A different worker with a like name is its own row.
+        let other = n.add(
+            "Kernel",
+            "[Edge review 2](agents/math-edge-review-2) — running",
+        );
+        assert!(!other.replaced);
+    }
+
+    #[test]
+    fn worker_rows_are_found_by_their_agents_target() {
+        let mut n = Notes::parse(SAMPLE);
+        n.add(
+            "Kernel",
+            "[Docstrings](agents/math-docstrings) — worker running",
+        );
+        n.add(
+            "Kernel",
+            "[Notes](agents/math-docstrings/notes.md) — the worker's list",
+        );
+        n.add("Kernel", "[Other](agents/math-docstrings-2) — running");
+        let mine = n.worker_items("math-docstrings");
+        assert_eq!(mine.len(), 2, "{mine:?}");
+        assert!(n.worker_items("nobody").is_empty());
     }
 }

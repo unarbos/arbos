@@ -780,7 +780,7 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
         EventKind::ImageDescribed { path, model, text } => {
             vec![Event::ImageDescribed { path, model, text }]
         }
-        EventKind::Nudge { text } => vec![Event::Nudge(text)],
+        EventKind::Nudge { text, .. } => vec![Event::Nudge(text)],
         // The turn was cut short; the pane says by whom (the fold line
         // picks the same text up).
         EventKind::Interrupted { detail } => vec![Event::Aside(

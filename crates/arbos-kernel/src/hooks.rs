@@ -142,6 +142,8 @@ impl Caps {
 pub const STATUS_DEBOUNCE_MS: i64 = 300;
 
 pub const NOTES_NUDGE: &str = "project page not updated last turn: a worker was started or reported and .arbos/notes.md did not change — update it (plan add/check) before or with your reply";
+/// The same, in the few words a window's notice line has room for.
+pub const NOTES_NUDGE_REASON: &str = "project page not updated";
 
 pub struct KernelHooks {
     pub place: Place,
@@ -416,6 +418,7 @@ impl KernelHooks {
         }
         let nudge = Event::new(EventKind::Nudge {
             text: NOTES_NUDGE.to_string(),
+            reason: NOTES_NUDGE_REASON.to_string(),
         });
         let _ = append_event(&self.layout(agent).transcript(), &nudge);
     }
@@ -1106,7 +1109,9 @@ impl KernelHooks {
         let saved_parent =
             arbos_core::load_agent(&self.place, &parent.id).unwrap_or_else(|_| parent.clone());
         let mut child = Agent::root(&id);
-        child.name = label.unwrap_or(brief).chars().take(48).collect();
+        child.name = label
+            .map(spoken_name)
+            .unwrap_or_else(|| brief.chars().take(48).collect());
         child.parent = Some(parent.id.clone());
         child.model = model.unwrap_or("inherit").to_string();
         if let Some(list) = allowlist {
@@ -1636,6 +1641,28 @@ pub fn roster(agents: &[Agent], me: &AgentId) -> String {
 
 /// A worker's name as an id: words joined by `-`, so "Write river poem"
 /// reads as `write-river-poem` in the panel and in `say to=`.
+/// The name a window shows for a spawned worker. A model that passes the
+/// slug it wants as the id (`math-docstrings`) would otherwise leave the
+/// name equal to the id, which every client treats as no name at all and
+/// falls back to "Delegate N". A slug reads as words: `Math docstrings`.
+/// A name with spaces or capitals is the model's own and stays.
+fn spoken_name(label: &str) -> String {
+    let label: String = label.trim().chars().take(48).collect();
+    let slug_like = !label.is_empty()
+        && label
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if !slug_like {
+        return label;
+    }
+    let words: Vec<&str> = label.split(['-', '_']).filter(|w| !w.is_empty()).collect();
+    let mut out = words.join(" ");
+    if let Some(first) = out.get(..1) {
+        out.replace_range(..1, &first.to_ascii_uppercase());
+    }
+    out
+}
+
 fn name_slug(name: &str) -> String {
     let words: Vec<String> = name
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -1706,4 +1733,18 @@ fn count_lines(path: &std::path::Path) -> u64 {
         n += buf[..read].iter().filter(|b| **b == b'\n').count() as u64;
     }
     n
+}
+
+#[cfg(test)]
+mod spoken_name_tests {
+    use super::spoken_name;
+
+    #[test]
+    fn a_slug_reads_as_words_and_a_real_name_stays() {
+        assert_eq!(spoken_name("math-docstrings"), "Math docstrings");
+        assert_eq!(spoken_name("math_edge_review-2"), "Math edge review 2");
+        assert_eq!(spoken_name("Review math_utils.py"), "Review math_utils.py");
+        assert_eq!(spoken_name("Changelog draft"), "Changelog draft");
+        assert_eq!(spoken_name("  "), "");
+    }
 }

@@ -107,6 +107,11 @@ pub enum EventKind {
     /// notice; a window draws it dim, as an aside, never as a failure.
     Nudge {
         text: String,
+        /// The nudge in a few words ("project page not updated"), for a
+        /// client's one-line notice; `text` is the full reminder the model
+        /// reads. Absent on lines from before the key existed.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        reason: String,
     },
     /// An attached image the selected model could not see, described in
     /// words by `model` (a vision-capable one) so the turn went on with the

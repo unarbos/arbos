@@ -47,7 +47,7 @@ impl Tool for StatusTool {
     fn schema(&self) -> Value {
         typed_schema(
             "status",
-            "Say what you are doing now, for the line beside your name: a verb phrase, six words or less (\"Reading project context\"). Call it at each major step; it replaces the last one.",
+            "Say what you are doing now, for the line beside your name: a verb phrase, six words or less (\"Reading project context\"). Call it at each major step; it replaces the last one. A tool call, not a line of text in your reply.",
             &[("step", "", true, "string")],
         )
     }
@@ -509,9 +509,16 @@ impl Tool for PlanTool {
                                 arbos_core::notes::SHAPES
                             )
                         })?;
-                    let k = notes.add(opt_str(&args, "section").unwrap_or(""), text);
+                    let added = notes.add(opt_str(&args, "section").unwrap_or(""), text);
                     hooks.save_notes(agent, &notes)?;
-                    format!("Added item {k}.")
+                    if added.replaced {
+                        format!(
+                            "Rewrote item {} (it already named that target); nothing was added.",
+                            added.n
+                        )
+                    } else {
+                        format!("Added item {}.", added.n)
+                    }
                 }
                 "check" => {
                     let k = n()?;

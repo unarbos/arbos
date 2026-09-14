@@ -74,6 +74,22 @@ pub fn clip(step: &str) -> String {
     cut
 }
 
+/// A `status` call the model wrote as prose instead: a reply that is one
+/// line, `status: Reading project context` (any case). Some models
+/// announce the step this way before their tool calls; the kernel takes
+/// the words as the live line so the window shows the step and not a
+/// paragraph. Anything longer, or with more lines, is a real reply.
+pub fn spoken(text: &str) -> Option<String> {
+    let line = text.trim();
+    if line.is_empty() || line.contains('\n') {
+        return None;
+    }
+    let lower = line.to_ascii_lowercase();
+    let rest = line.get(lower.strip_prefix("status:").map(|_| "status:".len())?..)?;
+    let step = rest.trim().trim_matches(['*', '`']).trim();
+    (!step.is_empty() && step.chars().count() <= MAX_CHARS * 2).then(|| clip(step))
+}
+
 /// The kernel's guess at what a tool call is doing, for an agent that
 /// has not said. Verb phrase, short, from the tool and its arguments.
 pub fn derived(tool: &str, args: Option<&serde_json::Value>) -> String {
@@ -230,5 +246,21 @@ mod tests {
         assert!(clear(&place, "root"));
         assert!(read(&place, "root").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_one_line_status_written_as_prose_is_the_step() {
+        assert_eq!(
+            spoken("status: Running sleep 45"),
+            Some("Running sleep 45".into())
+        );
+        assert_eq!(
+            spoken("  Status: **Reading the issue**"),
+            Some("Reading the issue".into())
+        );
+        assert_eq!(spoken("status:"), None);
+        assert_eq!(spoken("status: first\nthen a paragraph"), None);
+        assert_eq!(spoken("The status: all tests pass."), None);
+        assert_eq!(spoken("Done on branch x"), None);
     }
 }
