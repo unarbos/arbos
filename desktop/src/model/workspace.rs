@@ -550,6 +550,11 @@ impl Workspace {
         dirs::home_dir().map(|home| Place::local(home.join(".arbos")))
     }
 
+    /// The Home tab's index, when it is open.
+    pub fn home_index(&self) -> Option<usize> {
+        self.projects.iter().position(Self::is_home)
+    }
+
     /// Whether this project is the home tab.
     pub fn is_home(project: &Project) -> bool {
         Self::home_place().is_some_and(|home| home == project.place())
@@ -1502,12 +1507,27 @@ impl Workspace {
             .iter()
             .filter_map(|chat| chat.agent_session.clone().map(|sid| (sid, chat.id)))
             .collect();
-        for chat in &mut self.projects[ix].sessions {
-            if chat.parent.is_none() {
-                chat.parent = chat
+        let wanted: Vec<(u64, u64)> = self.projects[ix]
+            .sessions
+            .iter()
+            .filter(|chat| chat.parent.is_none())
+            .filter_map(|chat| {
+                let parent = chat
                     .parent_kernel
                     .as_ref()
-                    .and_then(|sid| by_kernel.get(sid).copied());
+                    .and_then(|sid| by_kernel.get(sid).copied())?;
+                Some((chat.id, parent))
+            })
+            .collect();
+        for (id, parent) in wanted {
+            // A filed parent that is this chat's own descendant would close
+            // the tree into a ring; the file is wrong, the link stays off.
+            if !self.projects[ix].can_parent(id, parent) {
+                eprintln!("session {id}: parent {parent} would make a ring; left unparented");
+                continue;
+            }
+            if let Some(chat) = self.projects[ix].session_mut(id) {
+                chat.parent = Some(parent);
             }
         }
         self.number_delegates(ix);
@@ -1747,6 +1767,45 @@ impl Workspace {
     /// turn (so it reopens lit) and appended to the agent's
     /// `feedback.jsonl` in the place, for QA and the kernel. Clicking the
     /// lit thumb clears the vote.
+    /// Try Live (A-02): open or close the live view of the agent's screen.
+    /// While open, the kernel is asked for a frame every two seconds; for
+    /// an agent on another machine the kernel forwards the request over
+    /// its link, so the window sees that machine's screen.
+    pub fn toggle_live(&mut self, id: u64, cx: &mut Context<Self>) {
+        let mut opened = false;
+        self.with_session(id, cx, |chat| {
+            chat.live_open = !chat.live_open;
+            opened = chat.live_open;
+            if opened {
+                chat.request_screen();
+            }
+        });
+        if !opened {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let keep = this
+                    .update(cx, |workspace, cx| {
+                        let mut open = false;
+                        workspace.with_session(id, cx, |chat| {
+                            open = chat.live_open;
+                            if open {
+                                chat.request_screen();
+                            }
+                        });
+                        open
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// "Rewind here" under a turn: chat and files back to before its prompt.
     pub fn rewind_turn(&mut self, id: u64, turn: usize, cx: &mut Context<Self>) {
         self.with_session(id, cx, |chat| chat.rewind(turn, true));
@@ -2127,6 +2186,18 @@ impl Workspace {
     /// See [`ChatSession::set_mode`].
     pub fn set_session_mode(&mut self, id: u64, mode_id: String, cx: &mut Context<Self>) {
         self.with_session(id, cx, |chat| chat.set_mode(&mode_id));
+    }
+
+    /// Plan mode with approval (P-10): the agent wrote its checklist in
+    /// plan mode (read-only); the user approves, so the mode becomes auto
+    /// and the next turn executes the list.
+    pub fn approve_plan(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.with_session(id, cx, |chat| chat.set_mode("auto"));
+        self.send(
+            id,
+            "Plan approved. Execute your checklist now: work the open items in order, check each off with plan check and a one-line readout as you go, and report when done.".to_string(),
+            cx,
+        );
     }
 
     /// Switch the model later turns run on. See [`ChatSession::set_model`].
@@ -2513,8 +2584,14 @@ impl Workspace {
                 .session(owner)
                 .and_then(|chat| chat.agent_session.clone());
             let mut dirty = false;
+            let ring = !self.projects[ix].can_parent(id, owner);
+            if ring {
+                eprintln!(
+                    "session {id} ({kernel_id}) listed as a child of {owner}, its own descendant; the link stays as it was"
+                );
+            }
             if let Some(chat) = self.projects[ix].session_mut(id) {
-                if chat.parent != Some(owner) {
+                if !ring && chat.parent != Some(owner) {
                     chat.parent = Some(owner);
                     dirty = true;
                 }

@@ -291,21 +291,27 @@ impl Project {
 
     /// Whether `older` is `younger` or sits above it in the parent chain.
     pub fn ancestor_of(&self, older: u64, younger: u64) -> bool {
-        let mut at = Some(younger);
-        while let Some(id) = at {
-            if id == older {
-                return true;
-            }
-            at = self.session(id).and_then(|chat| chat.parent);
-        }
-        false
+        self.path_to(younger).contains(&older)
     }
 
-    /// Sessions from the root that holds `id` down to `id`, root first.
+    /// Whether `child` may take `parent` as its parent: not itself, and
+    /// not one of its own descendants — a link that would close the chain
+    /// into a ring, which every walk up the tree would then circle for ever.
+    pub fn can_parent(&self, child: u64, parent: u64) -> bool {
+        child != parent && !self.ancestor_of(child, parent)
+    }
+
+    /// Sessions from the root that holds `id` down to `id`, root first. A
+    /// ring in the parent links (two chats naming each other) ends the walk
+    /// where it would repeat, so a bad link costs a wrong crumb, not the
+    /// window.
     pub fn path_to(&self, id: u64) -> Vec<u64> {
         let mut chain = Vec::new();
         let mut at = Some(id);
         while let Some(id) = at {
+            if chain.contains(&id) || chain.len() > self.sessions.len() {
+                break;
+            }
             chain.push(id);
             at = self.session(id).and_then(|chat| chat.parent);
         }

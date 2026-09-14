@@ -80,6 +80,10 @@ fn main() -> Result<()> {
             let code = arbos_kernel::check::run(arbos_kernel::check::Args::parse(args)?)?;
             std::process::exit(code);
         }
+        "store" => {
+            let code = arbos_kernel::store_cmd::run(args)?;
+            std::process::exit(code);
+        }
         "prompt" => {
             let code =
                 arbos_kernel::prompt_size::run(arbos_kernel::prompt_size::Args::parse(args)?)?;
@@ -151,6 +155,7 @@ fn main() -> Result<()> {
             println!("{}", arbos_kernel::rollout::USAGE);
             println!("{}", arbos_kernel::check::USAGE);
             println!("{}", arbos_kernel::prompt_size::USAGE);
+            println!("{}", arbos_kernel::store_cmd::USAGE);
             println!("{}", arbos_kernel::setup::USAGE);
             println!("{}", arbos_kernel::cli::USAGE);
             println!("{}", arbos_kernel::rewind::USAGE);

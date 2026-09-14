@@ -102,6 +102,12 @@ pub enum EventKind {
         #[serde(default)]
         failed: bool,
     },
+    /// A kernel reminder for the model, written between turns ("project
+    /// page not updated last turn"). For the model it reads like a kernel
+    /// notice; a window draws it dim, as an aside, never as a failure.
+    Nudge {
+        text: String,
+    },
     /// An attached image the selected model could not see, described in
     /// words by `model` (a vision-capable one) so the turn went on with the
     /// user's picture in text. `path` is the attachment as the `user` or

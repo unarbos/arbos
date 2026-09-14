@@ -142,9 +142,59 @@ pub fn tick(hooks: &Arc<KernelHooks>, now: i64) {
             if !sub.is_due(now) {
                 continue;
             }
+            // Overdue by whole periods (the kernel was down, the agent was
+            // paused): one firing with a note, or none — never one per
+            // missed period.
+            let missed = sub.missed_periods(now);
+            if missed > 0 {
+                match hooks.caps.catch_up {
+                    crate::hooks::CatchUp::Skip => {
+                        crate::klog::info(
+                            "subscription_catch_up_skipped",
+                            Some(id),
+                            format!("#{} missed {missed}; next in one period", sub.id),
+                        );
+                        settle(
+                            hooks,
+                            id,
+                            sub,
+                            now,
+                            format!("skipped {missed} missed firing(s)"),
+                        );
+                        continue;
+                    }
+                    crate::hooks::CatchUp::Once => {
+                        crate::klog::info(
+                            "subscription_catch_up_once",
+                            Some(id),
+                            format!("#{} missed {missed}; firing once", sub.id),
+                        );
+                        let note = format!(
+                            "(missed {missed} earlier firing(s) while the kernel was down or the agent was paused; this is the one catch-up)"
+                        );
+                        fire_with_note(hooks, &agent, sub, now, Some(note));
+                        continue;
+                    }
+                }
+            }
             fire(hooks, &agent, sub, now);
         }
     }
+}
+
+/// On resume: every overdue or paused-through subscription of `agent` is
+/// due one period from `now`. Returns how many were moved.
+pub fn resume_subscriptions(place: &arbos_core::Place, agent: &str, now: i64) -> usize {
+    let mut moved = 0;
+    for mut sub in subscription::list(place, agent) {
+        if sub.next_due_ms().is_some_and(|d| d <= now) {
+            sub.resume_at(now);
+            if subscription::save(place, agent, &sub).is_ok() {
+                moved += 1;
+            }
+        }
+    }
+    moved
 }
 
 /// Fire `sub` now from a window action, whatever its schedule says.
@@ -188,11 +238,28 @@ fn settle(hooks: &KernelHooks, agent: &str, mut sub: Subscription, now: i64, las
 }
 
 fn fire(hooks: &Arc<KernelHooks>, agent: &Agent, sub: Subscription, now: i64) {
+    fire_with_note(hooks, agent, sub, now, None);
+}
+
+/// `note`, when given, rides at the end of whatever message this firing
+/// delivers (the catch-up remark). It is never written into the file.
+fn fire_with_note(
+    hooks: &Arc<KernelHooks>,
+    agent: &Agent,
+    sub: Subscription,
+    now: i64,
+    note: Option<String>,
+) {
     let id = agent.id.as_str();
+    let noted = move |body: String| match &note {
+        Some(n) => format!("{body}\n{n}"),
+        None => body,
+    };
     match sub.kind.as_str() {
         "timer" => {
             let body = sub.prompt.clone();
-            let outcome = match inbox::deliver(&hooks.place, id, &message(&sub, true, body)) {
+            let outcome = match inbox::deliver(&hooks.place, id, &message(&sub, true, noted(body)))
+            {
                 Ok(_) => "fired".to_string(),
                 Err(e) => format!("could not deliver: {e:#}"),
             };
@@ -236,7 +303,7 @@ fn fire(hooks: &Arc<KernelHooks>, agent: &Agent, sub: Subscription, now: i64) {
                     path.display(),
                     list.join("\n")
                 );
-                match inbox::deliver(&hooks.place, id, &message(&sub, true, body)) {
+                match inbox::deliver(&hooks.place, id, &message(&sub, true, noted(body))) {
                     Ok(_) => format!("{} new file(s)", new.len()),
                     Err(e) => format!("could not deliver: {e:#}"),
                 }
@@ -297,7 +364,7 @@ fn fire(hooks: &Arc<KernelHooks>, agent: &Agent, sub: Subscription, now: i64) {
                             cmd,
                             if tail.is_empty() { "(none)" } else { &tail }
                         );
-                        match inbox::deliver(&hooks.place, id, &message(&sub, true, body)) {
+                        match inbox::deliver(&hooks.place, id, &message(&sub, true, noted(body))) {
                             Ok(_) => format!("exit 0 — {}", text::clip(&tail, 120)),
                             Err(e) => format!("exit 0 — could not deliver: {e:#}"),
                         }
@@ -319,7 +386,7 @@ fn fire(hooks: &Arc<KernelHooks>, agent: &Agent, sub: Subscription, now: i64) {
                         },
                         sub.id
                     );
-                    let _ = inbox::deliver(&hooks.place, id, &message(&sub, true, body));
+                    let _ = inbox::deliver(&hooks.place, id, &message(&sub, true, noted(body)));
                     format!("{why} — {}", text::clip(&tail, 120))
                 };
                 // The file may have moved on (paused, removed) meanwhile.

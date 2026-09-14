@@ -25,7 +25,8 @@ use anyhow::Result;
 use bezel::{
     gpui::{
         self, AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable as _, Hsla,
-        KeyBinding, PathPromptOptions, Render, Task, TitlebarOptions, Window, WindowBounds,
+        KeyBinding, PathPromptOptions, PromptLevel, Render, Task, TitlebarOptions, Window,
+        WindowBounds,
         WindowHandle, WindowOptions, actions, div, point, prelude::*, px, size,
     },
     motion::{Fade, Painter},
@@ -557,6 +558,9 @@ pub struct Arbos {
     voice_mirror_on: bool,
     /// The call in progress: which project it is for, and since when.
     pub(crate) call: Option<Call>,
+    /// The tab sheet is up for the Home tab's first-launch offer; when it
+    /// closes, the permissions sheet follows.
+    home_offer: bool,
     /// Native Fn monitor. Lives with the window so Drop removes it.
     #[cfg(target_os = "macos")]
     _fn_monitor: Option<crate::view::fn_key::Monitor>,
@@ -609,6 +613,7 @@ impl Arbos {
             |this, _, event: &OpenerEvent, window, cx| match event {
                 OpenerEvent::Open(place) => {
                     let place = place.clone();
+                    this.offer_store_out_of_sync(&place, window, cx);
                     this.workspace
                         .update(cx, |workspace, cx| workspace.open_place(place, cx));
                     this.offer_tab_face(window, cx);
@@ -618,13 +623,33 @@ impl Arbos {
             },
         )
         .detach();
-        cx.subscribe(&tab_sheet, |this, _, event: &TabSheetEvent, cx| match event {
-            TabSheetEvent::Keep(ix, identity) => {
-                let (ix, identity) = (*ix, identity.clone());
-                this.workspace
-                    .update(cx, |workspace, cx| workspace.set_identity(ix, identity, cx));
+        cx.subscribe(&tab_sheet, |this, _, event: &TabSheetEvent, cx| {
+            match event {
+                TabSheetEvent::Keep(ix, identity) => {
+                    let (ix, identity) = (*ix, identity.clone());
+                    this.workspace
+                        .update(cx, |workspace, cx| workspace.set_identity(ix, identity, cx));
+                }
+                // Skipped on the Home tab's one offer: the defaults are kept
+                // as its face, so the sheet is not offered again.
+                TabSheetEvent::Dismiss => {
+                    if this.home_offer {
+                        this.workspace.update(cx, |workspace, cx| {
+                            if let Some(ix) = workspace.home_index()
+                                && let Some(project) = workspace.projects.get(ix)
+                                && !project.identity_saved
+                            {
+                                let mut identity = project.identity.clone();
+                                identity.name = Some("Home".into());
+                                workspace.set_identity(ix, identity, cx);
+                            }
+                        });
+                    }
+                }
             }
-            TabSheetEvent::Dismiss => {}
+            if std::mem::take(&mut this.home_offer) {
+                this.permissions_once(cx);
+            }
         })
         .detach();
         cx.subscribe_in(
@@ -719,6 +744,7 @@ impl Arbos {
             voice_want_stop: false,
             voice_mirror_on: false,
             call: None,
+            home_offer: false,
             #[cfg(target_os = "macos")]
             _fn_monitor: None,
             draft_flush: Task::ready(()),
@@ -767,17 +793,29 @@ impl Arbos {
         .detach();
         keep_macos_glass(window);
         this.sync_composer(cx);
-        // First launch: the permissions sheet, once. After the window has
-        // painted, so it opens over something rather than before it.
-        if !this.workspace.read(cx).permissions_seen {
-            cx.spawn(async move |this, cx| {
+        // First launch: the Home tab's face — name, glyph, colour, prefilled
+        // "Home", skippable — then the permissions sheet, each once. After
+        // the window has painted, so they open over something rather than
+        // before it.
+        let home_fresh = this.workspace.read(cx).home_index().is_some_and(|ix| {
+            this.workspace
+                .read(cx)
+                .projects
+                .get(ix)
+                .is_some_and(|project| !project.identity_saved)
+        });
+        if home_fresh || !this.workspace.read(cx).permissions_seen {
+            cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor()
                     .timer(Duration::from_millis(600))
                     .await;
-                let _ = this.update(cx, |this, cx| {
-                    this.workspace
-                        .update(cx, |workspace, _| workspace.mark_permissions_seen());
-                    this.open_settings(Section::Permissions, cx);
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if home_fresh && let Some(ix) = this.workspace.read(cx).home_index() {
+                        this.home_offer = true;
+                        this.edit_tab(ix, window, cx);
+                    } else {
+                        this.permissions_once(cx);
+                    }
                 });
             })
             .detach();
@@ -1580,6 +1618,7 @@ impl Arbos {
                 return;
             };
             let _ = this.update_in(cx, |this, window, cx| {
+                this.offer_store_out_of_sync(&crate::model::place::Place::local(path.clone()), window, cx);
                 this.workspace
                     .update(cx, |workspace, cx| workspace.open_project(path, cx));
                 this.offer_tab_face(window, cx);
@@ -1588,9 +1627,77 @@ impl Arbos {
         .detach();
     }
 
+    /// A folder inside iCloud / a file-provider sync: reads of `.arbos/`
+    /// there block for minutes on items the provider has not downloaded,
+    /// and the kernel stalls with them. Offer to keep the store out of the
+    /// sync before the kernel starts: `.arbos.nosync` beside the project
+    /// (iCloud skips `*.nosync`) with `.arbos` a symlink to it, or a folder
+    /// under `~/.arbos/stores/`. Nothing when the store is already out.
+    fn offer_store_out_of_sync(&mut self, place: &crate::model::place::Place, window: &mut Window, cx: &mut Context<Self>) {
+        if place.is_remote() {
+            return;
+        }
+        let path = place.path.clone();
+        let Some(sync) = arbos_core::cloudsync::detect(&path) else {
+            return;
+        };
+        if arbos_core::cloudsync::settled(&path) {
+            return;
+        }
+        let detail = format!(
+            "{} is inside {} sync. Reads of its .arbos folder can block for minutes on items {} has not downloaded, and Arbos would stall with them.\n\nKeep the store out of the sync? \"Beside the project\" renames .arbos to .arbos.nosync (which iCloud skips) and leaves .arbos as a link to it. \"In ~/.arbos/stores\" moves it out of the folder entirely.",
+            path.display(),
+            sync.label(),
+            sync.label()
+        );
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "This folder is synced by iCloud",
+            Some(&detail),
+            &[
+                "Beside the project (.arbos.nosync)",
+                "In ~/.arbos/stores",
+                "Leave as is",
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(choice) = answer.await else {
+                return;
+            };
+            let how = match choice {
+                0 => arbos_core::cloudsync::Relocation::Nosync,
+                1 => arbos_core::cloudsync::Relocation::Home,
+                _ => return,
+            };
+            let outcome = arbos_core::cloudsync::relocate(&path, how);
+            let _ = this.update_in(cx, |_this, window, cx| {
+                let (title, detail) = match &outcome {
+                    Ok(target) => (
+                        "Store moved",
+                        format!(".arbos is now a link to {}.", target.display()),
+                    ),
+                    Err(e) => ("Could not move the store", format!("{e:#}")),
+                };
+                let _ = window.prompt(PromptLevel::Info, title, Some(&detail), &["OK"], cx);
+            });
+        })
+        .detach();
+    }
+
     /// A folder opened for the first time has no `project.toml`: offer the
     /// sheet with the folder's own defaults filled in. A folder that has
     /// one comes back wearing it, no questions.
+    /// Settings › Permissions, the first time only.
+    fn permissions_once(&mut self, cx: &mut Context<Self>) {
+        if self.workspace.read(cx).permissions_seen {
+            return;
+        }
+        self.workspace
+            .update(cx, |workspace, _| workspace.mark_permissions_seen());
+        self.open_settings(Section::Permissions, cx);
+    }
+
     fn offer_tab_face(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let fresh = self
             .workspace
@@ -1609,7 +1716,15 @@ impl Arbos {
             .read(cx)
             .projects
             .get(ix)
-            .map(|project| (project.identity.clone(), project.place().title()))
+            .map(|project| {
+                let mut identity = project.identity.clone();
+                // The Home tab's first offer comes prefilled, so Keep as-is
+                // names it "Home" in its project.toml.
+                if Workspace::is_home(project) && !project.identity_saved && identity.name.is_none() {
+                    identity.name = Some("Home".into());
+                }
+                (identity, Workspace::tab_label(project))
+            })
         else {
             return;
         };

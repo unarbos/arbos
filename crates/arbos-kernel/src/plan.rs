@@ -195,7 +195,12 @@ fn wake_from_message(
                 )),
             )
         }
-        (_, "user") | (_, "") => (WakeKind::User, Some(msg.body.clone())),
+        (_, "user") | (_, "") => {
+            // The user's new words re-arm the notes nudge for the turns
+            // that follow (once per idle period).
+            hooks.notes_nudge.lock().unwrap().remove(agent.id.as_str());
+            (WakeKind::User, Some(msg.body.clone()))
+        }
         (_, "kernel") => (WakeKind::Plan, Some(msg.body.clone())),
         (_, who) if who.starts_with("subscription:") => (WakeKind::Plan, Some(msg.body.clone())),
         (_, who) if who.starts_with("user:") => (WakeKind::User, Some(msg.body.clone())),

@@ -1129,6 +1129,7 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         "title": chat.title,
         "name": chat.name,
         "agent": chat.entry.name,
+        "agent_session": chat.agent_session,
         "model": chat.model,
         "parent": chat.parent,
         "draft": chat.draft,
@@ -1210,10 +1211,19 @@ fn item_json(item: &ChatItem) -> Value {
             "output": cut(output),
             "child_session": child_session,
         }),
+        ChatItem::Asked { question, answer } => json!({
+            "kind": "asked",
+            "question": cut(question),
+            "answer": cut(answer),
+        }),
         ChatItem::Notice { text, failed } => json!({
             "kind": "notice",
             "text": cut(text),
             "failed": failed,
+        }),
+        ChatItem::Nudge(text) => json!({
+            "kind": "nudge",
+            "text": cut(text),
         }),
         ChatItem::Artifacts(files) => json!({
             "kind": "artifacts",

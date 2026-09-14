@@ -72,11 +72,37 @@ impl Isolate {
 pub struct Caps {
     pub depth: usize,
     pub children: usize,
+    /// `catch_up` from config: `once` | `skip`.
+    pub catch_up: CatchUp,
+    /// `transcript_roll_lines` from config; 0 = never.
+    pub transcript_roll_lines: u64,
+}
+
+/// What an overdue subscription does (Mac wake-up incident: a kernel
+/// start must not fire a pile of missed timers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CatchUp {
+    /// Fire once, with a "missed N" note in the message.
+    #[default]
+    Once,
+    /// Reschedule only; the next firing is one period from now.
+    Skip,
+}
+
+impl CatchUp {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "skip" | "none" | "drop" => Self::Skip,
+            _ => Self::Once,
+        }
+    }
 }
 
 impl Default for Caps {
     fn default() -> Self {
         Self {
+            catch_up: CatchUp::Once,
+            transcript_roll_lines: 10_000,
             depth: MAX_DEPTH,
             children: MAX_CHILDREN,
         }
@@ -97,6 +123,8 @@ impl Caps {
             } else {
                 MAX_CHILDREN
             },
+            catch_up: CatchUp::parse(&cfg.catch_up),
+            transcript_roll_lines: cfg.transcript_roll_lines,
         }
     }
 }
@@ -158,6 +186,8 @@ pub struct KernelHooks {
     pub caps: Caps,
     /// Children on other machines, reached over SSH.
     pub remotes: crate::remote::RemoteHub,
+    /// Try Live requests forwarded to a remote kernel and not yet answered.
+    pub screen_pending: Arc<Mutex<HashSet<String>>>,
 }
 
 impl KernelHooks {
@@ -197,6 +227,7 @@ impl KernelHooks {
             spawn_lock: Mutex::new(()),
             inbox_retry: Mutex::new(HashMap::new()),
             remotes: crate::remote::RemoteHub::default(),
+            screen_pending: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -337,12 +368,16 @@ impl KernelHooks {
         if !dispatched {
             return;
         }
-        let notice = Event::new(EventKind::Notice {
+        // Once per idle period: a second turn that also leaves the page
+        // alone does not repeat it. The page changing, or the user's next
+        // message, re-arms it.
+        if !self.notes_nudge.lock().unwrap().insert(agent.to_string()) {
+            return;
+        }
+        let nudge = Event::new(EventKind::Nudge {
             text: NOTES_NUDGE.to_string(),
-            failed: false,
         });
-        let _ = append_event(&self.layout(agent).transcript(), &notice);
-        self.notes_nudge.lock().unwrap().insert(agent.to_string());
+        let _ = append_event(&self.layout(agent).transcript(), &nudge);
     }
 
     /// Whether a reminder is owed (for the window's status; cleared when
@@ -407,7 +442,9 @@ impl KernelHooks {
     pub fn plan_frame(&self, agent: &str) -> Frame {
         let mut nodes = crate::plan::wire_rows(&self.place, agent);
         // Inbox files ride along as the queued rows the window already
-        // draws (`inbox: true`).
+        // draws (`inbox: true`). A steer is not a follow-up — the running
+        // turn reads it at its next step — so the row carries the file's
+        // kind and the window leaves steers out of "queued".
         for filed in inbox::list(&self.place, agent) {
             nodes.push(arbos_core::wire::PlanNode {
                 id: inbox_id(&filed.name),
@@ -419,7 +456,11 @@ impl KernelHooks {
                 } else {
                     "waits".into()
                 },
-                do_kind: "agent".into(),
+                do_kind: if arbos_core::inbox::is_steer_kind(&filed.msg.kind) {
+                    "steer".into()
+                } else {
+                    "agent".into()
+                },
                 last: String::new(),
                 origin: filed.msg.from.clone(),
                 standing: false,

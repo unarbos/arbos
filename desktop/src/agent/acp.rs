@@ -63,6 +63,9 @@ pub enum Event {
     /// The agent spoke between turns: a callback fired, or background work
     /// finished. Not a turn, and not a failure.
     Aside(String),
+    /// A kernel reminder for the model ("project page not updated"): a
+    /// dim aside in the transcript, never a failure or a strip.
+    Nudge(String),
     /// An attached image the turn's model could not see was described in
     /// words by `model`. Belongs to the user card that carried the image.
     ImageDescribed {
@@ -149,6 +152,16 @@ pub enum Event {
         page: String,
         url: String,
         screenshot: Option<String>,
+    },
+    /// Try Live: one frame of the screen the agent works on (PNG bytes),
+    /// or why none could be taken.
+    Screen {
+        machine: String,
+        png: Vec<u8>,
+        mime: String,
+        width: u32,
+        height: u32,
+        error: Option<String>,
     },
     /// New output from one of the agent's detached jobs.
     Job {
@@ -462,6 +475,14 @@ impl Session {
         });
     }
 
+    /// Try Live: ask for the screen the agent works on. The answer comes
+    /// back as `Event::Screen`.
+    pub fn request_screen(&self) {
+        let _ = self.send_frame(&Frame::Screen {
+            agent: self.session_id.clone(),
+        });
+    }
+
     /// Move a plan node from the window: `cancel`, `run`, `reopen`, `answer`.
     pub fn plan_op(&self, node: u64, op: &str, text: &str) {
         let _ = self.send_frame(&Frame::PlanOp {
@@ -657,6 +678,29 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             url,
             screenshot,
         }],
+        Frame::Screenshot {
+            agent: id,
+            machine,
+            png,
+            mime,
+            width,
+            height,
+            error,
+            ..
+        } if id == agent => {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(png.as_bytes())
+                .unwrap_or_default();
+            vec![Event::Screen {
+                machine,
+                png: bytes,
+                mime,
+                width,
+                height,
+                error,
+            }]
+        }
         Frame::Job {
             agent: id,
             id: job,
@@ -722,6 +766,7 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
         EventKind::ImageDescribed { path, model, text } => {
             vec![Event::ImageDescribed { path, model, text }]
         }
+        EventKind::Nudge { text } => vec![Event::Nudge(text)],
         // The turn was cut short; the pane says by whom (the fold line
         // picks the same text up).
         EventKind::Interrupted { detail } => vec![Event::Aside(

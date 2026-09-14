@@ -27,6 +27,7 @@ pub mod secret_tool;
 pub mod serve;
 pub mod setup;
 pub mod snapshot;
+pub mod store_cmd;
 pub mod subs;
 pub mod tools;
 pub mod watch;

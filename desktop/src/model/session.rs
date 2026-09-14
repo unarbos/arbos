@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -99,9 +100,15 @@ pub enum ChatItem {
         text: String,
         failed: bool,
     },
+    /// A kernel reminder addressed to the model, shown dim so the user
+    /// knows why the next reply starts with a page update.
+    Nudge(String),
     /// Files a tool produced for the user to look at: screenshots and
     /// screen recordings. One row per tool call; click opens the file.
     Artifacts(Vec<Artifact>),
+    /// A question the agent asked, answered: the card folded to one line.
+    /// An empty `answer` is a skip.
+    Asked { question: String, answer: String },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,6 +317,17 @@ impl AskPrompt {
 }
 
 /// Whether the session has a live kernel socket.
+/// One frame of the screen an agent works on, for Try Live.
+#[derive(Clone)]
+pub struct LiveScreen {
+    pub image: Option<Arc<bezel::gpui::Image>>,
+    pub machine: String,
+    pub at: Instant,
+    pub width: u32,
+    pub height: u32,
+    pub error: Option<String>,
+}
+
 /// The kernel's own account of its provider, from its `provider` frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KernelProvider {
@@ -395,6 +413,10 @@ pub struct ChatSession {
     /// The last question answered or skipped from this window, and when:
     /// the transcript tail repeats it, and that repeat is not a new card.
     answered_ask: Option<(String, Instant)>,
+    /// Try Live (A-02): the latest screen frame from the agent's machine,
+    /// and whether the live view is open (the poll runs while it is).
+    pub live_screen: Option<LiveScreen>,
+    pub live_open: bool,
     /// A Stop was asked from this window (button, stop word, Force):
     /// the turn ending without an answer is then not a kernel failure.
     stop_requested: bool,
@@ -547,6 +569,8 @@ impl ChatSession {
             thought_at: None,
             streaming_agent: None,
             answered_ask: None,
+            live_screen: None,
+            live_open: false,
             stop_requested: false,
             draft_pushed: false,
             working: None,
@@ -617,6 +641,8 @@ impl ChatSession {
             thought_at: None,
             streaming_agent: None,
             answered_ask: None,
+            live_screen: None,
+            live_open: false,
             stop_requested: false,
             draft_pushed: false,
             working: None,
@@ -687,6 +713,8 @@ impl ChatSession {
             thought_at: None,
             streaming_agent: None,
             answered_ask: None,
+            live_screen: None,
+            live_open: false,
             stop_requested: false,
             draft_pushed: false,
             working: None,
@@ -1679,11 +1707,23 @@ impl ChatSession {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
+                // The card folds to one line; the answer is a line of yours
+                // under it.
+                let question = prompt
+                    .questions
+                    .first()
+                    .map(|q| q.prompt.clone())
+                    .filter(|q| !q.trim().is_empty())
+                    .unwrap_or_else(|| prompt.title.clone());
+                self.items.push(ChatItem::Asked {
+                    question,
+                    answer: said.clone(),
+                });
                 if !said.is_empty() {
                     self.items.push(ChatItem::User(UserMessage::from(said)));
-                    self.updated = SystemTime::now();
-                    self.flush();
                 }
+                self.updated = SystemTime::now();
+                self.flush();
             }
             _ => self.notice(true, "the agent asked a question; not connected"),
         }
@@ -1897,6 +1937,15 @@ impl ChatSession {
                 self.notice(false, &text);
                 self.flush();
             }
+            Event::Nudge(text) => {
+                // Once per idle period from the kernel; the same line twice
+                // in a row (a tail replay) is not two rows.
+                let dup = matches!(self.items.last(), Some(ChatItem::Nudge(t)) if *t == text);
+                if !dup {
+                    self.items.push(ChatItem::Nudge(text));
+                }
+                self.flush();
+            }
             Event::ImageDescribed { path, model, text } => {
                 // Inside the card that carried the image: the last user
                 // message, which is this turn's. Never a transcript line.
@@ -2051,6 +2100,37 @@ impl ChatSession {
             | Event::Browser { .. }
             | Event::Job { .. }
             | Event::StoreChanged(_) => {}
+            Event::Screen {
+                machine,
+                png,
+                mime,
+                width,
+                height,
+                error,
+            } => {
+                let format = if mime == "image/jpeg" {
+                    bezel::gpui::ImageFormat::Jpeg
+                } else {
+                    bezel::gpui::ImageFormat::Png
+                };
+                let image = (!png.is_empty())
+                    .then(|| Arc::new(bezel::gpui::Image::from_bytes(format, png)));
+                self.live_screen = Some(LiveScreen {
+                    image,
+                    machine,
+                    at: Instant::now(),
+                    width,
+                    height,
+                    error,
+                });
+            }
+        }
+    }
+
+    /// Try Live: ask the kernel for the agent's screen now.
+    pub fn request_screen(&self) {
+        if let Connection::Live(session) = &self.connection {
+            session.request_screen();
         }
     }
 
@@ -2087,11 +2167,13 @@ impl ChatSession {
         })
     }
 
-    /// Prompts the kernel holds for this agent that have not run yet.
+    /// Prompts the kernel holds for this agent that have not run yet. A
+    /// steer in the inbox is not one: the running turn takes it at its
+    /// next step.
     pub fn plan_queued(&self) -> usize {
         self.plan
             .iter()
-            .filter(|n| n.inbox && n.status == "pending")
+            .filter(|n| n.inbox && n.status == "pending" && n.do_kind != "steer")
             .count()
     }
 
@@ -2381,6 +2463,13 @@ impl ChatSession {
     }
 
     pub(crate) fn notice(&mut self, failed: bool, text: &str) {
+        // The kernel's page nudge is a standing state, not news each turn:
+        // one line, at the latest turn it applies to. An earlier copy goes.
+        if !failed && is_page_nudge(text) {
+            self.items.retain(|item| {
+                !matches!(item, ChatItem::Notice { text: t, failed: false } if is_page_nudge(t))
+            });
+        }
         self.items.push(ChatItem::Notice {
             text: text.to_owned(),
             failed,
@@ -2806,6 +2895,12 @@ fn pump(
             cx.notify();
         });
     })
+}
+
+/// The kernel's turn-end reminder that `.arbos/notes.md` did not change
+/// after a worker started or reported.
+pub fn is_page_nudge(text: &str) -> bool {
+    text.trim_start().starts_with("project page not updated")
 }
 
 /// A standing node the kernel keeps for itself: it marks the prompt so and
