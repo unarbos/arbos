@@ -625,6 +625,14 @@ fn short_error(text: &str) -> String {
     if lower.contains("attach writer closed") {
         return "Stopped.".into();
     }
+    // The kernel's rewind refusal names the agent id and a version note;
+    // the reader needs only what to do.
+    if lower.starts_with("rewind:") && lower.contains("no checkpoints yet") {
+        return "Nothing to rewind to yet: checkpoints are written when a turn starts.".into();
+    }
+    if lower.starts_with("rewind:") && lower.contains("checkpoint") {
+        return "Rewind failed: no checkpoint for that turn.".into();
+    }
     // The kernel's job line: "job j9 exited with code 1 after 1s — `pm2
     // status` — log: …". Cursor names the command and the code, no
     // backticks and no log path.
@@ -2611,8 +2619,31 @@ pub fn render(
     let column = root::CHAT_MAX_WIDTH - 2. * root::CHAT_GUTTER;
     let theme = Theme::of(cx).clone();
     let mut last_day: Option<i64> = None;
+    // Copy, fork, thumbs once per response: a worker's report wakes the
+    // agent into another turn, and a footer under each of those read as
+    // three replies to one prompt. In each run of turns between two
+    // prompts, the last one with an answer carries the footer.
+    let mut footer_at: Vec<bool> = vec![false; turns.len()];
+    {
+        let mut run_start = 0;
+        for position in 0..=turns.len() {
+            let starts_run = position == turns.len()
+                || (position > run_start
+                    && matches!(chat.items.get(turns[position].range.start), Some(ChatItem::User(_))));
+            if starts_run {
+                if let Some(answered) = (run_start..position)
+                    .rev()
+                    .find(|p| turn_answer(&chat.items, &turns[*p]).is_some())
+                {
+                    footer_at[answered] = true;
+                }
+                run_start = position;
+            }
+        }
+    }
     for (position, turn) in turns.iter().enumerate() {
         let running = position == last && chat.busy();
+        let footer = footer_at[position];
         // Cursor's date divider: "Today 4:22 PM" over the first turn, and
         // again wherever the conversation crosses into another day.
         if let Some(ChatItem::User(message)) = chat.items.get(turn.range.start)
@@ -2636,7 +2667,7 @@ pub fn render(
                 .w_full()
                 .max_w(px(column))
                 .self_center()
-                .child(zone(chat, turn, running, window, cx))
+                .child(zone(chat, turn, running, footer, window, cx))
                 .into_any_element(),
         );
     }
@@ -3152,6 +3183,7 @@ fn zone(
     chat: &ChatSession,
     turn: &Turn,
     running: bool,
+    footer: bool,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
@@ -3323,7 +3355,7 @@ fn zone(
     // the turn still runs — a long model call with nothing streaming, a
     // job in flight — an interim reply already has words, and the footer
     // under them read as "done" next to a live Stop button.
-    if !running && let Some(answer) = turn_answer(&chat.items, turn) {
+    if !running && footer && let Some(answer) = turn_answer(&chat.items, turn) {
         has_tail = true;
         // Always shown, faint, as Cursor's are: copy, then fork.
         tail = tail.child(turn_footer(chat, first, answer, &theme, cx));

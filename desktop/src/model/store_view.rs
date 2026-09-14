@@ -228,20 +228,56 @@ fn read_context(path: &Path) -> Option<String> {
         .map(|(_, rest)| rest)
         .unwrap_or(body)
         .trim_start_matches('\n');
-    let written = body.lines().map(str::trim).any(|line| {
-        !(line.is_empty()
-            || line.starts_with('#')
-            || matches!(line, "-" | "*" | "+" | "- [ ]")
-            || (line.starts_with('(') && line.ends_with(')')))
-    });
-    if !written {
-        return None;
-    }
+    let body = prune_template(body)?;
     if body.chars().count() <= CAP {
-        return Some(body.to_string());
+        return Some(body);
     }
     let head: String = body.chars().take(CAP).collect();
     Some(format!("{head}\n\n*… cut at {CAP} characters.*"))
+}
+
+/// A line the template wrote, not the author: blank, a heading, an empty
+/// bullet, or a parenthesised hint like "(what this project is for)".
+fn template_line(line: &str) -> bool {
+    let line = line.trim();
+    line.is_empty()
+        || line.starts_with('#')
+        || matches!(line, "-" | "*" | "+" | "- [ ]")
+        || (line.starts_with('(') && line.ends_with(')'))
+}
+
+/// The document without its unfilled template sections: a `##` section
+/// whose body is only hints and empty bullets is dropped, and a page whose
+/// sections are all like that is no page at all — the preamble alone
+/// ("Stable goals, constraints, …") is the template talking.
+fn prune_template(body: &str) -> Option<String> {
+    let mut sections: Vec<(Option<&str>, Vec<&str>)> = vec![(None, Vec::new())];
+    for line in body.lines() {
+        if line.starts_with("## ") {
+            sections.push((Some(line), Vec::new()));
+        } else {
+            sections.last_mut().expect("preamble").1.push(line);
+        }
+    }
+    let kept: Vec<String> = sections
+        .iter()
+        .filter(|(heading, lines)| heading.is_some() && lines.iter().any(|l| !template_line(l)))
+        .map(|(heading, lines)| {
+            let mut out = heading.unwrap_or_default().to_string();
+            out.push('\n');
+            out.push_str(lines.join("\n").trim_matches('\n'));
+            out
+        })
+        .collect();
+    if kept.is_empty() {
+        // No sections at all: a plain document is its own content.
+        let plain = sections.first().map(|(_, lines)| lines).filter(|_| sections.len() == 1)?;
+        if plain.iter().any(|l| !template_line(l)) {
+            return Some(plain.join("\n").trim_matches('\n').to_string());
+        }
+        return None;
+    }
+    Some(kept.join("\n\n"))
 }
 
 /// The files the page lists: `docs/` and `media/` (two levels), the loose

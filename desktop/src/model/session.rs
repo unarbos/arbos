@@ -1730,6 +1730,11 @@ impl ChatSession {
             return;
         };
         self.answered_ask = Some((prompt.title.clone(), Instant::now()));
+        // The kernel's "Waiting for your answer" line was true until now;
+        // the folded question and the answer under it say the rest.
+        self.items.retain(|item| {
+            !matches!(item, ChatItem::Notice { text, failed: false } if is_waiting_line(text))
+        });
         let (answers, details) = if skipped {
             (Vec::new(), String::new())
         } else {
@@ -1994,6 +1999,21 @@ impl ChatSession {
             Event::AssistantFinal(text) => {
                 self.finish_thinking();
                 let text = text.trim_matches('\n').to_string();
+                // The kernel records a `status` call as an assistant line
+                // "status: <step>". It is the live step, shown in the worker
+                // line and the panel, not a paragraph of the reply.
+                if let Some(step) = status_line(&text) {
+                    if let Some(ix) = self.streaming_agent.take()
+                        && matches!(self.items.get(ix), Some(ChatItem::Agent(body)) if status_line(body).is_some())
+                    {
+                        self.items.remove(ix);
+                    }
+                    if self.busy() {
+                        self.status = Some(step);
+                    }
+                    self.flush();
+                    return;
+                }
                 // The deltas of this step built an item: the recorded line is
                 // the same words, whole. Replace, never append.
                 if let Some(ix) = self.streaming_agent.take() {
@@ -2551,6 +2571,11 @@ impl ChatSession {
     }
 
     pub(crate) fn notice(&mut self, failed: bool, text: &str) {
+        // The kernel's parked-ask line after the question is already
+        // answered (a replay, a late frame) says nothing true.
+        if !failed && is_waiting_line(text) && self.questions.is_none() {
+            return;
+        }
         // The kernel's page nudge is a standing state, not news each turn:
         // one line, at the latest turn it applies to. An earlier copy goes.
         if !failed && is_page_nudge(text) {
@@ -3090,4 +3115,21 @@ pub const STOPPED_BY_YOU: &str = "Stopped by you";
 /// Whether a notice marks the end of an interrupted turn.
 pub fn is_interrupt_notice(text: &str) -> bool {
     text == STOPPED_BY_YOU || text.starts_with("Interrupted")
+}
+
+/// The kernel's notice while an `ask` is parked with the user.
+fn is_waiting_line(text: &str) -> bool {
+    text.trim() == "Waiting for your answer"
+}
+
+/// A kernel `status` call as the transcript records it: one line,
+/// "status: <what the agent is doing>". The step, or `None` for prose.
+fn status_line(text: &str) -> Option<String> {
+    let line = text.trim();
+    if line.contains('\n') {
+        return None;
+    }
+    let rest = line.strip_prefix("status:").or_else(|| line.strip_prefix("Status:"))?;
+    let step = rest.trim();
+    (!step.is_empty()).then(|| step.to_string())
 }
