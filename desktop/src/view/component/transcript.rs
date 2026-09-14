@@ -2681,6 +2681,16 @@ pub fn render(
                 .into_any_element(),
         );
     }
+    if let Some(card) = approve_card(chat, &theme, cx) {
+        zones.push(
+            div()
+                .w_full()
+                .max_w(px(column))
+                .self_center()
+                .child(card)
+                .into_any_element(),
+        );
+    }
     for card in tail {
         zones.push(
             div()
@@ -2741,6 +2751,135 @@ pub fn render(
             )
         })
         .into_any_element()
+}
+
+/// A question once answered: the card folded to one faint line, the
+/// answer (or "skipped") after it. The user's own line sits below.
+fn asked_line(question: &str, answer: &str, theme: &Theme) -> AnyElement {
+    div()
+        .self_start()
+        .w_full()
+        .max_w(px(520.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            icons::icon(icons::system::CHAT_ROUND_LINE)
+                .size(px(11.))
+                .text_color(theme.text_faint),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child(SharedString::from(format!("Question · {}", question.trim()))),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_style(TextStyle::Caption)
+                .text_color(if answer.is_empty() {
+                    theme.text_faint
+                } else {
+                    theme.text_muted
+                })
+                .child(if answer.is_empty() {
+                    "skipped".to_string()
+                } else {
+                    "answered".to_string()
+                }),
+        )
+        .into_any_element()
+}
+
+/// Plan mode with approval: the agent wrote its checklist read-only and
+/// the turn is over. One card at the end of the conversation — how many
+/// steps stand — with Approve and run, which switches the chat to auto and
+/// starts the work.
+fn approve_card(chat: &ChatSession, theme: &Theme, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let plan_mode = chat
+        .modes
+        .as_ref()
+        .is_some_and(|m| m.current_mode_id.to_string() == "plan");
+    if !plan_mode || chat.busy() {
+        return None;
+    }
+    let steps = chat
+        .plan_open()
+        .filter(|n| !n.standing && n.do_kind != "ask")
+        .count();
+    if steps == 0 {
+        return None;
+    }
+    let id = chat.id;
+    Some(
+        div()
+            .mt(px(8.))
+            .rounded(px(Theme::surface_radius()))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .px(px(12.))
+            .py(px(10.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                icons::icon(icons::editing::CHECKLIST)
+                    .size(px(12.))
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_style(TextStyle::Callout)
+                    .text_color(theme.text)
+                    .child(SharedString::from(format!(
+                        "Plan ready · {}",
+                        plural(steps, "step", "steps")
+                    ))),
+            )
+            .child(
+                theme
+                    .ghost(SharedString::from(format!("plan-approve-{id}")))
+                    .flex_none()
+                    .px(px(8.))
+                    .h(px(22.))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .rounded(px(Theme::control_radius()))
+                    .border_1()
+                    .border_color(theme.border)
+                    .tooltip(|window, cx| {
+                        Tooltip::text("Switch to auto and run the checklist", window, cx)
+                    })
+                    .child(
+                        icons::icon(icons::media::PLAY)
+                            .size(px(10.))
+                            .text_color(theme.text),
+                    )
+                    .child(
+                        div()
+                            .text_style(TextStyle::Caption)
+                            .text_color(theme.text)
+                            .child("Approve and run"),
+                    )
+                    .on_click(cx.listener(move |workspace, _, _, cx| {
+                        workspace.approve_plan(id, cx);
+                    })),
+            )
+            .into_any_element(),
+    )
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// A question the agent parked for you — an `ask` node — as a card at the
@@ -3192,6 +3331,7 @@ fn zone(
             }
             ChatItem::Notice { text, failed } => notice(chat, ix, text, *failed, &theme, cx),
             ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, &theme, cx),
+            ChatItem::Asked { question, answer } => asked_line(question, answer, &theme),
             _ => div().into_any_element(),
         });
     }
@@ -3704,6 +3844,7 @@ fn work_other(
         }
         ChatItem::Notice { text, failed } => notice(chat, ix, text, *failed, theme, cx),
         ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, theme, cx),
+        ChatItem::Asked { question, answer } => asked_line(question, answer, theme),
         _ => div().into_any_element(),
     }
 }

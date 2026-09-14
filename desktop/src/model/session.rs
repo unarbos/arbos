@@ -102,6 +102,9 @@ pub enum ChatItem {
     /// Files a tool produced for the user to look at: screenshots and
     /// screen recordings. One row per tool call; click opens the file.
     Artifacts(Vec<Artifact>),
+    /// A question the agent asked, answered: the card folded to one line.
+    /// An empty `answer` is a skip.
+    Asked { question: String, answer: String },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1679,11 +1682,23 @@ impl ChatSession {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
+                // The card folds to one line; the answer is a line of yours
+                // under it.
+                let question = prompt
+                    .questions
+                    .first()
+                    .map(|q| q.prompt.clone())
+                    .filter(|q| !q.trim().is_empty())
+                    .unwrap_or_else(|| prompt.title.clone());
+                self.items.push(ChatItem::Asked {
+                    question,
+                    answer: said.clone(),
+                });
                 if !said.is_empty() {
                     self.items.push(ChatItem::User(UserMessage::from(said)));
-                    self.updated = SystemTime::now();
-                    self.flush();
                 }
+                self.updated = SystemTime::now();
+                self.flush();
             }
             _ => self.notice(true, "the agent asked a question; not connected"),
         }

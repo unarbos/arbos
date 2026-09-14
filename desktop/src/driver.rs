@@ -1211,6 +1211,11 @@ fn item_json(item: &ChatItem) -> Value {
             "output": cut(output),
             "child_session": child_session,
         }),
+        ChatItem::Asked { question, answer } => json!({
+            "kind": "asked",
+            "question": cut(question),
+            "answer": cut(answer),
+        }),
         ChatItem::Notice { text, failed } => json!({
             "kind": "notice",
             "text": cut(text),

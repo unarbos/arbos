@@ -588,7 +588,12 @@ fn item(done: Option<bool>, depth: u8, text: &str, store: &Path) -> PageItem {
         }
         inner = l;
     }
-    let label = inner.to_owned();
+    // `[name](x)](y)` — a link closed twice — leaves `name](x)` as the
+    // label; the name is what was meant.
+    let label = match inner.find("](") {
+        Some(at) if inner.ends_with(')') => inner[..at].trim().to_owned(),
+        _ => inner.to_owned(),
+    };
     PageItem {
         done,
         depth,
@@ -608,7 +613,14 @@ fn leading_link(s: &str) -> Option<(&str, &str, &str)> {
     let after = &rest[close + 2..];
     let end = after.find(')')?;
     let target = after[..end].split_whitespace().next().unwrap_or("");
-    let tail = after[end + 1..].trim_start();
+    let mut tail = after[end + 1..].trim_start();
+    // A link closed twice — `](x)](y) rest` — leaves `](y)` in front of
+    // the readout; it is not part of it.
+    if let Some(stray) = tail.strip_prefix("](")
+        && let Some(close) = stray.find(')')
+    {
+        tail = stray[close + 1..].trim_start();
+    }
     let tail = tail
         .strip_prefix("—")
         .or_else(|| tail.strip_prefix("--"))
@@ -696,6 +708,13 @@ mod tests {
         };
         assert_eq!(second.label, "plain words");
         assert_eq!(second.readout, "pending");
+        let text = "## Math\n- [x] [add mul(a, b)](math_utils.py)](math_utils.py) — added mul\n";
+        let page = ProjectPage::parse(Path::new("/p/.arbos/notes.md"), store, text);
+        let PageBlock::Item(item) = &page.blocks[1] else {
+            panic!("item")
+        };
+        assert_eq!(item.label, "add mul(a, b)");
+        assert_eq!(item.readout, "added mul");
     }
 
     #[test]
