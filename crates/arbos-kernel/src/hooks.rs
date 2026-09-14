@@ -167,6 +167,9 @@ pub struct KernelHooks {
     /// Turns a parent asked the kernel to stop (`say mode=stop`): agent
     /// id and the reason the transcript records. The scheduler drains it.
     pub stop_requests: Mutex<Vec<(String, String)>>,
+    /// Agents that called `status` this turn: the kernel's derived guess
+    /// stays out of their way until the turn ends.
+    pub status_said: Mutex<HashSet<String>>,
     /// Transcript length when each running turn began, for the `done`
     /// message's summary of what the turn said.
     pub turn_lo: Mutex<HashMap<String, u64>>,
@@ -230,6 +233,7 @@ impl KernelHooks {
             waited: Mutex::new(HashSet::new()),
             archive_after: Mutex::new(HashMap::new()),
             stop_requests: Mutex::new(Vec::new()),
+            status_said: Mutex::new(HashSet::new()),
             turn_lo: Mutex::new(HashMap::new()),
             notes_at_start: Mutex::new(HashMap::new()),
             notes_nudge: Mutex::new(HashSet::new()),
@@ -270,6 +274,7 @@ impl KernelHooks {
                 kind: "agent".into(),
                 mode: a.mode.as_str().into(),
                 prs: arbos_core::prs::prs_of_tree(&prs, a.id.as_str(), &agents).len() as u32,
+                step: arbos_core::status::read(&self.place, a.id.as_str()).map(|s| s.step),
             })
             .collect();
         self.broadcast(Frame::Tree { tree });
@@ -298,6 +303,7 @@ impl KernelHooks {
 
     pub fn turn_started(&self, agent: &str) {
         self.running.lock().unwrap().insert(agent.to_string());
+        self.status_said.lock().unwrap().remove(agent);
         self.sent.lock().unwrap().remove(agent);
         let lo = count_lines(&self.layout(agent).transcript());
         self.turn_lo.lock().unwrap().insert(agent.to_string(), lo);
@@ -309,6 +315,16 @@ impl KernelHooks {
 
     pub fn turn_ended(&self, agent: &str) {
         self.running.lock().unwrap().remove(agent);
+        // Nothing is being done now: the live line goes.
+        self.status_said.lock().unwrap().remove(agent);
+        if arbos_core::status::clear(&self.place, agent) {
+            self.broadcast(Frame::Status {
+                agent: agent.to_string(),
+                step: String::new(),
+                since: String::new(),
+                source: String::new(),
+            });
+        }
         // The status page moved during this turn: tell every window now,
         // not at the watch's next second. Root is the only writer, so a
         // change seen at a child's turn end is root's, and still worth
@@ -674,6 +690,27 @@ impl KernelHooks {
             i += 1;
         }
         out
+    }
+
+    /// What `agent` is doing, in a few words. `source` is `agent` (the
+    /// `status` tool) or `derived` (the kernel's guess from the tool in
+    /// flight); a guess never overwrites what the agent said this turn.
+    /// Written to `status.toml`, sent as a `status` frame.
+    pub fn set_status(&self, agent: &str, step: &str, source: &str) -> Result<()> {
+        if source == "derived" && self.status_said.lock().unwrap().contains(agent) {
+            return Ok(());
+        }
+        if source == "agent" {
+            self.status_said.lock().unwrap().insert(agent.to_string());
+        }
+        let s = arbos_core::status::write(&self.place, agent, step, source)?;
+        self.broadcast(Frame::Status {
+            agent: agent.to_string(),
+            step: s.step,
+            since: s.since,
+            source: s.source,
+        });
+        Ok(())
     }
 
     /// The user pressed stop on `agent`: every standing or scheduled node

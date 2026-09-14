@@ -1198,6 +1198,7 @@ fn tree_nodes(place: &Place) -> Vec<TreeNode> {
             kind: "agent".into(),
             mode: a.mode.as_str().into(),
             prs: arbos_core::prs::prs_of_tree(&prs, a.id.as_str(), &agents).len() as u32,
+            step: arbos_core::status::read(place, a.id.as_str()).map(|s| s.step),
         })
         .collect()
 }
@@ -1576,6 +1577,7 @@ pub fn kernel_registry(hooks: &Arc<KernelHooks>, ptys: &Arc<PtyHub>) -> Registry
         .with(tools::Say(Arc::clone(hooks)))
         .with(tools::PlanTool(Arc::clone(hooks)))
         .with(tools::Ask(Arc::clone(hooks)))
+        .with(tools::StatusTool(Arc::clone(hooks)))
         .with(tools::Browser(Arc::clone(hooks)))
         .with(crate::screenshot::Screenshot)
         .with(crate::secret_tool::Secret)
