@@ -277,6 +277,7 @@ dependencies = [
  "futures",
  "image",
  "js-sys",
+ "libc",
  "lru",
  "notify",
  "objc",

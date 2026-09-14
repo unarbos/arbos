@@ -1173,8 +1173,8 @@ impl Arbos {
                 let first = crate::model::session::first_user_text(&chat.items)
                     .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
                     .unwrap_or_default();
-                let first: String = first.chars().take(60).collect();
-                let label = if first.is_empty() || first.starts_with(&title) {
+                let first: String = first.chars().take(72).collect();
+                let label = if first.is_empty() || first == title {
                     format!("{tab} › {title}")
                 } else {
                     format!("{tab} › {title} — {first}")
@@ -1467,12 +1467,12 @@ impl Arbos {
         .detach();
     }
 
+    /// A microphone or speech-server failure belongs under the mic button,
+    /// not in the transcript: the conversation did not fail, the take did.
     fn voice_error(&mut self, msg: &str, cx: &mut Context<Self>) {
-        if let Some(id) = self.workspace.read(cx).active_id() {
-            self.workspace.update(cx, |workspace, cx| {
-                workspace.with_session(id, cx, |chat| chat.notice(true, msg));
-            });
-        }
+        let note = msg.strip_prefix("voice failed: ").unwrap_or(msg).to_string();
+        self.composer
+            .update(cx, |composer, cx| composer.set_voice_note(Some(note), cx));
     }
 
     // ------------------------------------------------------------------ calls

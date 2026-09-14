@@ -54,7 +54,11 @@ impl ChatSearch {
             .iter()
             .map(|hit| SharedString::from(hit.label.clone()))
             .collect();
-        let palette = cx.new(|cx| CommandPalette::new(items, cx));
+        let palette = cx.new(|cx| {
+            let mut palette = CommandPalette::new(items, cx);
+            palette.set_placeholder("Search chats…", cx);
+            palette
+        });
         cx.subscribe(&palette, |this, _, event: &PaletteEvent, cx| match event {
             PaletteEvent::Selected(ix) => {
                 if let Some(hit) = this.hits.get(*ix) {

@@ -90,6 +90,14 @@ impl CommandPalette {
         }
     }
 
+    /// What the empty query says: "Type a command…" unless the host's list
+    /// is something else — chats, files, machines.
+    pub fn set_placeholder(&mut self, text: &str, cx: &mut Context<Self>) {
+        let text = text.to_string();
+        self.query
+            .update(cx, |field, cx| field.set_placeholder(text, cx));
+    }
+
     /// Focus the query field — call after mounting, or the palette swallows
     /// keys without showing a caret.
     pub fn focus(&self, window: &mut Window, cx: &mut App) {

@@ -2670,8 +2670,28 @@ pub fn render(
     // The reading column is the composer's: `CHAT_MAX_WIDTH` less its
     // gutter on each side. Each turn centres itself in the scroller.
     let column = root::CHAT_MAX_WIDTH - 2. * root::CHAT_GUTTER;
+    let theme = Theme::of(cx).clone();
+    let mut last_day: Option<i64> = None;
     for (position, turn) in turns.iter().enumerate() {
         let running = position == last && chat.busy();
+        // Cursor's date divider: "Today 4:22 PM" over the first turn, and
+        // again wherever the conversation crosses into another day.
+        if let Some(ChatItem::User(message)) = chat.items.get(turn.range.start)
+            && let Some(at) = message.sent_at.filter(|at| *at > 0)
+        {
+            let day = local_day(at);
+            if last_day != Some(day) {
+                last_day = Some(day);
+                zones.push(
+                    div()
+                        .w_full()
+                        .max_w(px(column))
+                        .self_center()
+                        .child(day_divider(at, &theme))
+                        .into_any_element(),
+                );
+            }
+        }
         zones.push(
             div()
                 .w_full()
@@ -2681,7 +2701,6 @@ pub fn render(
                 .into_any_element(),
         );
     }
-    let theme = Theme::of(cx).clone();
     for node in chat.plan_open().filter(|n| n.do_kind == "ask") {
         zones.push(
             div()
@@ -3515,6 +3534,72 @@ fn turn_footer(
             )
         });
     row.into_any_element()
+}
+
+/// Seconds east of UTC for the local clock at `at_secs`, from the C
+/// library's `localtime_r` — the one source that knows this machine's zone
+/// and its summer time.
+fn local_offset_secs(at_secs: i64) -> i64 {
+    let t: libc::time_t = at_secs as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let ok = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
+    if ok { tm.tm_gmtoff as i64 } else { 0 }
+}
+
+/// The local calendar day of an instant, as days since the epoch.
+fn local_day(at_ms: i64) -> i64 {
+    let secs = at_ms / 1000;
+    (secs + local_offset_secs(secs)).div_euclid(86_400)
+}
+
+/// "Today 4:22 PM", "Yesterday 9:10 AM", "Sep 12, 4:22 PM" — the line
+/// Cursor draws over the first message of a day.
+fn day_label(at_ms: i64) -> String {
+    let secs = at_ms / 1000;
+    let local = secs + local_offset_secs(secs);
+    let day = local.div_euclid(86_400);
+    let today = local_day(arbos_core::now_ms());
+    let tod = local.rem_euclid(86_400);
+    let (h24, m) = (tod / 3600, (tod % 3600) / 60);
+    let (h12, ampm) = match h24 {
+        0 => (12, "AM"),
+        1..=11 => (h24, "AM"),
+        12 => (12, "PM"),
+        _ => (h24 - 12, "PM"),
+    };
+    let clock = format!("{h12}:{m:02} {ampm}");
+    if day == today {
+        format!("Today {clock}")
+    } else if day == today - 1 {
+        format!("Yesterday {clock}")
+    } else {
+        let (y, mo, d) = civil_from_days(day);
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        let this_year = civil_from_days(today).0;
+        if y == this_year {
+            format!("{} {d}, {clock}", MONTHS[(mo - 1) as usize])
+        } else {
+            format!("{} {d}, {y}, {clock}", MONTHS[(mo - 1) as usize])
+        }
+    }
+}
+
+fn day_divider(at_ms: i64, theme: &Theme) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .justify_center()
+        .pt(px(4.))
+        .pb(px(10.))
+        .child(
+            div()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child(SharedString::from(day_label(at_ms))),
+        )
+        .into_any_element()
 }
 
 /// "Just now", "2m ago", "3h ago", "Yesterday", "3d ago", then a date.
