@@ -21,6 +21,10 @@ pub struct Snapshot {
     pub last_commenter: String,
     /// check name → conclusion (or status while pending).
     pub checks: BTreeMap<String, String>,
+    /// check name → the run's page, when known (branch runs). A red
+    /// check's line carries it so the subscriber can open the log.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub urls: BTreeMap<String, String>,
 }
 
 /// `gh` with the kernel's environment plus granted secrets.
@@ -111,7 +115,92 @@ pub fn snapshot(repo: &str, pr: u64) -> Result<Snapshot> {
         comments,
         last_commenter,
         checks,
+        urls: BTreeMap::new(),
     })
+}
+
+/// One look at a branch's workflow runs: the newest run per workflow on
+/// the branch's latest commit. `state` is `green`, `red`, or `pending`
+/// over those; `head` the commit they ran on.
+pub fn branch_snapshot(repo: &str, branch: &str) -> Result<Snapshot> {
+    let v = gh(&[
+        "run",
+        "list",
+        "--repo",
+        repo,
+        "--branch",
+        branch,
+        "--limit",
+        "30",
+        "--json",
+        "databaseId,workflowName,name,status,conclusion,headSha,url,createdAt",
+    ])?;
+    Ok(runs_snapshot(&v, branch))
+}
+
+/// `branch_snapshot` on the JSON `gh run list` returned. Runs come newest
+/// first; only those on the newest commit count, one per workflow.
+pub fn runs_snapshot(runs: &Value, branch: &str) -> Snapshot {
+    let runs = runs.as_array().cloned().unwrap_or_default();
+    let str_of = |r: &Value, k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let head = runs
+        .first()
+        .map(|r| str_of(r, "headSha"))
+        .unwrap_or_default();
+    let mut checks = BTreeMap::new();
+    let mut urls = BTreeMap::new();
+    for r in runs.iter().filter(|r| str_of(r, "headSha") == head) {
+        let name = {
+            let w = str_of(r, "workflowName");
+            if w.is_empty() { str_of(r, "name") } else { w }
+        };
+        if name.is_empty() || checks.contains_key(&name) {
+            continue;
+        }
+        let conclusion = str_of(r, "conclusion");
+        let outcome = if conclusion.is_empty() {
+            let status = str_of(r, "status");
+            if status.is_empty() {
+                "pending".to_string()
+            } else {
+                status
+            }
+        } else {
+            conclusion
+        };
+        let url = str_of(r, "url");
+        if !url.is_empty() {
+            urls.insert(name.clone(), url);
+        }
+        checks.insert(name, outcome);
+    }
+    let state = if checks.is_empty() {
+        "no runs".to_string()
+    } else if checks.values().any(|o| {
+        matches!(
+            o.as_str(),
+            "failure" | "timed_out" | "startup_failure" | "action_required"
+        )
+    }) {
+        "red".to_string()
+    } else if checks
+        .values()
+        .all(|o| matches!(o.as_str(), "success" | "skipped" | "neutral"))
+    {
+        "green".to_string()
+    } else {
+        "pending".to_string()
+    };
+    Snapshot {
+        state,
+        title: branch.to_string(),
+        head: head.chars().take(7).collect(),
+        reviews: Vec::new(),
+        comments: 0,
+        last_commenter: String::new(),
+        checks,
+        urls,
+    }
 }
 
 /// What changed between two looks, as lines for the subscriber. Empty when
@@ -149,11 +238,79 @@ pub fn diff(old: &Snapshot, new: &Snapshot) -> Vec<String> {
         ));
     }
     for (name, outcome) in &new.checks {
+        let url = match new.urls.get(name) {
+            // A run's page only when there is something to look at.
+            Some(u) if !matches!(outcome.as_str(), "success" | "skipped" | "neutral") => {
+                format!(" ({u})")
+            }
+            _ => String::new(),
+        };
         match old.checks.get(name) {
             Some(prev) if prev == outcome => {}
-            Some(prev) => lines.push(format!("check {name}: {prev} → {outcome}")),
-            None => lines.push(format!("check {name}: {outcome}")),
+            Some(prev) => lines.push(format!("check {name}: {prev} → {outcome}{url}")),
+            None => lines.push(format!("check {name}: {outcome}{url}")),
         }
     }
     lines
+}
+
+#[cfg(test)]
+mod branch_tests {
+    use super::*;
+
+    fn runs() -> Value {
+        serde_json::json!([
+            {"databaseId": 3, "workflowName": "ci", "name": "ci", "status": "completed", "conclusion": "failure", "headSha": "bbbbbbb1", "url": "https://github.com/o/r/actions/runs/3"},
+            {"databaseId": 4, "workflowName": "lint", "name": "lint", "status": "in_progress", "conclusion": "", "headSha": "bbbbbbb1", "url": "https://github.com/o/r/actions/runs/4"},
+            {"databaseId": 2, "workflowName": "ci", "name": "ci", "status": "completed", "conclusion": "success", "headSha": "aaaaaaa1", "url": "https://github.com/o/r/actions/runs/2"},
+            {"databaseId": 1, "workflowName": "lint", "name": "lint", "status": "completed", "conclusion": "success", "headSha": "aaaaaaa1", "url": "https://github.com/o/r/actions/runs/1"}
+        ])
+    }
+
+    #[test]
+    fn only_the_newest_commits_runs_count_one_per_workflow() {
+        let now = runs_snapshot(&runs(), "main");
+        assert_eq!(now.head, "bbbbbbb");
+        assert_eq!(now.state, "red");
+        assert_eq!(now.checks["ci"], "failure");
+        assert_eq!(now.checks["lint"], "in_progress");
+        assert_eq!(now.checks.len(), 2);
+        // The earlier commit, all green.
+        let old_runs: Value = serde_json::json!(runs().as_array().unwrap()[2..].to_vec());
+        let old = runs_snapshot(&old_runs, "main");
+        assert_eq!(
+            (old.state.as_str(), old.head.as_str()),
+            ("green", "aaaaaaa")
+        );
+        let lines = diff(&old, &now);
+        assert!(lines.iter().any(|l| l == "state: green → red"), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "new commits: head is now bbbbbbb"),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "check ci: success → failure (https://github.com/o/r/actions/runs/3)"),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("check lint: success → in_progress (")),
+            "{lines:?}"
+        );
+        // Green carries no link.
+        let back = diff(&now, &old);
+        assert!(
+            back.iter().any(|l| l == "check ci: failure → success"),
+            "{back:?}"
+        );
+        assert_eq!(
+            runs_snapshot(&serde_json::json!([]), "main").state,
+            "no runs"
+        );
+    }
 }

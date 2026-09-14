@@ -66,6 +66,8 @@ pub fn ensure_chores(place: &arbos_core::Place) {
         path: None,
         repo: None,
         pr: None,
+
+        branch: None,
         deliver_to: "none".into(),
         notify: None,
         expires: None,
@@ -463,7 +465,21 @@ struct Polled {
 fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
     let repo = sub.repo.clone().unwrap_or_default();
     let pr = sub.pr.unwrap_or(0);
-    match crate::github::snapshot(&repo, pr) {
+    // A `github_ci` with a branch and no PR watches the branch's runs.
+    let branch = sub
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty() && sub.pr.is_none());
+    let subject = match branch {
+        Some(b) => format!("{repo}@{b}"),
+        None => format!("{repo}#{pr}"),
+    };
+    let looked = match branch {
+        Some(b) => crate::github::branch_snapshot(&repo, b),
+        None => crate::github::snapshot(&repo, pr),
+    };
+    match looked {
         Ok(now) => {
             let prev: Option<crate::github::Snapshot> = sub
                 .seen
@@ -474,7 +490,11 @@ fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
                     .into_iter()
                     .filter(|l| {
                         let is_check = l.starts_with("check ");
-                        if sub.kind == "github_ci" {
+                        if branch.is_some() {
+                            // Branch runs: checks and the new-commit line;
+                            // the overall state line repeats the checks.
+                            is_check || l.starts_with("new commits")
+                        } else if sub.kind == "github_ci" {
                             is_check
                         } else {
                             !is_check
@@ -487,8 +507,12 @@ fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
                 "no change".to_string()
             } else {
                 let text = format!(
-                    "{repo}#{pr} ({}): {}{}",
-                    now.title,
+                    "{subject} ({}): {}{}",
+                    if branch.is_some() {
+                        now.state.clone()
+                    } else {
+                        now.title.clone()
+                    },
                     lines.join("; "),
                     if sub.prompt.is_empty() {
                         String::new()
@@ -513,7 +537,7 @@ fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
             let msg = format!("{e:#}");
             if sub.error.as_deref() != Some(&msg) {
                 let text = format!(
-                    "{repo}#{pr}: the subscription cannot be checked: {msg}. It stays until you remove it (subscribe remove {}).",
+                    "{subject}: the subscription cannot be checked: {msg}. It stays until you remove it (subscribe remove {}).",
                     sub.id
                 );
                 let mut m = message(sub, true, text);

@@ -54,6 +54,10 @@ pub struct Subscription {
     pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<u64>,
+    /// `github_ci` without a PR: the branch whose workflow runs are
+    /// watched (`gh run list --branch`). A "keep main green" loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// `agent` (an inbox file, a turn), `user` (a line to the user, no
     /// model turn), or `none` (a quiet chore: nothing on success). `user`
     /// and `none` are for `shell`; a failure always wakes the agent.
@@ -179,6 +183,8 @@ impl Subscription {
             c.clone()
         } else if let (Some(r), Some(n)) = (&self.repo, self.pr) {
             format!("{r}#{n}")
+        } else if let (Some(r), Some(b)) = (&self.repo, &self.branch) {
+            format!("{r}@{b}")
         } else if let Some(p) = &self.path {
             p.clone()
         } else {
@@ -249,9 +255,17 @@ impl Subscription {
                     bail!("notify must contain {{output}}, or the reading never reaches the user");
                 }
             }
-            "github_pr" | "github_ci" => {
+            "github_pr" => {
                 if self.repo.as_deref().unwrap_or("").trim().is_empty() || self.pr.is_none() {
-                    bail!("{} needs repo (owner/name) and pr", self.kind);
+                    bail!("github_pr needs repo (owner/name) and pr");
+                }
+            }
+            "github_ci" => {
+                let has_branch = self.branch.as_deref().is_some_and(|b| !b.trim().is_empty());
+                if self.repo.as_deref().unwrap_or("").trim().is_empty()
+                    || (self.pr.is_none() && !has_branch)
+                {
+                    bail!("github_ci needs repo (owner/name) and pr or branch");
                 }
             }
             "inbox" => {
@@ -588,6 +602,8 @@ mod tests {
             path: None,
             repo: None,
             pr: None,
+
+            branch: None,
             deliver_to: "agent".into(),
             notify: None,
             expires: None,
@@ -716,5 +732,51 @@ mod tests {
             t + 3_600_000 + 15 * 60_000
         );
         assert_eq!(align_at(t, None), t);
+    }
+}
+
+#[cfg(test)]
+mod branch_tests {
+    use super::*;
+
+    #[test]
+    fn github_ci_takes_a_branch_in_place_of_a_pr() {
+        let mut sub = Subscription {
+            id: 0,
+            kind: "github_ci".into(),
+            prompt: String::new(),
+            every: None,
+            at: None,
+            once: false,
+            cmd: None,
+            path: None,
+            repo: Some("o/r".into()),
+            pr: None,
+            branch: Some("main".into()),
+            deliver_to: "agent".into(),
+            notify: None,
+            expires: None,
+            paused: false,
+            internal: false,
+            created: String::new(),
+            next_due: None,
+            last_fired: None,
+            last: String::new(),
+            error: None,
+            seen: None,
+        };
+        sub.validate().unwrap();
+        assert_eq!(sub.label(), "o/r@main");
+        sub.branch = None;
+        assert!(sub.validate().is_err());
+        sub.kind = "github_pr".into();
+        sub.branch = Some("main".into());
+        assert!(sub.validate().is_err(), "github_pr still needs a pr");
+        // The line round-trips through TOML.
+        sub.kind = "github_ci".into();
+        let text = toml::to_string(&sub).unwrap();
+        assert!(text.contains("branch = \"main\""), "{text}");
+        let back: Subscription = toml::from_str(&text).unwrap();
+        assert_eq!(back.branch.as_deref(), Some("main"));
     }
 }
