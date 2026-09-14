@@ -56,3 +56,24 @@ jobs:
       - name: Build
         working-directory: desktop
         run: cargo build --locked
+
+  macos:
+    # The desktop's AppKit, CoreAudio and TCC code only compiles here.
+    # Required before a merge to main, like the two Linux jobs.
+    name: macOS (check kernel + desktop)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos
+          workspaces: |
+            .
+            desktop
+      - name: Check kernel
+        run: cargo check --workspace --locked
+      - name: Check desktop
+        working-directory: desktop
+        run: cargo check --locked --all-targets

@@ -190,6 +190,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     }
 
     doors::spawn_telegram_if_configured(Arc::clone(&hooks));
+    crate::chatdoor::spawn_if_configured(Arc::clone(&hooks));
     // `--hub`: register outbound so clients and other kernels reach this
     // one by machine name, with no port open here.
     match crate::hub_link::config_from_env() {
@@ -218,6 +219,15 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     // for three days across restarts. A `keep` file in the job folder
     // spares it.
     for agent in list_agents(&place).unwrap_or_default() {
+        // Nothing runs yet: a status line left by a kernel that died
+        // mid-turn is stale, and a fresh attach would draw it.
+        if arbos_core::status::clear(&place, agent.id.as_str()) {
+            klog::info(
+                "status_cleared",
+                Some(agent.id.as_str()),
+                "left by an earlier kernel run",
+            );
+        }
         let root = arbos_engine::JobsRoot::for_agent(&place, &agent.id);
         let found = root.reap_leftovers();
         for line in &found.reaped {
@@ -384,6 +394,13 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             Some(()) = kick_rx.recv() => {
                 // Coalesce a burst of kicks into one scan.
                 while kick_rx.try_recv().is_ok() {}
+                // A parent's `say mode=stop`: end that turn with its words.
+                let stops: Vec<(String, String)> =
+                    std::mem::take(&mut *hooks.stop_requests.lock().unwrap());
+                for (id, reason) in stops {
+                    sched.stop_for(&id, &reason);
+                    klog::info("turn_stopped_by_parent", Some(&id), reason);
+                }
                 for wake in plan::scan(&hooks) {
                     start(wake);
                 }
@@ -544,8 +561,10 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                     let path = Layout::new(&place, agent.id.as_str()).transcript();
                     let tail = tails.entry(agent.id.to_string()).or_default();
                     for mut ev in tail.read_new(&path).unwrap_or_default() {
-                        if record_prs(&place, agent.id.as_str(), &ev) {
+                        let opened = record_prs(&place, agent.id.as_str(), &ev);
+                        if !opened.is_empty() {
                             hooks.broadcast(Frame::Tree { tree: tree_nodes(&place) });
+                            follow_prs(&hooks, agent.id.as_str(), &opened);
                         }
                         arbos_core::files::scrub_child_claims(&place, agent.id.as_str(), &mut ev);
                         hooks.broadcast(Frame::Event {
@@ -673,6 +692,27 @@ fn handle_frame(
             // else after the current turn — and survives a restart either way.
             if text.trim().is_empty() && attachments.is_empty() {
                 eprintln!("inbox {agent}: empty prompt");
+                return;
+            }
+            // `/mode <skill>` pins a skill to this chat as its mode (`/mode
+            // off` clears it): a setting, not a prompt. The transcript gets
+            // a notice; the next turn's prompt carries the skill.
+            if attachments.is_empty()
+                && let Some(rest) = text.trim().strip_prefix("/mode")
+                && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+            {
+                let line = match hooks.set_mode_skill(&agent, rest.trim()) {
+                    Ok(line) => line,
+                    Err(e) => format!("/mode: {e:#}"),
+                };
+                let _ = append_event(
+                    &Layout::new(place, &agent).transcript(),
+                    &Event::new(EventKind::Notice {
+                        text: line,
+                        failed: false,
+                    }),
+                );
+                hooks.broadcast_tree();
                 return;
             }
             // "stop" typed at a running agent is the Stop button, not a
@@ -1151,6 +1191,14 @@ fn job_delta(
     if !running {
         offsets.insert(key.to_string(), (size.max(seen), true));
     }
+    // The process row shows the journal live; it gets the same redaction
+    // as the transcript, or a key echoed by a job would sit on screen.
+    let secrets = arbos_engine::secrets::store();
+    let delta = if secrets.has_any() {
+        secrets.redact(&delta)
+    } else {
+        delta
+    };
     let exit = match job.status {
         arbos_engine::JobStatus::Exited(code) => Some(code),
         arbos_engine::JobStatus::Running | arbos_engine::JobStatus::Killed => None,
@@ -1180,6 +1228,7 @@ fn tree_nodes(place: &Place) -> Vec<TreeNode> {
             kind: "agent".into(),
             mode: a.mode.as_str().into(),
             prs: arbos_core::prs::prs_of_tree(&prs, a.id.as_str(), &agents).len() as u32,
+            step: arbos_core::status::read(place, a.id.as_str()).map(|s| s.step),
         })
         .collect()
 }
@@ -1208,13 +1257,13 @@ fn sane_parent(agents: &[arbos_core::Agent], a: &arbos_core::Agent) -> Option<St
 
 /// A finished `bash` whose command ran `gh pr create` and whose output
 /// names the pull request: one record per new URL in `.arbos/prs.jsonl`.
-/// Returns whether anything new was recorded.
-fn record_prs(place: &Place, agent: &str, ev: &Event) -> bool {
+/// Returns the records that were new.
+fn record_prs(place: &Place, agent: &str, ev: &Event) -> Vec<arbos_core::PrRec> {
     let EventKind::Tool(rec) = &ev.kind else {
-        return false;
+        return Vec::new();
     };
     if !matches!(rec.name.as_str(), "bash" | "terminal") || rec.error.is_some() {
-        return false;
+        return Vec::new();
     }
     let Some(command) = rec
         .args
@@ -1222,16 +1271,16 @@ fn record_prs(place: &Place, agent: &str, ev: &Event) -> bool {
         .and_then(|a| a.get("command"))
         .and_then(|c| c.as_str())
     else {
-        return false;
+        return Vec::new();
     };
     if !arbos_core::prs::opens_pr(command) {
-        return false;
+        return Vec::new();
     }
     let Some(body) = rec.body.as_deref() else {
-        return false;
+        return Vec::new();
     };
     let branch = arbos_core::prs::head_branch(command);
-    let mut new = false;
+    let mut new = Vec::new();
     for (url, repo, number) in arbos_core::prs::pr_urls(body) {
         let pr = arbos_core::PrRec {
             ts: arbos_core::now_ms(),
@@ -1242,12 +1291,79 @@ fn record_prs(place: &Place, agent: &str, ev: &Event) -> bool {
             branch: branch.clone(),
         };
         match arbos_core::record_pr(place, &pr) {
-            Ok(true) => new = true,
+            Ok(true) => new.push(pr),
             Ok(false) => {}
             Err(e) => eprintln!("prs: {e:#}"),
         }
     }
     new
+}
+
+/// The agent that opened a pull request follows it (Cursor: "cloud agents
+/// automatically subscribe to PRs they create and drive them to
+/// completion"): one `github_pr` and one `github_ci` subscription per new
+/// PR, unless `project.toml` says `follow_prs = false` or the agent
+/// already has them. Both go when the PR is merged or closed.
+fn follow_prs(hooks: &Arc<KernelHooks>, agent: &str, opened: &[arbos_core::PrRec]) {
+    if !arbos_core::project::load(&hooks.place).follows_prs() {
+        return;
+    }
+    let existing = arbos_core::subscription::list(&hooks.place, agent);
+    for pr in opened {
+        for kind in ["github_pr", "github_ci"] {
+            let dup = existing.iter().any(|s| {
+                s.kind == kind
+                    && s.repo.as_deref() == Some(pr.repo.as_str())
+                    && s.pr == Some(pr.number)
+            });
+            if dup {
+                continue;
+            }
+            let prompt = match kind {
+                "github_pr" => format!(
+                    "You opened {}. A review comment or a new commit landed: read it (gh pr view {} --repo {} --comments), address it or answer it, and push; if it was merged or closed there is nothing left to do.",
+                    pr.url, pr.number, pr.repo
+                ),
+                _ => format!(
+                    "You opened {}. A check changed: when one failed, read its log (gh run view --log-failed), fix the cause on the branch, push, and say what it was; when all are green, say so briefly.",
+                    pr.url
+                ),
+            };
+            let sub = arbos_core::subscription::Subscription {
+                id: 0,
+                kind: kind.into(),
+                prompt,
+                every: None,
+                at: None,
+                once: false,
+                cmd: None,
+                path: None,
+                repo: Some(pr.repo.clone()),
+                pr: Some(pr.number),
+                branch: None,
+                deliver_to: "agent".into(),
+                notify: None,
+                expires: None,
+                paused: false,
+                internal: false,
+                continuity: false,
+                created: String::new(),
+                next_due: None,
+                last_fired: None,
+                last: String::new(),
+                error: None,
+                seen: None,
+            };
+            match hooks.subscribe(agent, sub, None) {
+                Ok(s) => klog::info(
+                    "pr_followed",
+                    Some(agent),
+                    format!("#{} {kind} {}#{}", s.id, pr.repo, pr.number),
+                ),
+                Err(e) => klog::warn("pr_follow_failed", Some(agent), format!("{e:#}")),
+            }
+        }
+    }
 }
 
 /// Secret-looking variable names in this process's environment that the
@@ -1491,6 +1607,7 @@ pub fn kernel_registry(hooks: &Arc<KernelHooks>, ptys: &Arc<PtyHub>) -> Registry
         .with(tools::Say(Arc::clone(hooks)))
         .with(tools::PlanTool(Arc::clone(hooks)))
         .with(tools::Ask(Arc::clone(hooks)))
+        .with(tools::StatusTool(Arc::clone(hooks)))
         .with(tools::Browser(Arc::clone(hooks)))
         .with(crate::screenshot::Screenshot)
         .with(crate::secret_tool::Secret)

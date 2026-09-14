@@ -447,6 +447,11 @@ pub struct Prompt {
     /// A model for this one turn ("switch to <vision model> for this
     /// turn"). None: the agent's own.
     pub model: Option<String>,
+    /// Where the words came from: empty for typed, `voice` for a dictated
+    /// take. The kernel keeps it on the transcript line.
+    pub channel: String,
+    /// Which device spoke, when `channel` is voice: `desktop`.
+    pub device: String,
 }
 
 impl From<String> for Prompt {
@@ -455,6 +460,8 @@ impl From<String> for Prompt {
             text,
             attachments: Vec::new(),
             model: None,
+            channel: String::new(),
+            device: String::new(),
         }
     }
 }
@@ -482,7 +489,16 @@ impl Prompt {
                 .join("\n\n"),
             attachments,
             model: None,
+            channel: String::new(),
+            device: String::new(),
         }
+    }
+
+    /// The same words, marked as spoken into this window.
+    pub fn dictated(mut self) -> Self {
+        self.channel = "voice".into();
+        self.device = "desktop".into();
+        self
     }
 
     pub fn is_empty(&self) -> bool {
@@ -494,6 +510,7 @@ impl Prompt {
         let mut text = Vec::new();
         let mut attachments = Vec::new();
         let mut model = None;
+        let (mut channel, mut device) = (String::new(), String::new());
         for part in parts {
             if !part.text.trim().is_empty() {
                 text.push(part.text);
@@ -502,11 +519,17 @@ impl Prompt {
             if part.model.is_some() {
                 model = part.model;
             }
+            if !part.channel.is_empty() {
+                channel = part.channel;
+                device = part.device;
+            }
         }
         Self {
             text: text.join("\n\n"),
             attachments,
             model,
+            channel,
+            device,
         }
     }
 
@@ -525,6 +548,7 @@ impl Prompt {
 
     pub fn message(&self) -> UserMessage {
         let mut message = UserMessage::from(self.text.clone());
+        message.channel = self.channel.clone();
         message.images = self
             .attachments
             .iter()

@@ -41,6 +41,8 @@ cacp-agents = "0.1.0"
 base64 = "0.22"
 anyhow = "1"
 dirs = "6"
+# Local clock for the transcript's date dividers (`localtime_r`).
+libc = "0.2"
 # `Shared`, which is the task an in-flight cover is held as. gpui builds its own
 # image cache on it and compiles the crate either way, so this names what is
 # already in the graph rather than adding to it.

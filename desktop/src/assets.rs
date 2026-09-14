@@ -20,7 +20,7 @@ use std::{borrow::Cow, path::PathBuf};
 /// stand an empty box where a picture goes.
 pub fn mark() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    // `…/Arbos.app/Contents/MacOS/arbos` — the Makefile puts a small copy
+    // `…/Arbos.app/Contents/MacOS/Arbos` — the Makefile puts a small copy
     // of the logo beside the `.icns` that AppKit reads, because nothing here
     // can paint an `.icns`.
     let bundled = exe.parent()?.parent()?.join("Resources").join("icon.png");

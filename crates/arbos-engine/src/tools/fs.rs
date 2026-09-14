@@ -124,8 +124,15 @@ impl Tool for GrepTool {
             if history {
                 // Transcripts change every turn and .arbos/ is usually
                 // gitignored, so this is a fresh walk, not the index.
+                // Finished workers move to the archive; their history
+                // counts the same.
                 let pattern = req(&args, "pattern")?;
-                let hits = history_walk(&cx.place.path().join(".arbos").join("agents"), pattern)?;
+                let arbos = cx.place.path().join(".arbos");
+                let mut hits = history_walk(&arbos.join("agents"), pattern)?;
+                hits.extend(history_walk(
+                    &arbos.join("archive").join("agents"),
+                    pattern,
+                )?);
                 return Ok(format_history_hits(&hits));
             }
             let pattern = req(&args, "pattern")?;
@@ -453,7 +460,20 @@ pub fn confine(root: &Path, cwd: &Path, path: &str) -> Result<PathBuf> {
 /// refused write outside the store.
 fn store_alias(root: &Path, cwd: &Path, path: &str) -> String {
     let trimmed = path.trim().trim_start_matches("./");
-    if trimmed.is_empty() || Path::new(trimmed).is_absolute() || trimmed.starts_with(".arbos") {
+    if trimmed.is_empty() || Path::new(trimmed).is_absolute() {
+        return path.to_string();
+    }
+    // A finished worker's folder has moved to the archive; the path the
+    // done message named (and the one the parent remembers) still reads.
+    if let Some(rest) = trimmed.strip_prefix(".arbos/agents/")
+        && !root.join(trimmed).exists()
+    {
+        let archived = root.join(".arbos/archive/agents").join(rest);
+        if archived.exists() {
+            return archived.display().to_string();
+        }
+    }
+    if trimmed.starts_with(".arbos") {
         return path.to_string();
     }
     let mut parts = trimmed.splitn(2, '/');
@@ -958,6 +978,29 @@ mod store_alias_tests {
         assert_eq!(
             confine(root, root, ".arbos/docs/x.md").unwrap(),
             store.join("docs/x.md")
+        );
+    }
+
+    #[test]
+    fn an_archived_workers_folder_still_reads_at_its_old_path() {
+        let d = place();
+        let root = d.path();
+        let store = root.join(".arbos");
+        std::fs::create_dir_all(store.join("archive/agents/w1")).unwrap();
+        std::fs::write(store.join("archive/agents/w1/transcript.jsonl"), "{}\n").unwrap();
+        std::fs::create_dir_all(store.join("agents/live")).unwrap();
+        assert_eq!(
+            confine(root, root, ".arbos/agents/w1/transcript.jsonl").unwrap(),
+            store.join("archive/agents/w1/transcript.jsonl")
+        );
+        // A live folder is itself; an unknown one stays where it was asked.
+        assert_eq!(
+            confine(root, root, ".arbos/agents/live/notes.md").unwrap(),
+            store.join("agents/live/notes.md")
+        );
+        assert_eq!(
+            confine(root, root, ".arbos/agents/nobody/notes.md").unwrap(),
+            store.join("agents/nobody/notes.md")
         );
     }
 

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-pub const USAGE: &str = "arbos-kernel run [--place DIR] [--agent ID] [--json] [--steer] [--timeout SECS] [--no-spawn] \"<prompt>\"\narbos-kernel answer [--place DIR] [--agent ID] [--follow] [--json] (\"<text>\" | --approve | --deny)\narbos-kernel attach [--place DIR | --hub MACHINE[/PROJECT]] [--agent ID] [--json]   (--hub: a kernel on another machine, by name, through ~/.config/arbos/hub.toml)";
+pub const USAGE: &str = "arbos-kernel run [--place DIR] [--agent ID] [--json] [--steer] [--timeout SECS] [--no-spawn] [--no-prompts] \"<prompt>\"\narbos-kernel answer [--place DIR] [--agent ID] [--follow] [--json] (\"<text>\" | --approve | --deny)\narbos-kernel attach [--place DIR | --hub MACHINE[/PROJECT]] [--agent ID] [--json]   (--hub: a kernel on another machine, by name, through ~/.config/arbos/hub.toml)";
 
 /// How long to wait for a kernel this command started to write its port.
 const READY_WAIT: Duration = Duration::from_secs(60);
@@ -38,6 +38,11 @@ pub struct Args {
     pub steer: bool,
     pub timeout: Option<Duration>,
     pub no_spawn: bool,
+    /// `run` only: unattended. Anything that would wait on a person — an
+    /// approval, a question — is answered at once with a denial (or "no
+    /// one is here; choose a default"), named on stderr, and the run goes
+    /// on instead of parking with exit 3.
+    pub no_prompts: bool,
     pub prompt: Option<String>,
     /// `answer` only: stream the rest of the turn after answering.
     pub follow: bool,
@@ -57,6 +62,7 @@ impl Args {
             steer: false,
             timeout: None,
             no_spawn: false,
+            no_prompts: false,
             prompt: None,
             follow: false,
             allow: None,
@@ -72,6 +78,7 @@ impl Args {
                 "--json" => args.json = true,
                 "--steer" => args.steer = true,
                 "--no-spawn" => args.no_spawn = true,
+                "--no-prompts" => args.no_prompts = true,
                 "--follow" | "-f" => args.follow = true,
                 "--approve" => args.allow = Some(true),
                 "--deny" => args.allow = Some(false),
@@ -222,18 +229,44 @@ async fn stream_turn(
                 question,
                 options,
                 id,
-            } if agent == args.agent && started => match answer(&agent, &question, &options, id)? {
-                Some(reply) => {
+            } if agent == args.agent => {
+                // Not gated on `started`: a fast tool approval can reach us
+                // before the tail's copy of our own prompt does, and a
+                // question left from before this run blocks it just the
+                // same. Unattended: nothing waits. An approval is denied, a
+                // question told there is no one to answer; both named.
+                if args.no_prompts {
+                    let reply = deny(&agent, &question, &options, id);
+                    let what = if matches!(reply, Frame::Approve { .. }) {
+                        "denied"
+                    } else {
+                        "unanswered"
+                    };
+                    if args.json {
+                        println!(
+                            "{}",
+                            serde_json::json!({"kind": "prompt", "agent": agent, "question": question, "outcome": what})
+                        );
+                    } else {
+                        eprintln!("run: --no-prompts: {what}: {question}");
+                    }
                     w.write_all(format!("{}\n", serde_json::to_string(&reply)?).as_bytes())
                         .await?;
+                    continue;
                 }
-                None => {
-                    eprintln!(
-                        "run: the agent is waiting on a question and there is no terminal to answer it. Answer with: arbos-kernel answer [--agent ID] [--follow] \"<text>\" (or --approve / --deny)"
-                    );
-                    return Ok(EXIT_WAITING);
+                match answer(&agent, &question, &options, id)? {
+                    Some(reply) => {
+                        w.write_all(format!("{}\n", serde_json::to_string(&reply)?).as_bytes())
+                            .await?;
+                    }
+                    None => {
+                        eprintln!(
+                            "run: the agent is waiting on a question and there is no terminal to answer it. Answer with: arbos-kernel answer [--agent ID] [--follow] \"<text>\" (or --approve / --deny), or run with --no-prompts to deny such prompts unattended"
+                        );
+                        return Ok(EXIT_WAITING);
+                    }
                 }
-            },
+            }
             _ => {}
         }
     }
@@ -467,6 +500,33 @@ fn spawn_kernel(place: &Place) -> Result<()> {
 }
 
 /// Ask the person at the terminal. None when there is no terminal.
+/// Whether a question is an allow/deny approval (a tool wanting to run)
+/// rather than something the agent asked in words.
+fn is_approval(options: &[String]) -> bool {
+    options.len() == 2
+        && options.iter().any(|o| o == "allow")
+        && options.iter().any(|o| o == "deny")
+}
+
+/// The unattended reply: an approval is denied; a question is answered
+/// with the fact that no one is here, so the agent picks a default and
+/// says which.
+fn deny(agent: &str, _question: &str, options: &[String], id: Option<String>) -> Frame {
+    if is_approval(options) {
+        Frame::Approve {
+            agent: agent.to_string(),
+            call_id: id.unwrap_or_default(),
+            allow: false,
+        }
+    } else {
+        Frame::Answer {
+            agent: agent.to_string(),
+            text: "No one is here to answer: this run is unattended (--no-prompts). Choose a sensible default yourself, say which you chose, and continue.".into(),
+            id,
+        }
+    }
+}
+
 fn answer(
     agent: &str,
     question: &str,
@@ -476,10 +536,7 @@ fn answer(
     if !std::io::stdin().is_terminal() {
         return Ok(None);
     }
-    let approval = options.len() == 2
-        && options.iter().any(|o| o == "allow")
-        && options.iter().any(|o| o == "deny")
-        && question.starts_with("allow ");
+    let approval = is_approval(options);
     let mut out = std::io::stdout();
     writeln!(out, "? {question}")?;
     if !options.is_empty() {

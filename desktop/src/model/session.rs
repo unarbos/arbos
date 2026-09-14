@@ -488,6 +488,9 @@ pub struct ChatSession {
     pub children: Vec<ChildSummary>,
     /// When `live` last became non-empty, for the braille tick.
     pub live_since: Option<SystemTime>,
+    /// What the agent says it is doing right now (the kernel's `status`
+    /// event); cleared when the turn ends.
+    pub status: Option<String>,
     /// When each running tool call began, by call id, so its finished
     /// item can say how long it took.
     tool_started: HashMap<String, Instant>,
@@ -601,6 +604,7 @@ impl ChatSession {
             live: Vec::new(),
             tool_started: HashMap::new(),
             live_since: None,
+            status: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -673,6 +677,7 @@ impl ChatSession {
             live: Vec::new(),
             tool_started: HashMap::new(),
             live_since: None,
+            status: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -745,6 +750,7 @@ impl ChatSession {
             live: Vec::new(),
             tool_started: HashMap::new(),
             live_since: None,
+            status: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -1156,6 +1162,60 @@ pub struct ChildSummary {
     pub kernel_id: Option<String>,
     pub title: String,
     pub state: ChildState,
+    /// What the worker is on right now: its `status` line from the kernel
+    /// when it sent one, else the tool it is running or last ran.
+    pub step: Option<String>,
+}
+
+impl ChatSession {
+    /// The one line that says what this chat is doing: the kernel's status
+    /// event, else the running tool's title, else the last tool's.
+    pub fn current_step(&self) -> Option<String> {
+        if let Some(status) = &self.status {
+            return Some(status.clone());
+        }
+        let mut last = None;
+        for item in self.items.iter().rev() {
+            if let ChatItem::Tool { label, status, .. } = item {
+                if *status == ToolStatus::Running {
+                    return Some(step_label(label));
+                }
+                if last.is_none() {
+                    last = Some(step_label(label));
+                }
+            }
+            if matches!(item, ChatItem::User(_)) {
+                break;
+            }
+        }
+        last
+    }
+}
+
+/// A tool's title as a step: "Reading main.py", "Running python3 main.py",
+/// "Searching for foo" — the verb Cursor's status lines use, from the tool
+/// name the label starts with.
+fn step_label(label: &str) -> String {
+    let label = label.trim();
+    let (name, rest) = label.split_once(' ').unwrap_or((label, ""));
+    let verb = match name {
+        "read" | "cat" => "Reading",
+        "write" | "edit" | "apply_patch" => "Editing",
+        "bash" | "terminal" | "run" | "exec" => "Running",
+        "grep" | "tgrep" | "find" | "search" | "ls" | "list" => "Searching",
+        "fetch" | "browser" => "Fetching",
+        "spawn" => "Spawning",
+        "say" => "Reporting",
+        "plan" => "Planning",
+        "ask" => "Asking",
+        "screenshot" | "record" => "Capturing",
+        _ => "",
+    };
+    match (verb.is_empty(), rest.is_empty()) {
+        (true, _) => label.to_string(),
+        (false, true) => verb.to_string(),
+        (false, false) => format!("{verb} {}", rest.trim()),
+    }
 }
 
 impl ChatSession {
@@ -1165,7 +1225,7 @@ impl ChatSession {
             ChildState::Working
         } else if self.answering.is_some() || self.plan_open().any(|n| n.do_kind == "ask") {
             ChildState::Asking
-        } else if self.closed || self.turn_ended.is_some() {
+        } else if self.closed || self.turn_ended.is_some() || self.agent_gone() {
             ChildState::Done
         } else {
             ChildState::Waiting
@@ -2041,8 +2101,13 @@ impl ChatSession {
                 self.turn_open = true;
                 self.turn_ended = None;
             }
+            Event::Status(text) => {
+                let text = text.trim().to_string();
+                self.status = (!text.is_empty()).then_some(text);
+            }
             Event::TurnDone(result) => {
                 self.working = None;
+                self.status = None;
                 self.stamp_worked();
                 self.voice_answer();
                 if let Some(prompt) = self.permission.take() {
@@ -2843,7 +2908,13 @@ fn pump(
                             cwd,
                             url,
                         } => workspace.open_shown(id, path, title, kind, cwd, url, cx),
-                        Event::Hide { path, .. } => workspace.close_shown(id, &path, cx),
+                        Event::Hide { path, kind } => {
+                            if kind == "process" {
+                                workspace.finish_shown_process(id, &path, cx)
+                            } else {
+                                workspace.close_shown(id, &path, cx)
+                            }
+                        }
                         Event::Browser {
                             page,
                             url,

@@ -33,10 +33,13 @@ fn timer(prompt: &str, every: Option<&str>) -> Subscription {
         path: None,
         repo: None,
         pr: None,
+
+        branch: None,
         deliver_to: "agent".into(),
         notify: None,
         expires: None,
         paused: false,
+        continuity: false,
         internal: false,
         created: String::new(),
         next_due: None,

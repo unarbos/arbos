@@ -37,6 +37,25 @@ const MAX_CUTS: u32 = 2;
 
 /// A reply that is one JSON object naming a tool, or a tool's arguments
 /// (`{"path": "src/lib.rs"}`), instead of a function call.
+/// The model a turn runs: the wake's, when the user switched one turn
+/// ("switch to <vision model> for this turn"); else, for a child, the
+/// host's `child_model` when set (it beats the spawn call and the kind);
+/// else the agent's own; else the host's.
+pub fn pick_model(wake_model: &str, agent: &Agent, host_model: &str, child_model: &str) -> String {
+    let wake_model = wake_model.trim();
+    if !wake_model.is_empty() {
+        return wake_model.to_string();
+    }
+    if agent.parent.is_some() && !child_model.trim().is_empty() {
+        return child_model.trim().to_string();
+    }
+    if agent.model == "inherit" || agent.model.is_empty() {
+        host_model.to_string()
+    } else {
+        agent.model.clone()
+    }
+}
+
 fn looks_like_tool_call_text(content: &str) -> bool {
     let t = content
         .trim()
@@ -207,15 +226,12 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         (None, _) => return refuse(&transcript, &place, &agent, host.missing_key_hint()),
         (_, Err(e)) => return refuse(&transcript, &place, &agent, format!("{e:#}")),
     };
-    // The wake may name a model for this turn only ("switch to <vision
-    // model> for this turn"); otherwise the agent's, then the host's.
-    let model = if !wake.model.trim().is_empty() {
-        wake.model.trim().to_string()
-    } else if agent.model == "inherit" || agent.model.is_empty() {
-        host.config.model()
-    } else {
-        agent.model.clone()
-    };
+    let model = pick_model(
+        &wake.model,
+        &agent,
+        &host.config.model(),
+        &host.config.child_model,
+    );
     // The model's own context length, from the provider's model list.
     // `window_tokens = 0` uses it, capped so a 1M-token model does not turn
     // every step into a 1M-token prompt. A configured `window_tokens` is a
@@ -287,6 +303,8 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         key,
         model,
         reasoning_effort: host.config.reasoning_effort.clone(),
+        cache_ttl: host.config.cache_ttl.clone(),
+        data_policy: host.config.data_policy.clone(),
         stream_idle: std::time::Duration::from_millis(host.config.stream_idle_ms.max(1_000)),
         max_tokens: output_cap,
         trace: host.config.trace.then(|| layout.dir.join("trace")),
@@ -348,6 +366,8 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let mut cuts = 0u32;
     // Dollars over every model call of this turn, when the provider prices them.
     let mut turn_cost: Option<f64> = None;
+    // Prompt tokens the provider served from cache, summed the same way.
+    let mut turn_cached: Option<u64> = None;
     // Same tool, same arguments, same failure, again and again: name it.
     let mut last_failure: Option<String> = None;
     let mut failure_streak = 0u32;
@@ -374,8 +394,12 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         // crash leaves behind starts the next turn instead.
         let steers = arbos_core::inbox::take_steers(&place, agent.id.as_str());
         if !steers.is_empty() {
+            // An answer's words are already on the transcript (the kernel
+            // appended the `answer` line when the user replied); taking the
+            // file is what makes this step read them.
             let batch: Vec<Event> = steers
                 .into_iter()
+                .filter(|msg| msg.kind != "answer")
                 .map(|msg| match msg.from.as_str() {
                     "kernel" => Event::new(EventKind::Notice {
                         text: msg.body,
@@ -393,7 +417,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     }),
                 })
                 .collect();
-            append_events(&transcript, &batch)?;
+            if !batch.is_empty() {
+                append_events(&transcript, &batch)?;
+            }
             events = load_transcript(&transcript)?;
         }
 
@@ -412,6 +438,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         if first_step {
             first_step = false;
             hooks.prompt_size(crate::tools::PromptSize {
+                model: provider.model.clone(),
                 system: managed.system,
                 tools: scaled_tools(tool_tokens, calib),
                 conversation: managed.estimated.saturating_sub(managed.system),
@@ -470,6 +497,15 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             tools,
         )
         .await?;
+        // The model call took seconds; the chat may have been deleted
+        // meanwhile (qa-017). Its reply is not written anywhere.
+        if gone() {
+            eprintln!(
+                "turn {}: agent folder was deleted during the model call; ending without writing",
+                agent.id
+            );
+            return Ok(());
+        }
         let (content, calls, usage, outcomes, reasoning_details) = match step {
             Step::Done {
                 content,
@@ -544,6 +580,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         if let Some(c) = usage.and_then(|u| u.cost) {
             turn_cost = Some(turn_cost.unwrap_or(0.0) + c);
         }
+        if let Some(n) = usage.and_then(|u| u.cached) {
+            turn_cached = Some(turn_cached.unwrap_or(0) + n);
+        }
         if let Some(u) = usage {
             let ours = managed.raw + if tools.is_empty() { 0 } else { tool_tokens };
             if u.used > 0 && ours > 0 {
@@ -600,6 +639,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             end(
                 usage.map(|mut u| {
                     u.cost = turn_cost;
+                    u.cached = turn_cached;
                     u
                 }),
                 None,
@@ -702,4 +742,58 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
 /// The tool schemas at the provider's rate, like the messages.
 fn scaled_tools(tokens: u64, calib: f64) -> u64 {
     (tokens as f64 * calib).round() as u64
+}
+
+#[cfg(test)]
+mod pick_model_tests {
+    use super::*;
+
+    fn agent(parent: Option<&str>, model: &str) -> Agent {
+        let mut a = Agent::root("x");
+        a.parent = parent.map(arbos_core::AgentId::new);
+        a.model = model.into();
+        a
+    }
+
+    #[test]
+    fn child_model_pins_every_child_but_not_root_and_not_a_users_one_turn_switch() {
+        let host = "openai/gpt-5.4-mini";
+        // Root: its own, else the host's; child_model never applies.
+        assert_eq!(
+            pick_model("", &agent(None, "inherit"), host, "cheap/x"),
+            host
+        );
+        assert_eq!(
+            pick_model("", &agent(None, "anthropic/claude"), host, "cheap/x"),
+            "anthropic/claude"
+        );
+        // A child: as asked when child_model is empty…
+        assert_eq!(
+            pick_model("", &agent(Some("root"), "inherit"), host, ""),
+            host
+        );
+        assert_eq!(
+            pick_model("", &agent(Some("root"), "kind/model"), host, ""),
+            "kind/model"
+        );
+        // …and child_model over the spawn call and the kind when set.
+        assert_eq!(
+            pick_model("", &agent(Some("root"), "kind/model"), host, "cheap/x"),
+            "cheap/x"
+        );
+        assert_eq!(
+            pick_model("", &agent(Some("root"), "inherit"), host, " cheap/x "),
+            "cheap/x"
+        );
+        // The user's per-turn switch beats everything.
+        assert_eq!(
+            pick_model(
+                "vision/y",
+                &agent(Some("root"), "kind/model"),
+                host,
+                "cheap/x"
+            ),
+            "vision/y"
+        );
+    }
 }

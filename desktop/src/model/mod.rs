@@ -4,6 +4,7 @@
 
 pub mod article;
 pub mod attachment;
+pub mod permission_center;
 pub mod board;
 pub mod cover;
 pub mod history;

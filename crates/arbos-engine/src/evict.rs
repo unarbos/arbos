@@ -65,6 +65,30 @@ pub fn evict_tail_to(full: &str, cite: &str, max_bytes: usize, max_lines: usize)
 }
 
 /// Persist the full body; the model sees a short head plus a cite.
+/// Where a tool result that the model cannot see whole is kept as plain
+/// text: `<agent dir>/results/<call id>.txt`. The cite on the evicted
+/// body names it, so `read path offset` continues where the head or the
+/// tail stopped — a file, not a JSON line to unpick.
+pub fn spill_name(call_id: &str) -> String {
+    let safe: String = call_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{safe}.txt")
+}
+
+/// Whether a body is more than the model's view of it will show, so the
+/// whole belongs in a file too.
+pub fn spills(body: &str) -> bool {
+    !fits(body, EVICT_BYTES, EVICT_LINES)
+}
+
 pub fn evict_head(full: &str, cite: &str) -> String {
     evict_head_to(full, cite, EVICT_BYTES, EVICT_LINES)
 }

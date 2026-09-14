@@ -320,6 +320,47 @@ pub fn check(place: &Place) -> Result<Report> {
             r.warn(rel(&notes), Some(p.line), p.what);
         }
     }
+    // Jobs whose command reached for the cloud metadata service, the
+    // container runtime, or credential files: named, so a run that was
+    // led there is visible after the fact (the guard asked at the time).
+    for agent in &agents {
+        let root = arbos_engine::JobsRoot::for_agent(place, &agent.id);
+        for job in root.list() {
+            if let Some(risk) = arbos_core::containment::risk_of(&job.meta.command) {
+                r.warn(
+                    format!(".arbos/agents/{}/jobs/{}", agent.id, job.id),
+                    None,
+                    format!(
+                        "this job reached for {risk}: {}",
+                        arbos_core::text::clip(job.meta.command.trim(), 100)
+                    ),
+                );
+            }
+        }
+    }
+    // results/ grows with every long tool result and nothing prunes it:
+    // past 50 MB it is worth a look (delete what is old; archived workers
+    // take theirs with them).
+    for agent in &agents {
+        let dir = place.agent_dir(agent.id.as_str()).join("results");
+        let bytes: u64 = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.metadata().ok())
+            .map(|m| m.len())
+            .sum();
+        if bytes > 50 * 1024 * 1024 {
+            r.warn(
+                format!(".arbos/agents/{}/results", agent.id),
+                None,
+                format!(
+                    "{} MB of spilled tool results; nothing prunes this folder — delete what is old",
+                    bytes / (1024 * 1024)
+                ),
+            );
+        }
+    }
     // Processes still writing into .arbos/: a job from an earlier kernel
     // run (the kernel reaps these at start; a `check` between runs sees
     // them), and, on Linux, any process holding a file under .arbos/ open
@@ -496,6 +537,89 @@ pub fn check(place: &Place) -> Result<Report> {
             None,
             arbos_core::cloudsync::advice(&sync, place.path()),
         );
+    }
+
+    // Worktrees of workers that are gone (archived or deleted): the kernel
+    // removes a clean one when it archives the worker; a dirty one, or one
+    // left by a kernel older than that, is named here.
+    for id in crate::worktree::ids(place.path()) {
+        if ids.contains(&id) {
+            continue;
+        }
+        let Some(left) = crate::worktree::leftover(place.path(), &id) else {
+            continue;
+        };
+        let what = if left.dirty == usize::MAX {
+            "worktree of a worker that is gone; git could not read it".to_string()
+        } else if left.dirty > 0 {
+            format!(
+                "worktree of a worker that is gone, with {} uncommitted path(s) on {}: commit or discard them, then `git worktree remove {}`",
+                left.dirty,
+                left.branch,
+                left.path.display()
+            )
+        } else if left.ahead > 0 {
+            format!(
+                "worktree of a worker that is gone; clean, {} keeps {} commit(s): `git worktree remove {}` (the branch stays)",
+                left.branch,
+                left.ahead,
+                left.path.display()
+            )
+        } else {
+            format!(
+                "worktree of a worker that is gone; clean and {} has nothing new: `git worktree remove {} && git branch -D {}`",
+                left.branch,
+                left.path.display(),
+                left.branch
+            )
+        };
+        r.warn(rel(&left.path), None, what);
+    }
+
+    // doors.toml: a chat door the kernel could not open is a warning; a
+    // file it cannot read is an error (no door opens then).
+    match crate::chatdoor::load(place) {
+        Ok(doors) => {
+            for d in doors {
+                let source = arbos_engine::secrets::Config::load(place.path())
+                    .ok()
+                    .and_then(|c| c.secrets.get(d.token.trim()).cloned())
+                    .unwrap_or_else(|| d.token.trim().to_string());
+                let kind = arbos_engine::secrets::kind_of(&source);
+                let reachable = if let Some(v) = source.strip_prefix("env:") {
+                    std::env::var_os(v.trim()).is_some()
+                } else if let Some(p) = source.strip_prefix("file:") {
+                    Path::new(p.trim()).exists()
+                } else if source.starts_with("op://") {
+                    std::env::var_os("OP_SERVICE_ACCOUNT_TOKEN").is_some()
+                        || std::env::var_os("OP_SESSION").is_some()
+                } else {
+                    false
+                };
+                if !reachable {
+                    r.warn(
+                        format!(".arbos/{}", crate::chatdoor::FILE),
+                        None,
+                        format!(
+                            "{} door: token {:?} ({kind}) cannot be read from here; the kernel logs door_token and leaves the door closed",
+                            d.kind, d.token
+                        ),
+                    );
+                }
+                if !arbos_core::agent_exists(place, &d.agent) {
+                    r.warn(
+                        format!(".arbos/{}", crate::chatdoor::FILE),
+                        None,
+                        format!("{} door: agent {:?} does not exist here", d.kind, d.agent),
+                    );
+                }
+            }
+        }
+        Err(e) => r.error(
+            format!(".arbos/{}", crate::chatdoor::FILE),
+            None,
+            format!("{e:#}"),
+        ),
     }
 
     // kernel.json: a live kernel, or a stale file.

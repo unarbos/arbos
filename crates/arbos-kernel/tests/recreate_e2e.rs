@@ -20,13 +20,6 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-fn root_events(a: &mut Attach, kind: &str, timeout: Duration) -> bool {
-    a.wait(timeout, |f| {
-        f["type"] == "event" && f["agent"] == "root" && f["event"]["kind"] == kind
-    })
-    .is_some()
-}
-
 #[test]
 fn a_restored_chat_folder_streams_its_new_lines() {
     // Three scripted replies, one per prompt: the turns run for real,
@@ -96,16 +89,27 @@ fn a_restored_chat_folder_streams_its_new_lines() {
         "the restored folder's new line must reach the client"
     );
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "after restore"}));
-    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    // Same either-order rule as above: `wait` consumes every frame it reads,
+    // so waiting for `idle` first swallowed the tailed `user` line whenever
+    // it came first, and the second wait then ran out its 5 s for nothing
+    // (the CI flake on #141/#147). One wait, both conditions.
+    let (mut idle, mut user) = (false, false);
+    let seen = a.wait(Duration::from_secs(30), |f| {
+        if f["type"] == "turn" && f["agent"] == "root" && f["state"] == "idle" {
+            idle = true;
+        }
+        if f["type"] == "event"
+            && f["agent"] == "root"
+            && f["event"]["kind"] == "user"
+            && f["event"]["text"] == "after restore"
+        {
+            user = true;
+        }
+        idle && user
+    });
     assert!(
-        a.wait(Duration::from_secs(5), |f| {
-            f["type"] == "event"
-                && f["agent"] == "root"
-                && f["event"]["kind"] == "user"
-                && f["event"]["text"] == "after restore"
-        })
-        .is_some(),
-        "the restored chat's user event must reach the client"
+        seen.is_some(),
+        "the restored chat's turn must end and its user event reach the client (idle: {idle}, user line: {user})"
     );
     let _ = k.child.kill();
 }

@@ -144,6 +144,7 @@ impl Replay {
             calls,
             usage: Some((0, 0)),
             cost: Some(0.0),
+            cached: None,
             reasoning_details: Vec::new(),
         }
     }

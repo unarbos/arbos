@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{Attach, restart_replay, start_kernel_replay_with};
+use common::{Attach, restart_replay, start_kernel_replay_prepared};
 use std::{path::Path, time::Duration};
 
 fn transcript(place: &Path, agent: &str) -> Vec<serde_json::Value> {
@@ -36,6 +36,19 @@ fn agents(place: &Path) -> Vec<String> {
         .collect();
     out.sort();
     out
+}
+
+/// These tests read finished workers' folders under `.arbos/agents/`;
+/// keep them there (archiving finished workers is the default).
+fn start(name: &str, replies: &str, config: &str) -> common::Kernel {
+    start_kernel_replay_prepared(name, replies, config, |place| {
+        std::fs::create_dir_all(place.join(".arbos")).unwrap();
+        std::fs::write(
+            place.join(".arbos/project.toml"),
+            "schema = 2\n[root]\nrole = \"coordinator\"\narchive_children = false\n",
+        )
+        .unwrap();
+    })
 }
 
 fn spawn_call(name: &str, extra: &str) -> String {
@@ -83,7 +96,7 @@ fn finished_children_do_not_count_toward_the_cap_and_their_dones_batch() {
         ),
         calls.join(",")
     );
-    let mut k = start_kernel_replay_with("multitask-cap", &replies, "max_children = 3\n");
+    let mut k = start("multitask-cap", &replies, "max_children = 3\n");
     let mut a = Attach::connect(&k.url);
     assert!(
         a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
@@ -156,7 +169,7 @@ fn a_waited_spawn_reports_once() {
         ),
         spawn_call("oracle", r#","wait":true"#)
     );
-    let mut k = start_kernel_replay_with("multitask-wait", &replies, "");
+    let mut k = start("multitask-wait", &replies, "");
     let mut a = Attach::connect(&k.url);
     assert!(
         a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
@@ -241,7 +254,7 @@ fn a_steer_before_a_batch_does_not_cancel_the_spawn() {
         &spawn_call("helper", ""),
         "spawned, and noted the steer",
     );
-    let mut k = start_kernel_replay_with("multitask-steer", &replies, "");
+    let mut k = start("multitask-steer", &replies, "");
     let mut a = Attach::connect(&k.url);
     assert!(
         a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
@@ -279,7 +292,7 @@ fn a_steer_before_a_batch_does_not_cancel_the_spawn() {
 fn a_stop_word_typed_while_running_stops_the_turn() {
     let port = slow_server(3);
     let replies = steered_replies(port, &spawn_call("helper", ""), "stopped as asked");
-    let mut k = start_kernel_replay_with("multitask-stop-steer", &replies, "");
+    let mut k = start("multitask-stop-steer", &replies, "");
     let mut a = Attach::connect(&k.url);
     assert!(
         a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
@@ -290,7 +303,9 @@ fn a_stop_word_typed_while_running_stops_the_turn() {
     );
     steer_when_running(&mut a, "stop");
     assert!(a.wait_turn("root", "idle", Duration::from_secs(40)));
-    std::thread::sleep(Duration::from_millis(500));
+    common::wait_for(Duration::from_secs(5), || {
+        count(&transcript(&k.place, "root"), "interrupted") >= 1
+    });
     let root = transcript(&k.place, "root");
     assert!(count(&root, "interrupted") >= 1, "{root:#?}");
     assert!(

@@ -219,6 +219,12 @@ pub struct Provider {
     pub key: String,
     pub model: String,
     pub reasoning_effort: Option<String>,
+    /// `cache_control.ttl` for Claude breakpoints: None = the 5-minute
+    /// default, Some("1h") = an hour.
+    pub cache_ttl: Option<String>,
+    /// OpenRouter routing by data policy: "deny" or "zdr" (see
+    /// `HostConfig::data_policy`); empty = the account's default.
+    pub data_policy: String,
     /// Longest silence tolerated mid-stream before the call counts as lost.
     pub stream_idle: Duration,
     /// `max_tokens` to send. None = omit the field.
@@ -269,6 +275,11 @@ impl Trace {
     fn write(&mut self, dir: &Option<std::path::PathBuf>) {
         let Some(dir) = dir else { return };
         self.ended_ms = now_ms();
+        // `trace/` lives in the agent folder; a folder deleted mid-call is
+        // not recreated for its trace (qa-017).
+        if !dir.parent().is_some_and(|agent| agent.is_dir()) {
+            return;
+        }
         if std::fs::create_dir_all(dir).is_err() {
             return;
         }
@@ -465,6 +476,9 @@ pub struct Completion {
     /// This call's price in US dollars, when the provider reported it
     /// (OpenRouter `usage.cost`, asked for with `usage: {include: true}`).
     pub cost: Option<f64>,
+    /// Prompt tokens served from the provider's cache on this call
+    /// (`usage.prompt_tokens_details.cached_tokens`), when reported.
+    pub cached: Option<u64>,
     /// `reasoning_details` blocks, to be sent back with this assistant
     /// message on later calls. Gemini 3 stops thinking without its thought
     /// signatures; Anthropic rejects a broken thinking chain.
@@ -485,8 +499,14 @@ impl Provider {
         mut on_delta: impl FnMut(Delta),
     ) -> Result<Completion> {
         let mut msgs = messages_json(messages);
-        if wants_cache_control(&self.model) {
-            mark_cache_breakpoints(&mut msgs);
+        if wants_cache_control(&self.model, &self.base) {
+            // The hour is Anthropic's; others drop or reject the field.
+            let m = self.model.to_ascii_lowercase();
+            let ttl = self
+                .cache_ttl
+                .as_deref()
+                .filter(|t| *t == "1h" && (m.contains("claude") || m.starts_with("anthropic/")));
+            mark_cache_breakpoints(&mut msgs, ttl);
         }
         let mut body = json!({
             "model": self.model,
@@ -501,6 +521,9 @@ impl Provider {
         // sent to OpenRouter alone.
         if self.base.contains("openrouter.ai") {
             body["usage"] = json!({ "include": true });
+            if let Some(provider) = data_policy_routing(&self.data_policy) {
+                body["provider"] = provider;
+            }
         }
         if let Some(n) = self.max_tokens {
             body["max_tokens"] = json!(n);
@@ -680,6 +703,7 @@ impl Provider {
         let mut calls: Vec<PartialCall> = Vec::new();
         let mut usage = None;
         let mut cost = None;
+        let mut cached = None;
         let mut reasoning_details: Vec<Value> = Vec::new();
         // Time since the last delta that carried text, reasoning or tool
         // arguments. Keep-alive comments and empty deltas do not count: a
@@ -750,6 +774,7 @@ impl Provider {
                         calls: finish_calls(calls),
                         usage,
                         cost,
+                        cached,
                         reasoning_details,
                     });
                 }
@@ -789,6 +814,9 @@ impl Provider {
                 }
                 if let Some(c) = cost_of(&v) {
                     cost = Some(c);
+                }
+                if let Some(n) = cached_of(&v) {
+                    cached = Some(n);
                 }
                 let Some(choice) = v.get("choices").and_then(|c| c.get(0)) else {
                     continue;
@@ -832,6 +860,7 @@ impl Provider {
                             calls: finish_calls(calls),
                             usage,
                             cost,
+                            cached,
                             reasoning_details,
                         });
                     }
@@ -848,6 +877,7 @@ impl Provider {
             calls: finish_calls(calls),
             usage,
             cost,
+            cached,
             reasoning_details,
         })
     }
@@ -1146,18 +1176,54 @@ fn usage_of(v: &Value) -> Option<(u64, u64)> {
     Some((prompt, total))
 }
 
+/// Prompt tokens read from the cache, as OpenAI and OpenRouter report them
+/// (`usage.prompt_tokens_details.cached_tokens`); Anthropic's own field
+/// (`cache_read_input_tokens`) when a direct endpoint sends it.
+fn cached_of(v: &Value) -> Option<u64> {
+    let u = v.get("usage")?;
+    u.get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| u.get("cache_read_input_tokens").and_then(Value::as_u64))
+}
+
 /// OpenRouter puts the call's price in `usage.cost` (dollars). Absent
 /// elsewhere.
 fn cost_of(v: &Value) -> Option<f64> {
     v.get("usage")?.get("cost")?.as_f64()
 }
 
-/// Anthropic models cache nothing unless the request says where. OpenAI
-/// and most others cache the prefix automatically and reject or ignore the
-/// marker, so it is only sent to Claude.
-fn wants_cache_control(model: &str) -> bool {
+/// OpenRouter's `provider` routing object for a data policy: "deny"
+/// keeps the request off providers that may store or train on prompts;
+/// "zdr" adds zero-data-retention endpoints only. None for anything else.
+fn data_policy_routing(policy: &str) -> Option<Value> {
+    match policy.trim().to_ascii_lowercase().as_str() {
+        "deny" => Some(json!({ "data_collection": "deny" })),
+        "zdr" => Some(json!({ "data_collection": "deny", "zdr": true })),
+        _ => None,
+    }
+}
+
+/// Who needs the `cache_control` marker. Anthropic models cache nothing
+/// unless the request says where. Through OpenRouter the same marker also
+/// drives Google's explicit caching (Gemini; the 2.5 line caches on its
+/// own too, the marker is harmless) and Alibaba's (Qwen, DeepSeek V3.2 on
+/// Alibaba). OpenAI, Grok, DeepSeek, Moonshot, Groq cache the prefix
+/// automatically; OpenRouter translates the marker for OpenAI but there
+/// is nothing to gain. A custom OpenAI-compatible endpoint may reject an
+/// unknown field, so off OpenRouter only Claude gets it.
+fn wants_cache_control(model: &str, base: &str) -> bool {
     let m = model.to_ascii_lowercase();
-    m.contains("claude") || m.starts_with("anthropic/")
+    if m.contains("claude") || m.starts_with("anthropic/") {
+        return true;
+    }
+    if !base.contains("openrouter.ai") {
+        return false;
+    }
+    m.starts_with("google/")
+        || m.starts_with("qwen/")
+        || m.starts_with("alibaba/")
+        || m.starts_with("deepseek/deepseek-v3.2")
 }
 
 /// Two breakpoints: after the system prompt (contract + tool list, the
@@ -1165,15 +1231,19 @@ fn wants_cache_control(model: &str) -> bool {
 /// next step's prefix). Cache reads cost a tenth of fresh tokens and cut
 /// time to first byte; without the markers every step re-reads the whole
 /// conversation at full price.
-fn mark_cache_breakpoints(msgs: &mut [Value]) {
-    fn mark(m: &mut Value) {
+fn mark_cache_breakpoints(msgs: &mut [Value], ttl: Option<&str>) {
+    let marker = match ttl {
+        Some(t) => json!({ "type": "ephemeral", "ttl": t }),
+        None => json!({ "type": "ephemeral" }),
+    };
+    let mark = |m: &mut Value| {
         let Some(content) = m.get_mut("content") else {
             return;
         };
         match content {
             Value::String(s) => {
                 let text = std::mem::take(s);
-                *content = json!([{ "type": "text", "text": text, "cache_control": { "type": "ephemeral" } }]);
+                *content = json!([{ "type": "text", "text": text, "cache_control": marker }]);
             }
             Value::Array(parts) => {
                 if let Some(last) = parts
@@ -1181,14 +1251,14 @@ fn mark_cache_breakpoints(msgs: &mut [Value]) {
                     .rev()
                     .find(|p| p.get("type").and_then(Value::as_str) == Some("text"))
                 {
-                    last["cache_control"] = json!({ "type": "ephemeral" });
+                    last["cache_control"] = marker.clone();
                 } else if let Some(last) = parts.last_mut() {
-                    last["cache_control"] = json!({ "type": "ephemeral" });
+                    last["cache_control"] = marker.clone();
                 }
             }
             _ => {}
         }
-    }
+    };
     let n = msgs.len();
     if n == 0 {
         return;
@@ -1263,4 +1333,86 @@ pub fn messages_json(messages: &[ChatMessage]) -> Vec<Value> {
             v
         })
         .collect()
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    const OR: &str = "https://openrouter.ai/api/v1";
+    const CUSTOM: &str = "http://localhost:8080/v1";
+
+    #[test]
+    fn the_marker_goes_to_vendors_that_need_it_and_only_through_openrouter_beyond_claude() {
+        for m in ["anthropic/claude-sonnet-4.5", "claude-3-5-haiku"] {
+            assert!(wants_cache_control(m, OR), "{m}");
+            assert!(wants_cache_control(m, CUSTOM), "{m} direct");
+        }
+        for m in [
+            "google/gemini-2.5-pro",
+            "google/gemini-3-flash",
+            "qwen/qwen3-coder-plus",
+            "deepseek/deepseek-v3.2",
+        ] {
+            assert!(wants_cache_control(m, OR), "{m}");
+            assert!(
+                !wants_cache_control(m, CUSTOM),
+                "{m} direct: unknown field risk"
+            );
+        }
+        for m in [
+            "openai/gpt-5.4-mini",
+            "x-ai/grok-4",
+            "deepseek/deepseek-chat",
+            "moonshotai/kimi-k2",
+        ] {
+            assert!(!wants_cache_control(m, OR), "{m} caches on its own");
+        }
+    }
+
+    #[test]
+    fn the_hour_ttl_rides_on_the_marker_only_when_asked() {
+        let mut msgs = vec![
+            json!({"role": "system", "content": "rules"}),
+            json!({"role": "user", "content": "hi"}),
+        ];
+        mark_cache_breakpoints(&mut msgs, Some("1h"));
+        assert_eq!(
+            msgs[0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        assert_eq!(
+            msgs[1]["content"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        let mut plain = vec![json!({"role": "system", "content": "rules"})];
+        mark_cache_breakpoints(&mut plain, None);
+        assert_eq!(
+            plain[0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+    }
+
+    #[test]
+    fn the_data_policy_becomes_openrouters_provider_routing() {
+        assert_eq!(data_policy_routing(""), None);
+        assert_eq!(data_policy_routing("allow"), None);
+        assert_eq!(
+            data_policy_routing("deny"),
+            Some(json!({"data_collection": "deny"}))
+        );
+        assert_eq!(
+            data_policy_routing(" ZDR "),
+            Some(json!({"data_collection": "deny", "zdr": true}))
+        );
+    }
+
+    #[test]
+    fn cached_tokens_are_read_from_either_shape() {
+        let openai = json!({"usage": {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 64}}});
+        assert_eq!(cached_of(&openai), Some(64));
+        let anthropic = json!({"usage": {"prompt_tokens": 100, "cache_read_input_tokens": 80}});
+        assert_eq!(cached_of(&anthropic), Some(80));
+        assert_eq!(cached_of(&json!({"usage": {"prompt_tokens": 1}})), None);
+    }
 }

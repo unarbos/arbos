@@ -162,6 +162,11 @@ pub struct Usage {
     /// the provider reports it (OpenRouter does).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
+    /// Prompt tokens read from the provider's cache over the turn's model
+    /// calls (`usage.prompt_tokens_details.cached_tokens`), when reported.
+    /// Zero with a cache-capable model means the breakpoints did not hit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached: Option<u64>,
 }
 
 fn is_zero(n: &u64) -> bool {

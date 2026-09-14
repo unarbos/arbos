@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{Attach, restart_replay, start_kernel_replay};
+use common::{Attach, restart_replay, start_kernel_replay, start_kernel_replay_prepared};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -102,7 +102,16 @@ fn a_fork_claims_no_worker_and_no_agent_is_its_own_ancestor() {
         "{\"agent\":\"root\",\"content\":\"started\"}\n",
         "{\"content\":\"word\"}\n",
     );
-    let mut k = start_kernel_replay("standing-fork", replies);
+    // The test reads w1's folder after its done: keep it where it is
+    // (finished workers are archived by default).
+    let mut k = start_kernel_replay_prepared("standing-fork", replies, "", |place| {
+        std::fs::create_dir_all(place.join(".arbos")).unwrap();
+        std::fs::write(
+            place.join(".arbos/project.toml"),
+            "schema = 2\n[root]\nrole = \"coordinator\"\narchive_children = false\n",
+        )
+        .unwrap();
+    });
     let mut a = snapshot(&k);
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "start one worker"}));
     assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
@@ -247,8 +256,14 @@ fn rewound_arrives_before_the_file_restore() {
     assert!(follow.is_some(), "the file restore must report");
 
     // qa-032: the cut takes the turn whole, wake included. What remains
-    // ends on turn 1's turn_complete, and a restart fires nothing.
-    let cut = transcript(&k.place, "root");
+    // ends on turn 1's turn_complete, and a restart fires nothing. Read
+    // the file by polling, as every other file check here does: a single
+    // read right after the frame caught the file mid-rewrite on the CI
+    // runner (#158/#162: "not a dangling wake: []"); the cut itself is
+    // now written whole, the poll is the belt to that brace.
+    let cut = wait_transcript(&k.place, "root", Duration::from_secs(5), |t| {
+        t.last().is_some_and(|e| e["kind"] == "turn_complete")
+    });
     assert!(
         cut.last().is_some_and(|e| e["kind"] == "turn_complete"),
         "the transcript must end on a finished turn, not a dangling wake: {cut:?}"
