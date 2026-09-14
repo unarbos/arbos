@@ -725,6 +725,16 @@ impl Arbos {
                 }
                 ComposerEvent::Agent(ix) => this.pick_agent(*ix, cx),
                 ComposerEvent::Switch(id, value) => this.switch(id, value, cx),
+                // The kernel owns modes: the chip's pick is the `/mode`
+                // line, sent like any prompt (the kernel intercepts it and
+                // starts no turn).
+                ComposerEvent::Mode(skill) => {
+                    let line = match skill {
+                        Some(name) => format!("/mode {name}"),
+                        None => "/mode off".to_string(),
+                    };
+                    this.submit(crate::model::attachment::Prompt::from(line), cx)
+                }
                 ComposerEvent::Voice => this.toggle_voice(cx),
                 ComposerEvent::Attach => {}
                 ComposerEvent::Step(step) => this.cycle_entry(*step, window, cx),

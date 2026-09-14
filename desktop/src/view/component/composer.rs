@@ -148,6 +148,9 @@ pub enum ComposerEvent {
     /// Leftover. Catalog ACP agents are not installed as chat runtimes.
     /// Set a switch to one of its values, by id.
     Switch(SwitchId, SharedString),
+    /// Pin a skill to the chat as its mode (`/mode <skill>`), or none
+    /// (`/mode off`). The kernel does the work; this is the chip's pick.
+    Mode(Option<String>),
     Voice,
     Attach,
     /// No slash or model menu: the arrow keys step the sidebar.
@@ -462,6 +465,12 @@ pub struct Composer {
     voice_at: usize,
     /// A lost connection can be woken by an empty send.
     reconnect: bool,
+    /// The skill pinned to this chat as its mode (`agent.md skill:`), and
+    /// the skills the place offers, for the chip beside the model picker.
+    mode_skill: Option<String>,
+    skills: Vec<String>,
+    /// The mode chip's menu is open.
+    mode_menu: bool,
     /// Provider filter for the model picker: the vendor prefix of the id
     /// (`openai/…` → `openai`). None: every provider.
     model_provider: Option<String>,
@@ -551,6 +560,9 @@ impl Composer {
             dictated: false,
             voice_at: 0,
             reconnect: false,
+            mode_skill: None,
+            skills: Vec::new(),
+            mode_menu: false,
             hint: "Send follow-up".into(),
             painted_hint: "".into(),
             watching_focus: false,
@@ -688,6 +700,24 @@ impl Composer {
 
     /// What the session can be switched between, and how much context it has
     /// spent. Both belong to a live connection, so both go empty with one.
+    /// The pinned mode and the skills on offer, from the session.
+    pub fn set_mode_skill(
+        &mut self,
+        pinned: Option<String>,
+        skills: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mode_skill == pinned && self.skills == skills {
+            return;
+        }
+        self.mode_skill = pinned;
+        self.skills = skills;
+        if self.mode_skill.is_none() {
+            self.mode_menu = false;
+        }
+        cx.notify();
+    }
+
     pub fn set_switches(&mut self, switches: &[Switch], cx: &mut Context<Self>) {
         if self.switches == switches {
             return;
@@ -1634,6 +1664,97 @@ impl Composer {
             .into_any_element()
     }
 
+    /// The pinned mode, as a chip beside the model picker: `◆ haiku`. A
+    /// press opens a short list — the place's skills and Off — and a pick
+    /// becomes `/mode <skill>` or `/mode off` for the kernel. No chip when
+    /// nothing is pinned (the `/mode` command still works).
+    fn mode_chip(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let pinned = self.mode_skill.clone()?;
+        let label: SharedString = format!("◆ {pinned}").into();
+        let tip: SharedString = format!("Mode: {pinned} is pinned to this chat. Click to change or turn off.").into();
+        let chip = div()
+            .id("composer-mode")
+            .relative()
+            .flex_none()
+            .h(px(root::COMPOSER_HIT))
+            .px(px(6.))
+            .rounded(px(6.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(3.))
+            .cursor_pointer()
+            .text_style(TextStyle::Body)
+            .text_color(theme.text_muted)
+            .hover(|button| button.bg(theme.element_hover))
+            .tooltip(move |window, cx| Tooltip::text(tip.clone(), window, cx))
+            .on_click(cx.listener(|composer, _, _, cx| {
+                composer.mode_menu = !composer.mode_menu;
+                cx.notify();
+            }))
+            .child(div().truncate().max_w(px(160.)).child(label))
+            .children(self.mode_menu_card(theme, window, cx));
+        Some(chip.into_any_element())
+    }
+
+    fn mode_menu_card(&self, theme: &Theme, _window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.mode_menu {
+            return None;
+        }
+        let pinned = self.mode_skill.clone();
+        let mut rows: Vec<AnyElement> = self
+            .skills
+            .iter()
+            .enumerate()
+            .map(|(ix, name)| {
+                let picked = pinned.as_deref() == Some(name.as_str());
+                let choice = name.clone();
+                popover::menu_row(theme, false, None)
+                    .id(SharedString::from(format!("composer-mode-{ix}")))
+                    .gap(px(8.))
+                    .py(px(4.))
+                    .cursor_pointer()
+                    .hover(|row| row.bg(theme.element_hover))
+                    .on_click(cx.listener(move |composer, _, _, cx| {
+                        composer.mode_menu = false;
+                        cx.emit(ComposerEvent::Mode(Some(choice.clone())));
+                        cx.notify();
+                    }))
+                    .child(div().flex_1().min_w_0().truncate().text_color(theme.text).child(name.clone()))
+                    .when(picked, |row| {
+                        row.child(div().flex_none().text_color(theme.text_muted).child("✓"))
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        rows.push(
+            popover::menu_row(theme, false, None)
+                .id("composer-mode-off")
+                .gap(px(8.))
+                .py(px(4.))
+                .cursor_pointer()
+                .hover(|row| row.bg(theme.element_hover))
+                .on_click(cx.listener(|composer, _, _, cx| {
+                    composer.mode_menu = false;
+                    cx.emit(ComposerEvent::Mode(None));
+                    cx.notify();
+                }))
+                .child(div().flex_1().text_color(theme.text_muted).child("Off — no mode pinned"))
+                .into_any_element(),
+        );
+        let card = popover::popover_card(theme)
+            .id("composer-mode-card")
+            .w(px(240.))
+            .max_h(px(PICKER_HEIGHT))
+            .overflow_y_scroll()
+            .children(rows);
+        Some(popover::anchored_menu_above(
+            "composer-mode-menu",
+            card.into_any_element(),
+            None,
+        ))
+    }
+
     fn model_switch(&self) -> Option<&Switch> {
         self.switches
             .iter()
@@ -2559,6 +2680,7 @@ impl Composer {
                                     .flex_row()
                                     .items_center()
                                     .gap(px(4.))
+                                    .children(self.mode_chip(&theme, window, cx))
                                     .child(
                                         div()
                                             .relative()
