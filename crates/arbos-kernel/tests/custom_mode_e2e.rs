@@ -87,6 +87,13 @@ fn slash_mode_pins_a_skill_to_the_chat_and_the_prompt_carries_it() {
             .is_none()
     );
 
+    // A fork of a pinned chat is pinned the same way.
+    let place = arbos_core::Place::new(&k.place);
+    let fork = arbos_core::files::fork_chat(&place, "root").unwrap();
+    assert_eq!(fork.skill.as_deref(), Some("haiku"));
+    let fork_md = std::fs::read_to_string(place.agent_dir(fork.id.as_str()).join("agent.md")).unwrap();
+    assert!(fork_md.contains("skill: haiku"), "{fork_md}");
+
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "/mode nosuch"}));
     assert!(
         wait_notice(&k.place, "no skill named \"nosuch\""),

@@ -316,6 +316,8 @@ pub fn fork_chat(place: &Place, source_id: &str) -> Result<Agent> {
     let mut agent = create_chat(place)?;
     agent.model = source.model.clone();
     agent.allowlist = source.allowlist.clone();
+    // A pinned mode is part of what the chat is for: the fork keeps it.
+    agent.skill = source.skill.clone();
     agent.title = if source.title.is_empty() {
         String::new()
     } else {
