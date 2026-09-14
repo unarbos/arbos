@@ -110,7 +110,10 @@ pub enum ChatItem {
     Artifacts(Vec<Artifact>),
     /// A question the agent asked, answered: the card folded to one line.
     /// An empty `answer` is a skip.
-    Asked { question: String, answer: String },
+    Asked {
+        question: String,
+        answer: String,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1278,6 +1281,12 @@ impl ChatSession {
             };
         }
         if self.is_delegate() {
+            // The kernel names a worker's folder after its brief
+            // ("math-docstrings"); that is the name Cursor would show, not
+            // a number. Only an id with nothing in it falls back to one.
+            if let Some(name) = self.agent_session.as_deref().and_then(worker_name) {
+                return name;
+            }
             return self
                 .delegate_number
                 .map_or_else(|| "Delegate".into(), |number| format!("Delegate {number}"));
@@ -2842,7 +2851,8 @@ fn pump(
                         chat.connection = Connection::Lost;
                         // A fault is news; a retry in progress is not, and
                         // a race the next try wins is not worth a line.
-                        if !again || chat.reconnect_attempt >= 1 && chat.reconnect_attempt % 5 == 0 {
+                        if !again || chat.reconnect_attempt >= 1 && chat.reconnect_attempt % 5 == 0
+                        {
                             chat.notice(true, &format!("connection failed: {e:#}"));
                         }
                     });
@@ -3042,9 +3052,14 @@ pub fn kernel_chore(node: &PlanNode) -> bool {
 /// path that is not a directory, a URL that is not one: no retry mends it.
 fn transient_connect_error(e: &anyhow::Error) -> bool {
     let text = format!("{e:#}");
-    !["failed to start", "is not a file", "is not a directory", "bad kernel url"]
-        .iter()
-        .any(|fault| text.contains(fault))
+    ![
+        "failed to start",
+        "is not a file",
+        "is not a directory",
+        "bad kernel url",
+    ]
+    .iter()
+    .any(|fault| text.contains(fault))
 }
 
 /// A child's row name from the brief the kernel named it after: the lead
@@ -3137,7 +3152,28 @@ fn status_line(text: &str) -> Option<String> {
     if line.contains('\n') {
         return None;
     }
-    let rest = line.strip_prefix("status:").or_else(|| line.strip_prefix("Status:"))?;
+    let rest = line
+        .strip_prefix("status:")
+        .or_else(|| line.strip_prefix("Status:"))?;
     let step = rest.trim();
     (!step.is_empty()).then(|| step.to_string())
+}
+
+/// A worker's folder name as a label: "math-docstrings" → "math docstrings",
+/// "sleep-done-2" → "sleep done 2". `None` for an id that is only a
+/// counter — "chat-1789394544546", "agent-3", digits — which says nothing.
+pub(crate) fn worker_name(id: &str) -> Option<String> {
+    let id = id.trim();
+    if id.is_empty() || id.eq_ignore_ascii_case("root") {
+        return None;
+    }
+    let words: Vec<&str> = id.split(['-', '_']).filter(|w| !w.is_empty()).collect();
+    let said = words.iter().any(|w| {
+        w.chars().any(|c| c.is_ascii_alphabetic())
+            && !matches!(*w, "chat" | "agent" | "worker" | "delegate")
+    });
+    if !said {
+        return None;
+    }
+    Some(words.join(" "))
 }

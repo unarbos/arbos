@@ -12,11 +12,11 @@ use crate::{
     },
     view::{
         component::{
+            chat_search::{ChatSearch, ChatSearchEvent, Hit},
             composer::{Composer, ComposerEvent, VoiceState},
             menu::Menu,
             meter,
             opener::{Opener, OpenerEvent},
-            chat_search::{ChatSearch, ChatSearchEvent, Hit},
             permissions_sheet::{PermissionsSheet, PermissionsSheetEvent},
             tab_sheet::{TabSheet, TabSheetEvent},
         },
@@ -29,8 +29,7 @@ use bezel::{
     gpui::{
         self, AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable as _, Hsla,
         KeyBinding, PathPromptOptions, PromptLevel, Render, Task, TitlebarOptions, Window,
-        WindowBounds,
-        WindowHandle, WindowOptions, actions, div, point, prelude::*, px, size,
+        WindowBounds, WindowHandle, WindowOptions, actions, div, point, prelude::*, px, size,
     },
     motion::{Fade, Painter},
     theme::{Material, TextStyle, Theme, Typeset, appearance},
@@ -627,7 +626,8 @@ impl Arbos {
         let permission_center = cx.new(|_| PermissionCenter::new(None));
         cx.set_global(Permissions(permission_center.clone()));
         let permissions_sheet = cx.new(|cx| PermissionsSheet::new(permission_center.clone(), cx));
-        cx.observe(&permission_center, |_, _, cx| cx.notify()).detach();
+        cx.observe(&permission_center, |_, _, cx| cx.notify())
+            .detach();
         cx.subscribe_in(
             &permissions_sheet,
             window,
@@ -674,34 +674,38 @@ impl Arbos {
             },
         )
         .detach();
-        cx.subscribe_in(&tab_sheet, window, |this, _, event: &TabSheetEvent, window, cx| {
-            match event {
-                TabSheetEvent::Keep(ix, identity) => {
-                    let (ix, identity) = (*ix, identity.clone());
-                    this.workspace
-                        .update(cx, |workspace, cx| workspace.set_identity(ix, identity, cx));
-                }
-                // Skipped on the Home tab's one offer: the defaults are kept
-                // as its face, so the sheet is not offered again.
-                TabSheetEvent::Dismiss => {
-                    if this.home_offer {
-                        this.workspace.update(cx, |workspace, cx| {
-                            if let Some(ix) = workspace.home_index()
-                                && let Some(project) = workspace.projects.get(ix)
-                                && !project.identity_saved
-                            {
-                                let mut identity = project.identity.clone();
-                                identity.name = Some("Home".into());
-                                workspace.set_identity(ix, identity, cx);
-                            }
-                        });
+        cx.subscribe_in(
+            &tab_sheet,
+            window,
+            |this, _, event: &TabSheetEvent, window, cx| {
+                match event {
+                    TabSheetEvent::Keep(ix, identity) => {
+                        let (ix, identity) = (*ix, identity.clone());
+                        this.workspace
+                            .update(cx, |workspace, cx| workspace.set_identity(ix, identity, cx));
+                    }
+                    // Skipped on the Home tab's one offer: the defaults are kept
+                    // as its face, so the sheet is not offered again.
+                    TabSheetEvent::Dismiss => {
+                        if this.home_offer {
+                            this.workspace.update(cx, |workspace, cx| {
+                                if let Some(ix) = workspace.home_index()
+                                    && let Some(project) = workspace.projects.get(ix)
+                                    && !project.identity_saved
+                                {
+                                    let mut identity = project.identity.clone();
+                                    identity.name = Some("Home".into());
+                                    workspace.set_identity(ix, identity, cx);
+                                }
+                            });
+                        }
                     }
                 }
-            }
-            if std::mem::take(&mut this.home_offer) {
-                this.permissions_once(window, cx);
-            }
-        })
+                if std::mem::take(&mut this.home_offer) {
+                    this.permissions_once(window, cx);
+                }
+            },
+        )
         .detach();
         cx.subscribe_in(
             &composer,
@@ -963,7 +967,12 @@ impl Arbos {
 
     /// ⌘T: a new tab, which is a project — pick the machine, then the
     /// folder. Same picker as ⌘O.
-    pub(crate) fn new_tab_action(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn new_tab_action(
+        &mut self,
+        _: &NewTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_project_action(&OpenProject, window, cx);
     }
 
@@ -1081,7 +1090,11 @@ impl Arbos {
             .read(cx)
             .active_project()
             .and_then(|project| project.focused_agent());
-        let list: Vec<u64> = self.visible_agent_rows(cx).into_iter().map(|row| row.id).collect();
+        let list: Vec<u64> = self
+            .visible_agent_rows(cx)
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
         let at = showing.and_then(|id| list.iter().position(|entry| *entry == id));
         let Some(landing) = stepped(at, list.len(), step).map(|ix| list[ix]) else {
             return;
@@ -1219,12 +1232,21 @@ impl Arbos {
 
     /// ⌘K and the panel's magnifier: search every open tab's chats by
     /// title and first words; Enter opens the one lit, in its tab.
-    pub(crate) fn search_chats(&mut self, _: &SearchChats, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn search_chats(
+        &mut self,
+        _: &SearchChats,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let workspace = self.workspace.read(cx);
         let mut hits: Vec<Hit> = Vec::new();
         for (ix, project) in workspace.projects.iter().enumerate() {
             let tab = Workspace::tab_label(project);
-            let mut chats: Vec<&ChatSession> = project.sessions.iter().filter(|chat| !chat.closed).collect();
+            let mut chats: Vec<&ChatSession> = project
+                .sessions
+                .iter()
+                .filter(|chat| !chat.closed)
+                .collect();
             chats.sort_by(|a, b| b.updated.cmp(&a.updated));
             for chat in chats {
                 let title = chat.label();
@@ -1260,12 +1282,7 @@ impl Arbos {
     }
 
     /// ⌘2 and the panel's Project header: the project page in the column.
-    pub(crate) fn show_project(
-        &mut self,
-        _: &ShowProject,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn show_project(&mut self, _: &ShowProject, _: &mut Window, cx: &mut Context<Self>) {
         self.show_pane(Pane::Project, cx);
     }
 
@@ -1287,17 +1304,26 @@ impl Arbos {
         // When the window goes — Escape, ⌘W, the title bar — this window
         // comes back forward and the composer takes the keyboard, so the
         // settings never sit between the user and the chat.
-        if !had && let Some(view) = self
-            .settings_window
-            .and_then(|handle| handle.entity(cx).ok())
+        if !had
+            && let Some(view) = self
+                .settings_window
+                .and_then(|handle| handle.entity(cx).ok())
         {
             cx.observe_release(&view, |this, _, cx| {
                 this.settings_window = None;
-                if let Some(main) = cx.windows().into_iter().find(|w| w.downcast::<Self>().is_some()) {
+                if let Some(main) = cx
+                    .windows()
+                    .into_iter()
+                    .find(|w| w.downcast::<Self>().is_some())
+                {
                     let _ = main.update(cx, |_, window, _| window.activate_window());
                 }
                 let composer = this.composer.read(cx).focus_handle(cx);
-                if let Some(main) = cx.windows().into_iter().find(|w| w.downcast::<Self>().is_some()) {
+                if let Some(main) = cx
+                    .windows()
+                    .into_iter()
+                    .find(|w| w.downcast::<Self>().is_some())
+                {
                     let _ = main.update(cx, |_, window, cx| window.focus(&composer, cx));
                 }
             })
@@ -1568,7 +1594,10 @@ impl Arbos {
     /// A microphone or speech-server failure belongs under the mic button,
     /// not in the transcript: the conversation did not fail, the take did.
     fn voice_error(&mut self, msg: &str, cx: &mut Context<Self>) {
-        let note = msg.strip_prefix("voice failed: ").unwrap_or(msg).to_string();
+        let note = msg
+            .strip_prefix("voice failed: ")
+            .unwrap_or(msg)
+            .to_string();
         // The microphone was wanted and the system said no: after "Skip for
         // now" this is what lights the dot on the gear.
         if crate::voice_ws::mic_permission().advice().is_some() {
@@ -1789,7 +1818,11 @@ impl Arbos {
                 return;
             };
             let _ = this.update_in(cx, |this, window, cx| {
-                this.offer_store_out_of_sync(&crate::model::place::Place::local(path.clone()), window, cx);
+                this.offer_store_out_of_sync(
+                    &crate::model::place::Place::local(path.clone()),
+                    window,
+                    cx,
+                );
                 this.workspace
                     .update(cx, |workspace, cx| workspace.open_project(path, cx));
                 this.offer_tab_face(window, cx);
@@ -1804,7 +1837,12 @@ impl Arbos {
     /// sync before the kernel starts: `.arbos.nosync` beside the project
     /// (iCloud skips `*.nosync`) with `.arbos` a symlink to it, or a folder
     /// under `~/.arbos/stores/`. Nothing when the store is already out.
-    fn offer_store_out_of_sync(&mut self, place: &crate::model::place::Place, window: &mut Window, cx: &mut Context<Self>) {
+    fn offer_store_out_of_sync(
+        &mut self,
+        place: &crate::model::place::Place,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if place.is_remote() {
             return;
         }
@@ -1904,21 +1942,15 @@ impl Arbos {
 
     /// The sheet, on the tab at `ix`: its name, glyph and colour.
     pub(crate) fn edit_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((identity, fallback)) = self
-            .workspace
-            .read(cx)
-            .projects
-            .get(ix)
-            .map(|project| {
-                let mut identity = project.identity.clone();
-                // The Home tab's first offer comes prefilled, so Keep as-is
-                // names it "Home" in its project.toml.
-                if Workspace::is_home(project) && !project.identity_saved && identity.name.is_none() {
-                    identity.name = Some("Home".into());
-                }
-                (identity, Workspace::tab_label(project))
-            })
-        else {
+        let Some((identity, fallback)) = self.workspace.read(cx).projects.get(ix).map(|project| {
+            let mut identity = project.identity.clone();
+            // The Home tab's first offer comes prefilled, so Keep as-is
+            // names it "Home" in its project.toml.
+            if Workspace::is_home(project) && !project.identity_saved && identity.name.is_none() {
+                identity.name = Some("Home".into());
+            }
+            (identity, Workspace::tab_label(project))
+        }) else {
             return;
         };
         self.dismiss_menu(cx);

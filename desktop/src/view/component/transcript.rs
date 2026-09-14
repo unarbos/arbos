@@ -270,8 +270,9 @@ impl State {
     fn doc(&self, ix: usize, text: &str) -> Rc<Doc> {
         // Links go in as chips — `⛓ #139`, `⚙ chat doors`, `📄 notes` — the
         // targets as written, so a click still opens the same thing.
-        self.docs
-            .get(ix, text, |text| markdown::parse(&crate::view::chips::dress(text)))
+        self.docs.get(ix, text, |text| {
+            markdown::parse(&crate::view::chips::dress(text))
+        })
     }
 
     /// The reveal for item `ix`: started while the item is `live` — the
@@ -511,12 +512,29 @@ fn turn_answer(items: &[ChatItem], turn: &Turn) -> Option<String> {
 /// reason only — the instruction half is the agent's to act on, not the
 /// reader's. No strip, no retry.
 fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
-    let shown = text
+    // "project page not updated last turn: a worker was started or
+    // reported and .arbos/notes.md did not change — update it" is the
+    // kernel's whole sentence; the reader needs the first clause, as a
+    // sentence of its own.
+    let clause = text
         .split(" — ")
         .next()
         .unwrap_or(text)
-        .trim()
-        .to_string();
+        .split(':')
+        .next()
+        .unwrap_or(text)
+        .trim();
+    let mut shown = String::with_capacity(clause.len());
+    let mut chars = clause.chars();
+    if let Some(first) = chars.next() {
+        shown.extend(first.to_uppercase());
+        shown.push_str(chars.as_str());
+    }
+    let shown = if shown.starts_with("Project page not updated") {
+        "Project page not updated this turn".to_string()
+    } else {
+        shown
+    };
     div()
         .self_start()
         .w_full()
@@ -897,7 +915,9 @@ fn user_prompt(
                                         .id(SharedString::from(format!("prompt-voice-{id}-{ix}")))
                                         .flex_none()
                                         .mt(px(3.))
-                                        .tooltip(|window, cx| Tooltip::text("Spoken on a call", window, cx))
+                                        .tooltip(|window, cx| {
+                                            Tooltip::text("Spoken on a call", window, cx)
+                                        })
                                         .child(
                                             icons::icon(icons::media::MICROPHONE)
                                                 .size(px(12.))
@@ -1149,11 +1169,7 @@ fn worker_card(
 /// A subscription the agent set up in this turn, as a small card under
 /// the work: what stands now and when it fires. The Project panel keeps
 /// the full list; this is the moment it was made.
-fn subscription_cards(
-    chat: &ChatSession,
-    body: Range<usize>,
-    theme: &Theme,
-) -> Vec<AnyElement> {
+fn subscription_cards(chat: &ChatSession, body: Range<usize>, theme: &Theme) -> Vec<AnyElement> {
     chat.items[body]
         .iter()
         .filter_map(|item| match item {
@@ -1244,7 +1260,11 @@ fn children_lines(
     let children: Vec<_> = chat
         .children
         .iter()
-        .filter(|c| c.kernel_id.as_deref().is_some_and(|id| spawned.iter().any(|s| s == id)))
+        .filter(|c| {
+            c.kernel_id
+                .as_deref()
+                .is_some_and(|id| spawned.iter().any(|s| s == id))
+        })
         .collect();
     let working = children
         .iter()
@@ -1273,12 +1293,22 @@ fn children_lines(
                         "Working".to_string()
                     };
                     first_working = false;
-                    (verb, child.step.clone().unwrap_or_else(|| child.title.clone()), theme.text_muted)
+                    (
+                        verb,
+                        child.step.clone().unwrap_or_else(|| child.title.clone()),
+                        theme.text_muted,
+                    )
                 }
                 ChildState::Asking => ("Asking".to_string(), child.title.clone(), theme.accent),
-                ChildState::Waiting => ("Waiting".to_string(), child.title.clone(), theme.text_faint),
+                ChildState::Waiting => {
+                    ("Waiting".to_string(), child.title.clone(), theme.text_faint)
+                }
                 ChildState::Done => {
-                    if child.kernel_id.as_deref().is_some_and(|k| reported.contains(&k)) {
+                    if child
+                        .kernel_id
+                        .as_deref()
+                        .is_some_and(|k| reported.contains(&k))
+                    {
                         return None;
                     }
                     ("Done".to_string(), child.title.clone(), theme.text_faint)
@@ -2629,7 +2659,10 @@ pub fn render(
         for position in 0..=turns.len() {
             let starts_run = position == turns.len()
                 || (position > run_start
-                    && matches!(chat.items.get(turns[position].range.start), Some(ChatItem::User(_))));
+                    && matches!(
+                        chat.items.get(turns[position].range.start),
+                        Some(ChatItem::User(_))
+                    ));
             if starts_run {
                 if let Some(answered) = (run_start..position)
                     .rev()
@@ -2775,7 +2808,10 @@ fn asked_line(question: &str, answer: &str, theme: &Theme) -> AnyElement {
                 .truncate()
                 .text_style(TextStyle::Caption)
                 .text_color(theme.text_faint)
-                .child(SharedString::from(format!("Question · {}", question.trim()))),
+                .child(SharedString::from(format!(
+                    "Question · {}",
+                    question.trim()
+                ))),
         )
         .child(
             div()
@@ -2799,7 +2835,11 @@ fn asked_line(question: &str, answer: &str, theme: &Theme) -> AnyElement {
 /// the turn is over. One card at the end of the conversation — how many
 /// steps stand — with Approve and run, which switches the chat to auto and
 /// starts the work.
-fn approve_card(chat: &ChatSession, theme: &Theme, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+fn approve_card(
+    chat: &ChatSession,
+    theme: &Theme,
+    cx: &mut Context<Workspace>,
+) -> Option<AnyElement> {
     let plan_mode = chat
         .modes
         .as_ref()
@@ -3355,7 +3395,10 @@ fn zone(
     // the turn still runs — a long model call with nothing streaming, a
     // job in flight — an interim reply already has words, and the footer
     // under them read as "done" next to a live Stop button.
-    if !running && footer && let Some(answer) = turn_answer(&chat.items, turn) {
+    if !running
+        && footer
+        && let Some(answer) = turn_answer(&chat.items, turn)
+    {
         has_tail = true;
         // Always shown, faint, as Cursor's are: copy, then fork.
         tail = tail.child(turn_footer(chat, first, answer, &theme, cx));
@@ -4483,7 +4526,12 @@ pub fn spinner<V: 'static>(since: Duration, color: Hsla, cx: &mut Context<V>) ->
 
 /// The same cell for a row drawn from another view's state: the caller's
 /// painter keeps that view ticking.
-pub fn spinner_with(painter: Painter, since: Duration, color: Hsla, cx: &mut bezel::gpui::App) -> AnyElement {
+pub fn spinner_with(
+    painter: Painter,
+    since: Duration,
+    color: Hsla,
+    cx: &mut bezel::gpui::App,
+) -> AnyElement {
     painter.lease(BRAILLE_FPS, BRAILLE_LEASE, cx);
     div()
         .text_style(TextStyle::Callout)
@@ -4650,7 +4698,9 @@ mod selection_tests {
         });
         let segs = segments(&items, 0..items.len());
         assert_eq!(
-            segs.iter().filter(|seg| matches!(seg, Seg::Thought(_))).count(),
+            segs.iter()
+                .filter(|seg| matches!(seg, Seg::Thought(_)))
+                .count(),
             12
         );
         assert!(matches!(segs.last(), Some(Seg::Run(range)) if range.start == 12));
@@ -4661,7 +4711,10 @@ mod selection_tests {
         let mut state = State::default();
         assert!(!state.groups.contains(&0));
         state.toggle_group(0);
-        assert!(state.groups.contains(&0), "opening the fold pins the run open");
+        assert!(
+            state.groups.contains(&0),
+            "opening the fold pins the run open"
+        );
         state.toggle_group(0);
         assert!(!state.groups.contains(&0));
     }

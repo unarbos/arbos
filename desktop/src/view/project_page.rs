@@ -108,7 +108,9 @@ impl Arbos {
                     .size(px(26.))
                     .items_center()
                     .justify_center()
-                    .tooltip(|window, cx| Tooltip::with_keystroke("Back to the chat", "⌘1", window, cx))
+                    .tooltip(|window, cx| {
+                        Tooltip::with_keystroke("Back to the chat", "⌘1", window, cx)
+                    })
                     .child(
                         icons::icon(icons::system::CHAT_ROUND_LINE)
                             .size(px(14.))
@@ -127,18 +129,13 @@ impl Arbos {
                 .flex_col()
                 .child(page_heading(2, "Files", false, PageScale::Page, &theme))
                 .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap(px(10.))
-                        .children(
-                            store
-                                .files
-                                .iter()
-                                .enumerate()
-                                .map(|(n, file)| self.file_card(n as u64, file, &theme, cx)),
-                        ),
+                    div().flex().flex_row().flex_wrap().gap(px(10.)).children(
+                        store
+                            .files
+                            .iter()
+                            .enumerate()
+                            .map(|(n, file)| self.file_card(n as u64, file, &theme, cx)),
+                    ),
                 )
         });
 
@@ -191,7 +188,13 @@ impl Arbos {
 
     /// One file of the store as a card: its glyph, its name, where it sits
     /// and how long ago it changed, dim. The context document leads.
-    fn file_card(&self, n: u64, file: &StoreFile, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn file_card(
+        &self,
+        n: u64,
+        file: &StoreFile,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let path = file.path.clone();
         let title = file.name.clone();
         let sub = match (file.pinned, file.folder.is_empty(), file.modified) {

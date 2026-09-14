@@ -5,7 +5,7 @@
 
 use crate::view::{
     component::menu::{self, Menu},
-    root::{CommitName, Arbos, DismissName},
+    root::{Arbos, CommitName, DismissName},
 };
 use bezel::{
     gpui::{
@@ -217,7 +217,12 @@ impl Arbos {
     ) -> AnyElement {
         let text = self.name_field.read(cx).content().to_string();
         let width = name_width(&text, TextStyle::Title3, window, cx);
-        self.name_field_frame(TextStyle::Title3, px(TextStyle::Title3.line_height()), width, cx)
+        self.name_field_frame(
+            TextStyle::Title3,
+            px(TextStyle::Title3.line_height()),
+            width,
+            cx,
+        )
     }
 
     /// The field, hugging its text: it carries its own press, because

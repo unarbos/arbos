@@ -141,12 +141,8 @@ impl Render for TabSheet {
         let theme = Theme::of(cx).clone();
         let painter = Painter::of(cx);
         let colour: Hsla = self.identity(cx).hsla();
-        let glyphs = div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(4.))
-            .children(GLYPHS.iter().enumerate().map(|(ix, (_, path))| {
+        let glyphs = div().flex().flex_row().flex_wrap().gap(px(4.)).children(
+            GLYPHS.iter().enumerate().map(|(ix, (_, path))| {
                 let picked = ix == self.glyph;
                 div()
                     .id(("tab-sheet-glyph", ix))
@@ -167,7 +163,8 @@ impl Render for TabSheet {
                         this.glyph = ix;
                         cx.notify();
                     }))
-            }));
+            }),
+        );
         let swatches = div()
             .flex()
             .flex_row()

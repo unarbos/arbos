@@ -47,7 +47,11 @@ impl SettingsWindow {
             div().flex().flex_row().justify_end().child(
                 theme
                     .button(
-                        if enabling { "Enabling…" } else { "Enable all" },
+                        if enabling {
+                            "Enabling…"
+                        } else {
+                            "Enable all"
+                        },
                         ButtonStyle::Prominent,
                         None,
                     )

@@ -1563,7 +1563,10 @@ impl Workspace {
         // A worker the kernel archived has no agent to speak to; its
         // transcript stays to read. Say so instead of holding the words.
         if chat.agent_gone() {
-            chat.notice(true, "this agent is archived: its history stays, but it takes no more messages");
+            chat.notice(
+                true,
+                "this agent is archived: its history stays, but it takes no more messages",
+            );
             chat.flush();
             cx.notify();
             return;
@@ -2481,11 +2484,9 @@ impl Workspace {
             return;
         };
         let project = &mut self.projects[ix];
-        let Some(pos) = project
-            .surfaces
-            .iter()
-            .position(|surface| surface.owner == Some(owner) && surface.kernel_id() == Some(kernel_id))
-        else {
+        let Some(pos) = project.surfaces.iter().position(|surface| {
+            surface.owner == Some(owner) && surface.kernel_id() == Some(kernel_id)
+        }) else {
             return;
         };
         if let Bind::Process { done, log, .. } = &mut project.surfaces[pos].bind

@@ -20,8 +20,8 @@
 
 use crate::view::root::{
     Arbos, CloseProject, EndCall, NewSession, NewTab, NextEntry, NextTab, OpenProject,
-    OpenSettings, PrevEntry, PrevTab, SearchChats, ShowPermissions, ShowProject, StartCall, ToggleMute, TogglePanel, ZoomIn,
-    ZoomOut, ZoomReset,
+    OpenSettings, PrevEntry, PrevTab, SearchChats, ShowPermissions, ShowProject, StartCall,
+    ToggleMute, TogglePanel, ZoomIn, ZoomOut, ZoomReset,
 };
 use bezel::{
     gpui::{

@@ -514,7 +514,11 @@ impl Arbos {
                     .agent_session
                     .as_deref()
                     .and_then(|sid| kernel::agent_skill(&place, sid));
-                let skills = if pinned.is_some() { kernel::skill_names(&place) } else { Vec::new() };
+                let skills = if pinned.is_some() {
+                    kernel::skill_names(&place)
+                } else {
+                    Vec::new()
+                };
                 (pinned, skills)
             }
             None => (None, Vec::new()),
@@ -769,9 +773,7 @@ impl Arbos {
                         .text_style(TextStyle::Body)
                         .text_color(theme.text)
                         .cursor_text()
-                        .tooltip(|window, cx| {
-                            Tooltip::text("Double-click to rename", window, cx)
-                        })
+                        .tooltip(|window, cx| Tooltip::text("Double-click to rename", window, cx))
                         .child(SharedString::from(title))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             if event.click_count() >= 2 {
@@ -798,20 +800,20 @@ impl Arbos {
                     Menu::Session(id),
                     cx,
                 )
-                    .tooltip(|window, cx| Tooltip::text("Chat actions", window, cx))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_menu_at_header(Menu::Session(id), cx)
-                    }))
-                    .child(
-                        icons::icon(icons::system::MENU_DOTS)
-                            .size(px(14.))
-                            .text_color(theme.text_muted),
-                    )
-                    .children(if self.menu_at_header {
-                        self.session_menu_element(id, closed, cx)
-                    } else {
-                        None
-                    }),
+                .tooltip(|window, cx| Tooltip::text("Chat actions", window, cx))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_menu_at_header(Menu::Session(id), cx)
+                }))
+                .child(
+                    icons::icon(icons::system::MENU_DOTS)
+                        .size(px(14.))
+                        .text_color(theme.text_muted),
+                )
+                .children(if self.menu_at_header {
+                    self.session_menu_element(id, closed, cx)
+                } else {
+                    None
+                }),
             )
             .child(self.panel_toggle(cx))
             .into_any_element()
@@ -950,7 +952,11 @@ impl Arbos {
         let mic_line = match &mic_error {
             Some(e) => {
                 let e: String = e.split_whitespace().collect::<Vec<_>>().join(" ");
-                let e: String = if e.chars().count() > 70 { e.chars().take(70).collect::<String>() + "…" } else { e };
+                let e: String = if e.chars().count() > 70 {
+                    e.chars().take(70).collect::<String>() + "…"
+                } else {
+                    e
+                };
                 format!("mic: {e}")
             }
             None => String::new(),
@@ -972,7 +978,9 @@ impl Arbos {
                     .size(px(size))
                     .rounded_full()
                     .when(!status.muted, |el| el.bg(orb_color))
-                    .when(status.muted, |el| el.border_2().border_color(theme.text_faint)),
+                    .when(status.muted, |el| {
+                        el.border_2().border_color(theme.text_faint)
+                    }),
             );
         let label = if call.connecting {
             "Calling…".to_string()
@@ -1010,15 +1018,27 @@ impl Arbos {
             .items_center()
             .gap(px(4.))
             .text_style(TextStyle::Caption)
-            .text_color(if muted { theme.danger } else { theme.text_muted })
+            .text_color(if muted {
+                theme.danger
+            } else {
+                theme.text_muted
+            })
             .when(muted, |el| el.bg(theme.danger.opacity(0.12)))
             .tooltip(move |window, cx| {
                 Tooltip::with_keystroke(if muted { "Unmute" } else { "Mute" }, "⇧⌘M", window, cx)
             })
             .child(
-                icons::icon(if muted { icons::media::VOLUME_MUTE } else { icons::media::MICROPHONE })
-                    .size(px(11.))
-                    .text_color(if muted { theme.danger } else { theme.text_muted }),
+                icons::icon(if muted {
+                    icons::media::VOLUME_MUTE
+                } else {
+                    icons::media::MICROPHONE
+                })
+                .size(px(11.))
+                .text_color(if muted {
+                    theme.danger
+                } else {
+                    theme.text_muted
+                }),
             )
             .child(if muted { "Unmute" } else { "Mute" })
             .on_click(cx.listener(|this, _, _, cx| this.toggle_mute(cx)));
@@ -1072,7 +1092,11 @@ impl Arbos {
                             .flex_none()
                             .max_w(px(260.))
                             .truncate()
-                            .text_color(if mic_error.is_some() { theme.danger } else { theme.text_faint })
+                            .text_color(if mic_error.is_some() {
+                                theme.danger
+                            } else {
+                                theme.text_faint
+                            })
                             .child(SharedString::from(mic_line)),
                     )
                 })
@@ -1085,8 +1109,18 @@ impl Arbos {
     /// Try Live (A-02): the toggle in the row under the composer. Open, it
     /// reads "Live" and closes the view.
     fn try_live_button(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let chat = self.workspace.read(cx).active_session()?;
+        let workspace = self.workspace.read(cx);
+        let chat = workspace.active_session()?;
         if !chat.live() {
+            return None;
+        }
+        // The screen a local agent works on is this one: the button would
+        // open a view of the window it sits in. It is for a remote place —
+        // or a view already open, which needs its way back.
+        let remote = workspace
+            .active_project()
+            .is_some_and(|project| project.host.is_some());
+        if !remote && !chat.live_open {
             return None;
         }
         let id = chat.id;
@@ -1154,7 +1188,11 @@ impl Arbos {
                         s.machine,
                         s.width,
                         s.height,
-                        if age == 0 { "now".to_string() } else { format!("{age}s ago") }
+                        if age == 0 {
+                            "now".to_string()
+                        } else {
+                            format!("{age}s ago")
+                        }
                     ),
                 }
             }
@@ -1368,7 +1406,10 @@ pub fn pill_counts(project: &Project, chat: &ChatSession) -> (Vec<u64>, Vec<Stri
                     }
                 }
                 let tree = arbos_core::prs::prs_of_tree(&all, agent, &agents);
-                for p in tree.iter().chain(all.iter().filter(|p| descendants.contains(&p.agent.as_str()))) {
+                for p in tree.iter().chain(
+                    all.iter()
+                        .filter(|p| descendants.contains(&p.agent.as_str())),
+                ) {
                     if !prs.contains(&p.url) {
                         prs.push(p.url.clone());
                     }
@@ -2229,7 +2270,11 @@ impl Arbos {
         // One question: the card is the question; a header that repeats
         // it is one more thing to read. Several: the set's title heads them.
         let heading = if count <= 1 || prompt.title.is_empty() {
-            if count <= 1 { "Question".to_owned() } else { "Questions".to_owned() }
+            if count <= 1 {
+                "Question".to_owned()
+            } else {
+                "Questions".to_owned()
+            }
         } else {
             format!("Questions · {}", prompt.title)
         };

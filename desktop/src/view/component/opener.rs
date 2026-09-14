@@ -30,7 +30,9 @@ const LOCAL_MACHINE: &str = if cfg!(target_os = "macos") {
 
 actions!(
     arbos_opener,
-    [Submit, PickHere, Descend, Ascend, Back, Next, Previous, Dismiss, Complete]
+    [
+        Submit, PickHere, Descend, Ascend, Back, Next, Previous, Dismiss, Complete
+    ]
 );
 
 const KEY_CONTEXT: &str = "ArbosOpener";

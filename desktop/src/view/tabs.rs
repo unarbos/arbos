@@ -184,7 +184,9 @@ impl Arbos {
             .gap(px(6.))
             .cursor_pointer()
             .text_style(TextStyle::Callout)
-            .when(active, |el| el.bg(theme.element_active).text_color(theme.text))
+            .when(active, |el| {
+                el.bg(theme.element_active).text_color(theme.text)
+            })
             .when(!active, |el| {
                 el.text_color(theme.text_muted)
                     .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
