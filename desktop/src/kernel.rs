@@ -1320,6 +1320,26 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
             }
         }
     }
+    // The kernel's "Waiting for your answer" was true while the ask was
+    // parked; in a replay only the last one can still be. A `status: …`
+    // assistant line is the step the worker line showed, not prose.
+    let n = items.len();
+    let mut ix = 0;
+    items.retain(|item| {
+        ix += 1;
+        match item {
+            crate::model::session::ChatItem::Notice { text, failed: false }
+                if text.trim() == "Waiting for your answer" && ix < n =>
+            {
+                false
+            }
+            crate::model::session::ChatItem::Agent(text) => {
+                let line = text.trim();
+                !(line.starts_with("status:") && !line.contains('\n'))
+            }
+            _ => true,
+        }
+    });
     Some(crate::model::history::Replay {
         items,
         model: agent_model(&arbos_core::Place::new(&place.path), id),

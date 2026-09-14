@@ -934,13 +934,39 @@ impl Arbos {
         } else {
             theme.success
         };
+        // The devices — `speaker · mic · level` — are the orb's tooltip, so
+        // a silent call is never a mystery and the strip stays one line of
+        // words. Only the mic's failure shows inline, in red.
+        let mic_error = status.mic_error.clone();
+        let mut parts: Vec<String> = Vec::new();
+        if !status.speaker_device.is_empty() {
+            parts.push(format!("speaker: {}", status.speaker_device));
+        }
+        if !status.mic_device.is_empty() {
+            parts.push(format!("mic: {}", status.mic_device));
+            parts.push(format!("level {}%", (status.level * 100.0).round() as u32));
+        }
+        let devices = parts.join(" · ");
+        let mic_line = match &mic_error {
+            Some(e) => {
+                let e: String = e.split_whitespace().collect::<Vec<_>>().join(" ");
+                let e: String = if e.chars().count() > 70 { e.chars().take(70).collect::<String>() + "…" } else { e };
+                format!("mic: {e}")
+            }
+            None => String::new(),
+        };
         let orb = div()
+            .id("call-orb")
             .flex_none()
             .w(px(20.))
             .h(px(20.))
             .flex()
             .items_center()
             .justify_center()
+            .when(!devices.is_empty(), |el| {
+                let devices = devices.clone();
+                el.tooltip(move |window, cx| Tooltip::text(devices.clone(), window, cx))
+            })
             .child(
                 div()
                     .size(px(size))
@@ -960,11 +986,11 @@ impl Arbos {
         // One line of live words: what the caller is saying now, else the
         // last thing the narrator said.
         let words = if !status.text.trim().is_empty() && !speaking {
-            format!("you: {}", status.text.trim())
+            format!("You · {}", status.text.trim())
         } else if !status.reply.trim().is_empty() && speaking {
-            format!("voice: {}", status.reply.trim())
+            format!("Arbos · {}", status.reply.trim())
         } else if !status.last_said.is_empty() {
-            format!("voice: {}", status.last_said)
+            format!("Arbos · {}", status.last_said)
         } else {
             String::new()
         };
@@ -974,26 +1000,6 @@ impl Arbos {
         } else {
             words
         };
-        // The devices, the phone's way: `speaker · mic · level`, so a silent
-        // call is never a mystery; the mic's failure, in red, when it has one.
-        let mic_error = status.mic_error.clone();
-        let mut parts: Vec<String> = Vec::new();
-        if !status.speaker_device.is_empty() {
-            parts.push(format!("speaker: {}", status.speaker_device));
-        }
-        match &mic_error {
-            Some(e) => {
-                let e: String = e.split_whitespace().collect::<Vec<_>>().join(" ");
-                let e: String = if e.chars().count() > 70 { e.chars().take(70).collect::<String>() + "…" } else { e };
-                parts.push(format!("mic: {e}"));
-            }
-            None if !status.mic_device.is_empty() => {
-                parts.push(format!("mic: {}", status.mic_device));
-                parts.push(format!("{}%", (status.level * 100.0).round() as u32));
-            }
-            None => {}
-        }
-        let mic_line = parts.join(" · ");
         let muted = status.muted;
         let mute = theme
             .ghost("call-mute")
@@ -1347,12 +1353,29 @@ pub fn pill_counts(project: &Project, chat: &ChatSession) -> (Vec<u64>, Vec<Stri
             let place = arbos_core::Place::new(&chat.cwd);
             let all = arbos_core::load_prs(&place);
             if !all.is_empty() {
+                // The kernel's live agent list places each PR under its
+                // opener; a worker the kernel has archived is no longer in
+                // it, so this window's own tree names the descendants too.
                 let agents = arbos_core::list_agents(&place).unwrap_or_default();
-                prs = arbos_core::prs::prs_of_tree(&all, agent, &agents)
-                    .into_iter()
-                    .map(|p| p.url)
-                    .collect();
-                return (working, prs);
+                let mut descendants: Vec<&str> = Vec::new();
+                let mut frontier = vec![chat.id];
+                while let Some(id) = frontier.pop() {
+                    for c in project.sessions.iter().filter(|c| c.parent == Some(id)) {
+                        if let Some(a) = c.agent_session.as_deref() {
+                            descendants.push(a);
+                        }
+                        frontier.push(c.id);
+                    }
+                }
+                let tree = arbos_core::prs::prs_of_tree(&all, agent, &agents);
+                for p in tree.iter().chain(all.iter().filter(|p| descendants.contains(&p.agent.as_str()))) {
+                    if !prs.contains(&p.url) {
+                        prs.push(p.url.clone());
+                    }
+                }
+                if !prs.is_empty() {
+                    return (working, prs);
+                }
             }
         }
     }
@@ -2203,8 +2226,10 @@ impl Arbos {
         let draft = prompt.draft(&question.id);
         let page = prompt.page;
         let count = prompt.questions.len();
-        let heading = if prompt.title.is_empty() {
-            "Questions".to_owned()
+        // One question: the card is the question; a header that repeats
+        // it is one more thing to read. Several: the set's title heads them.
+        let heading = if count <= 1 || prompt.title.is_empty() {
+            if count <= 1 { "Question".to_owned() } else { "Questions".to_owned() }
         } else {
             format!("Questions · {}", prompt.title)
         };
@@ -2292,7 +2317,9 @@ impl Arbos {
             .into_any_element(),
         );
         let prompt_text = if question.prompt.is_empty() {
-            heading.clone()
+            prompt.title.clone()
+        } else if count <= 1 {
+            question.prompt.clone()
         } else {
             format!("{}. {}", page + 1, question.prompt)
         };
