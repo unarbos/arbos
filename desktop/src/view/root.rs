@@ -512,6 +512,9 @@ pub struct Arbos {
     active_terminal: Option<String>,
     /// Whether the right-hand panel is out. ⌘B folds it away.
     pub(crate) panel_open: bool,
+    /// The panel's "N archived" row is unfolded: finished workers the
+    /// kernel moved to `archive/agents/` are listed, faint.
+    pub(crate) archived_open: bool,
     pub(crate) composer: Entity<Composer>,
     pub(crate) opener: Entity<Opener>,
     /// The sheet a tab's name, glyph and colour are set in.
@@ -722,6 +725,7 @@ impl Arbos {
             terminals: Default::default(),
             active_terminal: None,
             panel_open: true,
+            archived_open: false,
             composer,
             opener,
             tab_sheet,
@@ -999,7 +1003,7 @@ impl Arbos {
             .read(cx)
             .active_project()
             .and_then(|project| project.focused_agent());
-        let list: Vec<u64> = self.agent_rows(cx).into_iter().map(|row| row.id).collect();
+        let list: Vec<u64> = self.visible_agent_rows(cx).into_iter().map(|row| row.id).collect();
         let at = showing.and_then(|id| list.iter().position(|entry| *entry == id));
         let Some(landing) = stepped(at, list.len(), step).map(|ix| list[ix]) else {
             return;

@@ -1560,6 +1560,14 @@ impl Workspace {
         let Some(chat) = found else {
             return;
         };
+        // A worker the kernel archived has no agent to speak to; its
+        // transcript stays to read. Say so instead of holding the words.
+        if chat.agent_gone() {
+            chat.notice(true, "this agent is archived: its history stays, but it takes no more messages");
+            chat.flush();
+            cx.notify();
+            return;
+        }
         if chat.closed {
             chat.closed = false;
         }
