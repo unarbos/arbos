@@ -25,7 +25,8 @@ use anyhow::Result;
 use bezel::{
     gpui::{
         self, AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable as _, Hsla,
-        KeyBinding, PathPromptOptions, Render, Task, TitlebarOptions, Window, WindowBounds,
+        KeyBinding, PathPromptOptions, PromptLevel, Render, Task, TitlebarOptions, Window,
+        WindowBounds,
         WindowHandle, WindowOptions, actions, div, point, prelude::*, px, size,
     },
     motion::{Fade, Painter},
@@ -609,6 +610,7 @@ impl Arbos {
             |this, _, event: &OpenerEvent, window, cx| match event {
                 OpenerEvent::Open(place) => {
                     let place = place.clone();
+                    this.offer_store_out_of_sync(&place, window, cx);
                     this.workspace
                         .update(cx, |workspace, cx| workspace.open_place(place, cx));
                     this.offer_tab_face(window, cx);
@@ -1580,9 +1582,68 @@ impl Arbos {
                 return;
             };
             let _ = this.update_in(cx, |this, window, cx| {
+                this.offer_store_out_of_sync(&crate::model::place::Place::local(path.clone()), window, cx);
                 this.workspace
                     .update(cx, |workspace, cx| workspace.open_project(path, cx));
                 this.offer_tab_face(window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// A folder inside iCloud / a file-provider sync: reads of `.arbos/`
+    /// there block for minutes on items the provider has not downloaded,
+    /// and the kernel stalls with them. Offer to keep the store out of the
+    /// sync before the kernel starts: `.arbos.nosync` beside the project
+    /// (iCloud skips `*.nosync`) with `.arbos` a symlink to it, or a folder
+    /// under `~/.arbos/stores/`. Nothing when the store is already out.
+    fn offer_store_out_of_sync(&mut self, place: &crate::model::place::Place, window: &mut Window, cx: &mut Context<Self>) {
+        if place.is_remote() {
+            return;
+        }
+        let path = place.path.clone();
+        let Some(sync) = arbos_core::cloudsync::detect(&path) else {
+            return;
+        };
+        if arbos_core::cloudsync::settled(&path) {
+            return;
+        }
+        let detail = format!(
+            "{} is inside {} sync. Reads of its .arbos folder can block for minutes on items {} has not downloaded, and Arbos would stall with them.\n\nKeep the store out of the sync? \"Beside the project\" renames .arbos to .arbos.nosync (which iCloud skips) and leaves .arbos as a link to it. \"In ~/.arbos/stores\" moves it out of the folder entirely.",
+            path.display(),
+            sync.label(),
+            sync.label()
+        );
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "This folder is synced by iCloud",
+            Some(&detail),
+            &[
+                "Beside the project (.arbos.nosync)",
+                "In ~/.arbos/stores",
+                "Leave as is",
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(choice) = answer.await else {
+                return;
+            };
+            let how = match choice {
+                0 => arbos_core::cloudsync::Relocation::Nosync,
+                1 => arbos_core::cloudsync::Relocation::Home,
+                _ => return,
+            };
+            let outcome = arbos_core::cloudsync::relocate(&path, how);
+            let _ = this.update_in(cx, |_this, window, cx| {
+                let (title, detail) = match &outcome {
+                    Ok(target) => (
+                        "Store moved",
+                        format!(".arbos is now a link to {}.", target.display()),
+                    ),
+                    Err(e) => ("Could not move the store", format!("{e:#}")),
+                };
+                let _ = window.prompt(PromptLevel::Info, title, Some(&detail), &["OK"], cx);
             });
         })
         .detach();
