@@ -1338,6 +1338,20 @@ fn secs_between(from: i64, to: i64) -> Option<u32> {
 /// The model the kernel keeps for this agent in `agent.md`, when it is
 /// not `inherit`. The chip shows it, and a reopen does not fall back to
 /// the config default while the kernel keeps using the chosen one.
+/// `skill:` from a local agent's `agent.md`: the mode pinned to the chat.
+pub fn agent_skill(place: &arbos_core::Place, id: &str) -> Option<String> {
+    let agent = arbos_core::Agent::load(&place.agent_dir(id)).ok()?;
+    agent.skill.filter(|s| !s.trim().is_empty())
+}
+
+/// The names of the skills a place offers, for the mode chip's list.
+pub fn skill_names(place: &arbos_core::Place) -> Vec<String> {
+    arbos_core::load_skills(place)
+        .iter()
+        .map(|s| s.name.clone())
+        .collect()
+}
+
 pub fn agent_model(place: &arbos_core::Place, id: &str) -> Option<String> {
     let agent = arbos_core::Agent::load(&place.agent_dir(id)).ok()?;
     let model = agent.model.trim();

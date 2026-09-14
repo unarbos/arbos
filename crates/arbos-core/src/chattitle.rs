@@ -43,6 +43,11 @@ pub fn normalize(title: &str) -> Option<String> {
 /// then [`normalize`].
 pub fn from_prompt(prompt: &str) -> Option<String> {
     let line = prompt.lines().map(str::trim).find(|l| !l.is_empty())?;
+    // A slash command (`/mode haiku`, `/review`) is a setting or a skill
+    // call, not what the chat is about.
+    if line.starts_with('/') {
+        return None;
+    }
     normalize(line)
 }
 
@@ -60,4 +65,16 @@ pub fn is_generic(label: &str, session_id: Option<&str>) -> bool {
         || n.eq_ignore_ascii_case("chat")
         || n.eq_ignore_ascii_case("new chat")
         || n.to_ascii_lowercase().starts_with("new chat ")
+}
+
+#[cfg(test)]
+mod slash_tests {
+    use super::*;
+
+    #[test]
+    fn a_slash_command_names_no_chat() {
+        assert_eq!(from_prompt("/mode haiku"), None);
+        assert_eq!(from_prompt("  /review the diff"), None);
+        assert!(from_prompt("Fix the login bug").is_some());
+    }
 }

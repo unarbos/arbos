@@ -505,6 +505,20 @@ impl Arbos {
         let live = chat.filter(|chat| chat.live());
         let switches = switches(chat, &workspace.models);
         let model_note = workspace.models.error.clone();
+        // The pinned mode, from agent.md (local places), and the skills on
+        // offer for the chip's list.
+        let (mode_skill, skills) = match live.filter(|chat| chat.host.is_none()) {
+            Some(chat) => {
+                let place = arbos_core::Place::new(&chat.cwd);
+                let pinned = chat
+                    .agent_session
+                    .as_deref()
+                    .and_then(|sid| kernel::agent_skill(&place, sid));
+                let skills = if pinned.is_some() { kernel::skill_names(&place) } else { Vec::new() };
+                (pinned, skills)
+            }
+            None => (None, Vec::new()),
+        };
         let usage = live.and_then(|chat| chat.usage);
         let next_id = chat.map(|chat| chat.id);
         let next_draft = chat.map(|chat| chat.draft.clone()).unwrap_or_default();
@@ -549,6 +563,7 @@ impl Arbos {
             composer.set_agents(&agents, current, cx);
             composer.set_model_note(&model_note, cx);
             composer.set_switches(&switches, cx);
+            composer.set_mode_skill(mode_skill.clone(), skills.clone(), cx);
             composer.set_usage(usage, cx);
         });
         let fill = self
