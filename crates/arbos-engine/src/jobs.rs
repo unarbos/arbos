@@ -714,7 +714,7 @@ mod tests {
     async fn a_killed_job_says_who_and_after_how_long() {
         let root = JobsRoot::new(scratch("killed"));
         let (job, mut child) = root
-            .spawn("sleep 30", &root.dir().to_path_buf(), None, None)
+            .spawn("sleep 30", &root.dir().to_path_buf(), None, None, Vec::new())
             .unwrap();
         assert!(job.running());
         assert!(root.kill(&job));
