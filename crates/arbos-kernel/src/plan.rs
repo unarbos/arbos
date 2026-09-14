@@ -342,6 +342,35 @@ fn archive_finished(hooks: &KernelHooks, reported: &[String]) {
             Ok(()) => {
                 moved = true;
                 crate::klog::info("child_archived", Some(id), dest.display().to_string());
+                // Its worktree goes with it when nothing would be lost
+                // (K-01c); commits stay on the branch.
+                match crate::worktree::remove_if_clean(hooks.place.path(), id) {
+                    Ok(crate::worktree::Removed::Nothing) => {}
+                    Ok(crate::worktree::Removed::Removed {
+                        branch,
+                        ahead,
+                        branch_kept,
+                    }) => crate::klog::info(
+                        "worktree_removed",
+                        Some(id),
+                        if branch_kept {
+                            format!("{branch} keeps {ahead} commit(s)")
+                        } else {
+                            format!("{branch} had no commits; deleted")
+                        },
+                    ),
+                    Ok(crate::worktree::Removed::KeptDirty { path, dirty }) => crate::klog::warn(
+                        "worktree_kept",
+                        Some(id),
+                        format!(
+                            "{} has {dirty} uncommitted path(s); left as is",
+                            path.display()
+                        ),
+                    ),
+                    Err(e) => {
+                        crate::klog::warn("worktree_remove_failed", Some(id), format!("{e:#}"))
+                    }
+                }
             }
             Err(e) => crate::klog::warn("child_archive_failed", Some(id), format!("{e:#}")),
         }

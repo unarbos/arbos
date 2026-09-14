@@ -498,6 +498,43 @@ pub fn check(place: &Place) -> Result<Report> {
         );
     }
 
+    // Worktrees of workers that are gone (archived or deleted): the kernel
+    // removes a clean one when it archives the worker; a dirty one, or one
+    // left by a kernel older than that, is named here.
+    for id in crate::worktree::ids(place.path()) {
+        if ids.contains(&id) {
+            continue;
+        }
+        let Some(left) = crate::worktree::leftover(place.path(), &id) else {
+            continue;
+        };
+        let what = if left.dirty == usize::MAX {
+            "worktree of a worker that is gone; git could not read it".to_string()
+        } else if left.dirty > 0 {
+            format!(
+                "worktree of a worker that is gone, with {} uncommitted path(s) on {}: commit or discard them, then `git worktree remove {}`",
+                left.dirty,
+                left.branch,
+                left.path.display()
+            )
+        } else if left.ahead > 0 {
+            format!(
+                "worktree of a worker that is gone; clean, {} keeps {} commit(s): `git worktree remove {}` (the branch stays)",
+                left.branch,
+                left.ahead,
+                left.path.display()
+            )
+        } else {
+            format!(
+                "worktree of a worker that is gone; clean and {} has nothing new: `git worktree remove {} && git branch -D {}`",
+                left.branch,
+                left.path.display(),
+                left.branch
+            )
+        };
+        r.warn(rel(&left.path), None, what);
+    }
+
     // kernel.json: a live kernel, or a stale file.
     let kj = place.kernel_json();
     if kj.exists() {
