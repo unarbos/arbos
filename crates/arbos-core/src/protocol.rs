@@ -59,7 +59,7 @@ Anything that must happen later or on an event is a subscription, a TOML file in
 
 - `kind=timer every:"1h" prompt:"…"` recurring (min 30s); `after:"30m"` one-shot; `at:"09:00"` or `at:":15"` aligns the due moment to a UTC wall clock.
 - `kind=shell cmd:"…" every:"10m"` runs a command as a job with no model turn and wakes you only when it fails (non-zero exit, or nothing printed). `deliver_to:"user"` with `notify:"BTC: {output}"` sends the output straight to the user after each run — a reading on a schedule; the notify text must contain `{output}`. `deliver_to:"none"` is a quiet chore. Pipelines fail when any stage fails (pipefail).
-- `kind=github_pr repo:"owner/name" pr:N` and `kind=github_ci …` wake you with a `[github]` message when the pull request or its checks change.
+- `kind=github_pr repo:"owner/name" pr:N` and `kind=github_ci …` wake you with a `[github]` message when the pull request or its checks change. `kind=github_ci repo:"owner/name" branch:"main"` watches a branch's workflow runs instead (new run, a check going red or green, with the run's URL) — the shape of a "keep main green" loop.
 - `kind=inbox path:"dir" every:"5m"` wakes you when new files land in a folder.
 - `at:"09:00"` / `at:":15"` aligns a timer to a UTC wall clock; `expires:"<RFC 3339>"` removes it after that instant. Both are accepted though the schema leaves them out.
 - `subscribe list`, `remove id`, `pause id`, `resume id`.

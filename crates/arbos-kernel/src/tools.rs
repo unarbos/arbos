@@ -511,7 +511,7 @@ impl Tool for SubscribeTool {
             "type": "function",
             "function": {
                 "name": "subscribe",
-                "description": "The only clock; a firing arrives as a message from subscription:N. add kind: timer (every|after, prompt); shell (cmd, every: no model turn, wakes you on failure; deliver_to user + notify \"…{output}\" sends the reading to the user); github_pr|github_ci (repo, pr); inbox (path, every). list; remove|pause|resume id.",
+                "description": "The only clock; a firing arrives as a message from subscription:N. add kind: timer (every|after, prompt); shell (cmd, every: no model turn, wakes you on failure; deliver_to user + notify \"…{output}\" sends the reading to the user); github_pr (repo, pr); github_ci (repo, pr | branch: a branch's workflow runs); inbox (path, every). list; remove|pause|resume id.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -526,6 +526,7 @@ impl Tool for SubscribeTool {
                         "notify": {"type": "string", "description": "deliver_to user: line with {output}."},
                         "repo": {"type": "string", "description": "owner/name."},
                         "pr": {"type": "integer", "description": "PR number."},
+                        "branch": {"type": "string", "description": "github_ci: watch this branch's runs instead of a PR."},
                         "path": {"type": "string", "description": "inbox: folder."}
                     },
                     "required": ["op"]
@@ -561,6 +562,10 @@ impl Tool for SubscribeTool {
                         path: opt_str(&args, "path").map(str::to_string),
                         repo: opt_str(&args, "repo").map(str::to_string),
                         pr: args.get("pr").and_then(|v| v.as_u64()).filter(|n| *n > 0),
+                        branch: opt_str(&args, "branch")
+                            .map(str::trim)
+                            .filter(|b| !b.is_empty())
+                            .map(str::to_string),
                         deliver_to: opt_str(&args, "deliver_to").unwrap_or("agent").to_string(),
                         notify: opt_str(&args, "notify").map(str::to_string),
                         expires: opt_str(&args, "expires").map(str::to_string),
