@@ -56,8 +56,20 @@ pub struct ProjectConfig {
     pub schema: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// An agent that opens a pull request follows it: the kernel adds a
+    /// `github_pr` and a `github_ci` subscription for it, so a failing
+    /// check or a review comment wakes the agent that made the change.
+    /// On unless `follow_prs = false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_prs: Option<bool>,
     #[serde(default)]
     pub root: RootConfig,
+}
+
+impl ProjectConfig {
+    pub fn follows_prs(&self) -> bool {
+        self.follow_prs.unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,6 +130,7 @@ pub fn write_for_new_place(place: &Place, name: &str) -> Result<()> {
     let cfg = ProjectConfig {
         schema: Some(2),
         name: Some(name.to_string()),
+        follow_prs: None,
         root: RootConfig {
             role: Some(COORDINATOR.into()),
             archive_children: Some(true),
