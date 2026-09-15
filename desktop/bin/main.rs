@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use arbos_desktop::{
-    assets, memory,
+    assets, fonts, memory,
     model::{settings, state, workspace},
     reading,
     view::{
@@ -63,6 +63,10 @@ fn main() -> Result<()> {
     app.run(move |cx: &mut App| {
         if let Err(err) = ui::register_fonts(cx) {
             eprintln!("font registration failed: {err:?}");
+        }
+        // The UI face travels with the app; the theme names it below.
+        if let Err(err) = fonts::register(cx) {
+            eprintln!("bundled font registration failed: {err:?}");
         }
         // Cursor's colours, registered before the first palette is built.
         arbos_desktop::view::palette::install(cx);

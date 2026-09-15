@@ -16,7 +16,7 @@ categories = ["gui", "development-tools"]
 # file, which would ship the website and the bundling plumbing to anyone who
 # installs the binary. `assets/` is absent by design — the logo is downloaded,
 # never committed, and `mark()` already holds the case where it is missing.
-include = ["/src", "/bin", "/build.rs", "/README.md", "/LICENSE"]
+include = ["/src", "/bin", "/fonts", "/build.rs", "/README.md", "/LICENSE"]
 
 [[bin]]
 name = "arbos-desktop"
