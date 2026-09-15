@@ -102,9 +102,28 @@ impl Identity {
     /// `.arbos/` yet — a freshly opened tab is exactly that case.
     pub fn save(&self, store: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(store)?;
-        let body = toml::to_string_pretty(self)
+        // The file is the project's config too — `[root] role`,
+        // `permission`, `[spend]`, `follow_prs` — so the face is set into
+        // what is there, never written over it (a tab rename used to turn
+        // a coordinator place back into a plain one).
+        let path = Self::path(store);
+        let mut table: toml::Table = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| toml::from_str(&t).ok())
+            .unwrap_or_default();
+        match &self.name {
+            Some(n) => {
+                table.insert("name".into(), toml::Value::String(n.clone()));
+            }
+            None => {
+                table.remove("name");
+            }
+        }
+        table.insert("icon".into(), toml::Value::String(self.icon.clone()));
+        table.insert("color".into(), toml::Value::String(self.color.clone()));
+        let body = toml::to_string_pretty(&table)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(Self::path(store), body)
+        std::fs::write(path, body)
     }
 
     /// The asset path of the glyph; a name the palette does not know
@@ -154,4 +173,42 @@ fn hash(s: &str) -> u64 {
         h = h.wrapping_mul(1099511628211);
     }
     h
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::Identity;
+
+    /// The face is set into the project's file, not written over it.
+    #[test]
+    fn saving_the_face_keeps_the_rest_of_project_toml() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-identity-save-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            Identity::path(&dir),
+            "schema = 2\nname = \"old\"\n\n[root]\nrole = \"coordinator\"\npermission = \"auto\"\n\n[spend]\ncap_usd = 20.0\n",
+        )
+        .unwrap();
+        let face = Identity {
+            name: Some("Arbos".into()),
+            icon: "terminal".into(),
+            color: "teal".into(),
+        };
+        face.save(&dir).unwrap();
+        let text = std::fs::read_to_string(Identity::path(&dir)).unwrap();
+        assert!(text.contains("name = \"Arbos\""), "{text}");
+        assert!(text.contains("icon = \"terminal\"") && text.contains("color = \"teal\""), "{text}");
+        assert!(text.contains("role = \"coordinator\"") && text.contains("cap_usd = 20.0"), "the config survived: {text}");
+        assert!(text.contains("schema = 2"), "{text}");
+        let back = Identity::load(&dir).unwrap();
+        assert_eq!(back, face);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
