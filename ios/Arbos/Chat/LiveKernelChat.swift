@@ -20,6 +20,9 @@ final class LiveKernelChat: ChatSource {
     private var childNames: [String: String] = [:]
     private var workers: [String: WorkerStatus] = [:]
     private var workerOrder: [String] = []
+    /// Workers the tree has listed: only those read as done when they
+    /// leave it. A remote child is never in the tree; its `say` ends it.
+    private var inTree: Set<String> = []
     private var history: [ChatItem] = []
     private var replaying = true
     /// A reply is being streamed; the next `assistant` event is its final
@@ -244,6 +247,7 @@ final class LiveKernelChat: ChatSource {
         for agent in agents where agent.parent == focus {
             children.insert(agent.id)
             childNames[agent.id] = agent.name
+            inTree.insert(agent.id)
             // The tree carries each agent's live step; absent means idle.
             let running = agent.step != nil
             if workers[agent.id] == nil {
@@ -256,7 +260,7 @@ final class LiveKernelChat: ChatSource {
             }
         }
         // A worker gone from the tree is archived: no longer running.
-        for id in workerOrder where !agents.contains(where: { $0.id == id }) {
+        for id in workerOrder where inTree.contains(id) && !agents.contains(where: { $0.id == id }) {
             workers[id]?.running = false
         }
         publishWorkers()
