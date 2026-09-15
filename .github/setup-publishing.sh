@@ -197,7 +197,65 @@ esac
 say ""
 
 # ── 3. notarization credentials ──────────────────────────────────────────────
-say "apple id:   setting the notarization credentials."
+# Two ways to prove to Apple's notary service who is asking, and the API key
+# is the better one: it is made for this, it can be revoked without touching
+# the Apple ID, and no account password is involved. Both are set where the
+# material exists, and the build prefers the key.
+say "notarize:   setting the credentials."
+
+# The App Store Connect API key. The key id is in the file's own name —
+# `AuthKey_XANFG7S7YS.p8` is key `XANFG7S7YS` — which is how Apple ships it.
+key_file="$(op item get "$CERT_ITEM" --vault "$VAULT" --format json \
+  | python3 -c "
+import json, sys
+print(next((f['name'] for f in json.load(sys.stdin).get('files', [])
+            if f['name'].endswith('.p8')), ''))
+")"
+if [ -n "$key_file" ]; then
+  op read "op://$VAULT/$CERT_ITEM/$key_file" --out-file "$work/notary.p8" >/dev/null
+  key_id="$(printf '%s' "$key_file" | sed -n 's/^AuthKey_\([A-Z0-9]*\)\.p8$/\1/p')"
+  # The issuer id is a UUID. A field of its own is the tidy place for it; the
+  # note is where it is today, so it is read from there when there is exactly
+  # one UUID in it and nothing to mistake it for.
+  issuer_source="a labelled field"
+  op item get "$CERT_ITEM" --vault "$VAULT" --format json --reveal \
+    | python3 -c "
+import json, re, sys, uuid
+item = json.load(sys.stdin)
+def is_uuid(v):
+    try:
+        uuid.UUID(v or ''); return True
+    except ValueError:
+        return False
+labelled = [f['value'] for f in item['fields']
+            if f.get('label') != 'notesPlain' and is_uuid(f.get('value'))]
+if labelled:
+    open('$work/issuer', 'w').write(labelled[0]); sys.exit(0)
+note = next((f.get('value') or '' for f in item['fields']
+             if f.get('label') == 'notesPlain'), '')
+found = set(re.findall(
+    r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', note))
+if len(found) == 1:
+    open('$work/issuer', 'w').write(found.pop())
+    open('$work/issuer-from-note', 'w').write('yes')
+"
+  [ -f "$work/issuer-from-note" ] && issuer_source="the item's note"
+  if [ -s "$work/issuer" ] && [ -n "$key_id" ]; then
+    gh secret set NOTARY_KEY_P8 --repo "$repo" < "$work/notary.p8"
+    printf '%s' "$key_id" | gh secret set NOTARY_KEY_ID --repo "$repo"
+    gh secret set NOTARY_ISSUER_ID --repo "$repo" < "$work/issuer"
+    say "            $key_file → NOTARY_KEY_P8, NOTARY_KEY_ID (key $key_id),"
+    say "            NOTARY_ISSUER_ID (issuer id read from $issuer_source)."
+  else
+    say "            $key_file is there but its issuer id is not — App Store"
+    say "            Connect › Users and Access › Integrations shows it. Put it"
+    say "            on the vault item as its own field and re-run."
+  fi
+else
+  say "            no App Store Connect .p8 on the vault item."
+fi
+
+# The Apple ID fallback.
 op item get "$APPLE_ID_ITEM" --vault "$VAULT" --format json --reveal \
   | python3 -c "
 import json, sys
@@ -209,7 +267,8 @@ test -s "$work/apple-id" || { say "no email address on the Apple id item"; exit 
 gh secret set APPLE_ID --repo "$repo" < "$work/apple-id"
 printf '%s' "$APPLE_TEAM_ID" | gh secret set APPLE_TEAM_ID --repo "$repo"
 gh secret set APPLE_APP_PASSWORD --repo "$repo" < "$work/app-password"
-say "            APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD set."
+say "            APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD set as the"
+say "            fallback."
 say ""
 
 # ── 4. where that leaves us ──────────────────────────────────────────────────
