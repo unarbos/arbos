@@ -537,6 +537,8 @@ mod tests {
                 name: "demo".into(),
                 place: "/x/demo".into(),
                 live: false,
+                kind: String::new(),
+                parent: None,
             }],
             since: 1,
         };
