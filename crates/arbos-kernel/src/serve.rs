@@ -1338,7 +1338,7 @@ fn record_prs(place: &Place, agent: &str, ev: &Event) -> Vec<arbos_core::PrRec> 
 /// completion"): one `github_pr` and one `github_ci` subscription per new
 /// PR, unless `project.toml` says `follow_prs = false` or the agent
 /// already has them. Both go when the PR is merged or closed.
-fn follow_prs(hooks: &Arc<KernelHooks>, agent: &str, opened: &[arbos_core::PrRec]) {
+pub(crate) fn follow_prs(hooks: &Arc<KernelHooks>, agent: &str, opened: &[arbos_core::PrRec]) {
     if !arbos_core::project::load(&hooks.place).follows_prs() {
         return;
     }
@@ -1653,6 +1653,7 @@ pub fn kernel_registry(hooks: &Arc<KernelHooks>, ptys: &Arc<PtyHub>) -> Registry
         .with(crate::secret_tool::Secret)
         .with(crate::tools::SubscribeTool(Arc::clone(hooks)))
         .with(crate::record::Record::default())
+        .with(crate::pr_tool::Pr(Arc::clone(hooks)))
         .with(tools::Terminal {
             hooks: Arc::clone(hooks),
             ptys: Arc::clone(ptys),

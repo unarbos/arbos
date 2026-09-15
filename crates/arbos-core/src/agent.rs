@@ -54,6 +54,7 @@ pub const ALL_TOOLS: &[&str] = &[
     "delete",
     "agents",
     "transcript",
+    "pr",
 ];
 
 /// How much an agent may do without asking. `agent.md` `mode:`.
@@ -417,6 +418,11 @@ impl Agent {
         // Looking at one's workers goes with spawning them. Old agent.md
         // files predate the tools.
         if matches!(tool, "agents" | "transcript") && self.allowlist.iter().any(|t| t == "spawn") {
+            return true;
+        }
+        // Pull requests go with the shell that ran `gh`. Old agent.md files
+        // predate the tool.
+        if tool == "pr" && self.allowlist.iter().any(|t| t == "bash") {
             return true;
         }
         // Visible shell. Old agent.md files list bash only.

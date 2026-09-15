@@ -94,6 +94,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "tempfile",
  "tgrep-core",
  "tokio",
  "tokio-tungstenite",
