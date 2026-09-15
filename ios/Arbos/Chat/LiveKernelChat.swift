@@ -29,7 +29,7 @@ final class LiveKernelChat: ChatSource {
     /// text, not a new message.
     private var streamed = false
     /// Worker reports that arrived while a reply was streaming: shown
-    /// after the reply closes, so a paragraph is never cut in half.
+    /// when the turn ends, so a paragraph is never cut in half.
     private var deferred: [ChatItem] = []
     private var turnStarted: Date?
     /// A `history <agent>` request in flight: its replayed lines and the
@@ -177,7 +177,6 @@ final class LiveKernelChat: ChatSource {
                 stream?.yield(.agentDelta(trimmed))
                 stream?.yield(.agentDone)
             }
-            flushDeferred()
             return
         }
         if case .tool(let record) = event, record.name == "spawn", let child = record.child {

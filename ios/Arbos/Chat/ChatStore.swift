@@ -204,6 +204,14 @@ final class ChatStore: ObservableObject {
             // message already; only announce here if it is still open.
             if let index = items.lastIndex(where: { if case .agent = $0.kind { return true } else { return false } }) {
                 let wasOpen = items[index].isStreamingAgent
+                // The kernel's whole text for one step can land after the
+                // next step's tokens already started: when the streamed
+                // text runs past it, keep streaming instead of cutting.
+                if wasOpen, case .agent(let streamedText, _) = items[index].kind,
+                   streamedText.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(text),
+                   streamedText.trimmingCharacters(in: .whitespacesAndNewlines).count > text.count {
+                    break
+                }
                 items[index].kind = .agent(text, streaming: false)
                 if wasOpen, !text.isEmpty { onAgentMessage?(text) }
             } else {
