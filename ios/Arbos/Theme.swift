@@ -32,31 +32,23 @@ enum ArbosTheme {
     static let cardRadius: CGFloat = 8
     static let controlRadius: CGFloat = 6
 
-    // Spacing. Content sits 20 pt from the edge (the reference's text
-    // margin); the floating composer and pills 12 pt.
-    static let gutter: CGFloat = 20
-    static let barMargin: CGFloat = 12
+    // Spacing.
+    static let gutter: CGFloat = 14
     static let promptPadX: CGFloat = 12
     static let promptPadY: CGFloat = 10
     static let rowGap: CGFloat = 6
-    static let itemGap: CGFloat = 10
-    /// Prose line height 22 pt at 17 pt type, as the reference reads.
-    static let lineSpacing: CGFloat = 5
+    static let itemGap: CGFloat = 8
 
-    /// Type. The Mac app sets prose at 14 pt for a desk; a phone in the
-    /// hand reads at iOS's 17 pt body, which is what Jacob's Cursor stills
-    /// use — so the phone takes 17 and keeps the Mac's ratios below it
-    /// (secondary 15, caption 13, mono 14). Noted in the ledger (M-20).
-    static let titleSize: CGFloat = 22
-    static let bodySize: CGFloat = 17
-    static let calloutSize: CGFloat = 15
-    static let captionSize: CGFloat = 13
-    static let monoSize: CGFloat = 14
+    /// The desktop sets prose at 14 pt on a Mac. A phone is read at
+    /// arm's length, so the whole scale is one point up; every other
+    /// size keeps the desktop's ratio to the body.
+    static let bodySize: CGFloat = 15
+    static let calloutSize: CGFloat = 13.5
+    static let captionSize: CGFloat = 11.5
+    static let monoSize: CGFloat = 12.5
 
-    static let title = Font.system(size: titleSize, weight: .semibold)
     static let body = Font.system(size: bodySize)
     static let bodyMedium = Font.system(size: bodySize, weight: .medium)
-    static let bodySemibold = Font.system(size: bodySize, weight: .semibold)
     static let callout = Font.system(size: calloutSize)
     static let calloutMedium = Font.system(size: calloutSize, weight: .medium)
     static let caption = Font.system(size: captionSize)

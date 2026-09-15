@@ -79,11 +79,11 @@ struct ProjectChatView: View {
             HStack(spacing: 8) {
                 ProjectGlyph(identity: identity, size: 22, working: chat.busy || chat.running > 0)
                 Text(title)
-                    .font(ArbosTheme.bodySemibold)
+                    .font(ArbosTheme.bodyMedium)
                     .foregroundStyle(ArbosTheme.text)
                     .lineLimit(1)
             }
-            .frame(maxWidth: 220)
+            .frame(maxWidth: 200)
             HStack {
                 RoundButton(symbol: "chevron.left") { dismiss() }
                 Spacer()
@@ -109,9 +109,9 @@ struct ProjectChatView: View {
                 }
             }
         }
-        .padding(.horizontal, ArbosTheme.gutter)
-        .padding(.top, 4)
-        .padding(.bottom, 12)
+        .padding(.horizontal, ArbosTheme.gutter + 6)
+        .padding(.top, 6)
+        .padding(.bottom, 10)
     }
 
     /// The reference's pill row above the composer: here, the workers.
@@ -132,19 +132,17 @@ struct ProjectChatView: View {
                         }
                         Text(chat.running > 0 ? "Working \(chat.running)" : "Agents \(chat.workers.count)")
                     }
-                    .font(ArbosTheme.body)
+                    .font(ArbosTheme.callout)
                     .foregroundStyle(ArbosTheme.text)
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(Capsule().fill(ArbosTheme.raised))
                     .overlay(Capsule().strokeBorder(ArbosTheme.border, lineWidth: 1))
-                    .shadow(color: .black.opacity(0.3), radius: 10, y: 3)
                 }
                 .buttonStyle(.plain)
                 Spacer()
             }
-            .padding(.horizontal, ArbosTheme.barMargin)
-            .padding(.bottom, 4)
+            .padding(.horizontal, ArbosTheme.gutter + 6)
         }
     }
 
@@ -173,9 +171,9 @@ struct ProjectChatView: View {
                             .foregroundStyle(ArbosTheme.textDim)
                             .padding(.top, 4)
                     }
-                    Color.clear.frame(height: chat.workers.isEmpty ? 80 : 132).id("tail")
+                    Color.clear.frame(height: chat.workers.isEmpty ? 76 : 120).id("tail")
                 }
-                .padding(.horizontal, ArbosTheme.gutter)
+                .padding(.horizontal, ArbosTheme.gutter + 6)
                 .padding(.top, 4)
             }
             .defaultScrollAnchor(.bottom)
@@ -250,7 +248,7 @@ struct WorkersSheet: View {
             Text("Agents")
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(ArbosTheme.text)
-                .padding(.horizontal, ArbosTheme.gutter)
+                .padding(.horizontal, ArbosTheme.gutter + 6)
                 .padding(.top, 22)
                 .padding(.bottom, 12)
             ScrollView {
@@ -285,14 +283,14 @@ struct WorkersSheet: View {
                                     .font(.system(size: 11, weight: .semibold))
                                     .foregroundStyle(ArbosTheme.textDim)
                             }
-                            .padding(.horizontal, ArbosTheme.gutter)
-                            .padding(.vertical, 14)
+                            .padding(.horizontal, ArbosTheme.gutter + 6)
+                            .padding(.vertical, 12)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .overlay(alignment: .bottom) {
                             Rectangle().fill(ArbosTheme.border).frame(height: 0.5)
-                                .padding(.leading, ArbosTheme.gutter + 30)
+                                .padding(.leading, ArbosTheme.gutter + 6 + 30)
                         }
                     }
                 }
@@ -327,8 +325,8 @@ struct WorkerLine: View {
     var body: some View {
         HStack(spacing: 8) {
             BrailleSpinner(tint: ArbosTheme.textMuted)
-                .font(.system(size: 14, design: .monospaced))
-                .frame(width: 14)
+                .font(.system(size: 12, design: .monospaced))
+                .frame(width: 12)
             Text(text)
                 .font(ArbosTheme.body)
                 .foregroundStyle(ArbosTheme.textMuted)
@@ -363,7 +361,6 @@ struct ChatRow: View {
                 Spacer(minLength: 0)
                 Text(text)
                     .font(ArbosTheme.body)
-                    .lineSpacing(ArbosTheme.lineSpacing)
                     .foregroundStyle(ArbosTheme.text)
                     .padding(.horizontal, ArbosTheme.promptPadX)
                     .padding(.vertical, ArbosTheme.promptPadY)
@@ -378,7 +375,7 @@ struct ChatRow: View {
             HStack(alignment: .lastTextBaseline, spacing: 2) {
                 Text(Self.prose(text))
                     .font(ArbosTheme.body)
-                    .lineSpacing(ArbosTheme.lineSpacing)
+                    .lineSpacing(5)
                     .foregroundStyle(ArbosTheme.text)
                     .tint(ArbosTheme.accent)
                     .textSelection(.enabled)
@@ -437,8 +434,8 @@ struct ChatRow: View {
     ) -> some View {
         HStack(spacing: 8) {
             Image(systemName: symbol)
-                .font(.system(size: 10, weight: .semibold))
-                .frame(width: 12)
+                .font(.system(size: 9, weight: .semibold))
+                .frame(width: 10)
             Text(text)
                 .lineLimit(2)
                 .truncationMode(truncation)

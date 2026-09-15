@@ -47,7 +47,7 @@ struct WorkerChatView: View {
                         .padding(.top, 10)
                     Color.clear.frame(height: 24)
                 }
-                .padding(.horizontal, ArbosTheme.gutter)
+                .padding(.horizontal, ArbosTheme.gutter + 6)
                 .padding(.top, 4)
             }
         }
@@ -71,7 +71,7 @@ struct WorkerChatView: View {
                         .foregroundStyle(ArbosTheme.textFaint)
                 }
                 Text(worker.name)
-                    .font(ArbosTheme.bodySemibold)
+                    .font(ArbosTheme.bodyMedium)
                     .foregroundStyle(ArbosTheme.text)
                     .lineLimit(1)
             }
@@ -81,7 +81,7 @@ struct WorkerChatView: View {
                 Spacer()
             }
         }
-        .padding(.horizontal, ArbosTheme.gutter)
+        .padding(.horizontal, ArbosTheme.gutter + 6)
         .padding(.top, 6)
         .padding(.bottom, 10)
     }
