@@ -1020,7 +1020,7 @@ impl KernelHooks {
         kind: Option<&str>,
     ) -> Result<(AgentId, Option<Worktree>)> {
         self.spawn_based(
-            parent, name, brief, model, allowlist, readonly, cwd, isolate, kind, None,
+            parent, name, brief, model, allowlist, readonly, cwd, isolate, kind, None, None,
         )
     }
 
@@ -1039,6 +1039,7 @@ impl KernelHooks {
         isolate: Isolate,
         kind: Option<&str>,
         base: Option<&str>,
+        role: Option<&str>,
     ) -> Result<(AgentId, Option<Worktree>)> {
         // A definition fills in what the call left out; the call's own
         // model wins, the def's readonly cannot be switched off. Models fill
@@ -1052,8 +1053,13 @@ impl KernelHooks {
             Some(k) => match arbos_core::find_def(&self.place, k) {
                 Some(d) => Some(d),
                 None => {
+                    // The user's own kinds decide whether a wrong name is a
+                    // mistake: with none of theirs, a name the model made
+                    // up ("inherit", "Worker") is the plain child, as before
+                    // the built-in helpers existed.
                     let known: Vec<String> = arbos_core::load_defs(&self.place)
                         .into_iter()
+                        .filter(|d| !d.is_builtin())
                         .map(|d| d.name)
                         .collect();
                     if known.is_empty() {
@@ -1069,9 +1075,15 @@ impl KernelHooks {
                         );
                         None
                     } else {
+                        let mut all = known;
+                        all.extend(
+                            arbos_core::agent_def::builtin_defs()
+                                .into_iter()
+                                .map(|d| d.name),
+                        );
                         bail!(
                             "spawn: no agent definition named {k:?}. Kinds here: {}",
-                            known.join(", ")
+                            all.join(", ")
                         );
                     }
                 }
@@ -1154,9 +1166,11 @@ impl KernelHooks {
             .or_else(|| worktree.as_ref().map(|w| w.path.clone()));
         // Lean by default: a child without a kind is a worker. A kind
         // sets `role:` itself; `role: none` means no role line.
-        child.role = match def.as_ref() {
-            None => Some(arbos_core::project::WORKER.into()),
-            Some(d) => d.role.clone().filter(|r| r != "none"),
+        child.role = match (role, def.as_ref()) {
+            // `spawn role=coordinator`: an area coordinator (delegation 8).
+            (Some(r), _) => Some(r.to_string()),
+            (None, None) => Some(arbos_core::project::WORKER.into()),
+            (None, Some(d)) => d.role.clone().filter(|r| r != "none"),
         };
         if let Some(d) = &def {
             child.kind = d.name.clone();

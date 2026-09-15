@@ -162,6 +162,13 @@ pub fn apply_role(place: &Place, agent: &mut Agent) {
         if agent.role.is_none() && agent.kind.is_empty() {
             agent.role = Some(WORKER.into());
         }
+        // An area coordinator (spawn role=coordinator, or the built-in
+        // `coordinator` kind) keeps the coordinator's tools, like root.
+        if agent.role.as_deref() == Some(COORDINATOR) {
+            agent
+                .allowlist
+                .retain(|t| COORDINATOR_TOOLS.contains(&t.as_str()));
+        }
         return;
     }
     if !root_is_coordinator(place) {
