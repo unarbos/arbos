@@ -248,6 +248,7 @@ impl Workspace {
 
     fn save(&self) {
         state::save(&State {
+            version: state::STATE_VERSION,
             projects: self.projects.iter().map(|p| p.place().encode()).collect(),
             recents: self.recents.iter().map(|p| p.encode()).collect(),
             active: self.active.unwrap_or_default(),
