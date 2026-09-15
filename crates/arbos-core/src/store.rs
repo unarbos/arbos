@@ -170,6 +170,7 @@ pub const PROTECTED: &[&str] = &[
     ".cursor/agents/",
     ".cursor/mcp.json",
     ".cursor/rules/",
+    ".arbos/rules/",
     "AGENTS.md",
     "CLAUDE.md",
 ];
