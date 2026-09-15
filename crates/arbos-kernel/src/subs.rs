@@ -68,6 +68,12 @@ pub fn ensure_chores(place: &arbos_core::Place) {
         pr: None,
 
         branch: None,
+
+        channel: None,
+
+        thread: None,
+
+        match_text: None,
         deliver_to: "none".into(),
         notify: None,
         expires: None,
@@ -221,6 +227,55 @@ fn message(sub: &Subscription, wake: bool, body: String) -> inbox::Message {
         hops: 0,
         body,
         ..inbox::Message::default()
+    }
+}
+
+/// A human message landed in a door's channel: every `chat` subscription
+/// that names that channel (and thread, and text) fires now, as a wake
+/// from `subscription:N` carrying who said what where. Event-driven: no
+/// schedule to advance, the file only remembers the last firing.
+pub fn fire_chat(
+    hooks: &Arc<KernelHooks>,
+    channel_tag: &str,
+    thread: Option<&str>,
+    author: &str,
+    text: &str,
+) {
+    let now = arbos_core::now_ms();
+    for agent in list_agents(&hooks.place).unwrap_or_default() {
+        let id = agent.id.as_str();
+        for mut sub in subscription::list(&hooks.place, id) {
+            if !sub.matches_chat(channel_tag, thread, text) {
+                continue;
+            }
+            let where_ = match thread {
+                Some(t) => format!("{channel_tag} (thread {t})"),
+                None => channel_tag.to_string(),
+            };
+            let mut body = format!("[chat] {author} in {where_}: {text}");
+            if !sub.prompt.trim().is_empty() {
+                body = format!("{}\n\n{body}", sub.prompt.trim());
+            }
+            let outcome = match inbox::deliver(&hooks.place, id, &message(&sub, true, body)) {
+                Ok(_) => format!("{author}: {}", text::clip(text, 80)),
+                Err(e) => format!("could not deliver: {e:#}"),
+            };
+            sub.last_fired = Some(inbox::rfc3339(now));
+            sub.last = text::clip(&outcome, 200);
+            if let Err(e) = subscription::save(&hooks.place, id, &sub) {
+                crate::klog::warn(
+                    "subscription_save_failed",
+                    Some(id),
+                    format!("#{}: {e:#}", sub.id),
+                );
+            }
+            hooks.plan_changed(id);
+            crate::klog::info(
+                "chat_subscription_fired",
+                Some(id),
+                format!("#{} {channel_tag}", sub.id),
+            );
+        }
     }
 }
 

@@ -216,6 +216,12 @@ fn migrate_plan(hooks: &crate::hooks::KernelHooks, agent: &str, path: &Path) -> 
                 pr: None,
 
                 branch: None,
+
+                channel: None,
+
+                thread: None,
+
+                match_text: None,
                 deliver_to: "agent".into(),
                 notify: None,
                 expires: None,
@@ -374,6 +380,12 @@ fn migrate_github(place: &Place, path: &Path) -> Option<String> {
             pr: Some(old.pr),
 
             branch: None,
+
+            channel: None,
+
+            thread: None,
+
+            match_text: None,
             deliver_to: "agent".into(),
             notify: None,
             expires: None,

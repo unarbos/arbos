@@ -35,6 +35,12 @@ fn timer(prompt: &str, every: Option<&str>) -> Subscription {
         pr: None,
 
         branch: None,
+
+        channel: None,
+
+        thread: None,
+
+        match_text: None,
         deliver_to: "agent".into(),
         notify: None,
         expires: None,
