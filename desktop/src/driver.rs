@@ -1087,6 +1087,7 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         "showing": pane_name(this.showing(cx)),
         "panel_open": this.panel_open,
         "text_size": workspace.text_size,
+        "bionic_reading": workspace.bionic_reading,
         "settings_open": cx.windows().iter().any(|w| w.downcast::<SettingsWindow>().is_some()),
         "opener_open": this.opener.read(cx).open,
         "search_open": this.chat_search.read(cx).is_open(),

@@ -29,9 +29,16 @@ pub struct Entry {
     pub id: String,
 }
 
+/// The file's shape as this build writes it. A file without the key was
+/// written by a build from before the key existed; `restore` uses that to
+/// tell a setting the user chose from one an old default wrote for them.
+pub const STATE_VERSION: u32 = 2;
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
+    #[serde(default)]
+    pub version: u32,
     /// Places as one-line strings: a local path, or `host:folder`.
     #[serde(default)]
     pub projects: Vec<String>,
@@ -49,8 +56,9 @@ pub struct State {
     /// The body size the type ladder is scaled against, in points.
     pub text_size: f32,
     /// Whether the agent's prose is set for bionic reading — the front of
-    /// each word heavier than the rest. On unless switched off: no field-level
-    /// default, so a file written before it existed takes the struct's.
+    /// each word heavier than the rest. Off unless switched on. Builds before
+    /// `STATE_VERSION` 2 defaulted it on and wrote that `true` into every
+    /// file they saved, so `restore` reads it only from a versioned file.
     pub bionic_reading: bool,
     /// The greys' oklch hue in degrees, and how much of it they carry. Zero
     /// chroma is the shipped neutral, whatever the hue says.
@@ -92,6 +100,7 @@ pub const TEXT_SIZE: (f32, f32) = (11., 17.);
 impl Default for State {
     fn default() -> Self {
         Self {
+            version: STATE_VERSION,
             projects: Vec::new(),
             recents: Vec::new(),
             active: 0,
@@ -156,7 +165,13 @@ pub fn restore() -> State {
             .unwrap_or(raw);
         last.entry(key).or_insert(entry);
     }
+    // A `true` from a file older than version 2 is the old default, not a
+    // choice: the setting shipped on and every save wrote it back, so it
+    // survived the default's flip (Jacob's Mac, twice). Only a versioned
+    // file's word counts.
+    let bionic_reading = stored.version >= 2 && stored.bionic_reading;
     State {
+        version: STATE_VERSION,
         projects,
         recents,
         active,
@@ -164,7 +179,7 @@ pub fn restore() -> State {
         reduce_transparency: stored.reduce_transparency,
         cursor_blink: stored.cursor_blink,
         text_size: stored.text_size.clamp(TEXT_SIZE.0, TEXT_SIZE.1),
-        bionic_reading: stored.bionic_reading,
+        bionic_reading,
         hue: stored.hue,
         chroma: stored.chroma,
         last,
