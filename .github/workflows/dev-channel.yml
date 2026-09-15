@@ -1,0 +1,340 @@
+name: dev channel
+
+# Every green commit on `main` becomes an installable, signed release, with no
+# human picking a version number and no human pressing anything.
+#
+# Two channels exist, and they differ only in which document the app fetches:
+#
+#   stable  the tagged releases      (release.yml writes arbos-stable.json)
+#   dev     every green main commit  (this workflow writes arbos-dev.json)
+#
+# ── the version ──────────────────────────────────────────────────────────────
+# `0.2.0` out of desktop/Cargo.toml, and behind it the count of commits on the
+# branch. The pair is what the bundle already carries — CFBundleShortVersionString
+# and CFBundleVersion — so nothing is invented for the feed, and `0.2.0+1877`
+# sorts above `0.2.0+1876` without anybody deciding anything. The short SHA
+# rides along in the release entry so a build can be traced to its commit.
+#
+# ── never a red build ────────────────────────────────────────────────────────
+# The trigger is `workflow_run` on `ci`, and the job runs only when that run
+# concluded `success`. There is no path from a red commit to a published
+# payload.
+#
+# ── safe to re-run ───────────────────────────────────────────────────────────
+# Re-running publishes the same version and build again: the feed entry for
+# that pair is replaced rather than added, the assets are uploaded with
+# --clobber, and the rolling release is created only if it is missing. Running
+# it twice leaves exactly what running it once leaves.
+#
+# ── not fighting the steward ─────────────────────────────────────────────────
+# The release steward merges to `main` on an hourly pass, so several commits
+# can land at once and each starts a run. The concurrency group serialises them
+# and never cancels a running publish; GitHub keeps only the newest run
+# waiting, so a burst of merges collapses into the newest build rather than a
+# queue of stale ones. Tagged releases are release.yml's, under different tags
+# and a different feed file, so the two never write the same asset.
+#
+# ── signing ──────────────────────────────────────────────────────────────────
+# What makes a payload safe to install is the Ed25519 signature the feed
+# carries over its bytes, checked by the app against the public key compiled
+# into it (crates/arbos-update). That promise is ours to make and needs nothing
+# from Apple, which is why this works today.
+#
+# Apple's signature is a second, separate promise, about what Gatekeeper does
+# to a copy somebody downloads in a browser. `.github/actions/macos-payload`
+# makes whichever of it is possible:
+#
+#   DEVELOPER_ID_CERT_P12 + P12_PASSWORD      signed, notarized, stapled
+#   APPLE_SIGNING_CERT_P12 + ..._PASSWORD     signed (notarytool takes only a
+#                                             Developer ID certificate)
+#   neither                                   ad-hoc signed — what a fork gets,
+#                                             and the updater installs it
+#
+# Notarization, once it is possible, is not allowed to fail quietly: the macOS
+# job fails and nothing is published, rather than a payload going out that
+# Gatekeeper would reject.
+#
+# ── one repository secret is required ────────────────────────────────────────
+#   ARBOS_UPDATE_SIGNING_KEY   the private half of the update key, base64.
+# Set it, and the four optional Apple secrets, with:
+#   .github/setup-publishing.sh
+# Until it exists this workflow skips itself with a note rather than publishing
+# something every app would refuse.
+#
+# Everything hangs off one rolling pre-release tagged `dev`. The tag is a
+# container, not a version: it is made once and never moved, and what changes
+# is the assets on it. That is what keeps the feed URL constant —
+# https://github.com/unarbos/arbos/releases/download/dev/arbos-dev.json —
+# so a shipped app never has to be told where to look next.
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dev-channel
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  TAG: dev
+
+jobs:
+  # What is being published, worked out once so the three jobs below name the
+  # same files. The build number is a commit count, and a shallow checkout
+  # would count differently in each job.
+  plan:
+    name: what to publish
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    env:
+      HAVE_KEY: ${{ secrets.ARBOS_UPDATE_SIGNING_KEY != '' }}
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      sha: ${{ steps.plan.outputs.sha }}
+      short: ${{ steps.plan.outputs.short }}
+      version: ${{ steps.plan.outputs.version }}
+      build: ${{ steps.plan.outputs.build }}
+      notes: ${{ steps.plan.outputs.notes }}
+      minimum: ${{ steps.plan.outputs.minimum }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+      - id: plan
+        run: |
+          set -euo pipefail
+          if [ "$HAVE_KEY" != "true" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=dev channel not set up::ARBOS_UPDATE_SIGNING_KEY is not set, so nothing was published. Run .github/setup-publishing.sh once."
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' desktop/Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+          echo "build=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+          # The oldest macOS the bundle claims, read from the plist so the feed
+          # and the app cannot disagree about it.
+          echo "minimum=$(sed -n '/LSMinimumSystemVersion/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' desktop/bundle/Info.plist)" >> "$GITHUB_OUTPUT"
+          # The subject of the commit. For a merge that is the PR's own title,
+          # which is the sentence worth showing next to an Update button.
+          {
+            echo "notes<<ARBOS_EOF"
+            git log -1 --format=%s
+            echo "ARBOS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: Arbos.app (macOS arm64)
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: macos-14
+    outputs:
+      signing: ${{ steps.payload.outputs.signing }}
+      notarized: ${{ steps.payload.outputs.notarized }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dev-channel-macos
+          workspaces: |
+            .
+            desktop
+      - id: payload
+        uses: ./.github/actions/macos-payload
+        with:
+          build: ${{ needs.plan.outputs.build }}
+          developer-id-p12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          developer-id-p12-password: ${{ secrets.P12_PASSWORD }}
+          signing-p12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
+          signing-p12-password: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+          apple-id: ${{ secrets.APPLE_ID }}
+          apple-team-id: ${{ secrets.APPLE_TEAM_ID }}
+          apple-app-password: ${{ secrets.APPLE_APP_PASSWORD }}
+      - name: Collect
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "${{ steps.payload.outputs.path }}" dist/
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: payload-macos
+          # Only the zip. Nothing secret is ever in the workspace — the
+          # certificate is decoded into $RUNNER_TEMP and deleted — but the glob
+          # is narrow anyway.
+          path: dist/*.zip
+          retention-days: 7
+          if-no-files-found: error
+
+  linux:
+    name: arbos (Linux x86_64)
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dev-channel-linux
+          workspaces: |
+            .
+            desktop
+      - uses: ./.github/actions/linux-payload
+        with:
+          version: ${{ needs.plan.outputs.version }}
+          build: ${{ needs.plan.outputs.build }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: payload-linux
+          path: dist/*.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: sign and publish
+    needs: [plan, macos, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dev-channel-publish
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: The rolling pre-release the channel hangs off
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --prerelease \
+              --target "${{ needs.plan.outputs.sha }}" \
+              --title "Arbos dev channel" \
+              --notes "placeholder"
+          fi
+      # The feed already published is the one to merge into: it carries the
+      # builds before this one, which is what lets a machine that missed a few
+      # still find the newest.
+      - name: Last feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$TAG" --pattern arbos-dev.json --dir dist || echo "no feed yet; starting one"
+      - name: Measure, sign, and write the feed
+        env:
+          ARBOS_UPDATE_SIGNING_KEY: ${{ secrets.ARBOS_UPDATE_SIGNING_KEY }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          BUILD: ${{ needs.plan.outputs.build }}
+          SHORT: ${{ needs.plan.outputs.short }}
+          NOTES: ${{ needs.plan.outputs.notes }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          mac="$(ls dist/Arbos-*-macos-arm64.zip)"
+          linux="$(ls dist/arbos-*-linux-x86_64.tar.gz)"
+          printf '%s\n' "$NOTES" > dist/notes.txt
+          cargo run -q --release -p arbos-update --bin arbos-updatectl -- add \
+            --feed dist/arbos-dev.json \
+            --channel dev \
+            --version "$VERSION" \
+            --build "$BUILD" \
+            --commit "$SHORT" \
+            --base-url "https://github.com/${{ github.repository }}/releases/download/$TAG" \
+            --notes-file dist/notes.txt \
+            --notes-url "https://github.com/${{ github.repository }}/commit/${{ needs.plan.outputs.sha }}" \
+            --minimum-system-version "${{ needs.plan.outputs.minimum }}" \
+            --keep 10 \
+            --artifact "macos/arm64=$mac" \
+            --artifact "linux/x86_64=$linux"
+          rm -f dist/notes.txt
+          # What an app one build behind would be offered. A feed that answers
+          # "up to date" here was written wrong, and saying so now beats an
+          # Update button that never appears.
+          cargo run -q --release -p arbos-update --bin arbos-updatectl -- show \
+            --feed dist/arbos-dev.json \
+            --current "$VERSION+$((BUILD - 1))" \
+            --platform macos --arch arm64 | tee dist/check.txt
+          grep -q "would be offered" dist/check.txt
+          rm -f dist/check.txt
+      - name: Attach
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          BUILD: ${{ needs.plan.outputs.build }}
+          SHORT: ${{ needs.plan.outputs.short }}
+          NOTES: ${{ needs.plan.outputs.notes }}
+          SIGNING: ${{ needs.macos.outputs.signing }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" dist/* --clobber
+          # The page says what the newest build is, so the releases list reads
+          # as a release and not as a bucket.
+          commit_url="https://github.com/${{ github.repository }}/commit/${{ needs.plan.outputs.sha }}"
+          feed_url="https://github.com/${{ github.repository }}/releases/download/$TAG/arbos-dev.json"
+          {
+            printf '**%s+%s** — [`%s`](%s)\n\n' "$VERSION" "$BUILD" "$SHORT" "$commit_url"
+            printf '%s\n\n' "$NOTES"
+            printf 'Every green commit on `main`, published for the app'"'"'s own updater. The tag is a container, not a version: what changes is the assets on it. Switch a machine to this channel in Settings › General › Updates; tagged releases are the stable channel.\n\n'
+            printf 'macOS signature: `%s`.\n\n' "${SIGNING:-unknown}"
+            printf 'Feed: <%s>\n' "$feed_url"
+          } > dist/release-notes.md
+          gh release edit "$TAG" --notes-file dist/release-notes.md
+          rm -f dist/release-notes.md
+          # Drop the payloads no release in the feed points at any more, so the
+          # pre-release does not grow a payload per commit forever.
+          keep="$(jq -r '.releases[].downloads[].url | split("/") | last' dist/arbos-dev.json | sort -u)"
+          gh release view "$TAG" --json assets -q '.assets[].name' | while read -r name; do
+            case "$name" in
+              arbos-dev.json) continue ;;
+            esac
+            if ! printf '%s\n' "$keep" | grep -qxF "$name"; then
+              echo "pruning $name"
+              gh release delete-asset "$TAG" "$name" -y
+            fi
+          done
+      - name: Say what went out
+        env:
+          SIGNING: ${{ needs.macos.outputs.signing }}
+          NOTARIZED: ${{ needs.macos.outputs.notarized }}
+        run: |
+          {
+            echo "### dev channel"
+            echo
+            echo "Published \`${{ needs.plan.outputs.version }}+${{ needs.plan.outputs.build }}\` (\`${{ needs.plan.outputs.short }}\`)."
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| macOS signature | \`${SIGNING:-unknown}\` |"
+            echo "| Notarized | \`${NOTARIZED:-false}\` |"
+            echo "| Feed | <https://github.com/${{ github.repository }}/releases/download/$TAG/arbos-dev.json> |"
+            if [ "${NOTARIZED:-false}" != "true" ]; then
+              echo
+              echo "> The in-app updater installs this. A copy downloaded in a browser would be stopped by Gatekeeper until a Developer ID Application certificate is in \`DEVELOPER_ID_CERT_P12\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

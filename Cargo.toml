@@ -4,6 +4,7 @@ members = [
     "crates/arbos-engine",
     "crates/arbos-hub",
     "crates/arbos-kernel",
+    "crates/arbos-update",
 ]
 exclude = ["desktop"]
 resolver = "2"

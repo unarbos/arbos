@@ -2,8 +2,10 @@
 #
 #   make bundle            Arbos.app, ad-hoc signed (opens on this Mac)
 #   make dmg               Arbos-<version>-<arch>.dmg around it
+#   make zip               the payload the in-app updater installs
 #   make release           the same with a Developer ID, notarized, stapled
 #   make verify            what Gatekeeper will say about the app and image
+#   make ident             "<version> <build> <arch>", for CI to name files by
 #
 # Signing is inside-out: the kernel first, then the app around it, then the
 # image. Every binary gets the hardened runtime and a secure timestamp — the
@@ -19,6 +21,10 @@
 
 VERSION  := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 # Build number: commits on the branch, so two builds of one version sort.
+# It is also the half of the version the update feed compares on — `0.2.0`
+# does not move for weeks, and the dev channel publishes a build per commit.
+# Overridable on the command line (`make zip BUILD=1877`) so CI names the
+# payload and stamps the bundle from one number it worked out once.
 BUILD    := $(shell git rev-list --count HEAD 2>/dev/null || echo 0)
 SHA      := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 ARCH     := $(shell uname -m)
@@ -39,6 +45,10 @@ DMGSTAGE := $(OUT)/dmg
 DMGRW    := $(OUT)/Arbos-rw.dmg
 DMGMNT   := /Volumes/$(DMGVOL)
 DMGBG    := $(OUT)/dmg-background@2x.png
+# The update payload: the bundle itself, archived. A disk image is what a
+# person drags from; a zip is what a program unpacks, and the version and
+# build are in the name so one download directory can hold several.
+ZIP      := $(OUT)/Arbos-$(VERSION)-$(BUILD)-macos-$(ARCH).zip
 ENTITLEMENTS := bundle/entitlements.plist
 # The ten sizes an .icns wants. Each is also emitted at @2x, so 512 covers 1024.
 SIZES    := 16 32 128 256 512
@@ -64,7 +74,12 @@ DMG_LAYOUT ?= 1
 
 -include .env.release
 
-.PHONY: build bundle icon dmg notarize release verify open clean
+.PHONY: build bundle icon dmg zip notarize notarize-zip release verify open clean ident
+
+# What this tree would build, for a script that has to name the file before
+# the file exists. One line, three words: version, build, arch.
+ident:
+	@echo "$(VERSION) $(BUILD) $(ARCH)"
 
 build:
 	cargo build --release
@@ -135,21 +150,54 @@ dmg: bundle
 	codesign --force --timestamp --sign "$(SIGN)" $(DMG)
 	@echo "built $(DMG)"
 
-# Send the image to Apple and staple the ticket to it. The app inside is
-# covered by the same submission (notarytool scans the whole image); it
-# verifies against Apple on first launch when dragged out, which costs a
-# stapled app one round trip and nothing else.
+# The payload the in-app updater fetches and installs. `ditto` and not `zip`:
+# it is the only archiver that keeps a code signature valid across the round
+# trip, along with the symlinks a framework is built from and the extended
+# attributes a bundle carries. Unzipping it with `ditto -x -k` gives back the
+# app that went in, byte for byte, signature and all.
+#
+# Nothing is done to it here about trust. What makes this file safe to install
+# is the Ed25519 signature the publish step puts in the update feed over these
+# exact bytes (crates/arbos-update), which needs nothing from Apple and so
+# works today. Notarization is the separate promise below.
+zip: bundle
+	rm -f $(ZIP)
+	ditto -c -k --sequesterRsrc --keepParent $(APP) $(ZIP)
+	@echo "built $(ZIP)"
+
+# Send a file to Apple and staple the ticket to it. Defaults to the disk
+# image; `make notarize NOTARIZE_FILE=...` sends something else.
+#
+# For the image, the app inside is covered by the same submission (notarytool
+# scans the whole image); it verifies against Apple on first launch when
+# dragged out, which costs a stapled app one round trip and nothing else.
+NOTARIZE_FILE ?= $(DMG)
 notarize:
-	@test -f $(DMG) || { echo "no $(DMG): run make dmg first"; exit 1; }
+	@test -f $(NOTARIZE_FILE) || { echo "no $(NOTARIZE_FILE): build it first"; exit 1; }
 	@if [ -n "$(NOTARY_PROFILE)" ]; then \
-		xcrun notarytool submit $(DMG) --keychain-profile "$(NOTARY_PROFILE)" --wait; \
+		xcrun notarytool submit $(NOTARIZE_FILE) --keychain-profile "$(NOTARY_PROFILE)" --wait; \
 	elif [ -n "$(APPLE_ID)" ] && [ -n "$(APPLE_TEAM_ID)" ] && [ -n "$(APPLE_APP_PASSWORD)" ]; then \
-		xcrun notarytool submit $(DMG) --apple-id "$(APPLE_ID)" --team-id "$(APPLE_TEAM_ID)" --password "$(APPLE_APP_PASSWORD)" --wait; \
+		xcrun notarytool submit $(NOTARIZE_FILE) --apple-id "$(APPLE_ID)" --team-id "$(APPLE_TEAM_ID)" --password "$(APPLE_APP_PASSWORD)" --wait; \
 	else \
 		echo "notarize: set NOTARY_PROFILE, or APPLE_ID + APPLE_TEAM_ID + APPLE_APP_PASSWORD"; exit 1; \
 	fi
-	xcrun stapler staple $(DMG)
-	xcrun stapler validate $(DMG)
+	@# A zip is a container Apple will scan but cannot hold a ticket, so the
+	@# ticket goes on what came out of it and the caller re-archives.
+	@case "$(NOTARIZE_FILE)" in \
+		*.zip) xcrun stapler staple $(APP); xcrun stapler validate $(APP);; \
+		*) xcrun stapler staple $(NOTARIZE_FILE); xcrun stapler validate $(NOTARIZE_FILE);; \
+	esac
+
+# The update payload with Apple's ticket in it, for the day the Developer ID
+# certificate exists. The app is stapled first and the zip made again around
+# it, so a Mac with no network still sees a notarized app — which is the whole
+# point of stapling. The feed's own signature is unaffected: it is taken over
+# whichever bytes are published, and these are simply better bytes.
+notarize-zip: zip
+	$(MAKE) --no-print-directory notarize NOTARIZE_FILE=$(ZIP)
+	rm -f $(ZIP)
+	ditto -c -k --sequesterRsrc --keepParent $(APP) $(ZIP)
+	@echo "notarized $(ZIP)"
 
 release:
 	@case "$(SIGN)" in "-"|"") echo 'release: SIGN must name a "Developer ID Application" certificate'; exit 1;; esac
