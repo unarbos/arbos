@@ -1410,6 +1410,8 @@ impl Arbos {
         {
             return branch.clone();
         }
+        // The place's own `.git`, not a parent's: a folder inside someone's
+        // dotfiles repo is not on a branch of its own.
         let head = std::fs::read_to_string(path.join(".git").join("HEAD")).ok();
         let branch = head.and_then(|head| {
             let head = head.trim();

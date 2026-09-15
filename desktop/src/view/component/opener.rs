@@ -100,6 +100,8 @@ enum Offer {
     },
     Here(String),
     Dir(String),
+    /// A folder that does not exist yet, at the path typed: Enter makes it.
+    Create(String),
     /// The native folder picker, for whoever would rather click than type.
     Browse,
 }
@@ -296,7 +298,7 @@ impl Opener {
                                 .is_some_and(|h| h.to_lowercase().contains(&needle))
                     }
                     Offer::Browse => q.is_empty() || "browse".contains(&needle),
-                    Offer::Here(_) | Offer::Dir(_) => false,
+                    Offer::Here(_) | Offer::Dir(_) | Offer::Create(_) => false,
                 })
                 .collect(),
             Stage::Folder { host } => {
@@ -322,6 +324,15 @@ impl Opener {
                         .cloned()
                         .map(Offer::Dir),
                 );
+                // Nothing there by that name on this machine: offer to make
+                // the folder typed.
+                if host.is_none() && out.iter().all(|o| !matches!(o, Offer::Dir(_))) {
+                    let typed = q.trim().trim_end_matches('/');
+                    if !typed.is_empty() && !local_path(typed).is_dir() {
+                        out.retain(|o| !matches!(o, Offer::Here(_)));
+                        out.push(Offer::Create(typed.to_string()));
+                    }
+                }
                 out
             }
         }
@@ -386,6 +397,11 @@ impl Opener {
                 };
                 self.start(host, path, cx);
             }
+            Offer::Create(path) => {
+                if std::fs::create_dir_all(local_path(&path)).is_ok() {
+                    self.start(None, path, cx);
+                }
+            }
             Offer::Dir(name) => {
                 let q = self.query(cx);
                 let (dir, _) = split_path(&q);
@@ -419,6 +435,7 @@ impl Opener {
                 match offers.get(self.cursor).cloned() {
                     // The folder you are in, lit at the top of the list.
                     Some(Offer::Here(path)) => self.start(host, path, cx),
+                    Some(Offer::Create(path)) => self.take(Offer::Create(path), cx),
                     // Typed down to one folder: that is the one you meant.
                     Some(Offer::Dir(name)) if !prefix.is_empty() && dirs == 1 => {
                         self.start(host, join_dir(&dir, &name), cx)
@@ -461,7 +478,7 @@ impl Opener {
         let offers = self.offers(cx);
         match offers.get(self.cursor).cloned() {
             Some(offer @ (Offer::Dir(_) | Offer::Machine { .. })) => self.take(offer, cx),
-            Some(Offer::Here(_) | Offer::Browse) | None => {}
+            Some(Offer::Here(_) | Offer::Create(_) | Offer::Browse) | None => {}
         }
     }
 
@@ -530,7 +547,7 @@ impl Opener {
                     .into_iter()
                     .filter_map(|offer| match offer {
                         Offer::Dir(name) => Some(name),
-                        Offer::Machine { .. } | Offer::Here(_) | Offer::Browse => None,
+                        Offer::Machine { .. } | Offer::Here(_) | Offer::Create(_) | Offer::Browse => None,
                     })
                     .collect();
                 if names.is_empty() {
@@ -692,7 +709,8 @@ impl Opener {
         let path = if path.is_empty() { "/".into() } else { path };
         let place = match host {
             Some(host) => Place::remote(host, path),
-            None => Place::local(path),
+            // `~/Code` typed is the user's home, not a folder called `~`.
+            None => Place::local(local_path(&path)),
         };
         cx.emit(OpenerEvent::Open(place));
         cx.notify();
@@ -703,13 +721,29 @@ impl Opener {
             Offer::Machine { name, .. } => name.clone(),
             Offer::Here(path) => path.clone(),
             Offer::Dir(name) => format!("{name}/"),
+            Offer::Create(path) => format!("Create {path}"),
             Offer::Browse => "Browse folders…".to_string(),
         }
     }
 }
 
+/// A typed local path as the file system knows it: `~` and `~/…` are the
+/// user's home (this process's, the one the window runs as).
+fn local_path(typed: &str) -> PathBuf {
+    let typed = if typed.is_empty() { "/" } else { typed };
+    if typed == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    }
+    if let Some(rest) = typed.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    PathBuf::from(typed)
+}
+
 fn list_local(dir: &str) -> Vec<String> {
-    let path = PathBuf::from(if dir.is_empty() { "/" } else { dir });
+    let path = local_path(dir);
     let Ok(entries) = std::fs::read_dir(&path) else {
         return Vec::new();
     };
@@ -745,6 +779,10 @@ fn split_path(typed: &str) -> (String, String) {
     let typed = typed.trim();
     if typed.is_empty() || typed == "/" {
         return ("/".into(), String::new());
+    }
+    // `~` alone is the home folder, not a name to look for under `/`.
+    if typed == "~" {
+        return ("~".into(), String::new());
     }
     if typed.ends_with('/') {
         let dir = typed.trim_end_matches('/');

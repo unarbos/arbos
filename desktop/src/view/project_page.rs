@@ -101,20 +101,30 @@ impl Arbos {
                         this.open_store_file(path.clone(), &title, cx);
                     }))
             }))
+            // The way out, in words: Jacob could not find the lone chat
+            // glyph. Escape and ⌘1 do the same; so does the tab.
             .child(
                 theme
                     .ghost("page-back-to-chat")
                     .flex_none()
-                    .size(px(26.))
+                    .h(px(26.))
+                    .px(px(8.))
+                    .gap(px(6.))
                     .items_center()
                     .justify_center()
                     .tooltip(|window, cx| {
-                        Tooltip::with_keystroke("Back to the chat", "⌘1", window, cx)
+                        Tooltip::with_keystroke("Back to the chat (Esc)", "⌘1", window, cx)
                     })
                     .child(
                         icons::icon(icons::system::CHAT_ROUND_LINE)
                             .size(px(14.))
                             .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .text_style(TextStyle::Callout)
+                            .text_color(theme.text_muted)
+                            .child("Back to chat"),
                     )
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.show_chat(&ShowChat, window, cx);

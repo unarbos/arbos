@@ -1118,6 +1118,9 @@ impl Arbos {
     /// composer, and sending it is the person's call.
     fn invite_page(&mut self, cx: &mut Context<Self>) {
         let prompt = "Fill in .arbos/docs/project-context.md for this project (goal, constraints, decisions, resources) and start .arbos/notes.md with the workstreams you know of. Ask me what you need to know first.";
+        // From the Project page the composer is out of sight: go to the
+        // chat first, so the link visibly does something.
+        self.show_pane(crate::view::root::Pane::Chat, cx);
         self.workspace.update(cx, |workspace, cx| {
             if let Some(main) = workspace.active_project().and_then(|p| p.main_session()) {
                 workspace.select_session(main, cx);

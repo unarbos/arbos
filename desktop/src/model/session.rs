@@ -1836,8 +1836,8 @@ impl ChatSession {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
-                // The card folds to one line; the answer is a line of yours
-                // under it.
+                // The card folds to one line that carries the answer, as
+                // Cursor's does: no second bubble of yours under it.
                 let question = prompt
                     .questions
                     .first()
@@ -1848,9 +1848,6 @@ impl ChatSession {
                     question,
                     answer: said.clone(),
                 });
-                if !said.is_empty() {
-                    self.items.push(ChatItem::User(UserMessage::from(said)));
-                }
                 self.updated = SystemTime::now();
                 self.flush();
             }
