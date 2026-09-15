@@ -244,7 +244,7 @@ final class CallViewModel: ObservableObject {
     /// words instead of flickering between silence and peaks.
     private func meter(_ value: Float) {
         // Rise at once, fall over ~0.2 s: word gaps show, syllables do not flicker.
-        level = value >= level ? value : max(value, level - 0.2)
+        level = value >= level ? value : max(value, level - 0.3)
     }
 
     /// Phone speaker instead of a connected headset, and back.

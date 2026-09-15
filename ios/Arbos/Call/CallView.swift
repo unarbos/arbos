@@ -251,7 +251,7 @@ struct VoiceRing: View {
                     .scaleEffect(scale)
             }
             .onChange(of: context.date) { _, _ in
-                shown += (level - shown) * 0.35
+                shown += (level - shown) * 0.5
             }
         }
         .animation(.easeInOut(duration: 0.3), value: phase)
