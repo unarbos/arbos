@@ -91,8 +91,9 @@ final class LiveKernelChat: ChatSource {
 
     private func handle(_ frame: KernelFrame) {
         switch frame {
-        case .hello(let focus, _):
+        case .hello(let focus, _, let identity):
             self.focus = focus
+            if let identity { stream?.yield(.identity(identity.filled(key: "hello"))) }
         case .snapshot(let focusPath, let agents):
             focus = focusPath.split(separator: "/").last.map(String.init) ?? focus
             remember(agents)
@@ -117,10 +118,10 @@ final class LiveKernelChat: ChatSource {
             replaying = false
             stream?.yield(.history(history))
             history.removeAll()
-        case .assistantDelta(let agent, let text):
+        case .assistantDelta(let agent, let text, let step):
             guard agent == focus, !text.isEmpty else { return }
             streamed = true
-            stream?.yield(.agentDelta(text))
+            stream?.yield(.agentDelta(text, step: step))
         case .event(let agent, let event):
             if agent == focus { handleLive(event) }
         case .turn(let agent, let state):
@@ -132,7 +133,6 @@ final class LiveKernelChat: ChatSource {
                     if let started = turnStarted {
                         turnStarted = nil
                         stream?.yield(.agentDone)
-                        streamed = false
                         flushDeferred()
                         stream?.yield(.item(ChatItem(.worked(seconds: Int(Date().timeIntervalSince(started))))))
                     }
@@ -170,14 +170,19 @@ final class LiveKernelChat: ChatSource {
     }
 
     private func handleLive(_ event: KernelEvent) {
-        if case .assistant(let text) = event {
+        if case .assistant(let text, let step) = event {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
-            if streamed {
+            if step > 0 {
+                // Numbered (#247): the store replaces the step's streamed text,
+                // or adds the line when nothing was streamed for it. Never a
+                // second copy after "Worked".
+                stream?.yield(.agentReplace(trimmed, step: step))
+            } else if streamed {
                 streamed = false
-                stream?.yield(.agentReplace(trimmed))
+                stream?.yield(.agentReplace(trimmed, step: 0))
             } else {
-                stream?.yield(.agentDelta(trimmed))
+                stream?.yield(.agentDelta(trimmed, step: 0))
                 stream?.yield(.agentDone)
             }
             return
@@ -209,9 +214,9 @@ final class LiveKernelChat: ChatSource {
         switch event {
         case .user(let text), .answer(let text):
             return ChatItem(.user(text))
-        case .assistant(let text):
+        case .assistant(let text, let step):
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : ChatItem(.agent(trimmed, streaming: false))
+            return trimmed.isEmpty ? nil : ChatItem(.agent(trimmed, streaming: false), step: step)
         case .tool(let record):
             if record.name == "spawn", let child = record.child {
                 let brief = record.args?["brief"] as? String ?? child

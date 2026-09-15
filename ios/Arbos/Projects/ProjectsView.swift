@@ -101,13 +101,18 @@ struct ProjectsView: View {
                     Button {
                         path.append(entry.target)
                     } label: {
-                        ProjectRow(entry: entry, working: isWorking(entry), step: step(for: entry))
+                        ProjectRow(entry: entry, working: isWorking(entry), step: step(for: entry), nameShared: isShared(entry))
                     }
                     .buttonStyle(.plain)
                 }
             }
         }
         .padding(.bottom, 28)
+    }
+
+    /// Two projects with one name need the machine to tell them apart.
+    private func isShared(_ entry: ProjectEntry) -> Bool {
+        projects.entries.filter { $0.title.caseInsensitiveCompare(entry.title) == .orderedSame }.count > 1
     }
 
     private func step(for entry: ProjectEntry) -> String? {
@@ -203,42 +208,38 @@ struct ProjectsView: View {
     }
 }
 
-/// One project, as the reference draws an agent: status glyph, name,
-/// "Working · folder" or "No Changes · folder" beneath, age at the right,
-/// a hairline under the text.
+/// One project, as the reference draws an agent: its own glyph in its
+/// own colour, its name, one status line beneath. The folder shows only
+/// when it is not the name already; the machine only when another
+/// project shares the name. Nothing is said twice.
 struct ProjectRow: View {
     let entry: ProjectEntry
     var working = false
     var step: String?
+    var nameShared = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             statusGlyph
                 .frame(width: 20, height: 22)
             VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(entry.title)
-                        .font(ArbosTheme.body)
-                        .foregroundStyle(entry.live ? ArbosTheme.text : ArbosTheme.textMuted)
-                        .lineLimit(1)
-                    Spacer(minLength: 8)
-                    Text(entry.machine)
-                        .font(ArbosTheme.callout)
-                        .foregroundStyle(ArbosTheme.textFaint)
-                        .lineLimit(1)
-                }
+                Text(entry.title)
+                    .font(ArbosTheme.body)
+                    .foregroundStyle(entry.live ? ArbosTheme.text : ArbosTheme.textMuted)
+                    .lineLimit(1)
                 HStack(spacing: 0) {
                     Text(stateWord)
                         .foregroundStyle(working ? ArbosTheme.textMuted : ArbosTheme.textFaint)
-                    Text(" · ")
-                        .foregroundStyle(ArbosTheme.textDim)
-                    Text(folder)
-                        .foregroundStyle(ArbosTheme.textFaint)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    ForEach(details, id: \.self) { detail in
+                        Text(" · ").foregroundStyle(ArbosTheme.textDim)
+                        Text(detail).foregroundStyle(ArbosTheme.textFaint)
+                    }
                 }
                 .font(ArbosTheme.callout)
+                .lineLimit(1)
+                .truncationMode(.middle)
             }
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, ArbosTheme.gutter)
         .padding(.vertical, 15)
@@ -250,30 +251,32 @@ struct ProjectRow: View {
         }
     }
 
+    /// What follows the state: the folder if it says something the name
+    /// does not, the machine if the name is shared.
+    private var details: [String] {
+        var out: [String] = []
+        let folder = entry.place.isEmpty ? entry.folder : (entry.place as NSString).lastPathComponent
+        if folder.caseInsensitiveCompare(entry.title) != .orderedSame { out.append(folder) }
+        if nameShared { out.append(entry.machine) }
+        return out
+    }
+
     @ViewBuilder
     private var statusGlyph: some View {
         if working {
             BrailleSpinner(tint: entry.identity.tint)
                 .font(.system(size: 15, design: .monospaced))
-        } else if entry.live {
+        } else {
+            // Its own glyph in its own colour; dimmed when no kernel serves it.
             Image(systemName: entry.identity.symbol)
                 .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(entry.identity.tint)
-        } else {
-            Circle()
-                .fill(ArbosTheme.textDim.opacity(0.6))
-                .frame(width: 9, height: 9)
+                .foregroundStyle(entry.identity.tint.opacity(entry.live ? 1 : 0.45))
         }
     }
 
     private var stateWord: String {
         if working { return step.map { "Working · \($0)" } ?? "Working" }
         return entry.live ? "Idle" : "Off"
-    }
-
-    private var folder: String {
-        if entry.place.isEmpty { return entry.folder }
-        return (entry.place as NSString).lastPathComponent
     }
 }
 
