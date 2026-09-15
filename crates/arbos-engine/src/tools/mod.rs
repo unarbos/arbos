@@ -245,7 +245,15 @@ pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Res
     // writes; asking permission to ask would be absurd. A before-tool
     // hook's own question wins when it set one.
     let asking = cx.agent.mode == arbos_core::Mode::Ask;
-    let ask_first = writes && asking && decided.tool != "ask";
+    // An agent's own bookkeeping — its checklist, its todo, its status
+    // line, its memory — is never something to ask the user about, in
+    // any mode (a coordinator in ask mode put "allow plan: …" to the user
+    // as a card; Cursor never does).
+    let bookkeeping = matches!(
+        decided.tool.as_str(),
+        "ask" | "plan" | "todo" | "status" | "remember"
+    );
+    let ask_first = writes && asking && !bookkeeping;
     // The default mode asks nothing: "go go go" (Jacob, 2026-09-15; a
     // read-only question on his Mac drew an allow-bash card). A write
     // into a file that shapes how agents behave (T3-10) and a command

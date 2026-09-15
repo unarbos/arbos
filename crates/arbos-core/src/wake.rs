@@ -41,6 +41,9 @@ pub enum WakeKind {
     Job,
     /// Compact the transcript, then stop. No model step.
     Compact,
+    /// Root's first turn in a fresh place: read the folder, seed the
+    /// context file and the page, greet. No spawns, no questions.
+    Kickoff,
 }
 
 impl WakeKind {
@@ -52,6 +55,7 @@ impl WakeKind {
             Self::Serve => "serve",
             Self::Job => "job",
             Self::Compact => "compact",
+            Self::Kickoff => "kickoff",
         }
     }
 }

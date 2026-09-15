@@ -502,6 +502,65 @@ pub fn current_branch(place: &Path) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// Root's first turn in a place that was just opened: what it does and
+/// what it says. `name` is the user's, from `user.md`, when known.
+pub fn place_kickoff_brief(place: &Place) -> String {
+    let name = user_name(place);
+    let greet = match &name {
+        Some(n) => format!("\"Hey {n} —\""),
+        None => "\"Hey —\"".to_string(),
+    };
+    format!(
+        "This place was just opened for the first time; this is its kickoff turn — one bounded turn, then end. No spawn, no ask, no subscription, no status call.\n\
+1. Look at the folder with one composite bash (description \"Look around the new place\"): `ls -la; cat README* 2>/dev/null | head -40; git log --oneline 2>/dev/null | head -5`.\n\
+2. Write docs/project-context.md, replacing the template's placeholders with what the folder tells you: Goal stays \"(not stated yet — the user's first ask sets it)\"; under Resources note the stack, layout, and branch you saw, in a few lines. Keep the front matter.\n\
+3. plan set one item: `[Kickoff](docs/project-context.md) — ready; waiting for the first ask`.\n\
+4. Greet in two short lines, nothing more: the first opens {greet} and says the place is ready with one clause on what you saw (\"a Rust workspace with a kernel and a desktop app\"); the second asks what to work on and says they can tell you how to work and you will remember. No headings, no lists, no offers.{}",
+        match &name {
+            Some(n) => format!(" The user's name is {n} (from user.md)."),
+            None => " user.md names no one: greet without a name.".to_string(),
+        }
+    )
+}
+
+/// The user's name from `.arbos/user.md`: a `name:` line, else the first
+/// non-empty line when it reads like a name (one to three words, no
+/// punctuation).
+pub fn user_name(place: &Place) -> Option<String> {
+    let text = std::fs::read_to_string(place.user_md()).ok()?;
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("name:").or_else(|| t.strip_prefix("Name:")) {
+            let n = rest.trim().trim_matches('"');
+            if !n.is_empty() {
+                return Some(n.to_string());
+            }
+        }
+    }
+    let first = text.lines().map(str::trim).find(|l| {
+        !l.is_empty() && !l.starts_with('#') && !l.starts_with("+++") && !l.starts_with("---")
+    })?;
+    let words: Vec<&str> = first.split_whitespace().collect();
+    ((1..=3).contains(&words.len())
+        && words.iter().all(|w| {
+            w.chars()
+                .all(|c| c.is_alphabetic() || c == '-' || c == '\'')
+        }))
+    .then(|| first.to_string())
+}
+
+/// Is the turn now running for `agent` its kickoff turn?
+pub fn turn_is_kickoff(place: &Place, agent: &str) -> bool {
+    let Ok(events) = crate::load_transcript(&Layout::new(place, agent).transcript()) else {
+        return false;
+    };
+    events
+        .iter()
+        .rev()
+        .find(|e| e.is_wake())
+        .is_some_and(|e| matches!(&e.kind, EventKind::Wake { wake, .. } if wake == "kickoff"))
+}
+
 pub const KICKOFF_READ_FIRST: &str = ".arbos/docs/project-context.md, then .arbos/notes.md";
 pub const KICKOFF_RULES: &str = "Start from the base branch you are given; a code fix goes on its own branch (`git checkout -b fix/<what>`), committed and pushed there, and comes back as a draft pull request (`pr create`) against that base — never a commit on the base branch; never merge. No extra documents beyond what the task needs. Secrets come through `secret` by name, never printed; redact them in captures.";
 pub const KICKOFF_OUTPUT: &str = "Deliverables under .arbos/docs/, working notes under .arbos/internal/, captures under .arbos/media/<topic>/. Verify each file exists before you report it.";
