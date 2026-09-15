@@ -176,6 +176,7 @@ struct ProjectChatView: View {
                 .padding(.horizontal, ArbosTheme.gutter + 6)
                 .padding(.top, 4)
             }
+            .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: chat.items) { _, _ in
                 withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }

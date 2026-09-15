@@ -202,6 +202,9 @@ final class LiveKernelChat: ChatSource {
             if !worker, Self.hiddenRootTools.contains(record.name) { return nil }
             return ChatItem(.tool(label: record.label, failed: record.error != nil, seconds: record.seconds))
         case .say(let from, let text):
+            // A worker's report is its turn's end; a remote child is not in
+            // the tree, so this is the only word of its finish.
+            if children.contains(from) { setWorker(from, running: false, step: "") }
             return ChatItem(.subagent(name: childNames[from] ?? from, status: text))
         case .ask(let question):
             return ChatItem(.agent(question, streaming: false))
@@ -226,11 +229,15 @@ final class LiveKernelChat: ChatSource {
         for agent in agents where agent.parent == focus {
             children.insert(agent.id)
             childNames[agent.id] = agent.name
+            // The tree carries each agent's live step; absent means idle.
+            let running = agent.step != nil
             if workers[agent.id] == nil {
-                workers[agent.id] = WorkerStatus(id: agent.id, name: agent.name, step: "", running: false)
+                workers[agent.id] = WorkerStatus(id: agent.id, name: agent.name, step: agent.step ?? "", running: running)
                 workerOrder.append(agent.id)
             } else {
                 workers[agent.id]?.name = agent.name
+                workers[agent.id]?.running = running
+                workers[agent.id]?.step = agent.step ?? ""
             }
         }
         // A worker gone from the tree is archived: no longer running.

@@ -7,6 +7,8 @@ struct KernelAgent: Identifiable, Equatable {
     let parent: String?
     let paused: Bool
     let model: String
+    /// What the agent is doing now (`status.toml`); nil when idle.
+    let step: String?
 }
 
 /// One transcript line (`EventKind` in `arbos-core/src/event.rs`). The
@@ -211,7 +213,8 @@ enum KernelFrame {
                 name: row["name"] as? String ?? id,
                 parent: row["parent"] as? String,
                 paused: row["paused"] as? Bool ?? false,
-                model: row["model"] as? String ?? ""
+                model: row["model"] as? String ?? "",
+                step: row["step"] as? String
             )
         }
     }

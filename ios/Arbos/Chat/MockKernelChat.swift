@@ -18,8 +18,8 @@ final class MockKernelChat: ChatSource {
 
     func start() async throws {
         stream?.yield(.agents([
-            KernelAgent(id: "root", name: "main", parent: nil, paused: false, model: "claude-fable-5.1"),
-            KernelAgent(id: "a7k2", name: "reconnect test", parent: "root", paused: false, model: ""),
+            KernelAgent(id: "root", name: "main", parent: nil, paused: false, model: "claude-fable-5.1", step: nil),
+            KernelAgent(id: "a7k2", name: "reconnect test", parent: "root", paused: false, model: "", step: "Running cargo test"),
         ]))
         stream?.yield(.history([
             ChatItem(.user("Where are we on the kernel branch?")),
