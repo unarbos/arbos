@@ -50,13 +50,16 @@ pub fn scan(hooks: &Arc<KernelHooks>) -> Vec<Wake> {
         };
         match inbox::claim(&hooks.place, id, &filed) {
             Ok(turn_dir) => {
-                if let Some(wake) = wake_from_message(hooks, &agent, &filed.msg, &turn_dir) {
+                if let Some(mut wake) = wake_from_message(hooks, &agent, &filed.msg, &turn_dir) {
                     // Every other finished worker's done file joins this
                     // turn: one wake, one model call, one message to the
                     // user ("3 workers finished"), not one turn per child.
                     if filed.msg.kind == "done" {
                         let mut reported = vec![filed.msg.from.clone()];
                         reported.extend(batch_done_files(hooks, &agent, &filed, &turn_dir, now));
+                        let still = still_working(hooks, &agent, &reported);
+                        wake.kind = WakeKind::Done;
+                        wake.text = Some(done_line(&reported, &still));
                         archive_finished(hooks, &reported);
                     }
                     wakes.push(wake);
@@ -84,6 +87,51 @@ pub fn scan(hooks: &Arc<KernelHooks>) -> Vec<Wake> {
         }
     }
     wakes
+}
+
+/// This agent's other workers that are still running, queued, or parked
+/// on a question — the ones whose reports are yet to come.
+fn still_working(hooks: &KernelHooks, agent: &Agent, reported: &[String]) -> Vec<String> {
+    list_agents(&hooks.place)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.parent.as_ref().is_some_and(|p| p == &agent.id) && !a.paused)
+        .map(|a| a.id.to_string())
+        .filter(|id| {
+            !reported
+                .iter()
+                .any(|r| r.strip_prefix("agent:").unwrap_or(r) == id)
+        })
+        .filter(|id| hooks.is_live(id))
+        .collect()
+}
+
+/// The kernel line that opens a done wake: who reported, who is still
+/// working, and what the turn owes. Cursor's coordinator folds worker
+/// reports into one answer and says nothing in between (cold-p5, cold-pp2).
+fn done_line(reported: &[String], still: &[String]) -> String {
+    let names = |ids: &[String]| {
+        ids.iter()
+            .map(|r| r.strip_prefix("agent:").unwrap_or(r).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let who = names(reported);
+    let plural = if reported.len() == 1 {
+        "Report"
+    } else {
+        "Reports"
+    };
+    if still.is_empty() {
+        format!(
+            "{plural} from {who} above — the last of your workers. If the user is owed an answer, give it once now, combined, in the answer shape; do not relay each report. If your last message already covered it, or the user asked for nothing further, end with no message (an empty reply is right here)."
+        )
+    } else {
+        format!(
+            "{plural} from {who} above. Still working: {}. Hold the combined answer until the last report; end this turn with no message unless the user is owed something now (an empty reply is right here). Do not narrate the report that just came in.",
+            names(still)
+        )
+    }
 }
 
 /// The line a spawned child gets when it works in its own worktree: where
