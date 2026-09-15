@@ -91,8 +91,12 @@ pub fn instance_prompt(place: &Place, agent: &Agent, skills: &[String]) -> Strin
         None => String::new(),
     };
     let environment = crate::envprobe::line(Path::new(&cwd));
+    let now = now_line();
+    let store = place.arbos().display().to_string();
+    let git_state = git_snapshot(Path::new(&cwd));
+    let rules = rules_segment(place);
     format!(
-        "You: {id}\nName: {name}\n{kind}{role}{mode_skill}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\n{sandbox}Project: {project}\nCwd: {cwd}\nEnvironment: {environment}\nFocus: {focus}\nSkills (/name <args> brings its SKILL.md; .arbos/skills/<name>/): {skills}\n{git}\n{machines}\n{kinds}{instructions}{agents}{memory}",
+        "You: {id}\nName: {name}\n{kind}{role}{mode_skill}Parent: {parent}\nPaused: {paused}\nModel: {model}\nAllowlist: {allow}\nReadonly: {ro}\nMode: {mode}\n{sandbox}Project: {project}\nCwd: {cwd}\nStore: {store} (the project store every agent here shares: notes.md, docs/, internal/, media/)\nNow: {now}\nEnvironment: {environment}\n{git_state}Focus: {focus}\nSkills (/name <args> brings its SKILL.md; .arbos/skills/<name>/): {skills}\n{git}\n{machines}\n{kinds}{instructions}{rules}{agents}{memory}",
         id = agent.id,
         name = agent.name,
         parent = agent.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),
@@ -253,13 +257,26 @@ pub fn plan_segment(place: &Place, agent: &Agent) -> Option<String> {
         })
         .collect();
     let prs = arbos_core::load_prs(place);
-    if plan.is_empty() && peers.is_empty() && prs.is_empty() {
+    let waiting = inbox_waiting(place, id);
+    if plan.is_empty() && peers.is_empty() && prs.is_empty() && waiting.is_empty() {
         return None;
     }
     let mut out = String::new();
     if !plan.is_empty() {
         out.push_str("<<plan>> your notes.md checklist and standing subscriptions:\n");
         out.push_str(&plan);
+    }
+    if !waiting.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(
+            "<<inbox>> messages waiting for you (each opens a turn after this one; do not answer them now):\n",
+        );
+        for line in &waiting {
+            out.push_str(line);
+            out.push('\n');
+        }
     }
     if !peers.is_empty() {
         if !out.is_empty() {
@@ -285,6 +302,51 @@ pub fn plan_segment(place: &Place, agent: &Agent) -> Option<String> {
     Some(out)
 }
 
+/// The inbox files waiting for `id` — Cursor's queued-message hint: who
+/// they are from, their title or first words, whether they wake a turn.
+/// Oldest first, at most eight.
+fn inbox_waiting(place: &Place, id: &str) -> Vec<String> {
+    let dir = arbos_core::inbox::inbox_dir(place, id);
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = rd
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.') && n.ends_with(".md"))
+        .collect();
+    names.sort();
+    let total = names.len();
+    let mut out = Vec::new();
+    for name in names.iter().take(8) {
+        let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
+            continue;
+        };
+        let Ok(msg) = arbos_core::inbox::Message::parse(&text) else {
+            continue;
+        };
+        let what = if msg.title.is_empty() {
+            arbos_core::text::clip(msg.body.lines().next().unwrap_or(""), 80)
+        } else {
+            msg.title.clone()
+        };
+        out.push(format!(
+            "- from {} ({}{}): {what}",
+            msg.from,
+            msg.kind,
+            if msg.wake {
+                ", wakes a turn"
+            } else {
+                ", read at your next turn"
+            }
+        ));
+    }
+    if total > 8 {
+        out.push(format!("- … and {} more", total - 8));
+    }
+    out
+}
+
 /// Greetings do not need the tool list. Skipping it cuts prefill.
 pub fn skip_tools(text: &str) -> bool {
     let t = text
@@ -305,6 +367,161 @@ pub fn skill_names(place: &Place) -> Vec<String> {
         .iter()
         .map(arbos_core::Skill::roster_line)
         .collect()
+}
+
+/// `Now:` — the date (UTC), weekday, OS, and shell: what Cursor's user
+/// info line carries. The date, not the minute, so the prompt prefix
+/// changes once a day, not once a turn.
+fn now_line() -> String {
+    let stamp = arbos_core::inbox::rfc3339(arbos_core::now_ms());
+    let date = stamp.split('T').next().unwrap_or(&stamp).to_string();
+    let weekday = weekday_of(&date).unwrap_or("");
+    let shell = std::env::var("SHELL")
+        .ok()
+        .and_then(|s| s.rsplit('/').next().map(str::to_string))
+        .unwrap_or_else(|| "sh".to_string());
+    format!(
+        "{date}{} (UTC) · {} {} · shell {shell}",
+        if weekday.is_empty() {
+            String::new()
+        } else {
+            format!(" ({weekday})")
+        },
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
+/// Weekday of a `YYYY-MM-DD` date, by Zeller's rule.
+fn weekday_of(date: &str) -> Option<&'static str> {
+    let mut it = date.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let d: i64 = it.next()?.parse().ok()?;
+    let (y, m) = if m < 3 { (y - 1, m + 12) } else { (y, m) };
+    let k = y % 100;
+    let j = y / 100;
+    let h = (d + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 + 5 * j) % 7;
+    Some(
+        [
+            "Saturday",
+            "Sunday",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+        ][h.rem_euclid(7) as usize],
+    )
+}
+
+/// `Git:` — the checkout's branch and how dirty it is when the turn
+/// starts (Cursor's git status snapshot). Empty outside a repository.
+fn git_snapshot(cwd: &Path) -> String {
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let Some(branch) = run(&["rev-parse", "--abbrev-ref", "HEAD"]) else {
+        return String::new();
+    };
+    let dirty = run(&["status", "--porcelain"])
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0);
+    let head = run(&["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    format!(
+        "Git: branch {branch} at {head}, {}\n",
+        if dirty == 0 {
+            "clean".to_string()
+        } else {
+            format!("{dirty} changed path(s)")
+        }
+    )
+}
+
+/// The rules every turn carries (Cursor's always-applied workspace rules
+/// and user rules): `.cursor/rules/*.mdc` whose front matter says
+/// `alwaysApply: true`, every file in `.arbos/rules/`, and every file in
+/// `~/.config/arbos/rules/` (the user's, in every place). Each clipped
+/// like AGENTS.md; the file is the whole text.
+fn rules_segment(place: &Place) -> String {
+    let mut out = String::new();
+    let mut sources: Vec<(String, String)> = Vec::new();
+    for path in rule_files(&place.path.join(".cursor").join("rules"), "mdc") {
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && always_applies(&text)
+        {
+            sources.push((path.display().to_string(), strip_rule_front_matter(&text)));
+        }
+    }
+    for dir in [
+        place.arbos().join("rules"),
+        arbos_core::host_dir().join("rules"),
+    ] {
+        for path in rule_files(&dir, "md") {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                sources.push((path.display().to_string(), strip_rule_front_matter(&text)));
+            }
+        }
+    }
+    if sources.is_empty() {
+        return out;
+    }
+    out.push_str("\nRules (always applied; the user's and the project's):\n");
+    for (path, text) in sources {
+        let brief = crate::evict::evict_head(text.trim(), &format!("{path}:1"));
+        out.push_str(&format!("[{path}]\n{brief}\n"));
+    }
+    out
+}
+
+fn rule_files(dir: &Path, ext: &str) -> Vec<std::path::PathBuf> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<std::path::PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension().and_then(|e| e.to_str()) == Some(ext)
+                && !p
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// `alwaysApply: true` in a `.mdc` rule's front matter.
+fn always_applies(text: &str) -> bool {
+    let Some(rest) = text.trim_start_matches('\u{feff}').strip_prefix("---") else {
+        return false;
+    };
+    let Some(end) = rest.find("\n---") else {
+        return false;
+    };
+    rest[..end].lines().any(|l| {
+        let l = l.trim().to_ascii_lowercase();
+        l.starts_with("alwaysapply:") && l.ends_with("true")
+    })
+}
+
+fn strip_rule_front_matter(text: &str) -> String {
+    let t = text.trim_start_matches('\u{feff}');
+    if let Some(rest) = t.strip_prefix("---")
+        && let Some(end) = rest.find("\n---")
+    {
+        return rest[end + 4..].trim_start_matches('\n').to_string();
+    }
+    t.to_string()
 }
 
 fn first_agents_md(place: &Place) -> String {
