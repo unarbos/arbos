@@ -1021,11 +1021,26 @@ pub fn write(root: &Path, cwd: &Path, path: &str, contents: &str) -> Result<Tool
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if std::fs::read_to_string(&file).is_ok_and(|old| old == contents) {
+    let old = std::fs::read_to_string(&file).ok();
+    if old.as_deref() == Some(contents) {
         return Err(unchanged(&file));
     }
-    std::fs::write(&file, contents)?;
+    // The project page keeps its head whoever rewrites it: a coordinator
+    // that `write`s the whole page with its own title dropped the front
+    // matter and the context link the page algorithm and `check` expect
+    // (kickoff item 11). The body is the model's; the head is the page's.
+    let page = store_dir(root).join(arbos_core::store::NOTES);
+    let is_page = realize(&normalize(&file)) == realize(&normalize(&page));
+    let kept =
+        is_page.then(|| arbos_core::notes::keep_page_head(old.as_deref().unwrap_or(""), contents));
+    let written = kept.as_deref().unwrap_or(contents);
+    std::fs::write(&file, written)?;
     let mut body = format!("wrote {}", file.display());
+    if kept.is_some_and(|k| k != contents) {
+        body.push_str(
+            "\n(the page's head — front matter and the link to docs/project-context.md — was kept above your text; plan set/add/check keep the page's shape for you)",
+        );
+    }
     if let Some(note) = syntax_note(&file) {
         body.push('\n');
         body.push_str(&note);
