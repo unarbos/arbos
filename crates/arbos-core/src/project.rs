@@ -6,7 +6,7 @@
 //! code. `[root] role = "coordinator"` turns that on. New places get it;
 //! an existing place keeps its old behaviour until someone adds the line.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,14 @@ pub struct ProjectConfig {
     pub schema: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The project's face, as the desktop's tab sheet sets it and every
+    /// client draws it: a glyph by name (`folder`, `terminal`, `star`, …)
+    /// and a colour by name or `#rrggbb`. Kept here so a kernel that
+    /// rewrites the file keeps them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     /// An agent that opens a pull request follows it: the kernel adds a
     /// `github_pr` and a `github_ci` subscription for it, so a failing
     /// check or a review comment wakes the agent that made the change.
@@ -175,6 +183,8 @@ pub fn write_for_new_place(place: &Place, name: &str) -> Result<()> {
     let cfg = ProjectConfig {
         schema: Some(2),
         name: Some(name.to_string()),
+        icon: None,
+        color: None,
         follow_prs: None,
         root: RootConfig {
             role: Some(COORDINATOR.into()),
@@ -185,6 +195,54 @@ pub fn write_for_new_place(place: &Place, name: &str) -> Result<()> {
         spend: SpendConfig::default(),
     };
     save(place, &cfg)
+}
+
+/// A project's face — what a tab, a roster row, or a phone's list draws
+/// for it: the name, glyph, and colour from `.arbos/project.toml`. The
+/// same object rides in the hub roster (`ProjectInfo.identity`) and on
+/// the kernel's `hello`, so a client knows it in the first round trip.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProjectIdentity {
+    /// The label; absent means the folder's own name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A glyph by name; `folder` when the file says none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub icon: String,
+    /// A colour by name or `#rrggbb`; absent means the client's default
+    /// (the desktop hashes the path for one).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub color: String,
+}
+
+impl ProjectIdentity {
+    /// From the file's fields; the glyph defaults to the folder.
+    pub fn of(config: &ProjectConfig) -> Self {
+        Self {
+            name: config.name.clone().filter(|n| !n.trim().is_empty()),
+            icon: config
+                .icon
+                .clone()
+                .filter(|i| !i.trim().is_empty())
+                .unwrap_or_else(|| "folder".into()),
+            color: config.color.clone().unwrap_or_default(),
+        }
+    }
+}
+
+/// The face of the place at `place`, from its `project.toml` (defaults
+/// when the file is missing or says nothing).
+pub fn identity(place: &Place) -> ProjectIdentity {
+    ProjectIdentity::of(&load(place))
+}
+
+/// The face of a project folder that may have no `.arbos/` yet — a
+/// worker's checkout, listed for the roster. None when the folder has no
+/// readable `project.toml`.
+pub fn identity_at(project_dir: &Path) -> Option<ProjectIdentity> {
+    let text = std::fs::read_to_string(project_dir.join(".arbos").join("project.toml")).ok()?;
+    let config: ProjectConfig = toml::from_str(&text).ok()?;
+    Some(ProjectIdentity::of(&config))
 }
 
 /// Does the main chat of this place coordinate rather than edit?
@@ -273,6 +331,39 @@ mod tests {
         // The line off: off.
         std::fs::write(path(&p), "schema = 2\n[root]\narchive_children = false\n").unwrap();
         assert!(!load(&p).root.archives_children());
+    }
+
+    #[test]
+    fn the_face_reads_from_project_toml_and_a_kernel_rewrite_keeps_it() {
+        let p = place("face");
+        std::fs::create_dir_all(p.arbos()).unwrap();
+        std::fs::write(
+            path(&p),
+            "schema = 2\nname = \"Arbos\"\nicon = \"terminal\"\ncolor = \"teal\"\n\n[root]\nrole = \"coordinator\"\n",
+        )
+        .unwrap();
+        let face = identity(&p);
+        assert_eq!(face.name.as_deref(), Some("Arbos"));
+        assert_eq!(face.icon, "terminal");
+        assert_eq!(face.color, "teal");
+        assert_eq!(identity_at(&p.path).as_ref(), Some(&face));
+        // The kernel loading and saving the config keeps the face.
+        let cfg = load(&p);
+        save(&p, &cfg).unwrap();
+        let text = std::fs::read_to_string(path(&p)).unwrap();
+        assert!(
+            text.contains("icon = \"terminal\"") && text.contains("color = \"teal\""),
+            "{text}"
+        );
+        assert!(text.contains("role = \"coordinator\""), "{text}");
+        // No file, or a file with no face: the folder glyph, no colour, no name.
+        let bare = place("bare");
+        let d = identity(&bare);
+        assert_eq!(d.icon, "folder");
+        assert!(d.color.is_empty() && d.name.is_none());
+        assert!(identity_at(&bare.path).is_none());
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(json, r#"{"icon":"folder"}"#);
     }
 
     #[test]

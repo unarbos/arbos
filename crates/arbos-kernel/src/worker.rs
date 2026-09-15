@@ -127,6 +127,12 @@ async fn session(cfg: &HubConfig, dir: &Path, args: &Args) -> Result<()> {
     let token = cfg.token()?;
     let mut ws = hub_link::connect(&cfg.register_url(), &token).await?;
     let projects = projects_in(dir);
+    // Each checkout's face, for the roster: a phone lists projects it has
+    // never opened with the glyph and colour the desktop's tab set.
+    let identities: std::collections::BTreeMap<_, _> = projects
+        .iter()
+        .filter_map(|p| arbos_core::project::identity_at(&dir.join(p)).map(|i| (p.clone(), i)))
+        .collect();
     let id = hub_link::register(
         &mut ws,
         cfg,
@@ -136,6 +142,7 @@ async fn session(cfg: &HubConfig, dir: &Path, args: &Args) -> Result<()> {
         projects.clone(),
         &args.labels,
         args.capabilities.clone(),
+        identities,
     )
     .await?;
     println!(

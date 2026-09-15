@@ -92,6 +92,8 @@ struct MachineEntry {
     worker_projects: Vec<String>,
     /// Live kernels by project name.
     kernels: HashMap<String, Arc<Registrant>>,
+    /// Each project's face, by name, as its registrants read it.
+    identities: HashMap<String, arbos_core::project::ProjectIdentity>,
 }
 
 impl MachineEntry {
@@ -107,6 +109,7 @@ impl MachineEntry {
                 name: p.clone(),
                 place: r.place.clone().unwrap_or_default(),
                 live: true,
+                identity: self.identities.get(p).cloned(),
             })
             .collect();
         for p in &self.worker_projects {
@@ -115,6 +118,7 @@ impl MachineEntry {
                     name: p.clone(),
                     place: String::new(),
                     live: false,
+                    identity: self.identities.get(p).cloned(),
                 });
             }
         }
@@ -288,6 +292,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         project,
         place,
         projects,
+        identities,
         labels,
         capabilities,
         version,
@@ -367,6 +372,11 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         }
         if !version.is_empty() {
             entry.version = version;
+        }
+        // The latest word on a project's face wins (a kernel's over an
+        // older worker's, a re-registration over the last).
+        for (name, face) in identities {
+            entry.identities.insert(name, face);
         }
         match kind {
             RegistrantKind::Worker => {
@@ -697,4 +707,60 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
         return;
     }
     proxy(ws, who, kernel).await;
+}
+
+#[cfg(test)]
+mod roster_face_tests {
+    use super::*;
+
+    /// A phone's list draws each project's face from the roster: a live
+    /// kernel's project and a worker's checkout alike, as their
+    /// registrants read `project.toml`; a project no one read has none.
+    #[test]
+    fn the_roster_carries_each_projects_face() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let reg = Arc::new(Registrant {
+            id: 1,
+            machine: "mac".into(),
+            project: Some("arbos".into()),
+            place: Some("/Users/jacob/Code/arbos".into()),
+            to_socket: tx,
+            chans: Mutex::new(HashMap::new()),
+            next_chan: AtomicU64::new(1),
+        });
+        let mut entry = MachineEntry::default();
+        entry.kernels.insert("arbos".into(), reg);
+        entry.worker_projects = vec!["arbos".into(), "notes".into(), "bare".into()];
+        entry.identities.insert(
+            "arbos".into(),
+            arbos_core::project::ProjectIdentity {
+                name: Some("Arbos".into()),
+                icon: "terminal".into(),
+                color: "teal".into(),
+            },
+        );
+        entry.identities.insert(
+            "notes".into(),
+            arbos_core::project::ProjectIdentity {
+                name: None,
+                icon: "book".into(),
+                color: "#336699".into(),
+            },
+        );
+        let info = entry.info("mac");
+        let by_name = |n: &str| info.projects.iter().find(|p| p.name == n).unwrap().clone();
+        let arbos = by_name("arbos");
+        assert!(arbos.live);
+        assert_eq!(arbos.identity.as_ref().unwrap().icon, "terminal");
+        assert_eq!(
+            arbos.identity.as_ref().unwrap().name.as_deref(),
+            Some("Arbos")
+        );
+        let notes = by_name("notes");
+        assert!(!notes.live);
+        assert_eq!(notes.identity.as_ref().unwrap().color, "#336699");
+        assert!(by_name("bare").identity.is_none());
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["projects"][0]["identity"]["icon"], "terminal");
+    }
 }

@@ -142,6 +142,7 @@ pub async fn register(
     projects: Vec<String>,
     extra_labels: &[String],
     capabilities: Vec<String>,
+    identities: std::collections::BTreeMap<String, arbos_core::project::ProjectIdentity>,
 ) -> Result<u64> {
     send_json(
         ws,
@@ -153,6 +154,7 @@ pub async fn register(
             project,
             place,
             projects,
+            identities,
             labels: labels(extra_labels),
             capabilities,
             version: klog::version().to_string(),
@@ -229,6 +231,8 @@ async fn session(
 ) -> Result<()> {
     let token = cfg.token()?;
     let mut ws = connect(&cfg.register_url(), &token).await?;
+    let mut identities = std::collections::BTreeMap::new();
+    identities.insert(project.to_string(), arbos_core::project::identity(place));
     let id = register(
         &mut ws,
         cfg,
@@ -238,6 +242,7 @@ async fn session(
         Vec::new(),
         &[],
         Vec::new(),
+        identities,
     )
     .await?;
     klog::info(
