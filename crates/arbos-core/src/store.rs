@@ -358,6 +358,31 @@ pub struct Kickoff<'a> {
 }
 
 /// The line a brief gets when the user asked to see the result.
+/// The Show step, numbered after the brief's own steps ("3. The user
+/// asked to see …"). `do_text` decides the number: one past the last
+/// `N.` at a line start, else 2 (after the one default step).
+pub fn show_step(do_text: &str) -> String {
+    let last = do_text
+        .lines()
+        .filter_map(|l| {
+            let t = l.trim_start();
+            let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() {
+                return None;
+            }
+            let rest = &t[digits.len()..];
+            (rest.starts_with(". ") || rest.starts_with(") ") || rest == ".")
+                .then(|| digits.parse::<usize>().ok())
+                .flatten()
+        })
+        .max()
+        .unwrap_or(1);
+    format!(
+        "{}. The user asked to see the result: make the image and name its path in your report — a command's output: `screenshot target:\"text\" title:\"<the command>\" text:\"<its output>\"`; a page: `browser action:screenshot`; a window: `screenshot target:\"window\"`. It lands in your images/ folder (.arbos/agents/<you>/images/<name>.png); that path goes in the report.",
+        last + 1
+    )
+}
+
 pub const KICKOFF_SHOW: &str = "The user asked to see this. An image of the result is owed: `browser action:screenshot` for a page, `screenshot target:window` for a window, `screenshot target:text title:\"<the command>\" text:\"<its output>\"` for a command's output (no display needed). Name the image path in your report; words alone do not close the task.";
 
 /// Does this message ask to be shown something? Judged on the user's own
@@ -472,11 +497,20 @@ impl Kickoff<'_> {
         };
         line("Read first", self.read_first.unwrap_or(KICKOFF_READ_FIRST));
         line("Task", self.task);
-        line(
-            "Do",
-            self.do_
-                .unwrap_or("as the task says; number your steps in your first reply"),
-        );
+        let do_text = self
+            .do_
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .unwrap_or("as the task says; number your steps in your first reply");
+        // The image is a step of the work, numbered after the others, not
+        // only a note at the end: a worker that took the Show line as
+        // advice made the image two runs in five (kickoff item 3).
+        let do_text = if self.show {
+            format!("{do_text}\n{}", show_step(do_text))
+        } else {
+            do_text.to_string()
+        };
+        line("Do", &do_text);
         // A model that echoes the parameter description ("repo and base
         // branch, no merging") gets the default instead.
         let rules_given = self
@@ -931,7 +965,26 @@ mod show_tests {
             .expect(&brief);
         let report = brief.find("Report: ").expect(&brief);
         assert!(show < report, "{brief}");
-        assert!(brief.contains(".arbos/media/<topic>/"), "{brief}");
+        // With no steps given, the image is step 2 after the one default.
+        assert!(
+            brief.contains("\n  2. The user asked to see the result"),
+            "{brief}"
+        );
+        assert!(brief.contains("screenshot target:\"text\""), "{brief}");
+        // With numbered steps, it follows the last one.
+        let numbered = Kickoff {
+            task: "Run hello.py.",
+            do_: Some("1. Run python3 hello.py in ./toy-repo.\n2. Capture output.\n3. Report."),
+            show: true,
+            ..Kickoff::default()
+        }
+        .render();
+        assert!(
+            numbered.contains("  3. Report.\n  4. The user asked to see the result"),
+            "{numbered}"
+        );
+        assert_eq!(show_step("1) one\n2) two"), show_step("1. one\n2. two"));
+        assert!(show_step("do it").starts_with("2. "));
         let plain = Kickoff {
             task: "Run hello.py.",
             ..Kickoff::default()

@@ -56,6 +56,29 @@ pub fn pick_model(wake_model: &str, agent: &Agent, host_model: &str, child_model
     }
 }
 
+/// What the model reads when its turn is about to end with the brief's
+/// image still owed.
+pub const SHOW_NUDGE: &str = "Your brief says the user asked to see the result (Show), and this turn made no image. Make it now: a command's output → screenshot target:\"text\" title:\"<the command>\" text:\"<its output>\"; a page → browser action:screenshot; a window → screenshot target:\"window\". Then put the image path in your report.";
+
+/// The turn's wake carried a `Show:` line (the user asked to see the
+/// result) and no tool call since has produced an image.
+fn image_owed(events: &[Event]) -> bool {
+    let Some(start) = events.iter().rposition(Event::is_wake) else {
+        return false;
+    };
+    let brief_shows = matches!(
+        &events[start].kind,
+        EventKind::Wake { text: Some(t), .. } if t.contains("\nShow: ") || t.starts_with("Show: ")
+    );
+    if !brief_shows {
+        return false;
+    }
+    !events[start..].iter().any(|e| match &e.kind {
+        EventKind::Tool(rec) => !rec.images.is_empty() && rec.error.is_none(),
+        _ => false,
+    })
+}
+
 fn looks_like_tool_call_text(content: &str) -> bool {
     let t = content
         .trim()
@@ -627,6 +650,11 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     "That was a tool call written as text, so nothing ran. Call the tool itself.",
                     "tool call written as text",
                 ))
+            } else if image_owed(&events) {
+                // The brief said the user asked to see the result and the
+                // turn is ending with no image made: once, before the
+                // report goes out with words alone (kickoff item 3).
+                Some((SHOW_NUDGE, "image owed"))
             } else {
                 None
             };

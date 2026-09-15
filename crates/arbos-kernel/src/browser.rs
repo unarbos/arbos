@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
+    path::Path,
     process::{Child, Command, Stdio},
     sync::Mutex,
 };
@@ -291,6 +292,28 @@ impl BrowserHub {
         Cdp::connect(port)
     }
 
+    /// Draw a local HTML file as a PNG of `width`×`height` CSS pixels in
+    /// a page of its own, then close that page: the agents' browser pages
+    /// are left as they are. This is the kernel's running Chrome over CDP
+    /// — the one path that works on every machine the tests run on; a
+    /// one-shot `chrome --screenshot` sat for a minute on the CI runner.
+    pub fn render_file(&self, html: &Path, width: u32, height: u32) -> Result<Vec<u8>> {
+        let port = self.ensure_chrome()?;
+        let (mut cdp, target) = Cdp::connect_new(port)?;
+        let shot = (|| {
+            cdp.call(
+                "Emulation.setDeviceMetricsOverride",
+                json!({"width": width, "height": height, "deviceScaleFactor": 1, "mobile": false}),
+            )?;
+            cdp.navigate(&format!("file://{}", html.display()))?;
+            cdp.screenshot()
+        })();
+        // The page goes whatever happened; a failed close is not the
+        // caller's problem.
+        let _ = reqwest::blocking::get(format!("http://127.0.0.1:{port}/json/close/{target}"));
+        shot
+    }
+
     fn ensure_chrome(&self) -> Result<u16> {
         if let Some(p) = *self.port.lock().unwrap() {
             return Ok(p);
@@ -513,6 +536,29 @@ impl Cdp {
         let mut cdp = Self { socket, next_id: 0 };
         cdp.set_timeout(std::time::Duration::from_secs(15))?;
         Ok(cdp)
+    }
+
+    /// A fresh `about:blank` page of its own (its target id comes back for
+    /// closing it), so a render never touches an agent's page.
+    fn connect_new(port: u16) -> Result<(Self, String)> {
+        let made = reqwest::blocking::Client::new()
+            .put(format!("http://127.0.0.1:{port}/json/new?about:blank"))
+            .send()?
+            .text()?;
+        let page: Value = serde_json::from_str(&made)?;
+        let ws = page
+            .get("webSocketDebuggerUrl")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("chrome opened no page to draw in"))?;
+        let id = page
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let (socket, _) = tungstenite::connect(ws)?;
+        let mut cdp = Self { socket, next_id: 0 };
+        cdp.set_timeout(std::time::Duration::from_secs(15))?;
+        Ok((cdp, id))
     }
 
     fn set_timeout(&mut self, dur: std::time::Duration) -> Result<()> {
