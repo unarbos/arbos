@@ -1,14 +1,29 @@
 import SwiftUI
 
-/// The call. Voice first; the main chat is one swipe up.
+/// Builds the call from the environment so a project chat can present it
+/// full-screen without holding the model itself.
+struct CallScreen: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var chat: ChatStore
+    @EnvironmentObject private var link: VoiceLink
+
+    var body: some View {
+        CallView(settings: settings, chat: chat, link: link)
+            .environmentObject(settings)
+            .environmentObject(chat)
+            .environmentObject(link)
+    }
+}
+
+/// The call: a full-duplex conversation with the project's main agent.
+/// Opened from the project chat's handset; the chevron at the top goes
+/// back to the chat (the call keeps going until it is hung up).
 struct CallView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var chat: ChatStore
+    @Environment(\.dismiss) private var dismiss
     @StateObject private var model: CallViewModel
     @State private var showSettings = false
-    @State private var showChat = false
-    /// True when the chat was opened by swiping: bring the keyboard up.
-    @State private var chatWantsKeyboard = false
 
     init(settings: AppSettings, chat: ChatStore, link: VoiceLink) {
         _model = StateObject(wrappedValue: CallViewModel(settings: settings, chat: chat, link: link))
@@ -16,15 +31,15 @@ struct CallView: View {
 
     var body: some View {
         ZStack {
-            Color(red: 0.04, green: 0.04, blue: 0.05).ignoresSafeArea()
+            ArbosTheme.bg.ignoresSafeArea()
             VStack(spacing: 0) {
                 header
                 Spacer(minLength: 12)
                 StateOrb(phase: model.phase)
                     .padding(.top, 8)
                 Text(model.phase.label)
-                    .font(.system(.title3, design: .rounded, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.85))
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(ArbosTheme.text.opacity(0.85))
                     .padding(.top, 28)
                     .contentTransition(.opacity)
                     .animation(.easeInOut(duration: 0.25), value: model.phase)
@@ -37,16 +52,16 @@ struct CallView: View {
                     // phone's speaker and a connected headset.
                     Button(action: model.toggleSpeaker) {
                         Text(note)
-                            .font(.footnote)
-                            .foregroundStyle(.white.opacity(0.35))
+                            .font(ArbosTheme.caption)
+                            .foregroundStyle(ArbosTheme.textDim)
                             .padding(.top, 4)
                     }
                     .buttonStyle(.plain)
                 }
                 if case .failed(let reason) = model.phase {
                     Text(reason)
-                        .font(.footnote)
-                        .foregroundStyle(.white.opacity(0.5))
+                        .font(ArbosTheme.callout)
+                        .foregroundStyle(ArbosTheme.textFaint)
                         .padding(.top, 6)
                         .padding(.horizontal, 40)
                         .multilineTextAlignment(.center)
@@ -57,27 +72,16 @@ struct CallView: View {
                     .opacity(model.lines.isEmpty ? 0 : 1)
                 Spacer(minLength: 24)
                 callButton
-                    .padding(.bottom, 18)
-                chatHandle
-                    .padding(.bottom, 2)
+                    .padding(.bottom, 26)
                 Text(Self.buildLabel)
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.18))
+                    .foregroundStyle(ArbosTheme.text.opacity(0.18))
                     .padding(.bottom, 4)
             }
         }
-        .contentShape(Rectangle())
-        .gesture(swipeUp)
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showSettings, onDismiss: model.refreshIdle) {
             SettingsView().environmentObject(settings)
-        }
-        .sheet(isPresented: $showChat) {
-            MainChatView(focusComposer: chatWantsKeyboard)
-                .environmentObject(chat)
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-                .presentationBackground(Color(red: 0.06, green: 0.06, blue: 0.07))
         }
         .onChange(of: settings.openAIKey) { _, _ in model.refreshIdle() }
         .onChange(of: settings.selfHostedURL) { _, _ in model.refreshIdle() }
@@ -97,15 +101,29 @@ struct CallView: View {
         return "\(version) (\(build))"
     }
 
+    /// Back to the chat on the left; the settings on the right while idle.
     private var header: some View {
         HStack {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(ArbosTheme.textMuted)
+                    .frame(width: 44, height: 44)
+            }
+            Spacer()
+            Text(chat.identity?.label ?? chat.title)
+                .font(ArbosTheme.calloutMedium)
+                .foregroundStyle(ArbosTheme.textFaint)
+                .lineLimit(1)
             Spacer()
             Button {
                 showSettings = true
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.35))
+                    .foregroundStyle(ArbosTheme.textMuted)
                     .frame(width: 44, height: 44)
             }
             .disabled(model.phase.inCall)
@@ -132,38 +150,6 @@ struct CallView: View {
         .animation(.easeInOut(duration: 0.25), value: model.phase)
     }
 
-    /// The only hint that text exists: a chevron. Tap or swipe up.
-    private var chatHandle: some View {
-        Button {
-            openChat(keyboard: false)
-        } label: {
-            VStack(spacing: 3) {
-                Image(systemName: "chevron.compact.up")
-                    .font(.system(size: 22, weight: .regular))
-                Text("chat")
-                    .font(.caption2)
-            }
-            .foregroundStyle(.white.opacity(0.3))
-            .frame(maxWidth: .infinity)
-            .frame(height: 44)
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var swipeUp: some Gesture {
-        DragGesture(minimumDistance: 30)
-            .onEnded { value in
-                if value.translation.height < -60, abs(value.translation.width) < 80 {
-                    openChat(keyboard: true)
-                }
-            }
-    }
-
-    private func openChat(keyboard: Bool) {
-        chatWantsKeyboard = keyboard
-        showChat = true
-    }
-
     private func tapCall() {
         switch model.phase {
         case .unconfigured:
@@ -178,8 +164,8 @@ struct CallView: View {
     private var buttonTint: Color {
         switch model.phase {
         case .unconfigured: return Color(white: 0.28)
-        case .idle, .failed: return Color(red: 0.20, green: 0.72, blue: 0.42)
-        case .connecting, .listening, .thinking, .speaking: return Color(red: 0.90, green: 0.30, blue: 0.30)
+        case .idle, .failed: return ArbosTheme.ok
+        case .connecting, .listening, .thinking, .speaking: return ArbosTheme.danger
         }
     }
 
@@ -193,7 +179,7 @@ struct CallView: View {
 
     #if DEBUG
     /// Launch arguments for review and scripted tests:
-    /// `-previewChat 1` opens the chat and sends `-chatText` (or a default);
+    /// `-previewChat 1` sends `-chatText` (or a default) to the chat;
     /// `-previewCall 1` starts a call at once (pair with `-injectWav`).
     private func previewIfAsked() async {
         let defaults = UserDefaults.standard
@@ -203,8 +189,6 @@ struct CallView: View {
             model.startCall()
         }
         guard defaults.bool(forKey: "previewChat") else { return }
-        try? await Task.sleep(for: .milliseconds(400))
-        openChat(keyboard: false)
         try? await Task.sleep(for: .milliseconds(1500))
         chat.send(defaults.string(forKey: "chatText") ?? "What's left before I can merge?")
     }
@@ -219,8 +203,8 @@ private struct ElapsedLabel: View {
         TimelineView(.periodic(from: since, by: 1)) { context in
             let seconds = max(0, Int(context.date.timeIntervalSince(since)))
             Text(String(format: "%02d:%02d", seconds / 60, seconds % 60))
-                .font(.system(.footnote, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.4))
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundStyle(ArbosTheme.textFaint)
         }
     }
 }

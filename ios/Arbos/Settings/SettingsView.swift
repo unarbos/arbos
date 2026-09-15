@@ -65,9 +65,11 @@ struct SettingsView: View {
                 } header: {
                     Text("Mesh hub")
                 } footer: {
-                    Text("Lists Jacob's other machines; the chat title opens the picker.")
+                    Text("Lists the machines and projects the Projects screen shows.")
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(ArbosTheme.bg)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

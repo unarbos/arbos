@@ -11,6 +11,8 @@ struct ChatItem: Identifiable, Equatable {
         /// A sub-agent's status: spawned, what it said, done.
         case subagent(name: String, status: String)
         case notice(String, failed: Bool)
+        /// The desktop's turn headline once a live turn ends: "Worked 12s".
+        case worked(seconds: Int)
     }
 
     let id: UUID
@@ -27,6 +29,15 @@ struct ChatItem: Identifiable, Equatable {
     }
 }
 
+/// One of the root's workers, as the desktop's worker line shows it:
+/// "1 Working · <step>" while it runs, "Done <name>" after.
+struct WorkerStatus: Identifiable, Hashable {
+    let id: String
+    var name: String
+    var step: String
+    var running: Bool
+}
+
 /// What a chat source tells the store, in order.
 enum ChatUpdate {
     /// Replace everything shown (mock seed; later, a transcript replay).
@@ -41,6 +52,12 @@ enum ChatUpdate {
     case agentReplace(String)
     case turn(running: Bool)
     case agents([KernelAgent])
+    /// The root's workers and what each is doing now.
+    case workers([WorkerStatus])
+    /// The focused agent's live step ("Reading notes.md"); empty when idle.
+    case step(String)
+    /// `.arbos/project.toml` read off the kernel.
+    case identity(ProjectIdentity)
     case dropped(String)
 }
 
@@ -52,4 +69,11 @@ protocol ChatSource: AnyObject {
     func start() async throws
     func send(text: String, steer: Bool) async throws
     func stop()
+    /// A worker's transcript, replayed once. Sources without workers
+    /// return nothing.
+    func history(agent: String) async -> [ChatItem]
+}
+
+extension ChatSource {
+    func history(agent: String) async -> [ChatItem] { [] }
 }

@@ -7,6 +7,8 @@ struct KernelAgent: Identifiable, Equatable {
     let parent: String?
     let paused: Bool
     let model: String
+    /// What the agent is doing now (`status.toml`); nil when idle.
+    let step: String?
 }
 
 /// One transcript line (`EventKind` in `arbos-core/src/event.rs`). The
@@ -85,7 +87,10 @@ struct KernelToolRecord: Equatable {
     /// One line for the chat: what ran, on what.
     var label: String {
         let subject: String
-        if let first = paths.first, !first.isEmpty {
+        if ["bash", "shell", "run"].contains(name), let command = args?["command"] as? String ?? args?["cmd"] as? String {
+            // A shell call is what it ran, not the log file it wrote.
+            subject = command
+        } else if let first = paths.first, !first.isEmpty {
             subject = (first as NSString).lastPathComponent
         } else if let path = args?["path"] as? String ?? args?["file"] as? String ?? args?["dir"] as? String {
             subject = (path as NSString).lastPathComponent
@@ -123,11 +128,37 @@ enum KernelFrame {
     /// `running` or `idle`.
     case turn(agent: String, state: String)
     case ask(agent: String, question: String, options: [String])
+    /// What `agent` is doing now, in a few words; empty means idle.
+    case status(agent: String, step: String, source: String)
+    /// The model call for `agent` is alive but silent for `secs` seconds.
+    case working(agent: String, secs: Int)
+    /// A file under `.arbos/`, answering a `read`.
+    case file(path: String, text: String, error: String?)
+    case thinkingDelta(agent: String, text: String)
     case other(type: String)
 
     init?(json object: [String: Any]) {
         guard let type = object["type"] as? String else { return nil }
         switch type {
+        case "status":
+            self = .status(
+                agent: object["agent"] as? String ?? "",
+                step: object["step"] as? String ?? "",
+                source: object["source"] as? String ?? ""
+            )
+        case "working":
+            self = .working(agent: object["agent"] as? String ?? "", secs: object["secs"] as? Int ?? 0)
+        case "file":
+            self = .file(
+                path: object["path"] as? String ?? "",
+                text: object["text"] as? String ?? "",
+                error: object["error"] as? String
+            )
+        case "thinking_delta":
+            self = .thinkingDelta(
+                agent: object["agent"] as? String ?? "",
+                text: object["text"] as? String ?? ""
+            )
         case "hello":
             self = .hello(
                 focus: object["focus"] as? String ?? "root",
@@ -182,7 +213,8 @@ enum KernelFrame {
                 name: row["name"] as? String ?? id,
                 parent: row["parent"] as? String,
                 paused: row["paused"] as? Bool ?? false,
-                model: row["model"] as? String ?? ""
+                model: row["model"] as? String ?? "",
+                step: row["step"] as? String
             )
         }
     }

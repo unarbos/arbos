@@ -78,7 +78,10 @@ final class ArbosKernelClient {
     /// Send one text turn. `steer: true` slips it into a running turn at
     /// its next tool boundary instead of queueing a new one.
     func send(text: String, agent: String? = nil, steer: Bool = false) throws {
-        try write(["type": "user", "agent": agent ?? focus, "text": text, "steer": steer])
+        try write([
+            "type": "user", "agent": agent ?? focus, "text": text, "steer": steer,
+            "channel": "text", "device": "phone",
+        ])
     }
 
     func stop(agent: String? = nil) throws {
@@ -86,8 +89,22 @@ final class ArbosKernelClient {
     }
 
     /// Reply to an `ask` frame.
-    func answer(_ text: String, agent: String? = nil) throws {
-        try write(["type": "answer", "agent": agent ?? focus, "text": text])
+    func answer(_ text: String, agent: String? = nil, id: String? = nil) throws {
+        var frame: [String: Any] = ["type": "answer", "agent": agent ?? focus, "text": text]
+        if let id { frame["id"] = id }
+        try write(frame)
+    }
+
+    /// One file under `.arbos/` (`project.toml`, `notes.md`); answered
+    /// with a `file` frame.
+    func read(path: String) throws {
+        try write(["type": "read", "path": path])
+    }
+
+    /// Replay `agent`'s transcript: `replayed` frames, then `history_end`.
+    /// How a worker's chat is opened without refocusing the kernel.
+    func history(agent: String, limit: Int = 200) throws {
+        try write(["type": "history", "agent": agent, "since": 0, "limit": limit])
     }
 
     // MARK: - Private
@@ -99,6 +116,13 @@ final class ArbosKernelClient {
 
     private func receive(_ message: URLSessionWebSocketTask.Message) {
         guard let (_, object) = decodeTypedJSON(message), let frame = KernelFrame(json: object) else { return }
+        #if DEBUG
+        if let type = object["type"] as? String, ["turn", "status", "tree", "snapshot", "ask", "working"].contains(type) {
+            let agent = object["agent"] as? String ?? ""
+            let extra = (object["state"] as? String) ?? (object["step"] as? String) ?? ""
+            print("frame \(type) \(agent) \(extra.prefix(60))")
+        }
+        #endif
         switch frame {
         case .hello(let focus, let version):
             self.focus = focus
