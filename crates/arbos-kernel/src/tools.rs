@@ -574,6 +574,30 @@ impl Tool for Spawn {
             let brief = rendered.as_str();
             let model = opt_str(&args, "model");
             let readonly = opt_bool(&args, "readonly").unwrap_or(false);
+            // A read-only worker cannot write the deliverable its brief
+            // names: the two workers of remote-track F-36 reported exactly
+            // that. The mismatch is refused here, before the worker exists,
+            // with both ways out.
+            let kind_readonly = opt_str(&args, "kind")
+                .and_then(|k| arbos_core::find_def(&hooks.place, k))
+                .is_some_and(|d| d.readonly);
+            if readonly || kind_readonly {
+                let owed = arbos_engine::brief_output_paths(brief);
+                if !owed.is_empty() {
+                    anyhow::bail!(
+                        "spawn: {} but the brief names Output files it must write ({}). Drop readonly (the worker writes its deliverable), or drop the Output line and have it report in words.",
+                        if readonly {
+                            "readonly=true".to_string()
+                        } else {
+                            format!(
+                                "kind {:?} is read-only",
+                                opt_str(&args, "kind").unwrap_or("")
+                            )
+                        },
+                        owed.join(", ")
+                    );
+                }
+            }
             let cwd = opt_str(&args, "cwd").map(PathBuf::from);
             // A typed helper runs inline: its result is this call's result
             // unless the caller says otherwise.

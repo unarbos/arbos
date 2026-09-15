@@ -609,10 +609,8 @@ impl KernelHooks {
     /// True when it was filed.
     pub fn kickoff(&self, agent: &str) -> Result<bool> {
         let transcript = self.layout(agent).transcript();
-        let has_turns = arbos_core::load_transcript(&transcript)
-            .map(|events| events.iter().any(|e| e.is_wake()))
-            .unwrap_or(false);
-        if has_turns || self.is_live(agent) {
+        let events = arbos_core::load_transcript(&transcript).unwrap_or_default();
+        if kickoff_taken(&events) || self.is_live(agent) {
             return Ok(false);
         }
         let mut msg = inbox::Message::new(
@@ -1842,6 +1840,44 @@ impl KernelHooks {
 }
 
 /// `id — name (paused)` per agent other than `me`.
+/// Has root had a turn that counts, so the kickoff is spent? Any turn
+/// that is not a kickoff counts. A kickoff turn counts only when the
+/// model got as far as saying or calling something; one that died before
+/// that — no API key on a fresh machine, no model — is not root's turn,
+/// and the next `kickoff` (after the window put a key there) runs
+/// (remote track, F-34).
+pub fn kickoff_taken(events: &[Event]) -> bool {
+    let mut i = 0;
+    while i < events.len() {
+        let e = &events[i];
+        let EventKind::Wake { wake, .. } = &e.kind else {
+            i += 1;
+            continue;
+        };
+        if wake != "kickoff" {
+            return true;
+        }
+        // This kickoff turn: up to the next wake.
+        let mut j = i + 1;
+        let mut did_something = false;
+        while j < events.len() && !events[j].is_wake() {
+            match &events[j].kind {
+                EventKind::Assistant { text, .. } if !text.trim().is_empty() => {
+                    did_something = true
+                }
+                EventKind::Tool(_) | EventKind::Thinking { .. } => did_something = true,
+                _ => {}
+            }
+            j += 1;
+        }
+        if did_something {
+            return true;
+        }
+        i = j;
+    }
+    false
+}
+
 /// A finished worker in `archive/agents/`, for the `say` refusal.
 #[derive(Debug, Clone)]
 struct Archived {
