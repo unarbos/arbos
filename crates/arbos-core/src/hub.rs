@@ -505,6 +505,94 @@ pub fn content_hash(bytes: &[u8]) -> String {
     out
 }
 
+/// The names a brief uses for the project store (the contract and the
+/// kickoff defaults speak of `docs/`, `internal/`, `media/`, `notes.md`
+/// beside `.arbos/…`).
+const STORE_WORDS: &[&str] = &[
+    ".arbos/",
+    "docs/",
+    "internal/",
+    "media/",
+    "notes.md",
+    "archived.md",
+    "GOALS.md",
+];
+
+/// Rewrite the store paths in a brief to addresses on `store`, so a
+/// child on another machine reads the parent's Project memory and
+/// delivers into the parent's store rather than into its own fresh
+/// worktree's. Every token that names the store (`.arbos/docs/x.md`,
+/// `docs/x.md`, `notes.md`, a markdown link's target) becomes
+/// `arbos://<machine>/<project>/<path>`; code paths and prose stay as they
+/// are, and a token that is already an address is left alone.
+pub fn address_brief(brief: &str, store: &StoreAddress) -> String {
+    let root = StoreAddress::root(&store.machine, &store.project);
+    let rewrite_path = |raw: &str| -> Option<String> {
+        if raw.starts_with(STORE_SCHEME) {
+            return None;
+        }
+        let trimmed = raw.strip_prefix("./").unwrap_or(raw);
+        // A folder counts with its slash (`docs/x`, never the word `docs`);
+        // `.arbos` alone is the store itself.
+        let names_store = trimmed == ".arbos" || STORE_WORDS.iter().any(|w| trimmed.starts_with(w));
+        if !names_store {
+            return None;
+        }
+        let rel = trimmed.strip_prefix(".arbos/").unwrap_or(trimmed);
+        let rel = rel.strip_prefix(".arbos").unwrap_or(rel);
+        let mut out = root.join(rel).to_string();
+        // A folder keeps its trailing slash: `docs/` stays a folder.
+        if rel.ends_with('/') && !out.ends_with('/') {
+            out.push('/');
+        }
+        Some(out)
+    };
+    let mut out = String::with_capacity(brief.len() + 64);
+    for line in brief.split_inclusive('\n') {
+        let (body, nl) = match line.strip_suffix('\n') {
+            Some(b) => (b, "\n"),
+            None => (line, ""),
+        };
+        let mut first = true;
+        for raw in body.split(' ') {
+            if !first {
+                out.push(' ');
+            }
+            first = false;
+            out.push_str(&rewrite_token(raw, &rewrite_path));
+        }
+        out.push_str(nl);
+    }
+    out
+}
+
+/// One whitespace-delimited token: the path inside its punctuation
+/// (backticks, quotes, brackets, a trailing comma or full stop) or after
+/// a markdown link's `](`, rewritten when it names the store.
+fn rewrite_token(raw: &str, rewrite_path: &dyn Fn(&str) -> Option<String>) -> String {
+    const OPEN: &[char] = &['`', '"', '\'', '(', '[', '<', '*', '_'];
+    const CLOSE: &[char] = &['`', '"', '\'', ')', ']', '>', ',', '.', ';', ':', '*', '_'];
+    if let Some(i) = raw.find("](") {
+        // `[label](target)…`: the target is the path.
+        let (head, rest) = raw.split_at(i + 2);
+        let end = rest.find(')').unwrap_or(rest.len());
+        let (target, tail) = rest.split_at(end);
+        if let Some(new) = rewrite_path(target) {
+            return format!("{head}{new}{tail}");
+        }
+        return raw.to_string();
+    }
+    let start = raw.len() - raw.trim_start_matches(OPEN).len();
+    let core = &raw[start..];
+    let end = core.trim_end_matches(CLOSE).len();
+    let (path, close) = core.split_at(end);
+    // A trailing slash is part of a folder path, not punctuation.
+    match rewrite_path(path) {
+        Some(new) => format!("{}{new}{close}", &raw[..start]),
+        None => raw.to_string(),
+    }
+}
+
 /// Sharing modes a project may set in `project.toml` `[share] mode`.
 pub const SHARE_PRIVATE: &str = "private";
 pub const SHARE_MESH: &str = "mesh";
@@ -776,6 +864,31 @@ mod tests {
         }
         assert!(StoreAddress::looks_like("  arbos://x/y/z"));
         assert!(!StoreAddress::looks_like("/tmp/arbos://x"));
+    }
+
+    /// A kickoff brief carries paths, not content. For a child on another
+    /// machine every store path becomes the parent's address, so the
+    /// child reads the Project's memory and delivers into the Project;
+    /// code paths and prose are untouched.
+    #[test]
+    fn a_brief_for_a_remote_child_names_the_parents_store_by_address() {
+        let store = StoreAddress::root("cloud", "demo");
+        let brief = "Read first: .arbos/docs/project-context.md, then .arbos/notes.md\n\
+Task: Fix the echo gate in src/gateway.rs; see `docs/echo.md` and (internal/audit.md).\n\
+Output: Deliverables under .arbos/docs/, working notes under .arbos/internal/, captures under .arbos/media/<topic>/. Verify each file exists before you report it.\n\
+Report: link [the audit](docs/echo.md); read notes.md; keep ./media/mesh/1.txt and GOALS.md; arbos://mac/x/docs/a.md stays.\n";
+        let out = address_brief(brief, &store);
+        let want = "Read first: arbos://cloud/demo/docs/project-context.md, then arbos://cloud/demo/notes.md\n\
+Task: Fix the echo gate in src/gateway.rs; see `arbos://cloud/demo/docs/echo.md` and (arbos://cloud/demo/internal/audit.md).\n\
+Output: Deliverables under arbos://cloud/demo/docs/, working notes under arbos://cloud/demo/internal/, captures under arbos://cloud/demo/media/<topic>/. Verify each file exists before you report it.\n\
+Report: link [the audit](arbos://cloud/demo/docs/echo.md); read arbos://cloud/demo/notes.md; keep arbos://cloud/demo/media/mesh/1.txt and arbos://cloud/demo/GOALS.md; arbos://mac/x/docs/a.md stays.\n";
+        assert_eq!(out, want);
+        // Words that only contain a store word are prose, not paths.
+        assert_eq!(
+            address_brief("the docs are in mydocs/x", &store),
+            "the docs are in mydocs/x"
+        );
+        assert_eq!(address_brief(".arbos", &store), "arbos://cloud/demo/");
     }
 
     #[test]
