@@ -491,6 +491,9 @@ pub struct ChatSession {
     pub children: Vec<ChildSummary>,
     /// When `live` last became non-empty, for the braille tick.
     pub live_since: Option<SystemTime>,
+    /// Seconds a thought had before a later step reopened it; added back
+    /// when it settles again.
+    pub thought_carry: u32,
     /// What the agent says it is doing right now (the kernel's `status`
     /// event); cleared when the turn ends.
     pub status: Option<String>,
@@ -611,6 +614,7 @@ impl ChatSession {
             tool_started: HashMap::new(),
             status_only: false,
             live_since: None,
+            thought_carry: 0,
             status: None,
             turn_open: false,
             turn_ended: None,
@@ -685,6 +689,7 @@ impl ChatSession {
             tool_started: HashMap::new(),
             status_only: false,
             live_since: None,
+            thought_carry: 0,
             status: None,
             turn_open: false,
             turn_ended: None,
@@ -759,6 +764,7 @@ impl ChatSession {
             tool_started: HashMap::new(),
             status_only: false,
             live_since: None,
+            thought_carry: 0,
             status: None,
             turn_open: false,
             turn_ended: None,
@@ -2390,6 +2396,13 @@ impl ChatSession {
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 let text = content_text(&chunk.content);
+                // A `status` call between two reasoning steps draws no row:
+                // the new step continues the thought before it rather than
+                // opening a second "Thought briefly".
+                let shown = self.items.iter().rposition(|item| {
+                    !matches!(item, ChatItem::Tool { label, .. }
+                        if crate::view::component::transcript::is_status_call(label))
+                });
                 if let Some(ChatItem::Thinking {
                     text: body,
                     done: false,
@@ -2397,6 +2410,22 @@ impl ChatSession {
                 }) = self.items.last_mut()
                 {
                     merge_stream_text(body, &text);
+                } else if let Some(ChatItem::Thinking {
+                    text: body,
+                    done,
+                    secs,
+                }) = shown.and_then(|at| self.items.get_mut(at))
+                    && !text.is_empty()
+                {
+                    if !body.ends_with('\n') {
+                        body.push_str("\n\n");
+                    }
+                    merge_stream_text(body, &text);
+                    // The clock restarts for the new step and adds to the
+                    // seconds already on the thought when it settles.
+                    *done = false;
+                    self.thought_carry = secs.take().unwrap_or(0);
+                    self.thought_at = Some(SystemTime::now());
                 } else if !text.is_empty() {
                     self.thought_at = Some(SystemTime::now());
                     self.items.push(ChatItem::Thinking {
@@ -2665,15 +2694,22 @@ impl ChatSession {
     }
 
     fn finish_thinking(&mut self) {
-        if let Some(ChatItem::Thinking { done, secs, .. }) = self.items.last_mut() {
-            if !*done {
-                *done = true;
-                *secs = self
-                    .thought_at
-                    .and_then(|at| at.elapsed().ok())
-                    .map(|d| d.as_secs() as u32);
-            }
+        // The open thought is the last item, or the one a later step
+        // reopened across a `status` call.
+        let open = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, ChatItem::Thinking { done: false, .. }));
+        if let Some(ChatItem::Thinking { done, secs, .. }) = open.and_then(|at| self.items.get_mut(at)) {
+            *done = true;
+            let took = self
+                .thought_at
+                .and_then(|at| at.elapsed().ok())
+                .map(|d| d.as_secs() as u32)
+                .unwrap_or(0);
+            *secs = Some(took.saturating_add(self.thought_carry));
         }
+        self.thought_carry = 0;
         self.thought_at = None;
     }
 
