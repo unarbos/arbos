@@ -68,3 +68,53 @@ fn a_coordinator_runs_the_one_command_the_user_asks_to_see() {
     assert!(!agent.may("undo"));
     let _ = k.child.kill();
 }
+
+/// Symmetry cycle 6: asked to run the test suite, the coordinator ran it
+/// itself. A build or a test run in the coordinator's shell is refused
+/// with the way out; the quick command still runs.
+#[test]
+fn a_coordinators_test_run_is_refused_and_its_quick_command_is_not() {
+    let replies = concat!(
+        "{\"agent\":\"root\",\"content\":\"running the suite\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"python3 -m pytest -q\"}},{\"name\":\"bash\",\"arguments\":{\"command\":\"ls -la | wc -l\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"noted\"}\n",
+    );
+    let mut k = start_kernel_replay_prepared("coordinator-pytest", replies, "", |place| {
+        std::fs::create_dir_all(place.join(".arbos")).unwrap();
+        std::fs::write(
+            place.join(".arbos/project.toml"),
+            "schema = 2\n[root]\nrole = \"coordinator\"\n",
+        )
+        .unwrap();
+    });
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    a.send(serde_json::json!({
+        "type": "user", "agent": "root",
+        "text": "Run the test suite with python3 -m pytest -q and report the result."
+    }));
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    let root = transcript(&k.place, "root");
+    let bashes: Vec<&serde_json::Value> = root
+        .iter()
+        .filter(|e| e["kind"] == "tool" && e["name"] == "bash")
+        .collect();
+    assert_eq!(bashes.len(), 2, "{root:#?}");
+    let pytest = bashes
+        .iter()
+        .find(|b| b["args"]["command"] == "python3 -m pytest -q")
+        .expect("the pytest call");
+    let err = pytest["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("a test run is a worker's job") && err.contains("spawn a worker"),
+        "refused with the way out: {pytest:#?}"
+    );
+    let ls = bashes
+        .iter()
+        .find(|b| b["args"]["command"] == "ls -la | wc -l")
+        .expect("the ls call");
+    assert!(ls.get("error").is_none(), "the quick command runs: {ls:#?}");
+    let _ = k.child.kill();
+}

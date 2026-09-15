@@ -28,8 +28,9 @@ pub const WORKER: &str = "worker";
 /// `bash` for the one quick command the user asks to see run — Cursor's
 /// coordinator runs those itself ("Ran 1 command"), and a coordinator
 /// without a shell answered "I can't run shell commands" to the same
-/// prompt (symmetry loop, cycle 3). The contract keeps it to that; a
-/// build, a test run, or an edit is a worker's. `terminal` and `secret`
+/// prompt (symmetry loop, cycle 3). The contract keeps it to that, and
+/// the bash tool refuses a build or a test run for a coordinator (cycle
+/// 6: it ran pytest itself). `terminal` and `secret`
 /// follow `bash` (`Agent::may`): the same quick command in a visible
 /// pane, and a key by name for it. No `undo`.
 pub const COORDINATOR_TOOLS: &[&str] = &[

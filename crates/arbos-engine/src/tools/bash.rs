@@ -100,6 +100,16 @@ impl Tool for Bash {
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         Box::pin(async move {
             let cmd = req(&args, "command")?;
+            // A coordinator's shell is for the one quick command the user
+            // asked to see; a build or a test run is a worker's (decision
+            // 2026-09-14; the model ran pytest itself on cycle 6).
+            if cx.agent.role.as_deref() == Some(arbos_core::project::COORDINATOR)
+                && let Some(what) = build_or_test(cmd)
+            {
+                bail!(
+                    "bash: {what} is a worker's job, not the coordinator's — spawn a worker with the exact command (wait=true for a one-off) and relay its result. Your bash is for one quick command the user asked to see."
+                );
+            }
             // Before the approval prompt: a refused command is not a
             // question for the user.
             {
@@ -592,6 +602,43 @@ fn rm_wipes_root(lower: &str) -> bool {
 }
 
 #[cfg(test)]
+mod boundary_tests {
+    use super::build_or_test;
+
+    /// Symmetry cycle 6: the coordinator ran `python3 -m pytest -q` itself.
+    #[test]
+    fn builds_and_test_runs_are_named_quick_commands_are_not() {
+        for cmd in [
+            "python3 -m pytest -q",
+            "pytest tests/",
+            "cd toy-repo && python3 -m pytest",
+            "cargo test -p arbos-kernel",
+            "RUST_LOG=debug cargo build --release",
+            "npm test",
+            "npm run build",
+            "make -j4",
+            "go test ./...",
+            "time npx vitest",
+        ] {
+            assert!(build_or_test(cmd).is_some(), "{cmd}");
+        }
+        for cmd in [
+            "ls -la",
+            "python3 hello.py",
+            "for i in 1 2 3; do echo step $i; sleep 2; done",
+            "git status",
+            "cat README.md | head",
+            "cargo --version",
+            "npm --version",
+            "go version",
+            "python3 -c 'print(1)'",
+        ] {
+            assert!(build_or_test(cmd).is_none(), "{cmd}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod approval_tests {
     use super::needs_approval;
 
@@ -703,6 +750,61 @@ const READONLY_GIT: &[&str] = &[
 const WRITE_MARKERS: &[&str] = &[
     ">", "$(", "`", "tee ", "xargs", "sudo ", "sed -i", "-exec", "-delete",
 ];
+
+/// The build and test runners a coordinator hands to a worker: what the
+/// command is, in words for the refusal, when its first program (after
+/// `cd x &&`, env assignments, `time`, `nice`) is one of them.
+pub fn build_or_test(cmd: &str) -> Option<&'static str> {
+    for segment in cmd
+        .split("&&")
+        .flat_map(|s| s.split("||"))
+        .flat_map(|s| s.split(';'))
+    {
+        let words: Vec<&str> = segment
+            .split_whitespace()
+            .skip_while(|w| w.contains('=') && !w.starts_with('-'))
+            .skip_while(|w| matches!(*w, "time" | "nice" | "sudo" | "env"))
+            .collect();
+        let Some(first) = words.first() else {
+            continue;
+        };
+        let prog = first.rsplit('/').next().unwrap_or(first);
+        let second = words.get(1).copied().unwrap_or("");
+        let what = match prog {
+            "pytest" | "py.test" | "tox" | "nox" => Some("a test run"),
+            "cargo"
+                if matches!(
+                    second,
+                    "test" | "build" | "check" | "clippy" | "bench" | "nextest"
+                ) =>
+            {
+                Some("a cargo build or test run")
+            }
+            "npm" | "pnpm" | "yarn" | "bun"
+                if matches!(second, "test" | "run" | "build" | "ci" | "install") =>
+            {
+                Some("an npm build, install, or test run")
+            }
+            "npx" | "jest" | "vitest" | "mocha" | "playwright" | "cypress" => Some("a test run"),
+            "make" | "cmake" | "ninja" | "gradle" | "gradlew" | "mvn" | "bazel" | "meson" => {
+                Some("a build")
+            }
+            "go" if matches!(second, "test" | "build" | "vet") => Some("a go build or test run"),
+            "python" | "python3" if matches!(second, "-m") => match words.get(2).copied() {
+                Some("pytest" | "unittest" | "tox" | "nox" | "build") => Some("a test run"),
+                _ => None,
+            },
+            "dotnet" if matches!(second, "test" | "build") => Some("a dotnet build or test run"),
+            "swift" if matches!(second, "test" | "build") => Some("a swift build or test run"),
+            "docker" if matches!(second, "build" | "compose") => Some("a docker build"),
+            _ => None,
+        };
+        if what.is_some() {
+            return what;
+        }
+    }
+    None
+}
 
 /// Conservative. A wrong answer here is only ever "too cautious".
 pub fn is_readonly_command(cmd: &str) -> bool {
