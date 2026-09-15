@@ -18,6 +18,12 @@ use crate::tool::{
 /// `background: true` still waits this long so an instant failure
 /// (`command not found`) is reported without a second call.
 const BACKGROUND_GRACE: Duration = Duration::from_millis(500);
+/// The least an attached (foreground) call waits for its command before
+/// handing it to a job, whatever `wait_ms` the model sent: a "run this
+/// and show me the output" came back after the first line with
+/// wait_ms=3000 and the user saw one line of eight (remote track, F-37).
+/// A command that runs to its end within this is shown whole.
+const ATTACHED_WAIT_FLOOR: Duration = Duration::from_secs(120);
 const AWAIT_DEFAULT_MS: u64 = 30_000;
 const AWAIT_MAX_MS: u64 = 3_600_000;
 const AWAIT_POLL: Duration = Duration::from_millis(200);
@@ -55,7 +61,7 @@ impl Tool for Bash {
                 ("cwd", "", false, "string"),
                 (
                     "wait_ms",
-                    "Attached wait, ms (default 600000).",
+                    "Attached wait, ms (default 600000; never under 120000 — a command the user asked to see runs to its end while they watch).",
                     false,
                     "integer",
                 ),
@@ -160,6 +166,7 @@ impl Tool for Bash {
                 BACKGROUND_GRACE
             } else {
                 Duration::from_millis(opt_u64(&args, "wait_ms").unwrap_or(cx.bash_wait_ms))
+                    .max(ATTACHED_WAIT_FLOOR)
             };
 
             let root = JobsRoot::for_agent(&cx.place, &cx.agent.id);

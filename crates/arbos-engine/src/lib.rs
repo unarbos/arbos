@@ -42,4 +42,4 @@ pub use tool::{
 };
 pub use tools::git;
 pub use tools::{Grep, GrepHit, Hooks, PromptSize, is_readonly_command, kill_job};
-pub use turn::{TurnOpts, turn};
+pub use turn::{TurnOpts, brief_output_paths, turn};
