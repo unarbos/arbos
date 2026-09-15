@@ -986,7 +986,8 @@ fn user_prompt(
     div()
         .group(group)
         .w_full()
-        .mr(px(-root::COMPOSER_PAD_X))
+        .relative()
+        .left(px(root::COMPOSER_PAD_X))
         .flex()
         .flex_row()
         .justify_end()
@@ -4313,7 +4314,10 @@ fn thought_line(
         return div().into_any_element();
     };
     let id = chat.id;
-    let open = chat.transcript.thought_open(ix, done);
+    // A streaming thought opens its tail in a worker's chat; the root
+    // (Cursor's Project chat) keeps to the "Thinking" line unless clicked.
+    let folded = done || chat.parent.is_none();
+    let open = chat.transcript.thought_open(ix, folded);
     let live = chat
         .thought_elapsed()
         .or_else(|| chat.elapsed())
@@ -4341,7 +4345,7 @@ fn thought_line(
                 .hover(|el| el.bg(theme.element_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.with_session(id, cx, |chat| {
-                        chat.transcript.toggle_thought(ix, done);
+                        chat.transcript.toggle_thought(ix, folded);
                     });
                 }))
                 .child(

@@ -1061,7 +1061,7 @@ impl Arbos {
                             div()
                                 .line_clamp(2)
                                 .text_color(theme.text_faint)
-                                .child(SharedString::from(item.readout.clone())),
+                                .child(SharedString::from(plain_links(&item.readout))),
                         )
                     }),
             )
@@ -1504,4 +1504,27 @@ fn row_summary(chat: &ChatSession) -> Option<String> {
         phrase.push('…');
     }
     Some(phrase)
+}
+
+/// A readout's markdown links as words: "[PR 1](https://…)" → "PR 1". The
+/// row is one dim line; the link itself is on the page.
+fn plain_links(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match (after.find("]("), after.find(')')) {
+            (Some(close), Some(end)) if end > close => {
+                out.push_str(&after[..close]);
+                rest = &after[end + 1..];
+            }
+            _ => {
+                out.push('[');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
