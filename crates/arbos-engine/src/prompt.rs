@@ -9,7 +9,7 @@ subscribe is the only clock (timer, shell reading with deliver_to user, github_p
 say to=<id> reaches another agent (mode:request queues their turn, their reply arrives here as a message). [<id>] text in your prompt is a teammate's word, not the user's; answer it with say.
 read prints LINE:HASH|text; edit with that anchor (e.g. 12:kxm) and content, empty content deletes; apply_patch is Codex's multi-file format. Images (png/jpg/gif/webp, browser and screen screenshots, user attachments) arrive as pixels; an evicted one is read again. When the user wants to see something that runs, deliver an image (browser screenshot, screenshot, or a file you name), not a description.
 secret use NAME puts a key in bash's env as $NAME; you never see or print a value. bash never kills on wait: past wait_ms it continues as a job (await, jobs); background:true for servers. bash is a login shell; Environment: lists the interpreter, env, and project files — use them, do not install into another interpreter. Put independent tool calls in one response.
-remember keeps a durable fact (how the project works, a decision, a preference) in memory.md; progress goes in the plan, secrets never. search/fetch give numbered sources: cite [n] and end with a Sources list of URLs you saw.
+remember keeps a durable fact (how the project works, a decision) in memory.md; scope:user is the user's store for every place (preferences.md index, kind workflow/principle/script files) — save a preference only when the user states, corrects, or repeats it, and say where it applies; progress goes in the plan, secrets never. search/fetch give numbered sources: cite [n] and end with a Sources list of URLs you saw.
 After an edit, run the project check with bash; do not guess it is clean. Existing tests are the spec and read-only: never edit, delete, skip, xfail, or loosen one — not an assertion, a tolerance, an expected value, or a fixture. A test that fails after your change means the change is wrong or incomplete; fix the code. One case differs: the request itself says the behavior that test asserts is wrong — then make the requested behavior, leave the test untouched, and name in your reply the test that now fails and the request line that requires it. A test never vetoes the requested change; it only forbids rewriting it. New behavior gets new test functions. Keep the fix to the request's scope; existing tests often pin the narrow behavior.
 Fix at the root, not at the symptom: follow the wrong value to the lowest shared function that produces it and change it there, once — not at the caller you noticed it from, not in each backend or subclass, not in an outer layer (CLI wrapper, plotting front end, checker plugin) when a core helper is wrong. Before your first edit, one concrete check: grep the test tree for the function you plan to change and for the helper it calls (grep -rlw -e <fn> -e <helper> tests/); the level whose function existing tests name is the level the maintainers test at, and the fix belongs there. Every edit result ends with a [hook] Tests covering this edit line, per changed function; "no existing test names …" or "class-level match only" means stop and check whether you are at the symptom instead of the root. Then ask: would a caller reaching the same helper by another path be fixed too? If not, you are too high.
 The first edit, write, or apply_patch of a task carries mechanism: one line, what is wrong (the code path that produces the wrong value, and why) and what change fixes it; a headless run refuses the call without it. Check that line against every symptom the request names (each example, error message, edge) before you send it: a mechanism that explains one symptom but not another is the wrong one, even in the right file. changes shows the line; in the done-criterion pass read it against the request once more.
@@ -131,10 +131,14 @@ fn kinds_segment(place: &Place, agent: &Agent) -> String {
 /// The place's and the user's memory files, clipped like AGENTS.md. Empty
 /// when neither has anything.
 fn memory_segments(place: &Place) -> String {
-    use crate::tools::memory::{place_memory, user_memory};
+    use crate::tools::memory::{place_memory, user_memory, user_preferences, user_store_index};
     let mut out = String::new();
     for (label, path) in [
         ("Memory", Some(place_memory(place))),
+        (
+            "Preferences (user, every place; remember scope=user)",
+            user_preferences(),
+        ),
         ("Memory (user, every place)", user_memory()),
     ] {
         let Some(path) = path else { continue };
@@ -144,6 +148,20 @@ fn memory_segments(place: &Place) -> String {
         }
         let brief = crate::evict::evict_head(&text, &format!("{}:1", path.display()));
         out.push_str(&format!("\n{label} ({}):\n{brief}\n", path.display()));
+    }
+    // The user's playbooks, rules, and scripts by name: read the file when
+    // one fits the task.
+    let index = user_store_index();
+    if !index.is_empty() {
+        out.push_str("\nUser store (read the file when it fits the task): ");
+        out.push_str(
+            &index
+                .iter()
+                .map(|(kind, name, path)| format!("{kind} {name} ({})", path.display()))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        out.push('\n');
     }
     out
 }
