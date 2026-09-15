@@ -15,6 +15,11 @@ final class AudioEngine {
 
     /// Called on the audio thread with one frame of PCM16 mic audio.
     var onCapture: ((Data) -> Void)?
+    /// Live levels for the call screen, 0…1 (−50 dBFS … −10 dBFS): the
+    /// microphone per captured buffer, the reply per buffer as it plays.
+    var onInputLevel: ((Float) -> Void)?
+    var onOutputLevel: ((Float) -> Void)?
+    private var outputLevels: [Float] = []
     /// Called (on the audio thread) when every scheduled reply chunk has
     /// been heard.
     var onPlaybackDrained: (() -> Void)?
@@ -114,6 +119,7 @@ final class AudioEngine {
         replyPeak = max(replyPeak, peak)
         replySquares += squares
         replySamples += frames
+        let chunkLevel = Self.level(rms: Float(squares / Double(max(frames, 1))).squareRoot())
         if normalise { applyGain(channel, count: frames, chunkPeak: peak) }
         var sent: Float = 0
         for i in 0..<frames { sent = max(sent, abs(channel[i])) }
@@ -121,8 +127,19 @@ final class AudioEngine {
         lock.lock()
         scheduled += 1
         let current = generation
+        outputLevels.append(chunkLevel)
+        // The first buffer starts at once; its level shows now.
+        if scheduled == 1 { DispatchQueue.main.async { [weak self] in self?.onOutputLevel?(chunkLevel) } }
         lock.unlock()
         player.scheduleBuffer(buffer) { [weak self] in
+            // This buffer is done: the next one in the queue is what plays now.
+            if let self {
+                self.lock.lock()
+                if !self.outputLevels.isEmpty { self.outputLevels.removeFirst() }
+                let next = self.outputLevels.first ?? 0
+                self.lock.unlock()
+                DispatchQueue.main.async { self.onOutputLevel?(next) }
+            }
             self?.consumed(generation: current)
         }
         if !player.isPlaying { player.play() }
@@ -133,8 +150,10 @@ final class AudioEngine {
         lock.lock()
         generation += 1
         scheduled = 0
+        outputLevels.removeAll()
         lastPlaybackEnd = Date()
         lock.unlock()
+        DispatchQueue.main.async { [weak self] in self?.onOutputLevel?(0) }
         player.stop()
         player.play()
     }
@@ -223,6 +242,13 @@ final class AudioEngine {
             .joined(separator: ", ")
     }
 
+    /// −50 dBFS reads 0, −10 dBFS reads 1: the range a voice moves in.
+    static func level(rms: Float) -> Float {
+        guard rms > 0 else { return 0 }
+        let db = 20 * log10(rms)
+        return min(1, max(0, (db + 50) / 40))
+    }
+
     /// The system output volume for this session's route, 0…1.
     var systemVolume: Float { AVAudioSession.sharedInstance().outputVolume }
 
@@ -299,6 +325,12 @@ final class AudioEngine {
         }
         guard error == nil, out.frameLength > 0, let channel = out.int16ChannelData?[0] else { return }
         let count = Int(out.frameLength)
+        if let onInputLevel {
+            var squares: Double = 0
+            for i in 0..<count { let v = Float(channel[i]) / 32768; squares += Double(v * v) }
+            let level = Self.level(rms: Float(squares / Double(max(count, 1))).squareRoot())
+            DispatchQueue.main.async { onInputLevel(level) }
+        }
         if shouldMute(channel, count: count) {
             onCapture?(Data(count: count * MemoryLayout<Int16>.size))
         } else {

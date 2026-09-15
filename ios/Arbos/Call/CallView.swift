@@ -15,9 +15,10 @@ struct CallScreen: View {
     }
 }
 
-/// The call: a full-duplex conversation with the project's main agent.
-/// Opened from the project chat's handset; the chevron at the top goes
-/// back to the chat (the call keeps going until it is hung up).
+/// The call: one ring that moves with the live level, the state in a
+/// word, the last thing said, and one way to hang up. Designed to be
+/// glanced at with AirPods in: few elements, generous space, legible at
+/// arm's length. Same type, margins and palette as the two pages.
 struct CallView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var chat: ChatStore
@@ -33,50 +34,22 @@ struct CallView: View {
         ZStack {
             ArbosTheme.bg.ignoresSafeArea()
             VStack(spacing: 0) {
-                header
-                Spacer(minLength: 12)
-                StateOrb(phase: model.phase)
-                    .padding(.top, 8)
-                Text(model.phase.label)
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(ArbosTheme.text.opacity(0.85))
+                topBar
+                Spacer(minLength: 0)
+                VoiceRing(level: model.level, phase: model.phase)
+                    .frame(width: 196, height: 196)
+                Text(stateWord)
+                    .font(ArbosTheme.bodyMedium)
+                    .foregroundStyle(stateInk)
                     .padding(.top, 28)
                     .contentTransition(.opacity)
-                    .animation(.easeInOut(duration: 0.25), value: model.phase)
-                if let started = model.startedAt {
-                    ElapsedLabel(since: started)
-                        .padding(.top, 6)
-                }
-                if let note = model.note, model.phase.inCall {
-                    // Tap the status line to move the call between the
-                    // phone's speaker and a connected headset.
-                    Button(action: model.toggleSpeaker) {
-                        Text(note)
-                            .font(ArbosTheme.caption)
-                            .foregroundStyle(ArbosTheme.textDim)
-                            .padding(.top, 4)
-                    }
-                    .buttonStyle(.plain)
-                }
-                if case .failed(let reason) = model.phase {
-                    Text(reason)
-                        .font(ArbosTheme.callout)
-                        .foregroundStyle(ArbosTheme.textFaint)
-                        .padding(.top, 6)
-                        .padding(.horizontal, 40)
-                        .multilineTextAlignment(.center)
-                }
-                Spacer(minLength: 16)
-                TranscriptView(lines: model.lines)
-                    .frame(maxHeight: 220)
-                    .opacity(model.lines.isEmpty ? 0 : 1)
-                Spacer(minLength: 24)
+                    .animation(.easeInOut(duration: 0.2), value: model.phase)
+                words
+                    .padding(.top, 22)
+                    .padding(.horizontal, ArbosTheme.gutter + 8)
+                Spacer(minLength: 0)
                 callButton
-                    .padding(.bottom, 26)
-                Text(Self.buildLabel)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(ArbosTheme.text.opacity(0.18))
-                    .padding(.bottom, 4)
+                    .padding(.bottom, 36)
             }
         }
         .preferredColorScheme(.dark)
@@ -93,58 +66,118 @@ struct CallView: View {
         #endif
     }
 
-    /// `0.1.0 (57)`: so anyone can say which build they are running.
-    static var buildLabel: String {
-        let info = Bundle.main.infoDictionary ?? [:]
-        let version = info["CFBundleShortVersionString"] as? String ?? "?"
-        let build = info["CFBundleVersion"] as? String ?? "?"
-        return "\(version) (\(build))"
-    }
+    // MARK: - Pieces
 
-    /// Back to the chat on the left; the settings on the right while idle.
-    private var header: some View {
-        HStack {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(ArbosTheme.textMuted)
-                    .frame(width: 44, height: 44)
+    /// Back to the chat at the left; the route and the clock, small, in
+    /// the middle; the menu only while there is no call to disturb.
+    private var topBar: some View {
+        ZStack {
+            VStack(spacing: 3) {
+                Text(chat.identity?.label ?? chat.title)
+                    .font(ArbosTheme.bodySemibold)
+                    .foregroundStyle(ArbosTheme.text)
+                    .lineLimit(1)
+                if model.phase.inCall, let started = model.startedAt {
+                    HStack(spacing: 6) {
+                        ElapsedLabel(since: started)
+                        if !model.outputRoute.isEmpty {
+                            Text("·").foregroundStyle(ArbosTheme.textDim)
+                            Button(action: model.toggleSpeaker) {
+                                Text(model.outputRoute)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .font(ArbosTheme.caption)
+                    .foregroundStyle(ArbosTheme.textFaint)
+                }
             }
-            Spacer()
-            Text(chat.identity?.label ?? chat.title)
-                .font(ArbosTheme.calloutMedium)
-                .foregroundStyle(ArbosTheme.textFaint)
-                .lineLimit(1)
-            Spacer()
-            Button {
-                showSettings = true
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(ArbosTheme.textMuted)
-                    .frame(width: 44, height: 44)
+            .frame(maxWidth: 220)
+            HStack {
+                RoundButton(symbol: "chevron.down") { dismiss() }
+                Spacer()
+                if !model.phase.inCall {
+                    RoundButton(symbol: "ellipsis") { showSettings = true }
+                }
             }
-            .disabled(model.phase.inCall)
-            .opacity(model.phase.inCall ? 0 : 1)
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, ArbosTheme.gutter)
+        .padding(.top, 4)
     }
 
-    /// One control. Green to start, red to hang up, a gear when there is
-    /// nothing to call yet.
+    private var stateWord: String {
+        switch model.phase {
+        case .idle: return "Ready to call"
+        case .unconfigured(let why): return why
+        case .connecting: return "Connecting"
+        case .listening: return "Listening"
+        case .thinking: return "Thinking"
+        case .speaking: return "Speaking"
+        case .failed: return "Call failed"
+        }
+    }
+
+    private var stateInk: Color {
+        switch model.phase {
+        case .listening, .speaking: return ArbosTheme.text
+        case .thinking, .connecting: return ArbosTheme.textMuted
+        case .idle, .unconfigured: return ArbosTheme.textFaint
+        case .failed: return ArbosTheme.danger
+        }
+    }
+
+    /// What was just said: Jacob's last line, faint, then Arbos's reply
+    /// as it streams. Short by rule — he asks for more if he wants it.
+    @ViewBuilder
+    private var words: some View {
+        let user = model.lines.last { $0.speaker == .user }
+        let arbos = model.lines.last { $0.speaker == .arbos }
+        VStack(spacing: 12) {
+            if case .failed(let reason) = model.phase {
+                Text(reason)
+                    .font(ArbosTheme.callout)
+                    .foregroundStyle(ArbosTheme.textFaint)
+                    .multilineTextAlignment(.center)
+            }
+            if let user, !user.text.isEmpty {
+                Text(user.text)
+                    .font(ArbosTheme.body)
+                    .lineSpacing(ArbosTheme.lineSpacing)
+                    .foregroundStyle(ArbosTheme.textFaint)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .truncationMode(.head)
+            }
+            if let arbos, !arbos.text.isEmpty, isLatest(arbos) {
+                Text(arbos.text)
+                    .font(ArbosTheme.body)
+                    .lineSpacing(ArbosTheme.lineSpacing)
+                    .foregroundStyle(ArbosTheme.text)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(4)
+                    .truncationMode(.head)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(minHeight: 132, alignment: .top)
+        .animation(.easeOut(duration: 0.2), value: model.lines)
+    }
+
+    /// The reply is shown only while it is the newest thing said; once
+    /// Jacob speaks again it makes room.
+    private func isLatest(_ line: TranscriptLine) -> Bool {
+        guard let last = model.lines.last(where: { $0.speaker != .system }) else { return false }
+        return last.speaker == .arbos || model.phase == .speaking || model.phase == .thinking
+    }
+
+    /// One control: start, or hang up. A gear when nothing is set up.
     private var callButton: some View {
         Button(action: tapCall) {
-            ZStack {
-                Circle()
-                    .fill(buttonTint)
-                    .frame(width: 76, height: 76)
-                    .shadow(color: buttonTint.opacity(0.4), radius: 16, y: 6)
-                Image(systemName: buttonSymbol)
-                    .font(.system(size: 28, weight: .medium))
-                    .foregroundStyle(.white)
-            }
+            Image(systemName: buttonSymbol)
+                .font(.system(size: 26, weight: .medium))
+                .foregroundStyle(.white)
+                .frame(width: 68, height: 68)
+                .background(Circle().fill(buttonTint))
         }
         .buttonStyle(.plain)
         .animation(.easeInOut(duration: 0.25), value: model.phase)
@@ -163,7 +196,7 @@ struct CallView: View {
 
     private var buttonTint: Color {
         switch model.phase {
-        case .unconfigured: return Color(white: 0.28)
+        case .unconfigured: return ArbosTheme.raisedHover
         case .idle, .failed: return ArbosTheme.ok
         case .connecting, .listening, .thinking, .speaking: return ArbosTheme.danger
         }
@@ -195,6 +228,60 @@ struct CallView: View {
     #endif
 }
 
+/// The one moving thing: a thin ring, and inside it a disc that breathes
+/// with the live level — the microphone while Jacob talks (white ink),
+/// the reply while Arbos speaks (the accent). Thinking is a slow pulse
+/// with no sound behind it; idle is a still, faint ring.
+struct VoiceRing: View {
+    let level: Float
+    let phase: CallViewModel.Phase
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1 / 30)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let pulse = sin(t * 2 * .pi / 2.4) * 0.5 + 0.5
+            let scale = discScale(pulse: pulse)
+            ZStack {
+                Circle()
+                    .strokeBorder(ringInk, lineWidth: 1.5)
+                Circle()
+                    .fill(discInk)
+                    .scaleEffect(scale)
+                    .animation(.easeOut(duration: 0.08), value: level)
+            }
+        }
+        .animation(.easeInOut(duration: 0.3), value: phase)
+    }
+
+    /// 0.30 of the ring at rest, up to 0.92 at full level.
+    private func discScale(pulse: Double) -> CGFloat {
+        switch phase {
+        case .listening, .speaking: return 0.30 + 0.62 * CGFloat(min(1, max(0, level)))
+        case .thinking, .connecting: return 0.30 + 0.10 * CGFloat(pulse)
+        case .idle, .unconfigured, .failed: return 0.30
+        }
+    }
+
+    private var ringInk: Color {
+        switch phase {
+        case .listening, .thinking, .connecting: return ArbosTheme.borderStrong
+        case .speaking: return ArbosTheme.accent.opacity(0.5)
+        case .idle, .unconfigured: return ArbosTheme.border
+        case .failed: return ArbosTheme.danger.opacity(0.5)
+        }
+    }
+
+    private var discInk: Color {
+        switch phase {
+        case .listening: return ArbosTheme.text.opacity(0.9)
+        case .speaking: return ArbosTheme.accent
+        case .thinking, .connecting: return ArbosTheme.textMuted.opacity(0.7)
+        case .idle, .unconfigured: return ArbosTheme.textDim.opacity(0.6)
+        case .failed: return ArbosTheme.danger.opacity(0.7)
+        }
+    }
+}
+
 /// mm:ss since the call began.
 private struct ElapsedLabel: View {
     let since: Date
@@ -202,9 +289,8 @@ private struct ElapsedLabel: View {
     var body: some View {
         TimelineView(.periodic(from: since, by: 1)) { context in
             let seconds = max(0, Int(context.date.timeIntervalSince(since)))
-            Text(String(format: "%02d:%02d", seconds / 60, seconds % 60))
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(ArbosTheme.textFaint)
+            Text(String(format: "%d:%02d", seconds / 60, seconds % 60))
+                .monospacedDigit()
         }
     }
 }

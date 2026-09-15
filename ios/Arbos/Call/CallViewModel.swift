@@ -58,6 +58,11 @@ final class CallViewModel: ObservableObject {
     @Published private(set) var startedAt: Date?
     /// Short status under the label: engine, latency, "kernel offline".
     @Published private(set) var note: String?
+    /// The live level, 0…1: the microphone while Jacob talks, the reply
+    /// while Arbos speaks. Drives the ring on the call screen.
+    @Published private(set) var level: Float = 0
+    /// Where the sound goes: `speaker`, `AirPods`, `headphones`, …
+    var outputRoute: String { route }
 
     private let settings: AppSettings
     private let chat: ChatStore
@@ -136,6 +141,14 @@ final class CallViewModel: ObservableObject {
         audio.onPlaybackDrained = { [weak self] in
             Task { @MainActor in self?.playbackDrained() }
         }
+        audio.onInputLevel = { [weak self] value in
+            guard let self, self.phase != .speaking else { return }
+            self.level = value
+        }
+        audio.onOutputLevel = { [weak self] value in
+            guard let self, self.phase == .speaking || value > 0 else { return }
+            self.level = value
+        }
         audio.onRouteChange = { [weak self] route in
             guard let self else { return }
             self.route = route
@@ -197,11 +210,14 @@ final class CallViewModel: ObservableObject {
             }
         }
         #endif
-        await joinChat()
-        updateNote()
         #if DEBUG
+        // Before the chat joins: on a hub-attached kernel the join can take
+        // longer than the model's first reply, and the barge clip must be
+        // armed by then.
         startInjectionIfAsked()
         #endif
+        await joinChat()
+        updateNote()
     }
 
     /// The main chat mirrors the kernel. Only in the pipeline shape does
@@ -472,6 +488,7 @@ final class CallViewModel: ObservableObject {
         startedAt = nil
         kernelBusy = false
         speechEndedAt = nil
+        level = 0
     }
 
     #if DEBUG
@@ -502,6 +519,18 @@ final class CallViewModel: ObservableObject {
     private var injector: DebugInjector?
     private var bargeClip: Data?
 
+    /// Level of a PCM16 frame, as the engine measures the microphone.
+    nonisolated private static func level(of data: Data) -> Float {
+        let frames = data.count / 2
+        guard frames > 0 else { return 0 }
+        var squares: Double = 0
+        data.withUnsafeBytes { raw in
+            let samples = raw.bindMemory(to: Int16.self)
+            for i in 0..<frames { let v = Float(Int16(littleEndian: samples[i])) / 32768; squares += Double(v * v) }
+        }
+        return AudioEngine.level(rms: Float(squares / Double(frames)).squareRoot())
+    }
+
     /// 1 kHz sine at -3 dBFS, PCM16 mono at the wire rate.
     private static func tone(seconds: Int) -> Data {
         let rate = Int(AudioEngine.sampleRate)
@@ -520,7 +549,15 @@ final class CallViewModel: ObservableObject {
     /// reply to exercise barge-in.
     private func startInjectionIfAsked() {
         guard DebugInjector.isRequested() else { return }
-        let injector = DebugInjector(sink: link.audioSink())
+        let sink = link.audioSink()
+        let injector = DebugInjector(sink: { [weak self] data in
+            sink(data)
+            let level = Self.level(of: data)
+            Task { @MainActor in
+                guard let self, self.phase != .speaking else { return }
+                self.level = level
+            }
+        })
         self.injector = injector
         bargeClip = DebugInjector.clip(named: "bargeWav")
         injector.start()
