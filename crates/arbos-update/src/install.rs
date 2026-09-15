@@ -201,15 +201,20 @@ pub fn unpack(payload: &Path, format: Format, target: &Path) -> Result<PathBuf> 
     }
 }
 
+/// Launch Services' own register. Not on `PATH`, and not somewhere Apple
+/// promises it will stay, so every use of it is guarded.
+const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/\
+     LaunchServices.framework/Support/lsregister";
+
 /// Tell macOS the app at this path is new, so ⌘Space finds it now rather than
 /// whenever the system next gets round to looking.
 ///
 /// Two systems have to be told, and they are not the same one. Launch Services
-/// is the register of what applications exist — it is what opens a bundle, and
-/// what Spotlight's "open this app" results come from; Spotlight's own index
-/// is what matches the name typed into it. Replacing a bundle in place
-/// normally updates both eventually, and eventually is not what "⌘Space,
-/// arbos, return" means to somebody who just pressed Update.
+/// is the register of what applications exist — it is what resolves a bundle
+/// identifier to a bundle, and so what actually decides which Arbos opens;
+/// Spotlight's index is what matches the name typed into the search field.
+/// Replacing a bundle in place updates both eventually, and eventually is not
+/// what "⌘Space, arbos, return" means to somebody who just pressed Update.
 ///
 /// Both are best-effort. Neither failing is a reason to call an installed
 /// update a failed one, and on the next login both happen anyway.
@@ -217,12 +222,37 @@ pub fn reindex(target: &Path) {
     if cfg!(not(target_os = "macos")) {
         return;
     }
-    const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/\
-         LaunchServices.framework/Support/lsregister";
     if Path::new(LSREGISTER).is_file() {
         let _ = Command::new(LSREGISTER).arg("-f").arg(target).status();
     }
     let _ = Command::new("/usr/bin/mdimport").arg(target).status();
+}
+
+/// Take a bundle out of Launch Services' register.
+///
+/// Every copy of Arbos carries one `CFBundleIdentifier`, and Launch Services
+/// answers "open `life.arbos.desktop`" with whichever registered copy it
+/// likes. That is not a hypothetical: on Jacob's Mac five bundles claimed the
+/// identifier — build outputs and disk-image staging folders — and ⌘Space
+/// opened a stale scratch build instead of the installed app.
+///
+/// So every bundle this module is about to delete is unregistered first. A
+/// directory that is gone should stop answering on its own, and "should" is
+/// how the five got there.
+fn forget(path: &Path) {
+    if cfg!(not(target_os = "macos")) || !Path::new(LSREGISTER).is_file() {
+        return;
+    }
+    let _ = Command::new(LSREGISTER).arg("-u").arg(path).status();
+    // A staging directory holds the bundle rather than being one.
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for bundle in entries
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| path.extension().is_some_and(|e| e == "app"))
+        {
+            let _ = Command::new(LSREGISTER).arg("-u").arg(bundle).status();
+        }
+    }
 }
 
 /// Whether an unpacked tree is an Arbos that will run: the executable is
@@ -279,10 +309,17 @@ fn sibling(target: &Path, suffix: &str) -> Result<PathBuf> {
     Ok(parent.join(format!(".{name}{suffix}")))
 }
 
+/// Delete a tree, and take it out of Launch Services' register on the way.
+///
+/// Every path this module deletes is, or holds, a copy of the app — a backup,
+/// a staging tree, a rolled-back install. Unregistering before deleting is
+/// what keeps an update from leaving behind a second bundle that can answer
+/// for `life.arbos.desktop`, which is the bug this whole dance exists around.
 fn remove(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
+    forget(path);
     let removed = match path.is_dir() {
         true => std::fs::remove_dir_all(path),
         false => std::fs::remove_file(path),
