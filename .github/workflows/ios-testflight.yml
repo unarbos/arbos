@@ -65,12 +65,21 @@ jobs:
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
         run: |
+          set +e
           xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Arbos.xcarchive" \
             -exportOptionsPlist ExportOptions.plist -exportPath "$RUNNER_TEMP/export" \
             -allowProvisioningUpdates \
             -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_$NOTARY_KEY_ID.p8 \
             -authenticationKeyID "$NOTARY_KEY_ID" -authenticationKeyIssuerID "$NOTARY_ISSUER_ID" \
-            | tail -30
+            > "$RUNNER_TEMP/export.log" 2>&1
+          status=$?
+          set -e
+          tail -30 "$RUNNER_TEMP/export.log"
+          if grep -q "App record with bundle identifier" "$RUNNER_TEMP/export.log"; then
+            echo "::notice::No App Store Connect app record for com.unarbos.arbos.ios yet — nothing uploaded. Create the app once in App Store Connect (My Apps → + → New App)."
+            exit 0
+          fi
+          [ $status -eq 0 ] || exit $status
           echo "uploaded 0.2.0 ($BUILD) $(git rev-parse --short HEAD)"
 
       - name: Tell the dev feed where the iOS build lives
