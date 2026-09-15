@@ -40,21 +40,23 @@ struct CallView: View {
     var body: some View {
         ZStack {
             ArbosTheme.bg.ignoresSafeArea()
-            VStack(spacing: 0) {
-                topBar
-                Spacer(minLength: 0)
+            // The orb sits a little under the centre (the reference: centre
+            // + 14 pt) and stays put when the composer comes up.
+            VStack(spacing: 28) {
                 VoiceOrb(level: model.level, phase: model.phase)
                     .frame(width: 195, height: 195)
-                    .padding(.top, 28)
                     .onTapGesture(perform: tapOrb)
                 if let hint {
                     Text(hint)
                         .font(ArbosTheme.callout)
                         .foregroundStyle(ArbosTheme.textFaint)
                         .multilineTextAlignment(.center)
-                        .padding(.top, 28)
                         .padding(.horizontal, 40)
                 }
+            }
+            .offset(y: 14)
+            VStack(spacing: 0) {
+                topBar
                 Spacer(minLength: 0)
                 if pulledDown {
                     pulledDownRow
@@ -134,7 +136,7 @@ struct CallView: View {
                         .font(.system(size: 20, weight: .regular))
                         .foregroundStyle(ArbosTheme.textMuted)
                         .frame(width: 24, height: 24)
-                    TextField(model.phase.inCall ? "Type to \(chat.identity?.label ?? chat.agentName)" : "Type to \(chat.identity?.label ?? chat.agentName)", text: $draft)
+                    TextField("Type to \(projectName)", text: $draft)
                         .font(ArbosTheme.body)
                         .foregroundStyle(ArbosTheme.text)
                         .tint(ArbosTheme.accent)
@@ -190,6 +192,10 @@ struct CallView: View {
         case .failed(let reason): return reason
         case .connecting, .listening, .thinking, .speaking: return nil
         }
+    }
+
+    private var projectName: String {
+        chat.identity?.label ?? settings.kernelTarget.label.split(separator: "/").last.map(String.init) ?? "Arbos"
     }
 
     private var lastLine: TranscriptLine? {
