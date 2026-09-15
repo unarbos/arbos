@@ -60,6 +60,7 @@ pub const COORDINATOR_TOOLS: &[&str] = &[
     "delete",
     "agents",
     "transcript",
+    "pr",
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
