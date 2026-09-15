@@ -6,6 +6,7 @@ pub mod boardhub;
 pub mod build;
 pub mod data;
 pub mod driver;
+pub mod fonts;
 pub mod kernel;
 pub mod memory;
 pub mod model;
