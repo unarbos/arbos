@@ -143,11 +143,11 @@ final class CallViewModel: ObservableObject {
         }
         audio.onInputLevel = { [weak self] value in
             guard let self, self.phase != .speaking else { return }
-            self.level = value
+            self.meter(value)
         }
         audio.onOutputLevel = { [weak self] value in
             guard let self, self.phase == .speaking || value > 0 else { return }
-            self.level = value
+            self.meter(value)
         }
         audio.onRouteChange = { [weak self] route in
             guard let self else { return }
@@ -238,6 +238,13 @@ final class CallViewModel: ObservableObject {
     }
 
     private var route = ""
+
+    /// A voice envelope for the ring: rises at once, falls over ~0.3 s
+    /// (updates arrive every 40–45 ms), so the disc breathes with the
+    /// words instead of flickering between silence and peaks.
+    private func meter(_ value: Float) {
+        level = value >= level ? value : max(value, level - 0.12)
+    }
 
     /// Phone speaker instead of a connected headset, and back.
     func toggleSpeaker() {
@@ -555,7 +562,7 @@ final class CallViewModel: ObservableObject {
             let level = Self.level(of: data)
             Task { @MainActor in
                 guard let self, self.phase != .speaking else { return }
-                self.level = level
+                self.meter(level)
             }
         })
         self.injector = injector

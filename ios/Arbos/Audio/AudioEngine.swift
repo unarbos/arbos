@@ -19,7 +19,6 @@ final class AudioEngine {
     /// microphone per captured buffer, the reply per buffer as it plays.
     var onInputLevel: ((Float) -> Void)?
     var onOutputLevel: ((Float) -> Void)?
-    private var outputLevels: [Float] = []
     /// Called (on the audio thread) when every scheduled reply chunk has
     /// been heard.
     var onPlaybackDrained: (() -> Void)?
@@ -68,6 +67,16 @@ final class AudioEngine {
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: playFormat)
         engine.mainMixerNode.outputVolume = 1
+        // The reply's level as it actually plays, ~43 ms at a time.
+        player.installTap(onBus: 0, bufferSize: 1024, format: playFormat) { [weak self] buffer, _ in
+            guard let self, let onOutputLevel = self.onOutputLevel,
+                  let channel = buffer.floatChannelData?[0] else { return }
+            let count = Int(buffer.frameLength)
+            var squares: Double = 0
+            for i in 0..<count { squares += Double(channel[i] * channel[i]) }
+            let level = Self.level(rms: Float(squares / Double(max(count, 1))).squareRoot())
+            DispatchQueue.main.async { onOutputLevel(level) }
+        }
 
         if captureMic {
             let input = engine.inputNode
@@ -89,6 +98,7 @@ final class AudioEngine {
     func stop() {
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
+        player.removeTap(onBus: 0)
         if converter != nil {
             engine.inputNode.removeTap(onBus: 0)
             converter = nil
@@ -119,7 +129,7 @@ final class AudioEngine {
         replyPeak = max(replyPeak, peak)
         replySquares += squares
         replySamples += frames
-        let chunkLevel = Self.level(rms: Float(squares / Double(max(frames, 1))).squareRoot())
+
         if normalise { applyGain(channel, count: frames, chunkPeak: peak) }
         var sent: Float = 0
         for i in 0..<frames { sent = max(sent, abs(channel[i])) }
@@ -127,19 +137,8 @@ final class AudioEngine {
         lock.lock()
         scheduled += 1
         let current = generation
-        outputLevels.append(chunkLevel)
-        // The first buffer starts at once; its level shows now.
-        if scheduled == 1 { DispatchQueue.main.async { [weak self] in self?.onOutputLevel?(chunkLevel) } }
         lock.unlock()
         player.scheduleBuffer(buffer) { [weak self] in
-            // This buffer is done: the next one in the queue is what plays now.
-            if let self {
-                self.lock.lock()
-                if !self.outputLevels.isEmpty { self.outputLevels.removeFirst() }
-                let next = self.outputLevels.first ?? 0
-                self.lock.unlock()
-                DispatchQueue.main.async { self.onOutputLevel?(next) }
-            }
             self?.consumed(generation: current)
         }
         if !player.isPlaying { player.play() }
@@ -150,7 +149,6 @@ final class AudioEngine {
         lock.lock()
         generation += 1
         scheduled = 0
-        outputLevels.removeAll()
         lastPlaybackEnd = Date()
         lock.unlock()
         DispatchQueue.main.async { [weak self] in self?.onOutputLevel?(0) }
@@ -242,11 +240,11 @@ final class AudioEngine {
             .joined(separator: ", ")
     }
 
-    /// −50 dBFS reads 0, −10 dBFS reads 1: the range a voice moves in.
+    /// −55 dBFS reads 0, −12 dBFS reads 1: the range a voice moves in.
     static func level(rms: Float) -> Float {
         guard rms > 0 else { return 0 }
         let db = 20 * log10(rms)
-        return min(1, max(0, (db + 50) / 40))
+        return min(1, max(0, (db + 55) / 43))
     }
 
     /// The system output volume for this session's route, 0…1.
