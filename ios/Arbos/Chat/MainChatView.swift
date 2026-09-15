@@ -1,127 +1,215 @@
 import SwiftUI
 
-/// The project's main agent chat, with a composer. Opens as a sheet over
-/// the call screen; typing here talks to the same agent as the voice.
-struct MainChatView: View {
+/// A project's main chat — the desktop's Project chat, on a phone. The
+/// header block names the project the way its tab does; prompts are
+/// right-aligned cards; the agent's words are plain prose; a "Worked Ns"
+/// line closes each turn; workers show as the desktop's worker lines and
+/// open their own chat. The handset opens the call.
+struct ProjectChatView: View {
+    let target: KernelTarget
+    @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var chat: ChatStore
-    @Environment(\.dismiss) private var dismiss
-    /// Open with the keyboard up: the user swiped up to type.
-    var focusComposer = false
+    @EnvironmentObject private var projects: ProjectStore
 
     @State private var draft = ""
-    @State private var showTargets = false
+    @State private var showCall = false
+    @State private var worker: WorkerStatus?
     @FocusState private var composing: Bool
+
+    private var identity: ProjectIdentity {
+        chat.identity ?? projects.identity(for: target, remote: true)
+    }
+
+    private var entry: ProjectEntry? {
+        projects.entries.first { $0.target == target }
+    }
+
+    private var title: String {
+        identity.label ?? entry?.folder ?? target.label
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            header
             transcript
             composer
         }
-        .background(Color(red: 0.06, green: 0.06, blue: 0.07).ignoresSafeArea())
-        .preferredColorScheme(.dark)
-        .onAppear {
-            composing = focusComposer
-            #if DEBUG
-            if UserDefaults.standard.bool(forKey: "previewPicker") { showTargets = true }
-            #endif
-        }
-        .task { await chat.connect() }
-        .sheet(isPresented: $showTargets) {
-            TargetPickerView()
-                .presentationDetents([.medium, .large])
-        }
-    }
-
-    /// The title is a button: tap it to pick another machine or project.
-    private var header: some View {
-        HStack(spacing: 8) {
-            Button {
-                showTargets = true
-            } label: {
-                HStack(spacing: 4) {
-                    Text(chat.title)
-                        .font(.system(.headline, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.9))
+        .background(ArbosTheme.bg.ignoresSafeArea())
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                HStack(spacing: 8) {
+                    ProjectGlyph(identity: identity, size: 22, working: chat.busy || chat.running > 0)
+                    Text(title)
+                        .font(ArbosTheme.bodyMedium)
+                        .foregroundStyle(ArbosTheme.text)
                         .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.4))
                 }
             }
-            .buttonStyle(.plain)
-            Text(headerTag)
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.white.opacity(0.5))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Capsule().fill(.white.opacity(0.08)))
-            Spacer()
-            if chat.busy {
-                ProgressView().tint(.white.opacity(0.5)).controlSize(.small)
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showCall = true
+                } label: {
+                    Image(systemName: "phone")
+                        .foregroundStyle(ArbosTheme.text)
+                }
+                .disabled(!settings.isConfigured)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 18)
-        .padding(.bottom, 10)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(ArbosTheme.bg, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .fullScreenCover(isPresented: $showCall) {
+            CallScreen()
+        }
+        .navigationDestination(item: $worker) { worker in
+            WorkerChatView(worker: worker, project: identity)
+        }
+        .task(id: target) { await chat.switchTarget(target) }
+        .onChange(of: chat.identity) { _, face in
+            if let face { projects.remember(face, for: target) }
+        }
     }
 
-    /// `live · 1.7s`: where the chat comes from, and send → first token.
-    private var headerTag: String {
-        guard let latency = chat.lastFirstToken else { return chat.mode.tag }
-        return chat.mode.tag + String(format: " · %.1fs", latency)
-    }
+    // MARK: - Transcript
 
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                LazyVStack(alignment: .leading, spacing: ArbosTheme.itemGap) {
+                    header
                     ForEach(chat.items) { item in
-                        ChatRow(item: item)
-                            .id(item.id)
+                        ChatRow(item: item).id(item.id)
                     }
-                    if chat.busy, !(chat.items.last?.isStreamingAgent ?? false) {
-                        TypingDots().padding(.horizontal, 20).padding(.top, 2)
+                    if chat.busy {
+                        WorkingLine(step: chat.step)
+                    }
+                    workerLines
+                    if let notice = modeNotice {
+                        Text(notice)
+                            .font(ArbosTheme.caption)
+                            .foregroundStyle(ArbosTheme.textDim)
+                            .padding(.top, 4)
                     }
                     Color.clear.frame(height: 8).id("tail")
                 }
+                .padding(.horizontal, ArbosTheme.gutter)
                 .padding(.vertical, 8)
             }
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: chat.items) { _, _ in
                 withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
             }
+            .onChange(of: chat.workers) { _, _ in
+                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
+            }
             .onAppear { proxy.scrollTo("tail", anchor: .bottom) }
         }
     }
 
+    /// The desktop's header block: glyph, name, one line about the place.
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ProjectGlyph(identity: identity, size: 44)
+            Text(title)
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(ArbosTheme.text)
+            Text(headerLine)
+                .font(ArbosTheme.callout)
+                .foregroundStyle(ArbosTheme.textFaint)
+        }
+        .padding(.top, 18)
+        .padding(.bottom, 14)
+    }
+
+    private var headerLine: String {
+        var parts: [String] = []
+        if let entry {
+            parts.append(entry.machine)
+            if !entry.place.isEmpty { parts.append(entry.place) }
+        } else {
+            parts.append(target.label)
+        }
+        switch chat.mode {
+        case .connecting: parts.append("connecting…")
+        case .offline: parts.append("offline")
+        case .mock: parts.append("demo")
+        case .server, .live: break
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// One row per running worker, as the desktop draws them: the first
+    /// carries the count, each names its worker and its step. Tap opens
+    /// the worker's chat.
+    @ViewBuilder
+    private var workerLines: some View {
+        let running = chat.workers.filter(\.running)
+        if !running.isEmpty {
+            VStack(alignment: .leading, spacing: ArbosTheme.rowGap) {
+                ForEach(Array(running.enumerated()), id: \.element.id) { index, status in
+                    Button {
+                        worker = status
+                    } label: {
+                        WorkerLine(status: status, count: index == 0 ? running.count : nil)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private var modeNotice: String? {
+        switch chat.mode {
+        case .mock: return "No kernel reachable — a scripted chat is answering."
+        case .offline: return "Kernel offline."
+        case .connecting, .server, .live: return nil
+        }
+    }
+
+    // MARK: - Composer
+
+    /// The desktop's composer pill: radius 14, a hairline, the field, the
+    /// send disc at the trailing edge. Stop while a turn runs.
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            TextField("Message \(chat.agentName)", text: $draft, axis: .vertical)
-                .lineLimit(1...5)
+        HStack(alignment: .bottom, spacing: 8) {
+            TextField(placeholder, text: $draft, axis: .vertical)
+                .font(ArbosTheme.body)
+                .lineLimit(1...6)
                 .focused($composing)
-                .submitLabel(.send)
-                .onSubmit(send)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 20).fill(.white.opacity(0.08)))
-                .foregroundStyle(.white)
+                .foregroundStyle(ArbosTheme.text)
+                .tint(ArbosTheme.accent)
+                .padding(.leading, 6)
+                .padding(.vertical, 6)
             Button(action: send) {
                 Image(systemName: "arrow.up")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.black)
-                    .frame(width: 38, height: 38)
-                    .background(Circle().fill(canSend ? Color.white : Color.white.opacity(0.25)))
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(canSend ? Color.black : ArbosTheme.textDim)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(canSend ? ArbosTheme.text : ArbosTheme.raisedHover))
             }
             .disabled(!canSend)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 10)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: ArbosTheme.composerRadius, style: .continuous)
+                .fill(ArbosTheme.inputBg)
+                .overlay(
+                    RoundedRectangle(cornerRadius: ArbosTheme.composerRadius, style: .continuous)
+                        .strokeBorder(ArbosTheme.border, lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, ArbosTheme.gutter)
+        .padding(.top, 6)
+        .padding(.bottom, 8)
+    }
+
+    private var placeholder: String {
+        chat.items.isEmpty ? "What are you working on?" : "Send follow-up"
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.mode != .offline
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.mode != .offline && chat.mode != .connecting
     }
 
     private func send() {
@@ -131,54 +219,122 @@ struct MainChatView: View {
     }
 }
 
-/// One row. Jacob's turns are bright; the agent's are soft; tool and
-/// sub-agent lines are thin and dim so they read as texture, not text.
+/// The desktop's live headline while a turn runs: "Working <step>", the
+/// words breathing so the eye knows the agent is going.
+struct WorkingLine: View {
+    let step: String
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1 / 30)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let pulse = 0.55 + 0.45 * (sin(t * 2.2) * 0.5 + 0.5)
+            Text(step.isEmpty ? "Working" : "Working \(step)")
+                .font(ArbosTheme.body)
+                .foregroundStyle(ArbosTheme.textMuted.opacity(pulse))
+                .lineLimit(1)
+        }
+    }
+}
+
+/// "2 Working agent-B · Editing sets.md" / "Working agent-A · Reading notes.md".
+struct WorkerLine: View {
+    let status: WorkerStatus
+    var count: Int?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            BrailleSpinner(tint: ArbosTheme.textMuted)
+                .font(.system(size: 12, design: .monospaced))
+                .frame(width: 12)
+            Text(text)
+                .font(ArbosTheme.body)
+                .foregroundStyle(ArbosTheme.textMuted)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(ArbosTheme.textDim)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private var text: String {
+        let lead = count.map { "\($0) Working" } ?? "Working"
+        let step = status.step.isEmpty ? "" : " · \(status.step)"
+        return "\(lead) \(status.name)\(step)"
+    }
+}
+
+/// One row, in the desktop's shapes. A prompt is a right-aligned card
+/// (`#212121`, radius 10, 70 % max width). The agent's words are prose.
+/// Tool lines, worker reports and notices are one dim line each.
 struct ChatRow: View {
     let item: ChatItem
 
     var body: some View {
         switch item.kind {
         case .user(let text):
-            Text(text)
-                .font(.body.weight(.medium))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 20)
-                .padding(.top, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack {
+                Spacer(minLength: 0)
+                Text(text)
+                    .font(ArbosTheme.body)
+                    .foregroundStyle(ArbosTheme.text)
+                    .padding(.horizontal, ArbosTheme.promptPadX)
+                    .padding(.vertical, ArbosTheme.promptPadY)
+                    .background(
+                        RoundedRectangle(cornerRadius: ArbosTheme.promptRadius, style: .continuous)
+                            .fill(ArbosTheme.card)
+                    )
+                    .frame(maxWidth: UIScreen.main.bounds.width * 0.78, alignment: .trailing)
+            }
+            .padding(.top, 6)
         case .agent(let text, let streaming):
             HStack(alignment: .lastTextBaseline, spacing: 2) {
                 Text(text)
-                    .font(.body)
-                    .foregroundStyle(.white.opacity(0.78))
-                if streaming {
-                    Cursor()
-                }
+                    .font(ArbosTheme.body)
+                    .lineSpacing(5)
+                    .foregroundStyle(ArbosTheme.text)
+                    .textSelection(.enabled)
+                if streaming { Caret() }
             }
-            .padding(.horizontal, 20)
             .frame(maxWidth: .infinity, alignment: .leading)
+        case .worked(let seconds):
+            Text("Worked \(Self.duration(seconds))")
+                .font(ArbosTheme.body)
+                .foregroundStyle(ArbosTheme.textFaint)
         case .tool(let label, let failed, let seconds):
             line(
                 symbol: failed ? "xmark" : "chevron.right",
                 text: label,
                 trailing: seconds.map { $0 >= 1 ? "\($0)s" : "" } ?? "",
-                tint: failed ? Color(red: 0.86, green: 0.40, blue: 0.40) : .white.opacity(0.38),
+                tint: failed ? ArbosTheme.danger : ArbosTheme.textFaint,
                 truncation: .middle
             )
         case .subagent(let name, let status):
-            line(
-                symbol: "arrow.turn.down.right",
-                text: "\(name) · \(status)",
-                trailing: "",
-                tint: Color(red: 0.55, green: 0.64, blue: 0.98).opacity(0.85)
-            )
+            switch status {
+            case "done":
+                Text("Done \(name)")
+                    .font(ArbosTheme.body)
+                    .foregroundStyle(ArbosTheme.textFaint)
+                    .lineLimit(1)
+            case "spawned":
+                EmptyView()
+            default:
+                line(symbol: "arrow.turn.down.right", text: "\(name) · \(status)", trailing: "", tint: ArbosTheme.textFaint)
+            }
         case .notice(let text, let failed):
             line(
                 symbol: failed ? "exclamationmark.circle" : "info.circle",
                 text: text,
                 trailing: "",
-                tint: failed ? Color(red: 0.86, green: 0.40, blue: 0.40) : .white.opacity(0.38)
+                tint: failed ? ArbosTheme.danger : ArbosTheme.textFaint
             )
         }
+    }
+
+    static func duration(_ seconds: Int) -> String {
+        seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s"
     }
 
     private func line(
@@ -190,43 +346,26 @@ struct ChatRow: View {
                 .font(.system(size: 9, weight: .semibold))
                 .frame(width: 10)
             Text(text)
-                .lineLimit(1)
+                .lineLimit(2)
                 .truncationMode(truncation)
             Spacer(minLength: 8)
             if !trailing.isEmpty {
                 Text(trailing)
             }
         }
-        .font(.system(.caption, design: .monospaced))
+        .font(ArbosTheme.callout)
         .foregroundStyle(tint)
-        .padding(.horizontal, 20)
     }
 }
 
 /// A blinking caret at the end of a streaming reply.
-private struct Cursor: View {
+private struct Caret: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 0.5)) { context in
             let on = Int(context.date.timeIntervalSinceReferenceDate * 2) % 2 == 0
             RoundedRectangle(cornerRadius: 1)
-                .fill(.white.opacity(on ? 0.7 : 0.1))
+                .fill(ArbosTheme.text.opacity(on ? 0.7 : 0.1))
                 .frame(width: 2, height: 16)
-        }
-    }
-}
-
-/// Three soft dots while the agent works and has said nothing yet.
-private struct TypingDots: View {
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 20)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: 4) {
-                ForEach(0..<3, id: \.self) { i in
-                    Circle()
-                        .fill(.white.opacity(0.25 + 0.45 * (sin(t * 4 + Double(i) * 0.9) * 0.5 + 0.5)))
-                        .frame(width: 6, height: 6)
-                }
-            }
         }
     }
 }

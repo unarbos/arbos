@@ -36,6 +36,20 @@ final class MockKernelChat: ChatSource {
             ChatItem(.tool(label: "bash · cargo test -p arbos-kernel attach", failed: false, seconds: 41)),
         ]))
         stream?.yield(.turn(running: false))
+        stream?.yield(.identity(ProjectIdentity(name: "demo", icon: "terminal", color: "teal")))
+        stream?.yield(.workers([
+            WorkerStatus(id: "a7k2", name: "reconnect test", step: "Running cargo test", running: true),
+        ]))
+    }
+
+    func history(agent: String) async -> [ChatItem] {
+        [
+            ChatItem(.user("Write the reconnect test for the attach loop: three cases, one on a slow tunnel.")),
+            ChatItem(.tool(label: "read · serve.rs", failed: false, seconds: 0)),
+            ChatItem(.tool(label: "edit · tests/attach.rs", failed: false, seconds: 2)),
+            ChatItem(.tool(label: "bash · cargo test -p arbos-kernel attach", failed: false, seconds: 41)),
+            ChatItem(.agent("Three cases pass. The slow-tunnel case is flaky; widening the settle window.", streaming: false)),
+        ]
     }
 
     func send(text: String, steer: Bool) async throws {

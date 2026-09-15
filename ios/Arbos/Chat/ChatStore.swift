@@ -28,6 +28,12 @@ final class ChatStore: ObservableObject {
     @Published private(set) var items: [ChatItem] = []
     @Published private(set) var busy = false
     @Published private(set) var agents: [KernelAgent] = []
+    /// The root's workers, for the worker lines and the Working pill.
+    @Published private(set) var workers: [WorkerStatus] = []
+    /// The root's live step while a turn runs ("Reading notes.md").
+    @Published private(set) var step = ""
+    /// The project's face from `.arbos/project.toml`, once read.
+    @Published private(set) var identity: ProjectIdentity?
     /// Send → first token of the last typed turn.
     @Published private(set) var lastFirstToken: TimeInterval?
 
@@ -113,9 +119,19 @@ final class ChatStore: ObservableObject {
         disconnect()
         items.removeAll()
         agents.removeAll()
+        workers.removeAll()
+        step = ""
+        identity = nil
         lastFirstToken = nil
         await connect()
     }
+
+    /// A worker's transcript, replayed once from the kernel.
+    func history(agent: String) async -> [ChatItem] {
+        await source?.history(agent: agent) ?? []
+    }
+
+    var running: Int { workers.filter(\.running).count }
 
     /// Open another kernel: the pod, or a machine/project on the hub.
     func switchTarget(_ target: KernelTarget) async {
@@ -199,6 +215,12 @@ final class ChatStore: ObservableObject {
             if !running { closeOpenAgentMessage() }
         case .agents(let list):
             agents = list
+        case .workers(let list):
+            workers = list
+        case .step(let text):
+            step = text
+        case .identity(let face):
+            identity = face
         case .dropped(let reason):
             items.append(ChatItem(.notice(reason, failed: true)))
             mode = .offline

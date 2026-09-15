@@ -7,7 +7,8 @@ import Foundation
 /// (`replayed` … `history_end`), which becomes the chat's history in one
 /// go. Live replies stream token by token as `assistant_delta`; the kernel
 /// then sends `turn idle` and the whole `assistant` event, which replaces
-/// the streamed text rather than adding to it.
+/// the streamed text rather than adding to it. `status` frames drive the
+/// worker lines; `read project.toml` fetches the project's face.
 @MainActor
 final class LiveKernelChat: ChatSource {
     private let client: ArbosKernelClient
@@ -17,11 +18,17 @@ final class LiveKernelChat: ChatSource {
     private var focus = "root"
     private var children: Set<String> = []
     private var childNames: [String: String] = [:]
+    private var workers: [String: WorkerStatus] = [:]
+    private var workerOrder: [String] = []
     private var history: [ChatItem] = []
     private var replaying = true
     /// A reply is being streamed; the next `assistant` event is its final
     /// text, not a new message.
     private var streamed = false
+    private var turnStarted: Date?
+    /// A `history <agent>` request in flight: its replayed lines and the
+    /// continuation waiting for `history_end`.
+    private var pendingHistory: (agent: String, items: [ChatItem], done: CheckedContinuation<[ChatItem], Never>)?
 
     let updates: AsyncStream<ChatUpdate>
 
@@ -41,6 +48,7 @@ final class LiveKernelChat: ChatSource {
             }
         }
         try await client.attach(endpoint)
+        try? client.read(path: "project.toml")
     }
 
     func send(text: String, steer: Bool) async throws {
@@ -51,6 +59,23 @@ final class LiveKernelChat: ChatSource {
         pump?.cancel()
         client.detach()
         stream?.finish()
+        if let pending = pendingHistory {
+            pendingHistory = nil
+            pending.done.resume(returning: pending.items)
+        }
+    }
+
+    func history(agent: String) async -> [ChatItem] {
+        guard pendingHistory == nil else { return [] }
+        return await withCheckedContinuation { continuation in
+            pendingHistory = (agent, [], continuation)
+            do {
+                try client.history(agent: agent)
+            } catch {
+                pendingHistory = nil
+                continuation.resume(returning: [])
+            }
+        }
     }
 
     // MARK: - Frames → chat
@@ -67,9 +92,18 @@ final class LiveKernelChat: ChatSource {
             remember(agents)
             stream?.yield(.agents(agents))
         case .replayed(let agent, let event):
+            if let pending = pendingHistory, pending.agent == agent {
+                if let item = item(for: event, worker: true) { pendingHistory?.items.append(item) }
+                return
+            }
             guard agent == focus else { return }
-            if let item = item(for: event) { history.append(item) }
+            if let item = item(for: event, worker: false) { history.append(item) }
         case .historyEnd(let agent):
+            if let pending = pendingHistory, pending.agent == agent {
+                pendingHistory = nil
+                pending.done.resume(returning: pending.items)
+                return
+            }
             guard agent == focus else { return }
             replaying = false
             stream?.yield(.history(history))
@@ -81,19 +115,44 @@ final class LiveKernelChat: ChatSource {
         case .event(let agent, let event):
             if agent == focus { handleLive(event) }
         case .turn(let agent, let state):
+            let running = state == "running"
             if agent == focus {
-                stream?.yield(.turn(running: state == "running"))
+                if running {
+                    if turnStarted == nil { turnStarted = Date() }
+                } else {
+                    if let started = turnStarted {
+                        turnStarted = nil
+                        stream?.yield(.agentDone)
+                        stream?.yield(.item(ChatItem(.worked(seconds: Int(Date().timeIntervalSince(started))))))
+                    }
+                    stream?.yield(.step(""))
+                }
+                stream?.yield(.turn(running: running))
             } else if children.contains(agent) {
-                stream?.yield(.item(ChatItem(.subagent(
-                    name: childNames[agent] ?? agent,
-                    status: state == "running" ? "working" : "done"
-                ))))
+                setWorker(agent, running: running, step: running ? nil : "")
+                if !running {
+                    stream?.yield(.item(ChatItem(.subagent(name: childNames[agent] ?? agent, status: "done"))))
+                }
+            }
+        case .status(let agent, let step, _):
+            if agent == focus {
+                stream?.yield(.step(step))
+            } else if children.contains(agent) {
+                setWorker(agent, running: !step.isEmpty ? true : nil, step: step)
+            }
+        case .working(let agent, let secs):
+            if agent == focus { stream?.yield(.step(secs > 3 ? "Thinking · \(secs)s" : "Thinking")) }
+        case .file(let path, let text, let error):
+            if path == "project.toml", error == nil, let identity = ProjectIdentity.parse(toml: text) {
+                stream?.yield(.identity(identity))
             }
         case .ask(let agent, let question, _):
             if agent == focus {
                 stream?.yield(.agentDone)
                 stream?.yield(.item(ChatItem(.agent(question, streaming: false))))
             }
+        case .thinkingDelta:
+            break
         case .other(let type):
             if type == "closed" { stream?.yield(.dropped("kernel closed")) }
         }
@@ -115,15 +174,18 @@ final class LiveKernelChat: ChatSource {
         if case .tool(let record) = event, record.name == "spawn", let child = record.child {
             children.insert(child)
             childNames[child] = record.args?["brief"] as? String ?? child
+            setWorker(child, running: true, step: "Starting")
         }
-        guard let item = item(for: event) else { return }
+        guard let item = item(for: event, worker: false) else { return }
         stream?.yield(.agentDone)
         stream?.yield(.item(item))
     }
 
     /// One transcript line as a chat row; nil for lines the chat does not
-    /// draw (wakes, thinking, turn boundaries).
-    private func item(for event: KernelEvent) -> ChatItem? {
+    /// draw (wakes, thinking, turn boundaries). The root's own tool calls
+    /// are hidden the way the desktop's Project chat hides them; a
+    /// worker's chat shows every tool line.
+    private func item(for event: KernelEvent, worker: Bool) -> ChatItem? {
         switch event {
         case .user(let text), .answer(let text):
             return ChatItem(.user(text))
@@ -137,6 +199,7 @@ final class LiveKernelChat: ChatSource {
                 childNames[child] = brief
                 return ChatItem(.subagent(name: brief, status: "spawned"))
             }
+            if !worker, Self.hiddenRootTools.contains(record.name) { return nil }
             return ChatItem(.tool(label: record.label, failed: record.error != nil, seconds: record.seconds))
         case .say(let from, let text):
             return ChatItem(.subagent(name: childNames[from] ?? from, status: text))
@@ -145,16 +208,42 @@ final class LiveKernelChat: ChatSource {
         case .notice(let text, let failed):
             return ChatItem(.notice(text, failed: failed))
         case .interrupted(let detail):
-            return ChatItem(.notice(detail.isEmpty ? "stopped" : detail, failed: false))
+            return ChatItem(.notice(detail.isEmpty ? "Stopped by you" : detail, failed: false))
         case .thinking, .turnComplete, .other:
             return nil
         }
     }
 
+    /// The coordinator's bookkeeping calls: worker lines, the page, the
+    /// checklist and the live step stand in for them, never a row.
+    private static let hiddenRootTools: Set<String> = [
+        "status", "plan", "todo", "say", "subscribe", "remember", "notes", "page", "title",
+    ]
+
     private func remember(_ agents: [KernelAgent]) {
         for agent in agents where agent.parent == focus {
             children.insert(agent.id)
-            if childNames[agent.id] == nil { childNames[agent.id] = agent.name }
+            if childNames[agent.id] == nil || childNames[agent.id] == agent.id { childNames[agent.id] = agent.name }
+            if workers[agent.id] == nil {
+                workers[agent.id] = WorkerStatus(id: agent.id, name: agent.name, step: "", running: false)
+                workerOrder.append(agent.id)
+            } else {
+                workers[agent.id]?.name = agent.name
+            }
         }
+        publishWorkers()
+    }
+
+    private func setWorker(_ id: String, running: Bool?, step: String?) {
+        var worker = workers[id] ?? WorkerStatus(id: id, name: childNames[id] ?? id, step: "", running: false)
+        if workers[id] == nil { workerOrder.append(id) }
+        if let running { worker.running = running }
+        if let step { worker.step = step }
+        workers[id] = worker
+        publishWorkers()
+    }
+
+    private func publishWorkers() {
+        stream?.yield(.workers(workerOrder.compactMap { workers[$0] }))
     }
 }

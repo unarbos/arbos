@@ -123,11 +123,37 @@ enum KernelFrame {
     /// `running` or `idle`.
     case turn(agent: String, state: String)
     case ask(agent: String, question: String, options: [String])
+    /// What `agent` is doing now, in a few words; empty means idle.
+    case status(agent: String, step: String, source: String)
+    /// The model call for `agent` is alive but silent for `secs` seconds.
+    case working(agent: String, secs: Int)
+    /// A file under `.arbos/`, answering a `read`.
+    case file(path: String, text: String, error: String?)
+    case thinkingDelta(agent: String, text: String)
     case other(type: String)
 
     init?(json object: [String: Any]) {
         guard let type = object["type"] as? String else { return nil }
         switch type {
+        case "status":
+            self = .status(
+                agent: object["agent"] as? String ?? "",
+                step: object["step"] as? String ?? "",
+                source: object["source"] as? String ?? ""
+            )
+        case "working":
+            self = .working(agent: object["agent"] as? String ?? "", secs: object["secs"] as? Int ?? 0)
+        case "file":
+            self = .file(
+                path: object["path"] as? String ?? "",
+                text: object["text"] as? String ?? "",
+                error: object["error"] as? String
+            )
+        case "thinking_delta":
+            self = .thinkingDelta(
+                agent: object["agent"] as? String ?? "",
+                text: object["text"] as? String ?? ""
+            )
         case "hello":
             self = .hello(
                 focus: object["focus"] as? String ?? "root",
