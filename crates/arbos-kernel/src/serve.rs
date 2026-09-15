@@ -1611,6 +1611,7 @@ pub fn kernel_registry(hooks: &Arc<KernelHooks>, ptys: &Arc<PtyHub>) -> Registry
         .with(tools::Spawn(Arc::clone(hooks)))
         .with(tools::Say(Arc::clone(hooks)))
         .with(tools::PlanTool(Arc::clone(hooks)))
+        .with(tools::TodoTool(Arc::clone(hooks)))
         .with(tools::Ask(Arc::clone(hooks)))
         .with(tools::StatusTool(Arc::clone(hooks)))
         .with(tools::Browser(Arc::clone(hooks)))

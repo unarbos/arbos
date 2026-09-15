@@ -88,13 +88,34 @@ pub fn load(place: &Place, agent: &str) -> Notes {
 }
 
 pub fn save(place: &Place, agent: &str, notes: &Notes) -> Result<()> {
-    let p = path(place, agent);
+    save_path(&path(place, agent), notes)
+}
+
+/// `agents/<id>/todo.md`: the agent's own working checklist for the thread
+/// in hand (Cursor's TodoWrite), shown to the user as a card and never a
+/// page. A coordinator's `plan` writes the project page, so this is where
+/// its own steps go; a worker has both and may use either.
+pub const TODO: &str = "todo.md";
+
+pub fn todo_path(place: &Place, agent: &str) -> PathBuf {
+    place.agent_dir(agent).join(TODO)
+}
+
+pub fn load_todo(place: &Place, agent: &str) -> Notes {
+    read_path(&todo_path(place, agent))
+}
+
+pub fn save_todo(place: &Place, agent: &str, notes: &Notes) -> Result<()> {
+    save_path(&todo_path(place, agent), notes)
+}
+
+fn save_path(p: &Path, notes: &Notes) -> Result<()> {
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = p.with_extension(format!("md.{}.tmp", std::process::id()));
     std::fs::write(&tmp, notes.render()).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &p).with_context(|| format!("replace {}", p.display()))?;
+    std::fs::rename(&tmp, p).with_context(|| format!("replace {}", p.display()))?;
     Ok(())
 }
 

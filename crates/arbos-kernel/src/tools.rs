@@ -443,6 +443,172 @@ impl Tool for Say {
     }
 }
 
+/// Which checklist a `plan`/`todo` call edits. Both share one op set and
+/// one file shape (`notes::Notes`); they differ in the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Checklist {
+    /// `notes.md`: a worker's checklist; the coordinator's is the project
+    /// page `.arbos/notes.md`.
+    Plan,
+    /// `agents/<id>/todo.md`: the agent's own steps for the thread in
+    /// hand (Cursor's TodoWrite), a card for the user, never a page.
+    Todo,
+}
+
+impl Checklist {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Todo => "todo",
+        }
+    }
+    fn load(self, hooks: &KernelHooks, agent: &str) -> arbos_core::notes::Notes {
+        match self {
+            Self::Plan => hooks.notes(agent),
+            Self::Todo => hooks.todo(agent),
+        }
+    }
+    fn save(self, hooks: &KernelHooks, agent: &str, n: &arbos_core::notes::Notes) -> Result<()> {
+        match self {
+            Self::Plan => hooks.save_notes(agent, n),
+            Self::Todo => hooks.save_todo(agent, n),
+        }
+    }
+}
+
+/// One `set`/`add`/`check`/`update`/`remove`/`show` call on a checklist.
+fn checklist_op(
+    hooks: &KernelHooks,
+    agent: &str,
+    args: &Value,
+    list: Checklist,
+) -> Result<ToolOut> {
+    // What was meant when `op` is missing or spelt another way: a
+    // list under any of the usual keys is a set; text alone is a
+    // set too when it holds a checklist, else an add.
+    let list_key = [
+        "items",
+        "goals",
+        "nodes",
+        "steps",
+        "tasks",
+        "checklist",
+        "plan",
+        "list",
+    ]
+    .into_iter()
+    .find(|k| args.get(*k).is_some_and(|v| !v.is_null()));
+    let op_raw = opt_str(&args, "op")
+        .or_else(|| opt_str(&args, "action"))
+        .unwrap_or("");
+    let op = match op_raw.trim().to_ascii_lowercase().as_str() {
+        "set" | "replace" | "write" | "create" | "new" => "set",
+        "add" | "append" | "push" => "add",
+        "check" | "done" | "complete" | "finish" | "tick" => "check",
+        "update" | "edit" | "rename" => "update",
+        "remove" | "delete" | "drop" | "cancel" => "remove",
+        "show" | "list" | "get" | "read" | "view" => "show",
+        "" if list_key.is_some() => "set",
+        "" if opt_str(&args, "text")
+            .or_else(|| opt_str(&args, "markdown"))
+            .is_some_and(|t| t.contains("\n")) =>
+        {
+            "set"
+        }
+        "" if opt_str(&args, "text").is_some() => "add",
+        "" if args.as_object().is_none_or(|o| o.is_empty()) => "show",
+        other => anyhow::bail!(
+            "{}: op {other:?} is not one of set, add, check, update, remove, show. {}",
+            list.name(),
+            arbos_core::notes::SHAPES
+        ),
+    };
+    let mut notes = list.load(&hooks, agent);
+    let n = || -> Result<usize> {
+        ["n", "item", "index", "id", "number"]
+            .iter()
+            .find_map(|k| args.get(*k))
+            .and_then(|v| {
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+            })
+            .map(|v| v as usize)
+            .ok_or_else(|| anyhow::anyhow!("plan {op}: n (the item number from show) is required"))
+    };
+    let ack = match op {
+        "set" => {
+            let source = list_key
+                .and_then(|k| args.get(k))
+                .or_else(|| args.get("text"))
+                .or_else(|| args.get("markdown"))
+                .or_else(|| args.get("content"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("plan set: no items. {}", arbos_core::notes::SHAPES)
+                })?;
+            let items = arbos_core::notes::items_from_json(source)
+                .map_err(|e| anyhow::anyhow!("plan set: {e:#}. {}", arbos_core::notes::SHAPES))?;
+            notes.set(&items);
+            list.save(&hooks, agent, &notes)?;
+            format!("Set {} item(s).", items.len())
+        }
+        "add" => {
+            let text = opt_str(&args, "text")
+                .or_else(|| opt_str(&args, "item"))
+                .or_else(|| opt_str(&args, "label"))
+                .or_else(|| opt_str(&args, "goal"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("plan add: text is required. {}", arbos_core::notes::SHAPES)
+                })?;
+            let added = notes.add(opt_str(&args, "section").unwrap_or(""), text);
+            list.save(&hooks, agent, &notes)?;
+            if added.replaced {
+                format!(
+                    "Rewrote item {} (it already named that target); nothing was added.",
+                    added.n
+                )
+            } else {
+                format!("Added item {}.", added.n)
+            }
+        }
+        "check" => {
+            let k = n()?;
+            let done = args.get("done").and_then(|v| v.as_bool()).unwrap_or(true);
+            let item = notes.check_with_target(
+                k,
+                done,
+                opt_str(&args, "readout"),
+                opt_str(&args, "target"),
+            )?;
+            list.save(&hooks, agent, &notes)?;
+            format!(
+                "{} {}: {}. Items are renumbered after a check (done ones sink); use the numbers in this list.",
+                if done { "Checked" } else { "Reopened" },
+                k,
+                item.text
+            )
+        }
+        "update" => {
+            let k = n()?;
+            notes.update(k, req(&args, "text")?)?;
+            list.save(&hooks, agent, &notes)?;
+            format!("Updated item {k}.")
+        }
+        "remove" => {
+            let k = n()?;
+            let item = notes.remove(k)?;
+            list.save(&hooks, agent, &notes)?;
+            format!("Removed: {}", item.text)
+        }
+        _ => String::new(),
+    };
+    let shown = list.load(&hooks, agent).show();
+    Ok(ToolOut::text(if ack.is_empty() {
+        shown
+    } else {
+        format!("{ack}\n\n{shown}")
+    }))
+}
+
 pub struct PlanTool(pub Arc<KernelHooks>);
 
 impl Tool for PlanTool {
@@ -480,138 +646,47 @@ impl Tool for PlanTool {
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         let hooks = Arc::clone(&self.0);
-        Box::pin(async move {
-            let agent = cx.agent.id.as_str();
-            // What was meant when `op` is missing or spelt another way: a
-            // list under any of the usual keys is a set; text alone is a
-            // set too when it holds a checklist, else an add.
-            let list_key = [
-                "items",
-                "goals",
-                "nodes",
-                "steps",
-                "tasks",
-                "checklist",
-                "plan",
-                "list",
-            ]
-            .into_iter()
-            .find(|k| args.get(*k).is_some_and(|v| !v.is_null()));
-            let op_raw = opt_str(&args, "op")
-                .or_else(|| opt_str(&args, "action"))
-                .unwrap_or("");
-            let op = match op_raw.trim().to_ascii_lowercase().as_str() {
-                "set" | "replace" | "write" | "create" | "new" => "set",
-                "add" | "append" | "push" => "add",
-                "check" | "done" | "complete" | "finish" | "tick" => "check",
-                "update" | "edit" | "rename" => "update",
-                "remove" | "delete" | "drop" | "cancel" => "remove",
-                "show" | "list" | "get" | "read" | "view" => "show",
-                "" if list_key.is_some() => "set",
-                "" if opt_str(&args, "text")
-                    .or_else(|| opt_str(&args, "markdown"))
-                    .is_some_and(|t| t.contains("\n")) =>
-                {
-                    "set"
+        Box::pin(async move { checklist_op(&hooks, cx.agent.id.as_str(), &args, Checklist::Plan) })
+    }
+}
+
+pub struct TodoTool(pub Arc<KernelHooks>);
+
+impl Tool for TodoTool {
+    fn name(&self) -> &'static str {
+        "todo"
+    }
+    fn schema(&self) -> Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "todo",
+                "description": "Your own checklist for the thread in hand (agents/<you>/todo.md), shown to the user as a card — the steps you are working through now, not the project page and not a schedule. Same ops as plan: set items:[...] replaces it; add text; check n [readout]; update n text; remove n; show. Keep it short and current: check a step when it lands.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "op": {"type": "string", "enum": ["set", "add", "check", "update", "remove", "show"]},
+                        "items": {
+                            "type": "array",
+                            "description": "set: strings or {section, text}.",
+                            "items": {}
+                        },
+                        "section": {"type": "string", "description": "add."},
+                        "text": {"type": "string", "description": "add/update."},
+                        "n": {"type": "integer", "description": "check/update/remove."},
+                        "readout": {"type": "string", "description": "check: what came of it."}
+                    },
+                    "required": ["op"]
                 }
-                "" if opt_str(&args, "text").is_some() => "add",
-                "" if args.as_object().is_none_or(|o| o.is_empty()) => "show",
-                other => anyhow::bail!(
-                    "plan: op {other:?} is not one of set, add, check, update, remove, show. {}",
-                    arbos_core::notes::SHAPES
-                ),
-            };
-            let mut notes = hooks.notes(agent);
-            let n = || -> Result<usize> {
-                ["n", "item", "index", "id", "number"]
-                    .iter()
-                    .find_map(|k| args.get(*k))
-                    .and_then(|v| {
-                        v.as_u64()
-                            .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
-                    })
-                    .map(|v| v as usize)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("plan {op}: n (the item number from show) is required")
-                    })
-            };
-            let ack = match op {
-                "set" => {
-                    let source = list_key
-                        .and_then(|k| args.get(k))
-                        .or_else(|| args.get("text"))
-                        .or_else(|| args.get("markdown"))
-                        .or_else(|| args.get("content"))
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("plan set: no items. {}", arbos_core::notes::SHAPES)
-                        })?;
-                    let items = arbos_core::notes::items_from_json(source).map_err(|e| {
-                        anyhow::anyhow!("plan set: {e:#}. {}", arbos_core::notes::SHAPES)
-                    })?;
-                    notes.set(&items);
-                    hooks.save_notes(agent, &notes)?;
-                    format!("Set {} item(s).", items.len())
-                }
-                "add" => {
-                    let text = opt_str(&args, "text")
-                        .or_else(|| opt_str(&args, "item"))
-                        .or_else(|| opt_str(&args, "label"))
-                        .or_else(|| opt_str(&args, "goal"))
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "plan add: text is required. {}",
-                                arbos_core::notes::SHAPES
-                            )
-                        })?;
-                    let added = notes.add(opt_str(&args, "section").unwrap_or(""), text);
-                    hooks.save_notes(agent, &notes)?;
-                    if added.replaced {
-                        format!(
-                            "Rewrote item {} (it already named that target); nothing was added.",
-                            added.n
-                        )
-                    } else {
-                        format!("Added item {}.", added.n)
-                    }
-                }
-                "check" => {
-                    let k = n()?;
-                    let done = args.get("done").and_then(|v| v.as_bool()).unwrap_or(true);
-                    let item = notes.check_with_target(
-                        k,
-                        done,
-                        opt_str(&args, "readout"),
-                        opt_str(&args, "target"),
-                    )?;
-                    hooks.save_notes(agent, &notes)?;
-                    format!(
-                        "{} {}: {}. Items are renumbered after a check (done ones sink); use the numbers in this list.",
-                        if done { "Checked" } else { "Reopened" },
-                        k,
-                        item.text
-                    )
-                }
-                "update" => {
-                    let k = n()?;
-                    notes.update(k, req(&args, "text")?)?;
-                    hooks.save_notes(agent, &notes)?;
-                    format!("Updated item {k}.")
-                }
-                "remove" => {
-                    let k = n()?;
-                    let item = notes.remove(k)?;
-                    hooks.save_notes(agent, &notes)?;
-                    format!("Removed: {}", item.text)
-                }
-                _ => String::new(),
-            };
-            let shown = hooks.notes(agent).show();
-            Ok(ToolOut::text(if ack.is_empty() {
-                shown
-            } else {
-                format!("{ack}\n\n{shown}")
-            }))
+            }
         })
+    }
+    fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
+        Ok(Plan::access(Access::none()))
+    }
+    fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
+        let hooks = Arc::clone(&self.0);
+        Box::pin(async move { checklist_op(&hooks, cx.agent.id.as_str(), &args, Checklist::Todo) })
     }
 }
 

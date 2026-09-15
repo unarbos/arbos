@@ -218,6 +218,11 @@ pub fn check(place: &Place) -> Result<Report> {
                 "root's checklist is the project page .arbos/notes.md; this file is not read",
             );
         }
+        check_notes(
+            &mut r,
+            &rel(&layout.dir.join(arbos_core::notes::TODO)),
+            &layout.dir.join(arbos_core::notes::TODO),
+        );
         check_waiting(
             &mut r,
             &rel(&layout.dir.join("waiting")),
