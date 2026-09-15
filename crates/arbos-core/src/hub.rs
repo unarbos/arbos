@@ -154,6 +154,15 @@ pub struct ProjectInfo {
     /// folder has no file. A phone draws its list from this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<crate::project::ProjectIdentity>,
+    /// `worktree` when this is a worker's git worktree of another project
+    /// on the machine (a claim with `isolate`), not a project of the
+    /// user's; absent for a project. A client nests or hides it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    /// For a worktree: the project it was cut from (`demo` for
+    /// `demo--c616190-1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 /// One machine as the hub sees it.

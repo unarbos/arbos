@@ -94,6 +94,10 @@ struct MachineEntry {
     kernels: HashMap<String, Arc<Registrant>>,
     /// Each project's face, by name, as its registrants read it.
     identities: HashMap<String, arbos_core::project::ProjectIdentity>,
+    /// Worktree places a claim with `isolate` made, by the name their
+    /// kernel registers under → the project they were cut from. A phone
+    /// saw `demo--c616190-1` beside `demo` as a second project (M-12).
+    worktrees: HashMap<String, String>,
 }
 
 impl MachineEntry {
@@ -101,15 +105,42 @@ impl MachineEntry {
         self.worker.is_none() && self.kernels.is_empty()
     }
 
+    /// The project a registered name is a worktree of: as the claim
+    /// recorded it, or — after a hub restart forgot the claims — the
+    /// `<project>--<claim>` shape the worker gives worktree places, when
+    /// `<project>` is a project on this machine.
+    fn worktree_of(&self, name: &str) -> Option<String> {
+        if let Some(p) = self.worktrees.get(name) {
+            return Some(p.clone());
+        }
+        let (head, tail) = name.split_once("--")?;
+        let known =
+            self.worker_projects.iter().any(|p| p == head) || self.kernels.contains_key(head);
+        (known && !tail.is_empty()).then(|| head.to_string())
+    }
+
     fn info(&self, name: &str) -> MachineInfo {
         let mut projects: Vec<ProjectInfo> = self
             .kernels
             .iter()
-            .map(|(p, r)| ProjectInfo {
-                name: p.clone(),
-                place: r.place.clone().unwrap_or_default(),
-                live: true,
-                identity: self.identities.get(p).cloned(),
+            .map(|(p, r)| {
+                let parent = self.worktree_of(p);
+                ProjectInfo {
+                    name: p.clone(),
+                    place: r.place.clone().unwrap_or_default(),
+                    live: true,
+                    identity: self
+                        .identities
+                        .get(p)
+                        .or_else(|| parent.as_ref().and_then(|pp| self.identities.get(pp)))
+                        .cloned(),
+                    kind: if parent.is_some() {
+                        "worktree".into()
+                    } else {
+                        String::new()
+                    },
+                    parent,
+                }
             })
             .collect();
         for p in &self.worker_projects {
@@ -119,6 +150,8 @@ impl MachineEntry {
                     place: String::new(),
                     live: false,
                     identity: self.identities.get(p).cloned(),
+                    kind: String::new(),
+                    parent: None,
                 });
             }
         }
@@ -481,6 +514,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                     let key = project.clone().unwrap_or_default();
                     if entry.kernels.get(&key).is_some_and(|k| k.id == reg.id) {
                         entry.kernels.remove(&key);
+                        entry.worktrees.remove(&key);
                     }
                 }
             }
@@ -674,6 +708,15 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
         let _ = send_json(&mut ws, &answer).await;
         return;
     }
+    // A worktree place is not a project of the user's: the roster says
+    // whose it is, so a client nests or hides it (M-12).
+    if isolate && served != project {
+        let mut g = hub.inner.lock().unwrap();
+        if let Some(entry) = g.machines.get_mut(machine) {
+            entry.worktrees.insert(served.clone(), project.clone());
+            g.generation += 1;
+        }
+    }
     // The worker started a kernel; it registers under `served` when its
     // socket to the hub is up.
     let deadline = tokio::time::Instant::now() + KERNEL_WAIT;
@@ -762,5 +805,75 @@ mod roster_face_tests {
         assert!(by_name("bare").identity.is_none());
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["projects"][0]["identity"]["icon"], "terminal");
+        assert!(
+            json["projects"][0].get("kind").is_none()
+                && json["projects"][0].get("parent").is_none(),
+            "a project carries no kind or parent: {json}"
+        );
+    }
+
+    /// M-12: a worker's worktree place (`demo--c616190-1`, a claim with
+    /// `isolate`) registered as a project beside `demo`. The roster now
+    /// marks it `kind: worktree` with `parent: demo` — from the claim, or
+    /// from the name when the hub restarted in between — and it wears
+    /// the parent's face.
+    #[test]
+    fn a_worktree_place_is_marked_with_its_parent() {
+        let reg = |id: u64, project: &str| {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            Arc::new(Registrant {
+                id,
+                machine: "arboslife".into(),
+                project: Some(project.into()),
+                place: Some(format!("/home/u/arbos/{project}")),
+                to_socket: tx,
+                chans: Mutex::new(HashMap::new()),
+                next_chan: AtomicU64::new(1),
+            })
+        };
+        let mut entry = MachineEntry::default();
+        entry.worker_projects = vec!["demo".into(), "notes".into()];
+        entry.kernels.insert("demo".into(), reg(1, "demo"));
+        entry
+            .kernels
+            .insert("demo--c616190-1".into(), reg(2, "demo--c616190-1"));
+        entry
+            .kernels
+            .insert("notes--c7-2".into(), reg(3, "notes--c7-2"));
+        entry.kernels.insert("solo--x".into(), reg(4, "solo--x"));
+        entry
+            .worktrees
+            .insert("demo--c616190-1".into(), "demo".into());
+        entry.identities.insert(
+            "demo".into(),
+            arbos_core::project::ProjectIdentity {
+                name: Some("Demo".into()),
+                icon: "flask".into(),
+                color: "teal".into(),
+            },
+        );
+        let info = entry.info("arboslife");
+        let by_name = |n: &str| info.projects.iter().find(|p| p.name == n).unwrap().clone();
+        let demo = by_name("demo");
+        assert!(demo.kind.is_empty() && demo.parent.is_none());
+        let wt = by_name("demo--c616190-1");
+        assert_eq!(wt.kind, "worktree");
+        assert_eq!(wt.parent.as_deref(), Some("demo"));
+        assert_eq!(
+            wt.identity.as_ref().unwrap().icon,
+            "flask",
+            "wears the parent's face"
+        );
+        // Not in the claim map (hub restarted): the name says whose it is
+        // when the head is a project here.
+        let notes = by_name("notes--c7-2");
+        assert_eq!(notes.kind, "worktree");
+        assert_eq!(notes.parent.as_deref(), Some("notes"));
+        // A `--` name whose head is no project here is left alone.
+        let solo = by_name("solo--x");
+        assert!(solo.kind.is_empty() && solo.parent.is_none());
+        let json = serde_json::to_value(&wt).unwrap();
+        assert_eq!(json["kind"], "worktree");
+        assert_eq!(json["parent"], "demo");
     }
 }
