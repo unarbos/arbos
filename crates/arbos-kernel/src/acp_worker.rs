@@ -590,6 +590,7 @@ async fn handle_incoming(
                                 child: None,
                                 images: Vec::new(),
                                 diff: None,
+                                label: None,
                             })),
                         )?;
                     }

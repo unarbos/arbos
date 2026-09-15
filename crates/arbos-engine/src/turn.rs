@@ -143,6 +143,70 @@ fn output_owed(events: &[Event], place: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+/// A reply that only announces a command — "Running ls; cat README*
+/// 2>/dev/null | head -60;" — and ends the turn without calling anything
+/// (Jacob's Mac, 2026-09-15). Short: one or two lines, opening with a
+/// doing-word, carrying a shell fragment. A real answer that happens to
+/// quote a command runs longer than that.
+fn looks_like_announced_command(content: &str) -> bool {
+    let t = content.trim();
+    if t.is_empty() || t.lines().count() > 2 || t.chars().count() > 300 {
+        return false;
+    }
+    let lower = t.to_ascii_lowercase();
+    let opens = [
+        "running ",
+        "run ",
+        "executing ",
+        "checking ",
+        "listing ",
+        "reading ",
+        "let me run",
+        "let me check",
+        "let me list",
+        "i'll run",
+        "i will run",
+        "i'll check",
+        "i will check",
+        "now running",
+        "next, run",
+        "next: run",
+        "status: running",
+    ];
+    if !opens.iter().any(|o| lower.starts_with(o)) {
+        return false;
+    }
+    // Telling the user what to run is an answer, not an announcement.
+    if ["yourself", "you can", "when you", "if you"]
+        .iter()
+        .any(|m| lower.contains(m))
+    {
+        return false;
+    }
+    let shell = [
+        " | ",
+        "&&",
+        "2>/dev/null",
+        "2> /dev/null",
+        "ls ",
+        "ls;",
+        "cat ",
+        "grep ",
+        "find ",
+        "git ",
+        "head ",
+        "tail ",
+        "wc ",
+        "python",
+        "cargo ",
+        "npm ",
+        "make ",
+        "curl ",
+        "tree",
+    ];
+    shell.iter().any(|m| lower.contains(m))
+}
+
 fn looks_like_tool_call_text(content: &str) -> bool {
     let t = content
         .trim()
@@ -717,6 +781,12 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                         .to_string(),
                     "tool call written as text",
                 ))
+            } else if looks_like_announced_command(&content) {
+                Some((
+                    "You announced a command but did not call bash, so nothing ran. Call bash with it now, then answer from its output."
+                        .to_string(),
+                    "tool call written as text",
+                ))
             } else if image_owed(&events) {
                 // The brief said the user asked to see the result and the
                 // turn is ending with no image made: once, before the
@@ -940,5 +1010,33 @@ mod output_owed_tests {
             vec!["media/toy/run.txt", "docs/notes.md"]
         );
         assert!(brief_output_paths("Task: no output line").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod announced_command_tests {
+    use super::looks_like_announced_command;
+
+    #[test]
+    fn an_announced_command_with_no_call_is_caught_and_answers_are_not() {
+        assert!(looks_like_announced_command(
+            "Running ls; cat README* 2>/dev/null | head -60;"
+        ));
+        assert!(looks_like_announced_command(
+            "Let me check with `git status`."
+        ));
+        assert!(looks_like_announced_command(
+            "Running `cargo test -p arbos-kernel`"
+        ));
+        assert!(!looks_like_announced_command(
+            "The repo holds a kernel, a desktop app, and a harness."
+        ));
+        assert!(!looks_like_announced_command(
+            "Running the suite showed 3 failures:\n- a\n- b\n- c\nAll three are in the parser."
+        ));
+        assert!(!looks_like_announced_command("Done."));
+        assert!(!looks_like_announced_command(
+            "Run it yourself with `make` when you are ready; I have not changed anything."
+        ));
     }
 }

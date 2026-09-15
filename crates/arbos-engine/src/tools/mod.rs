@@ -244,17 +244,19 @@ pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Res
     // `ask` is exclusive because it waits on the user, not because it
     // writes; asking permission to ask would be absurd. A before-tool
     // hook's own question wins when it set one.
-    let ask_first = writes && cx.agent.mode == arbos_core::Mode::Ask && decided.tool != "ask";
-    // A write into a file that shapes how agents behave asks in every
-    // mode (T3-10). `remember` owns memory.md and is not asked.
-    let protected = (writes && decided.tool != "remember")
+    let asking = cx.agent.mode == arbos_core::Mode::Ask;
+    let ask_first = writes && asking && decided.tool != "ask";
+    // The default mode asks nothing: "go go go" (Jacob, 2026-09-15; a
+    // read-only question on his Mac drew an allow-bash card). A write
+    // into a file that shapes how agents behave (T3-10) and a command
+    // that reaches past this machine (T3-06) ask only in ask mode; auto
+    // keeps the hard refusals — the git guard, containment's fetch of a
+    // metadata URL — and nothing that waits on a card. `remember` owns
+    // memory.md and is never asked.
+    let protected = (asking && writes && decided.tool != "remember")
         .then(|| protected_target(cx.root(), &decided.tool, &plan, &decided.args))
         .flatten();
-    // A command that reaches past this machine — the cloud metadata
-    // service, the container runtime, credential files — asks in every
-    // mode (T3-06), unless sandbox.toml says the metadata reach is
-    // expected here.
-    let reach = matches!(decided.tool.as_str(), "bash" | "terminal")
+    let reach = (asking && matches!(decided.tool.as_str(), "bash" | "terminal"))
         .then(|| crate::tool::opt_str(&decided.args, "command"))
         .flatten()
         .and_then(arbos_core::containment::risk_of)

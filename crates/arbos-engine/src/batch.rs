@@ -116,8 +116,20 @@ impl Outcome {
             child,
             images,
             diff,
+            label: call_label(&call.arguments),
         }))
     }
+}
+
+/// The model's `description` of a call, trimmed to a line, when it gave
+/// one worth showing.
+pub(crate) fn call_label(args: &serde_json::Value) -> Option<String> {
+    let d = args.get("description")?.as_str()?.trim();
+    if d.is_empty() {
+        return None;
+    }
+    let one: String = d.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(one.chars().take(120).collect())
 }
 
 /// One line naming a call for the allow/deny question: the path, the
@@ -335,6 +347,7 @@ pub async fn run(
                     child: None,
                     images: vec![],
                     diff: None,
+                    label: call_label(&call.arguments),
                 })));
                 for note in &prepared.notices {
                     hook_notice(&cx, note);

@@ -670,6 +670,7 @@ mod spill_cite_tests {
             child: None,
             images: vec![],
             diff: None,
+            label: None,
         };
         events.push(Event::new(EventKind::Tool(rec)));
         for (i, e) in events.iter_mut().enumerate() {
@@ -721,6 +722,7 @@ mod spill_cite_tests {
             child: None,
             images: vec![],
             diff: None,
+            label: None,
         };
         let mut read_event = Event::new(EventKind::Tool(read_rec));
         read_event.seq = 3;

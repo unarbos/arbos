@@ -115,9 +115,23 @@ pub struct RootConfig {
     /// chat whose agent is gone instead of reconnecting to it, #129/#138).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_children: Option<bool>,
+    /// The main chat's permission mode: `auto` (the default everywhere —
+    /// no approval cards, "go go go", decided 2026-09-15), `ask` (every
+    /// write and risky command asks first), or `plan` (no writes). When
+    /// set here it is the place's word and wins over the chat's saved
+    /// mode; absent, the chat's own (the mode chip) applies, and that
+    /// defaults to `auto` too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<String>,
 }
 
 impl RootConfig {
+    /// The place's permission mode for the main chat, when the file names
+    /// one that parses.
+    pub fn permission_mode(&self) -> Option<crate::Mode> {
+        self.permission.as_deref().and_then(crate::Mode::parse)
+    }
+
     /// Whether finished workers are archived: the line, or on.
     pub fn archives_children(&self) -> bool {
         self.archive_children.unwrap_or(true)
@@ -165,6 +179,8 @@ pub fn write_for_new_place(place: &Place, name: &str) -> Result<()> {
         root: RootConfig {
             role: Some(COORDINATOR.into()),
             archive_children: Some(true),
+            // Written out so a new place says what it does: no cards.
+            permission: Some("auto".into()),
         },
         spend: SpendConfig::default(),
     };
@@ -195,7 +211,11 @@ pub fn apply_role(place: &Place, agent: &mut Agent) {
         }
         return;
     }
-    if !root_is_coordinator(place) {
+    let config = load(place);
+    if let Some(mode) = config.root.permission_mode() {
+        agent.mode = mode;
+    }
+    if config.root.role.as_deref() != Some(COORDINATOR) {
         return;
     }
     agent.role = Some(COORDINATOR.into());

@@ -223,24 +223,58 @@ pub fn bash_writes_protected(command: &str) -> Option<&'static str> {
                 .then_some(".arbos/agents/<id>/instructions.md")
         });
     let named = named?;
-    let writes = command.contains('>')
-        || [
-            "tee ",
-            "sed -i",
-            "cp ",
-            "mv ",
-            "rm ",
-            "truncate ",
-            "install ",
-            "patch ",
-            "git checkout --",
-            "perl -i",
-            "python -c",
-            "python3 -c",
-        ]
+    let name = named
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(named);
+    // A redirection counts when it lands *in* the file — `> project.toml`,
+    // `>> .arbos/hooks.toml`, `tee project.toml`. `cat project.toml
+    // 2>/dev/null` also holds a `>`, and that read drew an allow card on a
+    // "what is in this repo" question (Jacob's Mac, 2026-09-15).
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let names_it = |w: &str| w.contains(named.trim_end_matches('/')) || w.contains(name);
+    let redirected_in = words.iter().enumerate().any(|(i, w)| {
+        let arrow = w.trim_start_matches(['1', '2', '&']);
+        if arrow == ">" || arrow == ">>" {
+            words.get(i + 1).is_some_and(|t| names_it(t))
+        } else if let Some(target) = w
+            .trim_start_matches(['1', '2', '&'])
+            .strip_prefix(">>")
+            .or_else(|| w.trim_start_matches(['1', '2', '&']).strip_prefix('>'))
+        {
+            !target.is_empty() && names_it(target)
+        } else {
+            false
+        }
+    });
+    let tee_in = words
         .iter()
-        .any(|w| command.contains(w));
-    writes.then_some(named)
+        .enumerate()
+        .any(|(i, w)| *w == "tee" && words[i + 1..].iter().take(3).any(|t| names_it(t)));
+    // `cp`/`mv`: the file is the destination (last word); as a source it
+    // is being read.
+    let copied_in = words.iter().enumerate().any(|(i, w)| {
+        matches!(*w, "cp" | "mv" | "install")
+            && words[i + 1..]
+                .iter()
+                .filter(|t| !t.starts_with('-'))
+                .last()
+                .is_some_and(|t| names_it(t))
+    });
+    let edited_in_place = [
+        "sed -i",
+        "rm ",
+        "truncate ",
+        "patch ",
+        "git checkout --",
+        "perl -i",
+        "python -c",
+        "python3 -c",
+    ]
+    .iter()
+    .any(|w| command.contains(w));
+    (redirected_in || tee_in || copied_in || edited_in_place).then_some(named)
 }
 
 /// The line the user sees when a tool wants to change a protected file.
@@ -1103,6 +1137,45 @@ mod protected_tests {
             Some(".arbos/agents/<id>/instructions.md")
         );
         assert_eq!(bash_writes_protected("cat .arbos/secrets.toml"), None);
+        // Reads with a stderr redirection, a pipe, or the file as a copy
+        // source are reads (the Mac's "what is in this repo").
+        assert_eq!(
+            bash_writes_protected("cat .arbos/project.toml 2>/dev/null"),
+            None
+        );
+        assert_eq!(
+            bash_writes_protected("cat .arbos/project.toml 2> /dev/null | head -20"),
+            None
+        );
+        assert_eq!(
+            bash_writes_protected("ls -la .arbos && cat .arbos/project.toml 2>&1"),
+            None
+        );
+        assert_eq!(
+            bash_writes_protected("cp .arbos/project.toml /tmp/backup.toml"),
+            None
+        );
+        assert_eq!(
+            bash_writes_protected("find . -name project.toml 2>/dev/null"),
+            None
+        );
+        // Writes into it are still caught, every spelling.
+        assert_eq!(
+            bash_writes_protected("echo x > .arbos/project.toml 2>/dev/null"),
+            Some(".arbos/project.toml")
+        );
+        assert_eq!(
+            bash_writes_protected("printf 'a' >.arbos/project.toml"),
+            Some(".arbos/project.toml")
+        );
+        assert_eq!(
+            bash_writes_protected("cat x | tee .arbos/project.toml"),
+            Some(".arbos/project.toml")
+        );
+        assert_eq!(
+            bash_writes_protected("cp /tmp/backup.toml .arbos/project.toml"),
+            Some(".arbos/project.toml")
+        );
         assert_eq!(
             bash_writes_protected("grep -n hooks .arbos/hooks.toml"),
             None
