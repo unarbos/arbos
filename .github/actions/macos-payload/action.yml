@@ -37,6 +37,22 @@ inputs:
     required: false
     default: ""
 
+  # Notarization credentials. An App Store Connect API key is preferred — it
+  # is made for this, it is revocable on its own, and it involves no Apple ID
+  # password. The Apple ID trio is the fallback.
+  notary-key-p8:
+    description: The App Store Connect API key, the contents of the .p8 file.
+    required: false
+    default: ""
+  notary-key-id:
+    description: Its ten-character key id — `XANFG7S7YS` in `AuthKey_XANFG7S7YS.p8`.
+    required: false
+    default: ""
+  notary-issuer-id:
+    description: The team's App Store Connect issuer id, a UUID.
+    required: false
+    default: ""
+
   apple-id:
     description: The Apple ID notarytool submits as.
     required: false
@@ -149,20 +165,41 @@ runs:
       working-directory: desktop
       env:
         BUILD: ${{ inputs.build }}
+        NOTARY_KEY_P8: ${{ inputs.notary-key-p8 }}
+        NOTARY_KEY_ID: ${{ inputs.notary-key-id }}
+        NOTARY_ISSUER_ID: ${{ inputs.notary-issuer-id }}
         APPLE_ID: ${{ inputs.apple-id }}
         APPLE_TEAM_ID: ${{ inputs.apple-team-id }}
         APPLE_APP_PASSWORD: ${{ inputs.apple-app-password }}
       run: |
         set -euo pipefail
+        set +x
         kind="${SIGN_KIND:-ad-hoc}"
         notarized=false
+
+        # notarytool wants the key as a file. It goes in $RUNNER_TEMP, which is
+        # outside the workspace, and the cleanup step below deletes it however
+        # this job ends.
+        notary_key=""
+        if [ -n "$NOTARY_KEY_P8" ] && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER_ID" ]; then
+          umask 077
+          notary_key="$RUNNER_TEMP/AuthKey_$NOTARY_KEY_ID.p8"
+          printf '%s\n' "$NOTARY_KEY_P8" > "$notary_key"
+          echo "ARBOS_NOTARY_KEY=$notary_key" >> "$GITHUB_ENV"
+        fi
+
         case "$kind" in
           developer-id)
-            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then
+            if [ -n "$notary_key" ]; then
+              make notarize-zip SIGN="$SIGN" BUILD="$BUILD" \
+                NOTARY_KEY="$notary_key" NOTARY_KEY_ID="$NOTARY_KEY_ID" \
+                NOTARY_ISSUER_ID="$NOTARY_ISSUER_ID"
+              notarized=true
+            elif [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then
               make notarize-zip SIGN="$SIGN" BUILD="$BUILD"
               notarized=true
             else
-              echo "::warning title=Not notarized::A Developer ID certificate is here but APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD are not, so the payload is signed and not notarized."
+              echo "::warning title=Not notarized::A Developer ID certificate is here but no notarization credential is. Set NOTARY_KEY_P8 + NOTARY_KEY_ID + NOTARY_ISSUER_ID, or the APPLE_ID trio."
               make zip SIGN="$SIGN" BUILD="$BUILD"
             fi
             ;;
@@ -188,9 +225,11 @@ runs:
       shell: bash
       run: |
         set +e
-        if [ -n "${ARBOS_SIGNING_P12:-}" ]; then
-          rm -f "$ARBOS_SIGNING_P12"
-        fi
+        for secret in "${ARBOS_SIGNING_P12:-}" "${ARBOS_NOTARY_KEY:-}"; do
+          if [ -n "$secret" ]; then
+            rm -f "$secret"
+          fi
+        done
         if [ -n "${ARBOS_SIGNING_KEYCHAIN:-}" ]; then
           if [ -n "${ARBOS_KEYCHAINS_WERE:-}" ]; then
             security list-keychains -d user -s $ARBOS_KEYCHAINS_WERE

@@ -12,12 +12,24 @@
 # two things notarization refuses without — plus bundle/entitlements.plist.
 #
 # Release needs two things only Apple can hand out, both kept out of the
-# tree:  SIGN="Developer ID Application: <name> (<team>)" names the
-# certificate in the login keychain, and notarization takes either a keychain
-# profile (NOTARY_PROFILE, made once with `xcrun notarytool store-credentials`)
-# or APPLE_ID + APPLE_TEAM_ID + APPLE_APP_PASSWORD (an app-specific password
-# from appleid.apple.com, what CI uses). `.env.release` beside this file may
-# export any of them.
+# tree. SIGN="Developer ID Application: <name> (<team>)" names the certificate
+# in the login keychain — and it has to be that kind: Apple's notary service
+# refuses an "Apple Development" certificate, which can sign and can never be
+# notarized.
+#
+# Notarization then takes any one of three credentials, tried in this order:
+#
+#   NOTARY_KEY + NOTARY_KEY_ID + NOTARY_ISSUER_ID
+#       An App Store Connect API key — the `.p8` file, the ten-character key
+#       id, and the team's issuer id. Preferred: it is a key made for this,
+#       revocable on its own, and it does not involve an Apple ID password.
+#   NOTARY_PROFILE
+#       A keychain profile, made once with `xcrun notarytool store-credentials`.
+#       Convenient on a Mac somebody is sitting at.
+#   APPLE_ID + APPLE_TEAM_ID + APPLE_APP_PASSWORD
+#       An app-specific password from appleid.apple.com.
+#
+# `.env.release` beside this file may export any of them.
 
 VERSION  := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 # Build number: commits on the branch, so two builds of one version sort.
@@ -174,12 +186,17 @@ zip: bundle
 NOTARIZE_FILE ?= $(DMG)
 notarize:
 	@test -f $(NOTARIZE_FILE) || { echo "no $(NOTARIZE_FILE): build it first"; exit 1; }
-	@if [ -n "$(NOTARY_PROFILE)" ]; then \
+	@# `--wait` makes a refusal this command's failure, which is what stops a
+	@# rejected payload being published: everything downstream is a
+	@# prerequisite of this rule.
+	@if [ -n "$(NOTARY_KEY)" ] && [ -n "$(NOTARY_KEY_ID)" ] && [ -n "$(NOTARY_ISSUER_ID)" ]; then \
+		xcrun notarytool submit $(NOTARIZE_FILE) --key "$(NOTARY_KEY)" --key-id "$(NOTARY_KEY_ID)" --issuer "$(NOTARY_ISSUER_ID)" --wait; \
+	elif [ -n "$(NOTARY_PROFILE)" ]; then \
 		xcrun notarytool submit $(NOTARIZE_FILE) --keychain-profile "$(NOTARY_PROFILE)" --wait; \
 	elif [ -n "$(APPLE_ID)" ] && [ -n "$(APPLE_TEAM_ID)" ] && [ -n "$(APPLE_APP_PASSWORD)" ]; then \
 		xcrun notarytool submit $(NOTARIZE_FILE) --apple-id "$(APPLE_ID)" --team-id "$(APPLE_TEAM_ID)" --password "$(APPLE_APP_PASSWORD)" --wait; \
 	else \
-		echo "notarize: set NOTARY_PROFILE, or APPLE_ID + APPLE_TEAM_ID + APPLE_APP_PASSWORD"; exit 1; \
+		echo "notarize: set NOTARY_KEY + NOTARY_KEY_ID + NOTARY_ISSUER_ID, or NOTARY_PROFILE, or APPLE_ID + APPLE_TEAM_ID + APPLE_APP_PASSWORD"; exit 1; \
 	fi
 	@# A zip is a container Apple will scan but cannot hold a ticket, so the
 	@# ticket goes on what came out of it and the caller re-archives.

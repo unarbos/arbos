@@ -162,6 +162,9 @@ jobs:
           developer-id-p12-password: ${{ secrets.P12_PASSWORD }}
           signing-p12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
           signing-p12-password: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+          notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
+          notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
+          notary-issuer-id: ${{ secrets.NOTARY_ISSUER_ID }}
           apple-id: ${{ secrets.APPLE_ID }}
           apple-team-id: ${{ secrets.APPLE_TEAM_ID }}
           apple-app-password: ${{ secrets.APPLE_APP_PASSWORD }}
