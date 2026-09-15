@@ -214,7 +214,7 @@ runs:
         {
           echo "signing=$kind"
           echo "notarized=$notarized"
-          echo "path=desktop/$(ls target/bundle/Arbos-*-macos-*.zip)"
+          echo "path=desktop/$(ls target/bundle.noindex/Arbos-*-macos-*.zip)"
         } >> "$GITHUB_OUTPUT"
 
     # Always. A runner is thrown away after the job, but a certificate that

@@ -6,6 +6,7 @@
 #   make release           the same with a Developer ID, notarized, stapled
 #   make verify            what Gatekeeper will say about the app and image
 #   make ident             "<version> <build> <arch>", for CI to name files by
+#   make unregister-strays every other bundle claiming this app's identifier
 #
 # Signing is inside-out: the kernel first, then the app around it, then the
 # image. Every binary gets the hardened runtime and a secure timestamp — the
@@ -44,7 +45,20 @@ LOGO     := bundle/icon.png
 # The identifier the signature is designated by — read from the plist so the
 # two cannot drift.
 BUNDLE_ID := $(shell plutil -extract CFBundleIdentifier raw -o - bundle/Info.plist)
-OUT      := target/bundle
+# `.noindex` is the suffix Spotlight is told to skip, and everything this
+# Makefile builds goes under it.
+#
+# Not a tidiness choice. Every copy of the app carries the same
+# CFBundleIdentifier, and Launch Services resolves an identifier to whichever
+# registered copy it likes — so an indexed build output is a candidate for
+# "open life.arbos.desktop" on equal footing with the installed app. On
+# Jacob's Mac five bundles shared the identifier, all of them build outputs
+# and disk-image staging folders, and ⌘Space "arbos" opened a stale scratch
+# build instead of /Applications/Arbos.app. A build output that is never
+# indexed can never win that race.
+#
+# `make unregister-strays` clears the ones already registered.
+OUT      := target/bundle.noindex
 APP      := $(OUT)/Arbos.app
 MACOS    := $(APP)/Contents/MacOS
 RES      := $(APP)/Contents/Resources
@@ -86,7 +100,11 @@ DMG_LAYOUT ?= 1
 
 -include .env.release
 
-.PHONY: build bundle icon dmg zip notarize notarize-zip release verify open clean ident
+# Launch Services' own register. Not on PATH, and not somewhere Apple
+# promises it will stay, so every use of it is guarded.
+LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+
+.PHONY: build bundle icon dmg zip notarize notarize-zip release verify open clean ident unregister-strays
 
 # What this tree would build, for a script that has to name the file before
 # the file exists. One line, three words: version, build, arch.
@@ -152,6 +170,7 @@ dmg: bundle
 			osascript bundle/dmg-layout.applescript "$(DMGVOL)" "$(DMGMNT)" || echo "dmg: Finder layout skipped (no Automation permission?)"; \
 		fi; \
 		xattr -wx com.apple.FinderInfo $(CUSTOMICON) "$(DMGMNT)"; \
+		test -x $(LSREGISTER) && $(LSREGISTER) -u "$(DMGMNT)/Arbos.app" || true; \
 		sync; hdiutil detach "$(DMGMNT)" -quiet || { sleep 2; hdiutil detach "$(DMGMNT)" -force -quiet; }; }
 	@# lzfse over zlib: same second, a tenth off the download. Read since
 	@# 10.11, well under the bundle's own floor.
@@ -246,5 +265,33 @@ verify:
 open: bundle
 	open $(APP)
 
+# Every bundle on this Mac claiming this app's identifier, except the one in
+# /Applications, taken out of Launch Services' register.
+#
+# This is the repair for a Mac that already has strays — old build outputs,
+# a disk image that was mounted once, a copy dragged somewhere to try it.
+# They all carry the same CFBundleIdentifier, so any of them can answer for
+# it, and ⌘Space opens whichever the register hands back. Nothing is deleted:
+# a build output goes on being a build output, it just stops claiming to be
+# the installed app.
+#
+# Run it once. `OUT` being under `.noindex` is what stops new ones appearing.
+unregister-strays:
+	@test -x $(LSREGISTER) || { echo "no lsregister on this machine"; exit 0; }
+	@$(LSREGISTER) -dump \
+		| awk '/^[[:space:]]*path:/ { p = $$2; for (i = 3; i <= NF; i++) p = p " " $$i } \
+		       /identifier:[[:space:]]*$(BUNDLE_ID)([^a-zA-Z0-9.]|$$)/ { if (p != "") print p }' \
+		| sort -u \
+		| grep -v '^/Applications/Arbos\.app$$' \
+		| while IFS= read -r stray; do \
+			echo "unregistering $$stray"; \
+			$(LSREGISTER) -u "$$stray" || true; \
+		done
+	@echo "done — /Applications/Arbos.app is the only $(BUNDLE_ID) left registered"
+
 clean:
+	@# Take the build output out of the register on the way out, so a bundle
+	@# that was opened from here cannot answer for the identifier after the
+	@# directory it lived in is gone.
+	@test -x $(LSREGISTER) && test -d $(APP) && $(LSREGISTER) -u $(APP) || true
 	rm -rf $(OUT)
