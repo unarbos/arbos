@@ -81,14 +81,38 @@ impl Tool for Find {
         simple_schema(
             "find",
             "Find files by glob name.",
-            &[("pattern", "Glob, e.g. **/*.rs", true)],
+            &[
+                ("pattern", "Glob, e.g. **/*.rs", true),
+                (
+                    "path",
+                    "Search under this directory (relative to cwd). Default: cwd.",
+                    false,
+                ),
+                (
+                    "sort",
+                    "name (default) or mtime (most recently changed first, Cursor's Glob order).",
+                    false,
+                ),
+            ],
         )
     }
     fn plan(&self, cx: &PlanCx, _args: &Value) -> Result<Plan> {
         Ok(Plan::access(Access::read_path(cx.cwd)))
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
-        blocking(move || find(&cx.cwd, req(&args, "pattern")?))
+        blocking(move || {
+            let root = match opt_str(&args, "path").filter(|p| !p.trim().is_empty() && *p != ".") {
+                Some(p) => confine(cx.root(), &cx.cwd, p)?,
+                None => cx.cwd.clone(),
+            };
+            let by_mtime = opt_str(&args, "sort").is_some_and(|s| {
+                matches!(
+                    s.trim().to_ascii_lowercase().as_str(),
+                    "mtime" | "modified" | "newest" | "time"
+                )
+            });
+            find_sorted(&root, req(&args, "pattern")?, by_mtime)
+        })
     }
 }
 
@@ -109,6 +133,14 @@ impl Tool for GrepTool {
                 ),
                 ("glob", "Optional file glob.", false),
                 ("scope", "history: earlier agents' transcripts", false),
+                ("ignore_case", "true: case-insensitive.", false),
+                ("context", "N lines before and after each hit.", false),
+                (
+                    "mode",
+                    "content (default), files (paths with a hit), or count (hits per file).",
+                    false,
+                ),
+                ("limit", "Most hits shown (default 200).", false),
             ],
         )
     }
@@ -137,10 +169,14 @@ impl Tool for GrepTool {
             }
             let pattern = req(&args, "pattern")?;
             let glob = opt_str(&args, "glob");
-            let mut hits = if cx.grep.ready() {
+            let ignore_case = args
+                .get("ignore_case")
+                .is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true"));
+            // The index is case-sensitive; a case-insensitive search walks.
+            let mut hits = if cx.grep.ready() && !ignore_case {
                 cx.grep.search(pattern, glob)?
             } else {
-                grep_walk(&cx.cwd, pattern, glob)?
+                grep_walk_with(&cx.cwd, pattern, glob, ignore_case)?
             };
             // The index covers the whole place. A child in its own
             // worktree sees only its worktree, with paths relative to it:
@@ -208,9 +244,121 @@ impl Tool for GrepTool {
                     anyhow::bail!("{} does not exist", root.display());
                 }
             }
-            Ok(format_hits(&hits))
+            let limit = args
+                .get("limit")
+                .and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
+                .map(|n| (n as usize).clamp(1, 2000))
+                .unwrap_or(GREP_SHOWN);
+            let context = args
+                .get("context")
+                .and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
+                .map(|n| (n as usize).min(20))
+                .unwrap_or(0);
+            let mode = opt_str(&args, "mode")
+                .unwrap_or("content")
+                .trim()
+                .to_ascii_lowercase();
+            match mode.as_str() {
+                "content" | "" => Ok(format_hits_with(&hits, limit, context, cx.root())),
+                "files" | "files_with_matches" | "paths" => {
+                    let mut paths: Vec<String> = Vec::new();
+                    for h in &hits {
+                        if !paths.contains(&h.path) {
+                            paths.push(h.path.clone());
+                        }
+                    }
+                    let shown: Vec<String> = paths.iter().take(limit).cloned().collect();
+                    let mut body = shown.join("\n");
+                    if paths.len() > shown.len() {
+                        body.push_str(&format!("\n… {} more", paths.len() - shown.len()));
+                    }
+                    if body.is_empty() {
+                        body = "(no matches)".into();
+                    }
+                    body.push('\n');
+                    Ok(ToolOut::with_paths(body, shown))
+                }
+                "count" => {
+                    let mut counts: Vec<(String, usize)> = Vec::new();
+                    for h in &hits {
+                        match counts.iter_mut().find(|(p, _)| *p == h.path) {
+                            Some((_, n)) => *n += 1,
+                            None => counts.push((h.path.clone(), 1)),
+                        }
+                    }
+                    let body = if counts.is_empty() {
+                        "(no matches)\n".to_string()
+                    } else {
+                        counts
+                            .iter()
+                            .take(limit)
+                            .map(|(p, n)| format!("{p}:{n}\n"))
+                            .collect()
+                    };
+                    Ok(ToolOut::with_paths(
+                        body,
+                        counts.iter().take(limit).map(|(p, _)| p.clone()).collect(),
+                    ))
+                }
+                other => {
+                    anyhow::bail!("grep: mode must be content, files, or count, not {other:?}")
+                }
+            }
         })
     }
+}
+
+/// `format_hits` with a cap and, when asked, `context` lines around each
+/// hit read back from the file (`-` lines, the hit's own with `:`).
+fn format_hits_with(hits: &[GrepHit], limit: usize, context: usize, root: &Path) -> ToolOut {
+    if context == 0 && limit == GREP_SHOWN {
+        return format_hits(hits);
+    }
+    let mut body = String::new();
+    let mut paths = Vec::new();
+    for h in hits.iter().take(limit) {
+        if context > 0 {
+            let file = if Path::new(&h.path).is_absolute() {
+                PathBuf::from(&h.path)
+            } else {
+                root.join(&h.path)
+            };
+            if let Ok(text) = std::fs::read_to_string(&file) {
+                let lines: Vec<&str> = text.lines().collect();
+                let lo = h.line.saturating_sub(context + 1);
+                let hi = (h.line + context).min(lines.len());
+                for (i, l) in lines.iter().enumerate().take(hi).skip(lo) {
+                    let n = i + 1;
+                    let sep = if n == h.line { ':' } else { '-' };
+                    body.push_str(&format!("{}{sep}{n}{sep}{l}\n", h.path));
+                }
+                body.push_str("--\n");
+                paths.push(h.path.clone());
+                continue;
+            }
+        }
+        let text = if h.text.chars().count() > GREP_LINE_CHARS {
+            let head: String = h.text.chars().take(GREP_LINE_CHARS).collect();
+            format!("{head}… [line is {} chars]", h.text.chars().count())
+        } else {
+            h.text.clone()
+        };
+        body.push_str(&format!("{}:{}:{}\n", h.path, h.line, text));
+        paths.push(h.path.clone());
+    }
+    if hits.len() > limit {
+        body.push_str(&format!("… {} more\n", hits.len() - limit));
+    }
+    if body.is_empty() {
+        body = "(no matches)\n".into();
+    }
+    ToolOut::with_paths(body, paths)
 }
 
 /// History hits read `agent · line N: text`, with the JSON of a transcript
@@ -314,6 +462,42 @@ fn format_hits(hits: &[GrepHit]) -> ToolOut {
     ToolOut::with_paths(body, paths)
 }
 
+pub struct Delete;
+
+impl Tool for Delete {
+    fn name(&self) -> &'static str {
+        "delete"
+    }
+    fn schema(&self) -> Value {
+        simple_schema(
+            "delete",
+            "Delete one file (not a directory) under the place.",
+            &[("path", "The file.", true)],
+        )
+    }
+    fn plan(&self, cx: &PlanCx, args: &Value) -> Result<Plan> {
+        let file = cx.resolve_write(req(args, "path")?)?;
+        Ok(Plan::access(Access::write_path(&file)))
+    }
+    fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
+        blocking(move || {
+            let path = req(&args, "path")?;
+            let file = confine(cx.root(), &cx.cwd, path)?;
+            if file.is_dir() {
+                bail!("{} is a directory; delete names one file", file.display());
+            }
+            if !file.exists() {
+                bail!("{} does not exist", file.display());
+            }
+            std::fs::remove_file(&file)?;
+            Ok(ToolOut::with_paths(
+                format!("deleted {}", file.display()),
+                vec![file.display().to_string()],
+            ))
+        })
+    }
+}
+
 impl Tool for Write {
     fn name(&self) -> &'static str {
         "write"
@@ -367,6 +551,7 @@ impl Tool for Edit {
                         "op": {"type": "string", "enum": ["replace", "insert_after", "write"], "description": "Default replace."},
                         "edits": {"type": "array", "items": {"type": "object"}, "description": "Several {op, anchor, end_anchor, content} on this file, applied bottom-up."},
                         "old_string": {"type": "string", "description": "Unique text to find (classic)."},
+                        "replace_all": {"type": "boolean", "description": "classic: replace every occurrence of old_string, not one unique one."},
                         "new_string": {"type": "string", "description": "Replacement (classic)."},
                         "mechanism": crate::mechanism::schema_property()
                     },
@@ -393,6 +578,17 @@ impl Tool for Edit {
                 // path + content and nothing to anchor on: the model means
                 // the whole file ("here is the corrected implementation").
                 write(root, &cx.cwd, path, content)
+            } else if args
+                .get("replace_all")
+                .is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true"))
+            {
+                edit_all(
+                    root,
+                    &cx.cwd,
+                    path,
+                    req(&args, "old_string")?,
+                    req(&args, "new_string")?,
+                )
             } else {
                 edit(
                     root,
@@ -756,6 +952,11 @@ fn read_image(file: &Path) -> Result<ToolOut> {
 }
 
 pub fn find(cwd: &Path, pattern: &str) -> Result<ToolOut> {
+    find_sorted(cwd, pattern, false)
+}
+
+/// `find`, by name or by modification time (newest first).
+pub fn find_sorted(cwd: &Path, pattern: &str, by_mtime: bool) -> Result<ToolOut> {
     let glob = glob::Pattern::new(pattern).unwrap_or_else(|_| glob::Pattern::new("**/*").unwrap());
     // The kernel's own folder is not the project (see grep). A pattern that
     // names `.arbos` still reaches it.
@@ -782,7 +983,21 @@ pub fn find(cwd: &Path, pattern: &str) -> Result<ToolOut> {
             paths.push(s.into_owned());
         }
     }
-    paths.sort();
+    if by_mtime {
+        let mut stamped: Vec<(std::time::SystemTime, String)> = paths
+            .into_iter()
+            .map(|p| {
+                let t = std::fs::metadata(cwd.join(&p))
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                (t, p)
+            })
+            .collect();
+        stamped.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        paths = stamped.into_iter().map(|(_, p)| p).collect();
+    } else {
+        paths.sort();
+    }
     let body = if paths.is_empty() {
         "(no files)\n".into()
     } else {
@@ -875,6 +1090,32 @@ pub fn edit(root: &Path, cwd: &Path, path: &str, old: &str, new: &str) -> Result
         .with_diff(super::editdiff::numbered_diff(&text, &next)))
 }
 
+/// `edit` with `replace_all`: every occurrence of `old` becomes `new`
+/// (Cursor's StrReplace `replace_all`; a rename across one file).
+pub fn edit_all(root: &Path, cwd: &Path, path: &str, old: &str, new: &str) -> Result<ToolOut> {
+    let file = confine(root, cwd, path)?;
+    if old.is_empty() {
+        bail!("old_string must not be empty");
+    }
+    let text = std::fs::read_to_string(&file)?;
+    let count = text.matches(old).count();
+    if count == 0 {
+        bail!("old_string not found in {}", file.display());
+    }
+    let next = text.replace(old, new);
+    if next == text {
+        return Err(unchanged(&file));
+    }
+    std::fs::write(&file, &next)?;
+    let mut body = format!("edited {} ({count} occurrence(s) replaced)", file.display());
+    if let Some(note) = syntax_note(&file) {
+        body.push('\n');
+        body.push_str(&note);
+    }
+    Ok(ToolOut::with_paths(body, vec![file.display().to_string()])
+        .with_diff(super::editdiff::numbered_diff(&text, &next)))
+}
+
 /// A one-line parse check after a write, for languages with a cheap
 /// checker on the machine. A model that broke the file learns it from the
 /// tool result instead of from a test run three steps later. Best effort:
@@ -941,10 +1182,24 @@ pub fn syntax_note(file: &Path) -> Option<String> {
 }
 
 pub fn grep_walk(cwd: &Path, pattern: &str, glob: Option<&str>) -> Result<Vec<GrepHit>> {
+    grep_walk_with(cwd, pattern, glob, false)
+}
+
+/// `grep_walk`, case-insensitive when asked (the literal fallback too).
+pub fn grep_walk_with(
+    cwd: &Path,
+    pattern: &str,
+    glob: Option<&str>,
+    ignore_case: bool,
+) -> Result<Vec<GrepHit>> {
     let re = regex::RegexBuilder::new(pattern)
-        .case_insensitive(false)
+        .case_insensitive(ignore_case)
         .build()
-        .or_else(|_| regex::Regex::new(&regex::escape(pattern)))?;
+        .or_else(|_| {
+            regex::RegexBuilder::new(&regex::escape(pattern))
+                .case_insensitive(ignore_case)
+                .build()
+        })?;
     let file_glob = glob.and_then(|g| glob::Pattern::new(g).ok());
     let mut hits = Vec::new();
     let walker = ignore::WalkBuilder::new(cwd)

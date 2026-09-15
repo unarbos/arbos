@@ -57,6 +57,9 @@ pub const COORDINATOR_TOOLS: &[&str] = &[
     "secret",
     "status",
     "todo",
+    "delete",
+    "agents",
+    "transcript",
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

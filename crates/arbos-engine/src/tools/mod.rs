@@ -90,6 +90,7 @@ pub fn builtin() -> Registry {
         .with(fs::GrepTool)
         .with(fs::Write)
         .with(fs::Edit)
+        .with(fs::Delete)
         .with(apply_patch::ApplyPatch)
         .with(bash::Bash)
         .with(bash::Await)
