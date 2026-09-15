@@ -327,24 +327,27 @@ fn restore_usable_bounds(window: &mut Window) {
 /// strip's thumbnail, not the window, and pushing a frame at it does nothing
 /// useful; it is skipped by the `isOnActiveSpace`/key check below.
 #[cfg(target_os = "macos")]
+#[repr(C)]
+struct NsPoint {
+    x: f64,
+    y: f64,
+}
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct NsSize {
+    width: f64,
+    height: f64,
+}
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct NsRect {
+    origin: NsPoint,
+    size: NsSize,
+}
+
+#[cfg(target_os = "macos")]
 fn force_usable_ns_frame() {
     use objc::{class, msg_send, runtime::Object, sel, sel_impl};
-
-    #[repr(C)]
-    struct NsPoint {
-        x: f64,
-        y: f64,
-    }
-    #[repr(C)]
-    struct NsSize {
-        width: f64,
-        height: f64,
-    }
-    #[repr(C)]
-    struct NsRect {
-        origin: NsPoint,
-        size: NsSize,
-    }
 
     const YES: i8 = 1;
     unsafe {
@@ -366,7 +369,14 @@ fn force_usable_ns_frame() {
                 continue;
             }
             let frame: NsRect = msg_send![ns_window, frame];
+            // A saved frame that AppKit restored off the visible screens
+            // (a display that is gone, a window dragged half off the edge:
+            // Jacob saw only the left 40 %) comes back to the centre of
+            // the main display.
             if frame.size.width >= 600. && frame.size.height >= 320. {
+                if !frame_on_a_screen(&frame) {
+                    let _: () = msg_send![ns_window, center];
+                }
                 continue;
             }
             let screen: *mut Object = msg_send![ns_window, screen];
@@ -394,6 +404,39 @@ fn force_usable_ns_frame() {
             let _: () = msg_send![ns_window, setFrame: next display: YES];
         }
     }
+}
+
+/// Whether at least 70 % of `frame` lies inside some screen's visible
+/// area: the window can be seen and reached.
+#[cfg(target_os = "macos")]
+fn frame_on_a_screen(frame: &NsRect) -> bool {
+    use objc::{class, msg_send, runtime::Object, sel, sel_impl};
+    let area = frame.size.width * frame.size.height;
+    if area <= 0. {
+        return true;
+    }
+    unsafe {
+        let screens: *mut Object = msg_send![class!(NSScreen), screens];
+        if screens.is_null() {
+            return true;
+        }
+        let count: usize = msg_send![screens, count];
+        for i in 0..count {
+            let screen: *mut Object = msg_send![screens, objectAtIndex: i];
+            if screen.is_null() {
+                continue;
+            }
+            let vis: NsRect = msg_send![screen, visibleFrame];
+            let x0 = frame.origin.x.max(vis.origin.x);
+            let y0 = frame.origin.y.max(vis.origin.y);
+            let x1 = (frame.origin.x + frame.size.width).min(vis.origin.x + vis.size.width);
+            let y1 = (frame.origin.y + frame.size.height).min(vis.origin.y + vis.size.height);
+            if x1 > x0 && y1 > y0 && (x1 - x0) * (y1 - y0) >= 0.7 * area {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Float the main window above other apps. For the driver only: with Stage
@@ -490,7 +533,8 @@ pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHand
 }
 
 /// Which pane the detail column shows. A property of the window, not of a
-/// project — switching projects must not teleport you to another pane.
+/// project; a tab click or a new tab lands on the chat (Jacob: a new or
+/// empty project never opens on the Project page).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     Chat,
@@ -695,6 +739,7 @@ impl Arbos {
                 OpenerEvent::Open(place) => {
                     let place = place.clone();
                     this.offer_store_out_of_sync(&place, window, cx);
+                    this.show_pane(Pane::Chat, cx);
                     this.workspace
                         .update(cx, |workspace, cx| workspace.open_place(place, cx));
                     this.offer_tab_face(window, cx);
@@ -1175,7 +1220,11 @@ impl Arbos {
 
     /// Leaving a project is the moment a half-written card has to be filed:
     /// the spot it points at belongs to the board being navigated away from.
+    /// A tab click lands on the project's chat, whatever the column showed
+    /// before — the way back from the Project page or a document, and the
+    /// view a new tab opens on.
     pub(crate) fn select_project(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.show_pane(Pane::Chat, cx);
         self.workspace
             .update(cx, |workspace, cx| workspace.select_project(ix, cx));
     }
@@ -1193,8 +1242,16 @@ impl Arbos {
         }
     }
 
-    fn dismiss_menu_action(&mut self, _: &DismissMenu, _: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss_menu(cx);
+    fn dismiss_menu_action(&mut self, _: &DismissMenu, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu.is_some() {
+            self.dismiss_menu(cx);
+            return;
+        }
+        // Nothing to close: Escape leaves the Project page (or a document)
+        // for the chat, as ⌘1 does.
+        if self.pane != Pane::Chat {
+            self.show_chat(&ShowChat, window, cx);
+        }
     }
 
     pub(crate) fn show_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {

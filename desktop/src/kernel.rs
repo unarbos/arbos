@@ -1463,6 +1463,7 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
                     .started
                     .zip(rec.ended)
                     .map(|(started, ended)| ((ended - started).max(0) / 1000) as u32),
+                desc: rec.label.clone().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()),
             })
         }
         _ => None,

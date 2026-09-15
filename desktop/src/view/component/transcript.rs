@@ -52,7 +52,10 @@ const PROMPT_PAD_Y: f32 = 10.;
 /// The user's card: Cursor's ~10 px corners, and no wider than most of the
 /// reading column so the answer under it reads as a reply.
 const PROMPT_RADIUS: f32 = 10.;
-const PROMPT_MAX_WIDTH: f32 = (root::CHAT_MAX_WIDTH - 2. * root::CHAT_GUTTER) * 0.82;
+/// Jacob's Mac reference (`chat-2026-09-14/03`, 2x): the bubble is 483 pt
+/// of a 689 pt column — 70 % — with 12 pt side padding and a 10 pt radius.
+const PROMPT_MAX_WIDTH: f32 = (root::CHAT_MAX_WIDTH - 2. * root::CHAT_GUTTER) * 0.70;
+const PROMPT_PAD_X: f32 = 12.;
 /// Web diff/terminal: `text-[11.5px] leading-[1.5]`.
 const MONO_SIZE: f32 = 11.5;
 const MONO_LEAD: f32 = 17.;
@@ -474,7 +477,9 @@ fn turns(items: &[ChatItem]) -> Vec<Turn> {
     let mut turns = Vec::new();
     let mut start = 0;
     for ix in 1..=items.len() {
-        if ix < items.len() && !matches!(items[ix], ChatItem::User(_) | ChatItem::From { .. }) {
+        if ix < items.len()
+            && (!matches!(items[ix], ChatItem::User(_) | ChatItem::From { .. }) || is_ask_echo(items, ix))
+        {
             continue;
         }
         let interim =
@@ -580,6 +585,12 @@ fn notice(
     }
     if !failed && crate::model::session::is_page_nudge(text) {
         return page_nudge(text, theme);
+    }
+    // The kernel turned an answer down ("answer refused: no question is
+    // pending"): that belongs to the question's card, as one faint line in
+    // its shape, not a free line with Retry.
+    if let Some(reason) = text.strip_prefix("answer refused:") {
+        return asked_line("answer", &format!("refused — {}", reason.trim()), theme);
     }
     let shown = if failed {
         short_error(text)
@@ -867,15 +878,14 @@ fn user_prompt(
     let prompt = message.to_prompt();
     let (slash, body) = split_slash(&message.text);
     let group = SharedString::from(format!("prompt-{id}-{ix}"));
-    // Cursor's user bubble: a card on the right, raised off the page with
-    // a soft shadow, no wider than most of the column, the text dark. The
-    // edit pencil sits at its bottom-right and shows when the pointer is
-    // over the card.
+    // Cursor's user bubble: a card at the column's right edge, flush with
+    // the composer's, no wider than most of the column. The edit pencil
+    // sits outside the card, to its left, and shows on hover — inside, it
+    // widened the card and moved the text's right edge (Jacob's still).
     let card = div()
         .id(group.clone())
-        .group(group.clone())
         .max_w(px(PROMPT_MAX_WIDTH))
-        .px(px(root::COMPOSER_PAD_X))
+        .px(px(PROMPT_PAD_X))
         .py(px(PROMPT_PAD_Y))
         .rounded(px(PROMPT_RADIUS))
         // Cursor's prompt card: one step up from the page (#212121 on its
@@ -942,46 +952,49 @@ fn user_prompt(
                             ),
                     )
                 }),
-        )
-        .child(
-            div()
-                .id(SharedString::from(format!("replay-prompt-{id}-{ix}")))
-                .flex_none()
-                .size(px(24.))
-                .mt(px(-2.))
-                .mr(px(-6.))
-                .rounded(px(4.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                // Hidden until the pointer is over the card, then faint at
-                // its bottom-right — where Cursor keeps its restore arrow.
-                .invisible()
-                .group_hover(group, |el| el.visible())
-                .hover(|el| el.bg(theme.element_hover))
-                .tooltip(move |window, cx| Tooltip::text("Edit and resubmit from here", window, cx))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if prompt.is_empty() {
-                        return;
-                    }
-                    this.edit_in_composer(prompt.text.clone(), cx);
-                }))
-                .child(
-                    icons::icon(icons::editing::PEN)
-                        .size(px(12.))
-                        .text_color(theme.text_faint),
-                ),
         );
-    // A column with the card at its end: the card then takes its content's
-    // width up to PROMPT_MAX_WIDTH. As a row item it shrank to its text's
-    // minimum — one letter per line.
-    div()
-        .w_full()
+    let pencil = div()
+        .id(SharedString::from(format!("replay-prompt-{id}-{ix}")))
+        .flex_none()
+        .size(px(24.))
+        .mb(px(4.))
+        .rounded(px(4.))
         .flex()
-        .flex_col()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        // Hidden until the pointer is over the row, then faint beside the
+        // card's bottom-left corner; the card's own width never changes.
+        .invisible()
+        .group_hover(group.clone(), |el| el.visible())
+        .hover(|el| el.bg(theme.element_hover))
+        .tooltip(move |window, cx| Tooltip::text("Edit and resubmit from here", window, cx))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if prompt.is_empty() {
+                return;
+            }
+            this.edit_in_composer(prompt.text.clone(), cx);
+        }))
+        .child(
+            icons::icon(icons::editing::PEN)
+                .size(px(12.))
+                .text_color(theme.text_faint),
+        );
+    // A row with the card at its end: the card takes its content's width
+    // up to PROMPT_MAX_WIDTH and its right edge is the composer's — the
+    // composer's plate bleeds past the column gutter by its own pad.
+    div()
+        .group(group)
+        .w_full()
+        .relative()
+        .left(px(root::COMPOSER_PAD_X))
+        .flex()
+        .flex_row()
+        .justify_end()
         .items_end()
-        .child(card)
+        .gap(px(6.))
+        .child(pencil)
+        .child(card.flex_none())
         .into_any_element()
 }
 
@@ -1338,7 +1351,8 @@ fn children_lines(
                     .gap(px(6.))
                     .py(px(2.))
                     .cursor_pointer()
-                    .text_style(TextStyle::Callout)
+                    .text_style(TextStyle::Body)
+                    .text_size(px(root::CURSOR_PROSE_SIZE))
                     .child(
                         div()
                             .flex_none()
@@ -1381,7 +1395,8 @@ fn children_lines(
                 .items_baseline()
                 .gap(px(6.))
                 .py(px(2.))
-                .text_style(TextStyle::Callout)
+                .text_style(TextStyle::Body)
+                .text_size(px(root::CURSOR_PROSE_SIZE))
                 .text_color(theme.text_faint)
                 .child("Done")
                 .child(SharedString::from(sentence_case(
@@ -2570,6 +2585,9 @@ struct WorkStats {
     del: usize,
     first_file: Option<String>,
     first_edit: Option<String>,
+    /// The model's own words for the first command that had some (`bash`'s
+    /// description): "Ran List repo contents and recent commits".
+    first_desc: Option<String>,
     /// What the last tool of the range does — the verb a live header leads with.
     last_kind: Option<ToolKind>,
     /// Seconds the turn's tools and thoughts took, added up: the settled
@@ -2598,6 +2616,7 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
         add: 0,
         del: 0,
         first_file: None,
+        first_desc: None,
         first_edit: None,
         last_kind: None,
         secs: 0,
@@ -2620,6 +2639,7 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
             output,
             diff,
             secs,
+            desc,
             ..
         } = item
         {
@@ -2627,6 +2647,9 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
                 continue;
             }
             stats.tools += 1;
+            if stats.first_desc.is_none() {
+                stats.first_desc = desc.clone();
+            }
             stats.secs += u64::from(secs.unwrap_or(0));
             stats.last_label = Some(label.clone());
             let kind = coalesce_kind(*kind, label).unwrap_or(*kind);
@@ -2914,8 +2937,20 @@ pub fn render(
         .into_any_element()
 }
 
+/// An answer bubble a window from before this one wrote under its folded
+/// question (the same words as the card's answer): drawn nowhere now.
+fn is_ask_echo(items: &[ChatItem], ix: usize) -> bool {
+    ix > 0
+        && matches!(
+            (&items[ix - 1], &items[ix]),
+            (ChatItem::Asked { answer, .. }, ChatItem::User(message))
+                if !answer.is_empty() && message.text.trim() == answer.trim()
+        )
+}
+
 /// A question once answered: the card folded to one faint line, the
-/// answer (or "skipped") after it. The user's own line sits below.
+/// chosen answer (or "skipped") at its end — Cursor keeps the pick inside
+/// the collapsed card, not in a bubble of yours.
 fn asked_line(question: &str, answer: &str, theme: &Theme) -> AnyElement {
     div()
         .self_start()
@@ -2953,7 +2988,11 @@ fn asked_line(question: &str, answer: &str, theme: &Theme) -> AnyElement {
                 .child(if answer.is_empty() {
                     "skipped".to_string()
                 } else {
-                    "answered".to_string()
+                    let mut short: String = answer.trim().chars().take(60).collect();
+                    if answer.trim().chars().count() > 60 {
+                        short.push('…');
+                    }
+                    short
                 }),
         )
         .into_any_element()
@@ -3430,13 +3469,19 @@ fn zone(
                         .child(prose(chat, *ix, text, window, cx))
                         .into_any_element()
                 }
-                Seg::Run(range) if project_style => {
-                    // The root: the checklist the run wrote, nothing else of it.
+                Seg::Run(range) if project_style && !own_calls(&chat.items, range.clone()) => {
+                    // The root's kernel calls — spawn, say, plan, status —
+                    // are the worker lines, the page, the live step; the
+                    // run itself draws nothing but the checklist it wrote.
                     match todo_card(chat, range.clone(), &theme) {
                         Some(card) => card,
                         None => div().into_any_element(),
                     }
                 }
+                // The root's own quick call (a read-only command, a read)
+                // shows as Cursor's Project chat shows it: "Running 1
+                // command ⌄", then "Ran <what> ⌄" with the command card and
+                // its output; the next prompt folds it under "Worked".
                 Seg::Run(range) => {
                     // Present tense only on the run still taking calls.
                     let live = running && last_run == Some(n) && segs.len() == n + 1;
@@ -3951,6 +3996,13 @@ fn run_fold(
                         ChatItem::Thinking { .. } => thought(chat, ix, false, window, cx),
                         // A `status` call is the live step, not a row (#185).
                         ChatItem::Tool { label, .. } if is_status_call(label) => div().into_any_element(),
+                        // The root's kernel calls are drawn elsewhere (worker
+                        // lines, the panel's page): no row for them here.
+                        ChatItem::Tool { label, .. }
+                            if chat.parent.is_none() && is_kernel_call(label) =>
+                        {
+                            div().into_any_element()
+                        }
                         // A worker's `todo` call is its checklist card
                         // (Cursor's TodoWrite in a classic chat), not a
                         // bare "todo" row.
@@ -4003,9 +4055,10 @@ fn fold_row(
     cx: &mut Context<Workspace>,
 ) -> bezel::gpui::Stateful<bezel::gpui::Div> {
     let group = SharedString::from(format!("{name}-{key}"));
-    // Cursor sets "Worked 23s" in the prose size; the runs inside a fold
-    // stay a step smaller.
-    let style = if name == "work" { TextStyle::Body } else { TextStyle::Callout };
+    // Cursor sets "Worked 23s", "Running 1 command", "Ran …" all in the
+    // prose size (14 px on the Mac, the bubble's own): one size for the
+    // work lines, none a step smaller.
+    let style = TextStyle::Body;
     div()
         .id((name, key))
         .group(group.clone())
@@ -4022,6 +4075,7 @@ fn fold_row(
         .child(
             div()
                 .text_style(style)
+                .text_size(px(root::CURSOR_PROSE_SIZE))
                 .text_color(theme.text_muted)
                 .child(if live {
                     shimmer_label(verb, live_phase(), theme, cx)
@@ -4039,6 +4093,7 @@ fn fold_row(
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .text_style(style)
+                .text_size(px(root::CURSOR_PROSE_SIZE))
                     .text_color(theme.text_faint)
                     .child(spaced_label(rest, theme.text_faint, theme)),
             )
@@ -4109,11 +4164,16 @@ fn work_summary(
         }
     }
     if stats.commands > 0 {
-        parts.push(format!(
-            "ran {} {}",
-            stats.commands,
-            count_word(stats.commands, "command", "commands")
-        ));
+        // One command that described itself: Cursor's "Ran List repo
+        // contents and recent commits". Several, or none described: the count.
+        match (&stats.first_desc, stats.commands, stats.tools) {
+            (Some(desc), 1, 1) => parts.push(format!("ran {desc}")),
+            _ => parts.push(format!(
+                "ran {} {}",
+                stats.commands,
+                count_word(stats.commands, "command", "commands")
+            )),
+        }
     }
     if stats.spawns > 0 {
         parts.push(format!(
@@ -4254,7 +4314,10 @@ fn thought_line(
         return div().into_any_element();
     };
     let id = chat.id;
-    let open = chat.transcript.thought_open(ix, done);
+    // A streaming thought opens its tail in a worker's chat; the root
+    // (Cursor's Project chat) keeps to the "Thinking" line unless clicked.
+    let folded = done || chat.parent.is_none();
+    let open = chat.transcript.thought_open(ix, folded);
     let live = chat
         .thought_elapsed()
         .or_else(|| chat.elapsed())
@@ -4282,12 +4345,13 @@ fn thought_line(
                 .hover(|el| el.bg(theme.element_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.with_session(id, cx, |chat| {
-                        chat.transcript.toggle_thought(ix, done);
+                        chat.transcript.toggle_thought(ix, folded);
                     });
                 }))
                 .child(
                     div()
-                        .text_style(TextStyle::Callout)
+                        .text_style(TextStyle::Body)
+                        .text_size(px(root::CURSOR_PROSE_SIZE))
                         .text_color(theme.text_muted)
                         // Live, "Thinking" shimmers as Cursor's does; settled,
                         // the line is one faint colour.
@@ -4864,7 +4928,8 @@ fn heartbeat(
             .child(spinner(since, theme.text_muted, cx))
             .child(
                 div()
-                    .text_style(TextStyle::Callout)
+                    .text_style(TextStyle::Body)
+                    .text_size(px(root::CURSOR_PROSE_SIZE))
                     .text_color(theme.text_muted)
                     .child(shimmer_label(text, since, theme, cx)),
             )
@@ -4878,7 +4943,8 @@ fn heartbeat(
         .py(px(2.))
         .child(
             div()
-                .text_style(TextStyle::Callout)
+                .text_style(TextStyle::Body)
+                .text_size(px(root::CURSOR_PROSE_SIZE))
                 .text_color(theme.text_muted)
                 .child(shimmer_label(label, since, theme, cx)),
         )
@@ -4945,6 +5011,7 @@ mod selection_tests {
             diff: None,
             child_session: None,
             secs: None,
+            desc: None,
         });
         let segs = segments(&items, 0..items.len());
         assert_eq!(
@@ -5430,6 +5497,25 @@ fn todo_card(chat: &ChatSession, range: Range<usize>, theme: &Theme) -> Option<A
 /// `todo add`, `todo check 2`.
 fn is_todo_call(label: &str) -> bool {
     label == "todo" || label.starts_with("todo ")
+}
+
+/// A call to the kernel about the project rather than to the world: it
+/// shows as a worker line, the page, a checklist or the live step, never as
+/// a tool row of the root's.
+fn is_kernel_call(label: &str) -> bool {
+    matches!(
+        label.split_whitespace().next().unwrap_or(label),
+        "spawn" | "say" | "plan" | "todo" | "status" | "subscribe" | "remember" | "agents" | "transcript"
+    )
+}
+
+/// Whether a run holds a call of the root's own — a command, a read, a
+/// search — that Cursor's Project chat would show, as against kernel calls
+/// only (which draw as worker lines and cards).
+fn own_calls(items: &[ChatItem], range: Range<usize>) -> bool {
+    items[range].iter().any(|item| {
+        matches!(item, ChatItem::Tool { label, .. } if !is_kernel_call(label) && !is_status_call(label))
+    })
 }
 
 /// The kernel's echo of a checklist after a `todo` (or `plan`) call:

@@ -29,6 +29,11 @@ pub struct GitChanges {
 
 /// Untracked paths nobody means as a change: caches, virtual
 /// environments, build output, the app's own store.
+/// Past these the tree is a data dump or a checkout of everything, not
+/// work in progress; the pills stay away.
+const HUGE_FILES: usize = 400;
+const HUGE_LINES: u64 = 200_000;
+
 fn junk(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
     path.split('/').any(|part| {
@@ -57,6 +62,13 @@ impl GitChanges {
     /// untracked ones. `None` when `root` is not inside a git repository
     /// (or git is not there).
     pub fn read(root: &Path) -> Option<GitChanges> {
+        // The place itself must be the repository. A folder inside one (a
+        // home that is a dotfiles repo, `~/Code` full of other repos) would
+        // count the whole tree above and around it: Jacob saw
+        // "Changes +6241230" on `~/Code`.
+        if !root.join(".git").exists() {
+            return None;
+        }
         let numstat = git(root, &["diff", "--numstat", "HEAD", "--"])?;
         let mut files: Vec<FileChange> = numstat
             .lines()
@@ -94,6 +106,11 @@ impl GitChanges {
                     new: true,
                 });
             }
+        }
+        // A tree with hundreds of changed files or a million changed lines
+        // is not a change anyone means to review from a chat: no pill.
+        if files.len() > HUGE_FILES || files.iter().map(|f| u64::from(f.add) + u64::from(f.del)).sum::<u64>() > HUGE_LINES {
+            return None;
         }
         let ahead = git(root, &["rev-list", "--count", "@{u}..HEAD"])
             .and_then(|out| out.trim().parse().ok())

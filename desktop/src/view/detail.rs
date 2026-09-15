@@ -496,6 +496,10 @@ impl Arbos {
             // Cursor's subagent chat takes no follow-ups; a worker the
             // kernel archived is that here.
             _ if chat.is_some_and(|chat| chat.agent_gone()) => "Follow-ups aren't available for this worker",
+            // Cursor's new Project: the first message seeds the project.
+            _ if chat.is_some_and(|chat| chat.items.is_empty() && chat.parent.is_none()) => {
+                "What are you working on?"
+            }
             // Cursor: a fresh chat invites; one with a turn asks for the next.
             _ if chat.is_some_and(|chat| chat.items.is_empty()) => "Plan, search, build anything",
             _ => "Send follow-up",
@@ -603,12 +607,15 @@ impl Arbos {
         };
 
         let header = show_composer.then(|| self.chat_header(&theme, window, cx));
+        // A sub-chat with nothing said gives the composer the middle of the
+        // column. An empty root is Cursor's new-Project view — the header
+        // block and a greeting at the top, the composer at the foot.
         let empty_chat = show_composer
             && self
                 .workspace
                 .read(cx)
                 .active_session()
-                .is_some_and(|chat| chat.items.is_empty());
+                .is_some_and(|chat| chat.items.is_empty() && chat.parent.is_some());
         let content = div()
             // An empty chat gives the composer the middle of the column:
             // the body shrinks to the top half and the composer follows.
@@ -1410,6 +1417,8 @@ impl Arbos {
         {
             return branch.clone();
         }
+        // The place's own `.git`, not a parent's: a folder inside someone's
+        // dotfiles repo is not on a branch of its own.
         let head = std::fs::read_to_string(path.join(".git").join("HEAD")).ok();
         let branch = head.and_then(|head| {
             let head = head.trim();
@@ -1734,7 +1743,9 @@ impl Arbos {
         };
         // Nothing has been said yet, so what the session has to show for
         // itself is the directory the agent was started in.
-        let inner = if chat.items.is_empty() {
+        let inner = if chat.items.is_empty() && chat.parent.is_none() {
+            self.kickoff(&theme, window, cx)
+        } else if chat.items.is_empty() {
             let id = chat.id;
             let title = workspace.display_label(id);
             let naming = self.renaming == Some(Renaming::Session(id)) && self.rename_heading;
@@ -2185,6 +2196,51 @@ impl Arbos {
             );
         }
         card.into_any_element()
+    }
+
+    /// Cursor's new-Project view (`media/cursor-reference/mac-fixes/
+    /// cursor-new-project-kickoff.png`): the project header block, then
+    /// the coordinator's greeting where its first turn's words would go.
+    /// Cursor runs a "Setting up environment" turn here; ours is a line
+    /// until the kernel has a kickoff turn (features inbox). The first
+    /// message sent turns this into the Project chat.
+    fn kickoff(&self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let name = self
+            .workspace
+            .read(cx)
+            .active_project()
+            .map(crate::model::workspace::Workspace::tab_label)
+            .unwrap_or_else(|| "this project".to_string());
+        let greeting = format!(
+            "{name} is ready. Drag in files, or just tell me what you want to build and I'll get it moving.\n\nAnytime you want me to work differently, say so and I'll remember."
+        );
+        div()
+            .id("kickoff")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(root::CHAT_MAX_WIDTH))
+                    .px(px(root::CHAT_GUTTER))
+                    .flex()
+                    .flex_col()
+                    .children(self.chat_project_head(cx))
+                    .child(
+                        div()
+                            .id("kickoff-greeting")
+                            .pt(px(28.))
+                            .text_style(TextStyle::Body)
+                            .text_size(px(root::CURSOR_PROSE_SIZE))
+                            .line_height(px(root::CURSOR_PROSE_LEADING))
+                            .text_color(theme.text)
+                            .child(markdown::markdown(&greeting, window, cx)),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// Cursor's Project chat header, over the root chat's first turn: the
