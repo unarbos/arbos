@@ -1118,6 +1118,7 @@ pub fn seed_transcript(place: &Place, id: &str, items: &[crate::model::session::
             crate::model::session::ChatItem::Agent(text) => {
                 batch.push(arbos_core::Event::new(arbos_core::EventKind::Assistant {
                     text: text.clone(),
+                    step: 0,
                     reasoning_details: None,
                 }));
             }
@@ -1455,7 +1456,7 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
             failed: false,
         }),
         arbos_core::EventKind::Thinking { text, .. } if text.trim().is_empty() => None,
-        arbos_core::EventKind::Thinking { text, secs } => Some(ChatItem::Thinking {
+        arbos_core::EventKind::Thinking { text, secs, .. } => Some(ChatItem::Thinking {
             text: text.clone(),
             done: true,
             secs: secs.map(|s| s.min(u32::MAX as u64) as u32),

@@ -188,13 +188,15 @@ impl arbos_engine::Hooks for TurnHooks {
         // The whole step follows from the transcript tail as an `event`
         // with its line number, which older clients already render.
         let frame = match &event.kind {
-            EventKind::Assistant { text, .. } if event.seq == 0 => Frame::AssistantDelta {
+            EventKind::Assistant { text, step, .. } if event.seq == 0 => Frame::AssistantDelta {
                 agent: self.agent.to_string(),
                 text: text.clone(),
+                step: *step,
             },
-            EventKind::Thinking { text, .. } if event.seq == 0 => Frame::ThinkingDelta {
+            EventKind::Thinking { text, step, .. } if event.seq == 0 => Frame::ThinkingDelta {
                 agent: self.agent.to_string(),
                 text: text.clone(),
+                step: *step,
             },
             _ => Frame::Event {
                 agent: self.agent.to_string(),

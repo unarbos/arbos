@@ -369,6 +369,7 @@ pub fn project(
                 EventKind::Assistant {
                     text,
                     reasoning_details,
+                    ..
                 } => {
                     flush(&mut out, &mut pending);
                     pending = Some((i, text.clone(), reasoning_details.clone()));
@@ -660,6 +661,7 @@ mod spill_cite_tests {
         let rec = ToolRec {
             name: "bash".into(),
             call_id: "call_1".into(),
+            step: 0,
             paths: vec![],
             started: None,
             ended: None,
@@ -712,6 +714,7 @@ mod spill_cite_tests {
         let read_rec = ToolRec {
             name: "read".into(),
             call_id: "call_2".into(),
+            step: 0,
             paths: vec!["/src/big.rs".into()],
             started: None,
             ended: None,

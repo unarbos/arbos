@@ -48,6 +48,13 @@ pub enum EventKind {
     },
     Assistant {
         text: String,
+        /// The model step within the turn that said it, 1-based: one step
+        /// is one model call (its thinking, its text, its tool calls). A
+        /// window pairs the streamed `assistant_delta`s tagged N with the
+        /// settled line tagged N (M-14). 0 on lines from before the field:
+        /// pair by adjacency.
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        step: u64,
         /// Provider reasoning blocks that must go back with this message on
         /// the next call (Gemini 3 thought signatures, Anthropic thinking
         /// blocks via OpenRouter). Opaque; never rendered.
@@ -61,6 +68,9 @@ pub enum EventKind {
         /// Absent on a live delta and on lines from before the key.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secs: Option<u64>,
+        /// The model step within the turn, as on `Assistant`.
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        step: u64,
     },
     Tool(ToolRec),
     Ask {
@@ -144,6 +154,10 @@ pub enum EventKind {
 pub struct ToolRec {
     pub name: String,
     pub call_id: String,
+    /// The model step within the turn that made the call, as on
+    /// `Assistant`: a window attaching mid-turn puts a late final in order.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub step: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,4 +244,8 @@ impl Event {
             _ => None,
         }
     }
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
 }

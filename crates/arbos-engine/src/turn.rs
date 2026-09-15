@@ -530,11 +530,12 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         max_parallel: host.config.max_parallel_tools,
         speculate: host.config.speculate,
     };
-    let cx = RunCx {
+    let mut cx = RunCx {
         place: place.clone(),
         agent: agent.clone(),
         cwd,
         call_id: String::new(),
+        step: 0,
         cancel: control.cancel().clone(),
         grep,
         hooks: Arc::clone(&hooks),
@@ -697,6 +698,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         // The reply lands on the line after the last one loaded. Another
         // writer may slip in between; the call ids still tie the two.
         provider.trace_line = events.last().map(|e| e.seq).unwrap_or(0) + 1;
+        // One model call = one step; every event this step writes carries
+        // the number, so a window pairs streamed text with the settled line.
+        cx.step += 1;
         let step = model_step(
             StepCx {
                 provider: &mut provider,
@@ -744,6 +748,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 if !partial.trim().is_empty() {
                     batch.push(Event::new(EventKind::Assistant {
                         text: partial.trim_matches('\n').to_string(),
+                        step: cx.step,
                         reasoning_details: None,
                     }));
                 }
@@ -761,6 +766,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                         &transcript,
                         &Event::new(EventKind::Assistant {
                             text: partial,
+                            step: cx.step,
                             reasoning_details: None,
                         }),
                     )?;
@@ -821,6 +827,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 &transcript,
                 &Event::new(EventKind::Assistant {
                     text: content.trim_matches('\n').to_string(),
+                    step: cx.step,
                     reasoning_details: (!reasoning_details.is_empty())
                         .then(|| serde_json::Value::Array(reasoning_details.clone())),
                 }),
@@ -932,7 +939,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 parked = Some(why.clone());
             }
             let sig = format!("{}\u{0}{}", call.name, call.arguments);
-            let mut ev = outcome.into_event(&call);
+            let mut ev = outcome.into_event(&call, cx.step);
             if let EventKind::Tool(rec) = &mut ev.kind {
                 // Re-asking the same question of an unchanged tree gets the
                 // same answer. Any write clears the slate; a repeated read

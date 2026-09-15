@@ -563,7 +563,7 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
         // Streamed text, one chunk per frame (the kernel's live path); the
         // whole step arrives later as an `event` with a seq, which
         // `merge_stream_text` folds into what the chunks built.
-        Frame::AssistantDelta { agent: id, text } if id == agent || agent.is_empty() => {
+        Frame::AssistantDelta { agent: id, text, .. } if id == agent || agent.is_empty() => {
             vec![Event::Update(SessionUpdate::AgentMessageChunk(text_chunk(
                 text,
             )))]
@@ -582,7 +582,7 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             key,
             source,
         }],
-        Frame::ThinkingDelta { agent: id, text } if id == agent || agent.is_empty() => {
+        Frame::ThinkingDelta { agent: id, text, .. } if id == agent || agent.is_empty() => {
             vec![Event::Update(SessionUpdate::AgentThoughtChunk(text_chunk(
                 text,
             )))]

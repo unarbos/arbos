@@ -106,6 +106,10 @@ pub struct RunCx {
     pub agent: Agent,
     pub cwd: PathBuf,
     pub call_id: String,
+    /// The model step within the turn this call belongs to (1-based);
+    /// the turn sets it before each model call. On every event the step
+    /// writes.
+    pub step: u64,
     pub cancel: CancellationToken,
     pub grep: Arc<dyn Grep>,
     pub hooks: Arc<dyn Hooks>,

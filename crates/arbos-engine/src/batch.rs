@@ -53,7 +53,7 @@ pub enum Outcome {
 
 impl Outcome {
     /// The transcript record for this call.
-    pub fn into_event(self, call: &ToolCall) -> Event {
+    pub fn into_event(self, call: &ToolCall, step: u64) -> Event {
         let (body, paths, child, images, error, started, ended, diff) = match self {
             Outcome::Ran {
                 out: Ok(out),
@@ -106,6 +106,7 @@ impl Outcome {
         Event::new(EventKind::Tool(ToolRec {
             name: call.name.clone(),
             call_id: call.id.clone(),
+            step,
             paths,
             started,
             ended,
@@ -337,6 +338,7 @@ pub async fn run(
                 cx.hooks.emit(&Event::new(EventKind::Tool(ToolRec {
                     name: call.name.clone(),
                     call_id: call.id.clone(),
+                    step: cx.step,
                     paths: vec![],
                     started: Some(started),
                     ended: None,
