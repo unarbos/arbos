@@ -727,9 +727,18 @@ impl Opener {
     }
 }
 
+/// `/~/Code` — a `~` typed after the field's own prefilled `/` — is `~/Code`.
+fn untilde_slash(typed: &str) -> &str {
+    match typed.strip_prefix('/') {
+        Some(rest) if rest.starts_with('~') => rest,
+        _ => typed,
+    }
+}
+
 /// A typed local path as the file system knows it: `~` and `~/…` are the
 /// user's home (this process's, the one the window runs as).
 fn local_path(typed: &str) -> PathBuf {
+    let typed = untilde_slash(typed);
     let typed = if typed.is_empty() { "/" } else { typed };
     if typed == "~" {
         return dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
@@ -776,7 +785,7 @@ fn list_local(dir: &str) -> Vec<String> {
 }
 
 fn split_path(typed: &str) -> (String, String) {
-    let typed = typed.trim();
+    let typed = untilde_slash(typed.trim());
     if typed.is_empty() || typed == "/" {
         return ("/".into(), String::new());
     }

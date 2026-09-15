@@ -95,6 +95,12 @@ pub enum ChatItem {
         /// under a settled turn adds these up.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secs: Option<u32>,
+        /// What the call does, in the model's few words (`bash`'s
+        /// `description`, kept by the kernel as the record's `label`):
+        /// "Ran List repo contents and recent commits" instead of
+        /// "Ran 1 command". None when the model gave none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        desc: Option<String>,
     },
     /// Something the session has to say for itself: a stop reason, or a
     /// failure. `failed` picks which strip it paints as.
@@ -2442,6 +2448,14 @@ impl ChatSession {
                     }
                 } else {
                     self.tool_started.insert(id.clone(), Instant::now());
+                    let desc = call
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("label"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|d| !d.is_empty())
+                        .map(str::to_string);
                     self.items.push(ChatItem::Tool {
                         id,
                         kind: call.kind,
@@ -2451,6 +2465,7 @@ impl ChatSession {
                         diff,
                         child_session: None,
                         secs: None,
+                        desc,
                     });
                 }
             }

@@ -113,6 +113,7 @@ pub fn decode(value: &Value) -> Result<Vec<ChatItem>> {
                             ),
                             child_session: None,
                             secs: None,
+                            desc: None,
                         });
                     }
                 }
@@ -162,6 +163,7 @@ pub fn decode(value: &Value) -> Result<Vec<ChatItem>> {
                         diff,
                         child_session: child,
                         secs: None,
+                        desc: None,
                     });
                 }
             }

@@ -981,10 +981,12 @@ fn user_prompt(
                 .text_color(theme.text_faint),
         );
     // A row with the card at its end: the card takes its content's width
-    // up to PROMPT_MAX_WIDTH and its right edge is the column's.
+    // up to PROMPT_MAX_WIDTH and its right edge is the composer's — the
+    // composer's plate bleeds past the column gutter by its own pad.
     div()
         .group(group)
         .w_full()
+        .mr(px(-root::COMPOSER_PAD_X))
         .flex()
         .flex_row()
         .justify_end()
@@ -2582,6 +2584,9 @@ struct WorkStats {
     del: usize,
     first_file: Option<String>,
     first_edit: Option<String>,
+    /// The model's own words for the first command that had some (`bash`'s
+    /// description): "Ran List repo contents and recent commits".
+    first_desc: Option<String>,
     /// What the last tool of the range does — the verb a live header leads with.
     last_kind: Option<ToolKind>,
     /// Seconds the turn's tools and thoughts took, added up: the settled
@@ -2610,6 +2615,7 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
         add: 0,
         del: 0,
         first_file: None,
+        first_desc: None,
         first_edit: None,
         last_kind: None,
         secs: 0,
@@ -2632,6 +2638,7 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
             output,
             diff,
             secs,
+            desc,
             ..
         } = item
         {
@@ -2639,6 +2646,9 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
                 continue;
             }
             stats.tools += 1;
+            if stats.first_desc.is_none() {
+                stats.first_desc = desc.clone();
+            }
             stats.secs += u64::from(secs.unwrap_or(0));
             stats.last_label = Some(label.clone());
             let kind = coalesce_kind(*kind, label).unwrap_or(*kind);
@@ -4153,11 +4163,16 @@ fn work_summary(
         }
     }
     if stats.commands > 0 {
-        parts.push(format!(
-            "ran {} {}",
-            stats.commands,
-            count_word(stats.commands, "command", "commands")
-        ));
+        // One command that described itself: Cursor's "Ran List repo
+        // contents and recent commits". Several, or none described: the count.
+        match (&stats.first_desc, stats.commands, stats.tools) {
+            (Some(desc), 1, 1) => parts.push(format!("ran {desc}")),
+            _ => parts.push(format!(
+                "ran {} {}",
+                stats.commands,
+                count_word(stats.commands, "command", "commands")
+            )),
+        }
     }
     if stats.spawns > 0 {
         parts.push(format!(
@@ -4992,6 +5007,7 @@ mod selection_tests {
             diff: None,
             child_session: None,
             secs: None,
+            desc: None,
         });
         let segs = segments(&items, 0..items.len());
         assert_eq!(
