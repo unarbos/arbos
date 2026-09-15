@@ -500,6 +500,12 @@ pub struct ChatSession {
     /// Seconds a thought had before a later step reopened it; added back
     /// when it settles again.
     pub thought_carry: u32,
+    /// When this window asked the kernel for the kickoff turn on an empty
+    /// root (Cursor's "Setting up environment"). Runtime only.
+    pub kickoff_at: Option<SystemTime>,
+    /// How long the kickoff turn took, once it ended: the turn has no
+    /// prompt to stamp, so its "Worked Ns" lives here.
+    pub kickoff_secs: Option<u32>,
     /// What the agent says it is doing right now (the kernel's `status`
     /// event); cleared when the turn ends.
     pub status: Option<String>,
@@ -621,6 +627,8 @@ impl ChatSession {
             status_only: false,
             live_since: None,
             thought_carry: 0,
+            kickoff_at: None,
+            kickoff_secs: None,
             status: None,
             turn_open: false,
             turn_ended: None,
@@ -696,6 +704,8 @@ impl ChatSession {
             status_only: false,
             live_since: None,
             thought_carry: 0,
+            kickoff_at: None,
+            kickoff_secs: None,
             status: None,
             turn_open: false,
             turn_ended: None,
@@ -771,6 +781,8 @@ impl ChatSession {
             status_only: false,
             live_since: None,
             thought_carry: 0,
+            kickoff_at: None,
+            kickoff_secs: None,
             status: None,
             turn_open: false,
             turn_ended: None,
@@ -871,6 +883,14 @@ impl ChatSession {
         let Some(elapsed) = self.elapsed() else {
             return;
         };
+        // The kickoff turn has no prompt: its time is the chat's, measured
+        // from the ask to the last turn end before the user's first line.
+        if let Some(at) = self.kickoff_at
+            && !self.items.iter().any(|item| matches!(item, ChatItem::User(_)))
+        {
+            self.kickoff_secs = Some(at.elapsed().map(|d| d.as_secs() as u32).unwrap_or(0));
+            return;
+        }
         let Some(ChatItem::User(message)) = self
             .items
             .iter_mut()
@@ -1370,11 +1390,36 @@ impl ChatSession {
             self.queue.push_back(content);
             return;
         }
+        // The kickoff turn is not the user's to steer: words typed while it
+        // sets the place up wait for it, as Cursor's "Send follow-up" does,
+        // and open their own turn.
+        if self.kickoff_running() {
+            // The kernel holds a plain user frame for the next turn while
+            // one runs; its own record of the line lands the card in order,
+            // after the greeting, so nothing is drawn here now.
+            let held = match &self.connection {
+                Connection::Live(session) if !session.is_closed() => session.prompt(&content).is_ok(),
+                _ => false,
+            };
+            if !held {
+                self.queue.push_back(content);
+            }
+            self.flush();
+            return;
+        }
         if self.streaming || self.has_running_tool() {
             self.steer(content);
             return;
         }
         self.prompt(content);
+    }
+
+    /// The kickoff turn (asked for by this window, no prompt of the user's
+    /// yet) is still running.
+    pub fn kickoff_running(&self) -> bool {
+        self.kickoff_at.is_some()
+            && self.busy()
+            && !self.items.iter().any(|item| matches!(item, ChatItem::User(_)))
     }
 
     /// Hold the words for the next turn. The kernel keeps them as an inbox
@@ -2065,6 +2110,19 @@ impl ChatSession {
             }
             Event::Handshake { protocol, kernel } => {
                 let ok = protocol.is_some_and(|p| p >= crate::kernel::PROTOCOL);
+                // An empty root on a place opened for the first time: ask
+                // for the kickoff turn once. The kernel files nothing when
+                // root has a turn on record already.
+                if ok
+                    && self.parent.is_none()
+                    && self.items.is_empty()
+                    && self.kickoff_at.is_none()
+                    && self.agent_session.as_deref().is_none_or(|id| id == "root")
+                    && let Connection::Live(session) = &self.connection
+                    && session.kickoff().is_ok()
+                {
+                    self.kickoff_at = Some(SystemTime::now());
+                }
                 if !ok {
                     let where_ = match &self.host {
                         Some(h) => format!("on {h}"),

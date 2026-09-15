@@ -56,7 +56,10 @@ pub(crate) fn age(at: SystemTime) -> String {
 pub(crate) const PANEL_WIDTH: f32 = 280.;
 
 /// Below this window width the panel is left out; the chat comes first.
-pub(crate) const PANEL_MIN_WINDOW: f32 = 900.;
+/// Under this width the panel folds away and the chat takes the column:
+/// a 900-pt window (Mac cycle 11's small-window still) keeps a readable
+/// transcript instead of a 620-pt one beside a full panel.
+pub(crate) const PANEL_MIN_WINDOW: f32 = 1000.;
 
 /// A row's height, and the step each level of the tree indents by.
 const ROW_HEIGHT: f32 = 26.;

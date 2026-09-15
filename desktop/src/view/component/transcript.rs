@@ -93,6 +93,17 @@ const SHIMMER_FPS: f32 = 30.;
 /// so the band can fall between letters. `since` sets the phase, so a row
 /// that re-renders keeps its place in the sweep. Under Reduce Motion the
 /// label sits still in the muted colour.
+/// A shimmering line for another view (the kickoff view's "Setting up
+/// environment"): the same paint as the heartbeat's words.
+pub(crate) fn shimmer_line<V: 'static>(
+    text: &str,
+    since: Duration,
+    theme: &Theme,
+    cx: &mut Context<V>,
+) -> AnyElement {
+    shimmer_label(text, since, theme, cx).into_any_element()
+}
+
 fn shimmer_label<V: 'static>(
     text: impl AsRef<str>,
     since: Duration,
@@ -610,7 +621,15 @@ fn notice(
         .gap(px(8.))
         .text_style(TextStyle::Callout)
         .text_color(theme.text_muted)
-        .child(spaced_label(shown, theme.text_muted, theme))
+        // In a flex box the words need a shrinkable cell to wrap in; without
+        // it a long notice ("mode: ask — …") ran off the right edge (Mac
+        // cycle 11).
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(spaced_label(shown, theme.text_muted, theme)),
+        )
         .when_some(retry, |row, prompt| {
             row.child(
                 div()
@@ -2777,9 +2796,18 @@ pub fn render(
         // Cursor's Agents chat draws no date line over a turn; the footer's
         // "2m ago" is the only clock. The divider stays for a day crossing
         // inside one conversation, where "Yesterday" earns its line.
-        if let Some(ChatItem::User(message)) = chat.items.get(turn.range.start)
-            && let Some(at) = message.sent_at.filter(|at| *at > 0)
-        {
+        // The kickoff turn has no prompt; its clock is when it was asked for.
+        let kickoff_at = (turn.range.start == 0
+            && !matches!(chat.items.first(), Some(ChatItem::User(_))))
+        .then(|| chat.kickoff_at)
+        .flatten()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64);
+        let sent_at = match chat.items.get(turn.range.start) {
+            Some(ChatItem::User(message)) => message.sent_at.filter(|at| *at > 0),
+            _ => kickoff_at,
+        };
+        if let Some(at) = sent_at {
             let day = local_day(at);
             // Cursor's Project chat draws "Today 11:35 PM" over the first
             // turn; a subagent's chat does not. Both draw one at a day
@@ -3399,9 +3427,16 @@ fn zone(
 ) -> AnyElement {
     let theme = Theme::of(cx).clone();
     let first = turn.range.start;
-    let body = (first + 1).min(turn.range.end)..turn.answer_from;
+    // The kickoff turn (Cursor's "Setting up environment") opens the
+    // transcript with no prompt: its first item is work, not a card, and
+    // it folds to "Worked Ns" once settled — Cursor shows no detail of it.
+    let kickoff_turn = first == 0
+        && chat.kickoff_at.is_some()
+        && !matches!(chat.items.first(), Some(ChatItem::User(_) | ChatItem::From { .. }));
+    let body_start = if kickoff_turn { first } else { (first + 1).min(turn.range.end) };
+    let body = body_start..turn.answer_from.max(body_start);
     let stats = work_stats(&chat.items, body.clone());
-    let auto_open = auto_work_open(&chat.items, first, running);
+    let auto_open = auto_work_open(&chat.items, first, running) && !kickoff_turn;
     let open = chat
         .transcript
         .work
@@ -3445,6 +3480,23 @@ fn zone(
             None => open = true,
         }
     }
+    // Cursor's live headline over the timeline: "Working <step> ⌄" — the
+    // step the agent named, else the kernel's; the rows of work under it.
+    let live_headline = running && foldable && !kickoff_turn;
+    if live_headline {
+        let step = chat
+            .status
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| chat.current_step())
+            .unwrap_or_else(|| "Planning next moves".to_string());
+        zone = zone.child(
+            fold_row(&theme, "work", first, "Working".to_string(), step, None, true, true, cx)
+                .into_any_element(),
+        );
+        header_drawn = true;
+        open = true;
+    }
     // Cursor's Project chat (the root) shows no tool calls at all — the
     // coordinator's quick reads and commands are hidden work; its checklist
     // (`plan`, Cursor's TodoWrite) shows as a card. A worker's chat shows
@@ -3454,7 +3506,14 @@ fn zone(
         let last_run = segs.iter().rposition(|seg| matches!(seg, Seg::Run(_)));
         // A run still taking calls already shows a live line; a second
         // "Working" under it would say the same thing twice.
-        live_fold_shown = running && last_run.is_some() && last_run == Some(segs.len() - 1);
+        live_fold_shown = (running && last_run.is_some() && last_run == Some(segs.len() - 1))
+            || live_headline;
+        // Cursor's kickoff shows one shimmering line and nothing of the
+        // work until it ends.
+        let segs: Vec<Seg> = if kickoff_turn && running { Vec::new() } else { segs };
+        if kickoff_turn && running {
+            live_fold_shown = false;
+        }
         let kids: Vec<AnyElement> = segs
             .iter()
             .enumerate()
@@ -3897,6 +3956,8 @@ fn work_header(
     // tools and thoughts took.
     let stamped = match chat.items.get(turn) {
         Some(ChatItem::User(message)) => message.worked_secs.map(u64::from),
+        // The kickoff turn opens the transcript with no prompt.
+        _ if turn == 0 => chat.kickoff_secs.map(u64::from),
         _ => None,
     };
     let elapsed = chat
@@ -4035,6 +4096,7 @@ fn headline_describes(chat: &ChatSession, ix: usize) -> bool {
     };
     let stamped = match chat.items.get(turn.range.start) {
         Some(ChatItem::User(message)) => message.worked_secs.unwrap_or(0),
+        _ if turn.range.start == 0 => chat.kickoff_secs.unwrap_or(0),
         _ => 0,
     };
     if stamped > 0 {
@@ -4173,8 +4235,10 @@ fn work_summary(
     if stats.commands > 0 {
         // One command that described itself: Cursor's "Ran List repo
         // contents and recent commits". Several, or none described: the count.
-        match (&stats.first_desc, stats.commands, stats.tools) {
-            (Some(desc), 1, 1) => parts.push(format!("ran {desc}")),
+        // Live it counts ("Running 1 command"); the words come once it
+        // settles ("Ran List repo contents and recent commits"), as in Cursor.
+        match (&stats.first_desc, stats.commands, stats.tools, running) {
+            (Some(desc), 1, 1, false) => parts.push(format!("ran {desc}")),
             _ => parts.push(format!(
                 "ran {} {}",
                 stats.commands,
@@ -4865,9 +4929,16 @@ fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
     if chat.working.is_some() {
         return Some("Thinking".to_string());
     }
+    // The kickoff turn (no prompt of the user's, the chat's first) reads
+    // as Cursor's "Setting up environment" whatever step the kernel derives.
+    let kickoff = turn.range.start == 0
+        && chat.kickoff_at.is_some()
+        && !matches!(chat.items.first(), Some(ChatItem::User(_)));
     // The agent named its step (Cursor's UpdateCurrentStep on the
     // timeline: "Copying stills to artifacts"): that is the line.
-    if let Some(step) = chat.status.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(step) = chat.status.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        && !kickoff
+    {
         return Some(step.to_string());
     }
     let last = chat.items.get(turn.range.start..turn.range.end)?.last()?;
@@ -4904,6 +4975,7 @@ fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
     }
     Some(
         match last {
+            _ if kickoff => "Setting up environment",
             ChatItem::User(_) => "Planning next moves",
             _ => "Working",
         }

@@ -74,6 +74,11 @@ pub struct State {
     /// opens Settings › Permissions; after that it is a click away.
     #[serde(default)]
     pub permissions_seen: bool,
+    /// The window's last frame — x, y, width, height in points — so a
+    /// relaunch opens where the window was. Restored only when most of it
+    /// lies on a screen that is there; otherwise the window is centred.
+    #[serde(default)]
+    pub frame: Option<[f32; 4]>,
 }
 
 /// What the body size may be set to, in points: the ladder's smallest measured
@@ -97,13 +102,16 @@ impl Default for State {
             reduce_transparency: true,
             cursor_blink: true,
             text_size: TextStyle::Body.size(),
-            bionic_reading: true,
+            // Off: Cursor's prose is plain; the weighted words are a reading
+            // aid to switch on, not what a new user meets (Mac cycle 11).
+            bionic_reading: false,
             hue: 0.,
             chroma: 0.,
             last: BTreeMap::new(),
             names: BTreeMap::new(),
             dismissed: BTreeMap::new(),
             permissions_seen: false,
+            frame: None,
         }
     }
 }
@@ -163,6 +171,7 @@ pub fn restore() -> State {
         names: stored.names,
         dismissed: stored.dismissed,
         permissions_seen: stored.permissions_seen,
+        frame: stored.frame,
     }
 }
 

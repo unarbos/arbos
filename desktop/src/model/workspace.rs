@@ -96,6 +96,8 @@ pub struct Workspace {
     /// The body size the type ladder is scaled against, in points.
     pub text_size: f32,
     /// Whether the agent's prose is weighted for bionic reading.
+    /// The window's last frame (x, y, w, h in points), persisted.
+    pub frame: Option<[f32; 4]>,
     pub bionic_reading: bool,
     /// The hue the greys carry, and how much of it.
     pub tint: Tint,
@@ -171,6 +173,7 @@ impl Workspace {
             cursor_blink: state.cursor_blink,
             text_size: state.text_size,
             bionic_reading: state.bionic_reading,
+            frame: state.frame,
             tint: Tint::new(state.hue, state.chroma),
             meter: false,
             changes: HashMap::new(),
@@ -261,6 +264,7 @@ impl Workspace {
             names: BTreeMap::new(),
             dismissed: self.dismissed.clone(),
             permissions_seen: self.permissions_seen,
+            frame: self.frame,
         });
     }
 
@@ -512,6 +516,15 @@ impl Workspace {
     /// Kept as a global as well, the way the caret and the text size are: the
     /// transcript paints while this workspace is borrowed, so it cannot read
     /// the field off it.
+    /// The window moved or was resized: remember its frame for the next
+    /// launch.
+    pub fn set_frame(&mut self, frame: [f32; 4]) {
+        if self.frame != Some(frame) {
+            self.frame = Some(frame);
+            self.save();
+        }
+    }
+
     pub fn set_bionic_reading(&mut self, on: bool, cx: &mut Context<Self>) {
         self.bionic_reading = on;
         reading::set_bionic(on, cx);

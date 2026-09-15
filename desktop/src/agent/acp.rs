@@ -377,6 +377,15 @@ impl Session {
         .map_err(|e| Error::internal_error().data(e.to_string()))
     }
 
+    /// Cursor's "Setting up environment" turn on a new Project: asks the
+    /// kernel for root's one bounded kickoff turn. A no-op there once root
+    /// has any turn on record.
+    pub fn kickoff(&self) -> Result<()> {
+        self.send_frame(&Frame::Kickoff {
+            agent: self.session_id.clone(),
+        })
+    }
+
     pub fn approval(&self, request_id: &str, approved: bool) -> Result<()> {
         self.send_frame(&Frame::Approve {
             agent: self.session_id.clone(),
@@ -762,6 +771,11 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
             ts,
             channel,
         }],
+        // The kickoff turn opening live: its step reads as Cursor's
+        // "Setting up environment" until the agent names one of its own.
+        EventKind::Wake { wake, .. } if wake == "kickoff" && !recorded => {
+            vec![Event::Status("Setting up environment".into())]
+        }
         // A transcript line (tailed or replayed) is the step's final text;
         // a live emit without a seq is a delta (older kernels send those
         // as events too).
