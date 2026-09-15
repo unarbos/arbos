@@ -1229,10 +1229,19 @@ impl KernelHooks {
             .collect();
         match hits.len() {
             1 => self.check_target(from, hits[0].clone()),
-            0 => bail!(
-                "say: no agent is named {q:?}. Agents here: {}",
-                roster(&agents, from)
-            ),
+            0 => {
+                // A worker that finished a moment ago has moved to the
+                // archive; "no agent is named X. Agents here: (none)" read
+                // as if it never existed (qa-033). Say what happened.
+                if let Some(gone) = self.archived_named(q) {
+                    bail!("{}", gone.refusal(&agents, from));
+                }
+                bail!(
+                    "say: no agent is named {q:?}. Live agents: {}{}",
+                    roster(&agents, from),
+                    self.archived_note()
+                )
+            }
             _ => bail!(
                 "say: {q:?} matches several; nothing sent. Use the exact id of one:\n{}",
                 hits.iter()
@@ -1241,6 +1250,68 @@ impl KernelHooks {
                     .join("\n")
             ),
         }
+    }
+
+    /// An archived worker `q` names (exact id or name, then a unique
+    /// substring of a name), with when its last turn ended.
+    fn archived_named(&self, q: &str) -> Option<Archived> {
+        let all = self.archived();
+        let lq = q.to_ascii_lowercase();
+        let exact = all
+            .iter()
+            .find(|a| a.agent.id.as_str() == q || a.agent.name == q);
+        let found = exact.or_else(|| {
+            let hits: Vec<&Archived> = all
+                .iter()
+                .filter(|a| a.agent.name.to_ascii_lowercase().contains(&lq))
+                .collect();
+            (hits.len() == 1).then(|| hits[0])
+        })?;
+        Some(found.clone())
+    }
+
+    /// Every folder under `archive/agents/` that still reads as an agent.
+    fn archived(&self) -> Vec<Archived> {
+        let dir = arbos_core::project::archive_agents_dir(&self.place);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut out: Vec<Archived> = entries
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter_map(|e| {
+                let agent = Agent::load(&e.path()).ok()?;
+                let ended = arbos_core::load_transcript(&e.path().join("transcript.jsonl"))
+                    .ok()?
+                    .iter()
+                    .rev()
+                    .find(|ev| matches!(ev.kind, EventKind::TurnComplete { .. }))
+                    .map(|ev| ev.ts);
+                Some(Archived {
+                    agent,
+                    ended,
+                    path: e.path(),
+                })
+            })
+            .collect();
+        out.sort_by_key(|a| a.agent.id.to_string());
+        out
+    }
+
+    /// "; N archived: a, b, c" when workers have finished, else nothing —
+    /// so an empty live roster does not read as "nothing ever ran".
+    fn archived_note(&self) -> String {
+        let all = self.archived();
+        if all.is_empty() {
+            return String::new();
+        }
+        let names: Vec<&str> = all.iter().map(|a| a.agent.id.as_str()).take(8).collect();
+        format!(
+            ". {} archived (finished): {}{}",
+            all.len(),
+            names.join(", "),
+            if all.len() > names.len() { ", …" } else { "" }
+        )
     }
 
     fn check_target(&self, from: &AgentId, a: Agent) -> Result<Agent> {
@@ -1749,6 +1820,35 @@ impl KernelHooks {
 }
 
 /// `id — name (paused)` per agent other than `me`.
+/// A finished worker in `archive/agents/`, for the `say` refusal.
+#[derive(Debug, Clone)]
+struct Archived {
+    agent: Agent,
+    /// When its last turn ended (the last `turn_complete`), ms.
+    ended: Option<i64>,
+    path: std::path::PathBuf,
+}
+
+impl Archived {
+    fn refusal(&self, live: &[Agent], from: &AgentId) -> String {
+        let when = self
+            .ended
+            .map(|ms| format!(" at {}", arbos_core::inbox::rfc3339(ms)))
+            .unwrap_or_default();
+        let rel = self
+            .path
+            .strip_prefix(self.path.ancestors().nth(3).unwrap_or(&self.path))
+            .map(|p| format!(".arbos/{}", p.display()))
+            .unwrap_or_else(|_| self.path.display().to_string());
+        format!(
+            "say: {} ({}) finished{when} and is archived; it takes no more messages. Its report is its last words in {rel}/transcript.jsonl (read it, or grep scope=history). To carry the work on: spawn a new worker with the change, or do the small part yourself. Live agents: {}",
+            self.agent.id,
+            self.agent.name,
+            roster(live, from)
+        )
+    }
+}
+
 pub fn roster(agents: &[Agent], me: &AgentId) -> String {
     let lines: Vec<String> = agents
         .iter()
