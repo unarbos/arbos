@@ -18,6 +18,19 @@ use bezel::{
 };
 
 fn main() -> Result<()> {
+    // `--version` before anything else opens, so a packaging script can ask a
+    // freshly built binary what it was stamped with rather than working the
+    // number out a second time and hoping the two agree. `desktop/Makefile`
+    // reads exactly this to check itself against the bundle it is writing.
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!(
+            "{} {} {}",
+            env!("CARGO_PKG_VERSION"),
+            arbos_desktop::build::BUILD,
+            arbos_desktop::build::COMMIT
+        );
+        return Ok(());
+    }
     arbos_desktop::kernel::install_shutdown();
     let _tunnels = arbos_desktop::kernel::TunnelGuard;
     let settings = settings::load().unwrap_or_else(|err| {

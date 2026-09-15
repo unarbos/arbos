@@ -12,6 +12,9 @@ fn main() {
     println!("cargo::rustc-env=ARBOS_BUILD={}", build());
     println!("cargo::rustc-env=ARBOS_KERNEL_VERSION={}", kernel_version());
     println!("cargo::rerun-if-changed=../crates/arbos-kernel/Cargo.toml");
+    // Without this, a packager that passes a different number gets the number
+    // from the last build, which is exactly the drift this exists to stop.
+    println!("cargo::rerun-if-env-changed=ARBOS_BUILD");
     // Cargo has no reason of its own to look at git, so without these the
     // stamp is whichever commit was checked out the last time something else
     // forced a rebuild. `--git-path` resolves them through the repository
@@ -41,14 +44,28 @@ fn commit() -> String {
     }
 }
 
-/// Commits on the branch — the same number `desktop/Makefile` stamps
-/// `CFBundleVersion` with, and the half of the version that moves between two
-/// builds of one `0.2.0`. It is what the update feed orders on, so a build
-/// that does not know it can never be told it is behind.
+/// Commits on the branch: the half of the version that moves between two
+/// builds of one `0.2.0`, and what the update feed orders on. A build that
+/// does not know it can never be told it is behind.
 ///
-/// `0` where there is no repository to count, which sorts under every build
-/// that had one.
+/// `ARBOS_BUILD` in the environment wins, and whoever is packaging sets it —
+/// `desktop/Makefile` and the Linux payload action both do. That is the point.
+/// Counting commits here *and* in the Makefile is two answers to one question,
+/// and they drifted: a bundle went out whose `CFBundleVersion` said 870 while
+/// the binary inside said 879. Cargo caches this script's output, so the two
+/// are not even computed at the same moment. Now the packager decides once and
+/// tells everybody, and `rerun-if-env-changed` below makes a different answer
+/// force a re-stamp instead of being served from the cache.
+///
+/// The git count remains for a plain `cargo build`, which has no packager.
+/// `0` where there is no repository either, which sorts under every build that
+/// had one.
 fn build() -> String {
+    if let Ok(given) = std::env::var("ARBOS_BUILD")
+        && given.trim().parse::<u64>().is_ok()
+    {
+        return given.trim().to_owned();
+    }
     git(&["rev-list", "--count", "HEAD"]).unwrap_or_else(|| "0".into())
 }
 

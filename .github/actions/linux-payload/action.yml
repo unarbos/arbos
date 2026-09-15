@@ -40,7 +40,17 @@ runs:
       run: |
         set -euo pipefail
         cargo build --release --locked -p arbos-kernel
-        cargo build --release --locked --manifest-path desktop/Cargo.toml
+        # ARBOS_BUILD is handed to the compile rather than worked out again
+        # inside the crate. The tarball's name and the feed entry both use
+        # $BUILD, and the update feed is *ordered* on that number — a binary
+        # that disagreed with the release it was published as would either
+        # never update or offer the same update forever.
+        ARBOS_BUILD="$BUILD" cargo build --release --locked --manifest-path desktop/Cargo.toml
+        stamped="$(desktop/target/release/arbos-desktop --version | cut -d' ' -f2)"
+        test "$stamped" = "$BUILD" || {
+          echo "::error title=Build number drift::The binary was stamped $stamped but is being published as $BUILD."
+          exit 1
+        }
         out="arbos-$VERSION-$BUILD-linux-x86_64"
         mkdir -p "dist/$out"
         cp desktop/target/release/arbos-desktop "dist/$out/"

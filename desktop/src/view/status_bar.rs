@@ -22,7 +22,7 @@
 
 use crate::{
     build,
-    update::{State, Updater},
+    update::{Checked, State, Updater},
     view::{root::Arbos, settings::Section},
 };
 use arbos_update::Channel;
@@ -115,24 +115,29 @@ impl Arbos {
 
         // Taken out of the entity before anything else borrows `cx`.
         let updater = self.updater.read(cx);
-        let (state, channel, trouble, at) = (
+        let (state, channel, trouble, at, checked) = (
             updater.state().clone(),
             updater.channel(),
             updater.can_install(),
             updater.installed_at(),
+            updater.checked().cloned(),
         );
         match &state {
-            State::Idle | State::Checking => quiet(
+            State::Idle | State::Checking | State::Unreachable { .. } => quiet(
                 theme,
-                matches!(state, State::Checking),
-                channel,
-                trouble,
-                at,
+                Resting {
+                    state: state.clone(),
+                    channel,
+                    trouble,
+                    at,
+                    checked,
+                },
                 cx,
             ),
             State::Ready(update) => plate(
                 cx,
                 Plate {
+                    id: "status-bar-update",
                     label: "Update".into(),
                     icon: Some(icons::files::DOWNLOAD),
                     fill: theme.accent,
@@ -156,7 +161,8 @@ impl Arbos {
                 plate(
                     cx,
                     Plate {
-                        label: format!("Updating… {}%", (fraction * 100.).round() as u32),
+                        id: "status-bar-updating",
+                    label: format!("Updating… {}%", (fraction * 100.).round() as u32),
                         icon: None,
                         fill: theme.accent,
                         progress: Some(fraction),
@@ -168,6 +174,7 @@ impl Arbos {
             State::Installing(_) => plate(
                 cx,
                 Plate {
+                    id: "status-bar-installing",
                     label: "Installing…".into(),
                     icon: None,
                     fill: theme.accent,
@@ -182,6 +189,7 @@ impl Arbos {
             State::Restarting => plate(
                 cx,
                 Plate {
+                    id: "status-bar-restarting",
                     label: "Restarting…".into(),
                     icon: None,
                     fill: theme.accent,
@@ -193,6 +201,7 @@ impl Arbos {
             State::Failed { why, update } => plate(
                 cx,
                 Plate {
+                    id: "status-bar-update-failed",
                     label: "Update failed".into(),
                     icon: None,
                     fill: theme.danger,
@@ -205,22 +214,55 @@ impl Arbos {
     }
 }
 
-/// Resting: what build this is, faint, and a click to look for a newer one.
-fn quiet(
-    theme: &Theme,
-    checking: bool,
+/// Everything the resting control needs to know.
+struct Resting {
+    state: State,
     channel: Channel,
     trouble: Option<String>,
     at: Option<std::path::PathBuf>,
-    cx: &mut Context<Arbos>,
-) -> AnyElement {
+    checked: Option<Checked>,
+}
+
+/// Resting: what build this is, and a click to look for a newer one.
+///
+/// Three things rest here and they must not look alike. Up to date is the
+/// version alone. Checking is the same, dimmer. A check that could not reach
+/// the channel says so in words beside the version — quietly, because nothing
+/// is broken, but *visibly*, because folding it into the quiet state is how an
+/// app that has silently lost its channel passes for one that is current.
+///
+/// Each carries its own element id, so what the bar is showing can be read off
+/// the element tree instead of a colour or a tooltip. A pointer warp raises no
+/// hover event in this UI, which makes anything that appears only on hover
+/// untestable — so the id is the assertion, and the tooltip only ever repeats
+/// what is already somewhere else.
+fn quiet(theme: &Theme, resting: Resting, cx: &mut Context<Arbos>) -> AnyElement {
+    let Resting {
+        state,
+        channel,
+        trouble,
+        at,
+        checked,
+    } = resting;
     let version = build::version_label();
-    let tooltip = match &trouble {
+    let unreachable = matches!(state, State::Unreachable { .. });
+    let (id, tint) = match &state {
+        State::Unreachable { .. } => ("status-bar-unreachable", theme.text_muted),
+        State::Checking => ("status-bar-checking", theme.text_dim),
+        _ => ("status-bar-version", theme.text_faint),
+    };
+
+    let last = last_checked(checked.as_ref());
+    let tooltip = match (&trouble, &state) {
         // A build that cannot update itself says so here rather than offering
         // a button that would fail at the last step.
-        Some(why) => format!("Arbos {version}\n\n{why}"),
-        None => format!(
-            "Arbos {version} — up to date on the {} channel.\nClick to check again.{}",
+        (Some(why), _) => format!("Arbos {version}\n\n{why}"),
+        (None, State::Unreachable { why }) => format!(
+            "Could not reach the {} channel.\n{why}\n\n{last}\nClick to try again.",
+            channel.as_str()
+        ),
+        _ => format!(
+            "Arbos {version} — up to date on the {} channel.\n{last}\nClick to check again.{}",
             channel.as_str(),
             // Which copy this is. The first question worth answering when
             // ⌘Space opens the wrong Arbos, or none.
@@ -230,25 +272,55 @@ fn quiet(
             }
         ),
     };
+
     theme
-        .ghost("status-bar-version")
+        .ghost(id)
         .px(px(6.))
         .py(px(3.))
+        .gap(px(4.))
         .text_style(TextStyle::Caption)
-        .text_color(match checking {
-            true => theme.text_dim,
-            false => theme.text_faint,
-        })
+        .text_color(tint)
         .tooltip(move |window, cx| Tooltip::text(tooltip.clone(), window, cx))
         .child(version)
+        // In words, not a colour: a muted dot would be invisible to anybody
+        // not looking for it, and unreadable to anything driving the app.
+        .when(unreachable, |el| {
+            el.child(
+                div()
+                    .id("status-bar-unreachable-note")
+                    .text_color(theme.text_muted)
+                    .child("· check failed"),
+            )
+        })
         .on_click(cx.listener(|this, _, _, cx| {
             this.updater.update(cx, |updater, cx| updater.check(cx));
         }))
         .into_any_element()
 }
 
+/// `Checked 4m ago`, `Checked 4m ago — it failed`, or that nobody has looked.
+///
+/// Shown in Settings as its own row as well as here, because a tooltip needs a
+/// pointer resting on a control to appear and so cannot be the only place this
+/// is written down.
+pub(crate) fn last_checked(checked: Option<&Checked>) -> String {
+    match checked {
+        None => "Not checked yet.".into(),
+        Some(checked) => {
+            let ago = crate::view::panel::age(checked.at);
+            match &checked.failed {
+                None => format!("Checked {ago} ago."),
+                Some(_) => format!("Checked {ago} ago — it failed."),
+            }
+        }
+    }
+}
+
 /// Everything the control looks like when it has something to say.
 struct Plate {
+    /// The element id. One per state rather than one for the control, so what
+    /// the bar is showing can be asserted without a pointer or a colour.
+    id: &'static str,
     label: String,
     icon: Option<&'static str>,
     /// The plate's colour: the accent for an update, danger for a failure.
@@ -268,6 +340,7 @@ struct Plate {
 /// `view::palette` paints Cursor's blue.
 fn plate(cx: &mut Context<Arbos>, plate: Plate) -> AnyElement {
     let Plate {
+        id,
         label,
         icon,
         fill,
@@ -277,7 +350,7 @@ fn plate(cx: &mut Context<Arbos>, plate: Plate) -> AnyElement {
     } = plate;
     let ink = on_plate(fill);
     div()
-        .id("status-bar-update")
+        .id(id)
         .relative()
         .overflow_hidden()
         .flex()
