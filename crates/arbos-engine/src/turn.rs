@@ -79,6 +79,70 @@ fn image_owed(events: &[Event]) -> bool {
     })
 }
 
+/// What the model reads when its turn is about to end with a file its
+/// brief named as `Output:` still missing. `{paths}` is filled in.
+pub const OUTPUT_NUDGE: &str = "Your brief names Output: {paths} — not written yet. A reply is not the deliverable: write the file now (write path:\"<path>\" contents:…), check it exists, then name its path in your report.";
+
+/// The files a brief's `Output:` line names — one line, or the indented
+/// lines under it — as paths: tokens with a `/` or a `.arbos` head and a
+/// file extension. Folders (`…/`), placeholders (`<topic>`), and prose
+/// are not files to owe.
+pub fn brief_output_paths(text: &str) -> Vec<String> {
+    let mut lines = text.lines().peekable();
+    let mut spec = String::new();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.trim_start().strip_prefix("Output:") else {
+            continue;
+        };
+        spec.push_str(rest);
+        spec.push('\n');
+        while let Some(next) = lines.peek() {
+            if next.starts_with("  ") && !next.trim().is_empty() {
+                spec.push_str(next);
+                spec.push('\n');
+                lines.next();
+            } else {
+                break;
+            }
+        }
+        break;
+    }
+    spec.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '(' | ')' | '`' | '"' | '\''))
+        .map(|t| t.trim_end_matches(['.', ':']))
+        .filter(|t| !t.is_empty() && !t.ends_with('/') && !t.contains('<') && !t.contains('*'))
+        .filter(|t| t.contains('/') || t.starts_with(".arbos"))
+        .filter(|t| {
+            let name = t.rsplit('/').next().unwrap_or(t);
+            name.rsplit_once('.').is_some_and(|(stem, ext)| {
+                !stem.is_empty()
+                    && (1..=5).contains(&ext.len())
+                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            })
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// The turn's wake named `Output:` files and some are not on disk: which.
+/// `docs/x.md` and `.arbos/docs/x.md` are the same file (the store is
+/// spoken of without its folder); a path is looked for at the place and
+/// under `.arbos/`.
+fn output_owed(events: &[Event], place: &std::path::Path) -> Vec<String> {
+    let Some(start) = events.iter().rposition(Event::is_wake) else {
+        return Vec::new();
+    };
+    let EventKind::Wake { text: Some(t), .. } = &events[start].kind else {
+        return Vec::new();
+    };
+    brief_output_paths(t)
+        .into_iter()
+        .filter(|p| {
+            let rel = p.trim_start_matches("./");
+            !(place.join(rel).exists() || place.join(".arbos").join(rel).exists())
+        })
+        .collect()
+}
+
 fn looks_like_tool_call_text(content: &str) -> bool {
     let t = content
         .trim()
@@ -642,21 +706,32 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             // of as a bubble the user never typed.
             let nudge = if content.trim().is_empty() {
                 Some((
-                    "Your reply was empty. Continue the task, or say what is blocking you.",
+                    "Your reply was empty. Continue the task, or say what is blocking you."
+                        .to_string(),
                     "empty reply",
                 ))
             } else if looks_like_tool_call_text(&content) {
                 Some((
-                    "That was a tool call written as text, so nothing ran. Call the tool itself.",
+                    "That was a tool call written as text, so nothing ran. Call the tool itself."
+                        .to_string(),
                     "tool call written as text",
                 ))
             } else if image_owed(&events) {
                 // The brief said the user asked to see the result and the
                 // turn is ending with no image made: once, before the
                 // report goes out with words alone (kickoff item 3).
-                Some((SHOW_NUDGE, "image owed"))
+                Some((SHOW_NUDGE.to_string(), "image owed"))
             } else {
-                None
+                // The brief named a deliverable and the turn is ending
+                // without it: a research worker answered in its last words
+                // and never wrote research.md (kickoff, 2026-09-15).
+                let owed = output_owed(&events, place.path());
+                (!owed.is_empty()).then(|| {
+                    (
+                        OUTPUT_NUDGE.replace("{paths}", &owed.join(", ")),
+                        "output owed",
+                    )
+                })
             };
             if let Some((text, reason)) = nudge {
                 nudged = true;
@@ -668,7 +743,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     }));
                 }
                 batch.push(Event::new(EventKind::Nudge {
-                    text: text.into(),
+                    text,
                     reason: reason.into(),
                 }));
                 append_events(&transcript, &batch)?;
@@ -836,5 +911,33 @@ mod pick_model_tests {
             ),
             "vision/y"
         );
+    }
+}
+
+#[cfg(test)]
+mod output_owed_tests {
+    use super::brief_output_paths;
+
+    #[test]
+    fn the_briefs_output_files_are_read_and_prose_is_not() {
+        // The research worker's brief (kickoff, 2026-09-15).
+        let brief = "Task: research full duplex voice agents\nDo: \n  1. Search.\n  2. Write it up.\nRules: no merging\nOutput: .arbos/docs/research.md\nReport: a few lines";
+        assert_eq!(brief_output_paths(brief), vec![".arbos/docs/research.md"]);
+        // Two files, spoken without the store's folder, in a sentence.
+        let two = "Output: write docs/design.md and internal/qa-plan.md (both under the store).\nReport: x";
+        assert_eq!(
+            brief_output_paths(two),
+            vec!["docs/design.md", "internal/qa-plan.md"]
+        );
+        // The default Output text: folders and a placeholder, no file owed.
+        let default = format!("Output: {}\nReport: x", arbos_core::store::KICKOFF_OUTPUT);
+        assert!(brief_output_paths(&default).is_empty(), "{default}");
+        // Indented lines under Output: count; the Report line does not.
+        let multi = "Output: \n  media/toy/run.txt\n  docs/notes.md\nReport: docs/never.md";
+        assert_eq!(
+            brief_output_paths(multi),
+            vec!["media/toy/run.txt", "docs/notes.md"]
+        );
+        assert!(brief_output_paths("Task: no output line").is_empty());
     }
 }
