@@ -1845,7 +1845,7 @@ impl Arbos {
         let chat = workspace.active_session()?;
         let project = workspace.active_project()?;
         // A subagent's chat in Cursor carries no pills; they are the project's.
-        if chat.parent.is_some() || chat.is_delegate() {
+        if chat.parent.is_some() {
             return None;
         }
         let (working, prs) = pill_counts(project, chat);
@@ -2055,7 +2055,7 @@ impl Arbos {
         let theme = Theme::of(cx).clone();
         let workspace = self.workspace.read(cx);
         let chat = workspace.active_session()?;
-        if chat.parent.is_some() || chat.is_delegate() {
+        if chat.parent.is_some() {
             return None;
         }
         let project = workspace.active_project()?;

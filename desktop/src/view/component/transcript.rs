@@ -2734,7 +2734,7 @@ pub fn render(
             // Cursor's Project chat draws "Today 11:35 PM" over the first
             // turn; a subagent's chat does not. Both draw one at a day
             // crossing.
-            let first_of_root = last_day.is_none() && chat.parent.is_none() && !chat.is_delegate();
+            let first_of_root = last_day.is_none() && chat.parent.is_none();
             if first_of_root
                 || (last_day.is_some_and(|previous| previous != day))
             {
@@ -3362,6 +3362,11 @@ fn zone(
             None => open = true,
         }
     }
+    // Cursor's Project chat (the root) shows no tool calls at all — the
+    // coordinator's quick reads and commands are hidden work; its checklist
+    // (`plan`, Cursor's TodoWrite) shows as a card. A worker's chat shows
+    // every call.
+    let project_style = chat.parent.is_none();
     if open || !foldable {
         let last_run = segs.iter().rposition(|seg| matches!(seg, Seg::Run(_)));
         // A run still taking calls already shows a live line; a second
@@ -3383,6 +3388,13 @@ fn zone(
                         .text_color(theme.text)
                         .child(prose(chat, *ix, text, window, cx))
                         .into_any_element()
+                }
+                Seg::Run(range) if project_style => {
+                    // The root: the checklist the run wrote, nothing else of it.
+                    match todo_card(chat, range.clone(), &theme) {
+                        Some(card) => card,
+                        None => div().into_any_element(),
+                    }
                 }
                 Seg::Run(range) => {
                     // Present tense only on the run still taking calls.
@@ -4724,11 +4736,16 @@ const STALE_TAIL_MS: u128 = 1000;
 
 /// Web WorkingIndicator copy. A fresh prompt is "Planning next moves";
 /// a lull mid-turn is "Working".
-fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<&'static str> {
+fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
     // The kernel says the model is thinking in silence: always show it,
     // whatever the last item is.
     if chat.working.is_some() {
-        return Some("Thinking");
+        return Some("Thinking".to_string());
+    }
+    // The agent named its step (Cursor's UpdateCurrentStep on the
+    // timeline: "Copying stills to artifacts"): that is the line.
+    if let Some(step) = chat.status.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(step.to_string());
     }
     let last = chat.items.get(turn.range.start..turn.range.end)?.last()?;
     let tool_running = matches!(
@@ -4762,17 +4779,20 @@ fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<&'static str> {
     if tool_running {
         return None;
     }
-    Some(match last {
-        ChatItem::User(_) => "Planning next moves",
-        _ => "Working",
-    })
+    Some(
+        match last {
+            ChatItem::User(_) => "Planning next moves",
+            _ => "Working",
+        }
+        .to_string(),
+    )
 }
 
 /// Web: spinner + shimmering label under the last item while the turn
 /// is live and nothing else is moving.
 fn heartbeat(
     theme: &Theme,
-    label: &'static str,
+    label: String,
     chat: &ChatSession,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
@@ -5268,4 +5288,143 @@ pub(crate) fn plain_markdown(text: &str) -> String {
 /// by the worker line and the panel. Never a row of its own.
 fn is_status_call(label: &str) -> bool {
     label.split_whitespace().next().is_some_and(|first| first == "status")
+}
+
+/// Cursor's TodoWrite card, from the root's `plan` calls in a run: the
+/// section the kernel echoed back, one row per item with its box. The last
+/// call's echo is the list's state.
+fn todo_card(chat: &ChatSession, range: Range<usize>, theme: &Theme) -> Option<AnyElement> {
+    let key = range.start;
+    let (title, items) = range
+        .rev()
+        .filter_map(|ix| match &chat.items[ix] {
+            ChatItem::Tool { label, output, .. } if label.starts_with("plan ") => plan_items(output),
+            _ => None,
+        })
+        .next()?;
+    if items.is_empty() {
+        return None;
+    }
+    let done = items.iter().filter(|(d, _)| *d).count();
+    let mut card = div()
+        .id(("todo-card", key))
+        .w_full()
+        .max_w(px(root::CHAT_MAX_WIDTH))
+        .rounded(px(Theme::surface_radius()))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.ink(0.02))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .px(px(12.))
+                .py(px(7.))
+                .border_b_1()
+                .border_color(theme.border)
+                .text_style(TextStyle::Callout)
+                .child(div().flex_1().text_color(theme.text).child(SharedString::from(title)))
+                .child(
+                    div()
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(format!("{done}/{}", items.len()))),
+                ),
+        );
+    for (done, text) in items {
+        card = card.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(8.))
+                .px(px(12.))
+                .py(px(4.))
+                .text_style(TextStyle::Callout)
+                .child(if done {
+                    icons::icon(icons::status::CHECK)
+                        .size(px(12.))
+                        .flex_none()
+                        .mt(px(3.))
+                        .text_color(theme.success)
+                        .into_any_element()
+                } else {
+                    // Cursor's open item: a hollow circle.
+                    div()
+                        .size(px(10.))
+                        .flex_none()
+                        .mt(px(4.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.text_faint)
+                        .into_any_element()
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(if done { theme.text_faint } else { theme.text })
+                        .child(SharedString::from(text)),
+                ),
+        );
+    }
+    Some(card.into_any_element())
+}
+
+/// The kernel's echo of a notes section after a `plan` call:
+/// "## Maintenance" then lines "[ ] 1 - [ ] [label](target) — readout".
+/// Returns the section title and (done, words) per item.
+fn plan_items(output: &str) -> Option<(String, Vec<(bool, String)>)> {
+    let mut title = "Todos".to_string();
+    let mut items = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(heading) = line.strip_prefix("## ") {
+            title = heading.trim().to_string();
+            continue;
+        }
+        let (done, rest) = if let Some(rest) = line.strip_prefix("[x] ") {
+            (true, rest)
+        } else if let Some(rest) = line.strip_prefix("[ ] ") {
+            (false, rest)
+        } else {
+            continue;
+        };
+        // "1 - [ ] [label](target) — readout": drop the index and the inner box.
+        let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit()).trim_start();
+        let rest = rest.strip_prefix("- ").unwrap_or(rest);
+        let rest = rest
+            .strip_prefix("[ ] ")
+            .or_else(|| rest.strip_prefix("[x] "))
+            .unwrap_or(rest);
+        let words = strip_link(rest);
+        if !words.is_empty() {
+            items.push((done, words));
+        }
+    }
+    (!items.is_empty()).then_some((title, items))
+}
+
+/// "[label](target) — readout" → "label — readout".
+fn strip_link(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match (after.find("]("), after.find(')')) {
+            (Some(close), Some(end)) if end > close => {
+                out.push_str(&after[..close]);
+                rest = &after[end + 1..];
+            }
+            _ => {
+                out.push('[');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
