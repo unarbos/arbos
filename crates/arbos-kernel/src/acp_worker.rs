@@ -116,6 +116,9 @@ enum Incoming {
 struct TurnState {
     assistant: String,
     thinking: String,
+    /// The step number for the lines being gathered (1-based); words
+    /// before a tool call close a step, as the engine's model call does.
+    step: u64,
     /// toolCallId → (title, started ms, raw input)
     tools: HashMap<String, (String, i64, Option<Value>)>,
 }
@@ -526,6 +529,7 @@ async fn handle_incoming(
                         hooks.broadcast(arbos_core::wire::Frame::AssistantDelta {
                             agent: agent_id.clone(),
                             text: t.to_string(),
+                            step: state.step.max(1),
                         });
                     }
                 }
@@ -535,6 +539,7 @@ async fn handle_incoming(
                         hooks.broadcast(arbos_core::wire::Frame::ThinkingDelta {
                             agent: agent_id.clone(),
                             text: t.to_string(),
+                            step: state.step.max(1),
                         });
                     }
                 }
@@ -579,6 +584,7 @@ async fn handle_incoming(
                             Event::new(EventKind::Tool(ToolRec {
                                 name: format!("acp:{name}"),
                                 call_id,
+                                step: state.step.max(1),
                                 paths,
                                 started: Some(started),
                                 ended: Some(arbos_core::now_ms()),
@@ -593,6 +599,10 @@ async fn handle_incoming(
                                 label: None,
                             })),
                         )?;
+                        // Words after a finished call are the next step's.
+                        if state.tools.is_empty() {
+                            state.step = state.step.max(1) + 1;
+                        }
                     }
                 }
                 _ => {}
@@ -722,7 +732,11 @@ fn flush(
             hooks,
             agent_id,
             transcript,
-            Event::new(EventKind::Thinking { text, secs: None }),
+            Event::new(EventKind::Thinking {
+                text,
+                secs: None,
+                step: state.step.max(1),
+            }),
         )?;
     }
     if !state.assistant.trim().is_empty() {
@@ -733,6 +747,7 @@ fn flush(
             transcript,
             Event::new(EventKind::Assistant {
                 text,
+                step: state.step.max(1),
                 reasoning_details: None,
             }),
         )?;

@@ -199,10 +199,16 @@ pub enum Frame {
     AssistantDelta {
         agent: String,
         text: String,
+        /// The model step within the turn, 1-based; the settled
+        /// `assistant` event of the same step carries the same number.
+        #[serde(default)]
+        step: u64,
     },
     ThinkingDelta {
         agent: String,
         text: String,
+        #[serde(default)]
+        step: u64,
     },
     Snapshot {
         tree: Vec<TreeNode>,

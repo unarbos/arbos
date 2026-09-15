@@ -821,6 +821,7 @@ mod roll_tests {
                 &path,
                 &Event::new(EventKind::Assistant {
                     text: format!("line {i}"),
+                    step: 0,
                     reasoning_details: None,
                 }),
             )
