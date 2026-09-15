@@ -132,7 +132,18 @@ impl Tool for Spawn {
                     false,
                     "string",
                 ),
-                ("kind", "Leave out unless a Kind fits.", false, "string"),
+                (
+                    "kind",
+                    "Leave out unless a Kind fits. Built in everywhere: explore (read-only codebase question, inline), computer-use (drive a page or the screen, inline), video-review (check a recording, inline), coordinator (an area with several parallel topics: it runs its own workers and returns one result).",
+                    false,
+                    "string",
+                ),
+                (
+                    "role",
+                    "coordinator: the worker runs an area for you — its own workers, one combined report back. Leave out for a plain worker.",
+                    false,
+                    "string",
+                ),
                 (
                     "isolate",
                     "Leave out: the worker edits the checkout in place. worktree only when another worker edits code at the same time.",
@@ -153,7 +164,7 @@ impl Tool for Spawn {
                 ),
                 (
                     "wait",
-                    "Block until its first report and return it (quick sub-tasks only).",
+                    "Block until its first report and return it (quick sub-tasks only). Inline kinds (explore, computer-use, video-review) wait unless told false.",
                     false,
                     "boolean",
                 ),
@@ -208,7 +219,18 @@ impl Tool for Spawn {
             let model = opt_str(&args, "model");
             let readonly = opt_bool(&args, "readonly").unwrap_or(false);
             let cwd = opt_str(&args, "cwd").map(PathBuf::from);
-            let wait = opt_bool(&args, "wait").unwrap_or(false);
+            // A typed helper runs inline: its result is this call's result
+            // unless the caller says otherwise.
+            let inline_kind = opt_str(&args, "kind")
+                .and_then(|k| arbos_core::find_def(&hooks.place, k))
+                .is_some_and(|d| d.inline);
+            let wait = opt_bool(&args, "wait").unwrap_or(inline_kind);
+            let role = match opt_str(&args, "role").map(|r| r.trim().to_ascii_lowercase()) {
+                None => None,
+                Some(r) if r == arbos_core::project::COORDINATOR => Some(r),
+                Some(r) if r == arbos_core::project::WORKER || r == "none" => None,
+                Some(r) => anyhow::bail!("spawn: role must be coordinator or left out, not {r:?}"),
+            };
             let wait_secs = args
                 .get("wait_secs")
                 .and_then(Value::as_u64)
@@ -278,6 +300,7 @@ impl Tool for Spawn {
                     isolate,
                     kind_owned.as_deref(),
                     base_owned.as_deref(),
+                    role.as_deref(),
                 )
             })
             .await

@@ -217,8 +217,12 @@ impl Agent {
             self.mode.as_str(),
             self.kind,
             match self.role.as_deref() {
-                // The coordinator role is per turn, never on disk.
-                Some(r) if r != crate::project::COORDINATOR => format!("role: {r}\n"),
+                // Root's coordinator role comes from project.toml each turn,
+                // never from its agent.md; a child's (an area coordinator)
+                // is its own and is saved.
+                Some(r) if r != crate::project::COORDINATOR || self.parent.is_some() => {
+                    format!("role: {r}\n")
+                }
                 _ => String::new(),
             },
             match self.skill.as_deref() {
