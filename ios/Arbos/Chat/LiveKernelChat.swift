@@ -25,6 +25,9 @@ final class LiveKernelChat: ChatSource {
     /// A reply is being streamed; the next `assistant` event is its final
     /// text, not a new message.
     private var streamed = false
+    /// Worker reports that arrived while a reply was streaming: shown
+    /// after the reply closes, so a paragraph is never cut in half.
+    private var deferred: [ChatItem] = []
     private var turnStarted: Date?
     /// A `history <agent>` request in flight: its replayed lines and the
     /// continuation waiting for `history_end`.
@@ -123,6 +126,8 @@ final class LiveKernelChat: ChatSource {
                     if let started = turnStarted {
                         turnStarted = nil
                         stream?.yield(.agentDone)
+                        streamed = false
+                        flushDeferred()
                         stream?.yield(.item(ChatItem(.worked(seconds: Int(Date().timeIntervalSince(started))))))
                     }
                     stream?.yield(.step(""))
@@ -169,6 +174,7 @@ final class LiveKernelChat: ChatSource {
                 stream?.yield(.agentDelta(trimmed))
                 stream?.yield(.agentDone)
             }
+            flushDeferred()
             return
         }
         if case .tool(let record) = event, record.name == "spawn", let child = record.child {
@@ -177,8 +183,17 @@ final class LiveKernelChat: ChatSource {
             setWorker(child, running: true, step: "Starting")
         }
         guard let item = item(for: event, worker: false) else { return }
+        if case .say = event, streamed {
+            deferred.append(item)
+            return
+        }
         stream?.yield(.agentDone)
         stream?.yield(.item(item))
+    }
+
+    private func flushDeferred() {
+        for item in deferred { stream?.yield(.item(item)) }
+        deferred.removeAll()
     }
 
     /// One transcript line as a chat row; nil for lines the chat does not
