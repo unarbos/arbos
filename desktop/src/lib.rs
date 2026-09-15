@@ -11,6 +11,7 @@ pub mod memory;
 pub mod model;
 pub mod permissions;
 pub mod reading;
+pub mod update;
 pub mod view;
 pub mod voice;
 pub mod voice_ws;

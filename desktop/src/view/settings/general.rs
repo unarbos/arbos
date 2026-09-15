@@ -1,8 +1,9 @@
 //! The general section: what this copy of the app is.
 
-use crate::{assets, build, view::settings::SettingsWindow};
+use crate::{assets, build, update, view::settings::SettingsWindow};
+use arbos_update::Channel;
 use bezel::{
-    gpui::{AnyElement, Context, div, img, prelude::*, px},
+    gpui::{AnyElement, Context, SharedString, div, img, prelude::*, px},
     theme::{TextStyle, Theme, Typeset},
     ui::widgets::{Content, Scaffolding},
 };
@@ -22,7 +23,7 @@ const COMMIT: &str = build::COMMIT;
 const MARK: f32 = 72.;
 
 impl SettingsWindow {
-    pub(super) fn general_body(&self, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn general_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         div()
             .flex()
@@ -80,6 +81,104 @@ impl SettingsWindow {
                                 None => theme.badge(COMMIT).into_any_element(),
                             }),
                     ),
+            )
+            .child(self.updates_group(cx))
+            .into_any_element()
+    }
+
+    /// Which builds this machine follows, and a way to look now.
+    ///
+    /// The control that acts on this lives in the bar along the bottom of the
+    /// window; this is where the choice behind it is made, because a channel
+    /// is a decision taken once and the button is pressed often.
+    fn updates_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let chosen = update::channel_of(&self.workspace.read(cx).settings);
+        theme
+            .group_box()
+            .child(
+                theme
+                    .card_row(true)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(theme.row_title("Updates"))
+                            .child(
+                                div()
+                                    .text_style(TextStyle::Caption)
+                                    .text_color(theme.text_muted)
+                                    .child(chosen.describe()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(2.))
+                            .p(px(2.))
+                            .rounded(px(Theme::control_radius()))
+                            .bg(theme.input_bg)
+                            .children(Channel::ALL.into_iter().map(|channel| {
+                                let selected = channel == chosen;
+                                div()
+                                    .id(match channel {
+                                        Channel::Stable => "update-channel-stable",
+                                        Channel::Dev => "update-channel-dev",
+                                    })
+                                    .px(px(10.))
+                                    .py(px(3.))
+                                    .rounded(px(Theme::control_radius() - 1.))
+                                    .text_style(TextStyle::Caption)
+                                    .when(selected, |el| {
+                                        el.bg(theme.surface_raised).text_color(theme.text)
+                                    })
+                                    .when(!selected, |el| {
+                                        el.cursor_pointer()
+                                            .text_color(theme.text_muted)
+                                            .hover(|el| el.bg(theme.element_hover))
+                                    })
+                                    .child(match channel {
+                                        Channel::Stable => "Stable",
+                                        Channel::Dev => "Dev",
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.workspace.update(cx, |workspace, cx| {
+                                            workspace.set_update_channel(channel, cx);
+                                        });
+                                        cx.notify();
+                                    }))
+                            })),
+                    ),
+            )
+            .child(
+                theme
+                    .card_row(false)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(theme.row_title("This build"))
+                            .child(
+                                div()
+                                    .text_style(TextStyle::Caption)
+                                    .text_color(theme.text_muted)
+                                    .child(match update::built_in_key_present() {
+                                        true => SharedString::from(
+                                            "Updates are checked against Arbos's signing key.",
+                                        ),
+                                        // A build made before anybody set the
+                                        // key up. It can never install an
+                                        // update, and saying so here is kinder
+                                        // than a button that fails.
+                                        false => SharedString::from(
+                                            "This build carries no update key, so it cannot \
+                                             install an update.",
+                                        ),
+                                    }),
+                            ),
+                    )
+                    .child(theme.badge(build::version_label())),
             )
             .into_any_element()
     }

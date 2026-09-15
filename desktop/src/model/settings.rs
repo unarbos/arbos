@@ -24,6 +24,10 @@ pub struct Settings {
     /// What the app will show. Every bare key has to go above it.
     #[serde(default)]
     pub features: Features,
+    /// Which builds this machine follows. A table, so it goes below the bare
+    /// keys for the reason above.
+    #[serde(default)]
+    pub update: Update,
     /// Leftover from when this shell spawned ACP binaries. Ignored: one
     /// kernel, model switch via `set_model`. Kept so an old file still parses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -52,6 +56,47 @@ impl Default for Features {
             tables: false,
         }
     }
+}
+
+/// Which builds this machine updates itself to.
+///
+/// `stable` is the tagged releases and is what anybody who has not asked
+/// otherwise gets. `dev` is every green commit on `main` — the channel to be
+/// on to test what just merged.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Update {
+    /// `stable` or `dev`. A string rather than an enum so a file naming a
+    /// channel this build has never heard of falls back to the default
+    /// instead of refusing to parse — see [`crate::update::channel_of`].
+    pub channel: String,
+}
+
+impl Default for Update {
+    fn default() -> Self {
+        Self {
+            channel: arbos_update::Channel::default().as_str().to_owned(),
+        }
+    }
+}
+
+/// Put the channel in the file.
+///
+/// Edited with `toml_edit` for the reason [`set_feature`] is: this file is
+/// meant to be opened by hand, and a round trip would drop every comment in
+/// it.
+pub fn set_update_channel(channel: arbos_update::Channel) -> Result<()> {
+    let path = dir()?.join("settings.toml");
+    let body = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = body.parse().context("settings.toml is not valid toml")?;
+    let update = doc["update"].or_insert(toml_edit::table());
+    let Some(update) = update.as_table_mut() else {
+        anyhow::bail!("`update` in settings.toml is not a table");
+    };
+    update.set_implicit(false);
+    update["channel"] = toml_edit::value(channel.as_str());
+    std::fs::write(&path, doc.to_string())?;
+    Ok(())
 }
 
 /// One switchable surface, named rather than reached as a field so the settings
@@ -159,6 +204,7 @@ impl Default for Settings {
             cover_memory: cover_memory(),
             watch_bounce: watch_bounce(),
             features: Features::default(),
+            update: Update::default(),
             agents: Vec::new(),
         }
     }

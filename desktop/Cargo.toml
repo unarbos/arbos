@@ -83,6 +83,10 @@ toml_edit = "0.22"
 # the catalog with, so this adds no second HTTP stack.
 ureq = "3"
 arbos-core = { path = "../crates/arbos-core" }
+# The update feed, the version order, and the signature over a payload —
+# shared with the CI step that publishes them, so the two cannot disagree
+# about what a published build is.
+arbos-update = { path = "../crates/arbos-update" }
 # Lockfile pin: getrandom's js-sys ^0.3.77 otherwise picks 0.3.81
 # (wasm-bindgen =0.2.104) and clashes with bezel's wasm-bindgen ^0.2.120.
 js-sys = "0.3.104"
