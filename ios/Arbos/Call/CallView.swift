@@ -160,7 +160,6 @@ struct CallView: View {
         }
         .frame(maxWidth: .infinity)
         .frame(minHeight: 132, alignment: .top)
-        .animation(.easeOut(duration: 0.2), value: model.lines)
     }
 
     /// The reply is shown only while it is the newest thing said; once

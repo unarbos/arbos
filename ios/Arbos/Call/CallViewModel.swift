@@ -568,7 +568,10 @@ final class CallViewModel: ObservableObject {
     }
 
     private func scheduleBargeIn() {
-        guard let clip = bargeClip, let injector else { return }
+        guard let clip = bargeClip, let injector else {
+            print("metric barge_in_unarmed clip=\(bargeClip != nil) injector=\(injector != nil)")
+            return
+        }
         bargeClip = nil
         Task {
             try? await Task.sleep(for: .milliseconds(1500))
