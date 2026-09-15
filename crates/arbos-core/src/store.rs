@@ -332,7 +332,7 @@ pub fn may_write(agent: &Agent) -> bool {
 pub const REFUSAL: &str = ".arbos/notes.md (the project page), docs/project-context.md, and archived.md are owned by the main chat (root); keep your own checklist with the plan tool and propose the change with `say to=root`";
 
 /// Why a coordinator's write outside the store is refused.
-pub const COORDINATOR_REFUSAL: &str = "as coordinator you write only the project store (.arbos/notes.md, docs/, internal/, media/, archived.md); code and other files are a worker's job — spawn one";
+pub const COORDINATOR_REFUSAL: &str = "as coordinator you write only the project store (.arbos/notes.md, docs/, internal/, media/, archived.md); code and other files are a worker's job. Do it now: spawn name:\"<five words, imperative>\" task:\"<the user's request, in their words>\" wait:true — its report comes back as that call's result; relay it in one sentence. Do not read or edit the code yourself first.";
 
 /// The prompt segment: the context file's text under the cap, or nothing
 /// when it is still the untouched template or empty.
