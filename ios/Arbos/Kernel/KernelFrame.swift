@@ -85,7 +85,10 @@ struct KernelToolRecord: Equatable {
     /// One line for the chat: what ran, on what.
     var label: String {
         let subject: String
-        if let first = paths.first, !first.isEmpty {
+        if ["bash", "shell", "run"].contains(name), let command = args?["command"] as? String ?? args?["cmd"] as? String {
+            // A shell call is what it ran, not the log file it wrote.
+            subject = command
+        } else if let first = paths.first, !first.isEmpty {
             subject = (first as NSString).lastPathComponent
         } else if let path = args?["path"] as? String ?? args?["file"] as? String ?? args?["dir"] as? String {
             subject = (path as NSString).lastPathComponent

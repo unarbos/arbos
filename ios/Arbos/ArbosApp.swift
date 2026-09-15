@@ -27,13 +27,11 @@ struct ArbosApp: App {
     }
 }
 
-/// Projects first, a project's chat one tap in, the call one more. On a
-/// cold start the phone reopens the project it last had open, the way the
-/// desktop comes back to its tabs.
+/// Projects first, a project's chat one tap in, the call one more. A cold
+/// start lands on the list (Jacob's reference); the list's own composer
+/// still talks to the project last open.
 struct RootView: View {
-    @EnvironmentObject private var settings: AppSettings
     @State private var path = NavigationPath()
-    @State private var restored = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -44,12 +42,5 @@ struct RootView: View {
         }
         .tint(ArbosTheme.accent)
         .preferredColorScheme(.dark)
-        .onAppear {
-            guard !restored else { return }
-            restored = true
-            if UserDefaults.standard.string(forKey: "kernelTarget") != nil {
-                path.append(settings.kernelTarget)
-            }
-        }
     }
 }

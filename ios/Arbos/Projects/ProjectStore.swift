@@ -43,7 +43,9 @@ final class ProjectStore: ObservableObject {
             do {
                 let machines = try await HubClient.list(hubURL: settings.hubURL, token: settings.hubToken)
                 for machine in machines {
-                    for project in machine.projects {
+                    // `<project>--<child>` is a worker's worktree place, not a
+                    // project of Jacob's: it belongs under its parent's chat.
+                    for project in machine.projects where !project.name.contains("--") {
                         list.append(entry(
                             target: .hub(machine: machine.name, project: project.name),
                             folder: project.name,
