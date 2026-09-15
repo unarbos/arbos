@@ -2847,6 +2847,20 @@ pub fn render(
                         .size_full()
                         .overflow_y_scroll()
                         .track_scroll(&chat.transcript.scroll)
+                        // The wheel decides the follow: up while a turn
+                        // streams unpins (Cursor lets you read back and
+                        // shows ↓); back to the end pins again. Without
+                        // this, growing content kept the old pin and
+                        // snapped the reader to the bottom.
+                        .on_scroll_wheel({
+                            let handle = chat.transcript.scroll.clone();
+                            let follow = chat.transcript.follow.clone();
+                            move |_, _, _| {
+                                let max = handle.max_offset().y;
+                                let now = handle.offset().y.clamp(-max, px(0.));
+                                follow.0.set((at_bottom(max, now, FOLLOW_SLACK), max));
+                            }
+                        })
                         .px(px(root::CHAT_GUTTER))
                         .pt(px(PAD))
                         .pb(px(PAD))
