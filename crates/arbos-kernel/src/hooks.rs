@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::{
     attach::Frame,
     browser::{BrowserHub, BrowserOut},
-    sched::{MAX_CHILDREN, MAX_DEPTH},
+    sched::{MAX_CHILDREN, MAX_CHILDREN_CAP, MAX_DEPTH},
     worktree::{self, Worktree},
 };
 
@@ -124,7 +124,7 @@ impl Caps {
             } else {
                 MAX_DEPTH
             },
-            children: if (1..=64).contains(&cfg.max_children) {
+            children: if (1..=MAX_CHILDREN_CAP).contains(&cfg.max_children) {
                 cfg.max_children
             } else {
                 MAX_CHILDREN
@@ -2060,5 +2060,37 @@ mod spoken_name_tests {
         assert_eq!(spoken_name("Review math_utils.py"), "Review math_utils.py");
         assert_eq!(spoken_name("Changelog draft"), "Changelog draft");
         assert_eq!(spoken_name("  "), "");
+    }
+}
+
+#[cfg(test)]
+mod caps_tests {
+    use super::Caps;
+    use crate::sched::{MAX_CHILDREN, MAX_CHILDREN_CAP};
+
+    /// Projects-post gap 4: the default cap of 8 live children stalled a
+    /// coordinator on its ninth spawn; Jacob's Projects run wide. The
+    /// default is 24, a config value holds up to 256, and zero or absurd
+    /// values fall back to the default.
+    #[test]
+    fn the_children_cap_defaults_wide_and_takes_config_up_to_the_ceiling() {
+        assert_eq!(MAX_CHILDREN, 24);
+        assert_eq!(Caps::default().children, 24);
+        let mut cfg = arbos_core::HostConfig::default();
+        assert_eq!(cfg.max_children, 24, "config default matches");
+        cfg.max_children = 100;
+        assert_eq!(Caps::from_config(&cfg).children, 100);
+        cfg.max_children = MAX_CHILDREN_CAP;
+        assert_eq!(Caps::from_config(&cfg).children, 256);
+        cfg.max_children = MAX_CHILDREN_CAP + 1;
+        assert_eq!(
+            Caps::from_config(&cfg).children,
+            24,
+            "past the ceiling: the default"
+        );
+        cfg.max_children = 0;
+        assert_eq!(Caps::from_config(&cfg).children, 24);
+        cfg.max_children = 3;
+        assert_eq!(Caps::from_config(&cfg).children, 3);
     }
 }

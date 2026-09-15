@@ -556,7 +556,7 @@ name = "myproject"
 [defaults]
 model = "inherit"
 allowlist = ["ls", "read", "find", "grep", "write", "edit", "apply_patch", "bash", "await", "jobs", "fetch", "search", "spawn", "say", "ask", "plan", "changes", "undo", "browser", "terminal"]
-max_children = 8
+max_children = 24
 max_depth = 3
 ```
 
