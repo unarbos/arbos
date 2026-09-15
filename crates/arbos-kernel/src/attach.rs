@@ -55,6 +55,13 @@ pub enum Conn {
     /// An HTTP `POST`: a webhook. Answered and closed by the door, never
     /// admitted as a client.
     Hook(HookRequest),
+    /// A plain HTTP `GET` with no WebSocket upgrade — a tunnel's health
+    /// probe, a browser, `curl`. Answered with a small reply and closed
+    /// (qa-036: dropping it read as 502 through cloudflared).
+    Http {
+        stream: TcpStream,
+        path: String,
+    },
 }
 
 /// One HTTP POST as the webhook door reads it: the request line's path,
@@ -164,6 +171,29 @@ impl Conn {
             return Ok(Conn::Hook(read_http_post(stream).await?));
         }
         if n >= 3 && &head[..3] == b"GET" {
+            // The request head, as much as has arrived: a GET without an
+            // upgrade is not a client and gets an HTTP answer instead of a
+            // failed handshake and a closed socket.
+            let mut buf = vec![0u8; 8192];
+            let m = tokio::time::timeout(PEEK_WAIT, stream.peek(&mut buf))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or(n);
+            let head_text = String::from_utf8_lossy(&buf[..m]).to_string();
+            let lower = head_text.to_ascii_lowercase();
+            let upgrades = lower
+                .lines()
+                .any(|l| l.trim_start().starts_with("upgrade:") && l.contains("websocket"));
+            if !upgrades {
+                let path = head_text
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                return Ok(Conn::Http { stream, path });
+            }
             let mut upgrade = Upgrade::default();
             let seen = &mut upgrade;
             let ws = tokio_tungstenite::accept_hdr_async(
@@ -202,6 +232,11 @@ impl Conn {
             // that reaches here reads as a closed peer.
             Conn::Hook(req) => {
                 let (r, w) = req.stream.into_split();
+                (Reader::Tcp(BufReader::new(r).lines()), Writer::Tcp(w))
+            }
+            // Same for a plain GET: answered by the door before this.
+            Conn::Http { stream, .. } => {
+                let (r, w) = stream.into_split();
                 (Reader::Tcp(BufReader::new(r).lines()), Writer::Tcp(w))
             }
         }
@@ -373,4 +408,47 @@ fn frame_name(line: &str) -> String {
         .ok()
         .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
         .unwrap_or_else(|| "that frame".into())
+}
+
+/// The reply to a plain GET on the attach port: `/` and `/healthz` get
+/// `200` with what this is — the kernel's version, that attaching is a
+/// WebSocket, how it authenticates — so a tunnel, a load balancer, or a
+/// browser sees a healthy origin; any other path gets `426 Upgrade
+/// Required`. The request head is drained first so the peer never sees a
+/// reset before the reply.
+pub async fn answer_http(
+    mut stream: TcpStream,
+    path: &str,
+    kernel: &str,
+    protocol: u32,
+    auth: &str,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut sink = [0u8; 8192];
+    let _ = tokio::time::timeout(PEEK_WAIT, stream.read(&mut sink)).await;
+    let path_only = path.split('?').next().unwrap_or("/");
+    let (status, body) = if path_only == "/" || path_only == "/healthz" {
+        (
+            "200 OK",
+            format!(
+                "{{\"kernel\":\"{kernel}\",\"protocol\":{protocol},\"attach\":\"websocket\",\"auth\":\"{auth}\"}}\n"
+            ),
+        )
+    } else {
+        (
+            "426 Upgrade Required",
+            "{\"error\":\"this port speaks the arbos attach protocol over WebSocket; GET / or /healthz for a health reply\"}\n".to_string(),
+        )
+    };
+    let reply = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n{}\r\n{body}",
+        body.len(),
+        if status.starts_with("426") {
+            "Upgrade: websocket\r\n"
+        } else {
+            ""
+        }
+    );
+    let _ = stream.write_all(reply.as_bytes()).await;
+    let _ = stream.shutdown().await;
 }
