@@ -33,7 +33,7 @@ fn timer(prompt: &str, every: Option<&str>) -> Subscription {
         path: None,
         repo: None,
         pr: None,
-
+        author: None,
         branch: None,
 
         channel: None,

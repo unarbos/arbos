@@ -108,11 +108,16 @@ pub async fn model_step(
         let emit = |delta: Delta| match delta {
             Delta::Text(text) => hooks.emit(&Event::new(EventKind::Assistant {
                 text,
+                step: s.cx.step,
                 reasoning_details: None,
             })),
             Delta::Thinking(text) => {
                 thought.lock().unwrap().push(&text);
-                hooks.emit(&Event::new(EventKind::Thinking { text, secs: None }))
+                hooks.emit(&Event::new(EventKind::Thinking {
+                    text,
+                    secs: None,
+                    step: s.cx.step,
+                }))
             }
             Delta::Waiting(for_) => hooks.working(for_.as_secs()),
             Delta::Call(call) => {
@@ -124,7 +129,7 @@ pub async fn model_step(
             .complete_stream(messages, tools, s.control.cancel(), emit)
             .await;
 
-        if let Some(record) = thought.into_inner().unwrap_or_default().settled() {
+        if let Some(record) = thought.into_inner().unwrap_or_default().settled(s.cx.step) {
             // On the transcript before the step's assistant line, as the
             // model produced it; the model never reads it back.
             if let Err(e) = append_event(s.transcript, &record) {
@@ -478,7 +483,7 @@ impl Thought {
 
     /// The settled record, when anything was thought: the text (clipped)
     /// and the span in whole seconds.
-    fn settled(self) -> Option<Event> {
+    fn settled(self, step: u64) -> Option<Event> {
         let (first, last) = (self.first?, self.last?);
         if self.text.trim().is_empty() {
             return None;
@@ -493,6 +498,7 @@ impl Thought {
         Some(Event::new(EventKind::Thinking {
             text,
             secs: Some(secs),
+            step,
         }))
     }
 }

@@ -8,7 +8,13 @@ use tokio::sync::mpsc;
 
 use crate::hooks::KernelHooks;
 
-pub const MAX_CHILDREN: usize = 8;
+/// Live children one agent may have at once, by default. Jacob's Projects
+/// run wide (the Cursor Projects post: "more subagents in parallel than
+/// your laptop could support"); 8 stalled a coordinator on its ninth
+/// spawn. `max_children` in config.toml overrides, up to MAX_CHILDREN_CAP.
+pub const MAX_CHILDREN: usize = 24;
+/// The most `max_children` may be set to.
+pub const MAX_CHILDREN_CAP: usize = 256;
 pub const MAX_DEPTH: usize = 3;
 
 /// One in-flight turn per agent, each with its own control handle.
@@ -219,13 +225,15 @@ impl arbos_engine::Hooks for TurnHooks {
         // The whole step follows from the transcript tail as an `event`
         // with its line number, which older clients already render.
         let frame = match &event.kind {
-            EventKind::Assistant { text, .. } if event.seq == 0 => Frame::AssistantDelta {
+            EventKind::Assistant { text, step, .. } if event.seq == 0 => Frame::AssistantDelta {
                 agent: self.agent.to_string(),
                 text: text.clone(),
+                step: *step,
             },
-            EventKind::Thinking { text, .. } if event.seq == 0 => Frame::ThinkingDelta {
+            EventKind::Thinking { text, step, .. } if event.seq == 0 => Frame::ThinkingDelta {
                 agent: self.agent.to_string(),
                 text: text.clone(),
+                step: *step,
             },
             _ => Frame::Event {
                 agent: self.agent.to_string(),

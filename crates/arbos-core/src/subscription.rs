@@ -25,6 +25,7 @@ pub const KINDS: &[&str] = &[
     "timer",
     "shell",
     "github_pr",
+    "github_prs",
     "github_ci",
     "inbox",
     "goal",
@@ -36,7 +37,12 @@ pub struct Subscription {
     /// 0 in a hand-written file: `read` fills it from the `NNNN-` prefix.
     #[serde(default)]
     pub id: u32,
-    /// `timer` | `shell` | `github_pr` | `github_ci` | `inbox` | `goal`.
+    /// `timer` | `shell` | `github_pr` | `github_prs` | `github_ci` | `inbox` | `goal`.
+    /// A `github_prs` follows a whole repository's pull requests: opened,
+    /// merged, closed, new commits, and a check going red on any open one
+    /// — optionally only one author's (`author`, `@me` for the token's
+    /// user). "Follow all my PRs" is one of these (the Projects post's
+    /// gardening loop).
     /// A `goal` is an objective held until met: `prompt` says what, `cmd`
     /// (optional) is the check that says when — exit 0 closes the goal;
     /// while it fails the agent is woken with the goal and the check's
@@ -69,6 +75,10 @@ pub struct Subscription {
     pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<u64>,
+    /// `github_prs`: only pull requests by this login (`@me`: the gh
+    /// token's user). Absent: every author.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     /// `github_ci` without a PR: the branch whose workflow runs are
     /// watched (`gh run list --branch`). A "keep main green" loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,7 +155,7 @@ impl Subscription {
         match &self.every {
             Some(e) => parse_duration_ms(e),
             None => match self.kind.as_str() {
-                "github_pr" | "github_ci" => Some(GITHUB_DEFAULT_EVERY_MS),
+                "github_pr" | "github_prs" | "github_ci" => Some(GITHUB_DEFAULT_EVERY_MS),
                 "goal" => Some(GOAL_DEFAULT_EVERY_MS),
                 _ => None,
             },
@@ -279,7 +289,7 @@ impl Subscription {
                         Some(t) => format!("on each message in thread {t}"),
                         None => "on each message".to_string(),
                     },
-                    "github_pr" | "github_ci" => format!(
+                    "github_pr" | "github_prs" | "github_ci" => format!(
                         "every {}{next}",
                         human_ms(self.every_ms().unwrap_or(GITHUB_DEFAULT_EVERY_MS))
                     ),
@@ -310,6 +320,28 @@ impl Subscription {
             self.kind = "shell".into();
         } else if matches!(self.kind.as_str(), "default" | "") {
             self.kind = "timer".into();
+        }
+        // `github_pr` with a repo and no pr means the repository's pull
+        // requests, all of them: "follow all my PRs" (the model writes
+        // the singular kind it knows).
+        if self.kind == "github_pr"
+            && self.pr.is_none()
+            && self.repo.as_deref().is_some_and(|r| !r.trim().is_empty())
+        {
+            notes.push(
+                "kind = github_pr without pr follows every pull request of the repository: kind = github_prs".into(),
+            );
+            self.kind = "github_prs".into();
+        }
+        if self.kind == "github_prs"
+            && let Some(a) = self.author.as_deref()
+            && matches!(
+                a.trim().to_ascii_lowercase().as_str(),
+                "me" | "mine" | "my" | "myself" | "self"
+            )
+        {
+            self.author = Some("@me".into());
+            notes.push("author \"me\" is written @me (the gh token's user)".into());
         }
         if self.kind == "shell"
             && self.deliver_to == "user"
@@ -367,7 +399,16 @@ impl Subscription {
             }
             "github_pr" => {
                 if self.repo.as_deref().unwrap_or("").trim().is_empty() || self.pr.is_none() {
-                    bail!("github_pr needs repo (owner/name) and pr");
+                    bail!(
+                        "github_pr needs repo (owner/name) and pr; to follow every pull request of a repository (or all of yours: author \"@me\") use kind = github_prs with repo alone"
+                    );
+                }
+            }
+            "github_prs" => {
+                if self.repo.as_deref().unwrap_or("").trim().is_empty() {
+                    bail!(
+                        "github_prs needs repo (owner/name); author (\"@me\" or a login) is optional"
+                    );
                 }
             }
             "github_ci" => {
@@ -738,6 +779,7 @@ mod tests {
             path: None,
             repo: None,
             pr: None,
+            author: None,
 
             branch: None,
 
@@ -899,6 +941,7 @@ mod coerce_tests {
             path: None,
             repo: None,
             pr: None,
+            author: None,
             branch: None,
             channel: None,
             thread: None,
@@ -957,6 +1000,7 @@ mod branch_tests {
             path: None,
             repo: Some("o/r".into()),
             pr: None,
+            author: None,
             branch: Some("main".into()),
             channel: None,
             thread: None,
