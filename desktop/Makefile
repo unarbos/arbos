@@ -38,6 +38,14 @@ VERSION  := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 # does not move for weeks, and the dev channel publishes a build per commit.
 # Overridable on the command line (`make zip BUILD=1877`) so CI names the
 # payload and stamps the bundle from one number it worked out once.
+# This is the *only* place the number is decided. It is handed to the compile
+# as ARBOS_BUILD and stamped into CFBundleVersion, and `bundle` refuses to
+# finish unless the binary agrees with the plist beside it.
+#
+# It used to be worked out twice — here, and again in `build.rs` — and the two
+# drifted: a bundle shipped whose CFBundleVersion said 870 while the binary
+# inside said 879. Two numbers claiming to be the version is a bug waiting to
+# mislead an update comparison, because the feed is ordered on this number.
 BUILD    := $(shell git rev-list --count HEAD 2>/dev/null || echo 0)
 SHA      := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 ARCH     := $(shell uname -m)
@@ -111,8 +119,10 @@ LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/Launc
 ident:
 	@echo "$(VERSION) $(BUILD) $(ARCH)"
 
+# `ARBOS_BUILD` is handed down rather than worked out again inside the crate:
+# see the comment on BUILD above, and `build.rs`.
 build:
-	cargo build --release
+	ARBOS_BUILD=$(BUILD) cargo build --release
 	cargo build --release -p arbos-kernel --manifest-path ../Cargo.toml
 
 bundle: build
@@ -125,6 +135,17 @@ bundle: build
 	cp $(KERNEL) $(MACOS)/arbos-kernel
 	sed -e 's/@VERSION@/$(VERSION)/g' -e 's/@BUILD@/$(BUILD)/g' bundle/Info.plist > $(APP)/Contents/Info.plist
 	plutil -lint $(APP)/Contents/Info.plist >/dev/null
+	@# The binary says what it was stamped with; the plist says what this
+	@# bundle claims. They are one number and they are now checked to be, so
+	@# a drift cannot leave here — it would reach the update comparison, and
+	@# an app that misreports its own build either never updates or updates
+	@# forever.
+	@stamped="$$($(MACOS)/Arbos --version | cut -d' ' -f2)"; \
+	claimed="$$(plutil -extract CFBundleVersion raw -o - $(APP)/Contents/Info.plist)"; \
+	test "$$stamped" = "$$claimed" || { \
+		echo "bundle: the binary was built as $$stamped but the bundle claims $$claimed"; \
+		echo "bundle: run 'make clean' — the compiled stamp came from a cached build"; \
+		exit 1; }
 	$(MAKE) --no-print-directory icon
 	cp $(OUT)/AppIcon.icns $(RES)/AppIcon.icns
 	@# The 256 png beside the .icns is the app's own: settings paints the

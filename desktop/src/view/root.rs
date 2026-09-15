@@ -897,6 +897,9 @@ impl Arbos {
         // The updater is the window's, so closing the window stops it looking.
         let updater = cx.new(move |cx| crate::update::Updater::new(channel, cx));
         crate::view::status_bar::observe(cx, &updater);
+        // Settings is its own window and shows what the updater knows, so the
+        // entity is reachable from there the way the permission centre is.
+        cx.set_global(crate::update::Updates(updater.clone()));
 
         let mut this = Self {
             meter: cx.new(Stats::new),

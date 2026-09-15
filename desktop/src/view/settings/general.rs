@@ -1,6 +1,10 @@
 //! The general section: what this copy of the app is.
 
-use crate::{assets, build, update, view::settings::SettingsWindow};
+use crate::{
+    assets, build, update,
+    update::Updates,
+    view::{settings::SettingsWindow, status_bar},
+};
 use arbos_update::Channel;
 use bezel::{
     gpui::{AnyElement, Context, SharedString, div, img, prelude::*, px},
@@ -86,6 +90,23 @@ impl SettingsWindow {
             .into_any_element()
     }
 
+    /// `Checked 4m ago`, or that nobody has looked yet.
+    fn update_last_checked(&self, cx: &Context<Self>) -> String {
+        let updates = cx.global::<Updates>().0.read(cx);
+        status_bar::last_checked(updates.checked())
+    }
+
+    /// Why the last check failed, when it did. The bar says *that* it failed;
+    /// this is the only place that says why without a pointer resting on a
+    /// control.
+    fn update_failure(&self, cx: &Context<Self>) -> Option<String> {
+        cx.global::<Updates>()
+            .0
+            .read(cx)
+            .checked()
+            .and_then(|checked| checked.failed.clone())
+    }
+
     /// Which builds this machine follows, and a way to look now.
     ///
     /// The control that acts on this lives in the bar along the bottom of the
@@ -149,6 +170,33 @@ impl SettingsWindow {
                                         cx.notify();
                                     }))
                             })),
+                    ),
+            )
+            // Written down where no pointer is needed to read it. The bar's
+            // tooltip says the same thing, and a tooltip needs the pointer to
+            // rest on the control — which puts it out of reach of anything
+            // driving the app, and out of mind for anybody who is not already
+            // suspicious that updates have stopped arriving.
+            .child(
+                theme
+                    .card_row(false)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(theme.row_title("Last checked"))
+                            .children(self.update_failure(cx).map(|why| {
+                                div()
+                                    .id("update-last-check-why")
+                                    .text_style(TextStyle::Caption)
+                                    .text_color(theme.text_muted)
+                                    .child(why)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("update-last-checked")
+                            .child(theme.badge(self.update_last_checked(cx))),
                     ),
             )
             .child(

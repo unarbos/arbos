@@ -41,7 +41,7 @@ use arbos_update::{
     feed::{Download, Platform, current_arch},
     install, sign,
 };
-use bezel::gpui::{App, Context, Task};
+use bezel::gpui::{App, Context, Entity, Global, Task};
 use futures::{StreamExt, channel::mpsc};
 use std::{path::PathBuf, time::Duration};
 
@@ -72,6 +72,17 @@ pub enum State {
     Idle,
     /// Looking. Still quiet — a check nobody asked for should not flicker.
     Checking,
+    /// The channel could not be reached, or answered with something
+    /// unreadable.
+    ///
+    /// Its own state, and visible, because the alternative was folding it into
+    /// [`Self::Idle`] — and then a machine that has quietly stopped being able
+    /// to reach the channel looks exactly like a machine that is up to date.
+    /// The two mean opposite things and had the same face.
+    ///
+    /// Calm, though: a laptop on a train is not an error, and the app is
+    /// working perfectly. The next check tries again.
+    Unreachable { why: String },
     /// There is a newer build. This is the blue button.
     Ready(Box<Available>),
     /// Fetching it. `total` is `0` until the server says how big it is.
@@ -103,6 +114,23 @@ impl State {
     }
 }
 
+/// The window's updater, reachable from the settings window too.
+///
+/// A global for the same reason [`crate::model::permission_center::Permissions`]
+/// is one: settings is its own window with its own view, and the thing it is
+/// showing lives on the main one.
+pub struct Updates(pub Entity<Updater>);
+
+impl Global for Updates {}
+
+/// The last time the channel was asked, and what came back.
+#[derive(Debug, Clone)]
+pub struct Checked {
+    pub at: std::time::SystemTime,
+    /// `None` when the channel answered — whether or not it had anything new.
+    pub failed: Option<String>,
+}
+
 /// One step of the work, sent from the thread doing it.
 enum Step {
     Progress { got: u64, total: u64 },
@@ -116,6 +144,15 @@ pub struct Updater {
     state: State,
     /// The build this binary is, which is what "newer" is measured against.
     current: Version,
+    /// When the channel was last asked, and whether it answered. `None` until
+    /// the first check finishes.
+    ///
+    /// Shown in Settings as a row, not only in the bar's tooltip: a tooltip
+    /// needs a pointer to rest on the control, which makes it unreachable to
+    /// anything driving the app and easy to miss for anybody who is not
+    /// already suspicious. The tooltip may repeat this; it may not be the only
+    /// copy of it.
+    checked: Option<Checked>,
     /// Held so dropping the updater stops the work.
     running: Option<Task<()>>,
     polling: Option<Task<()>>,
@@ -127,6 +164,7 @@ impl Updater {
             channel,
             state: State::Idle,
             current: build::version(),
+            checked: None,
             running: None,
             polling: None,
         };
@@ -153,6 +191,12 @@ impl Updater {
 
     pub fn channel(&self) -> Channel {
         self.channel
+    }
+
+    /// When the channel was last asked and what it said. `None` before the
+    /// first check finishes.
+    pub fn checked(&self) -> Option<&Checked> {
+        self.checked.as_ref()
     }
 
     /// Whether this build can install an update at all: it knows the key to
@@ -207,13 +251,21 @@ impl Updater {
                 if updater.channel != channel || updater.state.busy() {
                     return;
                 }
+                let why = found.as_ref().err().map(|e| format!("{e:#}"));
+                updater.checked = Some(Checked {
+                    at: std::time::SystemTime::now(),
+                    failed: why.clone(),
+                });
                 updater.state = match found {
                     Ok(Some(update)) => State::Ready(Box::new(update)),
                     Ok(None) => State::Idle,
-                    // A check that could not reach the network is not a
-                    // failure worth a red bar — it is a laptop on a train.
-                    // The bar stays quiet and the next check tries again.
-                    Err(_) => State::Idle,
+                    // Not a red bar — a laptop on a train is not an error, and
+                    // the next check tries again. But not silence either: an
+                    // app that has stopped being able to reach its channel
+                    // must not wear the face of one that is up to date.
+                    Err(_) => State::Unreachable {
+                        why: why.unwrap_or_default(),
+                    },
                 };
                 cx.notify();
             });
