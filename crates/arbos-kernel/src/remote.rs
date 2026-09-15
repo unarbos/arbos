@@ -982,6 +982,19 @@ fn deliver(hooks: &KernelHooks, record: &Record, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// `uname -sm` ("Linux x86_64", "Darwin arm64") as the release names it
+/// (`linux-amd64`, `darwin-arm64`).
+fn os_arch_of(uname_sm: &str) -> String {
+    let mut parts = uname_sm.split_whitespace();
+    let os = parts.next().unwrap_or("").to_ascii_lowercase();
+    let arch = match parts.next().unwrap_or("") {
+        "x86_64" | "amd64" => "amd64",
+        "aarch64" | "arm64" => "arm64",
+        other => other,
+    };
+    format!("{os}-{arch}")
+}
+
 // ── ssh plumbing (blocking) ─────────────────────────────────────────────
 
 /// The private key as a file path, reading an `op://` reference once into
@@ -1176,7 +1189,7 @@ fn prepare_remote(machine: &Machine, local_place: &Path, remote_path: &str) -> R
     let probe = ssh_run(
         machine,
         &format!(
-            "if test -x {k}; then echo have; else echo none; fi; uname -sm; test -f {c}/arbos/config.toml && echo config || echo noconfig",
+            "if test -x {k}; then echo have; else echo none; fi; uname -sm; test -f {c}/arbos/config.toml && echo config || echo noconfig; {k} --version 2>/dev/null | head -n1 || true",
             k = sq(&kernel),
             c = sq(&config_home)
         ),
@@ -1185,7 +1198,25 @@ fn prepare_remote(machine: &Machine, local_place: &Path, remote_path: &str) -> R
     let have = probe_lines.next().unwrap_or("none") == "have";
     let arch = probe_lines.next().unwrap_or("").trim().to_string();
     let has_config = probe_lines.next().unwrap_or("noconfig") == "config";
-    if !have {
+    let theirs = probe_lines
+        .next()
+        .and_then(arbos_core::remote_kernel::KernelVersion::parse);
+    // The version rule the desktop applies when it opens a remote place:
+    // a kernel older than this one (or the same version from another
+    // build) is replaced; a newer one is left alone. Never over a
+    // running binary: `<bin>.new` then mv.
+    let mine = arbos_core::remote_kernel::KernelVersion::parse(&format!(
+        "arbos-kernel {} {} protocol {}",
+        crate::klog::version(),
+        crate::klog::git_sha(),
+        crate::serve::PROTOCOL
+    ));
+    let wants_update = match (&theirs, &mine) {
+        (Some(t), Some(m)) => t.needs_update_to(m),
+        (None, _) => have,
+        (Some(_), None) => false,
+    };
+    if !have || wants_update {
         let local_arch = format!(
             "{} {}",
             match std::env::consts::OS {
@@ -1195,16 +1226,60 @@ fn prepare_remote(machine: &Machine, local_place: &Path, remote_path: &str) -> R
             },
             std::env::consts::ARCH
         );
-        if local_arch != arch {
-            bail!(
-                "{} has no arbos-kernel at {kernel} and runs {arch}, not {local_arch}, so this kernel's binary will not run there. Build one on that machine (clone the repo; cargo build --release -p arbos-kernel; copy target/release/arbos-kernel to {kernel}) or set kernel = \"<path>\" for it in machines.toml.",
-                machine.name
+        if local_arch == arch {
+            let me = std::env::current_exe().context("locate this kernel binary")?;
+            let staged = format!("{kernel}.new");
+            scp(machine, &me, &staged)?;
+            ssh_run(
+                machine,
+                &format!(
+                    "chmod 755 {s} && mv -f {s} {k}",
+                    s = sq(&staged),
+                    k = sq(&kernel)
+                ),
+            )?;
+        } else {
+            // Another machine type: the release cut for it, else a source
+            // build when the machine allows it. The script says which.
+            let os_arch = os_arch_of(&arch);
+            let (version, sha) = mine
+                .as_ref()
+                .map(|m| (m.short(), m.sha.clone()))
+                .unwrap_or_default();
+            if version.is_empty() {
+                bail!(
+                    "{} has no usable arbos-kernel at {kernel} and runs {arch}, not {local_arch}; this build has no version to fetch a release by. Put an arbos-kernel built for it at {kernel}.",
+                    machine.name
+                );
+            }
+            let script = arbos_core::remote_kernel::install_script(
+                &kernel,
+                &version,
+                if sha.is_empty() { "main" } else { &sha },
+                &os_arch,
+                machine.build,
             );
+            let out = ssh_run(machine, &script);
+            let steps = arbos_core::remote_kernel::steps_in(out.as_deref().unwrap_or(""));
+            if out.is_err() {
+                bail!(
+                    "{} runs {arch}, not {local_arch}, and arbos-kernel {version} could not be placed at {kernel}: {}",
+                    machine.name,
+                    steps
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| "the install script failed".into())
+                );
+            }
         }
-        let me = std::env::current_exe().context("locate this kernel binary")?;
-        scp(machine, &me, &kernel)?;
-        ssh_run(machine, &format!("chmod 755 {}", sq(&kernel)))?;
-        notes.push_str(&format!("Installed arbos-kernel at {kernel}. "));
+        notes.push_str(&match &theirs {
+            Some(t) if have => format!(
+                "Updated arbos-kernel at {kernel} from {} to {}. ",
+                t.short(),
+                mine.as_ref().map(|m| m.short()).unwrap_or_default()
+            ),
+            _ => format!("Installed arbos-kernel at {kernel}. "),
+        });
     }
     if !has_config {
         // The remote kernel needs a model key of its own. The one this
@@ -1412,4 +1487,17 @@ fn remote_transcript_tail(machine: &Machine, path: &str, from: usize) -> Result<
 /// Single-quote for a POSIX shell.
 fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod os_arch_tests {
+    use super::os_arch_of;
+
+    #[test]
+    fn uname_reads_as_the_release_names_it() {
+        assert_eq!(os_arch_of("Linux x86_64"), "linux-amd64");
+        assert_eq!(os_arch_of("Darwin arm64"), "darwin-arm64");
+        assert_eq!(os_arch_of("Linux aarch64"), "linux-arm64");
+        assert_eq!(os_arch_of(""), "-");
+    }
 }
