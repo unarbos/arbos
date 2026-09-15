@@ -143,6 +143,66 @@ fn output_owed(events: &[Event], place: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+/// What the model reads when its reply links a pull request no tool
+/// opened. `{urls}` is filled in.
+pub const PR_LINK_NUDGE: &str = "Your reply links a pull request ({urls}) that no tool opened: no pr create or gh pr create output in your transcript has it, and the store has no record of it. A PR link comes from the tool's output, never from memory. Either open it now with pr action:create and report from its output, or say plainly that no pull request was opened and where the work is (a branch in this checkout, uncommitted edits).";
+
+/// GitHub pull-request URLs in `reply` that appear in no tool result on
+/// the transcript and in no `prs.jsonl` record: links the model made up
+/// (a worker "opened PR 1" on a repository with no remote, cold-p5).
+fn unbacked_pr_links(events: &[Event], reply: &str, place: &arbos_core::Place) -> Vec<String> {
+    let claimed: Vec<String> = arbos_core::prs::pr_urls(reply)
+        .into_iter()
+        .map(|(url, _, _)| url)
+        .collect();
+    if claimed.is_empty() {
+        return Vec::new();
+    }
+    let recorded: Vec<String> = arbos_core::load_prs(place)
+        .into_iter()
+        .map(|p| p.url)
+        .collect();
+    let mut seen: Vec<String> = Vec::new();
+    for e in events {
+        match &e.kind {
+            EventKind::Tool(rec) => {
+                if let Some(b) = &rec.body {
+                    seen.extend(arbos_core::prs::pr_urls(b).into_iter().map(|(u, _, _)| u));
+                }
+                seen.extend(rec.paths.iter().filter(|p| p.contains("/pull/")).cloned());
+            }
+            // Someone else's report may carry a real PR: the user or a
+            // worker said it, and the worker's own tool output backs it.
+            EventKind::User { text, .. }
+            | EventKind::Say { text, .. }
+            | EventKind::Wake {
+                text: Some(text), ..
+            } => {
+                seen.extend(
+                    arbos_core::prs::pr_urls(text)
+                        .into_iter()
+                        .map(|(u, _, _)| u),
+                );
+            }
+            _ => {}
+        }
+    }
+    let known = |u: &str| {
+        let key = u.trim_end_matches('/');
+        recorded
+            .iter()
+            .chain(seen.iter())
+            .any(|k| k.trim_end_matches('/') == key)
+    };
+    let mut out: Vec<String> = Vec::new();
+    for url in claimed {
+        if !known(&url) && !out.contains(&url) {
+            out.push(url);
+        }
+    }
+    out
+}
+
 /// A reply that only announces a command — "Running ls; cat README*
 /// 2>/dev/null | head -60;" — and ends the turn without calling anything
 /// (Jacob's Mac, 2026-09-15). Short: one or two lines, opening with a
@@ -526,6 +586,11 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let mut failure_streak = 0u32;
     // Identical read-only calls since the last write.
     let mut repeats: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    // The same words said again in one turn: a coordinator waiting on its
+    // workers streamed "Please provide the sentences … once both are
+    // available" five to eight times between status calls (mobile cycle
+    // 1, item 4). Told once at the second; the turn ends at the third.
+    let mut said: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut hidden_seen = 0usize;
     let mut first_step = true;
     loop {
@@ -770,11 +835,16 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             // `[kernel] …` either way, and the window draws it dim instead
             // of as a bubble the user never typed.
             let nudge = if content.trim().is_empty() {
-                Some((
-                    "Your reply was empty. Continue the task, or say what is blocking you."
-                        .to_string(),
-                    "empty reply",
-                ))
+                // A done wake that has nothing to add ends in silence:
+                // Cursor's coordinator says nothing between worker reports
+                // when the user is owed nothing yet (cold-p5).
+                (wake.kind != WakeKind::Done).then(|| {
+                    (
+                        "Your reply was empty. Continue the task, or say what is blocking you."
+                            .to_string(),
+                        "empty reply",
+                    )
+                })
             } else if looks_like_tool_call_text(&content) {
                 Some((
                     "That was a tool call written as text, so nothing ran. Call the tool itself."
@@ -786,6 +856,13 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     "You announced a command but did not call bash, so nothing ran. Call bash with it now, then answer from its output."
                         .to_string(),
                     "tool call written as text",
+                ))
+            } else if let Some(urls) =
+                Some(unbacked_pr_links(&events, &content, &place)).filter(|u| !u.is_empty())
+            {
+                Some((
+                    PR_LINK_NUDGE.replace("{urls}", &urls.join(", ")),
+                    "pr link not from a tool",
                 ))
             } else if image_owed(&events) {
                 // The brief said the user asked to see the result and the
@@ -806,18 +883,16 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             };
             if let Some((text, reason)) = nudge {
                 nudged = true;
-                let mut batch = Vec::new();
-                if !content.trim().is_empty() {
-                    batch.push(Event::new(EventKind::Assistant {
-                        text: content.trim_matches('\n').to_string(),
-                        reasoning_details: None,
-                    }));
-                }
-                batch.push(Event::new(EventKind::Nudge {
-                    text,
-                    reason: reason.into(),
-                }));
-                append_events(&transcript, &batch)?;
+                // The reply itself is already on the transcript (the
+                // Assistant line above); only the nudge follows it, or the
+                // window shows the same words twice.
+                append_event(
+                    &transcript,
+                    &Event::new(EventKind::Nudge {
+                        text,
+                        reason: reason.into(),
+                    }),
+                )?;
                 events = load_transcript(&transcript)?;
                 continue;
             }
@@ -921,9 +996,42 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             append_events(&transcript, &results)?;
             return end(None, None);
         }
+        if let Some(key) = repeat_key(&content) {
+            let n = said.entry(key).or_insert(0);
+            *n += 1;
+            if *n == 2 {
+                results.push(Event::new(EventKind::Nudge {
+                    text: REPEAT_NUDGE.to_string(),
+                    reason: "repeated reply".into(),
+                }));
+            } else if *n >= 3 {
+                results.push(Event::new(EventKind::Notice {
+                    text: "The same words a third time in one turn: the turn ends here. A worker's done, a subscription, or the user opens the next one.".to_string(),
+                    failed: false,
+                }));
+                append_events(&transcript, &results)?;
+                return end(None, Some("repeated itself three times"));
+            }
+        }
         append_events(&transcript, &results)?;
         events = load_transcript(&transcript)?;
     }
+}
+
+/// What the model reads the second time it says the same thing in one
+/// turn.
+pub const REPEAT_NUDGE: &str = "You said that already this turn. Do not say it again. If you are waiting on workers, end the turn now with no tool calls — their done wakes you, and asking or polling does not bring it sooner. Otherwise do the next step.";
+
+/// The comparison form of a reply for the repeat check: whitespace and
+/// case folded, and only for a reply with something in it (a status word
+/// or a one-line answer said twice is not the loop this catches).
+fn repeat_key(content: &str) -> Option<String> {
+    let key: String = content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    (key.chars().count() >= 40).then_some(key)
 }
 
 /// The tool schemas at the provider's rate, like the messages.

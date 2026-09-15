@@ -401,6 +401,28 @@ fn create(place: &arbos_core::Place, cwd: &Path, agent: &str, args: &Value) -> R
     let title =
         opt(args, "title").ok_or_else(|| anyhow::anyhow!("pr create: title is required"))?;
     let body = opt(args, "body").unwrap_or_default();
+    // A repository with no remote has nothing to open a PR against; said
+    // here in plain words, before gh's "no git remotes" (cold-p5, where
+    // a worker then reported an invented PR link).
+    if git(cwd, &["remote"])
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(false)
+    {
+        let branch = git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+        bail!(
+            "pr create: this repository has no remote, so there is no pull request to open. The work is on branch {} in this checkout only — report it as local, do not report a PR (git remote add origin <url> && git push -u origin {} would make one possible).",
+            if branch.is_empty() {
+                "(unknown)".to_string()
+            } else {
+                branch.clone()
+            },
+            if branch.is_empty() {
+                "<branch>".to_string()
+            } else {
+                branch
+            }
+        );
+    }
     let repo = name_with_owner(cwd)?;
     let body = with_template(cwd, &body);
     let (body, uploaded, upload_note) = upload_artifacts(place, cwd, agent, &body, &repo);

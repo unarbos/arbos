@@ -39,6 +39,11 @@ pub enum WakeKind {
     Serve,
     /// A detached bash job finished.
     Job,
+    /// One or more of this agent's workers ended; their reports are on the
+    /// transcript as `say` lines. Its text names who reported and who is
+    /// still working. An empty reply ends it without a nudge: when nothing
+    /// is owed to the user yet, silence is the right answer (cold-p5).
+    Done,
     /// Compact the transcript, then stop. No model step.
     Compact,
     /// Root's first turn in a fresh place: read the folder, seed the
@@ -54,6 +59,7 @@ impl WakeKind {
             Self::Plan => "plan",
             Self::Serve => "serve",
             Self::Job => "job",
+            Self::Done => "done",
             Self::Compact => "compact",
             Self::Kickoff => "kickoff",
         }
