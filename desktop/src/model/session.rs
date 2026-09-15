@@ -497,6 +497,9 @@ pub struct ChatSession {
     pub children: Vec<ChildSummary>,
     /// When `live` last became non-empty, for the braille tick.
     pub live_since: Option<SystemTime>,
+    /// Seconds a thought had before a later step reopened it; added back
+    /// when it settles again.
+    pub thought_carry: u32,
     /// What the agent says it is doing right now (the kernel's `status`
     /// event); cleared when the turn ends.
     pub status: Option<String>,
@@ -617,6 +620,7 @@ impl ChatSession {
             tool_started: HashMap::new(),
             status_only: false,
             live_since: None,
+            thought_carry: 0,
             status: None,
             turn_open: false,
             turn_ended: None,
@@ -691,6 +695,7 @@ impl ChatSession {
             tool_started: HashMap::new(),
             status_only: false,
             live_since: None,
+            thought_carry: 0,
             status: None,
             turn_open: false,
             turn_ended: None,
@@ -765,6 +770,7 @@ impl ChatSession {
             tool_started: HashMap::new(),
             status_only: false,
             live_since: None,
+            thought_carry: 0,
             status: None,
             turn_open: false,
             turn_ended: None,
@@ -1737,11 +1743,47 @@ impl ChatSession {
             .send(RequestPermissionResponse::selected(option_id));
     }
 
-    /// Flip whether the pending prompt is answered once or for good.
-    pub fn toggle_permission_always(&mut self) {
-        if let Some(prompt) = &mut self.permission {
-            prompt.always = !prompt.always;
+    /// An ask that is really an approval — the kernel in `ask` mode puts
+    /// "allow <call>" to the user with allow / deny options. Cursor draws
+    /// that as its approval row, not a question. Returns the call's words
+    /// and the two option ids.
+    pub fn approval_ask(&self) -> Option<(String, String, String)> {
+        let prompt = self.questions.as_ref()?;
+        if prompt.questions.len() != 1 {
+            return None;
         }
+        let question = prompt.current()?;
+        let words = if question.prompt.trim().is_empty() {
+            prompt.title.as_str()
+        } else {
+            question.prompt.as_str()
+        };
+        let call = words.trim().strip_prefix("allow ").or_else(|| words.trim().strip_prefix("Allow "))?;
+        let find = |want: &str| {
+            question
+                .options
+                .iter()
+                .find(|o| o.id.eq_ignore_ascii_case(want) || o.label.trim().eq_ignore_ascii_case(want))
+                .map(|o| o.id.clone())
+        };
+        Some((call.trim().to_string(), find("allow")?, find("deny")?))
+    }
+
+    /// Answer an approval-shaped ask: pick allow or deny and send it.
+    pub fn answer_approval(&mut self, allow: bool) {
+        let Some((_, allow_id, deny_id)) = self.approval_ask() else {
+            return;
+        };
+        let Some(question_id) = self.questions.as_ref().and_then(|p| p.current()).map(|q| q.id.clone()) else {
+            return;
+        };
+        let pick = if allow { allow_id } else { deny_id };
+        if let Some(prompt) = self.questions.as_mut() {
+            let draft = prompt.drafts.entry(question_id).or_default();
+            draft.selected = vec![pick];
+            draft.other = false;
+        }
+        self.answer_ask("", false);
     }
 
     pub fn toggle_ask_option(&mut self, question_id: &str, option_id: &str) {
@@ -2400,6 +2442,13 @@ impl ChatSession {
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 let text = content_text(&chunk.content);
+                // A `status` call between two reasoning steps draws no row:
+                // the new step continues the thought before it rather than
+                // opening a second "Thought briefly".
+                let shown = self.items.iter().rposition(|item| {
+                    !matches!(item, ChatItem::Tool { label, .. }
+                        if crate::view::component::transcript::is_status_call(label))
+                });
                 if let Some(ChatItem::Thinking {
                     text: body,
                     done: false,
@@ -2407,6 +2456,22 @@ impl ChatSession {
                 }) = self.items.last_mut()
                 {
                     merge_stream_text(body, &text);
+                } else if let Some(ChatItem::Thinking {
+                    text: body,
+                    done,
+                    secs,
+                }) = shown.and_then(|at| self.items.get_mut(at))
+                    && !text.is_empty()
+                {
+                    if !body.ends_with('\n') {
+                        body.push_str("\n\n");
+                    }
+                    merge_stream_text(body, &text);
+                    // The clock restarts for the new step and adds to the
+                    // seconds already on the thought when it settles.
+                    *done = false;
+                    self.thought_carry = secs.take().unwrap_or(0);
+                    self.thought_at = Some(SystemTime::now());
                 } else if !text.is_empty() {
                     self.thought_at = Some(SystemTime::now());
                     self.items.push(ChatItem::Thinking {
@@ -2684,15 +2749,22 @@ impl ChatSession {
     }
 
     fn finish_thinking(&mut self) {
-        if let Some(ChatItem::Thinking { done, secs, .. }) = self.items.last_mut() {
-            if !*done {
-                *done = true;
-                *secs = self
-                    .thought_at
-                    .and_then(|at| at.elapsed().ok())
-                    .map(|d| d.as_secs() as u32);
-            }
+        // The open thought is the last item, or the one a later step
+        // reopened across a `status` call.
+        let open = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, ChatItem::Thinking { done: false, .. }));
+        if let Some(ChatItem::Thinking { done, secs, .. }) = open.and_then(|at| self.items.get_mut(at)) {
+            *done = true;
+            let took = self
+                .thought_at
+                .and_then(|at| at.elapsed().ok())
+                .map(|d| d.as_secs() as u32)
+                .unwrap_or(0);
+            *secs = Some(took.saturating_add(self.thought_carry));
         }
+        self.thought_carry = 0;
         self.thought_at = None;
     }
 

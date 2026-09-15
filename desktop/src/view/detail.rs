@@ -25,7 +25,7 @@ use bezel::{
     ui::{
         icons, surface,
         tooltip::Tooltip,
-        widgets::{ButtonStyle, Buttons, Content, Controls},
+        widgets::{ButtonStyle, Buttons, Content},
     },
 };
 use cacp::schema::{
@@ -289,6 +289,39 @@ impl Arbos {
         };
         if self.builtin_command(id, &text.text, cx) {
             return;
+        }
+        // Cursor's approval card takes Enter as "Run ↵": an empty send while
+        // one is parked allows the call.
+        if text.text.trim().is_empty() && text.attachments.is_empty() {
+            let allow = self
+                .workspace
+                .read(cx)
+                .active_session()
+                .and_then(|chat| chat.permission.as_ref())
+                .and_then(|prompt| {
+                    prompt
+                        .options
+                        .iter()
+                        .find(|o| o.kind == PermissionOptionKind::AllowOnce)
+                        .map(|o| o.id.clone())
+                });
+            if let Some(option_id) = allow {
+                self.workspace.update(cx, |workspace, cx| {
+                    workspace.with_session(id, cx, |chat| chat.respond_permission(option_id));
+                });
+                return;
+            }
+            let approval_ask = self
+                .workspace
+                .read(cx)
+                .active_session()
+                .is_some_and(|chat| chat.approval_ask().is_some());
+            if approval_ask {
+                self.workspace.update(cx, |workspace, cx| {
+                    workspace.with_session(id, cx, |chat| chat.answer_approval(true));
+                });
+                return;
+            }
         }
         // "stop" while the chat works is the Stop button, not a follow-up.
         let busy = self
@@ -1897,7 +1930,8 @@ impl Arbos {
                 .rev()
                 .take_while(|item| !matches!(item, crate::model::session::ChatItem::User(_)))
                 .any(|item| matches!(item, crate::model::session::ChatItem::Notice { text, .. } if crate::model::session::is_interrupt_notice(text)));
-        if working.is_empty() && prs.is_empty() && changes.is_none() && ahead.is_none() && !stopped {
+        let has_agents = project.sessions.iter().any(|c| c.parent == Some(chat.id));
+        if working.is_empty() && !has_agents && prs.is_empty() && changes.is_none() && ahead.is_none() && !stopped {
             return None;
         }
         let root = project.path.clone();
@@ -1934,11 +1968,21 @@ impl Arbos {
             .is_some_and(|(id, ids)| *id == main_id && working.iter().all(|w| ids.contains(w)));
         let card_open = !working.is_empty() && !closed;
         let pill_ids = working.clone();
-        let workers: Vec<(u64, String, Duration)> = working
+        let workers: Vec<(u64, String, Duration, bool)> = working
             .iter()
             .filter_map(|id| project.sessions.iter().find(|c| c.id == *id))
-            .map(|c| (c.id, c.label(), c.elapsed().unwrap_or_default()))
+            .map(|c| (c.id, c.label(), c.elapsed().unwrap_or_default(), true))
             .collect();
+        // Cursor's pill once the workers are done reads "Agents" and opens
+        // the same list, a check per finished worker.
+        let mut agents: Vec<(u64, String, Duration, bool)> = project
+            .sessions
+            .iter()
+            .filter(|c| c.parent == Some(main_id))
+            .map(|c| (c.id, c.label(), Duration::ZERO, c.busy()))
+            .collect();
+        agents.sort_by_key(|(id, ..)| *id);
+        let agents_open = working.is_empty() && !agents.is_empty() && self.agents_card_open == Some(main_id);
         let row = div()
                 .w_full()
                 .flex()
@@ -1965,6 +2009,29 @@ impl Arbos {
                                 None
                             } else {
                                 Some((main_id, pill_ids.clone()))
+                            };
+                            cx.notify();
+                        })),
+                    )
+                })
+                .when(working.is_empty() && has_agents, |row| {
+                    row.child(
+                        pill(
+                            "pill-agents",
+                            svg()
+                                .path(crate::assets::DELEGATE_ICON)
+                                .size(px(12.))
+                                .flex_none()
+                                .text_color(theme.text_muted)
+                                .into_any_element(),
+                            "Agents".to_string(),
+                        )
+                        .tooltip(|window, cx| Tooltip::text("This chat's sub-agents", window, cx))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.agents_card_open = if this.agents_card_open == Some(main_id) {
+                                None
+                            } else {
+                                Some(main_id)
                             };
                             cx.notify();
                         })),
@@ -2088,7 +2155,13 @@ impl Arbos {
                         }),
                     )
                 });
-        let card = card_open.then(|| self.working_card(&workers, main_id, &theme, cx));
+        let card = if card_open {
+            Some(self.working_card(&workers, main_id, true, &theme, cx))
+        } else if agents_open {
+            Some(self.working_card(&agents, main_id, false, &theme, cx))
+        } else {
+            None
+        };
         Some(
             div()
                 .w_full()
@@ -2106,12 +2179,13 @@ impl Arbos {
     /// A row opens the worker; Stop All cancels every running one.
     fn working_card(
         &self,
-        workers: &[(u64, String, Duration)],
+        workers: &[(u64, String, Duration, bool)],
         main_id: u64,
+        live: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let ids: Vec<u64> = workers.iter().map(|(id, _, _)| *id).collect();
+        let ids: Vec<u64> = workers.iter().map(|(id, ..)| *id).collect();
         let close_ids = ids.clone();
         let mut card = div()
             .id("working-card")
@@ -2131,8 +2205,13 @@ impl Arbos {
                     .px(px(12.))
                     .h(px(28.))
                     .text_style(TextStyle::Callout)
-                    .child(div().flex_1().text_color(theme.text_muted).child("Working"))
                     .child(
+                        div()
+                            .flex_1()
+                            .text_color(theme.text_muted)
+                            .child(if live { "Working" } else { "Agents" }),
+                    )
+                    .when(live, |head| head.child(
                         div()
                             .id("working-stop-all")
                             .px(px(4.))
@@ -2149,7 +2228,7 @@ impl Arbos {
                                     }
                                 });
                             })),
-                    )
+                    ))
                     .child(
                         div()
                             .id("working-card-close")
@@ -2168,13 +2247,17 @@ impl Arbos {
                                     .text_color(theme.text_muted),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.working_card_closed = Some((main_id, close_ids.clone()));
+                                if live {
+                                    this.working_card_closed = Some((main_id, close_ids.clone()));
+                                } else {
+                                    this.agents_card_open = None;
+                                }
                                 cx.notify();
                             })),
                     ),
             );
-        for (id, label, since) in workers {
-            let (id, since) = (*id, *since);
+        for (id, label, since, running) in workers {
+            let (id, since, running) = (*id, *since, *running);
             card = card.child(
                 div()
                     .id(("working-row", id))
@@ -2190,7 +2273,15 @@ impl Arbos {
                     .hover(|el| el.bg(theme.element_hover))
                     .text_style(TextStyle::Callout)
                     .text_color(theme.text)
-                    .child(transcript::spinner(since, theme.text_muted, cx))
+                    .child(if running {
+                        transcript::spinner(since, theme.text_muted, cx)
+                    } else {
+                        icons::icon(icons::status::CHECK)
+                            .size(px(12.))
+                            .flex_none()
+                            .text_color(theme.success)
+                            .into_any_element()
+                    })
                     .child(SharedString::from(label.clone()))
                     .on_click(cx.listener(move |this, _, _, cx| this.select_session(id, cx))),
             );
@@ -2602,52 +2693,20 @@ impl Arbos {
                 }))
         };
         let body = match alert(&prompt.options) {
-            // How long the answer holds, then the answers — the affirmative
-            // last, where macOS puts the default.
+            // Cursor's approval row, trailing edge: "Skip" as plain words,
+            // "Always Run" when the agent offers a standing allow, "Run ↵"
+            // as the default. Enter in the empty composer is the same Run.
             Some((deny, allow)) => div()
                 .flex()
                 .flex_row()
                 .items_center()
+                .justify_end()
                 .gap(px(8.))
-                // An agent offering neither *always* form has no second
-                // question to ask, and the row is just the two buttons.
-                .children((deny.always.is_some() || allow.always.is_some()).then(|| {
-                    div()
-                        .id("permission-always")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.))
-                        .cursor_pointer()
-                        .child(theme.checkbox(prompt.always))
-                        .child(
-                            div()
-                                .text_style(TextStyle::Callout)
-                                .text_color(theme.text_muted)
-                                .child("Always allow"),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace.update(cx, |workspace, cx| {
-                                workspace
-                                    .with_session(id, cx, |chat| chat.toggle_permission_always());
-                            });
-                        }))
+                .child(answer("deny", deny.id(false), "Skip", ButtonStyle::Ghost))
+                .children(allow.always.map(|always| {
+                    answer("allow-always", always.to_owned(), "Always Run", ButtonStyle::Ghost)
                 }))
-                // Whatever is on the left is on the left: the answers hold the
-                // trailing edge whether or not the checkbox is there.
-                .child(div().flex_1())
-                .child(answer(
-                    "deny",
-                    deny.id(prompt.always),
-                    deny.label,
-                    ButtonStyle::Ghost,
-                ))
-                .child(answer(
-                    "allow",
-                    allow.id(prompt.always),
-                    allow.label,
-                    ButtonStyle::Prominent,
-                ))
+                .child(answer("allow", allow.id(false), "Run ↵", ButtonStyle::Prominent))
                 .into_any_element(),
             // Every option the agent sent, one full-width row each. A label of
             // any length reads here, which is the whole point of stacking them.
@@ -2711,11 +2770,16 @@ impl Arbos {
     }
 
     /// The ask tool's form: one question at a time, Skip or Continue.
-    fn questions(&self, cx: &Context<Self>) -> Option<impl IntoElement + use<>> {
+    fn questions(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
         let chat = self.workspace.read(cx).active_session()?;
         let prompt = chat.questions.as_ref()?;
         let id = chat.id;
+        // The kernel's ask-mode approval ("allow bash: ls -la" with allow /
+        // deny) is Cursor's approval card: the call, then Skip · Run ↵.
+        if let Some((call, _, _)) = chat.approval_ask() {
+            return Some(self.approval_ask_card(id, call, &theme, cx).into_any_element());
+        }
         let question = prompt.current()?;
         let draft = prompt.draft(&question.id);
         let page = prompt.page;
@@ -2936,8 +3000,68 @@ impl Arbos {
                                     });
                                 })),
                         ),
-                ),
+                )
+                .into_any_element(),
         )
+    }
+
+    /// Cursor's approval card for an approval-shaped ask: the call's words
+    /// under a key glyph, "Skip" and "Run ↵" at the trailing edge.
+    fn approval_ask_card(&self, id: u64, call: String, theme: &Theme, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let painter = Painter::of(cx);
+        let answer = |key: &str, allow: bool, label: &str, style| {
+            let fade = Fade::new(painter, format!("approval-ask-{id}-{key}"));
+            theme
+                .button(label.to_owned(), style, Some(fade))
+                .id(SharedString::from(key.to_owned()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.workspace.update(cx, |workspace, cx| {
+                        workspace.with_session(id, cx, |chat| chat.answer_approval(allow));
+                    });
+                }))
+        };
+        div()
+            .rounded(px(Theme::surface_radius()))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .px(px(root::COMPOSER_PAD_X))
+            .py(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(8.))
+                    .child(
+                        icons::icon(icons::system::KEY_MINIMALISTIC)
+                            .size(px(14.))
+                            .flex_none()
+                            .mt(px(3.))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_style(TextStyle::Body)
+                            .text_color(theme.text)
+                            .child(SharedString::from(call)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(answer("ask-skip", false, "Skip", ButtonStyle::Ghost))
+                    .child(answer("ask-continue", true, "Run ↵", ButtonStyle::Prominent)),
+            )
     }
 
     /// A pick from one of the composer's switches — the session's mode, or a

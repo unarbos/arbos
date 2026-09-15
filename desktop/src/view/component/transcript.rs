@@ -3207,7 +3207,10 @@ fn jump_to_end(
         div()
             .absolute()
             .bottom(px(10.))
-            .right(px(RAIL_INSET + MARK + 12.))
+            .left_0()
+            .right(px(RAIL_INSET + MARK))
+            .flex()
+            .justify_center()
             .child(
                 div()
                     .id(("jump-to-end", id))
@@ -4006,7 +4009,11 @@ fn run_fold(
                         // A worker's `todo` call is its checklist card
                         // (Cursor's TodoWrite in a classic chat), not a
                         // bare "todo" row.
-                        ChatItem::Tool { label, .. } if is_todo_call(label) => {
+                        // A worker's `plan` writes its own notes file, so in
+                        // its chat that call is a checklist card as well.
+                        ChatItem::Tool { label, .. }
+                            if is_todo_call(label) || (chat.parent.is_some() && is_plan_call(label)) =>
+                        {
                             let theme = Theme::of(cx).clone();
                             todo_card(chat, ix..ix + 1, &theme)
                                 .unwrap_or_else(|| tool(chat, ix, false, cx))
@@ -5405,7 +5412,7 @@ pub(crate) fn plain_markdown(text: &str) -> String {
 
 /// The kernel's `status` tool: what the agent says it is doing, carried
 /// by the worker line and the panel. Never a row of its own.
-fn is_status_call(label: &str) -> bool {
+pub(crate) fn is_status_call(label: &str) -> bool {
     label.split_whitespace().next().is_some_and(|first| first == "status")
 }
 
@@ -5418,7 +5425,11 @@ fn todo_card(chat: &ChatSession, range: Range<usize>, theme: &Theme) -> Option<A
     let (title, items) = range
         .rev()
         .filter_map(|ix| match &chat.items[ix] {
-            ChatItem::Tool { label, output, .. } if is_todo_call(label) => plan_items(output),
+            ChatItem::Tool { label, output, .. }
+                if is_todo_call(label) || (chat.parent.is_some() && is_plan_call(label)) =>
+            {
+                plan_items(output)
+            }
             _ => None,
         })
         .next()?;
@@ -5516,6 +5527,10 @@ fn own_calls(items: &[ChatItem], range: Range<usize>) -> bool {
     items[range].iter().any(|item| {
         matches!(item, ChatItem::Tool { label, .. } if !is_kernel_call(label) && !is_status_call(label))
     })
+}
+
+fn is_plan_call(label: &str) -> bool {
+    label == "plan" || label.starts_with("plan ")
 }
 
 /// The kernel's echo of a checklist after a `todo` (or `plan`) call:

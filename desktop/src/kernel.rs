@@ -1308,7 +1308,16 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
                 _ => {}
             }
             if let Some(item) = event_to_item(&ev) {
-                match (&item, items.last_mut()) {
+                // A `status` call between two reasoning steps draws no row;
+                // the thoughts on either side of it are one thought.
+                let last_shown = items
+                    .iter()
+                    .rposition(|held| {
+                        !matches!(held, crate::model::session::ChatItem::Tool { label, .. }
+                            if crate::view::component::transcript::is_status_call(label))
+                    })
+                    .filter(|_| matches!(item, crate::model::session::ChatItem::Thinking { .. }));
+                match (&item, last_shown.and_then(|at| items.get_mut(at))) {
                     (
                         crate::model::session::ChatItem::Thinking { text, secs, .. },
                         Some(crate::model::session::ChatItem::Thinking {

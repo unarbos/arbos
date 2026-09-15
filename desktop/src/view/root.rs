@@ -595,6 +595,9 @@ pub struct Arbos {
     /// the workers that were running. A new worker after that reopens it,
     /// so the next fan-out shows the card again.
     pub(crate) working_card_closed: Option<(u64, Vec<u64>)>,
+    /// The root chat whose idle "Agents" card is open (Cursor's Agents pill
+    /// once the workers are done).
+    pub(crate) agents_card_open: Option<u64>,
     pub(crate) composer: Entity<Composer>,
     pub(crate) opener: Entity<Opener>,
     /// The sheet a tab's name, glyph and colour are set in.
@@ -864,6 +867,7 @@ impl Arbos {
             panel_open: true,
             archived_open: false,
             working_card_closed: None,
+            agents_card_open: None,
             composer,
             opener,
             tab_sheet,
