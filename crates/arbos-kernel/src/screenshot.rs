@@ -19,6 +19,13 @@ use std::time::Duration;
 
 /// Longest a capture may take. macOS can sit on a permission dialog.
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Longest a text render may take: a cold Chrome on a small CI runner
+/// needs most of 15 s on its own, and two at once went past it (#219).
+const RENDER_TIMEOUT: Duration = Duration::from_secs(60);
+/// One Chrome at a time for text renders: they are quick, and two cold
+/// starts side by side on a small machine are slower than one after the
+/// other.
+static RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub struct Screenshot;
 
@@ -240,13 +247,12 @@ fn render_text(dir: &Path, title: &str, text: &str) -> Result<Captured> {
     // long log does not make a 40 000-pixel image.
     let height = (lines as u32 * 22 + if title.is_empty() { 40 } else { 76 }).clamp(120, 4600);
     // Its own profile: the browser tool's Chrome holds the default one,
-    // and two Chromes on one profile wait on each other's lock.
-    let profile = std::env::temp_dir().join(format!(
-        "arbos-textshot-{}-{}",
-        std::process::id(),
-        arbos_core::now_ms()
-    ));
+    // and two Chromes on one profile wait on each other's lock. One per
+    // kernel process, kept between renders — a fresh profile is the slow
+    // part of a cold start, and renders run one at a time (RENDER_LOCK).
+    let profile = std::env::temp_dir().join(format!("arbos-textshot-{}", std::process::id()));
     std::fs::create_dir_all(&profile)?;
+    sweep_stale_profiles();
     let mut cmd = Command::new(chrome);
     cmd.args([
         "--headless=new",
@@ -255,15 +261,21 @@ fn render_text(dir: &Path, title: &str, text: &str) -> Result<Captured> {
         "--disable-dev-shm-usage",
         "--hide-scrollbars",
         "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-sync",
         "--force-device-scale-factor=1",
     ])
     .arg(format!("--user-data-dir={}", profile.display()))
     .arg(format!("--window-size={TEXT_IMAGE_WIDTH},{height}"))
     .arg(format!("--screenshot={}", path.display()))
     .arg(format!("file://{}", html_path.display()));
-    let result = run_until_file(&mut cmd, &path);
+    let result = {
+        let _one_at_a_time = RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        run_until_file(&mut cmd, &path, RENDER_TIMEOUT)
+    };
     let _ = std::fs::remove_file(&html_path);
-    let _ = std::fs::remove_dir_all(&profile);
     result.map_err(|e| anyhow::anyhow!("chrome could not render the text: {e:#}"))?;
     let png = std::fs::read(&path)
         .with_context(|| format!("chrome wrote nothing to {}", path.display()))?;
@@ -278,11 +290,47 @@ fn render_text(dir: &Path, title: &str, text: &str) -> Result<Captured> {
     })
 }
 
+/// Profiles left by kernels that are gone (no Drop runs for a killed
+/// process): removed on the next render, by pid.
+fn sweep_stale_profiles() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let me = std::process::id();
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("arbos-textshot-"))
+            // `<pid>`; an earlier build wrote `<pid>-<ms>`.
+            .and_then(|p| p.split('-').next()?.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == me || pid_alive(pid) {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(e.path());
+    }
+}
+
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // kill -0: "may I signal it" is "does it exist" for our own user.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 /// Run `cmd` until it exits or `file` is written whole, whichever first.
 /// Headless Chrome writes the screenshot and then may sit on its exit;
 /// the file is the result, so a written file ends the wait and the
 /// process is killed. The time cap kills it too.
-fn run_until_file(cmd: &mut Command, file: &Path) -> Result<()> {
+fn run_until_file(cmd: &mut Command, file: &Path, cap: Duration) -> Result<()> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -291,6 +339,7 @@ fn run_until_file(cmd: &mut Command, file: &Path) -> Result<()> {
         .with_context(|| format!("start {}", cmd.get_program().to_string_lossy()))?;
     let started = std::time::Instant::now();
     let mut last_len: Option<u64> = None;
+    let mut steady = 0;
     loop {
         if let Some(status) = child.try_wait()? {
             if status.success() || file.is_file() {
@@ -303,24 +352,30 @@ fn run_until_file(cmd: &mut Command, file: &Path) -> Result<()> {
             }
             bail!("{status}: {}", err.trim().lines().last().unwrap_or(""));
         }
-        // Written and no longer growing across two looks: done.
+        // Written and no longer growing across a few looks (a slow disk
+        // can land a PNG in more than one write): done.
         let len = std::fs::metadata(file)
             .map(|m| m.len())
             .ok()
             .filter(|&n| n > 0);
         if len.is_some() && len == last_len {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(());
+            steady += 1;
+            if steady >= 3 {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(());
+            }
+        } else {
+            steady = 0;
         }
         last_len = len;
-        if started.elapsed() > CAPTURE_TIMEOUT {
+        if started.elapsed() > cap {
             let _ = child.kill();
             let _ = child.wait();
             if file.is_file() {
                 return Ok(());
             }
-            bail!("took longer than {CAPTURE_TIMEOUT:?}");
+            bail!("took longer than {cap:?}");
         }
         std::thread::sleep(Duration::from_millis(100));
     }

@@ -36,7 +36,7 @@ fn a_commands_output_renders_as_an_image_without_a_display() {
             .is_some()
     );
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "run hello.py and show me the output"}));
-    assert!(a.wait_turn("root", "idle", Duration::from_secs(60)));
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(150)));
     let transcript =
         std::fs::read_to_string(k.place.join(".arbos/agents/root/transcript.jsonl")).unwrap();
     let rec: serde_json::Value = transcript

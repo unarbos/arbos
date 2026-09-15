@@ -72,8 +72,9 @@ fn drive(k: &mut common::Kernel) {
     );
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "run hello.py and show me the output"}));
     assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    // A cold Chrome on a CI runner takes most of a minute to render.
     assert!(
-        wait_for(Duration::from_secs(40), || transcript(&k.place, "w1")
+        wait_for(Duration::from_secs(150), || transcript(&k.place, "w1")
             .iter()
             .any(|e| e["kind"] == "turn_complete")),
         "w1's turn ends"
