@@ -168,6 +168,12 @@ pub struct ToolRec {
     /// Display diff for the chat card. The model never sees this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
+    /// What the call does, in the model's few words (`bash`'s
+    /// `description`: "List repo contents and recent commits"), for the
+    /// line a window shows instead of "Ran 1 command". Absent when the
+    /// model gave none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
