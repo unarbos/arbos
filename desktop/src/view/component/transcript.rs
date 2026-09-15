@@ -489,7 +489,7 @@ fn turns(items: &[ChatItem]) -> Vec<Turn> {
     let mut start = 0;
     for ix in 1..=items.len() {
         if ix < items.len()
-            && (!matches!(items[ix], ChatItem::User(_) | ChatItem::From { .. }) || is_ask_echo(items, ix))
+            && (!matches!(items[ix], ChatItem::User(_) | ChatItem::From { .. }) || inline_user(items, ix))
         {
             continue;
         }
@@ -2967,6 +2967,13 @@ pub fn render(
 
 /// An answer bubble a window from before this one wrote under its folded
 /// question (the same words as the card's answer): drawn nowhere now.
+/// A card that does not open a turn of its own: a steer typed into the
+/// running turn (Cursor keeps the turn whole, the card inside its work), or
+/// an older window's echo of an answered ask.
+fn inline_user(items: &[ChatItem], ix: usize) -> bool {
+    matches!(&items[ix], ChatItem::User(m) if m.steer) || is_ask_echo(items, ix)
+}
+
 fn is_ask_echo(items: &[ChatItem], ix: usize) -> bool {
     ix > 0
         && matches!(
@@ -4341,6 +4348,10 @@ fn work_other(
         }
         ChatItem::Notice { text, failed } => notice(chat, ix, text, *failed, theme, cx),
         ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, theme, cx),
+        // A steer's card, inside the turn it steered.
+        ChatItem::User(message) if message.steer => {
+            user_prompt(chat, ix, message, theme, window, cx)
+        }
         ChatItem::Asked { question, answer } => asked_line(question, answer, theme),
         _ => div().into_any_element(),
     }
@@ -5071,6 +5082,33 @@ mod selection_tests {
     use super::*;
 
     #[test]
+    fn a_steer_stays_inside_the_turn_it_steered() {
+        let mut steer = UserMessage::from("Also print the date at the end.".to_string());
+        steer.steer = true;
+        let items = vec![
+            ChatItem::User(UserMessage::from("Run the loop.".to_string())),
+            ChatItem::Tool {
+                id: "t1".into(),
+                kind: ToolKind::Execute,
+                label: "bash for i in 1 2 3".into(),
+                status: ToolStatus::Success,
+                output: "step 1".into(),
+                diff: None,
+                child_session: None,
+                secs: None,
+                desc: None,
+            },
+            ChatItem::User(steer),
+            ChatItem::Agent("Done, with the date.".into()),
+            ChatItem::User(UserMessage::from("Thanks.".to_string())),
+        ];
+        let turns = turns(&items);
+        assert_eq!(turns.len(), 2, "a steer opens no turn of its own");
+        assert_eq!(turns[0].range, 0..4);
+        assert_eq!(turns[1].range, 4..5);
+    }
+
+    #[test]
     fn a_settled_run_folds_and_a_click_pins_it_open() {
         // Twelve thoughts that lead the turn each stand on their own line;
         // a tool call after them starts the run they lead into.
@@ -5243,6 +5281,7 @@ mod selection_tests {
                 text: String::new(),
                 images: vec![image.clone(), image],
                 described: Vec::new(),
+                steer: false,
                 files: Vec::new(),
                 worked_secs: None,
                 channel: String::new(),
@@ -5588,7 +5627,16 @@ fn is_todo_call(label: &str) -> bool {
 fn is_kernel_call(label: &str) -> bool {
     matches!(
         label.split_whitespace().next().unwrap_or(label),
-        "spawn" | "say" | "plan" | "todo" | "status" | "subscribe" | "remember" | "agents" | "transcript"
+        "spawn"
+            | "say"
+            | "plan"
+            | "todo"
+            | "status"
+            | "subscribe"
+            | "remember"
+            | "agents"
+            | "transcript"
+            | "ask"
     )
 }
 
