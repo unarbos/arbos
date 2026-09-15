@@ -264,8 +264,17 @@ fn render_text(dir: &Path, title: &str, text: &str) -> Result<Captured> {
         "--no-default-browser-check",
         "--disable-extensions",
         "--disable-background-networking",
+        "--disable-component-update",
         "--disable-sync",
+        "--disable-crash-reporter",
+        "--disable-breakpad",
         "--force-device-scale-factor=1",
+        // A local page has nothing to wait for; on a CI runner headless
+        // Chrome still sat on the load for a minute before writing the
+        // shot. Virtual time runs the page's timers out at once, and
+        // --timeout stops the load and takes the shot regardless.
+        "--virtual-time-budget=3000",
+        "--timeout=8000",
     ])
     .arg(format!("--user-data-dir={}", profile.display()))
     .arg(format!("--window-size={TEXT_IMAGE_WIDTH},{height}"))

@@ -33,6 +33,10 @@ fn wait_for(timeout: Duration, mut ok: impl FnMut() -> bool) -> bool {
     ok()
 }
 
+/// The two cases each start a kernel and a Chrome; one at a time on a
+/// small runner, where two cold Chromes side by side went past the cap.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn has_chrome() -> bool {
     [
         "chromium",
@@ -87,6 +91,7 @@ fn a_worker_that_ends_without_the_image_is_nudged_once_and_then_makes_it() {
         eprintln!("no chrome here; skipping");
         return;
     }
+    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     // The worker reports in words; nudged, it renders the output.
     let worker = concat!(
         "{\"content\":\"hello.py printed: hello\"}\n",
@@ -143,6 +148,7 @@ fn a_worker_that_makes_the_image_is_not_nudged() {
         eprintln!("no chrome here; skipping");
         return;
     }
+    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let worker = concat!(
         "{\"content\":\"rendering\",\"calls\":[{\"name\":\"screenshot\",\"arguments\":{\"target\":\"text\",\"title\":\"$ python3 hello.py\",\"text\":\"hello\"}}]}\n",
         "{\"content\":\"done; see images/\"}\n",
