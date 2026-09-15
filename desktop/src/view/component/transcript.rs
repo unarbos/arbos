@@ -489,7 +489,8 @@ fn turns(items: &[ChatItem]) -> Vec<Turn> {
     let mut start = 0;
     for ix in 1..=items.len() {
         if ix < items.len()
-            && (!matches!(items[ix], ChatItem::User(_) | ChatItem::From { .. }) || inline_user(items, ix))
+            && (!matches!(items[ix], ChatItem::User(_) | ChatItem::From { .. })
+                || inline_user(items, ix))
         {
             continue;
         }
@@ -1402,7 +1403,10 @@ fn children_lines(
     // A worker the kernel has archived and this window never had a session
     // for (a transcript read back after a relaunch): still one line, "Done"
     // and its name, so the fan-out reads whole. Nothing to open.
-    let known: Vec<&str> = children.iter().filter_map(|c| c.kernel_id.as_deref()).collect();
+    let known: Vec<&str> = children
+        .iter()
+        .filter_map(|c| c.kernel_id.as_deref())
+        .collect();
     let gone: Vec<AnyElement> = spawned
         .iter()
         .filter(|id| !known.contains(&id.as_str()) && !reported.contains(&id.as_str()))
@@ -1424,7 +1428,12 @@ fn children_lines(
                 .into_any_element()
         })
         .collect();
-    div().flex().flex_col().children(rows).children(gone).into_any_element()
+    div()
+        .flex()
+        .flex_col()
+        .children(rows)
+        .children(gone)
+        .into_any_element()
 }
 
 /// One message, selectable. The transcript's two prose items — what you asked
@@ -2622,7 +2631,10 @@ struct WorkStats {
 /// Cursor leaves the newest turn's timeline open — "Worked 6s ⌄" with its
 /// Thought / Explored / Edited lines — until the next prompt folds it.
 fn auto_work_open(items: &[ChatItem], first: usize, running: bool) -> bool {
-    running || turns(items).last().is_some_and(|turn| turn.range.start == first)
+    running
+        || turns(items)
+            .last()
+            .is_some_and(|turn| turn.range.start == first)
 }
 
 fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
@@ -2789,7 +2801,10 @@ pub fn render(
         }
     }
     // Workers still running count as the turn still going: no footer yet.
-    let workers_busy_now = chat.children.iter().any(|c| c.state == crate::model::session::ChildState::Working);
+    let workers_busy_now = chat
+        .children
+        .iter()
+        .any(|c| c.state == crate::model::session::ChildState::Working);
     for (position, turn) in turns.iter().enumerate() {
         let running = position == last && chat.busy();
         let footer = footer_at[position] && !(position == last && workers_busy_now);
@@ -2813,9 +2828,7 @@ pub fn render(
             // turn; a subagent's chat does not. Both draw one at a day
             // crossing.
             let first_of_root = last_day.is_none() && chat.parent.is_none();
-            if first_of_root
-                || (last_day.is_some_and(|previous| previous != day))
-            {
+            if first_of_root || (last_day.is_some_and(|previous| previous != day)) {
                 zones.push(
                     div()
                         .w_full()
@@ -2839,7 +2852,10 @@ pub fn render(
     // Cursor's "2 Files Changed · Review" card under the last answer: the
     // working tree's uncommitted files with their line counts, while the
     // chat is idle. The main chat of a local repository only.
-    let workers_busy = chat.children.iter().any(|c| c.state == crate::model::session::ChildState::Working);
+    let workers_busy = chat
+        .children
+        .iter()
+        .any(|c| c.state == crate::model::session::ChildState::Working);
     // Cursor's card follows a turn that changed files: an edit of its own,
     // or a worker (whose edits land in the tree, not in this chat's items).
     // A turn that only ran a test or read a file gets none.
@@ -3439,8 +3455,15 @@ fn zone(
     // it folds to "Worked Ns" once settled — Cursor shows no detail of it.
     let kickoff_turn = first == 0
         && chat.kickoff_at.is_some()
-        && !matches!(chat.items.first(), Some(ChatItem::User(_) | ChatItem::From { .. }));
-    let body_start = if kickoff_turn { first } else { (first + 1).min(turn.range.end) };
+        && !matches!(
+            chat.items.first(),
+            Some(ChatItem::User(_) | ChatItem::From { .. })
+        );
+    let body_start = if kickoff_turn {
+        first
+    } else {
+        (first + 1).min(turn.range.end)
+    };
     let body = body_start..turn.answer_from.max(body_start);
     let stats = work_stats(&chat.items, body.clone());
     let auto_open = auto_work_open(&chat.items, first, running) && !kickoff_turn;
@@ -3498,8 +3521,18 @@ fn zone(
             .or_else(|| chat.current_step())
             .unwrap_or_else(|| "Planning next moves".to_string());
         zone = zone.child(
-            fold_row(&theme, "work", first, "Working".to_string(), step, None, true, true, cx)
-                .into_any_element(),
+            fold_row(
+                &theme,
+                "work",
+                first,
+                "Working".to_string(),
+                step,
+                None,
+                true,
+                true,
+                cx,
+            )
+            .into_any_element(),
         );
         header_drawn = true;
         open = true;
@@ -3513,11 +3546,22 @@ fn zone(
         let last_run = segs.iter().rposition(|seg| matches!(seg, Seg::Run(_)));
         // A run still taking calls already shows a live line; a second
         // "Working" under it would say the same thing twice.
-        live_fold_shown = (running && last_run.is_some() && last_run == Some(segs.len() - 1))
-            || live_headline;
+        // The run still taking calls is the last one with nothing but
+        // inline cards (a steer's bubble) after it: the steer must not turn
+        // "Running" into "Ran" before any output arrives.
+        let tail_is_run = last_run.is_some_and(|at| {
+            segs[at + 1..]
+                .iter()
+                .all(|seg| matches!(seg, Seg::Other(_)))
+        });
+        live_fold_shown = (running && tail_is_run) || live_headline;
         // Cursor's kickoff shows one shimmering line and nothing of the
         // work until it ends.
-        let segs: Vec<Seg> = if kickoff_turn && running { Vec::new() } else { segs };
+        let segs: Vec<Seg> = if kickoff_turn && running {
+            Vec::new()
+        } else {
+            segs
+        };
         if kickoff_turn && running {
             live_fold_shown = false;
         }
@@ -3553,7 +3597,7 @@ fn zone(
                 // its output; the next prompt folds it under "Worked".
                 Seg::Run(range) => {
                     // Present tense only on the run still taking calls.
-                    let live = running && last_run == Some(n) && segs.len() == n + 1;
+                    let live = running && last_run == Some(n) && tail_is_run;
                     run_fold(chat, range.clone(), live, window, cx)
                 }
                 Seg::Other(ix) => work_other(chat, *ix, &theme, window, cx),
@@ -3707,88 +3751,85 @@ fn turn_footer(
         .gap(px(6.))
         .pt(px(6.))
         .pb(px(2.));
-    let copy = 
-            div()
-                .id(SharedString::from(format!("copy-turn-{id}-{turn}")))
-                .cursor_pointer()
-                .rounded(px(4.))
-                .p(px(3.))
-                .hover(|el| el.bg(theme.element_hover))
-                .active(|el| el.bg(theme.element_active))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(answer.clone()));
+    let copy = div()
+        .id(SharedString::from(format!("copy-turn-{id}-{turn}")))
+        .cursor_pointer()
+        .rounded(px(4.))
+        .p(px(3.))
+        .hover(|el| el.bg(theme.element_hover))
+        .active(|el| el.bg(theme.element_active))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(answer.clone()));
+            this.with_session(id, cx, |chat| {
+                chat.transcript.copy_flash.insert(turn, Instant::now());
+            });
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(COPY_FLASH).await;
+                let _ = this.update(cx, |this, cx| {
                     this.with_session(id, cx, |chat| {
-                        chat.transcript.copy_flash.insert(turn, Instant::now());
+                        if chat
+                            .transcript
+                            .copy_flash
+                            .get(&turn)
+                            .is_some_and(|at| at.elapsed() >= COPY_FLASH)
+                        {
+                            chat.transcript.copy_flash.remove(&turn);
+                        }
                     });
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(COPY_FLASH).await;
-                        let _ = this.update(cx, |this, cx| {
-                            this.with_session(id, cx, |chat| {
-                                if chat
-                                    .transcript
-                                    .copy_flash
-                                    .get(&turn)
-                                    .is_some_and(|at| at.elapsed() >= COPY_FLASH)
-                                {
-                                    chat.transcript.copy_flash.remove(&turn);
-                                }
-                            });
-                        });
-                    })
-                    .detach();
-                }))
-                .child(
-                    icons::icon(glyph)
-                        .size(px(12.))
-                        .text_color(theme.text_faint),
-                );
+                });
+            })
+            .detach();
+        }))
+        .child(
+            icons::icon(glyph)
+                .size(px(12.))
+                .text_color(theme.text_faint),
+        );
     let msg_for_fork = SharedString::from(format!("msg-{turn}"));
-    let fork = 
-            div()
-                .id(SharedString::from(format!("fork-turn-{id}-{turn}")))
-                // Cursor's Project and subagent footers have no fork; the
-                // classic chat's does. Ours shows when the pointer is over
-                // the answer, so the feature stays a reach away.
-                .invisible()
-                .group_hover(msg_for_fork, |el| el.visible())
-                .cursor_pointer()
-                .rounded(px(4.))
-                .p(px(3.))
-                .hover(|el| el.bg(theme.element_hover))
-                .active(|el| el.bg(theme.element_active))
-                .tooltip(|window, cx| Tooltip::text("Fork chat from here", window, cx))
-                .on_click(cx.listener(move |this, _, _, cx| this.fork_session(id, cx)))
-                .child(
-                    icons::icon(icons::editing::GIT_BRANCH)
-                        .size(px(12.))
-                        .text_color(theme.text_faint),
-                );
+    let fork = div()
+        .id(SharedString::from(format!("fork-turn-{id}-{turn}")))
+        // Cursor's Project and subagent footers have no fork; the
+        // classic chat's does. Ours shows when the pointer is over
+        // the answer, so the feature stays a reach away.
+        .invisible()
+        .group_hover(msg_for_fork, |el| el.visible())
+        .cursor_pointer()
+        .rounded(px(4.))
+        .p(px(3.))
+        .hover(|el| el.bg(theme.element_hover))
+        .active(|el| el.bg(theme.element_active))
+        .tooltip(|window, cx| Tooltip::text("Fork chat from here", window, cx))
+        .on_click(cx.listener(move |this, _, _, cx| this.fork_session(id, cx)))
+        .child(
+            icons::icon(icons::editing::GIT_BRANCH)
+                .size(px(12.))
+                .text_color(theme.text_faint),
+        );
     // Cursor keeps the checkpoint restore on the prompt card, not here; the
     // footer's copy shows only while the pointer is over the answer.
     let msg = SharedString::from(format!("msg-{turn}"));
-    let rewind = 
-            div()
-                .id(SharedString::from(format!("rewind-turn-{id}-{turn}")))
-                .invisible()
-                .group_hover(msg, |el| el.visible())
-                .cursor_pointer()
-                .rounded(px(4.))
-                .p(px(3.))
-                .hover(|el| el.bg(theme.element_hover))
-                .active(|el| el.bg(theme.element_active))
-                .tooltip(|window, cx| {
-                    Tooltip::text(
-                        "Rewind here: chat and files back to before this prompt",
-                        window,
-                        cx,
-                    )
-                })
-                .on_click(cx.listener(move |this, _, _, cx| this.rewind_turn(id, turn, cx)))
-                .child(
-                    icons::icon(icons::system::RESTART)
-                        .size(px(12.))
-                        .text_color(theme.text_faint),
-                );
+    let rewind = div()
+        .id(SharedString::from(format!("rewind-turn-{id}-{turn}")))
+        .invisible()
+        .group_hover(msg, |el| el.visible())
+        .cursor_pointer()
+        .rounded(px(4.))
+        .p(px(3.))
+        .hover(|el| el.bg(theme.element_hover))
+        .active(|el| el.bg(theme.element_active))
+        .tooltip(|window, cx| {
+            Tooltip::text(
+                "Rewind here: chat and files back to before this prompt",
+                window,
+                cx,
+            )
+        })
+        .on_click(cx.listener(move |this, _, _, cx| this.rewind_turn(id, turn, cx)))
+        .child(
+            icons::icon(icons::system::RESTART)
+                .size(px(12.))
+                .text_color(theme.text_faint),
+        );
     // Cursor's order: thumbs up, thumbs down, copy, fork, then "Just now".
     let (vote, sent_at) = match chat.items.get(turn) {
         Some(ChatItem::User(message)) => (message.feedback, message.sent_at),
@@ -4066,7 +4107,9 @@ fn run_fold(
                     .children(range.map(|ix| match &chat.items[ix] {
                         ChatItem::Thinking { .. } => thought(chat, ix, false, window, cx),
                         // A `status` call is the live step, not a row (#185).
-                        ChatItem::Tool { label, .. } if is_status_call(label) => div().into_any_element(),
+                        ChatItem::Tool { label, .. } if is_status_call(label) => {
+                            div().into_any_element()
+                        }
                         // The root's kernel calls are drawn elsewhere (worker
                         // lines, the panel's page): no row for them here.
                         ChatItem::Tool { label, .. }
@@ -4080,7 +4123,8 @@ fn run_fold(
                         // A worker's `plan` writes its own notes file, so in
                         // its chat that call is a checklist card as well.
                         ChatItem::Tool { label, .. }
-                            if is_todo_call(label) || (chat.parent.is_some() && is_plan_call(label)) =>
+                            if is_todo_call(label)
+                                || (chat.parent.is_some() && is_plan_call(label)) =>
                         {
                             let theme = Theme::of(cx).clone();
                             todo_card(chat, ix..ix + 1, &theme)
@@ -4098,7 +4142,10 @@ fn run_fold(
 /// description itself (no time to say "Worked 12s") and that turn has this
 /// one run — the case where a run line would repeat the headline.
 fn headline_describes(chat: &ChatSession, ix: usize) -> bool {
-    let Some(turn) = turns(&chat.items).into_iter().find(|t| t.range.contains(&ix)) else {
+    let Some(turn) = turns(&chat.items)
+        .into_iter()
+        .find(|t| t.range.contains(&ix))
+    else {
         return false;
     };
     let stamped = match chat.items.get(turn.range.start) {
@@ -4169,7 +4216,7 @@ fn fold_row(
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .text_style(style)
-                .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .text_size(px(root::CURSOR_PROSE_SIZE))
                     .text_color(theme.text_faint)
                     .child(spaced_label(rest, theme.text_faint, theme)),
             )
@@ -4179,7 +4226,9 @@ fn fold_row(
             // The turn's headline wears its chevron ("Worked 6m 44s ›"); a run
             // inside the opened timeline shows one on hover.
             div()
-                .when(name != "work", |el| el.invisible().group_hover(group, |el| el.visible()))
+                .when(name != "work", |el| {
+                    el.invisible().group_hover(group, |el| el.visible())
+                })
                 .child(Layout::disclosure(theme, open)),
         )
 }
@@ -4261,12 +4310,18 @@ fn work_summary(
         ));
     }
     if stats.plans > 0 {
-        parts.push(format!(
-            "updated the project page {}",
-            if stats.plans == 1 { String::new() } else { format!("{} times", stats.plans) }
-        )
-        .trim_end()
-        .to_string());
+        parts.push(
+            format!(
+                "updated the project page {}",
+                if stats.plans == 1 {
+                    String::new()
+                } else {
+                    format!("{} times", stats.plans)
+                }
+            )
+            .trim_end()
+            .to_string(),
+        );
     }
     if stats.todos > 0 {
         parts.push("kept its checklist".to_string());
@@ -4283,7 +4338,14 @@ fn work_summary(
         } else {
             // With no time and nothing to describe there is no line; the
             // caller drops the header and shows the body open.
-            ("Worked".to_owned(), if elapsed.as_secs() == 0 { String::new() } else { since(elapsed) })
+            (
+                "Worked".to_owned(),
+                if elapsed.as_secs() == 0 {
+                    String::new()
+                } else {
+                    since(elapsed)
+                },
+            )
         };
     }
     let first = parts.remove(0);
@@ -4947,7 +5009,11 @@ fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
         && !matches!(chat.items.first(), Some(ChatItem::User(_)));
     // The agent named its step (Cursor's UpdateCurrentStep on the
     // timeline: "Copying stills to artifacts"): that is the line.
-    if let Some(step) = chat.status.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    if let Some(step) = chat
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         && !kickoff
     {
         return Some(step.to_string());
@@ -5142,7 +5208,10 @@ mod selection_tests {
         // the newest turn; an older turn folds once it settles, and from
         // there a click owns the fold.
         assert!(auto_work_open(&items, 0, true));
-        assert!(auto_work_open(&items, 0, false), "the newest turn stays open");
+        assert!(
+            auto_work_open(&items, 0, false),
+            "the newest turn stays open"
+        );
         let mut older = items.clone();
         older.push(ChatItem::User("Next".to_string().into()));
         assert!(!auto_work_open(&older, 0, false), "an older turn folds");
@@ -5396,7 +5465,12 @@ fn files_changed_card(
                 .border_b_1()
                 .border_color(theme.border)
                 .text_style(TextStyle::Callout)
-                .child(div().flex_1().text_color(theme.text).child(SharedString::from(head)))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme.text)
+                        .child(SharedString::from(head)),
+                )
                 .child(
                     div()
                         .id("files-changed-review")
@@ -5524,7 +5598,10 @@ pub(crate) fn plain_markdown(text: &str) -> String {
 /// The kernel's `status` tool: what the agent says it is doing, carried
 /// by the worker line and the panel. Never a row of its own.
 pub(crate) fn is_status_call(label: &str) -> bool {
-    label.split_whitespace().next().is_some_and(|first| first == "status")
+    label
+        .split_whitespace()
+        .next()
+        .is_some_and(|first| first == "status")
 }
 
 /// Cursor's TodoWrite card, from the root's `todo` calls in a run (the
@@ -5568,7 +5645,12 @@ fn todo_card(chat: &ChatSession, range: Range<usize>, theme: &Theme) -> Option<A
                 .border_b_1()
                 .border_color(theme.border)
                 .text_style(TextStyle::Callout)
-                .child(div().flex_1().text_color(theme.text).child(SharedString::from(title)))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme.text)
+                        .child(SharedString::from(title)),
+                )
                 .child(
                     div()
                         .text_color(theme.text_faint)
@@ -5673,7 +5755,9 @@ fn plan_items(output: &str) -> Option<(String, Vec<(bool, String)>)> {
             continue;
         };
         // "1 - [ ] [label](target) — readout": drop the index and the inner box.
-        let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit()).trim_start();
+        let rest = rest
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .trim_start();
         let rest = rest.strip_prefix("- ").unwrap_or(rest);
         let rest = rest
             .strip_prefix("[ ] ")

@@ -79,7 +79,33 @@ pub enum Event {
     /// A whole assistant step as the transcript recorded it (an `event`
     /// with a `seq`). Authoritative: it replaces whatever the deltas of
     /// that step built, so the reply never shows twice.
-    AssistantFinal(String),
+    AssistantFinal {
+        text: String,
+        step: u64,
+    },
+    /// Streamed text of model step `step` (1-based within the turn), from
+    /// a kernel that numbers its steps; the settled line of the same step
+    /// replaces what these built. `step` 0 never reaches here (the plain
+    /// chunk path takes it).
+    TextDelta {
+        text: String,
+        step: u64,
+    },
+    /// A thought's streamed words, by step, likewise.
+    ThoughtDelta {
+        text: String,
+        step: u64,
+    },
+    /// The settled thought of step `step` (recorded, with its seconds):
+    /// stamps the streamed item of that step; opens one when none streamed.
+    ThoughtFinal {
+        text: String,
+        step: u64,
+        secs: Option<u32>,
+    },
+    /// A recorded `wake`: a turn opens (a prompt, a child's report, a
+    /// subscription firing); the model's step numbers start again at 1.
+    Woke,
     /// The model call is alive and has been silent for this many seconds
     /// (`working` frame). Live only.
     Working(u64),
@@ -563,10 +589,14 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
         // Streamed text, one chunk per frame (the kernel's live path); the
         // whole step arrives later as an `event` with a seq, which
         // `merge_stream_text` folds into what the chunks built.
-        Frame::AssistantDelta { agent: id, text, .. } if id == agent || agent.is_empty() => {
-            vec![Event::Update(SessionUpdate::AgentMessageChunk(text_chunk(
-                text,
-            )))]
+        Frame::AssistantDelta { agent: id, text, step } if id == agent || agent.is_empty() => {
+            if step > 0 {
+                vec![Event::TextDelta { text, step }]
+            } else {
+                vec![Event::Update(SessionUpdate::AgentMessageChunk(text_chunk(
+                    text,
+                )))]
+            }
         }
         Frame::Working { agent: id, secs } if id == agent || agent.is_empty() => {
             vec![Event::Working(secs)]
@@ -582,10 +612,14 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             key,
             source,
         }],
-        Frame::ThinkingDelta { agent: id, text, .. } if id == agent || agent.is_empty() => {
-            vec![Event::Update(SessionUpdate::AgentThoughtChunk(text_chunk(
-                text,
-            )))]
+        Frame::ThinkingDelta { agent: id, text, step } if id == agent || agent.is_empty() => {
+            if step > 0 {
+                vec![Event::ThoughtDelta { text, step }]
+            } else {
+                vec![Event::Update(SessionUpdate::AgentThoughtChunk(text_chunk(
+                    text,
+                )))]
+            }
         }
         Frame::Turn {
             agent: id,
@@ -776,10 +810,13 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
         EventKind::Wake { wake, .. } if wake == "kickoff" && !recorded => {
             vec![Event::Status("Setting up environment".into())]
         }
+        EventKind::Wake { .. } if recorded => vec![Event::Woke],
         // A transcript line (tailed or replayed) is the step's final text;
         // a live emit without a seq is a delta (older kernels send those
         // as events too).
-        EventKind::Assistant { text, .. } if recorded => vec![Event::AssistantFinal(text)],
+        EventKind::Assistant { text, step, .. } if recorded => {
+            vec![Event::AssistantFinal { text, step }]
+        }
         EventKind::Assistant { text, .. } => {
             vec![Event::Update(SessionUpdate::AgentMessageChunk(text_chunk(
                 text,
@@ -789,6 +826,15 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
         // deltas that already built the thought: nothing to add live. A
         // recorded thought without `secs` is an ACP worker's only form of
         // it and still shows.
+        EventKind::Thinking {
+            text,
+            secs: Some(secs),
+            step,
+        } if recorded && step > 0 => vec![Event::ThoughtFinal {
+            text,
+            step,
+            secs: Some(secs.min(u32::MAX as u64) as u32),
+        }],
         EventKind::Thinking { secs: Some(_), .. } if recorded => Vec::new(),
         EventKind::Thinking { text, .. } => {
             vec![Event::Update(SessionUpdate::AgentThoughtChunk(text_chunk(
@@ -838,7 +884,12 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
             tool.kind = tool_kind(&rec.name);
             let hint = tool_hint(&rec.name, &rec.paths, rec.args.as_ref());
             tool.title = tool_title(&rec.name, hint.as_deref());
-            if let Some(label) = rec.label.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
+            if let Some(label) = rec
+                .label
+                .as_deref()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+            {
                 let mut meta = serde_json::Map::new();
                 meta.insert("label".into(), serde_json::Value::String(label.to_string()));
                 tool.meta = Some(meta);

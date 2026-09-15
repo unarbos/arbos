@@ -435,8 +435,24 @@ pub fn append_events(path: &Path, events: &[Event]) -> Result<usize> {
             path.display()
         );
     }
+    // One batch, one millisecond: a queued prompt's `wake` and `user`
+    // lines carried the same `ts`, and a client that orders by time (the
+    // phone, a replay) could not tell which came first. Within a batch
+    // each line's `ts` is at least one past the line before it; the
+    // order on disk and the order in time then agree.
     let mut buf = Vec::with_capacity(events.len() * 256);
+    let mut last_ts: Option<i64> = None;
     for event in events {
+        let mut owned;
+        let event = match last_ts {
+            Some(prev) if event.ts <= prev => {
+                owned = event.clone();
+                owned.ts = prev + 1;
+                &owned
+            }
+            _ => event,
+        };
+        last_ts = Some(event.ts);
         serde_json::to_writer(&mut buf, event)?;
         buf.push(b'\n');
     }
@@ -852,5 +868,52 @@ mod roll_tests {
         }
         // Off: never.
         assert!(roll_transcript(&place, "root", 0).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod batch_ts_tests {
+    use super::*;
+    use crate::event::EventKind;
+
+    /// Symmetry loop: a queued prompt's `wake` and `user` lines carried the
+    /// same `ts`, so a client that orders by time could not tell which
+    /// came first. Within one batch, each line's `ts` is past the one
+    /// before it; a batch already in order is written as it is.
+    #[test]
+    fn lines_of_one_batch_have_strictly_increasing_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let t = 1_789_500_000_000i64;
+        let mut wake = Event::new(EventKind::Wake {
+            wake: "user".into(),
+            text: Some("hi".into()),
+            brief: None,
+        });
+        wake.ts = t;
+        let mut user = Event::new(EventKind::User {
+            text: "hi".into(),
+            attachments: vec![],
+            channel: String::new(),
+            device: String::new(),
+        });
+        user.ts = t;
+        let mut later = Event::new(EventKind::Assistant {
+            text: "hello".into(),
+            step: 1,
+            reasoning_details: None,
+        });
+        later.ts = t + 50;
+        append_events(&path, &[wake, user, later]).unwrap();
+        let back = load_transcript(&path).unwrap();
+        assert_eq!(back.len(), 3);
+        assert_eq!(back[0].ts, t);
+        assert_eq!(back[1].ts, t + 1, "the second line is one past the first");
+        assert_eq!(
+            back[2].ts,
+            t + 50,
+            "a line already later keeps its own time"
+        );
+        assert!(back.windows(2).all(|w| w[0].ts < w[1].ts));
     }
 }
