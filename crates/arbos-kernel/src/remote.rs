@@ -45,6 +45,9 @@ const TUNNEL_READY: Duration = Duration::from_secs(20);
 const CLAIM_READY: Duration = Duration::from_secs(150);
 /// After the remote says idle, the time its transcript tail has to settle.
 const SETTLE: Duration = Duration::from_millis(1500);
+/// While the remote runs, how often its new transcript lines are pulled
+/// here (M-27: a chat opened mid-run showed only the start notices).
+const PULL_EVERY: Duration = Duration::from_secs(3);
 /// Transcript lines fetched per `history` request over the hub.
 const HISTORY_LIMIT: u32 = 2000;
 /// `serve --leash` for a kernel this kernel starts on another machine:
@@ -926,14 +929,21 @@ async fn attach(
     Ok(())
 }
 
-/// Watch the remote root's turns; when one ends, fetch the new transcript
-/// lines, mirror them locally, and deliver the reply to the parent.
+/// Watch the remote root's turns and mirror its transcript here as it
+/// grows — every `PULL_EVERY` while it runs, once more when it settles —
+/// so a window or a phone that opens the child's chat sees the work,
+/// not only the kernel's start notices (M-27). When a turn ends, the
+/// reply goes to the parent.
 async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::UnboundedReceiver<Frame>) {
     let mut running = false;
     let mut idle_at: Option<Instant> = None;
     let mut mirrored = link.record.mirrored;
-    // Hub route: `replayed` lines gathered until `history_end`.
-    let mut collecting: Option<Vec<Event>> = None;
+    let mut last_pull = Instant::now();
+    // What the running turn has said so far, for the report at its end.
+    let mut turn_events: Vec<Event> = Vec::new();
+    // Hub route: `replayed` lines gathered until `history_end`; `true`
+    // when this fetch is the one that closes a turn.
+    let mut collecting: Option<(Vec<Event>, bool)> = None;
     loop {
         tokio::select! {
             frame = rx.recv() => {
@@ -941,6 +951,9 @@ async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::Unbounded
                 match frame {
                     Frame::Turn { agent, state, budget } if agent == "root" => {
                         if state == "running" {
+                            if !running {
+                                turn_events.clear();
+                            }
                             running = true;
                             idle_at = None;
                         } else if state == "idle" && running {
@@ -952,15 +965,20 @@ async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::Unbounded
                         mirror_status(&hooks, &link.record.agent, &step, &source);
                     }
                     Frame::Replayed { agent, event } if agent == "root" => {
-                        if let Some(buf) = collecting.as_mut() {
+                        if let Some((buf, _)) = collecting.as_mut() {
                             buf.push(event);
                         }
                     }
                     Frame::HistoryEnd { agent, to, .. } if agent == "root" => {
-                        if let Some(events) = collecting.take() {
+                        if let Some((events, closes_turn)) = collecting.take() {
                             if !events.is_empty() {
                                 mirrored = to as usize;
+                                turn_events.extend(events.iter().cloned());
                                 mirror(&hooks, &link, events, mirrored);
+                            }
+                            if closes_turn {
+                                report(&hooks, &link, &turn_events);
+                                turn_events.clear();
                             }
                         }
                     }
@@ -984,40 +1002,59 @@ async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::Unbounded
             }
             _ = tokio::time::sleep(Duration::from_millis(300)) => {}
         }
-        if let Some(at) = idle_at
-            && at.elapsed() >= SETTLE
-        {
+        // The turn settled: one last fetch, then the report.
+        let closing = idle_at.is_some_and(|at| at.elapsed() >= SETTLE);
+        // Mid-turn: a fetch every PULL_EVERY, no report.
+        let due = running && !closing && last_pull.elapsed() >= PULL_EVERY;
+        if !closing && !due {
+            continue;
+        }
+        if closing {
             idle_at = None;
             running = false;
-            match &link.route {
-                Route::Ssh { machine, .. } => {
-                    let m = machine.clone();
-                    let path = link.record.path.clone();
-                    let from = mirrored;
-                    let fetched = tokio::task::spawn_blocking(move || {
-                        remote_transcript_tail(&m, &path, from)
-                    })
-                    .await;
-                    match fetched {
-                        Ok(Ok(events)) if !events.is_empty() => {
-                            mirrored += events.len();
-                            mirror(&hooks, &link, events, mirrored);
-                        }
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => {
-                            eprintln!("remote: read transcript on {}: {e:#}", machine.name)
-                        }
-                        Err(e) => eprintln!("remote: transcript task: {e}"),
+        }
+        last_pull = Instant::now();
+        match &link.route {
+            Route::Ssh { machine, .. } => {
+                let m = machine.clone();
+                let path = link.record.path.clone();
+                let from = mirrored;
+                let fetched =
+                    tokio::task::spawn_blocking(move || remote_transcript_tail(&m, &path, from))
+                        .await;
+                match fetched {
+                    Ok(Ok(events)) if !events.is_empty() => {
+                        mirrored += events.len();
+                        turn_events.extend(events.iter().cloned());
+                        mirror(&hooks, &link, events, mirrored);
                     }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        eprintln!("remote: read transcript on {}: {e:#}", machine.name)
+                    }
+                    Err(e) => eprintln!("remote: transcript task: {e}"),
                 }
-                Route::Hub => {
-                    collecting = Some(Vec::new());
-                    let _ = link.to_remote.send(Frame::History {
-                        agent: "root".into(),
-                        since: mirrored as u64,
-                        limit: HISTORY_LIMIT,
-                    });
+                if closing {
+                    report(&hooks, &link, &turn_events);
+                    turn_events.clear();
                 }
+            }
+            Route::Hub => {
+                if collecting.is_some() {
+                    // The last fetch has not answered yet; a closing one
+                    // waits for it so the lines stay in order.
+                    if closing {
+                        idle_at = Some(Instant::now() - SETTLE);
+                        running = true;
+                    }
+                    continue;
+                }
+                collecting = Some((Vec::new(), closing));
+                let _ = link.to_remote.send(Frame::History {
+                    agent: "root".into(),
+                    since: mirrored as u64,
+                    limit: HISTORY_LIMIT,
+                });
             }
         }
     }
@@ -1028,12 +1065,17 @@ async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::Unbounded
         .lock()
         .unwrap()
         .remove(&link.record.agent);
-    mirror_turn(&hooks, &link.record.agent, "idle", None);
     if let Route::Ssh { tunnel, .. } = &link.route
         && let Some(mut t) = tunnel.lock().unwrap().take()
     {
         let _ = t.kill();
     }
+    // A child that was archived (`forget` closed this link on purpose)
+    // is not a lost link: no notice, no message to the parent.
+    if !arbos_core::agent_exists(&hooks.place, &link.record.agent) {
+        return;
+    }
+    mirror_turn(&hooks, &link.record.agent, "idle", None);
     let _ = append_event(
         &hooks.layout(&link.record.agent).transcript(),
         &Event::new(EventKind::Notice {
@@ -1117,8 +1159,9 @@ fn mirror_status(hooks: &KernelHooks, local: &str, step: &str, source: &str) {
     }
 }
 
-/// New remote lines: onto the child's local transcript, the mirror mark
-/// into `remotes.json`, and the reply to the parent.
+/// New remote lines: onto the child's local transcript (the tail task
+/// broadcasts them as `event`s, so an attached window or phone sees the
+/// work live) and the mirror mark into `remotes.json`.
 fn mirror(hooks: &KernelHooks, link: &Link, events: Vec<Event>, mirrored: usize) {
     let events: Vec<Event> = events
         .into_iter()
@@ -1135,7 +1178,11 @@ fn mirror(hooks: &KernelHooks, link: &Link, events: Vec<Event>, mirrored: usize)
         }
     }
     let _ = file.save(&hooks.place);
-    let reply = events
+}
+
+/// A remote turn ended: its last words (or its failure) to the parent.
+fn report(hooks: &KernelHooks, link: &Link, turn_events: &[Event]) {
+    let reply = turn_events
         .iter()
         .rev()
         .find_map(|e| match &e.kind {
@@ -1143,7 +1190,7 @@ fn mirror(hooks: &KernelHooks, link: &Link, events: Vec<Event>, mirrored: usize)
             _ => None,
         })
         .or_else(|| {
-            events.iter().rev().find_map(|e| match &e.kind {
+            turn_events.iter().rev().find_map(|e| match &e.kind {
                 EventKind::Notice { text, failed: true } => {
                     Some(format!("(failed on {}) {text}", link.record.machine))
                 }
@@ -1952,5 +1999,209 @@ mod lifecycle_tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async { RemoteHub::restore(&h) });
         assert!(RecordsFile::load(&p).remotes.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::{Link, PULL_EVERY, Record, Route, SETTLE, relay};
+    use arbos_core::{Event, EventKind, Place, wire::Frame};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn place(name: &str) -> Place {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-remote-relay-{name}-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join(".arbos/runtime")).unwrap();
+        let p = Place::new(dir);
+        arbos_core::Agent::root("root")
+            .save(&p.agent_dir("root"))
+            .unwrap();
+        let mut w = arbos_core::Agent::root("far");
+        w.parent = Some(arbos_core::AgentId::new("root"));
+        w.remote = Some("box:/home/u/arbos/demo--c1".into());
+        w.save(&p.agent_dir("far")).unwrap();
+        p
+    }
+
+    fn local(p: &Place, agent: &str) -> Vec<Event> {
+        arbos_core::load_transcript(&arbos_core::Layout::new(p, agent).transcript())
+            .unwrap_or_default()
+    }
+
+    /// M-27: a remote worker's chat showed only the kernel's start notices
+    /// because the remote transcript was mirrored only when the turn
+    /// ended. Over the hub route, the relay now asks for the new lines
+    /// every PULL_EVERY while the remote runs, appends them to the local
+    /// transcript as they come, and reports once at the end with the
+    /// turn's last words — not the words of a mid-turn fetch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_remote_transcript_is_mirrored_while_it_runs_and_reported_once() {
+        let p = place("hub");
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (kick_tx, _kick_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = crate::hooks::KernelHooks::new(p.clone(), wake_tx, kick_tx);
+        // The fake remote: what the relay sends to it, what it answers.
+        let (to_remote_tx, mut to_remote_rx) = tokio::sync::mpsc::unbounded_channel::<Frame>();
+        let (from_remote_tx, from_remote_rx) = tokio::sync::mpsc::unbounded_channel::<Frame>();
+        let link = Arc::new(Link {
+            record: Record {
+                agent: "far".into(),
+                parent: "root".into(),
+                machine: "box".into(),
+                path: "/home/u/arbos/demo--c1".into(),
+                mirrored: 0,
+                route: "hub".into(),
+                project: "demo--c1".into(),
+            },
+            route: Route::Hub,
+            to_remote: to_remote_tx,
+        });
+        hooks
+            .remotes
+            .links
+            .lock()
+            .unwrap()
+            .insert("far".into(), Arc::clone(&link));
+        let task = tokio::spawn(relay(Arc::clone(&hooks), Arc::clone(&link), from_remote_rx));
+
+        // The remote root starts a turn.
+        from_remote_tx
+            .send(Frame::Turn {
+                agent: "root".into(),
+                state: "running".into(),
+                budget: None,
+            })
+            .unwrap();
+        // Within a pull period the relay asks for the transcript so far.
+        let asked = tokio::time::timeout(PULL_EVERY + Duration::from_secs(2), to_remote_rx.recv())
+            .await
+            .expect("a history request while running")
+            .unwrap();
+        let Frame::History { agent, since, .. } = asked else {
+            panic!("{asked:?}");
+        };
+        assert_eq!(agent, "root");
+        assert_eq!(since, 0);
+        // The remote answers with what it has: the brief and a first thought.
+        for (i, ev) in [
+            Event::new(EventKind::User {
+                text: "the brief".into(),
+                attachments: vec![],
+                channel: String::new(),
+                device: String::new(),
+            }),
+            Event::new(EventKind::Assistant {
+                text: "Reading the tests first.".into(),
+                reasoning_details: None,
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut ev = ev;
+            ev.seq = i as u64 + 1;
+            from_remote_tx
+                .send(Frame::Replayed {
+                    agent: "root".into(),
+                    event: ev,
+                })
+                .unwrap();
+        }
+        from_remote_tx
+            .send(Frame::HistoryEnd {
+                agent: "root".into(),
+                from: 0,
+                to: 2,
+                total: 2,
+            })
+            .unwrap();
+        // Mid-turn: the lines are on the local transcript, no report yet.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mine = local(&p, "far");
+        assert!(
+            mine.iter().any(|e| matches!(&e.kind, EventKind::Assistant { text, .. } if text == "Reading the tests first.")),
+            "mirrored while running: {mine:#?}"
+        );
+        assert!(
+            arbos_core::inbox::list(&p, "root").is_empty(),
+            "no report before the turn ends"
+        );
+
+        // The next pull asks from where it left off.
+        let asked = tokio::time::timeout(PULL_EVERY + Duration::from_secs(2), to_remote_rx.recv())
+            .await
+            .expect("a second history request")
+            .unwrap();
+        let Frame::History { since, .. } = asked else {
+            panic!("{asked:?}");
+        };
+        assert_eq!(since, 2);
+        from_remote_tx
+            .send(Frame::HistoryEnd {
+                agent: "root".into(),
+                from: 2,
+                to: 2,
+                total: 2,
+            })
+            .unwrap();
+
+        // The turn ends; after SETTLE one closing fetch, then the report.
+        from_remote_tx
+            .send(Frame::Turn {
+                agent: "root".into(),
+                state: "idle".into(),
+                budget: None,
+            })
+            .unwrap();
+        let asked = tokio::time::timeout(SETTLE + Duration::from_secs(2), to_remote_rx.recv())
+            .await
+            .expect("the closing history request")
+            .unwrap();
+        let Frame::History { since, .. } = asked else {
+            panic!("{asked:?}");
+        };
+        assert_eq!(since, 2);
+        let mut last = Event::new(EventKind::Assistant {
+            text: "Done: two tests fixed.".into(),
+            reasoning_details: None,
+        });
+        last.seq = 3;
+        from_remote_tx
+            .send(Frame::Replayed {
+                agent: "root".into(),
+                event: last,
+            })
+            .unwrap();
+        from_remote_tx
+            .send(Frame::HistoryEnd {
+                agent: "root".into(),
+                from: 2,
+                to: 3,
+                total: 3,
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let filed = arbos_core::inbox::list(&p, "root");
+        assert_eq!(filed.len(), 1, "one report: {filed:?}");
+        assert!(
+            filed[0].msg.body.contains("Done: two tests fixed."),
+            "the turn's last words, not the mid-turn ones: {}",
+            filed[0].msg.body
+        );
+        assert!(!filed[0].msg.body.contains("Reading the tests first."));
+        let mine = local(&p, "far");
+        assert_eq!(
+            mine.iter()
+                .filter(|e| matches!(e.kind, EventKind::Assistant { .. }))
+                .count(),
+            2,
+            "each remote line once: {mine:#?}"
+        );
+        drop(from_remote_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
     }
 }
