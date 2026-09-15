@@ -311,6 +311,17 @@ impl Arbos {
                 });
                 return;
             }
+            let approval_ask = self
+                .workspace
+                .read(cx)
+                .active_session()
+                .is_some_and(|chat| chat.approval_ask().is_some());
+            if approval_ask {
+                self.workspace.update(cx, |workspace, cx| {
+                    workspace.with_session(id, cx, |chat| chat.answer_approval(true));
+                });
+                return;
+            }
         }
         // "stop" while the chat works is the Stop button, not a follow-up.
         let busy = self
@@ -2703,11 +2714,16 @@ impl Arbos {
     }
 
     /// The ask tool's form: one question at a time, Skip or Continue.
-    fn questions(&self, cx: &Context<Self>) -> Option<impl IntoElement + use<>> {
+    fn questions(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
         let chat = self.workspace.read(cx).active_session()?;
         let prompt = chat.questions.as_ref()?;
         let id = chat.id;
+        // The kernel's ask-mode approval ("allow bash: ls -la" with allow /
+        // deny) is Cursor's approval card: the call, then Skip · Run ↵.
+        if let Some((call, _, _)) = chat.approval_ask() {
+            return Some(self.approval_ask_card(id, call, &theme, cx).into_any_element());
+        }
         let question = prompt.current()?;
         let draft = prompt.draft(&question.id);
         let page = prompt.page;
@@ -2928,8 +2944,68 @@ impl Arbos {
                                     });
                                 })),
                         ),
-                ),
+                )
+                .into_any_element(),
         )
+    }
+
+    /// Cursor's approval card for an approval-shaped ask: the call's words
+    /// under a key glyph, "Skip" and "Run ↵" at the trailing edge.
+    fn approval_ask_card(&self, id: u64, call: String, theme: &Theme, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let painter = Painter::of(cx);
+        let answer = |key: &str, allow: bool, label: &str, style| {
+            let fade = Fade::new(painter, format!("approval-ask-{id}-{key}"));
+            theme
+                .button(label.to_owned(), style, Some(fade))
+                .id(SharedString::from(key.to_owned()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.workspace.update(cx, |workspace, cx| {
+                        workspace.with_session(id, cx, |chat| chat.answer_approval(allow));
+                    });
+                }))
+        };
+        div()
+            .rounded(px(Theme::surface_radius()))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .px(px(root::COMPOSER_PAD_X))
+            .py(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(8.))
+                    .child(
+                        icons::icon(icons::system::KEY_MINIMALISTIC)
+                            .size(px(14.))
+                            .flex_none()
+                            .mt(px(3.))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_style(TextStyle::Body)
+                            .text_color(theme.text)
+                            .child(SharedString::from(call)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(answer("ask-skip", false, "Skip", ButtonStyle::Ghost))
+                    .child(answer("ask-continue", true, "Run ↵", ButtonStyle::Prominent)),
+            )
     }
 
     /// A pick from one of the composer's switches — the session's mode, or a

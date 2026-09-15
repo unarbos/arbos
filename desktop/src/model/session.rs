@@ -1737,6 +1737,49 @@ impl ChatSession {
             .send(RequestPermissionResponse::selected(option_id));
     }
 
+    /// An ask that is really an approval — the kernel in `ask` mode puts
+    /// "allow <call>" to the user with allow / deny options. Cursor draws
+    /// that as its approval row, not a question. Returns the call's words
+    /// and the two option ids.
+    pub fn approval_ask(&self) -> Option<(String, String, String)> {
+        let prompt = self.questions.as_ref()?;
+        if prompt.questions.len() != 1 {
+            return None;
+        }
+        let question = prompt.current()?;
+        let words = if question.prompt.trim().is_empty() {
+            prompt.title.as_str()
+        } else {
+            question.prompt.as_str()
+        };
+        let call = words.trim().strip_prefix("allow ").or_else(|| words.trim().strip_prefix("Allow "))?;
+        let find = |want: &str| {
+            question
+                .options
+                .iter()
+                .find(|o| o.id.eq_ignore_ascii_case(want) || o.label.trim().eq_ignore_ascii_case(want))
+                .map(|o| o.id.clone())
+        };
+        Some((call.trim().to_string(), find("allow")?, find("deny")?))
+    }
+
+    /// Answer an approval-shaped ask: pick allow or deny and send it.
+    pub fn answer_approval(&mut self, allow: bool) {
+        let Some((_, allow_id, deny_id)) = self.approval_ask() else {
+            return;
+        };
+        let Some(question_id) = self.questions.as_ref().and_then(|p| p.current()).map(|q| q.id.clone()) else {
+            return;
+        };
+        let pick = if allow { allow_id } else { deny_id };
+        if let Some(prompt) = self.questions.as_mut() {
+            let draft = prompt.drafts.entry(question_id).or_default();
+            draft.selected = vec![pick];
+            draft.other = false;
+        }
+        self.answer_ask("", false);
+    }
+
     pub fn toggle_ask_option(&mut self, question_id: &str, option_id: &str) {
         let Some(prompt) = self.questions.as_mut() else {
             return;
