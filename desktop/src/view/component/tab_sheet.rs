@@ -193,7 +193,9 @@ impl Render for TabSheet {
             .flex()
             .items_start()
             .justify_center()
-            .pt(px(120.))
+            // Below the new-Project header block, which the sheet is
+            // about; over it, the name being edited was hidden (Mac cycle 11).
+            .pt(px(200.))
             .bg(Hsla {
                 h: 0.,
                 s: 0.,

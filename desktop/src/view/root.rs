@@ -28,7 +28,7 @@ use anyhow::Result;
 use bezel::{
     gpui::{
         self, AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable as _, Hsla,
-        KeyBinding, PathPromptOptions, PromptLevel, Render, Task, TitlebarOptions, Window,
+        KeyBinding, PathPromptOptions, Pixels, PromptLevel, Render, Task, TitlebarOptions, Window,
         WindowBounds, WindowHandle, WindowOptions, actions, div, point, prelude::*, px, size,
     },
     motion::{Fade, Painter},
@@ -406,6 +406,25 @@ fn force_usable_ns_frame() {
     }
 }
 
+/// Whether at least 70 % of `frame` lies on one of the displays gpui
+/// knows: the window can be seen and reached. Every platform.
+fn frame_mostly_on_a_display(frame: &Bounds<Pixels>, cx: &App) -> bool {
+    let area = f32::from(frame.size.width) * f32::from(frame.size.height);
+    if area <= 0. {
+        return false;
+    }
+    cx.displays().iter().any(|display| {
+        let screen = display.bounds();
+        let x0 = f32::from(frame.origin.x).max(f32::from(screen.origin.x));
+        let y0 = f32::from(frame.origin.y).max(f32::from(screen.origin.y));
+        let x1 = (f32::from(frame.origin.x) + f32::from(frame.size.width))
+            .min(f32::from(screen.origin.x) + f32::from(screen.size.width));
+        let y1 = (f32::from(frame.origin.y) + f32::from(frame.size.height))
+            .min(f32::from(screen.origin.y) + f32::from(screen.size.height));
+        x1 > x0 && y1 > y0 && (x1 - x0) * (y1 - y0) >= 0.7 * area
+    })
+}
+
 /// Whether at least 70 % of `frame` lies inside some screen's visible
 /// area: the window can be seen and reached.
 #[cfg(target_os = "macos")]
@@ -489,7 +508,18 @@ fn force_usable_ns_frame() {}
 /// Open the workspace window. Called at launch, and again when the Dock
 /// reopens an app whose window ⌘W closed.
 pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHandle<Arbos>> {
-    let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
+    // Where the window was last time, when most of that frame is still on
+    // a screen; otherwise centred on the main display (a fresh install, a
+    // display that is gone, a frame dragged off the edge — Jacob saw only
+    // the left 40 % of one).
+    let bounds = state
+        .frame
+        .map(|[x, y, w, h]| Bounds {
+            origin: point(px(x), px(y)),
+            size: size(px(w.max(600.)), px(h.max(320.))),
+        })
+        .filter(|frame| frame_mostly_on_a_display(frame, cx))
+        .unwrap_or_else(|| Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx));
     let handle = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -934,11 +964,21 @@ impl Arbos {
         // Entering or leaving a size — zoom, simple fullscreen — can drop the
         // blur view and the transparent titlebar. Put both back, and keep
         // Spaces fullscreen off: a style-mask change resets that too.
-        cx.observe_window_bounds(window, |_, window, cx| {
+        cx.observe_window_bounds(window, |this, window, cx| {
             appearance::reapply_window_background(cx);
             keep_macos_glass(window);
             sync_macos_chrome(cx);
             restore_usable_bounds(window);
+            // Remember the frame for the next launch (not a fullscreen one).
+            if let WindowBounds::Windowed(bounds) = window.window_bounds() {
+                let frame = [
+                    f32::from(bounds.origin.x),
+                    f32::from(bounds.origin.y),
+                    f32::from(bounds.size.width),
+                    f32::from(bounds.size.height),
+                ];
+                this.workspace.update(cx, |workspace, _| workspace.set_frame(frame));
+            }
             cx.notify();
         })
         .detach();

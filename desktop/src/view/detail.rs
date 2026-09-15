@@ -2204,7 +2204,8 @@ impl Arbos {
                     .items_center()
                     .px(px(12.))
                     .h(px(28.))
-                    .text_style(TextStyle::Callout)
+                    .text_style(TextStyle::Body)
+                    .text_size(px(root::CURSOR_PROSE_SIZE))
                     .child(
                         div()
                             .flex_1()
@@ -2296,15 +2297,27 @@ impl Arbos {
     /// until the kernel has a kickoff turn (features inbox). The first
     /// message sent turns this into the Project chat.
     fn kickoff(&self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let name = self
-            .workspace
-            .read(cx)
+        let workspace = self.workspace.read(cx);
+        let name = workspace
             .active_project()
             .map(crate::model::workspace::Workspace::tab_label)
             .unwrap_or_else(|| "this project".to_string());
+        // The kernel's kickoff turn was asked for: its first record lands
+        // within seconds and takes this view over (the turn is then the
+        // transcript). Until then, and while it runs, Cursor's shimmer. A
+        // kernel that never answers (older, offline) gets the words below.
+        let asked = workspace
+            .active_session()
+            .and_then(|chat| chat.kickoff_at)
+            .and_then(|at| at.elapsed().ok());
+        let busy = workspace.active_session().is_some_and(|chat| chat.busy());
+        let setting_up = asked.is_some_and(|since| busy || since < Duration::from_secs(20));
         let greeting = format!(
             "{name} is ready. Drag in files, or just tell me what you want to build and I'll get it moving.\n\nAnytime you want me to work differently, say so and I'll remember."
         );
+        if setting_up {
+            Painter::of(cx).lease(2.0, Duration::from_millis(1100), cx);
+        }
         div()
             .id("kickoff")
             .flex_1()
@@ -2320,7 +2333,25 @@ impl Arbos {
                     .flex()
                     .flex_col()
                     .children(self.chat_project_head(cx))
-                    .child(
+                    .child(if setting_up {
+                        div()
+                            .id("kickoff-setting-up")
+                            .pt(px(28.))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.))
+                            .text_style(TextStyle::Body)
+                            .text_size(px(root::CURSOR_PROSE_SIZE))
+                            .text_color(theme.text_muted)
+                            .child(transcript::shimmer_line(
+                                "Setting up environment",
+                                asked.unwrap_or_default(),
+                                theme,
+                                cx,
+                            ))
+                            .into_any_element()
+                    } else {
                         div()
                             .id("kickoff-greeting")
                             .pt(px(28.))
@@ -2328,8 +2359,9 @@ impl Arbos {
                             .text_size(px(root::CURSOR_PROSE_SIZE))
                             .line_height(px(root::CURSOR_PROSE_LEADING))
                             .text_color(theme.text)
-                            .child(markdown::markdown(&greeting, window, cx)),
-                    ),
+                            .child(markdown::markdown(&greeting, window, cx))
+                            .into_any_element()
+                    }),
             )
             .into_any_element()
     }
