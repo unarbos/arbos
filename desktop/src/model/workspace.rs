@@ -1249,7 +1249,12 @@ impl Workspace {
         }
         // A chat this window kept whose prompts have no kernel clock yet
         // (typed here, never read back): its history lends the stamps.
-        for chat in self.projects.get(ix).map(|p| p.sessions.as_slice()).unwrap_or_default() {
+        for chat in self
+            .projects
+            .get(ix)
+            .map(|p| p.sessions.as_slice())
+            .unwrap_or_default()
+        {
             if let Some(sid) = chat.agent_session.clone()
                 && !load.contains(&sid)
                 && chat.items.iter().any(|item| {
@@ -2375,7 +2380,12 @@ impl Workspace {
     /// Cursor's Review: the working tree's diff (one file, or all of it),
     /// written under the project's desktop folder and opened in the column
     /// as code.
-    pub fn review_changes(&mut self, root: &std::path::Path, file: Option<&str>, cx: &mut Context<Self>) {
+    pub fn review_changes(
+        &mut self,
+        root: &std::path::Path,
+        file: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         let text = crate::model::changes::GitChanges::diff_text(root, file);
         let path = crate::model::changes::GitChanges::review_path(root, file);
         if let Some(parent) = path.parent() {
@@ -2781,7 +2791,10 @@ impl Workspace {
         if chat.items.is_empty()
             && let Some(brief) = brief
         {
-            chat.items.push(ChatItem::User(crate::model::attachment::UserMessage::from(brief)));
+            chat.items
+                .push(ChatItem::User(crate::model::attachment::UserMessage::from(
+                    brief,
+                )));
         }
         chat.rank = self.projects[ix].front_rank(Some(owner));
         self.projects[ix].sessions.push(chat);

@@ -1,0 +1,248 @@
+name: macOS update payload
+description: >-
+  Arbos.app archived as the payload the in-app updater installs, signed with
+  the best identity this repository has. A Developer ID Application
+  certificate is signed, notarized and stapled; any other Apple code-signing
+  identity is signed only, because notarytool accepts nothing else; no
+  certificate at all is ad-hoc signed. All three are installable, because what
+  the running app checks is the Ed25519 signature the update feed carries over
+  the payload's bytes (crates/arbos-update) — a promise we make ourselves and
+  can therefore make today.
+
+inputs:
+  build:
+    description: The build number to stamp the bundle with (a commit count).
+    required: true
+
+  # A real "Developer ID Application" certificate: the only kind Apple will
+  # notarize. Pass both halves or neither.
+  developer-id-p12:
+    description: Base64 of the Developer ID Application certificate and key.
+    required: false
+    default: ""
+  developer-id-p12-password:
+    description: The password that .p12 was exported with.
+    required: false
+    default: ""
+
+  # Any other Apple code-signing identity — an "Apple Development"
+  # certificate, say. Used only when there is no Developer ID. It buys a
+  # genuine, stable signature and nothing from Apple's notary service.
+  signing-p12:
+    description: Base64 of a fallback Apple code-signing certificate and key.
+    required: false
+    default: ""
+  signing-p12-password:
+    description: The password that .p12 was exported with.
+    required: false
+    default: ""
+
+  # Notarization credentials. An App Store Connect API key is preferred — it
+  # is made for this, it is revocable on its own, and it involves no Apple ID
+  # password. The Apple ID trio is the fallback.
+  notary-key-p8:
+    description: The App Store Connect API key, the contents of the .p8 file.
+    required: false
+    default: ""
+  notary-key-id:
+    description: Its ten-character key id — `XANFG7S7YS` in `AuthKey_XANFG7S7YS.p8`.
+    required: false
+    default: ""
+  notary-issuer-id:
+    description: The team's App Store Connect issuer id, a UUID.
+    required: false
+    default: ""
+
+  apple-id:
+    description: The Apple ID notarytool submits as.
+    required: false
+    default: ""
+  apple-team-id:
+    required: false
+    default: ""
+  apple-app-password:
+    description: An app-specific password from appleid.apple.com, for notarytool.
+    required: false
+    default: ""
+
+outputs:
+  path:
+    description: The zip that was built, relative to the workspace root.
+    value: ${{ steps.build.outputs.path }}
+  signing:
+    description: "`developer-id`, `other`, or `ad-hoc`."
+    value: ${{ steps.build.outputs.signing }}
+  notarized:
+    description: "`true` when Apple has seen this payload and its ticket is stapled."
+    value: ${{ steps.build.outputs.notarized }}
+
+runs:
+  using: composite
+  steps:
+    # Everything secret stays in $RUNNER_TEMP, which is outside the workspace
+    # and so cannot be swept up by an `upload-artifact` glob. The keychain is
+    # made for this job, given a random password nobody keeps, and deleted by
+    # the last step whatever happens — including when the build fails.
+    - name: Import the signing certificate
+      if: inputs.developer-id-p12 != '' || inputs.signing-p12 != ''
+      shell: bash
+      env:
+        DEVELOPER_ID_P12: ${{ inputs.developer-id-p12 }}
+        DEVELOPER_ID_P12_PASSWORD: ${{ inputs.developer-id-p12-password }}
+        SIGNING_P12: ${{ inputs.signing-p12 }}
+        SIGNING_P12_PASSWORD: ${{ inputs.signing-p12-password }}
+      run: |
+        set -euo pipefail
+        # No tracing anywhere in this step: it would put the password in the log.
+        set +x
+        umask 077
+
+        # A Developer ID wins when both are given: it is the one Apple will
+        # notarize, and a repository that has one has no use for the other.
+        if [ -n "$DEVELOPER_ID_P12" ]; then
+          p12_b64="$DEVELOPER_ID_P12"
+          p12_password="$DEVELOPER_ID_P12_PASSWORD"
+        else
+          p12_b64="$SIGNING_P12"
+          p12_password="$SIGNING_P12_PASSWORD"
+        fi
+
+        keychain="$RUNNER_TEMP/arbos-signing-$(uuidgen).keychain-db"
+        p12="$RUNNER_TEMP/arbos-signing-$(uuidgen).p12"
+        # Recorded before anything is created, so the cleanup step can undo a
+        # half-finished import as surely as a finished one.
+        {
+          echo "ARBOS_SIGNING_KEYCHAIN=$keychain"
+          echo "ARBOS_SIGNING_P12=$p12"
+          echo "ARBOS_KEYCHAINS_WERE=$(security list-keychains -d user | xargs)"
+        } >> "$GITHUB_ENV"
+
+        printf '%s' "$p12_b64" | base64 --decode > "$p12"
+        keychain_password="$(openssl rand -hex 32)"
+        security create-keychain -p "$keychain_password" "$keychain"
+        # No auto-lock and no timeout: codesign is called minutes later.
+        security set-keychain-settings -lut 21600 "$keychain"
+        security unlock-keychain -p "$keychain_password" "$keychain"
+        security import "$p12" -P "$p12_password" -A -t cert -f pkcs12 -k "$keychain"
+        # Without this, codesign stops on a GUI prompt nobody can answer.
+        security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+        security list-keychains -d user -s "$keychain" $(security list-keychains -d user | xargs)
+        rm -f "$p12"
+
+        # `find-identity -v` lists only identities whose chain validates, so an
+        # empty answer here usually means the export carried the leaf and the
+        # key and no intermediate — which is what Keychain Access produces.
+        # Apple publishes the intermediates; fetch them and look again.
+        identities="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(.*\)".*/\1/p')"
+        if [ -z "$identities" ]; then
+          echo "no valid identity yet; adding Apple's intermediate certificates"
+          for ca in DeveloperIDG2CA AppleWWDRCAG3; do
+            if curl -fsS -o "$RUNNER_TEMP/$ca.cer" "https://www.apple.com/certificateauthority/$ca.cer"; then
+              security import "$RUNNER_TEMP/$ca.cer" -t cert -f DER -k "$keychain" >/dev/null 2>&1 || true
+              rm -f "$RUNNER_TEMP/$ca.cer"
+            fi
+          done
+          identities="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(.*\)".*/\1/p')"
+        fi
+        if [ -z "$identities" ]; then
+          echo "::error title=No usable signing identity::The .p12 imported, but no identity in it has a chain this machine can validate. A Keychain Access export contains the leaf and its key only; if Apple's \"Developer ID Certification Authority\" could not be fetched, there is nothing to chain it to."
+          exit 1
+        fi
+        developer_id="$(printf '%s\n' "$identities" | grep '^Developer ID Application:' | head -1 || true)"
+        if [ -n "$developer_id" ]; then
+          echo "SIGN=$developer_id" >> "$GITHUB_ENV"
+          echo "SIGN_KIND=developer-id" >> "$GITHUB_ENV"
+        else
+          other="$(printf '%s\n' "$identities" | head -1)"
+          echo "SIGN=$other" >> "$GITHUB_ENV"
+          echo "SIGN_KIND=other" >> "$GITHUB_ENV"
+          echo "::notice title=Not a Developer ID certificate::Signing with \"$other\". Apple's notary service accepts only a \"Developer ID Application\" certificate, so this payload is signed but not notarized. The updater installs it either way; a copy downloaded by hand would be stopped by Gatekeeper."
+        fi
+
+    - name: Build it
+      id: build
+      shell: bash
+      working-directory: desktop
+      env:
+        BUILD: ${{ inputs.build }}
+        NOTARY_KEY_P8: ${{ inputs.notary-key-p8 }}
+        NOTARY_KEY_ID: ${{ inputs.notary-key-id }}
+        NOTARY_ISSUER_ID: ${{ inputs.notary-issuer-id }}
+        APPLE_ID: ${{ inputs.apple-id }}
+        APPLE_TEAM_ID: ${{ inputs.apple-team-id }}
+        APPLE_APP_PASSWORD: ${{ inputs.apple-app-password }}
+      run: |
+        set -euo pipefail
+        set +x
+        kind="${SIGN_KIND:-ad-hoc}"
+        notarized=false
+
+        # notarytool wants the key as a file. It goes in $RUNNER_TEMP, which is
+        # outside the workspace, and the cleanup step below deletes it however
+        # this job ends.
+        notary_key=""
+        if [ -n "$NOTARY_KEY_P8" ] && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER_ID" ]; then
+          umask 077
+          notary_key="$RUNNER_TEMP/AuthKey_$NOTARY_KEY_ID.p8"
+          printf '%s\n' "$NOTARY_KEY_P8" > "$notary_key"
+          echo "ARBOS_NOTARY_KEY=$notary_key" >> "$GITHUB_ENV"
+        fi
+
+        case "$kind" in
+          developer-id)
+            if [ -n "$notary_key" ]; then
+              make notarize-zip SIGN="$SIGN" BUILD="$BUILD" \
+                NOTARY_KEY="$notary_key" NOTARY_KEY_ID="$NOTARY_KEY_ID" \
+                NOTARY_ISSUER_ID="$NOTARY_ISSUER_ID"
+              notarized=true
+            elif [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then
+              make notarize-zip SIGN="$SIGN" BUILD="$BUILD"
+              notarized=true
+            else
+              echo "::warning title=Not notarized::A Developer ID certificate is here but no notarization credential is. Set NOTARY_KEY_P8 + NOTARY_KEY_ID + NOTARY_ISSUER_ID, or the APPLE_ID trio."
+              make zip SIGN="$SIGN" BUILD="$BUILD"
+            fi
+            ;;
+          other)
+            make zip SIGN="$SIGN" BUILD="$BUILD"
+            ;;
+          *)
+            echo "::notice title=Ad-hoc signed::No certificate in this repository, so the payload is ad-hoc signed. The updater installs it — a bundle the app replaces itself is never quarantined, so Gatekeeper's first-launch check never runs on it. This is the path a fork takes, and it works."
+            make zip BUILD="$BUILD"
+            ;;
+        esac
+        {
+          echo "signing=$kind"
+          echo "notarized=$notarized"
+          echo "path=desktop/$(ls target/bundle.noindex/Arbos-*-macos-*.zip)"
+        } >> "$GITHUB_OUTPUT"
+
+    # Always. A runner is thrown away after the job, but a certificate that
+    # outlives the step that needed it is a certificate some later step can
+    # sign with, and this keeps that window as small as the work itself.
+    - name: Put the keychain back
+      if: always()
+      shell: bash
+      run: |
+        set +e
+        for secret in "${ARBOS_SIGNING_P12:-}" "${ARBOS_NOTARY_KEY:-}"; do
+          if [ -n "$secret" ]; then
+            rm -f "$secret"
+          fi
+        done
+        if [ -n "${ARBOS_SIGNING_KEYCHAIN:-}" ]; then
+          if [ -n "${ARBOS_KEYCHAINS_WERE:-}" ]; then
+            security list-keychains -d user -s $ARBOS_KEYCHAINS_WERE
+          fi
+          security delete-keychain "$ARBOS_SIGNING_KEYCHAIN"
+          rm -f "$ARBOS_SIGNING_KEYCHAIN"
+          echo "signing keychain removed"
+        fi
+        # Nothing later in the job has any business signing.
+        {
+          echo "SIGN="
+          echo "SIGN_KIND="
+          echo "ARBOS_SIGNING_KEYCHAIN="
+          echo "ARBOS_SIGNING_P12="
+        } >> "$GITHUB_ENV"
+        exit 0

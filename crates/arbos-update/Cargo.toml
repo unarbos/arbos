@@ -1,0 +1,29 @@
+[package]
+name = "arbos-update"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Arbos updates: the channel feed, version order, and the signature over a payload"
+
+# The tool CI signs and publishes with. The library is what the desktop reads
+# the feed with, so both sides of an update agree on the format by sharing the
+# types rather than by agreeing to write the same JSON twice.
+[[bin]]
+name = "arbos-updatectl"
+path = "src/bin/updatectl.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+# Ed25519 and SHA-256. Already compiled in both trees — rustls pulls it for
+# the kernel's HTTPS and for the desktop's websocket — so the signature costs
+# a dependency line and no build time. Apple is not in this path at all, which
+# is the point: a payload verifies on a Mac with no Developer ID anywhere
+# near it.
+ring = "0.17"
+
+[dev-dependencies]
+tempfile = "3"
