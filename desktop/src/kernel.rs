@@ -1279,8 +1279,11 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
             let thinking = matches!(ev.kind, arbos_core::EventKind::Thinking { .. });
             if !thinking {
                 if let Some(since) = thinking_since.take() {
+                    // The record's own `secs` (settled thoughts since #221)
+                    // beats the gap to the next event.
                     if let Some(crate::model::session::ChatItem::Thinking { secs, .. }) =
                         items.last_mut()
+                        && secs.is_none()
                     {
                         *secs = secs_between(since, ev.ts);
                     }
@@ -1307,13 +1310,20 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
             if let Some(item) = event_to_item(&ev) {
                 match (&item, items.last_mut()) {
                     (
-                        crate::model::session::ChatItem::Thinking { text, .. },
+                        crate::model::session::ChatItem::Thinking { text, secs, .. },
                         Some(crate::model::session::ChatItem::Thinking {
-                            text: held, done, ..
+                            text: held,
+                            done,
+                            secs: held_secs,
                         }),
                     ) => {
                         held.push_str(text);
                         *done = true;
+                        // Two settled steps in a row read as one thought, their
+                        // seconds added.
+                        if let Some(more) = secs {
+                            *held_secs = Some(held_secs.unwrap_or(0).saturating_add(*more));
+                        }
                     }
                     _ => items.push(item),
                 }
@@ -1395,10 +1405,12 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
         // The brief a worker was spawned with is its prompt: Cursor shows a
         // subagent's as the first card. A plan wake with no text (a timer,
         // a chore) is not a message.
-        arbos_core::EventKind::Wake { wake, text: Some(text), .. }
-            if wake == "plan" && !text.trim().is_empty() =>
-        {
-            let mut message = crate::model::attachment::UserMessage::from(brief_of(text));
+        arbos_core::EventKind::Wake {
+            wake,
+            text: Some(text),
+            brief,
+        } if wake == "plan" && !text.trim().is_empty() => {
+            let mut message = crate::model::attachment::UserMessage::from(wake_brief(text, brief.as_deref()));
             message.sent_at = (ev.ts > 0).then_some(ev.ts);
             Some(ChatItem::User(message))
         }
@@ -2984,6 +2996,16 @@ fn brief_of(text: &str) -> String {
     }
 }
 
+/// The prompt a spawned child was given: the wake's `brief` (the mission as
+/// the parent wrote it, on wakes since #221) when present, else the mission
+/// cut out of the kernel's framing in `text` (older transcripts).
+fn wake_brief(text: &str, brief: Option<&str>) -> String {
+    match brief.map(str::trim).filter(|b| !b.is_empty()) {
+        Some(brief) => brief.to_string(),
+        None => brief_of(text),
+    }
+}
+
 /// The brief a worker was spawned with: the text of the first plan wake in
 /// its transcript. `None` for a remote place, an id that is not a folder,
 /// or a transcript that does not start with one.
@@ -3002,9 +3024,11 @@ pub fn agent_brief(place: &Place, id: &str) -> Option<String> {
     std::io::BufRead::read_line(&mut std::io::BufReader::new(file), &mut first).ok()?;
     let ev: arbos_core::Event = serde_json::from_str(first.trim()).ok()?;
     match ev.kind {
-        arbos_core::EventKind::Wake { wake, text: Some(text), .. } if wake == "plan" && !text.trim().is_empty() => {
-            Some(brief_of(&text))
-        }
+        arbos_core::EventKind::Wake {
+            wake,
+            text: Some(text),
+            brief,
+        } if wake == "plan" && !text.trim().is_empty() => Some(wake_brief(&text, brief.as_deref())),
         _ => None,
     }
 }

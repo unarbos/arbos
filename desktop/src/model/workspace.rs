@@ -1234,6 +1234,18 @@ impl Workspace {
         {
             load.push(sid);
         }
+        // A chat this window kept whose prompts have no kernel clock yet
+        // (typed here, never read back): its history lends the stamps.
+        for chat in self.projects.get(ix).map(|p| p.sessions.as_slice()).unwrap_or_default() {
+            if let Some(sid) = chat.agent_session.clone()
+                && !load.contains(&sid)
+                && chat.items.iter().any(|item| {
+                    matches!(item, crate::model::session::ChatItem::User(m) if m.sent_at.is_none())
+                })
+            {
+                load.push(sid);
+            }
+        }
         let known: HashSet<String> = self
             .projects
             .get(ix)
