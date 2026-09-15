@@ -1366,7 +1366,31 @@ fn children_lines(
             )
         })
         .collect();
-    div().flex().flex_col().children(rows).into_any_element()
+    // A worker the kernel has archived and this window never had a session
+    // for (a transcript read back after a relaunch): still one line, "Done"
+    // and its name, so the fan-out reads whole. Nothing to open.
+    let known: Vec<&str> = children.iter().filter_map(|c| c.kernel_id.as_deref()).collect();
+    let gone: Vec<AnyElement> = spawned
+        .iter()
+        .filter(|id| !known.contains(&id.as_str()) && !reported.contains(&id.as_str()))
+        .map(|id| {
+            div()
+                .self_start()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .gap(px(6.))
+                .py(px(2.))
+                .text_style(TextStyle::Callout)
+                .text_color(theme.text_faint)
+                .child("Done")
+                .child(SharedString::from(sentence_case(
+                    &crate::model::session::worker_name(id).unwrap_or_else(|| id.clone()),
+                )))
+                .into_any_element()
+        })
+        .collect();
+    div().flex().flex_col().children(rows).children(gone).into_any_element()
 }
 
 /// One message, selectable. The transcript's two prose items — what you asked
@@ -3927,6 +3951,14 @@ fn run_fold(
                         ChatItem::Thinking { .. } => thought(chat, ix, false, window, cx),
                         // A `status` call is the live step, not a row (#185).
                         ChatItem::Tool { label, .. } if is_status_call(label) => div().into_any_element(),
+                        // A worker's `todo` call is its checklist card
+                        // (Cursor's TodoWrite in a classic chat), not a
+                        // bare "todo" row.
+                        ChatItem::Tool { label, .. } if is_todo_call(label) => {
+                            let theme = Theme::of(cx).clone();
+                            todo_card(chat, ix..ix + 1, &theme)
+                                .unwrap_or_else(|| tool(chat, ix, false, cx))
+                        }
                         ChatItem::Tool { .. } => tool(chat, ix, false, cx),
                         _ => div().into_any_element(),
                     })),
@@ -4871,7 +4903,7 @@ fn thought_label(done: bool, secs: Option<u32>, _live: Duration) -> (String, Str
     }
     // Cursor: "Thought briefly" under a few seconds, "Thought for 12s" past.
     let time = match secs {
-        Some(s) if s > 5 => format!("for {}", since(Duration::from_secs(u64::from(s)))),
+        Some(s) if s >= 5 => format!("for {}", since(Duration::from_secs(u64::from(s)))),
         _ => "briefly".to_owned(),
     };
     ("Thought".to_owned(), time)
@@ -5454,4 +5486,13 @@ fn strip_link(text: &str) -> String {
     }
     out.push_str(rest);
     out.trim().to_string()
+}
+
+/// "set explainer" → "Set explainer": a worker's folder name as a title.
+fn sentence_case(words: &str) -> String {
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }

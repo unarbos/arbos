@@ -83,6 +83,10 @@ pub enum Event {
     /// The model call is alive and has been silent for this many seconds
     /// (`working` frame). Live only.
     Working(u64),
+    /// A recorded turn ended at this kernel time (ms): the "Worked 25s" of
+    /// a transcript read back is the gap from its prompt's `ts`, not the
+    /// seconds the replay took to stream.
+    TurnEndedAt(i64),
     /// The agent's own word on what it is doing now — the kernel's `status`
     /// event, one line, replaced by the next. Drawn on the parent's
     /// "1 Working  …" line for a worker.
@@ -862,6 +866,23 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
         // per job by the scheduler; the tailed `TurnComplete` arrives up to
         // 200 ms later and a second TurnDone would drain a queued follow-up
         // into a turn that is already running.
+        EventKind::TurnComplete { usage } if recorded => usage
+            .map(|u| {
+                vec![Event::Update(SessionUpdate::UsageUpdate(UsageUpdate {
+                    used: u.used,
+                    size: u.size,
+                    cost: u.cost.map(|amount| Cost {
+                        amount,
+                        currency: "USD".into(),
+                        meta: None,
+                    }),
+                    meta: None,
+                }))]
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .chain(std::iter::once(Event::TurnEndedAt(ts)))
+            .collect(),
         EventKind::TurnComplete { usage } => usage
             .map(|u| {
                 vec![Event::Update(SessionUpdate::UsageUpdate(UsageUpdate {

@@ -7,7 +7,7 @@
 
 use crate::{
     model::{
-        session::{ChatSession, ChildState},
+        session::{ChatItem, ChatSession, ChildState},
         store_view::{FileKind, PageBlock, PageItem, ProjectPage, Resource, StoreFile, Target},
         surface::{Surface, SurfaceId, SurfaceKind},
         workspace::Workspace,
@@ -134,6 +134,9 @@ struct AgentLine {
     archived: bool,
     /// How long its turn has run, for the spinner.
     since: Duration,
+    /// Cursor's task-list rows read "title — summary": the step while it
+    /// works, its last words once done. None for the main chat.
+    summary: Option<String>,
 }
 
 /// A worker the kernel archived that this window never had a row for:
@@ -268,6 +271,7 @@ impl Arbos {
                     // A kernel child has no flight to time; the shared clock
                     // keeps its spinner turning.
                     since: chat.elapsed().unwrap_or_else(transcript::live_phase),
+                    summary: (n != 0).then(|| row_summary(chat)).flatten(),
                 })
             })
             .collect();
@@ -631,9 +635,19 @@ impl Arbos {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_color(tint)
-                    .child(title),
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .child(div().flex_none().truncate().text_color(tint).child(title))
+                    .when_some(line.summary, |el, summary| {
+                        el.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from(format!(" — {summary}"))),
+                        )
+                    }),
             )
             .when(line.main, |el| {
                 el.child(
@@ -1463,4 +1477,28 @@ fn store_rows(resources: &[Resource], theme: &Theme) -> Vec<AnyElement> {
                 .into_any_element()
         })
         .collect()
+}
+
+/// A worker row's em-dash summary: the live step while it works, else the
+/// first line of its last words. Cut to a phrase; the row truncates the rest.
+fn row_summary(chat: &ChatSession) -> Option<String> {
+    let text = match chat.child_state() {
+        ChildState::Working => chat.current_step()?,
+        ChildState::Asking | ChildState::Waiting => return None,
+        ChildState::Done => chat.items.iter().rev().find_map(|item| match item {
+            ChatItem::Agent(text) if !text.trim().is_empty() => Some(text.clone()),
+            _ => None,
+        })?,
+    };
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))?
+        .trim_start_matches(['-', '*', ' '])
+        .to_string();
+    let mut phrase: String = line.chars().take(90).collect();
+    if line.chars().count() > 90 {
+        phrase.push('…');
+    }
+    Some(phrase)
 }

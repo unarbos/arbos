@@ -827,11 +827,16 @@ impl Arbos {
     /// spinner on the right while a turn runs.
     fn context_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let workspace = self.workspace.read(cx);
-        let since = workspace
-            .active_session()
-            .filter(|chat| chat.busy())
-            .and_then(|chat| chat.live_since)
-            .and_then(|at| at.elapsed().ok());
+        // Cursor keeps a small ring at the row's end; ours turns while any
+        // agent of the project works — the root, or only its workers.
+        let since = workspace.active_project().and_then(|project| {
+            project
+                .sessions
+                .iter()
+                .filter(|chat| chat.busy())
+                .map(|chat| chat.elapsed().unwrap_or_else(transcript::live_phase))
+                .max()
+        });
         let host = workspace
             .active_project()
             .and_then(|project| project.host.clone());

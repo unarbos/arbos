@@ -1052,6 +1052,48 @@ impl ChatSession {
             return;
         }
         self.merge_tool_diffs(&items);
+        self.merge_turn_clocks(&items);
+    }
+
+    /// The kernel's clock on prompts this window typed: when its own copy of
+    /// the transcript wins, the prompts it kept have no `sent_at` (the date
+    /// line, "Just now") and a worked time measured live or not at all. The
+    /// history's prompts, matched in order by their words, lend theirs.
+    fn merge_turn_clocks(&mut self, incoming: &[ChatItem]) {
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        let theirs: Vec<&crate::model::attachment::UserMessage> = incoming
+            .iter()
+            .filter_map(|item| match item {
+                ChatItem::User(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        let mut next = 0;
+        let mut changed = false;
+        for item in &mut self.items {
+            let ChatItem::User(mine) = item else {
+                continue;
+            };
+            let Some(pos) = theirs[next.min(theirs.len())..]
+                .iter()
+                .position(|m| squash(&m.text) == squash(&mine.text))
+            else {
+                continue;
+            };
+            let found = theirs[next + pos];
+            next += pos + 1;
+            if mine.sent_at.is_none() && found.sent_at.is_some() {
+                mine.sent_at = found.sent_at;
+                changed = true;
+            }
+            if found.worked_secs.is_some() && mine.worked_secs != found.worked_secs {
+                mine.worked_secs = found.worked_secs;
+                changed = true;
+            }
+        }
+        if changed {
+            self.flush();
+        }
     }
 
     fn merge_tool_diffs(&mut self, incoming: &[ChatItem]) {
@@ -1413,17 +1455,22 @@ impl ChatSession {
         let squash = |s: &str| s.split_whitespace().collect::<String>();
         let echo = self
             .items
-            .iter()
+            .iter_mut()
             .rev()
             .find_map(|item| match item {
                 ChatItem::User(message) => Some(message),
                 _ => None,
             })
-            .is_some_and(|last| {
+            .filter(|last| {
                 squash(&last.text) == squash(&text)
                     && last.sent_at.is_none_or(|sent| (ts - sent).abs() < 120_000)
             });
-        if echo {
+        if let Some(last) = echo {
+            // The line this window typed, read back with the kernel's clock
+            // on it: the date line and "Just now" want that stamp.
+            if last.sent_at.is_none() && ts > 0 {
+                last.sent_at = Some(ts);
+            }
             return;
         }
         let mut message = crate::model::attachment::UserMessage::from(text);
@@ -2134,6 +2181,19 @@ impl ChatSession {
             Event::Status(text) => {
                 let text = text.trim().to_string();
                 self.status = (!text.is_empty()).then_some(text);
+            }
+            Event::TurnEndedAt(ended) => {
+                if let Some(ChatItem::User(message)) = self
+                    .items
+                    .iter_mut()
+                    .rev()
+                    .find(|item| matches!(item, ChatItem::User(_)))
+                    && message.worked_secs.is_none()
+                    && let Some(sent) = message.sent_at
+                    && ended > sent
+                {
+                    message.worked_secs = Some(((ended - sent) / 1000).min(u32::MAX as i64) as u32);
+                }
             }
             Event::TurnDone(result) => {
                 self.working = None;
