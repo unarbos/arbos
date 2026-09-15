@@ -114,6 +114,32 @@ pub enum Frame {
         kind: String,
         size: u64,
     },
+    /// Client → kernel: write one file under `.arbos/`, whole. A peer on
+    /// the mesh writing by address (`arbos://…`); the receiving kernel
+    /// applies the same rules as a local write (root-owned pages and
+    /// protected files are refused; only the store's shared folders).
+    /// `base_hash` is the sha-256 of the content the writer last read:
+    /// the write happens only if the file still has it (`""` = must not
+    /// exist yet); absent = write regardless. Answered with `written`.
+    Put {
+        path: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_hash: Option<String>,
+    },
+    /// Kernel → client: the outcome of a `put`. `hash` is the sha-256 of
+    /// what is on disk now; on a refusal or a conflict `error` says why
+    /// and `hash` is still the current file's, so the writer can re-read.
+    Written {
+        path: String,
+        #[serde(default)]
+        size: u64,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        hash: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Client → kernel: the entries of a folder under `.arbos/`.
     List {
         #[serde(default)]

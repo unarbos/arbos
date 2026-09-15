@@ -251,10 +251,9 @@ async fn session(
     let mut identities = std::collections::BTreeMap::new();
     identities.insert(project.to_string(), arbos_core::project::identity(place));
     let mut shares = std::collections::BTreeMap::new();
-    shares.insert(
-        project.to_string(),
-        arbos_core::project::share_mode(place).to_string(),
-    );
+    if let Some(mode) = arbos_core::project::share_mode_set(place) {
+        shares.insert(project.to_string(), mode.to_string());
+    }
     let id = register(
         &mut ws,
         cfg,
@@ -425,4 +424,200 @@ pub async fn deliver(
         project.map(|p| format!(" ({p})")).unwrap_or_default(),
         cfg.machine
     ))
+}
+
+// ── another node's store, by address ─────────────────────────────────────
+
+/// How long one read, list, or write of a peer's store may take, dial
+/// included. Past it the tool fails with the address and the reason;
+/// nothing stale or empty is returned in its place.
+const STORE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Attach to the node an address names and run `ask` on the socket, or
+/// read the file here when the address is this very node (the fast path).
+async fn with_store<T, F>(address: &str, local: F, ask: Frame) -> Result<T>
+where
+    F: FnOnce(Frame) -> Option<Frame>,
+    T: FromReply,
+{
+    let addr = arbos_core::hub::StoreAddress::parse(address)?;
+    if let Some((m, p)) = self_node()
+        && addr.is_node(m, p)
+    {
+        let reply = local(ask).with_context(|| format!("{addr}: no reply from this kernel"))?;
+        return T::from_reply(reply);
+    }
+    let cfg = config_from_env()?.with_context(|| format!("{addr}: {}", arbos_engine::NO_MESH))?;
+    let work = async {
+        // The hub's own refusal (no such machine, not shared with you) is
+        // the answer; anything else is the road being down.
+        let mut ws = match attach(&cfg, &addr.machine, Some(&addr.project)).await {
+            Ok(ws) => ws,
+            Err(e) if e.to_string().starts_with("hub:") => bail!("{addr}: {e}"),
+            Err(e) => {
+                return Err(e.context(format!(
+                    "{addr}: {} is not reachable through the hub; nothing was read or written",
+                    addr.machine
+                )));
+            }
+        };
+        let want = match &ask {
+            Frame::Read { path } | Frame::List { path } | Frame::Put { path, .. } => path.clone(),
+            Frame::Tail { path, .. } => path.clone(),
+            _ => String::new(),
+        };
+        send_json(&mut ws, &ask).await?;
+        loop {
+            let Some(line) = next_text(&mut ws).await else {
+                bail!("{addr}: the node closed the connection before answering");
+            };
+            let Ok(frame) = serde_json::from_str::<Frame>(&line) else {
+                continue;
+            };
+            let is_answer = match &frame {
+                Frame::File { path, .. }
+                | Frame::Listing { path, .. }
+                | Frame::Written { path, .. }
+                | Frame::Chunk { path, .. } => *path == want,
+                Frame::Error {
+                    agent: None,
+                    detail,
+                } if detail.starts_with("hub:") => {
+                    bail!("{addr}: {detail}")
+                }
+                _ => false,
+            };
+            if is_answer {
+                let _ = ws.close(None).await;
+                return T::from_reply(frame);
+            }
+        }
+    };
+    match tokio::time::timeout(STORE_TIMEOUT, work).await {
+        Ok(r) => r,
+        Err(_) => bail!(
+            "{addr}: no answer from {} within {STORE_TIMEOUT:?} (hub {}); nothing was read or written",
+            addr.machine,
+            cfg.url
+        ),
+    }
+}
+
+/// `read` by address: the file's text, or why not.
+pub async fn store_read(place: &Place, address: &str) -> Result<arbos_engine::StoreFile> {
+    let addr = arbos_core::hub::StoreAddress::parse(address)?;
+    let place2 = place.clone();
+    with_store::<arbos_engine::StoreFile, _>(
+        address,
+        move |f| crate::files::handle(&place2, f),
+        Frame::Read { path: addr.path },
+    )
+    .await
+}
+
+/// `ls` by address.
+pub async fn store_list(place: &Place, address: &str) -> Result<Vec<arbos_core::wire::Entry>> {
+    let addr = arbos_core::hub::StoreAddress::parse(address)?;
+    let place2 = place.clone();
+    let listing = with_store::<Listing, _>(
+        address,
+        move |f| crate::files::handle(&place2, f),
+        Frame::List { path: addr.path },
+    )
+    .await?;
+    Ok(listing.0)
+}
+
+/// `write` by address, with the compare-and-swap hash when the caller
+/// read the file first.
+pub async fn store_write(
+    place: &Place,
+    address: &str,
+    text: String,
+    base_hash: Option<String>,
+) -> Result<arbos_engine::StoreWritten> {
+    let addr = arbos_core::hub::StoreAddress::parse(address)?;
+    let place2 = place.clone();
+    with_store::<arbos_engine::StoreWritten, _>(
+        address,
+        move |f| crate::files::handle(&place2, f),
+        Frame::Put {
+            path: addr.path,
+            text,
+            base_hash,
+        },
+    )
+    .await
+}
+
+/// The kernel's refusal names the path itself; do not say it twice.
+fn name_once(path: &str, error: &str) -> String {
+    if error.starts_with(&format!("{path}:")) || error.starts_with(&format!("{path} ")) {
+        error.to_string()
+    } else {
+        format!("{path}: {error}")
+    }
+}
+
+/// A store reply frame as the value a tool wants.
+trait FromReply: Sized {
+    fn from_reply(f: Frame) -> Result<Self>;
+}
+
+struct Listing(Vec<arbos_core::wire::Entry>);
+
+impl FromReply for Listing {
+    fn from_reply(f: Frame) -> Result<Self> {
+        match f {
+            Frame::Listing {
+                path,
+                entries,
+                error,
+            } => match error {
+                Some(e) => bail!("{}", name_once(&path, &e)),
+                None => Ok(Listing(entries)),
+            },
+            other => bail!("expected a listing, got {other:?}"),
+        }
+    }
+}
+
+impl FromReply for arbos_engine::StoreFile {
+    fn from_reply(f: Frame) -> Result<Self> {
+        match f {
+            Frame::File {
+                path,
+                text,
+                size,
+                truncated,
+                error,
+            } => match error {
+                Some(e) => bail!("{}", name_once(&path, &e)),
+                None => Ok(arbos_engine::StoreFile {
+                    hash: arbos_core::hub::content_hash(text.as_bytes()),
+                    text,
+                    size,
+                    truncated,
+                }),
+            },
+            other => bail!("expected a file, got {other:?}"),
+        }
+    }
+}
+
+impl FromReply for arbos_engine::StoreWritten {
+    fn from_reply(f: Frame) -> Result<Self> {
+        match f {
+            Frame::Written {
+                path,
+                size,
+                hash,
+                error,
+            } => match error {
+                Some(e) => bail!("{}", name_once(&path, &e)),
+                None => Ok(arbos_engine::StoreWritten { size, hash }),
+            },
+            other => bail!("expected a written, got {other:?}"),
+        }
+    }
 }

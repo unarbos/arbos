@@ -141,11 +141,8 @@ async fn session(cfg: &HubConfig, dir: &Path, args: &Args) -> Result<()> {
     // its store by address once a kernel serves it.
     let shares: std::collections::BTreeMap<_, _> = projects
         .iter()
-        .map(|p| {
-            (
-                p.clone(),
-                arbos_core::project::share_mode_at(&dir.join(p)).to_string(),
-            )
+        .filter_map(|p| {
+            arbos_core::project::share_mode_set_at(&dir.join(p)).map(|m| (p.clone(), m.to_string()))
         })
         .collect();
     let id = hub_link::register(

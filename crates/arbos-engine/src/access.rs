@@ -14,6 +14,10 @@ pub enum Resource {
     Path(PathBuf),
     /// The shared browser session. Browser calls order among themselves.
     Browser,
+    /// A file or folder in another node's store, by address
+    /// (`arbos://<machine>/<project>/<path>`). Covers its subtree, like a
+    /// path; a write to one is a write for plan mode and readonly agents.
+    Store(String),
 }
 
 impl Resource {
@@ -21,6 +25,7 @@ impl Resource {
         match (self, other) {
             (Resource::Path(a), Resource::Path(b)) => b.starts_with(a),
             (Resource::Browser, Resource::Browser) => true,
+            (Resource::Store(a), Resource::Store(b)) => b.starts_with(a.trim_end_matches('/')),
             _ => false,
         }
     }
@@ -71,6 +76,22 @@ impl Access {
 
     pub fn write_path(path: &Path) -> Self {
         Self::writes([path.to_path_buf()])
+    }
+
+    /// A read of another node's store by address.
+    pub fn read_store(address: impl Into<String>) -> Self {
+        Self {
+            reads: vec![Resource::Store(address.into())],
+            ..Self::default()
+        }
+    }
+
+    /// A write into another node's store by address.
+    pub fn write_store(address: impl Into<String>) -> Self {
+        Self {
+            writes: vec![Resource::Store(address.into())],
+            ..Self::default()
+        }
     }
 
     pub fn write_resource(r: Resource) -> Self {

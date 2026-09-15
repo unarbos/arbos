@@ -1763,6 +1763,7 @@ pub async fn serve_client(
             let place_for_history = accept_place.clone();
             let out_for_history = out_tx.clone();
             let out_for_read = out_tx;
+            let who_name = who.name.clone();
             tokio::spawn(async move {
                 while let Some(frame) = local_rx.recv().await {
                     match frame {
@@ -1785,8 +1786,19 @@ pub async fn serve_client(
                             );
                         }
                         // Files under .arbos/, answered here too; a slow
-                        // disk stalls this client alone.
-                        f @ (Frame::Read { .. } | Frame::Tail { .. } | Frame::List { .. }) => {
+                        // disk stalls this client alone. `put` is a peer's
+                        // write by address; the store rules apply inside.
+                        f @ (Frame::Read { .. }
+                        | Frame::Tail { .. }
+                        | Frame::List { .. }
+                        | Frame::Put { .. }) => {
+                            if let Frame::Put { path, .. } = &f {
+                                klog::info(
+                                    "store_put",
+                                    None,
+                                    format!("who={who_name} path={path}"),
+                                );
+                            }
                             if let Some(reply) = crate::files::handle(&place_for_history, f) {
                                 let _ = out_for_history.send(reply);
                             }

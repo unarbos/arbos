@@ -35,6 +35,23 @@ fn roundtrip(frame: &Frame) -> serde_json::Value {
 fn every_frame_variant_round_trips_with_a_snake_case_tag() {
     let frames: Vec<(Frame, &str)> = vec![
         (
+            Frame::Put {
+                path: "docs/plan.md".into(),
+                text: "# Plan\n".into(),
+                base_hash: Some(String::new()),
+            },
+            "put",
+        ),
+        (
+            Frame::Written {
+                path: "docs/plan.md".into(),
+                size: 7,
+                hash: "abc".into(),
+                error: None,
+            },
+            "written",
+        ),
+        (
             Frame::Snapshot {
                 tree: vec![TreeNode {
                     id: "root".into(),
