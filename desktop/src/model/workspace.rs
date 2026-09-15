@@ -2740,6 +2740,7 @@ impl Workspace {
         // The kernel named the child after its brief; the row says that,
         // not "Delegate N", from the first frame.
         let name = kernel::agent_name(&self.projects[ix].place(), &kernel_id);
+        let brief = kernel::agent_brief(&self.projects[ix].place(), &kernel_id);
         let mut chat = ChatSession::adopt(
             id,
             entry,
@@ -2750,6 +2751,13 @@ impl Workspace {
             cx,
         );
         chat.name = name;
+        // Cursor shows a subagent's brief as its first card; the kernel
+        // wrote it as the worker's first wake.
+        if chat.items.is_empty()
+            && let Some(brief) = brief
+        {
+            chat.items.push(ChatItem::User(crate::model::attachment::UserMessage::from(brief)));
+        }
         chat.rank = self.projects[ix].front_rank(Some(owner));
         self.projects[ix].sessions.push(chat);
         self.number_delegates(ix);

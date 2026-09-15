@@ -2597,6 +2597,9 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
             ..
         } = item
         {
+            if is_status_call(label) {
+                continue;
+            }
             stats.tools += 1;
             stats.secs += u64::from(secs.unwrap_or(0));
             stats.last_label = Some(label.clone());
@@ -2672,6 +2675,7 @@ fn tool_icon(kind: ToolKind) -> &'static str {
 pub fn render(
     chat: &ChatSession,
     changes: Option<crate::model::changes::GitChanges>,
+    head: Option<AnyElement>,
     tail: Vec<AnyElement>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
@@ -2680,6 +2684,11 @@ pub fn render(
     let turns = turns(&chat.items);
     let last = turns.len().saturating_sub(1);
     let mut zones: Vec<AnyElement> = Vec::new();
+    // Cursor's Project chat opens on the project itself: icon, name, one
+    // line, and the way to its page. A subagent's chat has none.
+    if let Some(head) = head {
+        zones.push(head);
+    }
     // The reading column is the composer's: `CHAT_MAX_WIDTH` less its
     // gutter on each side. Each turn centres itself in the scroller.
     let column = root::CHAT_MAX_WIDTH - 2. * root::CHAT_GUTTER;
@@ -2722,8 +2731,12 @@ pub fn render(
             && let Some(at) = message.sent_at.filter(|at| *at > 0)
         {
             let day = local_day(at);
-            if let Some(previous) = last_day
-                && previous != day
+            // Cursor's Project chat draws "Today 11:35 PM" over the first
+            // turn; a subagent's chat does not. Both draw one at a day
+            // crossing.
+            let first_of_root = last_day.is_none() && chat.parent.is_none() && !chat.is_delegate();
+            if first_of_root
+                || (last_day.is_some_and(|previous| previous != day))
             {
                 zones.push(
                     div()
@@ -3562,9 +3575,15 @@ fn turn_footer(
                         .size(px(12.))
                         .text_color(theme.text_faint),
                 );
+    let msg_for_fork = SharedString::from(format!("msg-{turn}"));
     let fork = 
             div()
                 .id(SharedString::from(format!("fork-turn-{id}-{turn}")))
+                // Cursor's Project and subagent footers have no fork; the
+                // classic chat's does. Ours shows when the pointer is over
+                // the answer, so the feature stays a reach away.
+                .invisible()
+                .group_hover(msg_for_fork, |el| el.visible())
                 .cursor_pointer()
                 .rounded(px(4.))
                 .p(px(3.))
@@ -3852,6 +3871,9 @@ fn run_fold(
     // not count — has no line; Cursor shows the rows, never a bare
     // "Worked" over them.
     let bare = !live && verb == "Worked" && rest.is_empty();
+    // The headline of a turn without a stamped time already says what
+    // this run did; one run under it would say it twice. Show the rows.
+    let bare = bare || (!live && headline_describes(chat, range.start));
     let open = bare || chat.transcript.groups.contains(&key);
     div()
         .flex()
@@ -3874,12 +3896,36 @@ fn run_fold(
                     .gap(px(ITEM_GAP))
                     .children(range.map(|ix| match &chat.items[ix] {
                         ChatItem::Thinking { .. } => thought(chat, ix, false, window, cx),
+                        // A `status` call is the live step, not a row (#185).
+                        ChatItem::Tool { label, .. } if is_status_call(label) => div().into_any_element(),
                         ChatItem::Tool { .. } => tool(chat, ix, false, cx),
                         _ => div().into_any_element(),
                     })),
             )
         })
         .into_any_element()
+}
+
+/// Whether the turn holding item `ix` draws a headline that is the run
+/// description itself (no time to say "Worked 12s") and that turn has this
+/// one run — the case where a run line would repeat the headline.
+fn headline_describes(chat: &ChatSession, ix: usize) -> bool {
+    let Some(turn) = turns(&chat.items).into_iter().find(|t| t.range.contains(&ix)) else {
+        return false;
+    };
+    let stamped = match chat.items.get(turn.range.start) {
+        Some(ChatItem::User(message)) => message.worked_secs.unwrap_or(0),
+        _ => 0,
+    };
+    if stamped > 0 {
+        return false;
+    }
+    let body = (turn.range.start + 1).min(turn.range.end)..turn.answer_from;
+    let runs = segments(&chat.items, body.clone())
+        .iter()
+        .filter(|seg| matches!(seg, Seg::Run(_)))
+        .count();
+    runs == 1 && work_stats(&chat.items, body).secs == 0
 }
 
 /// Cursor's fold line: the verb a shade brighter than what follows, the
@@ -5216,4 +5262,10 @@ pub(crate) fn plain_markdown(text: &str) -> String {
         }
     }
     out
+}
+
+/// The kernel's `status` tool: what the agent says it is doing, carried
+/// by the worker line and the panel. Never a row of its own.
+fn is_status_call(label: &str) -> bool {
+    label.split_whitespace().next().is_some_and(|first| first == "status")
 }
