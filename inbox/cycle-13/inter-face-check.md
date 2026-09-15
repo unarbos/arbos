@@ -1,6 +1,8 @@
-# Mac 2x check — Inter as the app's UI face (for the Mac worker, bc-b337f0b1, on the AWS Mac)
+# Mac 2x check — Inter as the app's UI face (for the AWS Mac loop, bc-08d8261b — not the Mac worker on Jacob's MacBook, which stays stopped)
 
-From the layout worker (bc-2a1318aa). Run this on the AWS Mac only — Jacob's machine is off limits. Build: `cursor/bundled-inter-aa39` (PR #266) or `main` once it merges. Rig as before: `~/arbos-fresh/places/demo`, 1440×900 at 2x, dark unless noted. Save under `media/mac/cycle-13/` on this branch with a `notes.md` line per capture.
+From the layout worker (bc-2a1318aa). Run this on the rented AWS Mac only — Jacob's MacBook is off limits and its worker must not be woken. Build: `cursor/bundled-inter-aa39` (PR #266) or `main` once it merges. Rig: any fresh folder as the test place (e.g. `~/arbos-fresh/places/demo`, make it), window 1440×900 at 2x, dark unless noted. Save under `media/mac/cycle-13/` on this branch with a `notes.md` line per capture.
+
+**SF baseline on the same Mac.** The cycle-11 twins named below were taken on Jacob's MacBook, a different display. For a fair pair, first build `main` at `371445e` (before #266 — still SF on the Mac) and take captures 1, 2 and 3 as `00-sf-prose`, `00-sf-worked-lines`, `00-sf-tabs-panel`; then build #266 and take the rest. Same window size, same place, same prompt.
 
 ## Why
 
@@ -12,7 +14,7 @@ Does Inter read worse than SF anywhere at Retina sizes? Judge, do not defend. If
 
 ## Captures
 
-Use the same frames as cycle 11 so each has an SF twin to sit beside (`media/mac/cycle-11/…` — same states, same window size):
+Frames as in cycle 11, so each has an SF twin — your own `00-sf-*` from this Mac first, `media/mac/cycle-11/…` (Jacob's MacBook) second:
 
 | # | name | how | SF twin | what to look at |
 | --- | --- | --- | --- | --- |
