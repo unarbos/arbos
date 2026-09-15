@@ -292,6 +292,10 @@ pub struct UserMessage {
     /// paperclip inside this card, never as a line of the transcript.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub described: Vec<DescribedImage>,
+    /// Typed into a running turn (Cursor's steer): the card sits inside
+    /// that turn's work, and the turn stays one — no second "Worked".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub steer: bool,
 }
 
 /// One image described for a model that takes no image input.
@@ -364,6 +368,7 @@ impl From<StoredMessage> for UserMessage {
                 sent_at: None,
                 feedback: None,
                 described: Vec::new(),
+            steer: false,
             },
             StoredMessage::Images {
                 text,
@@ -378,6 +383,7 @@ impl From<StoredMessage> for UserMessage {
                 sent_at: None,
                 feedback: None,
                 described: Vec::new(),
+            steer: false,
             },
         };
         out.lift_files();
@@ -396,6 +402,7 @@ impl From<String> for UserMessage {
             sent_at: Some(arbos_core::now_ms()),
             feedback: None,
             described: Vec::new(),
+            steer: false,
         };
         message.lift_files();
         message

@@ -294,11 +294,30 @@ impl AskPrompt {
         let held = held.trim();
         let current_id = self.questions.get(self.page).map(|q| q.id.as_str());
         let mut used_as_other = false;
+        // Words that name an option are that option, once: typed "alpha"
+        // with alpha picked (or not) reached the model as "alphaalpha".
+        let mut used_as_pick = false;
         let answers = self
             .questions
             .iter()
             .map(|question| {
                 let mut draft = self.draft(question.id.as_str());
+                if current_id == Some(question.id.as_str()) && !held.is_empty() {
+                    let named = question.options.iter().find(|o| {
+                        o.id.eq_ignore_ascii_case(held) || o.label.trim().eq_ignore_ascii_case(held)
+                    });
+                    if let Some(option) = named {
+                        if !draft.selected.iter().any(|id| *id == option.id) {
+                            if question.allow_multiple {
+                                draft.selected.push(option.id.clone());
+                            } else {
+                                draft.selected = vec![option.id.clone()];
+                            }
+                        }
+                        draft.other = false;
+                        used_as_pick = true;
+                    }
+                }
                 if draft.other
                     && draft.other_text.is_empty()
                     && current_id == Some(question.id.as_str())
@@ -318,7 +337,7 @@ impl AskPrompt {
                 }
             })
             .collect();
-        let details = if used_as_other {
+        let details = if used_as_other || used_as_pick {
             String::new()
         } else {
             held.to_owned()
@@ -1499,7 +1518,9 @@ impl ChatSession {
             self.flush();
             return;
         }
-        self.items.push(ChatItem::User(content.message()));
+        let mut message = content.message();
+        message.steer = true;
+        self.items.push(ChatItem::User(message));
         self.updated = SystemTime::now();
         self.flush();
     }

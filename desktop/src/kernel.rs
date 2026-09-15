@@ -1274,9 +1274,20 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
     // event after it.
     let mut turn_began: Option<i64> = None;
     let mut thinking_since: Option<i64> = None;
+    // A `user` line while a turn is open (after its wake, before its
+    // turn_complete) was a steer: its card stays inside that turn.
+    let mut turn_open = false;
     for line in text.lines() {
         if let Ok(ev) = serde_json::from_str::<arbos_core::Event>(line) {
             let thinking = matches!(ev.kind, arbos_core::EventKind::Thinking { .. });
+            let steer = turn_open && matches!(ev.kind, arbos_core::EventKind::User { .. });
+            match &ev.kind {
+                arbos_core::EventKind::Wake { .. } => turn_open = true,
+                arbos_core::EventKind::TurnComplete { .. } | arbos_core::EventKind::Interrupted { .. } => {
+                    turn_open = false
+                }
+                _ => {}
+            }
             if !thinking {
                 if let Some(since) = thinking_since.take() {
                     // The record's own `secs` (settled thoughts since #221)
@@ -1290,7 +1301,7 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
                 }
             }
             match &ev.kind {
-                arbos_core::EventKind::User { .. } => turn_began = Some(ev.ts),
+                arbos_core::EventKind::User { .. } if !steer => turn_began = Some(ev.ts),
                 arbos_core::EventKind::Thinking { .. } => {
                     thinking_since.get_or_insert(ev.ts);
                 }
@@ -1307,7 +1318,10 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
                 }
                 _ => {}
             }
-            if let Some(item) = event_to_item(&ev) {
+            if let Some(mut item) = event_to_item(&ev) {
+                if steer && let crate::model::session::ChatItem::User(message) = &mut item {
+                    message.steer = true;
+                }
                 // A `status` call between two reasoning steps draws no row;
                 // the thoughts on either side of it are one thought.
                 let last_shown = items
