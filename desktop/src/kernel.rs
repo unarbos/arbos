@@ -2821,19 +2821,44 @@ fn kernel_workspace_toml(root: &Path) -> Result<String> {
 }
 
 fn ssh_put(host: &str, local: &Path, remote: &str) -> Result<()> {
-    remember_mux_host(host);
+    // scp over SFTP (OpenSSH 9+) takes the remote path as it is: no shell
+    // there to turn `$HOME` or `~` into a directory. Ask the host once.
+    let remote = if remote.starts_with("$HOME") || remote.starts_with('~') {
+        let home = ssh_run(host, r#"printf %s "$HOME""#)?;
+        if home.status != 0 || home.stdout.trim().is_empty() {
+            return Err(anyhow!("could not read $HOME on {host}: {}", home.problem()));
+        }
+        let rest = remote
+            .trim_start_matches("$HOME")
+            .trim_start_matches('~');
+        format!("{}{}", home.stdout.trim(), rest)
+    } else {
+        remote.to_string()
+    };
     let dest = format!("{host}:{remote}");
-    let status = Command::new("scp")
-        .args(ssh_shared())
-        .arg("-q")
-        .arg(local)
-        .arg(&dest)
-        .status()
-        .context("scp")?;
-    if !status.success() {
-        return Err(anyhow!("scp {} to {host} failed", local.display()));
+    // Its own connection, not the probe's mux: with ControlPersist=no the
+    // probe's master is closing as scp starts, and scp through that socket
+    // died with "Connection closed" every time on arboslife (cycle 11).
+    let mut last = String::new();
+    for attempt in 0..2 {
+        let out = Command::new("scp")
+            .args(ssh_base())
+            .arg("-q")
+            .arg(local)
+            .arg(&dest)
+            .stdin(Stdio::null())
+            .output()
+            .context("scp")?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        last = if err.is_empty() { out.status.to_string() } else { err };
+        if attempt == 0 {
+            thread::sleep(Duration::from_millis(500));
+        }
     }
-    Ok(())
+    Err(anyhow!("scp {} to {host} failed: {last}", local.display()))
 }
 
 fn local_os_arch() -> String {
@@ -2865,12 +2890,18 @@ fn ssh_launch(target: &RemoteTarget, path: &Path) -> Result<()> {
         bin = target.bin,
     );
     let inner = launch.replace('\'', "'\\''");
+    // The launch log lives under ~/.cache/arbos, which the install makes;
+    // ~/.arbos is the home place and may be anything (on templar a symlink
+    // to a folder that is gone — the redirect failed and the kernel never
+    // started, cycle 11). A log dir that cannot be made is a failure here,
+    // not a 60 s wait for a file that never comes.
     let script = format!(
-        r#"umask 077 && mkdir -p "$HOME/.arbos"
+        r#"umask 077 && mkdir -p "$HOME/.cache/arbos" || {{ echo "cannot make $HOME/.cache/arbos" >&2; exit 1; }}
+log="$HOME/.cache/arbos/web.log"
 if command -v setsid >/dev/null 2>&1; then
-  setsid nohup sh -c '{inner}' >>"$HOME/.arbos/web.log" 2>&1 </dev/null &
+  setsid nohup sh -c '{inner}' >>"$log" 2>&1 </dev/null &
 else
-  nohup sh -c '{inner}' >>"$HOME/.arbos/web.log" 2>&1 </dev/null &
+  nohup sh -c '{inner}' >>"$log" 2>&1 </dev/null &
 fi
 echo started"#
     );
@@ -2899,7 +2930,7 @@ fn wait_remote_json(host: &str, path: &Path) -> Result<WebInfo> {
         thread::sleep(Duration::from_millis(500));
     }
     Err(anyhow!(
-        "arbos did not start within 60 s (see ~/.arbos/web.log on {host})"
+        "arbos did not start within 60 s (see ~/.cache/arbos/web.log on {host})"
     ))
 }
 
