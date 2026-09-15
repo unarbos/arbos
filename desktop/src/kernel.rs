@@ -1283,9 +1283,8 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
             let steer = turn_open && matches!(ev.kind, arbos_core::EventKind::User { .. });
             match &ev.kind {
                 arbos_core::EventKind::Wake { .. } => turn_open = true,
-                arbos_core::EventKind::TurnComplete { .. } | arbos_core::EventKind::Interrupted { .. } => {
-                    turn_open = false
-                }
+                arbos_core::EventKind::TurnComplete { .. }
+                | arbos_core::EventKind::Interrupted { .. } => turn_open = false,
                 _ => {}
             }
             if !thinking {
@@ -1433,7 +1432,8 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
             text: Some(text),
             brief,
         } if wake == "plan" && !text.trim().is_empty() => {
-            let mut message = crate::model::attachment::UserMessage::from(wake_brief(text, brief.as_deref()));
+            let mut message =
+                crate::model::attachment::UserMessage::from(wake_brief(text, brief.as_deref()));
             message.sent_at = (ev.ts > 0).then_some(ev.ts);
             Some(ChatItem::User(message))
         }
@@ -1486,7 +1486,11 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
                     .started
                     .zip(rec.ended)
                     .map(|(started, ended)| ((ended - started).max(0) / 1000) as u32),
-                desc: rec.label.clone().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()),
+                desc: rec
+                    .label
+                    .clone()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty()),
             })
         }
         _ => None,
@@ -2383,7 +2387,8 @@ fn attach_remote_cached(key: &str, create: impl FnOnce() -> Result<Tunnel>) -> R
 /// Set by `open_remote_tunnel` as it goes; `Ready` when the tunnel is up;
 /// `Failed` with the step when it is not. Read with `remote_progress`.
 fn progress_lock() -> &'static Mutex<HashMap<String, arbos_core::remote_kernel::Progress>> {
-    static P: OnceLock<Mutex<HashMap<String, arbos_core::remote_kernel::Progress>>> = OnceLock::new();
+    static P: OnceLock<Mutex<HashMap<String, arbos_core::remote_kernel::Progress>>> =
+        OnceLock::new();
     P.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -2457,7 +2462,10 @@ fn open_remote_tunnel_steps(
                 to: m.short(),
             }),
             _ => step(Progress::Installing {
-                version: mine.as_ref().map(|m| m.short()).unwrap_or_else(|| "this build".into()),
+                version: mine
+                    .as_ref()
+                    .map(|m| m.short())
+                    .unwrap_or_else(|| "this build".into()),
             }),
         }
         if probe.running.is_some() {
@@ -2674,7 +2682,9 @@ fn ssh_install_kernel(
                 remote_arch,
                 target.build,
             );
-            if target.build && arbos_core::remote_kernel::release_asset(remote_arch, &version).is_none() {
+            if target.build
+                && arbos_core::remote_kernel::release_asset(remote_arch, &version).is_none()
+            {
                 step(arbos_core::remote_kernel::Progress::Building);
             }
             let out = ssh_run(host, &script)?;
@@ -2858,11 +2868,12 @@ fn ssh_put(host: &str, local: &Path, remote: &str) -> Result<()> {
     let remote = if remote.starts_with("$HOME") || remote.starts_with('~') {
         let home = ssh_run(host, r#"printf %s "$HOME""#)?;
         if home.status != 0 || home.stdout.trim().is_empty() {
-            return Err(anyhow!("could not read $HOME on {host}: {}", home.problem()));
+            return Err(anyhow!(
+                "could not read $HOME on {host}: {}",
+                home.problem()
+            ));
         }
-        let rest = remote
-            .trim_start_matches("$HOME")
-            .trim_start_matches('~');
+        let rest = remote.trim_start_matches("$HOME").trim_start_matches('~');
         format!("{}{}", home.stdout.trim(), rest)
     } else {
         remote.to_string()
@@ -2885,7 +2896,11 @@ fn ssh_put(host: &str, local: &Path, remote: &str) -> Result<()> {
             return Ok(());
         }
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        last = if err.is_empty() { out.status.to_string() } else { err };
+        last = if err.is_empty() {
+            out.status.to_string()
+        } else {
+            err
+        };
         if attempt == 0 {
             thread::sleep(Duration::from_millis(500));
         }

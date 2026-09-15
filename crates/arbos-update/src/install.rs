@@ -33,8 +33,7 @@ use std::{
 };
 
 /// The suffix the old tree is set aside under, and the one [`recover`] looks
-/// for. It begins with a dot so Finder does not show a second Arbos in
-/// `/Applications` for the second the swap takes.
+/// for.
 const BACKUP_SUFFIX: &str = ".arbos-old";
 
 /// And the one the new tree is unpacked into.
@@ -202,6 +201,30 @@ pub fn unpack(payload: &Path, format: Format, target: &Path) -> Result<PathBuf> 
     }
 }
 
+/// Tell macOS the app at this path is new, so ⌘Space finds it now rather than
+/// whenever the system next gets round to looking.
+///
+/// Two systems have to be told, and they are not the same one. Launch Services
+/// is the register of what applications exist — it is what opens a bundle, and
+/// what Spotlight's "open this app" results come from; Spotlight's own index
+/// is what matches the name typed into it. Replacing a bundle in place
+/// normally updates both eventually, and eventually is not what "⌘Space,
+/// arbos, return" means to somebody who just pressed Update.
+///
+/// Both are best-effort. Neither failing is a reason to call an installed
+/// update a failed one, and on the next login both happen anyway.
+pub fn reindex(target: &Path) {
+    if cfg!(not(target_os = "macos")) {
+        return;
+    }
+    const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/\
+         LaunchServices.framework/Support/lsregister";
+    if Path::new(LSREGISTER).is_file() {
+        let _ = Command::new(LSREGISTER).arg("-f").arg(target).status();
+    }
+    let _ = Command::new("/usr/bin/mdimport").arg(target).status();
+}
+
 /// Whether an unpacked tree is an Arbos that will run: the executable is
 /// there, and so is the kernel beside it.
 ///
@@ -239,7 +262,12 @@ pub fn check_tree(root: &Path, executable: &str, kernel: &str) -> Result<()> {
     Ok(())
 }
 
-/// `/Applications/Arbos.app` → `/Applications/Arbos.app.arbos-old`.
+/// `/Applications/Arbos.app` → `/Applications/.Arbos.app.arbos-old`.
+///
+/// Beside the target, because both renames have to stay within one
+/// filesystem. Hidden — the leading dot — because for the second or two that
+/// the swap takes, the directory it is in is `/Applications`, and neither
+/// Finder nor Spotlight should ever see two things called Arbos there.
 fn sibling(target: &Path, suffix: &str) -> Result<PathBuf> {
     let name = target
         .file_name()
@@ -248,7 +276,7 @@ fn sibling(target: &Path, suffix: &str) -> Result<PathBuf> {
     let parent = target
         .parent()
         .with_context(|| format!("{} has nowhere beside it", target.display()))?;
-    Ok(parent.join(format!("{name}{suffix}")))
+    Ok(parent.join(format!(".{name}{suffix}")))
 }
 
 fn remove(path: &Path) -> Result<()> {
@@ -391,6 +419,34 @@ mod tests {
     }
 
     #[test]
+    fn the_app_keeps_its_own_path_and_leaves_no_second_arbos_beside_it() {
+        // ⌘Space has to find it: the app is replaced where it stands, so its
+        // path, its name and its `.app` extension are the ones they were, and
+        // what is beside it while the swap runs is hidden and then gone.
+        let home = tempfile::tempdir().unwrap();
+        let applications = home.path().join("Applications");
+        let target = tree(&applications.join("Arbos.app"), "old");
+        let staged = tree(&applications.join("staged"), "new");
+
+        let swap = Swap::begin(&target, &staged).unwrap();
+        let visible: Vec<String> = fs::read_dir(&applications)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.starts_with('.'))
+            .collect();
+        assert_eq!(visible, ["Arbos.app"], "mid-swap: {visible:?}");
+        swap.commit().unwrap();
+
+        assert!(target.is_dir(), "still at {}", target.display());
+        assert_eq!(marker_of(&target), "app new");
+        let left: Vec<String> = fs::read_dir(&applications)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["Arbos.app"], "afterwards: {left:?}");
+    }
+
+    #[test]
     fn a_crash_between_the_two_renames_is_repaired_on_the_next_launch() {
         // No running code can catch this one: the process is gone between the
         // rename that moves the old app aside and the one that puts the new
@@ -398,7 +454,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let target = home.path().join("Arbos.app");
         tree(&target, "old");
-        let backup = home.path().join("Arbos.app.arbos-old");
+        let backup = home.path().join(".Arbos.app.arbos-old");
         fs::rename(&target, &backup).unwrap();
         assert!(!target.exists());
 
@@ -416,7 +472,7 @@ mod tests {
 
         // A commit that could not delete its backup: the app is fine, and the
         // leftovers are tidied rather than restored over the top of it.
-        let backup = tree(&home.path().join("Arbos.app.arbos-old"), "stale");
+        let backup = tree(&home.path().join(".Arbos.app.arbos-old"), "stale");
         assert!(!recover(&target).unwrap());
         assert_eq!(marker_of(&target), "app current");
         assert!(!backup.exists());
@@ -426,7 +482,7 @@ mod tests {
     fn a_stale_backup_does_not_stop_the_next_update() {
         let home = tempfile::tempdir().unwrap();
         let target = tree(&home.path().join("Arbos.app"), "old");
-        tree(&home.path().join("Arbos.app.arbos-old"), "older still");
+        tree(&home.path().join(".Arbos.app.arbos-old"), "older still");
         let staged = tree(&home.path().join("staged"), "new");
 
         let swap = Swap::begin(&target, &staged).unwrap();

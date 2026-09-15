@@ -72,9 +72,7 @@ impl Arbos {
             .ghost("status-bar-settings")
             .px(px(6.))
             .py(px(4.))
-            .tooltip(|window, cx| {
-                Tooltip::with_keystroke("Settings", "⌘,", window, cx)
-            })
+            .tooltip(|window, cx| Tooltip::with_keystroke("Settings", "⌘,", window, cx))
             .child(
                 div()
                     .relative()
@@ -117,15 +115,21 @@ impl Arbos {
 
         // Taken out of the entity before anything else borrows `cx`.
         let updater = self.updater.read(cx);
-        let (state, channel, trouble) = (
+        let (state, channel, trouble, at) = (
             updater.state().clone(),
             updater.channel(),
             updater.can_install(),
+            updater.installed_at(),
         );
         match &state {
-            State::Idle | State::Checking => {
-                quiet(theme, matches!(state, State::Checking), channel, trouble, cx)
-            }
+            State::Idle | State::Checking => quiet(
+                theme,
+                matches!(state, State::Checking),
+                channel,
+                trouble,
+                at,
+                cx,
+            ),
             State::Ready(update) => plate(
                 cx,
                 Plate {
@@ -150,17 +154,13 @@ impl Arbos {
                     total => (*got as f32 / *total as f32).clamp(0., 1.),
                 };
                 plate(
-                cx,
+                    cx,
                     Plate {
                         label: format!("Updating… {}%", (fraction * 100.).round() as u32),
                         icon: None,
                         fill: theme.accent,
                         progress: Some(fraction),
-                        tooltip: Some(format!(
-                            "{} of {}",
-                            megabytes(*got),
-                            megabytes(*total)
-                        )),
+                        tooltip: Some(format!("{} of {}", megabytes(*got), megabytes(*total))),
                         clickable: false,
                     },
                 )
@@ -197,9 +197,7 @@ impl Arbos {
                     icon: None,
                     fill: theme.danger,
                     progress: None,
-                    tooltip: Some(format!(
-                        "{why}\n\nArbos is unchanged. Click to try again.",
-                    )),
+                    tooltip: Some(format!("{why}\n\nArbos is unchanged. Click to try again.",)),
                     clickable: update.is_some(),
                 },
             ),
@@ -213,6 +211,7 @@ fn quiet(
     checking: bool,
     channel: Channel,
     trouble: Option<String>,
+    at: Option<std::path::PathBuf>,
     cx: &mut Context<Arbos>,
 ) -> AnyElement {
     let version = build::version_label();
@@ -221,8 +220,14 @@ fn quiet(
         // a button that would fail at the last step.
         Some(why) => format!("Arbos {version}\n\n{why}"),
         None => format!(
-            "Arbos {version} — up to date on the {} channel.\nClick to check again.",
-            channel.as_str()
+            "Arbos {version} — up to date on the {} channel.\nClick to check again.{}",
+            channel.as_str(),
+            // Which copy this is. The first question worth answering when
+            // ⌘Space opens the wrong Arbos, or none.
+            match &at {
+                Some(at) => format!("\n\n{}", at.display()),
+                None => String::new(),
+            }
         ),
     };
     theme
@@ -306,14 +311,11 @@ fn plate(cx: &mut Context<Arbos>, plate: Plate) -> AnyElement {
                 .hover(|el| el.opacity(0.88))
                 .active(|el| el.opacity(0.78))
         })
-        .children(icon.map(|icon| {
-            div().child(
-                icons::icon(icon)
-                    .size(px(12.))
-                    .flex_none()
-                    .text_color(ink),
-            )
-        }))
+        .children(
+            icon.map(|icon| {
+                div().child(icons::icon(icon).size(px(12.)).flex_none().text_color(ink))
+            }),
+        )
         .child(
             div()
                 .relative()

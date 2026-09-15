@@ -169,6 +169,13 @@ impl Updater {
         }
     }
 
+    /// Where the app being updated lives. Shown in the bar, because "which
+    /// copy am I running" is the first question when ⌘Space opens the wrong
+    /// one — or opens nothing.
+    pub fn installed_at(&self) -> Option<PathBuf> {
+        installed_root().ok().map(|root| root.path)
+    }
+
     pub fn set_channel(&mut self, channel: Channel, cx: &mut Context<Self>) {
         if self.channel == channel {
             return;
@@ -286,7 +293,10 @@ impl Updater {
             // Relaunching is the main thread's: it has to be the last thing
             // this process does, and the windows have to be gone first.
             let _ = cx.update(|cx| {
-                if let Some(true) = this.read_with(cx, |u, _| matches!(u.state, State::Restarting)).ok() {
+                if let Some(true) = this
+                    .read_with(cx, |u, _| matches!(u.state, State::Restarting))
+                    .ok()
+                {
                     relaunch(cx);
                 }
             });
@@ -368,6 +378,10 @@ fn fetch_and_install(
     install::check_tree(&root.path, root.executable, root.kernel)
         .context("the new build did not survive being moved into place")?;
     swap.commit()?;
+    // The app is back at the path it has always had, and macOS is told so now
+    // rather than eventually: ⌘Space, "arbos", return has to work the moment
+    // this finishes, not after the system next re-indexes on its own.
+    install::reindex(&root.path);
     Ok(())
 }
 
@@ -573,9 +587,7 @@ pub fn channel_of(settings: &settings::Settings) -> Channel {
     std::env::var("ARBOS_UPDATE_CHANNEL")
         .ok()
         .and_then(|name| Channel::parse(&name))
-        .unwrap_or_else(|| {
-            Channel::parse(&settings.update.channel).unwrap_or_default()
-        })
+        .unwrap_or_else(|| Channel::parse(&settings.update.channel).unwrap_or_default())
 }
 
 /// Whether this build knows the key an update has to be signed with.

@@ -88,7 +88,8 @@ impl Default for Update {
 pub fn set_update_channel(channel: arbos_update::Channel) -> Result<()> {
     let path = dir()?.join("settings.toml");
     let body = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = body.parse().context("settings.toml is not valid toml")?;
+    let mut doc: toml_edit::DocumentMut =
+        body.parse().context("settings.toml is not valid toml")?;
     let update = doc["update"].or_insert(toml_edit::table());
     let Some(update) = update.as_table_mut() else {
         anyhow::bail!("`update` in settings.toml is not a table");
