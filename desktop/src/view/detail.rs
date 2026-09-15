@@ -493,6 +493,9 @@ impl Arbos {
             _ if chat.is_some_and(|chat| chat.answering.is_some()) => {
                 "Your answer to the plan question…"
             }
+            // Cursor's subagent chat takes no follow-ups; a worker the
+            // kernel archived is that here.
+            _ if chat.is_some_and(|chat| chat.agent_gone()) => "Follow-ups aren't available for this worker",
             // Cursor: a fresh chat invites; one with a turn asks for the next.
             _ if chat.is_some_and(|chat| chat.items.is_empty()) => "Plan, search, build anything",
             _ => "Send follow-up",
@@ -1781,6 +1784,7 @@ impl Arbos {
             .into_iter()
             .flatten()
             .collect();
+            let mut head = self.chat_project_head(cx);
             // A tool-list panic must not skip the composer sibling. The
             // transcript is inline in this render; catch it here.
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1789,7 +1793,8 @@ impl Arbos {
                     match workspace.session(id) {
                         Some(chat) => {
                             let changes = workspace.changes.get(&chat.cwd).cloned();
-                            transcript::render(chat, changes, tail, window, cx)
+                            let head = head.take();
+                            transcript::render(chat, changes, head, tail, window, cx)
                         }
                         None => div().flex_1().into_any_element(),
                     }
@@ -1839,6 +1844,10 @@ impl Arbos {
         let workspace = self.workspace.read(cx);
         let chat = workspace.active_session()?;
         let project = workspace.active_project()?;
+        // A subagent's chat in Cursor carries no pills; they are the project's.
+        if chat.parent.is_some() {
+            return None;
+        }
         let (working, prs) = pill_counts(project, chat);
         // Cursor's Changes pill: the working tree's uncommitted lines, and
         // beside it Commit & Push. Only for a local repository with changes.
@@ -2035,6 +2044,76 @@ impl Arbos {
                         }),
                     )
                 })
+                .into_any_element(),
+        )
+    }
+
+    /// Cursor's Project chat header, over the root chat's first turn: the
+    /// project's glyph in its colour, its name, one line about it, and
+    /// "View Project Page". A worker's chat draws none.
+    fn chat_project_head(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = Theme::of(cx).clone();
+        let workspace = self.workspace.read(cx);
+        let chat = workspace.active_session()?;
+        if chat.parent.is_some() {
+            return None;
+        }
+        let project = workspace.active_project()?;
+        let name = crate::model::workspace::Workspace::tab_label(project);
+        let glyph = project.identity.glyph();
+        let color = project.identity.hsla();
+        let line = crate::model::store_view::StoreView::read(&project.path)
+            .page
+            .as_ref()
+            .and_then(|page| page.tldr.first().map(|item| item.label.clone()))
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| {
+                format!("Tracks the decisions, agent work, and follow-through needed to move {name} forward.")
+            });
+        Some(
+            div()
+                .id("project-head")
+                .w_full()
+                .max_w(px(root::CHAT_MAX_WIDTH - 2. * root::CHAT_GUTTER))
+                .self_center()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(6.))
+                .pt(px(28.))
+                .pb(px(24.))
+                .child(
+                    div()
+                        .size(px(28.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icons::icon(glyph).size(px(24.)).text_color(color)),
+                )
+                .child(
+                    div()
+                        .text_style(TextStyle::Headline)
+                        .text_color(theme.text)
+                        .child(SharedString::from(name)),
+                )
+                .child(
+                    div()
+                        .max_w(px(360.))
+                        .text_style(TextStyle::Callout)
+                        .text_color(theme.text_muted)
+                        .text_center()
+                        .child(SharedString::from(line)),
+                )
+                .child(
+                    div()
+                        .id("project-head-page")
+                        .mt(px(6.))
+                        .cursor_pointer()
+                        .text_style(TextStyle::Callout)
+                        .text_color(theme.accent)
+                        .child("View Project Page")
+                        .on_click(cx.listener(|this, _, _, cx| this.show_pane(Pane::Project, cx))),
+                )
                 .into_any_element(),
         )
     }

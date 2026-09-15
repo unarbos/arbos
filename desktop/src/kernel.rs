@@ -1392,6 +1392,16 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
         }
         // An empty line is a step boundary for the kernel's projection, not
         // something the model said.
+        // The brief a worker was spawned with is its prompt: Cursor shows a
+        // subagent's as the first card. A plan wake with no text (a timer,
+        // a chore) is not a message.
+        arbos_core::EventKind::Wake { wake, text: Some(text) }
+            if wake == "plan" && !text.trim().is_empty() =>
+        {
+            let mut message = crate::model::attachment::UserMessage::from(brief_of(text));
+            message.sent_at = (ev.ts > 0).then_some(ev.ts);
+            Some(ChatItem::User(message))
+        }
         arbos_core::EventKind::Assistant { text, .. } if text.trim().is_empty() => None,
         arbos_core::EventKind::Assistant { text, .. } => Some(ChatItem::Agent(text.clone())),
         arbos_core::EventKind::Say { from, text } => Some(ChatItem::From {
@@ -2961,4 +2971,40 @@ fn stable_local_port(host: &str, path: &Path, salt: &str) -> u16 {
 
 fn port_free(port: u16) -> bool {
     TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// The brief inside a spawn wake: the kernel prefixes "You were spawned by
+/// agent root for this mission:" and a blank line; the card shows the
+/// mission as the parent wrote it.
+fn brief_of(text: &str) -> String {
+    let t = text.trim();
+    match t.split_once("for this mission:") {
+        Some((_, rest)) => rest.trim().to_string(),
+        None => t.to_string(),
+    }
+}
+
+/// The brief a worker was spawned with: the text of the first plan wake in
+/// its transcript. `None` for a remote place, an id that is not a folder,
+/// or a transcript that does not start with one.
+pub fn agent_brief(place: &Place, id: &str) -> Option<String> {
+    if place.host.is_some() || !safe_session_id(id) {
+        return None;
+    }
+    let path = place
+        .path
+        .join(".arbos")
+        .join("agents")
+        .join(id)
+        .join("transcript.jsonl");
+    let file = std::fs::File::open(path).ok()?;
+    let mut first = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(file), &mut first).ok()?;
+    let ev: arbos_core::Event = serde_json::from_str(first.trim()).ok()?;
+    match ev.kind {
+        arbos_core::EventKind::Wake { wake, text: Some(text) } if wake == "plan" && !text.trim().is_empty() => {
+            Some(brief_of(&text))
+        }
+        _ => None,
+    }
 }
