@@ -22,6 +22,7 @@ use arbos_core::{Place, list_agents};
 const AGENT_FILES: &[&str] = &[
     "agent.md",
     "notes.md",
+    "todo.md",
     "transcript.jsonl",
     "feedback.jsonl",
     "checkpoints.jsonl",

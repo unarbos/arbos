@@ -534,6 +534,25 @@ impl KernelHooks {
         Ok(())
     }
 
+    pub fn todo(&self, agent: &str) -> notes::Notes {
+        notes::load_todo(&self.place, agent)
+    }
+
+    /// The thread checklist moved: windows hear it as a `changed` frame
+    /// for `agents/<id>/todo.md` and draw the card from the file.
+    pub fn save_todo(&self, agent: &str, n: &notes::Notes) -> Result<()> {
+        notes::save_todo(&self.place, agent, n)?;
+        let size = crate::watch::stat(&notes::todo_path(&self.place, agent))
+            .map(|(size, _)| size)
+            .unwrap_or(0);
+        self.broadcast(Frame::Changed {
+            path: format!("agents/{agent}/{}", notes::TODO),
+            kind: "modified".into(),
+            size,
+        });
+        Ok(())
+    }
+
     /// `subscribe add`: validated, numbered, saved.
     pub fn subscribe(
         &self,

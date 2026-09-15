@@ -56,6 +56,7 @@ pub const COORDINATOR_TOOLS: &[&str] = &[
     // showing; `use` arms a worker's bash through the kernel.
     "secret",
     "status",
+    "todo",
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

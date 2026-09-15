@@ -50,6 +50,7 @@ pub const ALL_TOOLS: &[&str] = &[
     "subscribe",
     "record",
     "status",
+    "todo",
 ];
 
 /// How much an agent may do without asking. `agent.md` `mode:`.
@@ -398,6 +399,11 @@ impl Agent {
         // Following a pull request is standing work, like a plan node.
         // Old agent.md files predate the tool.
         if tool == "subscribe" && self.allowlist.iter().any(|t| t == "plan") {
+            return true;
+        }
+        // The thread checklist goes with the plan. Old agent.md files
+        // predate the tool.
+        if tool == "todo" && self.allowlist.iter().any(|t| t == "plan") {
             return true;
         }
         // Visible shell. Old agent.md files list bash only.

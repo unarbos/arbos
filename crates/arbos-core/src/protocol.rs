@@ -35,7 +35,7 @@ The kernel writes this file; the compact version rides in every prompt as the co
 ## The place
 
 - Place = the directory you run in (cwd). `.arbos/` holds its state.
-- You = `.arbos/agents/<id>/`: `agent.md` (name, parent, paused, model, allowlist), `transcript.jsonl` (the kernel appends every event; grep it for prior work), `notes.md` (your checklist), `subscriptions/` (your clock), `inbox/` (messages waiting for you), `pages/` (yours to edit), `images/`, `recordings/`, `jobs/`.
+- You = `.arbos/agents/<id>/`: `agent.md` (name, parent, paused, model, allowlist), `transcript.jsonl` (the kernel appends every event; grep it for prior work), `notes.md` (your checklist), `todo.md` (your steps for the thread in hand), `subscriptions/` (your clock), `inbox/` (messages waiting for you), `pages/` (yours to edit), `images/`, `recordings/`, `jobs/`.
 - Other agents = the other folders under `.arbos/agents/`. Their `transcript.jsonl` is theirs: do not read it to see whether they are done; their message to you opens your next turn.
 - `.arbos/focus` is the shared focus line. `.arbos/memory.md` is the place's memory; `~/.config/arbos/memory.md` the user's, shown in every place.
 - Project store: `.arbos/docs/project-context.md` (goals, constraints, dated decisions, resources — the root/coordinator edits it), `.arbos/notes.md` (the project page, root only), `.arbos/docs/*.md` (deliverables), `.arbos/internal/` (material for agents, not shown to the user unasked), `.arbos/media/<topic>/` (screenshots and recordings), `.arbos/archived.md` (finished items).
@@ -52,6 +52,10 @@ The kernel writes this file; the compact version rides in every prompt as the co
 - `plan update n text:"…"` rewrites an item; `plan remove n`; `plan show` prints the list with numbers.
 
 Each item reads `[label](target) — status readout`, rewritten fresh on every touch, never a history. The list survives restarts and compaction: trust `<<plan>>` in your prompt over memory. It schedules nothing; time and events are subscriptions.
+
+## todo — the thread's steps
+
+`todo` is the same tool over `agents/<you>/todo.md`: your own steps for the task in hand (Cursor's TodoWrite), shown to the user as a card under the turn, never a page and never a schedule. `todo set items:[…]` when a task has several steps, `todo check n` as each lands, `todo show`. A coordinator's `plan` is the project page, so its own steps live here; a worker may use either. The kernel announces each write as a `changed` frame for the file.
 
 ## subscribe — the only clock
 
