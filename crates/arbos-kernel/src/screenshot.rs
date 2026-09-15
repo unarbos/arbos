@@ -27,7 +27,7 @@ const RENDER_TIMEOUT: Duration = Duration::from_secs(60);
 /// other.
 static RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-pub struct Screenshot;
+pub struct Screenshot(pub std::sync::Arc<crate::hooks::KernelHooks>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Target {
@@ -93,6 +93,7 @@ impl Tool for Screenshot {
         Ok(Plan::access(Access::none()))
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
+        let hooks = std::sync::Arc::clone(&self.0);
         Box::pin(async move {
             let raw = args
                 .get("target")
@@ -120,9 +121,11 @@ impl Tool for Screenshot {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                tokio::task::spawn_blocking(move || render_text(&dir, &title, &text))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("screenshot task: {e}"))??
+                tokio::task::spawn_blocking(move || {
+                    render_text(&hooks.browsers, &dir, &title, &text)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("screenshot task: {e}"))??
             } else {
                 tokio::task::spawn_blocking(move || capture(&dir, target, display))
                     .await
@@ -232,7 +235,12 @@ fn fresh_named(dir: &Path, stem: &str) -> PathBuf {
 /// from a one-page HTML file (removed afterwards). Chrome is what the
 /// browser tool already needs, so no new dependency; a machine without it
 /// gets told what to install and what to do instead.
-fn render_text(dir: &Path, title: &str, text: &str) -> Result<Captured> {
+fn render_text(
+    hub: &crate::browser::BrowserHub,
+    dir: &Path,
+    title: &str,
+    text: &str,
+) -> Result<Captured> {
     let Some(chrome) = chrome_binary() else {
         bail!(
             "screenshot target text needs chromium or google-chrome on this machine (none found); save the output to a file under .arbos/media/<topic>/ and name it in your reply instead"
@@ -246,6 +254,25 @@ fn render_text(dir: &Path, title: &str, text: &str) -> Result<Captured> {
     // 22 px a line at 14 px monospace, a title band, padding; capped so a
     // long log does not make a 40 000-pixel image.
     let height = (lines as u32 * 22 + if title.is_empty() { 40 } else { 76 }).clamp(120, 4600);
+    // The kernel's own Chrome over CDP, in a page of its own: the path the
+    // browser tool proves on every machine. The one-shot `--screenshot`
+    // below is the fallback when the hub cannot come up.
+    {
+        let _one_at_a_time = RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        match hub.render_file(&html_path, TEXT_IMAGE_WIDTH, height) {
+            Ok(png) if !png.is_empty() => {
+                let _ = std::fs::remove_file(&html_path);
+                std::fs::write(&path, &png)?;
+                return Ok(Captured {
+                    path,
+                    png,
+                    backend: "chrome (text)",
+                });
+            }
+            Ok(_) => {}
+            Err(e) => crate::klog::warn("text_render_cdp_failed", None, format!("{e:#}")),
+        }
+    }
     // Its own profile: the browser tool's Chrome holds the default one,
     // and two Chromes on one profile wait on each other's lock. One per
     // kernel process, kept between renders — a fresh profile is the slow
@@ -295,7 +322,7 @@ fn render_text(dir: &Path, title: &str, text: &str) -> Result<Captured> {
     Ok(Captured {
         path,
         png,
-        backend: "chrome (text)",
+        backend: "chrome (text, one-shot)",
     })
 }
 
