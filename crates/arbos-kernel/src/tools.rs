@@ -36,7 +36,7 @@ fn board(owner: &str, action: &str, panel: &str, ids: Vec<String>) -> Frame {
 pub struct Spawn(pub Arc<KernelHooks>);
 pub struct Say(pub Arc<KernelHooks>);
 pub struct Ask(pub Arc<KernelHooks>);
-/// `status "Reading project context"`: the live line beside the agent's
+/// `status "<-ing verb> <what>"`: the live line beside the agent's
 /// name in every window (Cursor's UpdateCurrentStep).
 pub struct StatusTool(pub Arc<KernelHooks>);
 
@@ -47,7 +47,7 @@ impl Tool for StatusTool {
     fn schema(&self) -> Value {
         typed_schema(
             "status",
-            "Say what you are doing now, for the line beside your name: a verb phrase, six words or less (\"Reading project context\"). Call it at each major step; it replaces the last one. A tool call, not a line of text in your reply.",
+            "Say what you are doing now, for the line beside your name: an -ing verb plus the thing you are on, six words or less, naming your actual step (the file, the command, the question) — never a sample phrase. Call it at each major step; it replaces the last one. A tool call, not a line of text in your reply.",
             &[("step", "", true, "string")],
         )
     }
