@@ -240,11 +240,14 @@ final class AudioEngine {
             .joined(separator: ", ")
     }
 
-    /// −55 dBFS reads 0, −12 dBFS reads 1: the range a voice moves in.
+    /// −50 dBFS reads 0, −6 dBFS reads 1, on a curve that spends most of
+    /// its range where speech sits (−35 … −15), so a voice breathes
+    /// instead of pegging.
     static func level(rms: Float) -> Float {
         guard rms > 0 else { return 0 }
         let db = 20 * log10(rms)
-        return min(1, max(0, (db + 55) / 43))
+        let linear = min(1, max(0, (db + 50) / 44))
+        return pow(linear, 1.6)
     }
 
     /// The system output volume for this session's route, 0…1.

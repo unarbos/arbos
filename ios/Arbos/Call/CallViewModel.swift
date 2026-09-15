@@ -243,7 +243,8 @@ final class CallViewModel: ObservableObject {
     /// (updates arrive every 40–45 ms), so the disc breathes with the
     /// words instead of flickering between silence and peaks.
     private func meter(_ value: Float) {
-        level = value >= level ? value : max(value, level - 0.12)
+        // Rise at once, fall over ~0.2 s: word gaps show, syllables do not flicker.
+        level = value >= level ? value : max(value, level - 0.2)
     }
 
     /// Phone speaker instead of a connected headset, and back.

@@ -234,9 +234,12 @@ struct CallView: View {
 struct VoiceRing: View {
     let level: Float
     let phase: CallViewModel.Phase
+    /// The level the disc is drawn at: eased toward `level` every frame,
+    /// so 25 Hz meter updates read as one motion, not steps.
+    @State private var shown: Float = 0
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 30)) { context in
+        TimelineView(.animation(minimumInterval: 1 / 60)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             let pulse = sin(t * 2 * .pi / 2.4) * 0.5 + 0.5
             let scale = discScale(pulse: pulse)
@@ -246,7 +249,9 @@ struct VoiceRing: View {
                 Circle()
                     .fill(discInk)
                     .scaleEffect(scale)
-                    .animation(.easeOut(duration: 0.08), value: level)
+            }
+            .onChange(of: context.date) { _, _ in
+                shown += (level - shown) * 0.35
             }
         }
         .animation(.easeInOut(duration: 0.3), value: phase)
@@ -255,7 +260,7 @@ struct VoiceRing: View {
     /// 0.30 of the ring at rest, up to 0.92 at full level.
     private func discScale(pulse: Double) -> CGFloat {
         switch phase {
-        case .listening, .speaking: return 0.30 + 0.62 * CGFloat(min(1, max(0, level)))
+        case .listening, .speaking: return 0.30 + 0.62 * CGFloat(min(1, max(0, shown)))
         case .thinking, .connecting: return 0.30 + 0.10 * CGFloat(pulse)
         case .idle, .unconfigured, .failed: return 0.30
         }
