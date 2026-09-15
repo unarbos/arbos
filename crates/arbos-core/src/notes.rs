@@ -85,6 +85,74 @@ pub fn project_page(place: &Place) -> PathBuf {
     place.arbos().join("notes.md")
 }
 
+/// The page's head is not the model's to lose: its front matter (owner)
+/// and the link to `docs/project-context.md` stay whatever a whole-page
+/// `write` says. `new` keeps its own front matter when it has one; else
+/// `old`'s (or the template's) goes on top. The context link, when the new
+/// text lacks it, follows the first `#` title or opens the body. A page
+/// written with a `# Title` of its own keeps that title.
+pub fn keep_page_head(old: &str, new: &str) -> String {
+    fn front_matter(text: &str) -> Option<&str> {
+        for fence in ["+++", "---"] {
+            if let Some(rest) = text.strip_prefix(fence)
+                && let Some(end) = rest.find(&format!("\n{fence}"))
+            {
+                let len = fence.len() + end + 1 + fence.len();
+                let mut head = &text[..len];
+                if text[len..].starts_with('\n') {
+                    head = &text[..len + 1];
+                }
+                return Some(head);
+            }
+        }
+        None
+    }
+    const LINK: &str = "Goals, constraints, decisions: [project-context](docs/project-context.md)";
+    if front_matter(new).is_some() && new.contains("docs/project-context.md") {
+        return new.to_string();
+    }
+    let front = front_matter(new)
+        .or_else(|| front_matter(old))
+        .or_else(|| front_matter(crate::store::NOTES_TEMPLATE))
+        .unwrap_or("");
+    let body = &new[front_matter(new).map_or(0, str::len)..];
+    let mut out = String::from(front);
+    if !front.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if body.contains("docs/project-context.md") {
+        out.push_str(body);
+        return out;
+    }
+    let mut lines = body.lines();
+    match lines.next() {
+        Some(first) if first.starts_with("# ") => {
+            out.push_str(first);
+            out.push_str("\n\n");
+            out.push_str(LINK);
+            out.push('\n');
+            let rest: Vec<&str> = lines.collect();
+            let rest = rest.join("\n");
+            if !rest.trim().is_empty() {
+                if !rest.starts_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(rest.trim_start_matches('\n'));
+            }
+        }
+        _ => {
+            out.push_str("# Notes\n\n");
+            out.push_str(LINK);
+            out.push_str("\n\n");
+            out.push_str(body.trim_start_matches('\n'));
+        }
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 /// Is `candidate` this place's project page?
 pub fn is_project_page(place_root: &Path, candidate: &Path) -> bool {
     let page = place_root.join(".arbos").join("notes.md");
@@ -1126,6 +1194,49 @@ mod tests {
             n.show()
         );
         assert!(n.render().contains("## Plan\n- [ ] read the issue — done reading\n- [ ] commit\n\n## Verify\n- [ ] run tests\n"), "{}", n.render());
+    }
+
+    #[test]
+    fn a_whole_page_write_keeps_the_front_matter_and_the_context_link() {
+        let old = crate::store::NOTES_TEMPLATE;
+        // The kickoff coordinator's write: its own title, no head.
+        let new = "# Project Status\n\n- [ ] Speak in full duplex — pending\n";
+        let kept = keep_page_head(old, new);
+        assert!(
+            kept.starts_with("+++\nowner = \"root\"\n+++\n# Project Status\n\n"),
+            "{kept}"
+        );
+        assert!(
+            kept.contains("[project-context](docs/project-context.md)"),
+            "{kept}"
+        );
+        assert!(
+            kept.ends_with("- [ ] Speak in full duplex — pending\n"),
+            "{kept}"
+        );
+        assert_eq!(kept.matches("# Project Status").count(), 1);
+        // No title at all: the page's own.
+        let kept = keep_page_head(old, "- [ ] one\n- [ ] two\n");
+        assert!(
+            kept.starts_with("+++\nowner = \"root\"\n+++\n# Notes\n\nGoals, constraints"),
+            "{kept}"
+        );
+        assert!(kept.ends_with("- [ ] one\n- [ ] two\n"), "{kept}");
+        // A write that already has both is left exactly as written.
+        let full = "+++\nowner = \"root\"\n+++\n# Notes\n\n[project context](docs/project-context.md)\n\n## Work\n- [ ] x\n";
+        assert_eq!(keep_page_head(old, full), full);
+        // Front matter of its own but no link: the link is added, the
+        // front matter is the new one.
+        let kept = keep_page_head(
+            old,
+            "---\nowner = \"root\"\nextra = 1\n---\n# Page\n\n- [ ] x\n",
+        );
+        assert!(
+            kept.starts_with("---\nowner = \"root\"\nextra = 1\n---\n# Page\n\nGoals"),
+            "{kept}"
+        );
+        let items = Notes::parse(&kept).items();
+        assert_eq!(items.len(), 1);
     }
 
     #[test]

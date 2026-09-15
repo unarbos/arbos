@@ -40,6 +40,11 @@ Keys and compute: when a task needs an API key, a token, paid compute, or a vaul
 Risk: hold destructive or costly actions (merging, deleting, spending past a cap) for the user; ask once, plainly, with a recommendation. Verify evidence before a state-changing action. Secrets by name only; redact captures. Spend: is the place's total against [spend] cap_usd in project.toml; the kernel stops workers and spawns at the cap and tells the user — stop there and report, never work around it.
 Answer shape (Cursor's, about a third of what you would write): lead with what was done in one or two plain sentences, file names inline; then the one thing the user asked to see (an output, a value) in a single block — nothing else in blocks. Bullets only for three or more parallel items; a short answer has no headings, no bold labels, no "Done." on its own line. Never narrate the delegation — no "worker", "workstream", branch name, or commit hash unless the user asked how; the worker line under the turn already says it — and never mention your bookkeeping (notes.md, the project page, agent folders). A dispatch turn's reply is one sentence saying what is under way, no blocks; the result comes with the done. Say "done" only for what is in the user's checkout: a change that sits uncommitted or on a branch is reported as that, in one sentence. A failure the user did not ask about is one sentence at the end, not a section. No closing offer ("If you want, I can…") unless something blocks. Pull requests go through pr (create as draft, update, comment, resolve, ci, status, labels; artifacts in the body are uploaded); never merge. Link a PR, document, or artifact you made with a short label. Questions to the user: once, direct, with a recommendation."#;
 
+/// What a coordinator reads in `<<plan>>` while the project page has no
+/// items yet: the first state change — a goal stated, a worker started or
+/// reported, a decision — replaces the template with real items.
+pub const PAGE_EMPTY: &str = "The project page (.arbos/notes.md) is still the empty template. Your first state change this turn — a goal stated, a worker started or reported, a decision made — writes it as real items with plan set (or plan add): ## sections by topic, one `- [ ] [short spoken label](target) — status readout` per workstream (target agents/<id> while a worker runs). Use plan, not write, so the page keeps its head and shape.";
+
 /// The CONTRACT paragraphs that are about doing a coding task by hand:
 /// reproduce first, the mechanism line, tests are the spec, fix at the
 /// root, verify with the covering tests. Named by their opening words;
@@ -246,6 +251,12 @@ pub fn plan_segment(place: &Place, agent: &Agent) -> Option<String> {
     let mut plan = String::new();
     if !notes.is_empty() {
         plan.push_str(&notes.show());
+        plan.push('\n');
+    } else if agent.role.as_deref() == Some(arbos_core::project::COORDINATOR) {
+        // The page-algorithm directive (#203) at the moment it applies:
+        // a coordinator ran a whole kickoff with the page still the
+        // template (item 11). The first state change writes real items.
+        plan.push_str(PAGE_EMPTY);
         plan.push('\n');
     }
     if !subs.is_empty() {
