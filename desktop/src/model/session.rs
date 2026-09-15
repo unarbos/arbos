@@ -2169,14 +2169,25 @@ impl ChatSession {
                             self.notice(true, "no reply from the kernel");
                         }
                     }
+                    // The kernel spells a user stop `cancelled` or, since the
+                    // stop word landed, `stop`. Its own "Stopped by you" line
+                    // follows on the tail, so this window adds nothing when it
+                    // asked for the stop.
+                    Ok(StopReason::Cancelled) | Ok(StopReason::Other(_)) if stopped => {
+                        self.fail_running_tools();
+                    }
                     Ok(StopReason::Cancelled) => {
+                        self.fail_running_tools();
+                        self.notice(false, "Stopped.");
+                    }
+                    Ok(StopReason::Other(reason)) if reason == "stop" => {
                         self.fail_running_tools();
                         self.notice(false, "Stopped.");
                     }
                     Ok(StopReason::Refusal) => self.notice(false, "the agent refused to continue"),
                     Ok(StopReason::MaxTokens) => self.notice(false, "stopped: max tokens"),
                     Ok(StopReason::MaxTurnRequests) => self.notice(false, "stopped: max steps"),
-                    Ok(other) => self.notice(false, &format!("stopped: {other:?}")),
+                    Ok(StopReason::Other(reason)) => self.notice(false, &format!("stopped: {reason}")),
                     Err(e) => {
                         self.fail_running_tools();
                         self.notice(true, &format!("turn failed: {}", acp::error_text(&e)));
