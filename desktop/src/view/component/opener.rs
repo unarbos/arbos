@@ -8,7 +8,7 @@ use bezel::{
     gpui::{
         self, App, Context, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable,
         Hsla, KeyBinding, MouseButton, Pixels, Point, Render, ScrollHandle, SharedString, Task,
-        Window, actions, div, prelude::*, px,
+        TextAlign, Window, actions, div, prelude::*, px,
     },
     theme::{Glass, SurfaceStyle, TextStyle, Theme, Typeset},
     ui::{
@@ -62,9 +62,10 @@ pub fn init(cx: &mut App) {
     crate::view::bind_field_editing(cx, KEY_CONTEXT, false);
     let ctx = Some(KEY_CONTEXT);
     // Finder's quick-open, on the field: the arrows walk the list and the
-    // tree, Enter steps into the lit folder or opens the one match, ⌘↩
-    // opens the folder you are in. Bound after the field's own editing
-    // chords on this context, so these win the shared keys.
+    // tree; Enter does what the lit row says — "Open <folder>" opens, a
+    // folder row steps in; ⌘↩ opens the folder you are in. Bound after
+    // the field's own editing chords on this context, so these win the
+    // shared keys.
     cx.bind_keys([
         KeyBinding::new("enter", Submit, ctx),
         KeyBinding::new("cmd-enter", PickHere, ctx),
@@ -310,26 +311,43 @@ impl Opener {
                     .map(|listing| listing.names.as_slice())
                     .unwrap_or(&[]);
                 let prefix_l = prefix.to_lowercase();
+                // The folder the text names, when there is one: `~/Code`
+                // typed whole is `Code`, with or without its slash, even
+                // when `Code2` sits beside it. Locally the file system
+                // says; on a remote host the parent's listing does.
+                let exact = if prefix.is_empty() {
+                    Some(dir.clone())
+                } else if names.iter().any(|name| *name == prefix)
+                    || (host.is_none() && local_path(&join_dir(&dir, &prefix)).is_dir())
+                {
+                    Some(join_dir(&dir, &prefix))
+                } else {
+                    None
+                };
+                let matches: Vec<String> = names
+                    .iter()
+                    .filter(|name| {
+                        !name.starts_with('.')
+                            && (prefix.is_empty() || name.to_lowercase().starts_with(&prefix_l))
+                            && Some(name.as_str())
+                                != exact.as_deref().and_then(|e| e.rsplit('/').next())
+                    })
+                    .cloned()
+                    .collect();
                 let mut out = Vec::new();
-                if prefix.is_empty() {
-                    out.push(Offer::Here(dir.clone()));
+                // The first row always says what Enter does. The folder
+                // named outright; else the one folder the text narrows to.
+                if let Some(path) = &exact {
+                    out.push(Offer::Here(path.clone()));
+                } else if matches.len() == 1 {
+                    out.push(Offer::Here(join_dir(&dir, &matches[0])));
                 }
-                out.extend(
-                    names
-                        .iter()
-                        .filter(|name| {
-                            !name.starts_with('.')
-                                && (prefix.is_empty() || name.to_lowercase().starts_with(&prefix_l))
-                        })
-                        .cloned()
-                        .map(Offer::Dir),
-                );
+                out.extend(matches.into_iter().map(Offer::Dir));
                 // Nothing there by that name on this machine: offer to make
                 // the folder typed.
-                if host.is_none() && out.iter().all(|o| !matches!(o, Offer::Dir(_))) {
+                if host.is_none() && exact.is_none() && out.is_empty() {
                     let typed = q.trim().trim_end_matches('/');
                     if !typed.is_empty() && !local_path(typed).is_dir() {
-                        out.retain(|o| !matches!(o, Offer::Here(_)));
                         out.push(Offer::Create(typed.to_string()));
                     }
                 }
@@ -427,20 +445,13 @@ impl Opener {
             Stage::Folder { host } => {
                 let host = host.clone();
                 let offers = self.offers(cx);
-                let (dir, prefix) = split_path(&self.query(cx));
-                let dirs = offers
-                    .iter()
-                    .filter(|offer| matches!(offer, Offer::Dir(_)))
-                    .count();
                 match offers.get(self.cursor).cloned() {
-                    // The folder you are in, lit at the top of the list.
+                    // "Open <folder>", lit at the top of the list.
                     Some(Offer::Here(path)) => self.start(host, path, cx),
                     Some(Offer::Create(path)) => self.take(Offer::Create(path), cx),
-                    // Typed down to one folder: that is the one you meant.
-                    Some(Offer::Dir(name)) if !prefix.is_empty() && dirs == 1 => {
-                        self.start(host, join_dir(&dir, &name), cx)
-                    }
-                    // Otherwise Enter walks in, like Right.
+                    // A folder row is a step in, like → and a click; the
+                    // Open row above it is how it opens. Enter never means
+                    // two things depending on how many siblings matched.
                     Some(Offer::Dir(name)) => self.take(Offer::Dir(name), cx),
                     Some(Offer::Machine { .. } | Offer::Browse) | None => {
                         let typed = self.query(cx);
@@ -722,12 +733,37 @@ impl Opener {
     fn row_label(offer: &Offer) -> String {
         match offer {
             Offer::Machine { name, .. } => name.clone(),
-            Offer::Here(path) => path.clone(),
+            Offer::Here(path) => format!("Open {}", folder_name(path)),
             Offer::Dir(name) => format!("{name}/"),
             Offer::Create(path) => format!("Create {path}"),
             Offer::Browse => "Browse folders…".to_string(),
         }
     }
+
+    /// The dim readout beside a row: the whole path behind "Open <name>",
+    /// the step-in mark behind a folder.
+    fn row_detail(offer: &Offer) -> Option<String> {
+        match offer {
+            Offer::Here(path) => Some(path.clone()),
+            Offer::Dir(_) => Some("›".to_string()),
+            Offer::Machine { .. } | Offer::Create(_) | Offer::Browse => None,
+        }
+    }
+}
+
+/// The last name in a path, for "Open <name>": `/` for the root, the home
+/// folder's own name for `~`.
+fn folder_name(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "/".to_string();
+    }
+    if trimmed == "~" {
+        return dirs::home_dir()
+            .and_then(|home| home.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "~".to_string());
+    }
+    trimmed.rsplit('/').next().unwrap_or(trimmed).to_string()
 }
 
 /// `/~/Code` — a `~` typed after the field's own prefilled `/` — is `~/Code`.
@@ -883,6 +919,8 @@ impl Render for Opener {
                 .track_scroll(&self.scroll),
             |list, (ix, offer)| {
                 let label = Self::row_label(offer);
+                let detail = Self::row_detail(offer);
+                let opens = matches!(offer, Offer::Here(_));
                 let offer = offer.clone();
                 list.child(
                     div()
@@ -894,18 +932,51 @@ impl Render for Opener {
                         .flex()
                         .flex_row()
                         .items_center()
+                        .gap(px(10.))
                         .cursor_pointer()
                         .when(ix == lit, |el| el.bg(theme.surface_raised))
                         .hover(|el| el.bg(theme.surface_raised))
                         .child(
+                            icons::icon(if opens {
+                                icons::files::FOLDER_WITH_FILES
+                            } else {
+                                icons::files::FOLDER
+                            })
+                            .size(px(14.))
+                            .text_color(if opens {
+                                theme.accent
+                            } else {
+                                theme.text_faint
+                            }),
+                        )
+                        .child(
                             div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
+                                .flex_none()
                                 .text_style(TextStyle::Callout)
                                 .text_color(theme.text)
                                 .child(SharedString::from(label)),
                         )
+                        .when_some(detail, |el, detail| {
+                            el.child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_align(TextAlign::Right)
+                                    .text_style(TextStyle::Caption)
+                                    .text_color(theme.text_faint)
+                                    .child(SharedString::from(detail)),
+                            )
+                        })
+                        .when(ix == lit && opens, |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .text_style(TextStyle::Caption)
+                                    .text_color(theme.text_faint)
+                                    .child("↵"),
+                            )
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| this.take(offer.clone(), cx))),
                 )
             },
