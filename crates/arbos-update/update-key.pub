@@ -22,3 +22,4 @@
 #
 # Until the line exists, a build refuses every update rather than trusting an
 # unsigned one, and the publish workflow skips itself with a note.
+ed25519 tRMVEMFE8nHJfhoFBIt3pIjEUEFiqvXB9HiB8Rnn3YQ=
