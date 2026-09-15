@@ -455,9 +455,14 @@ fn installed_root() -> Result<Installed> {
     #[cfg(target_os = "macos")]
     {
         // `<something>.app/Contents/MacOS/Arbos`.
+        //
+        // A closure rather than `Path::parent`: the type would have to be
+        // imported, and an import only this block uses is an unused one
+        // everywhere else — which is the warning that hid this from the Linux
+        // build until CI reached a Mac.
         let app = beside
             .parent()
-            .and_then(Path::parent)
+            .and_then(|contents| contents.parent())
             .filter(|app| app.extension().is_some_and(|e| e == "app"))
             .context(
                 "this copy of Arbos is not an installed app, so it cannot update itself — \
