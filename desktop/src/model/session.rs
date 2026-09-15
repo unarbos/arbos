@@ -1731,13 +1731,6 @@ impl ChatSession {
             .send(RequestPermissionResponse::selected(option_id));
     }
 
-    /// Flip whether the pending prompt is answered once or for good.
-    pub fn toggle_permission_always(&mut self) {
-        if let Some(prompt) = &mut self.permission {
-            prompt.always = !prompt.always;
-        }
-    }
-
     pub fn toggle_ask_option(&mut self, question_id: &str, option_id: &str) {
         let Some(prompt) = self.questions.as_mut() else {
             return;

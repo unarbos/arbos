@@ -3168,7 +3168,10 @@ fn jump_to_end(
         div()
             .absolute()
             .bottom(px(10.))
-            .right(px(RAIL_INSET + MARK + 12.))
+            .left_0()
+            .right(px(RAIL_INSET + MARK))
+            .flex()
+            .justify_center()
             .child(
                 div()
                     .id(("jump-to-end", id))
@@ -5338,7 +5341,7 @@ pub(crate) fn plain_markdown(text: &str) -> String {
 
 /// The kernel's `status` tool: what the agent says it is doing, carried
 /// by the worker line and the panel. Never a row of its own.
-fn is_status_call(label: &str) -> bool {
+pub(crate) fn is_status_call(label: &str) -> bool {
     label.split_whitespace().next().is_some_and(|first| first == "status")
 }
 
