@@ -198,6 +198,27 @@ impl Auth {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
+    /// How many distinct people hold tokens here. One means every node
+    /// is the operator's; two or more means someone else can connect,
+    /// and an unset project's store is then `private` by default (Jacob,
+    /// 2026-09-15: sharing with other people must not silently expose a
+    /// project).
+    pub fn user_count(&self) -> usize {
+        let mut users: Vec<&str> = self.entries.iter().map(|e| e.identity.user()).collect();
+        users.sort_unstable();
+        users.dedup();
+        users.len()
+    }
+
+    /// The share mode of a project whose `project.toml` sets none.
+    pub fn default_share(&self) -> &'static str {
+        if self.user_count() > 1 {
+            arbos_core::hub::SHARE_PRIVATE
+        } else {
+            arbos_core::hub::SHARE_MESH
+        }
+    }
 }
 
 fn resolve(name: &str, token: Option<&str>, env: Option<&str>, path: &Path) -> Result<String> {
@@ -244,4 +265,50 @@ pub fn token_from_request(query: &str, authorization: Option<&str>) -> Option<St
         let (k, v) = kv.split_once('=')?;
         (k == "token").then(|| v.to_string())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ONE: &str = r#"
+[[machine]]
+name = "mac"
+token = "0123456789abcdef0123"
+[[machine]]
+name = "arboslife"
+token = "0123456789abcdef0124"
+[[client]]
+name = "desktop"
+token = "0123456789abcdef0125"
+"#;
+
+    /// Every row is the operator's until one names another person; then
+    /// an unset project defaults to private.
+    #[test]
+    fn a_second_users_token_flips_the_default_share_to_private() {
+        let path = Path::new("hub-server.toml");
+        let one = Auth::parse(ONE, path).unwrap();
+        assert_eq!(one.user_count(), 1);
+        assert_eq!(one.default_share(), "mesh");
+        let who = one.authenticate("0123456789abcdef0123").unwrap();
+        assert_eq!(who.user(), OWNER_USER);
+        assert_eq!(who.role(), "owner");
+        let two = Auth::parse(
+            &format!(
+                "{ONE}\n[[client]]\nname = \"alice\"\ntoken = \"0123456789abcdef0126\"\nrole = \"writer\"\nuser = \"alice\"\n"
+            ),
+            path,
+        )
+        .unwrap();
+        assert_eq!(two.user_count(), 2);
+        assert_eq!(two.default_share(), "private");
+        let alice = two.authenticate("0123456789abcdef0126").unwrap();
+        assert_eq!(alice.user(), "alice");
+        assert_eq!(alice.role(), "writer");
+        assert_eq!(
+            alice.as_client(),
+            ("alice".to_string(), "writer".to_string())
+        );
+    }
 }

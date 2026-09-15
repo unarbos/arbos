@@ -159,7 +159,9 @@ Two layers, as in the file-system design:
 1. **Who you are**: the hub token (later the Cloudflare Access email). Every `hub-server.toml` row gains `user` (default `owner`, the hub's operator). A machine token is `user = owner` unless the row says otherwise; a person's client token names them (`user = "alice"`, `role = "writer"`).
 2. **What you may do** on a project = `min(token role, project share mode)`: `private` → owner-user identities keep their role, everyone else `none`; `mesh` (default) → your token's role; `open` → at least `reader` for anyone the hub admits. Then the per-file rules above.
 
-Today all of Jacob's machines hold `user = owner` tokens, so they read and write each other's `docs/`, `internal/`, `media/` freely, and none may rewrite another node's `notes.md` (that stays the local root's). When Alice connects with her own client token, a `mesh` project gives her `writer` on `docs/…`; a `private` one gives her nothing; and every file she writes lands with her name in the receiving kernel's log.
+Today all of Jacob's machines hold `user = owner` tokens, so they read and write each other's `docs/`, `internal/`, `media/` freely, and none may rewrite another node's `notes.md` (that stays the local root's). When Alice connects with her own client token, a `mesh` project gives her `writer` on `docs/…`; a `private` one gives her nothing; and every file she writes lands with her name in the receiving kernel's log (`store_put who=hub:alice path=…`).
+
+**The default flips by itself (decided 2026-09-15).** A project whose `project.toml` sets no `[share] mode` is `mesh` while every token on the hub belongs to one user, and `private` the moment a second person's token appears in `hub-server.toml` (`Auth::default_share`). So sharing the hub with another person cannot silently expose a project: everything unset closes, and Jacob opens what he means to share with one line. The hub enforces this at `/attach` (an identity with `none` is refused before any frame reaches the kernel) and hands the kernel the *effective* role, so a `writer` token on an `open` project is a writer there and nothing more.
 
 ### 5. What a spawn brief becomes
 
@@ -182,14 +184,14 @@ and the first prompt tells the child: your parent's store is `arbos://cloud/demo
 
 | # | Slice | Touches | Status |
 | --- | --- | --- | --- |
-| 1 | **Addressing and discovery**: `StoreAddress` parse/format; `ProjectInfo.{store,share,access}`; `[share] mode` in `project.toml`; hub computes `access` per recipient; `hello.store`; `.arbos/machines/` and `machines.md` show addresses and rights | `arbos-core::hub`, `project`, `wire`; `arbos-hub`; `hub_link`, `worker`, `serve` (one line) | PR on `main` (this slice) |
-| 2 | **Read by address**: `read`/`ls`/`tail` on `arbos://`; `Hooks::store_read/list`; kernel client with 10 s timeout and loud failure; `arbos-kernel store read <address>` for people | `arbos-engine::tools::fs`, `tool.rs`; kernel `hub_link`, `tools.rs` | next |
-| 3 | **Write by address**: `put`/`written`/`conflict` frames; receiving rules; `write`/`edit` on addresses | `wire`, kernel `files.rs`, engine | after 2 |
+| 1 | **Addressing and discovery**: `StoreAddress` parse/format; `ProjectInfo.{store,share,access}`; `[share] mode` in `project.toml`; hub computes `access` per recipient; `hello.store`; `.arbos/machines/` and `machines.md` show addresses and rights | `arbos-core::hub`, `project`, `wire`; `arbos-hub`; `hub_link`, `worker`, `serve` (one line) | [PR #251](https://github.com/unarbos/arbos/pull/251) on `main` |
+| 2 | **Read by address**: `read`/`ls` on `arbos://`; `Hooks::store_read/list`; kernel client with a 10 s timeout and loud failure; the hub refuses `none` at `/attach` and passes the effective role; the private-by-default switch; `arbos-kernel store read|ls <address>` for people | `arbos-engine::tools::{fs,mod}`, `access`; kernel `hub_link`, `sched`, `store_cmd`; `arbos-hub` | [PR #254](https://github.com/unarbos/arbos/pull/254), stacked on #251 |
+| 3 | **Write by address**: `put`/`written` frames with compare-and-swap on the content hash; receiving rules in `files.rs` (root-owned pages and protected files refused, shared folders only, tmp + rename); `write`/`edit` on addresses (edit = fetch, apply locally to a copy, put with the read hash); `store put` | `wire`, kernel `files.rs`, `serve.rs`, engine | same PR, second commit |
 | 4 | **Briefs by address**: rewrite store paths in remote kickoffs; store sentence in `first_prompt`; done report names addresses | `remote.rs` (coordinate with the features agent: #243 mid-rebase, #237/#239 today), `tools.rs` | after 3; after #243 lands |
 | 5 | Later: opt-in stale cache for offline reads; chunked media `put`; Cloudflare Access identities replacing tokens | | not planned yet |
 
-### Needs Jacob
+### Decided (2026-09-15, via the coordinator; Jacob may veto)
 
-1. **May a remote owner write another node's `notes.md`?** Design says no: root-owned files are the local root's, and a peer proposes with `say`. If Jacob wants his desktop's root to edit a remote project's page directly, `owner` must bypass root-ownership for peers.
-2. **Default share mode** for existing projects: `mesh` (any admitted identity gets its token's role) is proposed. `private` is the safer default if other people will be on the hub before per-project settings are in use.
-3. **Deliverables land in the parent's store** (6) — confirm this is the wanted default over "child writes locally, parent reads by address".
+1. **A remote owner may not write another node's `notes.md`.** Root-owned pages stay the local root's; peers propose with `say`. Enforced in `files::put` whatever the peer's role (`put_tests::a_put_obeys_the_places_own_rules`).
+2. **`mesh` is the default while every token on the hub is Jacob's; `private` the moment another person's token joins.** Built into the hub (`Auth::default_share`), not left for later.
+3. **A remote child's deliverables land in the parent's store by address.** The parent's store is the Project Jacob opens. The child's own `agents/root/` record stays where it runs. Slice 4 makes the brief say so.

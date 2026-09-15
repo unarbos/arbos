@@ -110,6 +110,19 @@ impl ShareConfig {
         self.mode.is_none()
     }
 
+    /// The mode the file sets, as a known word; `None` when it sets none
+    /// (or a word that is not one). The hub fills the default for an
+    /// unset project: `mesh` while every token on it is one user's,
+    /// `private` once another person's token joins.
+    pub fn mode_set(&self) -> Option<&'static str> {
+        match self.mode.as_deref().map(str::trim) {
+            Some(crate::hub::SHARE_PRIVATE) => Some(crate::hub::SHARE_PRIVATE),
+            Some(crate::hub::SHARE_OPEN) => Some(crate::hub::SHARE_OPEN),
+            Some(crate::hub::SHARE_MESH) => Some(crate::hub::SHARE_MESH),
+            _ => None,
+        }
+    }
+
     /// The mode as a known word; anything else, or nothing, is `mesh`.
     pub fn mode(&self) -> &'static str {
         match self.mode.as_deref().map(str::trim) {
@@ -120,19 +133,29 @@ impl ShareConfig {
     }
 }
 
-/// The sharing mode of the place's store.
+/// The sharing mode of the place's store, with `mesh` for an unset one.
 pub fn share_mode(place: &Place) -> &'static str {
     load(place).share.mode()
+}
+
+/// The sharing mode the place's `project.toml` sets, if any. What a
+/// kernel sends the hub: the hub fills the default for an unset project.
+pub fn share_mode_set(place: &Place) -> Option<&'static str> {
+    load(place).share.mode_set()
 }
 
 /// The sharing mode of a project folder that may have no `.arbos/` yet
 /// (a worker's checkout, listed for the roster); `mesh` when unreadable.
 pub fn share_mode_at(project_dir: &Path) -> &'static str {
+    share_mode_set_at(project_dir).unwrap_or(crate::hub::SHARE_MESH)
+}
+
+/// The mode a project folder's `project.toml` sets, if any.
+pub fn share_mode_set_at(project_dir: &Path) -> Option<&'static str> {
     std::fs::read_to_string(project_dir.join(".arbos").join("project.toml"))
         .ok()
         .and_then(|t| toml::from_str::<ProjectConfig>(&t).ok())
-        .map(|c| c.share.mode())
-        .unwrap_or(crate::hub::SHARE_MESH)
+        .and_then(|c| c.share.mode_set())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -419,6 +442,12 @@ mod tests {
         assert_eq!(share_mode_at(&p.path), "private");
         std::fs::write(path(&p), "[share]\nmode = \"bogus\"\n").unwrap();
         assert_eq!(share_mode(&p), "mesh");
+        assert_eq!(share_mode_set(&p), None, "a bad word is unset for the hub");
+        std::fs::write(path(&p), "[share]\nmode = \"mesh\"\n").unwrap();
+        assert_eq!(share_mode_set(&p), Some("mesh"));
+        assert_eq!(share_mode_set_at(&p.path), Some("mesh"));
+        let unset = place("share-unset");
+        assert_eq!(share_mode_set(&unset), None);
         // A kernel rewrite keeps the line.
         std::fs::write(path(&p), "[share]\nmode = \"open\"\n").unwrap();
         let cfg = load(&p);

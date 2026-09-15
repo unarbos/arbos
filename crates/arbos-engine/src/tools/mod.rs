@@ -62,6 +62,58 @@ pub trait Hooks: Send + Sync {
     /// instead of the `status` tool. `step` is the words after the colon,
     /// clipped; the kernel shows them as the live line.
     fn spoke_status(&self, _step: &str) {}
+
+    /// A file in another node's store, by address (`arbos://…`). The host
+    /// reaches it through the hub; a host with no hub says so. Failure is
+    /// an error, never empty text: an agent must not take a missing peer
+    /// for an empty file.
+    fn store_read(&self, address: &str) -> BoxFuture<'static, Result<StoreFile>> {
+        let a = address.to_string();
+        Box::pin(async move { anyhow::bail!("{a}: {NO_MESH}") })
+    }
+
+    /// The entries of a folder in another node's store, by address.
+    fn store_list(
+        &self,
+        address: &str,
+    ) -> BoxFuture<'static, Result<Vec<arbos_core::wire::Entry>>> {
+        let a = address.to_string();
+        Box::pin(async move { anyhow::bail!("{a}: {NO_MESH}") })
+    }
+
+    /// Write a file in another node's store, by address. `base_hash` is
+    /// the hash of what was read (compare-and-swap); the receiving kernel
+    /// applies its own store rules and answers with the new hash.
+    fn store_write(
+        &self,
+        address: &str,
+        _text: String,
+        _base_hash: Option<String>,
+    ) -> BoxFuture<'static, Result<StoreWritten>> {
+        let a = address.to_string();
+        Box::pin(async move { anyhow::bail!("{a}: {NO_MESH}") })
+    }
+}
+
+/// Why a store address cannot be used on a host with no hub.
+pub const NO_MESH: &str = "a store address (arbos://<machine>/<project>/<path>) needs a kernel registered on a hub, and this one is on none; use the local path";
+
+/// A file read from another node's store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreFile {
+    pub text: String,
+    /// The whole file's size; `text` is shorter when `truncated`.
+    pub size: u64,
+    pub truncated: bool,
+    /// sha-256 of `text`, the `base_hash` a following write carries.
+    pub hash: String,
+}
+
+/// What the store said after a write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreWritten {
+    pub size: u64,
+    pub hash: String,
 }
 
 /// Token estimates (chars/4, calibrated against the provider's count once

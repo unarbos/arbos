@@ -168,6 +168,37 @@ struct TurnHooks {
 }
 
 impl arbos_engine::Hooks for TurnHooks {
+    fn store_read(
+        &self,
+        address: &str,
+    ) -> BoxFuture<'static, anyhow::Result<arbos_engine::StoreFile>> {
+        let place = self.inner.place.clone();
+        let address = address.to_string();
+        Box::pin(async move { crate::hub_link::store_read(&place, &address).await })
+    }
+
+    fn store_list(
+        &self,
+        address: &str,
+    ) -> BoxFuture<'static, anyhow::Result<Vec<arbos_core::wire::Entry>>> {
+        let place = self.inner.place.clone();
+        let address = address.to_string();
+        Box::pin(async move { crate::hub_link::store_list(&place, &address).await })
+    }
+
+    fn store_write(
+        &self,
+        address: &str,
+        text: String,
+        base_hash: Option<String>,
+    ) -> BoxFuture<'static, anyhow::Result<arbos_engine::StoreWritten>> {
+        let place = self.inner.place.clone();
+        let address = address.to_string();
+        Box::pin(
+            async move { crate::hub_link::store_write(&place, &address, text, base_hash).await },
+        )
+    }
+
     fn approve(
         &self,
         agent: &AgentId,

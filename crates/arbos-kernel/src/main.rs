@@ -87,7 +87,15 @@ fn main() -> Result<()> {
             std::process::exit(code);
         }
         "store" => {
-            let code = arbos_kernel::store_cmd::run(args)?;
+            let mut args = args.peekable();
+            let code = match args.peek().map(String::as_str) {
+                Some(verb @ ("read" | "ls" | "put")) => {
+                    let verb = verb.to_string();
+                    args.next();
+                    arbos_kernel::store_cmd::run_remote(&verb, args)?
+                }
+                _ => arbos_kernel::store_cmd::run(args)?,
+            };
             std::process::exit(code);
         }
         "prompt" => {

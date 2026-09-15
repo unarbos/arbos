@@ -492,6 +492,19 @@ impl std::fmt::Display for StoreAddress {
     }
 }
 
+/// The sha-256 of `bytes` as lower-case hex: the `hash` of a `written`
+/// frame and the `base_hash` of a `put`. Stable across machines and
+/// builds, so a writer's view and the store's can be compared by value.
+pub fn content_hash(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
 /// Sharing modes a project may set in `project.toml` `[share] mode`.
 pub const SHARE_PRIVATE: &str = "private";
 pub const SHARE_MESH: &str = "mesh";

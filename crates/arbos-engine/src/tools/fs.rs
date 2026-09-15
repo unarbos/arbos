@@ -9,6 +9,7 @@ use crate::tool::{
     BoxFuture, Plan, PlanCx, RunCx, Tool, blocking, opt_str, opt_u64, req, simple_schema,
     typed_schema,
 };
+use arbos_core::hub::StoreAddress;
 
 // ---- Tool impls -----------------------------------------------------------
 
@@ -26,17 +27,29 @@ impl Tool for Ls {
     fn schema(&self) -> Value {
         simple_schema(
             "ls",
-            "List a directory.",
-            &[("path", "Directory path, relative to cwd.", false)],
+            "List a directory. A store address (arbos://<machine>/<project>/<path>, see .arbos/machines.md) lists a folder in another node's .arbos/.",
+            &[(
+                "path",
+                "Directory path, relative to cwd, or a store address.",
+                false,
+            )],
         )
     }
     fn plan(&self, cx: &PlanCx, args: &Value) -> Result<Plan> {
-        Ok(Plan::access(Access::read_path(
-            &cx.resolve(opt_str(args, "path").unwrap_or("."))?,
-        )))
+        let path = opt_str(args, "path").unwrap_or(".");
+        if StoreAddress::looks_like(path) {
+            return Ok(Plan::access(Access::read_store(
+                StoreAddress::parse(path)?.to_string(),
+            )));
+        }
+        Ok(Plan::access(Access::read_path(&cx.resolve(path)?)))
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
-        blocking(move || ls(cx.root(), &cx.cwd, opt_str(&args, "path").unwrap_or(".")))
+        let path = opt_str(&args, "path").unwrap_or(".").to_string();
+        if StoreAddress::looks_like(&path) {
+            return Box::pin(async move { remote_ls(&cx, &path).await });
+        }
+        blocking(move || ls(cx.root(), &cx.cwd, &path))
     }
 }
 
@@ -47,20 +60,29 @@ impl Tool for Read {
     fn schema(&self) -> Value {
         typed_schema(
             "read",
-            "Read a file (text or image). Text lines are LINE:HASH|body. Pass LINE:HASH to edit.",
+            "Read a file (text or image). Text lines are LINE:HASH|body. Pass LINE:HASH to edit. A store address (arbos://<machine>/<project>/<path>, see .arbos/machines.md) reads a file in another node's .arbos/ — the parent project's notes.md or docs/ from a remote worker.",
             &[
-                ("path", "", true, "string"),
+                ("path", "A path, or a store address.", true, "string"),
                 ("offset", "Start line (1-based).", false, "integer"),
                 ("limit", "Max lines.", false, "integer"),
             ],
         )
     }
     fn plan(&self, cx: &PlanCx, args: &Value) -> Result<Plan> {
-        Ok(Plan::access(Access::read_path(
-            &cx.resolve(req(args, "path")?)?,
-        )))
+        let path = req(args, "path")?;
+        if StoreAddress::looks_like(path) {
+            return Ok(Plan::access(Access::read_store(
+                StoreAddress::parse(path)?.to_string(),
+            )));
+        }
+        Ok(Plan::access(Access::read_path(&cx.resolve(path)?)))
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
+        if let Some(addr) = opt_str(&args, "path").filter(|p| StoreAddress::looks_like(p)) {
+            let addr = addr.to_string();
+            let (offset, limit) = (opt_u64(&args, "offset"), opt_u64(&args, "limit"));
+            return Box::pin(async move { remote_read(&cx, &addr, offset, limit).await });
+        }
         blocking(move || {
             read(
                 cx.root(),
@@ -505,8 +527,11 @@ impl Tool for Write {
     fn schema(&self) -> Value {
         let mut schema = simple_schema(
             "write",
-            "Create or overwrite a file.",
-            &[("path", "", true), ("contents", "", true)],
+            "Create or overwrite a file. A store address (arbos://<machine>/<project>/docs/…) writes into another node's .arbos/ — how a remote worker delivers into its parent's project store; that node applies its own rules (its notes.md stays its root's).",
+            &[
+                ("path", "A path, or a store address.", true),
+                ("contents", "", true),
+            ],
         );
         if let Some(props) = schema
             .pointer_mut("/function/parameters/properties")
@@ -517,11 +542,22 @@ impl Tool for Write {
         schema
     }
     fn plan(&self, cx: &PlanCx, args: &Value) -> Result<Plan> {
-        Ok(Plan::access(Access::write_path(
-            &cx.resolve_write(req(args, "path")?)?,
-        )))
+        let path = req(args, "path")?;
+        if StoreAddress::looks_like(path) {
+            return Ok(Plan::access(Access::write_store(
+                StoreAddress::parse(path)?.to_string(),
+            )));
+        }
+        Ok(Plan::access(Access::write_path(&cx.resolve_write(path)?)))
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
+        if let Some(addr) = opt_str(&args, "path").filter(|p| StoreAddress::looks_like(p)) {
+            let addr = addr.to_string();
+            return Box::pin(async move {
+                let contents = req(&args, "contents").or_else(|_| req(&args, "content"))?;
+                remote_write(&cx, &addr, contents, None).await
+            });
+        }
         blocking(move || {
             let path = req(&args, "path")?;
             // `content` for `contents` is the usual slip.
@@ -561,11 +597,19 @@ impl Tool for Edit {
         })
     }
     fn plan(&self, cx: &PlanCx, args: &Value) -> Result<Plan> {
-        Ok(Plan::access(Access::write_path(
-            &cx.resolve_write(req(args, "path")?)?,
-        )))
+        let path = req(args, "path")?;
+        if StoreAddress::looks_like(path) {
+            return Ok(Plan::access(Access::write_store(
+                StoreAddress::parse(path)?.to_string(),
+            )));
+        }
+        Ok(Plan::access(Access::write_path(&cx.resolve_write(path)?)))
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
+        if let Some(addr) = opt_str(&args, "path").filter(|p| StoreAddress::looks_like(p)) {
+            let addr = addr.to_string();
+            return Box::pin(async move { remote_edit(&cx, &addr, &args).await });
+        }
         blocking(move || {
             let path = req(&args, "path")
                 .map_err(|e| anyhow::anyhow!("{e}. edit always needs path — the file you read"))?;
@@ -617,6 +661,163 @@ fn note_inferred_path(out: Result<ToolOut>, args: &Value, path: &str) -> Result<
         }
         Err(e) => Err(anyhow::anyhow!("{note} {e}")),
     }
+}
+
+// ---- Another node's store, by address --------------------------------------
+
+/// `ls` of a folder in another node's store. Failure is the host's error,
+/// with the address in it; never an empty listing for a peer that is gone.
+async fn remote_ls(cx: &RunCx, address: &str) -> Result<ToolOut> {
+    let addr = StoreAddress::parse(address)?;
+    let entries = cx.hooks.store_list(&addr.to_string()).await?;
+    let names: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            if e.dir {
+                format!("{}/", e.name)
+            } else {
+                e.name.clone()
+            }
+        })
+        .collect();
+    Ok(ToolOut::with_paths(
+        names.join("\n"),
+        vec![addr.to_string()],
+    ))
+}
+
+/// `read` of a file in another node's store, rendered like a local read
+/// (LINE:HASH|body) so `edit` by address takes the same anchors.
+async fn remote_read(
+    cx: &RunCx,
+    address: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+) -> Result<ToolOut> {
+    let addr = StoreAddress::parse(address)?;
+    if image::is_image_path(Path::new(&addr.path)) {
+        bail!(
+            "{addr}: an image in another node's store is not read by address yet; ask its agent for the file, or read a text file"
+        );
+    }
+    let file = cx.hooks.store_read(&addr.to_string()).await?;
+    let lines: Vec<&str> = file.text.lines().collect();
+    let start = offset.unwrap_or(1).saturating_sub(1) as usize;
+    let take = limit.unwrap_or(lines.len() as u64) as usize;
+    let mut body = String::new();
+    for (i, line) in lines.iter().skip(start).take(take).enumerate() {
+        let n = start + i + 1;
+        body.push_str(&format!(
+            "{n:>6}:{h}|{line}\n",
+            h = super::hashline::line_tag(line)
+        ));
+    }
+    if file.truncated {
+        body.push_str(&format!(
+            "[{addr} is {} bytes; only the first {} were read]\n",
+            file.size,
+            file.text.len()
+        ));
+    }
+    Ok(ToolOut::with_paths(body, vec![addr.to_string()]))
+}
+
+/// `write` into another node's store. `base_hash` carries the hash the
+/// caller read, for an edit; a plain write passes none.
+async fn remote_write(
+    cx: &RunCx,
+    address: &str,
+    contents: &str,
+    base_hash: Option<String>,
+) -> Result<ToolOut> {
+    let addr = StoreAddress::parse(address)?;
+    let written = cx
+        .hooks
+        .store_write(&addr.to_string(), contents.to_string(), base_hash)
+        .await?;
+    Ok(ToolOut::with_paths(
+        format!(
+            "wrote {addr} ({} bytes) on {}; that node's own rules applied",
+            written.size, addr.machine
+        ),
+        vec![addr.to_string()],
+    ))
+}
+
+/// `edit` of a file in another node's store: fetch it, apply the same
+/// edit the local tool would (hashline anchors, classic old/new, whole
+/// file) to a copy, and put the result back with the hash that was read,
+/// so a change on the far side in between is a conflict, not a lost update.
+async fn remote_edit(cx: &RunCx, address: &str, args: &Value) -> Result<ToolOut> {
+    let addr = StoreAddress::parse(address)?;
+    let whole = (opt_str(args, "old_string"), opt_str(args, "content"));
+    if let (None, Some(content)) = whole
+        && !hashline::looks_like_hashline(args)
+    {
+        return remote_write(cx, address, content, None).await;
+    }
+    let file = cx.hooks.store_read(&addr.to_string()).await?;
+    if file.truncated {
+        bail!(
+            "{addr} is {} bytes, over what one read carries; edit it on its own node",
+            file.size
+        );
+    }
+    // A scratch copy the local edit code works on. Its folder is the
+    // confinement root, so the edit sees one file and nothing else.
+    let scratch = std::env::temp_dir().join(format!(
+        "arbos-remote-edit-{}-{}",
+        std::process::id(),
+        arbos_core::now_ms()
+    ));
+    std::fs::create_dir_all(&scratch)?;
+    let name = Path::new(&addr.path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    std::fs::write(scratch.join(&name), &file.text)?;
+    let args_local = args.clone();
+    let (scratch2, name2) = (scratch.clone(), name.clone());
+    let out = tokio::task::spawn_blocking(move || -> Result<String> {
+        let root = scratch2.as_path();
+        let result = if hashline::looks_like_hashline(&args_local) {
+            hashline::edit(root, root, &name2, &args_local)
+        } else if args_local
+            .get("replace_all")
+            .is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true"))
+        {
+            edit_all(
+                root,
+                root,
+                &name2,
+                req(&args_local, "old_string")?,
+                req(&args_local, "new_string")?,
+            )
+        } else {
+            edit(
+                root,
+                root,
+                &name2,
+                req(&args_local, "old_string")?,
+                req(&args_local, "new_string")?,
+            )
+        };
+        result?;
+        Ok(std::fs::read_to_string(root.join(&name2))?)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("edit task: {e}"))?;
+    let _ = std::fs::remove_dir_all(&scratch);
+    let new_text = out?;
+    let written = cx
+        .hooks
+        .store_write(&addr.to_string(), new_text, Some(file.hash))
+        .await?;
+    Ok(ToolOut::with_paths(
+        format!("edited {addr} ({} bytes) on {}", written.size, addr.machine),
+        vec![addr.to_string()],
+    ))
 }
 
 // ---- Bodies ---------------------------------------------------------------
@@ -1393,5 +1594,420 @@ mod store_alias_tests {
         assert!(confine(root, root, &other.join("secret.rs").display().to_string()).is_err());
         assert!(confine(root, root, ".arbos/worktrees/w2/secret.rs").is_err());
         assert!(confine(root, root, "../w2/secret.rs").is_err());
+    }
+}
+
+#[cfg(test)]
+mod store_address_tests {
+    use super::*;
+    use crate::tool::WebCfg;
+    use crate::tools::{Hooks, StoreFile, StoreWritten};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    /// A peer store in memory: what the kernel would answer through the
+    /// hub, without a hub. `down` makes every call fail like an
+    /// unreachable machine.
+    #[derive(Default)]
+    struct FakeMesh {
+        files: Mutex<HashMap<String, String>>,
+        down: bool,
+        writes: Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    impl Hooks for FakeMesh {
+        fn approve(
+            &self,
+            _agent: &arbos_core::AgentId,
+            _tool: &str,
+            _command: &str,
+        ) -> BoxFuture<'static, Result<bool>> {
+            Box::pin(async { Ok(true) })
+        }
+        fn store_read(&self, address: &str) -> BoxFuture<'static, Result<StoreFile>> {
+            let a = address.to_string();
+            if self.down {
+                return Box::pin(async move {
+                    bail!("{a}: arboslife is not reachable through the hub; nothing was read")
+                });
+            }
+            let got = self.files.lock().unwrap().get(&a).cloned();
+            Box::pin(async move {
+                let text = got.with_context(|| format!("{a}: no such file"))?;
+                Ok(StoreFile {
+                    hash: arbos_core::hub::content_hash(text.as_bytes()),
+                    size: text.len() as u64,
+                    text,
+                    truncated: false,
+                })
+            })
+        }
+        fn store_list(
+            &self,
+            address: &str,
+        ) -> BoxFuture<'static, Result<Vec<arbos_core::wire::Entry>>> {
+            let prefix = address.trim_end_matches('/').to_string() + "/";
+            let names: Vec<String> = self
+                .files
+                .lock()
+                .unwrap()
+                .keys()
+                .filter_map(|k| k.strip_prefix(&prefix).map(str::to_string))
+                .collect();
+            Box::pin(async move {
+                Ok(names
+                    .into_iter()
+                    .map(|n| arbos_core::wire::Entry {
+                        dir: n.contains('/'),
+                        name: n.split('/').next().unwrap_or("").to_string(),
+                        size: 0,
+                        modified: None,
+                    })
+                    .collect())
+            })
+        }
+        fn store_write(
+            &self,
+            address: &str,
+            text: String,
+            base_hash: Option<String>,
+        ) -> BoxFuture<'static, Result<StoreWritten>> {
+            let a = address.to_string();
+            self.writes
+                .lock()
+                .unwrap()
+                .push((a.clone(), base_hash.clone()));
+            let mut files = self.files.lock().unwrap();
+            let current = files
+                .get(&a)
+                .map(|t| arbos_core::hub::content_hash(t.as_bytes()))
+                .unwrap_or_default();
+            if let Some(base) = base_hash
+                && base != current
+            {
+                return Box::pin(async move {
+                    bail!("{a}: conflict — the file changed since you read it")
+                });
+            }
+            if a.ends_with("notes.md") {
+                return Box::pin(async move { bail!("{a}: {}", arbos_core::store::REFUSAL) });
+            }
+            let size = text.len() as u64;
+            let hash = arbos_core::hub::content_hash(text.as_bytes());
+            files.insert(a, text);
+            Box::pin(async move { Ok(StoreWritten { size, hash }) })
+        }
+    }
+
+    struct NoGrep;
+    impl crate::tools::Grep for NoGrep {
+        fn search(&self, _p: &str, _g: Option<&str>) -> Result<Vec<GrepHit>> {
+            Ok(vec![])
+        }
+    }
+
+    fn cx(mesh: Arc<FakeMesh>, dir: &Path) -> RunCx {
+        RunCx {
+            place: arbos_core::Place::new(dir.to_path_buf()),
+            agent: arbos_core::Agent::root("root"),
+            cwd: dir.to_path_buf(),
+            call_id: String::new(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            grep: Arc::new(NoGrep),
+            hooks: mesh,
+            bash_wait_ms: 0,
+            hops: 0,
+            web: Arc::new(WebCfg::default()),
+            step: 0,
+        }
+    }
+
+    fn run(tool: &dyn Tool, cx: RunCx, args: Value) -> Result<ToolOut> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(tool.run(cx, args))
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("arbos-mesh-fs-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".arbos")).unwrap();
+        dir
+    }
+
+    const NOTES: &str = "arbos://cloud/demo/notes.md";
+    const DOC: &str = "arbos://cloud/demo/docs/plan.md";
+
+    fn mesh() -> Arc<FakeMesh> {
+        let m = FakeMesh::default();
+        m.files.lock().unwrap().insert(
+            NOTES.into(),
+            "# Notes\n\n- [ ] [Voice](docs/voice.md) — landing\n".into(),
+        );
+        m.files
+            .lock()
+            .unwrap()
+            .insert(DOC.into(), "one\ntwo\nthree\n".into());
+        Arc::new(m)
+    }
+
+    /// A remote worker reads its parent's notes by address and gets the
+    /// same LINE:HASH lines a local read gives; `ls` lists the store.
+    #[test]
+    fn read_and_ls_by_address_go_through_the_mesh() {
+        let dir = scratch("read");
+        let m = mesh();
+        let plan = Read
+            .plan(
+                &PlanCx {
+                    root: &dir,
+                    cwd: &dir,
+                    agent: &arbos_core::Agent::root("root"),
+                },
+                &json!({"path": NOTES}),
+            )
+            .unwrap();
+        assert!(plan.access.is_readonly());
+        assert_eq!(
+            plan.access.reads,
+            vec![crate::access::Resource::Store(NOTES.into())]
+        );
+        let out = run(&Read, cx(m.clone(), &dir), json!({"path": NOTES})).unwrap();
+        assert!(out.body.starts_with("     1:"), "{}", out.body);
+        assert!(out.body.contains("|# Notes"), "{}", out.body);
+        assert_eq!(out.paths, vec![NOTES.to_string()]);
+        let page = run(
+            &Read,
+            cx(m.clone(), &dir),
+            json!({"path": DOC, "offset": 2, "limit": 1}),
+        )
+        .unwrap();
+        assert!(
+            page.body.contains("|two") && !page.body.contains("|one"),
+            "{}",
+            page.body
+        );
+        let ls = run(
+            &Ls,
+            cx(m.clone(), &dir),
+            json!({"path": "arbos://cloud/demo/"}),
+        )
+        .unwrap();
+        assert!(
+            ls.body.contains("notes.md") && ls.body.contains("docs/"),
+            "{}",
+            ls.body
+        );
+        // A bad address is refused at plan time, before anything runs.
+        assert!(
+            Read.plan(
+                &PlanCx {
+                    root: &dir,
+                    cwd: &dir,
+                    agent: &arbos_core::Agent::root("root"),
+                },
+                &json!({"path": "arbos://cloud"}),
+            )
+            .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unreachable peer is an error naming the address, never empty
+    /// text an agent could take for an empty file.
+    #[test]
+    fn an_unreachable_peer_fails_loudly() {
+        let dir = scratch("down");
+        let m = Arc::new(FakeMesh {
+            down: true,
+            ..FakeMesh::default()
+        });
+        let err = run(&Read, cx(m, &dir), json!({"path": NOTES})).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(NOTES) && msg.contains("not reachable"),
+            "{msg}"
+        );
+        // A host with no hub says so too.
+        struct NoHub;
+        impl Hooks for NoHub {
+            fn approve(
+                &self,
+                _a: &arbos_core::AgentId,
+                _t: &str,
+                _c: &str,
+            ) -> BoxFuture<'static, Result<bool>> {
+                Box::pin(async { Ok(true) })
+            }
+        }
+        let cx = RunCx {
+            hooks: Arc::new(NoHub),
+            ..cx(Arc::new(FakeMesh::default()), &dir)
+        };
+        let err = run(&Read, cx, json!({"path": NOTES})).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("needs a kernel registered on a hub"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `write` by address is a write (plan mode and readonly agents see
+    /// it); the far node's rules answer: the parent's notes.md is refused.
+    #[test]
+    fn write_by_address_is_a_write_and_the_far_node_rules() {
+        let dir = scratch("write");
+        let m = mesh();
+        let plan = Write
+            .plan(
+                &PlanCx {
+                    root: &dir,
+                    cwd: &dir,
+                    agent: &arbos_core::Agent::root("root"),
+                },
+                &json!({"path": DOC, "contents": "x"}),
+            )
+            .unwrap();
+        assert!(!plan.access.is_readonly());
+        let out = run(
+            &Write,
+            cx(m.clone(), &dir),
+            json!({"path": "arbos://cloud/demo/docs/new.md", "contents": "# New\n"}),
+        )
+        .unwrap();
+        assert!(
+            out.body.contains("wrote arbos://cloud/demo/docs/new.md"),
+            "{}",
+            out.body
+        );
+        assert_eq!(
+            m.files
+                .lock()
+                .unwrap()
+                .get("arbos://cloud/demo/docs/new.md")
+                .map(String::as_str),
+            Some("# New\n")
+        );
+        let err = run(
+            &Write,
+            cx(m.clone(), &dir),
+            json!({"path": NOTES, "contents": "mine now"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("owned by the main chat"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `edit` by address fetches, edits the copy with the local rules
+    /// (classic, hashline, whole), and puts it back with the hash it
+    /// read; a change in between is a conflict, not a lost update.
+    #[test]
+    fn edit_by_address_is_a_compare_and_swap() {
+        let dir = scratch("edit");
+        let m = mesh();
+        let out = run(
+            &Edit,
+            cx(m.clone(), &dir),
+            json!({"path": DOC, "old_string": "two", "new_string": "deux"}),
+        )
+        .unwrap();
+        assert!(
+            out.body.contains("edited arbos://cloud/demo/docs/plan.md"),
+            "{}",
+            out.body
+        );
+        assert_eq!(
+            m.files.lock().unwrap().get(DOC).map(String::as_str),
+            Some("one\ndeux\nthree\n")
+        );
+        let (_, base) = m.writes.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(
+            base.as_deref(),
+            Some(arbos_core::hub::content_hash(b"one\ntwo\nthree\n").as_str()),
+            "the put carries the hash that was read"
+        );
+        // Hashline anchors from a read by address work too.
+        let read = run(&Read, cx(m.clone(), &dir), json!({"path": DOC})).unwrap();
+        let anchor = read
+            .body
+            .lines()
+            .nth(2)
+            .unwrap()
+            .split('|')
+            .next()
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(anchor.starts_with("3:"), "{anchor}");
+        run(
+            &Edit,
+            cx(m.clone(), &dir),
+            json!({"path": DOC, "anchor": anchor, "content": "trois"}),
+        )
+        .unwrap();
+        assert_eq!(
+            m.files.lock().unwrap().get(DOC).map(String::as_str),
+            Some("one\ndeux\ntrois\n")
+        );
+        // Whole-file: content with no anchor and no old_string.
+        run(
+            &Edit,
+            cx(m.clone(), &dir),
+            json!({"path": DOC, "content": "whole\n"}),
+        )
+        .unwrap();
+        assert_eq!(
+            m.files.lock().unwrap().get(DOC).map(String::as_str),
+            Some("whole\n")
+        );
+        // A conflict: the store changes between the read and the put.
+        struct Racing(Arc<FakeMesh>);
+        impl Hooks for Racing {
+            fn approve(
+                &self,
+                a: &arbos_core::AgentId,
+                t: &str,
+                c: &str,
+            ) -> BoxFuture<'static, Result<bool>> {
+                self.0.approve(a, t, c)
+            }
+            fn store_read(&self, address: &str) -> BoxFuture<'static, Result<StoreFile>> {
+                let f = self.0.store_read(address);
+                self.0
+                    .files
+                    .lock()
+                    .unwrap()
+                    .insert(address.to_string(), "someone else\n".into());
+                f
+            }
+            fn store_write(
+                &self,
+                address: &str,
+                text: String,
+                base_hash: Option<String>,
+            ) -> BoxFuture<'static, Result<StoreWritten>> {
+                self.0.store_write(address, text, base_hash)
+            }
+        }
+        let cx_racing = RunCx {
+            hooks: Arc::new(Racing(m.clone())),
+            ..cx(m.clone(), &dir)
+        };
+        let err = run(
+            &Edit,
+            cx_racing,
+            json!({"path": DOC, "old_string": "whole", "new_string": "lost"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("conflict"), "{err}");
+        assert_eq!(
+            m.files.lock().unwrap().get(DOC).map(String::as_str),
+            Some("someone else\n"),
+            "the other writer's text stands"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
