@@ -248,15 +248,18 @@ final class LiveKernelChat: ChatSource {
             children.insert(agent.id)
             childNames[agent.id] = agent.name
             inTree.insert(agent.id)
-            // The tree carries each agent's live step; absent means idle.
-            let running = agent.step != nil
+            // The tree carries a local agent's live step. A remote child's
+            // status lives on its machine, so no step here says nothing:
+            // its spawn record and its report set running on and off.
             if workers[agent.id] == nil {
-                workers[agent.id] = WorkerStatus(id: agent.id, name: agent.name, step: agent.step ?? "", running: running)
+                workers[agent.id] = WorkerStatus(id: agent.id, name: agent.name, step: agent.step ?? "", running: agent.step != nil)
                 workerOrder.append(agent.id)
             } else {
                 workers[agent.id]?.name = agent.name
-                workers[agent.id]?.running = running
-                workers[agent.id]?.step = agent.step ?? ""
+                if let step = agent.step {
+                    workers[agent.id]?.running = true
+                    workers[agent.id]?.step = step
+                }
             }
         }
         // A worker gone from the tree is archived: no longer running.
