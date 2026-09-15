@@ -2097,6 +2097,7 @@ mod relay_tests {
             Event::new(EventKind::Assistant {
                 text: "Reading the tests first.".into(),
                 reasoning_details: None,
+                step: 0,
             }),
         ]
         .into_iter()
@@ -2168,6 +2169,7 @@ mod relay_tests {
         let mut last = Event::new(EventKind::Assistant {
             text: "Done: two tests fixed.".into(),
             reasoning_details: None,
+            step: 0,
         });
         last.seq = 3;
         from_remote_tx
