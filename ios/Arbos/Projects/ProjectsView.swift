@@ -52,6 +52,11 @@ struct ProjectsView: View {
         }
         .fullScreenCover(isPresented: $showCall) { CallScreen() }
         .task { await projects.refresh() }
+        #if DEBUG
+        // `-previewCall 1` on the launch line: straight into the call, for
+        // the scripted voice measurements (see `CallView.previewIfAsked`).
+        .onAppear { if UserDefaults.standard.bool(forKey: "previewCall") { showCall = true } }
+        #endif
     }
 
     // MARK: - Rows
