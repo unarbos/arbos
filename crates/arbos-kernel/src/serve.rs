@@ -879,14 +879,35 @@ fn handle_frame(
             }
         }
         Frame::Answer { agent, text, id } => {
+            // An approval goes out as an `ask` frame with allow/deny
+            // options, and a client may answer it as one (the desktop did:
+            // "answer refused: no question is pending" after Jacob clicked
+            // allow, 2026-09-15). When the id names the pending approval —
+            // or nothing else is pending for this agent — the answer is
+            // the verdict.
+            let approve_pending = hooks
+                .approves
+                .lock()
+                .unwrap()
+                .get(&agent)
+                .map(|(_, call_id, _)| call_id.clone());
+            let asks_pending = hooks.pending_asks(&agent);
+            if let Some(call_id) = approve_pending
+                && (id.as_deref() == Some(call_id.as_str())
+                    || (asks_pending.is_empty()
+                        && id.as_deref().is_none_or(|i| i.is_empty() || i == agent)))
+            {
+                let allow = matches!(
+                    text.trim().to_ascii_lowercase().as_str(),
+                    "allow" | "yes" | "y" | "ok" | "approve" | "approved" | "go" | "a"
+                );
+                resolve_approve(hooks, place, agent, call_id, allow);
+                return;
+            }
             // Only a question that is pending may resolve; a late or
             // duplicate answer (the same ask arriving twice through the live
             // frame and the transcript tail, qa-021) is refused, not applied.
-            let pending: Vec<String> = hooks
-                .pending_asks(&agent)
-                .into_iter()
-                .map(|w| w.id)
-                .collect();
+            let pending: Vec<String> = asks_pending.into_iter().map(|w| w.id).collect();
             let ask_id = match hooks.answer_allowed(&agent, id.as_deref().unwrap_or(""), &pending) {
                 Ok(ask_id) => ask_id,
                 Err(why) => {
@@ -915,30 +936,7 @@ fn handle_frame(
                 refuse(hooks, Some(&agent), format!("approval refused: {why}"));
                 return;
             }
-            let pending = hooks.approves.lock().unwrap().remove(&agent);
-            if let Some((_, id, _)) = &pending {
-                arbos_core::waiting::remove(place, &agent, "approve", id);
-            }
-            let tool = pending
-                .as_ref()
-                .map(|(tool, _, _)| tool.clone())
-                .unwrap_or_else(|| "bash".into());
-            let call_id = pending
-                .as_ref()
-                .map(|(_, id, _)| id.clone())
-                .unwrap_or(call_id);
-            if let Some((_, _, tx)) = pending {
-                let _ = tx.send(allow);
-            }
-            // The decision is part of the record: the transcript shows what
-            // was allowed or denied, not just a failed tool.
-            let event = Event::new(EventKind::Approval {
-                call_id,
-                tool,
-                allowed: allow,
-            });
-            let _ = append_event(&Layout::new(place, &agent).transcript(), &event);
-            hooks.broadcast(Frame::Event { agent, event });
+            resolve_approve(hooks, place, agent, call_id, allow);
         }
         Frame::Undo { agent } => {
             let cwd = load_agent(place, &arbos_core::AgentId::new(&agent))
@@ -1948,6 +1946,41 @@ fn rewind_live(
             });
         }
     });
+}
+
+/// The pending approval for `agent` gets its verdict: the waiting tool
+/// call goes on (or fails), the parked file goes, and the decision is on
+/// the transcript so the record shows what was allowed or denied, not
+/// just a failed tool.
+fn resolve_approve(
+    hooks: &KernelHooks,
+    place: &Place,
+    agent: String,
+    call_id: String,
+    allow: bool,
+) {
+    let pending = hooks.approves.lock().unwrap().remove(&agent);
+    if let Some((_, id, _)) = &pending {
+        arbos_core::waiting::remove(place, &agent, "approve", id);
+    }
+    let tool = pending
+        .as_ref()
+        .map(|(tool, _, _)| tool.clone())
+        .unwrap_or_else(|| "bash".into());
+    let call_id = pending
+        .as_ref()
+        .map(|(_, id, _)| id.clone())
+        .unwrap_or(call_id);
+    if let Some((_, _, tx)) = pending {
+        let _ = tx.send(allow);
+    }
+    let event = Event::new(EventKind::Approval {
+        call_id,
+        tool,
+        allowed: allow,
+    });
+    let _ = append_event(&Layout::new(place, &agent).transcript(), &event);
+    hooks.broadcast(Frame::Event { agent, event });
 }
 
 /// `<agent> turn L<line>: <the last words>` — what the .arbos/ commit for a
