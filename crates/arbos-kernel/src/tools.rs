@@ -636,8 +636,31 @@ impl Tool for Spawn {
                     host.to_string(),
                 )
                 .await?;
+                let mut body = format!("spawned {id} {where_}: {brief}");
+                // `wait=true` blocks on the worker's report the way a local
+                // spawn does — not on the sync and start notices (qa-037).
+                if wait {
+                    let rx = hooks.wait_for(cx.agent.id.as_str(), id.as_str());
+                    let report = tokio::select! {
+                        r = rx => r.ok(),
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(wait_secs)) => None,
+                        _ = cx.cancel.cancelled() => {
+                            hooks.stop_waiting(id.as_str());
+                            anyhow::bail!("interrupted while waiting for {id}; it keeps working on {host}")
+                        }
+                    };
+                    match report {
+                        Some(text) => body = format!("{id} reports:\n{text}"),
+                        None => {
+                            hooks.stop_waiting(id.as_str());
+                            body.push_str(&format!(
+                                "\n{id} is still working after {wait_secs}s; its report will arrive here as a message from it."
+                            ));
+                        }
+                    }
+                }
                 return Ok(ToolOut {
-                    body: format!("spawned {id} {where_}: {brief}"),
+                    body,
                     paths: vec![format!(".arbos/agents/{id}")],
                     child: Some(id.to_string()),
                     images: vec![],

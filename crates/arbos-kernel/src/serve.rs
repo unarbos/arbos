@@ -321,6 +321,17 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     // `--until-idle`: a check a second; the loop ends with its code.
     let mut until_idle = idle::UntilIdle::from_env();
     let mut idle_tick = interval(Duration::from_secs(1));
+    // `--leash`: a check every few seconds; alone and idle for the span
+    // ends the kernel (a child's kernel on another machine, qa-038).
+    let mut leash = idle::Leash::from_env();
+    let mut leash_tick = interval(Duration::from_secs(3));
+    if let Some(l) = &leash {
+        klog::info(
+            "leash",
+            None,
+            format!("exit after {:?} alone and idle", l.after()),
+        );
+    }
     // `changed` frames for attached clients: a stat pass once a second.
     let mut watch = crate::watch::Watch::default();
     let mut watch_tick = interval(Duration::from_secs(1));
@@ -524,6 +535,16 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                     }
                 }
             }
+            _ = leash_tick.tick(), if leash.is_some() => {
+                let clients = hooks.frames.lock().unwrap().iter().filter(|tx| !tx.is_closed()).count();
+                let busy = !hooks.running.lock().unwrap().is_empty()
+                    || !sched.in_flight.lock().unwrap().is_empty();
+                if leash.as_mut().is_some_and(|l| l.poll(clients, busy)) {
+                    println!("arbos-kernel stopping: no client and nothing running (--leash)");
+                    klog::info("kernel_stop", None, "leash");
+                    break;
+                }
+            }
             _ = idle_tick.tick(), if until_idle.is_some() => {
                 if let Some(code) = until_idle.as_mut().and_then(|u| u.poll(&hooks)) {
                     let why = if code == idle::EXIT_IDLE { "idle" } else { "waiting on a question" };
@@ -623,12 +644,14 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 println!("arbos-kernel stopping");
                 klog::info("kernel_stop", None, "signal");
                 stop_turns(&sched, &hooks, &mut done_rx).await;
+                crate::remote::stop_all(&hooks).await;
                 break;
             }
             _ = sigterm.recv() => {
                 println!("arbos-kernel stopping");
                 klog::info("kernel_stop", None, "signal");
                 stop_turns(&sched, &hooks, &mut done_rx).await;
+                crate::remote::stop_all(&hooks).await;
                 break;
             }
         }

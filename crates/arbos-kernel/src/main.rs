@@ -40,6 +40,12 @@ fn main() -> Result<()> {
                         &args.next().context("--project needs a name")?,
                     ),
                     "--until-idle" => set_env(arbos_kernel::idle::UNTIL_IDLE_ENV, "1"),
+                    "--leash" => set_env(
+                        arbos_kernel::idle::LEASH_ENV,
+                        &args
+                            .next()
+                            .context("--leash needs a duration (10m, 600s)")?,
+                    ),
                     "--horizon" => set_env(
                         arbos_kernel::idle::HORIZON_ENV,
                         &args
@@ -150,7 +156,7 @@ fn main() -> Result<()> {
         }
         "help" | "-h" | "--help" => {
             println!(
-                "arbos-kernel serve [place] [--provider replay --replies FILE] [--bind HOST:PORT] [--hub wss://URL --machine NAME [--project NAME]] [--until-idle] [--horizon 1h] [--now 2026-09-13T09:00:00Z]   (off loopback: tokens in <place>/.arbos/access.toml, [[client]] name/token|token_env/role; --hub registers with an arbos-hub, token from ~/.config/arbos/hub.toml or ARBOS_HUB_TOKEN)"
+                "arbos-kernel serve [place] [--provider replay --replies FILE] [--bind HOST:PORT] [--hub wss://URL --machine NAME [--project NAME]] [--until-idle] [--horizon 1h] [--leash 10m] [--now 2026-09-13T09:00:00Z]   (off loopback: tokens in <place>/.arbos/access.toml, [[client]] name/token|token_env/role; --hub registers with an arbos-hub, token from ~/.config/arbos/hub.toml or ARBOS_HUB_TOKEN)"
             );
             println!("{}", arbos_kernel::rollout::USAGE);
             println!("{}", arbos_kernel::check::USAGE);

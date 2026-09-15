@@ -72,6 +72,10 @@ impl Args {
     }
 }
 
+/// `serve --leash` for a worktree kernel: alone and idle this long, it
+/// exits; the worktree stays on disk for the branch.
+const WORKTREE_LEASH: &str = "10m";
+
 /// The checkouts this machine offers: every non-hidden folder under `dir`.
 fn projects_in(dir: &Path) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -270,8 +274,14 @@ fn start_kernel(
         .arg("--machine")
         .arg(&cfg.machine)
         .arg("--project")
-        .arg(&served)
-        .stdin(Stdio::null())
+        .arg(&served);
+    // A worktree kernel exists for one claim: once the claiming kernel's
+    // channel is gone and nothing runs, it exits (qa-038). The checkout's
+    // own kernel stays for the next opener.
+    if isolate {
+        cmd.arg("--leash").arg(WORKTREE_LEASH);
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
     // Its own process group: the worker stopping does not stop the kernel,
