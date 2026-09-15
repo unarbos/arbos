@@ -1134,7 +1134,14 @@ impl Tool for SubscribeTool {
                         error: None,
                         seen: None,
                     };
+                    let mut sub = sub;
+                    let read_as = sub.coerce();
                     let sub = hooks.subscribe(agent, sub, opt_str(&args, "after"))?;
+                    let read_note = if read_as.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" Read as: {}.", read_as.join("; "))
+                    };
                     let door_note = if sub.kind == "chat" {
                         let want = sub.channel.clone().unwrap_or_default();
                         let polled = crate::chatdoor::load(&hooks.place)
@@ -1156,7 +1163,7 @@ impl Tool for SubscribeTool {
                         String::new()
                     };
                     format!(
-                        "Subscribed #{} ({} · {}). It fires as a message from subscription:{}; end the turn — you are woken when it does.{door_note}",
+                        "Subscribed #{} ({} · {}).{read_note} It fires as a message from subscription:{}; end the turn — you are woken when it does.{door_note}",
                         sub.id,
                         sub.kind,
                         sub.when_line(),

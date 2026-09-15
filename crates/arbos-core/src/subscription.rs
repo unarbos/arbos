@@ -293,6 +293,40 @@ impl Subscription {
         }
     }
 
+    /// Read the shape the model meant where it is unambiguous, instead of
+    /// refusing (qa-019 `kind="default"`, qa-031 `host="local"`, qa-035
+    /// `kind=timer` with a `cmd`). Returns what was changed, in words for
+    /// the tool result; nothing when the call was already as written.
+    pub fn coerce(&mut self) -> Vec<String> {
+        let mut notes = Vec::new();
+        let has_cmd = self.cmd.as_deref().is_some_and(|c| !c.trim().is_empty());
+        if matches!(self.kind.as_str(), "timer" | "default" | "") && has_cmd {
+            // A command on a schedule is a shell subscription: the kernel
+            // runs it, no model turn, the output goes where deliver_to says.
+            notes.push(format!(
+                "kind = {} with a cmd runs as kind = shell (the kernel runs the command; deliver_to = user posts its output)",
+                if self.kind.is_empty() { "(none)".to_string() } else { self.kind.clone() }
+            ));
+            self.kind = "shell".into();
+        } else if matches!(self.kind.as_str(), "default" | "") {
+            self.kind = "timer".into();
+        }
+        if self.kind == "shell"
+            && self.deliver_to == "user"
+            && self
+                .notify
+                .as_deref()
+                .is_some_and(|n| !n.contains("{output}"))
+        {
+            // A notify without the output would post the label alone; the
+            // reading goes after it.
+            let n = self.notify.take().unwrap_or_default();
+            self.notify = Some(format!("{}: {{output}}", n.trim_end_matches(':').trim()));
+            notes.push("notify had no {output}; the command's output is appended to it".into());
+        }
+        notes
+    }
+
     /// Refuse what the watcher could not run.
     pub fn validate(&self) -> Result<()> {
         if !KINDS.contains(&self.kind.as_str()) {
@@ -506,6 +540,8 @@ pub fn read(path: &Path) -> Result<Subscription> {
             sub.at.as_deref(),
         )));
     }
+    // A hand-written file gets the same reading as a tool call.
+    sub.coerce();
     sub.validate().with_context(|| format!("{name}"))?;
     Ok(sub)
 }
@@ -576,6 +612,7 @@ pub fn add(
             sub.once = true;
         }
     }
+    sub.coerce();
     sub.validate()?;
     save(place, agent, &sub)?;
     Ok(sub)
@@ -767,8 +804,11 @@ mod tests {
         assert!(add(&p, "root", shell.clone(), None).is_err());
         shell.cmd = Some("date".into());
         shell.deliver_to = "user".into();
+        // A notify without the output slot is read as "label: {output}"
+        // rather than refused (qa-035).
         shell.notify = Some("now".into());
-        assert!(add(&p, "root", shell.clone(), None).is_err());
+        let saved = add(&p, "root", shell.clone(), None).unwrap();
+        assert_eq!(saved.notify.as_deref(), Some("now: {output}"));
         shell.notify = Some("now: {output}".into());
         assert!(add(&p, "root", shell, None).is_ok());
     }
@@ -838,6 +878,65 @@ mod tests {
             t + 3_600_000 + 15 * 60_000
         );
         assert_eq!(align_at(t, None), t);
+    }
+}
+
+#[cfg(test)]
+mod coerce_tests {
+    use super::*;
+
+    /// qa-035: the kickoff coordinator's call, as it sent it.
+    #[test]
+    fn a_timer_with_a_cmd_is_read_as_a_shell_subscription() {
+        let mut sub = Subscription {
+            id: 0,
+            kind: "timer".into(),
+            prompt: "record the QA loop result in notes.md".into(),
+            every: Some("1h".into()),
+            at: None,
+            once: false,
+            cmd: Some("python3 toy-repo/hello.py".into()),
+            path: None,
+            repo: None,
+            pr: None,
+            branch: None,
+            channel: None,
+            thread: None,
+            match_text: None,
+            deliver_to: "user".into(),
+            notify: Some("QA loop result: {output}".into()),
+            expires: None,
+            paused: false,
+            continuity: false,
+            internal: false,
+            created: String::new(),
+            next_due: None,
+            last_fired: None,
+            last: String::new(),
+            error: None,
+            seen: None,
+        };
+        assert!(sub.validate().is_err(), "as sent, it is refused");
+        let notes = sub.coerce();
+        assert_eq!(sub.kind, "shell");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("kind = timer with a cmd runs as kind = shell"),
+            "{notes:?}"
+        );
+        sub.validate().unwrap();
+        assert_eq!(sub.notify.as_deref(), Some("QA loop result: {output}"));
+        // A notify without the output slot gets it; a plain timer stays one.
+        sub.notify = Some("QA loop result".into());
+        let notes = sub.coerce();
+        assert_eq!(sub.notify.as_deref(), Some("QA loop result: {output}"));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        let mut plain = sub.clone();
+        plain.kind = "timer".into();
+        plain.cmd = None;
+        plain.deliver_to = "agent".into();
+        assert!(plain.coerce().is_empty());
+        assert_eq!(plain.kind, "timer");
     }
 }
 
