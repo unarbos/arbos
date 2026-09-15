@@ -32,7 +32,10 @@ fn a_folder_without_agent_md_is_named_at_boot_and_left_out_of_the_roster() {
         .filter_map(|x| x["id"].as_str())
         .map(str::to_owned)
         .collect();
-    assert!(names.iter().any(|n| n == "root"), "root is listed: {names:?}");
+    assert!(
+        names.iter().any(|n| n == "root"),
+        "root is listed: {names:?}"
+    );
     assert!(
         !names.iter().any(|n| n == "agentA" || n == "scratch"),
         "a folder without a readable agent.md is not listed: {names:?}"
