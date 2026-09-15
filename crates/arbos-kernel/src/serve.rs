@@ -1687,6 +1687,7 @@ pub async fn serve_client(
             // has the conversation before the first live frame.
             let focus_agent = focus_agent(&accept_place);
             let _ = out_tx.send(Frame::Hello {
+                identity: Some(arbos_core::project::identity(&accept_place)),
                 protocol: PROTOCOL,
                 kernel: env!("CARGO_PKG_VERSION").to_string(),
                 tail: ATTACH_TAIL,

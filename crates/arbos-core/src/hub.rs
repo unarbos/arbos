@@ -68,6 +68,10 @@ pub enum HubFrame {
         /// Worker: checkouts it can start a kernel in.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         projects: Vec<String>,
+        /// The face of each project named (the kernel's own, a worker's
+        /// checkouts), by project name, from each `project.toml`.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        identities: std::collections::BTreeMap<String, crate::project::ProjectIdentity>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         labels: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -145,6 +149,11 @@ pub struct ProjectInfo {
     /// A kernel serves it now.
     #[serde(default)]
     pub live: bool,
+    /// The project's face from its `project.toml` (name, glyph, colour),
+    /// as the registering kernel or worker read it; absent when the
+    /// folder has no file. A phone draws its list from this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<crate::project::ProjectIdentity>,
 }
 
 /// One machine as the hub sees it.
@@ -511,6 +520,11 @@ mod tests {
             version: "0.2.0".into(),
             worker: true,
             projects: vec![ProjectInfo {
+                identity: Some(crate::project::ProjectIdentity {
+                    name: Some("Demo".into()),
+                    icon: "terminal".into(),
+                    color: "teal".into(),
+                }),
                 name: "demo".into(),
                 place: "/x/demo".into(),
                 live: false,
@@ -518,7 +532,14 @@ mod tests {
             since: 1,
         };
         write_roster(&place, "wss://hub", &[m.clone()]).unwrap();
-        assert_eq!(read_roster(&place), vec![m]);
+        assert_eq!(read_roster(&place), vec![m.clone()]);
+        // The face rides in the roster as the phone reads it.
+        let json = serde_json::to_value(&m.projects[0]).unwrap();
+        assert_eq!(json["identity"]["icon"], "terminal");
+        assert_eq!(json["identity"]["name"], "Demo");
+        // An older hub without the field still reads.
+        let old: ProjectInfo = serde_json::from_str(r#"{"name":"demo","live":true}"#).unwrap();
+        assert!(old.identity.is_none());
         // Prompt-size pass (2026-09-13): the roster in the prompt carries
         // names only; the details stay in .arbos/machines/ for `read`.
         let line = roster_line(&place).unwrap();

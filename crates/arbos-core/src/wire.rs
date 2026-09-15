@@ -16,6 +16,11 @@ pub enum Frame {
         token: String,
     },
     Hello {
+        /// The place's face (name, glyph, colour from `project.toml`),
+        /// so a client draws the same identity as the desktop's tab in
+        /// the first round trip. `changed project.toml` follows a rewrite.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<crate::project::ProjectIdentity>,
         protocol: u32,
         kernel: String,
         tail: u32,
