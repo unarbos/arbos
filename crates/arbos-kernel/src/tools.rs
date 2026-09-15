@@ -365,7 +365,7 @@ fn render_transcript(events: &[arbos_core::Event]) -> String {
     let mut out = String::new();
     for e in events {
         match &e.kind {
-            EventKind::Wake { wake, text } => {
+            EventKind::Wake { wake, text, .. } => {
                 out.push_str(&format!("\n== turn ({wake})\n"));
                 if let Some(t) = text {
                     out.push_str(&format!("wake: {}\n", arbos_core::text::clip(t, 400)));

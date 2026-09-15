@@ -27,6 +27,12 @@ pub enum EventKind {
         wake: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+        /// On a spawned child's first wake: the mission as the parent
+        /// wrote it, alone. `text` has it inside the kernel's framing
+        /// ("You were spawned by … for this mission: …"); a client shows
+        /// this one as the prompt, no string cut.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        brief: Option<String>,
     },
     User {
         text: String,
@@ -50,6 +56,11 @@ pub enum EventKind {
     },
     Thinking {
         text: String,
+        /// On a settled record (one per model step that reasoned): how
+        /// long the thinking streamed, from its first token to its last.
+        /// Absent on a live delta and on lines from before the key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secs: Option<u64>,
     },
     Tool(ToolRec),
     Ask {

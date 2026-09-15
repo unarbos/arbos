@@ -1395,7 +1395,7 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
         // The brief a worker was spawned with is its prompt: Cursor shows a
         // subagent's as the first card. A plan wake with no text (a timer,
         // a chore) is not a message.
-        arbos_core::EventKind::Wake { wake, text: Some(text) }
+        arbos_core::EventKind::Wake { wake, text: Some(text), .. }
             if wake == "plan" && !text.trim().is_empty() =>
         {
             let mut message = crate::model::attachment::UserMessage::from(brief_of(text));
@@ -1419,11 +1419,11 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
             text: crate::model::session::interrupt_label(detail),
             failed: false,
         }),
-        arbos_core::EventKind::Thinking { text } if text.trim().is_empty() => None,
-        arbos_core::EventKind::Thinking { text } => Some(ChatItem::Thinking {
+        arbos_core::EventKind::Thinking { text, .. } if text.trim().is_empty() => None,
+        arbos_core::EventKind::Thinking { text, secs } => Some(ChatItem::Thinking {
             text: text.clone(),
             done: true,
-            secs: None,
+            secs: secs.map(|s| s.min(u32::MAX as u64) as u32),
         }),
         arbos_core::EventKind::Tool(rec) => {
             let hint = crate::agent::acp::tool_hint(&rec.name, &rec.paths, rec.args.as_ref());
@@ -3002,7 +3002,7 @@ pub fn agent_brief(place: &Place, id: &str) -> Option<String> {
     std::io::BufRead::read_line(&mut std::io::BufReader::new(file), &mut first).ok()?;
     let ev: arbos_core::Event = serde_json::from_str(first.trim()).ok()?;
     match ev.kind {
-        arbos_core::EventKind::Wake { wake, text: Some(text) } if wake == "plan" && !text.trim().is_empty() => {
+        arbos_core::EventKind::Wake { wake, text: Some(text), .. } if wake == "plan" && !text.trim().is_empty() => {
             Some(brief_of(&text))
         }
         _ => None,

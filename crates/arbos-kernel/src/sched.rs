@@ -192,7 +192,7 @@ impl arbos_engine::Hooks for TurnHooks {
                 agent: self.agent.to_string(),
                 text: text.clone(),
             },
-            EventKind::Thinking { text } if event.seq == 0 => Frame::ThinkingDelta {
+            EventKind::Thinking { text, .. } if event.seq == 0 => Frame::ThinkingDelta {
                 agent: self.agent.to_string(),
                 text: text.clone(),
             },

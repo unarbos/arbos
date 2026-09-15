@@ -26,6 +26,9 @@ pub struct Wake {
     pub model: String,
     /// The sender's label for this turn (`say title=`), or empty.
     pub title: String,
+    /// A spawned child's mission as the parent wrote it — the brief alone,
+    /// without the kernel's framing around it in `text`. Empty otherwise.
+    pub brief: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +69,7 @@ impl Wake {
             device: String::new(),
             model: String::new(),
             title: String::new(),
+            brief: String::new(),
         }
     }
 

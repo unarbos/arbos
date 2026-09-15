@@ -173,6 +173,7 @@ pub fn user_line(e: &Event) -> Option<String> {
         EventKind::Wake {
             wake,
             text: Some(text),
+            ..
         } if wake != "user" && !text.trim().is_empty() => Some(format!("[kernel {wake}] {text}")),
         EventKind::Say { from, text } => Some(format!("[{from}] {text}")),
         EventKind::Answer { text } => Some(format!("[user answer] {text}")),

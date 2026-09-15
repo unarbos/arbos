@@ -721,7 +721,7 @@ fn flush(
             hooks,
             agent_id,
             transcript,
-            Event::new(EventKind::Thinking { text }),
+            Event::new(EventKind::Thinking { text, secs: None }),
         )?;
     }
     if !state.assistant.trim().is_empty() {

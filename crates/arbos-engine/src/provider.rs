@@ -479,6 +479,10 @@ pub struct Completion {
     /// Prompt tokens served from the provider's cache on this call
     /// (`usage.prompt_tokens_details.cached_tokens`), when reported.
     pub cached: Option<u64>,
+    /// A scripted thought (`thinking` on a replay reply), streamed as
+    /// `Delta::Thinking` before the text so tests can see a thinking
+    /// record settle. Live providers stream theirs and leave this empty.
+    pub thinking: Option<String>,
     /// `reasoning_details` blocks, to be sent back with this assistant
     /// message on later calls. Gemini 3 stops thinking without its thought
     /// signatures; Anthropic rejects a broken thinking chain.
@@ -600,6 +604,9 @@ impl Provider {
             ..Trace::default()
         };
         let c = replay.next(&self.trace_agent);
+        if let Some(t) = c.thinking.as_deref().filter(|t| !t.is_empty()) {
+            on_delta(Delta::Thinking(t.to_string()));
+        }
         if !c.content.is_empty() {
             on_delta(Delta::Text(c.content.clone()));
         }
@@ -775,6 +782,7 @@ impl Provider {
                         usage,
                         cost,
                         cached,
+                        thinking: None,
                         reasoning_details,
                     });
                 }
@@ -861,6 +869,7 @@ impl Provider {
                             usage,
                             cost,
                             cached,
+                            thinking: None,
                             reasoning_details,
                         });
                     }
@@ -878,6 +887,7 @@ impl Provider {
             usage,
             cost,
             cached,
+            thinking: None,
             reasoning_details,
         })
     }

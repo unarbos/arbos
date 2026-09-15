@@ -267,6 +267,11 @@ fn wake_from_message(
         device: msg.device.clone(),
         model: msg.model.clone(),
         title: msg.title.clone(),
+        brief: if msg.kind == "brief" {
+            msg.body.clone()
+        } else {
+            String::new()
+        },
     })
 }
 

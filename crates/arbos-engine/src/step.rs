@@ -101,12 +101,19 @@ pub async fn model_step(
             rx,
         ));
         let hooks = &s.cx.hooks;
+        // The thought as it streams: its words and its span, for one
+        // settled `thinking` record after the step (Cursor's "Thought for
+        // 12s" in a chat opened after the fact).
+        let thought: std::sync::Mutex<Thought> = std::sync::Mutex::new(Thought::default());
         let emit = |delta: Delta| match delta {
             Delta::Text(text) => hooks.emit(&Event::new(EventKind::Assistant {
                 text,
                 reasoning_details: None,
             })),
-            Delta::Thinking(text) => hooks.emit(&Event::new(EventKind::Thinking { text })),
+            Delta::Thinking(text) => {
+                thought.lock().unwrap().push(&text);
+                hooks.emit(&Event::new(EventKind::Thinking { text, secs: None }))
+            }
             Delta::Waiting(for_) => hooks.working(for_.as_secs()),
             Delta::Call(call) => {
                 let _ = tx.send(Msg::Call(call));
@@ -117,6 +124,13 @@ pub async fn model_step(
             .complete_stream(messages, tools, s.control.cancel(), emit)
             .await;
 
+        if let Some(record) = thought.into_inner().unwrap_or_default().settled() {
+            // On the transcript before the step's assistant line, as the
+            // model produced it; the model never reads it back.
+            if let Err(e) = append_event(s.transcript, &record) {
+                eprintln!("thinking record: {e:#}");
+            }
+        }
         let err = match streamed {
             Ok(done) => {
                 let _ = tx.send(Msg::Commit);
@@ -440,5 +454,45 @@ mod tests {
         assert!(out[1].images.is_empty());
         let c = out[1].content.as_deref().unwrap();
         assert!(c.starts_with("look\n\n[1 image omitted"), "{c}");
+    }
+}
+
+/// Longest thought kept on the transcript; the rest is cut with a note.
+const THOUGHT_KEEP_CHARS: usize = 4000;
+
+/// A model step's reasoning as it streamed.
+#[derive(Default)]
+struct Thought {
+    text: String,
+    first: Option<std::time::Instant>,
+    last: Option<std::time::Instant>,
+}
+
+impl Thought {
+    fn push(&mut self, delta: &str) {
+        let now = std::time::Instant::now();
+        self.first.get_or_insert(now);
+        self.last = Some(now);
+        self.text.push_str(delta);
+    }
+
+    /// The settled record, when anything was thought: the text (clipped)
+    /// and the span in whole seconds.
+    fn settled(self) -> Option<Event> {
+        let (first, last) = (self.first?, self.last?);
+        if self.text.trim().is_empty() {
+            return None;
+        }
+        let secs = last.duration_since(first).as_secs();
+        let text = if self.text.chars().count() > THOUGHT_KEEP_CHARS {
+            let head: String = self.text.chars().take(THOUGHT_KEEP_CHARS).collect();
+            format!("{head}\n… [thought cut at {THOUGHT_KEEP_CHARS} characters]")
+        } else {
+            self.text
+        };
+        Some(Event::new(EventKind::Thinking {
+            text,
+            secs: Some(secs),
+        }))
     }
 }

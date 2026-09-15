@@ -45,6 +45,10 @@ pub struct Reply {
     /// Default nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
+    /// A thought to stream before the content, for tests of thinking
+    /// records. Default none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -149,6 +153,7 @@ impl Replay {
             usage: Some((0, 0)),
             cost: Some(reply.cost.unwrap_or(0.0)),
             cached: None,
+            thinking: reply.thinking.clone(),
             reasoning_details: Vec::new(),
         }
     }

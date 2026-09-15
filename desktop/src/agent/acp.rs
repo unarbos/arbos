@@ -767,7 +767,12 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
                 text,
             )))]
         }
-        EventKind::Thinking { text } => {
+        // A settled thinking record (recorded, with `secs`) follows the
+        // deltas that already built the thought: nothing to add live. A
+        // recorded thought without `secs` is an ACP worker's only form of
+        // it and still shows.
+        EventKind::Thinking { secs: Some(_), .. } if recorded => Vec::new(),
+        EventKind::Thinking { text, .. } => {
             vec![Event::Update(SessionUpdate::AgentThoughtChunk(text_chunk(
                 text,
             )))]

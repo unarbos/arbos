@@ -232,6 +232,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         let mut batch = vec![Event::new(EventKind::Wake {
             wake: wake.kind.as_str().into(),
             text: wake.text.clone(),
+            brief: (!wake.brief.is_empty()).then(|| wake.brief.clone()),
         })];
         if wake.kind == WakeKind::User {
             // A new task: the mechanism line belongs to the last one.
