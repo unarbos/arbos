@@ -838,12 +838,7 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
             tool.kind = tool_kind(&rec.name);
             let hint = tool_hint(&rec.name, &rec.paths, rec.args.as_ref());
             tool.title = tool_title(&rec.name, hint.as_deref());
-            if let Some(label) = rec
-                .label
-                .as_deref()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-            {
+            if let Some(label) = rec.label.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
                 let mut meta = serde_json::Map::new();
                 meta.insert("label".into(), serde_json::Value::String(label.to_string()));
                 tool.meta = Some(meta);

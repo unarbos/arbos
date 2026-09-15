@@ -910,10 +910,7 @@ impl ChatSession {
         // The kickoff turn has no prompt: its time is the chat's, measured
         // from the ask to the last turn end before the user's first line.
         if let Some(at) = self.kickoff_at
-            && !self
-                .items
-                .iter()
-                .any(|item| matches!(item, ChatItem::User(_)))
+            && !self.items.iter().any(|item| matches!(item, ChatItem::User(_)))
         {
             self.kickoff_secs = Some(at.elapsed().map(|d| d.as_secs() as u32).unwrap_or(0));
             return;
@@ -1425,9 +1422,7 @@ impl ChatSession {
             // one runs; its own record of the line lands the card in order,
             // after the greeting, so nothing is drawn here now.
             let held = match &self.connection {
-                Connection::Live(session) if !session.is_closed() => {
-                    session.prompt(&content).is_ok()
-                }
+                Connection::Live(session) if !session.is_closed() => session.prompt(&content).is_ok(),
                 _ => false,
             };
             if !held {
@@ -1466,10 +1461,7 @@ impl ChatSession {
     pub fn kickoff_running(&self) -> bool {
         self.kickoff_at.is_some()
             && self.busy()
-            && !self
-                .items
-                .iter()
-                .any(|item| matches!(item, ChatItem::User(_)))
+            && !self.items.iter().any(|item| matches!(item, ChatItem::User(_)))
     }
 
     /// Hold the words for the next turn. The kernel keeps them as an inbox
@@ -1855,17 +1847,12 @@ impl ChatSession {
         } else {
             question.prompt.as_str()
         };
-        let call = words
-            .trim()
-            .strip_prefix("allow ")
-            .or_else(|| words.trim().strip_prefix("Allow "))?;
+        let call = words.trim().strip_prefix("allow ").or_else(|| words.trim().strip_prefix("Allow "))?;
         let find = |want: &str| {
             question
                 .options
                 .iter()
-                .find(|o| {
-                    o.id.eq_ignore_ascii_case(want) || o.label.trim().eq_ignore_ascii_case(want)
-                })
+                .find(|o| o.id.eq_ignore_ascii_case(want) || o.label.trim().eq_ignore_ascii_case(want))
                 .map(|o| o.id.clone())
         };
         Some((call.trim().to_string(), find("allow")?, find("deny")?))
@@ -1876,12 +1863,7 @@ impl ChatSession {
         let Some((_, allow_id, deny_id)) = self.approval_ask() else {
             return;
         };
-        let Some(question_id) = self
-            .questions
-            .as_ref()
-            .and_then(|p| p.current())
-            .map(|q| q.id.clone())
-        else {
+        let Some(question_id) = self.questions.as_ref().and_then(|p| p.current()).map(|q| q.id.clone()) else {
             return;
         };
         let pick = if allow { allow_id } else { deny_id };
@@ -2165,9 +2147,7 @@ impl ChatSession {
                 self.questions = None;
                 let what = match restored {
                     Some(_) => rewound_line(dropped, true),
-                    None if pending => {
-                        format!("rewound: {dropped} transcript lines cut; {RESTORING}")
-                    }
+                    None if pending => format!("rewound: {dropped} transcript lines cut; {RESTORING}"),
                     None => rewound_line(dropped, false),
                 };
                 self.notice(false, &what);
@@ -2417,9 +2397,7 @@ impl ChatSession {
                     Ok(StopReason::Refusal) => self.notice(false, "the agent refused to continue"),
                     Ok(StopReason::MaxTokens) => self.notice(false, "stopped: max tokens"),
                     Ok(StopReason::MaxTurnRequests) => self.notice(false, "stopped: max steps"),
-                    Ok(StopReason::Other(reason)) => {
-                        self.notice(false, &format!("stopped: {reason}"))
-                    }
+                    Ok(StopReason::Other(reason)) => self.notice(false, &format!("stopped: {reason}")),
                     Err(e) => {
                         self.fail_running_tools();
                         self.notice(true, &format!("turn failed: {}", acp::error_text(&e)));
@@ -2888,9 +2866,7 @@ impl ChatSession {
             .items
             .iter()
             .rposition(|item| matches!(item, ChatItem::Thinking { done: false, .. }));
-        if let Some(ChatItem::Thinking { done, secs, .. }) =
-            open.and_then(|at| self.items.get_mut(at))
-        {
+        if let Some(ChatItem::Thinking { done, secs, .. }) = open.and_then(|at| self.items.get_mut(at)) {
             *done = true;
             let took = self
                 .thought_at
@@ -3465,11 +3441,7 @@ pub(crate) fn worker_name(id: &str) -> Option<String> {
 /// The line under a rewind, in the reader's words: what came back, not
 /// the commit hashes the kernel reports (they are in the kernel's log).
 fn rewound_line(dropped: u64, files: bool) -> String {
-    let lines = if dropped == 1 {
-        "1 line".to_string()
-    } else {
-        format!("{dropped} lines")
-    };
+    let lines = if dropped == 1 { "1 line".to_string() } else { format!("{dropped} lines") };
     if files {
         format!("Rewound to before this prompt: {lines} of chat cut, files restored")
     } else {

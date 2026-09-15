@@ -204,14 +204,8 @@ mod save_tests {
         face.save(&dir).unwrap();
         let text = std::fs::read_to_string(Identity::path(&dir)).unwrap();
         assert!(text.contains("name = \"Arbos\""), "{text}");
-        assert!(
-            text.contains("icon = \"terminal\"") && text.contains("color = \"teal\""),
-            "{text}"
-        );
-        assert!(
-            text.contains("role = \"coordinator\"") && text.contains("cap_usd = 20.0"),
-            "the config survived: {text}"
-        );
+        assert!(text.contains("icon = \"terminal\"") && text.contains("color = \"teal\""), "{text}");
+        assert!(text.contains("role = \"coordinator\"") && text.contains("cap_usd = 20.0"), "the config survived: {text}");
         assert!(text.contains("schema = 2"), "{text}");
         let back = Identity::load(&dir).unwrap();
         assert_eq!(back, face);

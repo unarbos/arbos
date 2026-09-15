@@ -547,10 +547,7 @@ impl Opener {
                     .into_iter()
                     .filter_map(|offer| match offer {
                         Offer::Dir(name) => Some(name),
-                        Offer::Machine { .. }
-                        | Offer::Here(_)
-                        | Offer::Create(_)
-                        | Offer::Browse => None,
+                        Offer::Machine { .. } | Offer::Here(_) | Offer::Create(_) | Offer::Browse => None,
                     })
                     .collect();
                 if names.is_empty() {

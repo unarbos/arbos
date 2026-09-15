@@ -368,7 +368,7 @@ impl From<StoredMessage> for UserMessage {
                 sent_at: None,
                 feedback: None,
                 described: Vec::new(),
-                steer: false,
+            steer: false,
             },
             StoredMessage::Images {
                 text,
@@ -383,7 +383,7 @@ impl From<StoredMessage> for UserMessage {
                 sent_at: None,
                 feedback: None,
                 described: Vec::new(),
-                steer: false,
+            steer: false,
             },
         };
         out.lift_files();
