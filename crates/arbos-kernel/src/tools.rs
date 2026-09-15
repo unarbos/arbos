@@ -733,7 +733,7 @@ impl Tool for Say {
                 ),
                 (
                     "rename",
-                    "A new durable name for a worker of yours, only when its assignment changed.",
+                    "Not the target (that is `to`): a new durable name for the worker in `to`, only when its assignment changed.",
                     false,
                 ),
             ],
