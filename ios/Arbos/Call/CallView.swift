@@ -36,7 +36,7 @@ struct CallView: View {
             VStack(spacing: 0) {
                 topBar
                 Spacer(minLength: 0)
-                VoiceRing(level: model.level, phase: model.phase)
+                VoiceRing(level: model.level, phase: model.phase, speakingInk: speakingInk)
                     .frame(width: 196, height: 196)
                 Text(stateWord)
                     .font(ArbosTheme.bodyMedium)
@@ -103,6 +103,19 @@ struct CallView: View {
         }
         .padding(.horizontal, ArbosTheme.gutter)
         .padding(.top, 4)
+    }
+
+    /// The reply's colour: the accent (the desktop's one colour). A DEBUG
+    /// launch line `-ringTint project` tries the project's own tint, for
+    /// the side-by-side Jacob picks from.
+    private var speakingInk: Color {
+        #if DEBUG
+        if UserDefaults.standard.string(forKey: "ringTint") == "project",
+           let tint = (chat.identity ?? ProjectIdentity.defaults(key: settings.kernelTarget.stored, remote: true)).tint as Color? {
+            return tint
+        }
+        #endif
+        return ArbosTheme.accent
     }
 
     private var stateWord: String {
@@ -234,6 +247,7 @@ struct CallView: View {
 struct VoiceRing: View {
     let level: Float
     let phase: CallViewModel.Phase
+    var speakingInk: Color = ArbosTheme.accent
     /// The level the disc is drawn at: eased toward `level` every frame,
     /// so 25 Hz meter updates read as one motion, not steps.
     @State private var shown: Float = 0
@@ -269,7 +283,7 @@ struct VoiceRing: View {
     private var ringInk: Color {
         switch phase {
         case .listening, .thinking, .connecting: return ArbosTheme.borderStrong
-        case .speaking: return ArbosTheme.accent.opacity(0.5)
+        case .speaking: return speakingInk.opacity(0.5)
         case .idle, .unconfigured: return ArbosTheme.border
         case .failed: return ArbosTheme.danger.opacity(0.5)
         }
@@ -278,7 +292,7 @@ struct VoiceRing: View {
     private var discInk: Color {
         switch phase {
         case .listening: return ArbosTheme.text.opacity(0.9)
-        case .speaking: return ArbosTheme.accent
+        case .speaking: return speakingInk
         case .thinking, .connecting: return ArbosTheme.textMuted.opacity(0.7)
         case .idle, .unconfigured: return ArbosTheme.textDim.opacity(0.6)
         case .failed: return ArbosTheme.danger.opacity(0.7)
