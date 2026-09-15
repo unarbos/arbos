@@ -14,6 +14,7 @@ pub mod panel;
 pub mod project_page;
 pub mod root;
 pub mod settings;
+pub mod status_bar;
 pub mod tabs;
 pub mod terminal;
 

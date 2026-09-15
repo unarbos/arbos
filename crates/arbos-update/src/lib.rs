@@ -9,11 +9,14 @@
 //! - [`version`] — the marketing version and the build number, ordered.
 //! - [`feed`] — the document a channel publishes and the app reads.
 //! - [`sign`] — Ed25519 over the payload's bytes, and the key that checks it.
+//! - [`install`] — putting the new build in place, and putting the old one
+//!   back when that goes wrong.
 //!
 //! Nothing here opens a socket. The desktop fetches with the HTTP client it
-//! already has; this crate only says what the bytes mean.
+//! already has; this crate only says what the bytes mean and where they go.
 
 pub mod feed;
+pub mod install;
 pub mod sign;
 pub mod version;
 

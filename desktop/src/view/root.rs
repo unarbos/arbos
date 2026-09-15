@@ -660,6 +660,9 @@ pub struct Arbos {
     pub(crate) name_field: Entity<TextField>,
     meter: Entity<Stats>,
     meter_at: Floating,
+    /// What the bar along the bottom draws: which build this is, and whether
+    /// the channel has a newer one. See [`crate::update`].
+    pub(crate) updater: Entity<crate::update::Updater>,
     /// Where the focus rests when no field holds it — a board, a table and a
     /// transcript have none — so the bindings below always have a path here.
     focus: FocusHandle,
@@ -856,6 +859,9 @@ impl Arbos {
         .detach();
 
         let name_field = name_field_entity(false, cx);
+        // Read before the settings are handed to the workspace, and used to
+        // start the bar's updater below.
+        let channel = crate::update::channel_of(&settings);
         let workspace = cx.new(|cx| Workspace::new(settings, state, cx));
         // The model is the only thing that says a session appeared or a turn
         // ended; the composer's placeholder, commands and busy state are all
@@ -888,9 +894,14 @@ impl Arbos {
         )
         .detach();
 
+        // The updater is the window's, so closing the window stops it looking.
+        let updater = cx.new(move |cx| crate::update::Updater::new(channel, cx));
+        crate::view::status_bar::observe(cx, &updater);
+
         let mut this = Self {
             meter: cx.new(Stats::new),
             meter_at: Floating::new(Painter::of(cx)),
+            updater,
             workspace,
             terminals: Default::default(),
             active_terminal: None,
@@ -2241,6 +2252,9 @@ impl Render for Arbos {
                     .child(self.detail(window, cx))
                     .children(self.panel(window, cx)),
             )
+            // Under everything, the width of the window: settings and the
+            // update control, where Cursor keeps them.
+            .child(self.status_bar(cx))
             .children(
                 self.workspace
                     .read(cx)

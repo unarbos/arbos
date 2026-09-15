@@ -1,0 +1,376 @@
+//! The bar across the bottom of the window: settings on the left, and beside
+//! it what build this is — or, when there is a newer one, a blue Update
+//! button.
+//!
+//! Cursor's is the shape being matched. It sits at the bottom left, it is
+//! always there, and it is quiet until it has something to say. Resting, it is
+//! the version in faint text and nothing else. When a build is waiting it
+//! becomes a filled blue control that reads `Update` — not a tinted pill or a
+//! dot on an icon, because the whole point is that it cannot be missed.
+//!
+//! The four states it is judged on:
+//!
+//! | state | what it looks like |
+//! | --- | --- |
+//! | resting, up to date | `0.2.0 (1877)` in faint text; hovering lifts it |
+//! | update waiting | a filled blue `⭳ Update`; hovering lightens the plate |
+//! | updating | the same plate with the download filling it left to right, reading `Updating… 42%`, then `Installing…`, then `Restarting…` |
+//! | failed | the plate goes to the danger colour and reads `Update failed`; the reason is in the tooltip, and a click tries again |
+//!
+//! Nothing here decides anything. [`crate::update::Updater`] holds the state
+//! and does the work; this draws it.
+
+use crate::{
+    build,
+    update::{State, Updater},
+    view::{root::Arbos, settings::Section},
+};
+use arbos_update::Channel;
+use bezel::{
+    gpui::{AnyElement, Context, Entity, FontWeight, Hsla, div, hsla, prelude::*, px},
+    theme::{TextStyle, Theme, Typeset},
+    ui::{icons, tooltip::Tooltip, widgets::Buttons},
+};
+
+/// The strip's height. The tab bar is 36; the bar under the window is meant to
+/// read as chrome rather than as another row of content, so it is shorter.
+const HEIGHT: f32 = 28.;
+
+/// The inset either end, matching the panel's.
+const PAD_X: f32 = 8.;
+
+impl Arbos {
+    /// The bar. Always drawn: it is where the version lives, and a control
+    /// that appears only when it has news is a control nobody learns.
+    pub(crate) fn status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        div()
+            .id("status-bar")
+            .flex_none()
+            .w_full()
+            .h(px(HEIGHT))
+            .px(px(PAD_X))
+            .border_t_1()
+            .border_color(theme.border)
+            .bg(crate::view::root::chrome_bg(&theme))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.))
+            .child(self.status_bar_settings(&theme, cx))
+            .child(self.status_bar_update(&theme, cx))
+            .into_any_element()
+    }
+
+    /// The gear. The same control the panel's foot carries, in the place
+    /// Cursor keeps it, so it is reachable with the panel folded away.
+    fn status_bar_settings(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        // Something the user tried needed a permission that is not granted: a
+        // dot on the gear, and nothing louder.
+        let wants_permission = self.permission_center.read(cx).wants_attention();
+        theme
+            .ghost("status-bar-settings")
+            .px(px(6.))
+            .py(px(4.))
+            .tooltip(|window, cx| Tooltip::with_keystroke("Settings", "⌘,", window, cx))
+            .child(
+                div()
+                    .relative()
+                    .child(
+                        icons::icon(icons::system::SETTINGS_MINIMALISTIC)
+                            .size(px(13.))
+                            .text_color(theme.text_muted),
+                    )
+                    .when(wants_permission, |el| {
+                        el.child(
+                            div()
+                                .id("status-bar-settings-dot")
+                                .absolute()
+                                .top(px(-2.))
+                                .right(px(-3.))
+                                .size(px(6.))
+                                .rounded_full()
+                                .bg(theme.warning),
+                        )
+                    }),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if wants_permission {
+                    this.show_permissions(window, cx);
+                } else {
+                    this.open_settings(Section::General, cx);
+                }
+            }))
+            .into_any_element()
+    }
+
+    /// The version, or the button.
+    fn status_bar_update(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        // Settings owns the choice and this owns the asking, so the two are
+        // reconciled here rather than through a third thing that watches the
+        // file. `set_channel` does nothing when it has not moved.
+        let chosen = crate::update::channel_of(&self.workspace.read(cx).settings);
+        self.updater
+            .update(cx, |updater, cx| updater.set_channel(chosen, cx));
+
+        // Taken out of the entity before anything else borrows `cx`.
+        let updater = self.updater.read(cx);
+        let (state, channel, trouble, at) = (
+            updater.state().clone(),
+            updater.channel(),
+            updater.can_install(),
+            updater.installed_at(),
+        );
+        match &state {
+            State::Idle | State::Checking => quiet(
+                theme,
+                matches!(state, State::Checking),
+                channel,
+                trouble,
+                at,
+                cx,
+            ),
+            State::Ready(update) => plate(
+                cx,
+                Plate {
+                    label: "Update".into(),
+                    icon: Some(icons::files::DOWNLOAD),
+                    fill: theme.accent,
+                    progress: None,
+                    tooltip: Some(format!(
+                        "Update to {}{}",
+                        update.version.human(),
+                        match update.notes.trim() {
+                            "" => String::new(),
+                            notes => format!(" — {notes}"),
+                        }
+                    )),
+                    clickable: true,
+                },
+            ),
+            State::Downloading { got, total, .. } => {
+                let fraction = match total {
+                    0 => 0.,
+                    total => (*got as f32 / *total as f32).clamp(0., 1.),
+                };
+                plate(
+                    cx,
+                    Plate {
+                        label: format!("Updating… {}%", (fraction * 100.).round() as u32),
+                        icon: None,
+                        fill: theme.accent,
+                        progress: Some(fraction),
+                        tooltip: Some(format!("{} of {}", megabytes(*got), megabytes(*total))),
+                        clickable: false,
+                    },
+                )
+            }
+            State::Installing(_) => plate(
+                cx,
+                Plate {
+                    label: "Installing…".into(),
+                    icon: None,
+                    fill: theme.accent,
+                    // Unpacking and moving are quick and have no honest
+                    // fraction; a bar that jumped to full and sat there would
+                    // be a lie.
+                    progress: Some(1.),
+                    tooltip: Some("Putting the new build in place".into()),
+                    clickable: false,
+                },
+            ),
+            State::Restarting => plate(
+                cx,
+                Plate {
+                    label: "Restarting…".into(),
+                    icon: None,
+                    fill: theme.accent,
+                    progress: Some(1.),
+                    tooltip: Some("Arbos is reopening with your tabs and chats".into()),
+                    clickable: false,
+                },
+            ),
+            State::Failed { why, update } => plate(
+                cx,
+                Plate {
+                    label: "Update failed".into(),
+                    icon: None,
+                    fill: theme.danger,
+                    progress: None,
+                    tooltip: Some(format!("{why}\n\nArbos is unchanged. Click to try again.",)),
+                    clickable: update.is_some(),
+                },
+            ),
+        }
+    }
+}
+
+/// Resting: what build this is, faint, and a click to look for a newer one.
+fn quiet(
+    theme: &Theme,
+    checking: bool,
+    channel: Channel,
+    trouble: Option<String>,
+    at: Option<std::path::PathBuf>,
+    cx: &mut Context<Arbos>,
+) -> AnyElement {
+    let version = build::version_label();
+    let tooltip = match &trouble {
+        // A build that cannot update itself says so here rather than offering
+        // a button that would fail at the last step.
+        Some(why) => format!("Arbos {version}\n\n{why}"),
+        None => format!(
+            "Arbos {version} — up to date on the {} channel.\nClick to check again.{}",
+            channel.as_str(),
+            // Which copy this is. The first question worth answering when
+            // ⌘Space opens the wrong Arbos, or none.
+            match &at {
+                Some(at) => format!("\n\n{}", at.display()),
+                None => String::new(),
+            }
+        ),
+    };
+    theme
+        .ghost("status-bar-version")
+        .px(px(6.))
+        .py(px(3.))
+        .text_style(TextStyle::Caption)
+        .text_color(match checking {
+            true => theme.text_dim,
+            false => theme.text_faint,
+        })
+        .tooltip(move |window, cx| Tooltip::text(tooltip.clone(), window, cx))
+        .child(version)
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.updater.update(cx, |updater, cx| updater.check(cx));
+        }))
+        .into_any_element()
+}
+
+/// Everything the control looks like when it has something to say.
+struct Plate {
+    label: String,
+    icon: Option<&'static str>,
+    /// The plate's colour: the accent for an update, danger for a failure.
+    fill: Hsla,
+    /// `0.0` to `1.0`, drawn as the plate filling left to right. `None` for a
+    /// plate that is not working on anything.
+    progress: Option<f32>,
+    tooltip: Option<String>,
+    clickable: bool,
+}
+
+/// The filled control.
+///
+/// bezel ships `Ghost`, `Prominent` and `Destructive`, and `Prominent` is a
+/// white plate — right for a dialog's confirm, wrong for this. Cursor's update
+/// button is its one blue, so this is built from `theme.accent`, which
+/// `view::palette` paints Cursor's blue.
+fn plate(cx: &mut Context<Arbos>, plate: Plate) -> AnyElement {
+    let Plate {
+        label,
+        icon,
+        fill,
+        progress,
+        tooltip,
+        clickable,
+    } = plate;
+    let ink = on_plate(fill);
+    div()
+        .id("status-bar-update")
+        .relative()
+        .overflow_hidden()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(5.))
+        .h(px(20.))
+        .px(px(8.))
+        .rounded(px(Theme::control_radius()))
+        // The plate under everything. While a download is running the same
+        // colour is laid over it at full strength up to the fraction done, so
+        // the button *is* the progress bar rather than growing one.
+        .bg(dim(fill, 0.45))
+        .when_some(progress, |el, fraction| {
+            el.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .bottom_0()
+                    .w(bezel::gpui::relative(fraction))
+                    .bg(fill),
+            )
+        })
+        .when(progress.is_none(), |el| el.bg(fill))
+        .when(clickable, |el| {
+            el.cursor_pointer()
+                // Lighter on hover, the way Cursor's does. `opacity` on the
+                // whole control rather than a second background, so the label
+                // moves with the plate instead of washing out against it.
+                .hover(|el| el.opacity(0.88))
+                .active(|el| el.opacity(0.78))
+        })
+        .children(
+            icon.map(|icon| {
+                div().child(icons::icon(icon).size(px(12.)).flex_none().text_color(ink))
+            }),
+        )
+        .child(
+            div()
+                .relative()
+                .text_style(TextStyle::Caption)
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(ink)
+                .child(label),
+        )
+        .when_some(tooltip, |el, tooltip| {
+            el.tooltip(move |window, cx| Tooltip::text(tooltip.clone(), window, cx))
+        })
+        .when(clickable, |el| {
+            el.on_click(cx.listener(|this, _, _, cx| {
+                // The open projects: their kernels run on the binary about to
+                // be replaced, so the updater stops them before it swaps.
+                let places = this
+                    .workspace
+                    .read(cx)
+                    .projects
+                    .iter()
+                    .map(|project| project.place().clone())
+                    .collect();
+                this.updater
+                    .update(cx, |updater, cx| updater.install(places, cx));
+            }))
+        })
+        .into_any_element()
+}
+
+/// A label that reads on a plate.
+///
+/// `theme.on_accent` is bezel's answer for `theme.accent_strong`, which is a
+/// near-neutral plate; `view::palette` paints `accent` an actual blue and
+/// leaves the other two alone, so the pair would not match. Choosing from the
+/// plate's own lightness is right whichever colour it is given, which also
+/// keeps the failed state legible without a second token.
+fn on_plate(fill: Hsla) -> Hsla {
+    match fill.l > 0.5 {
+        true => hsla(0., 0., 0.08, 1.),
+        false => hsla(0., 0., 1., 1.),
+    }
+}
+
+/// The same colour, held back — the unfilled part of the plate while a
+/// download runs.
+fn dim(color: Hsla, by: f32) -> Hsla {
+    hsla(color.h, color.s, color.l, color.a * by)
+}
+
+/// `48.2 MB`. Bytes are not a thing to read while waiting.
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.)
+}
+
+/// Redraw the bar when the updater moves.
+pub(crate) fn observe(arbos: &mut Context<Arbos>, updater: &Entity<Updater>) {
+    arbos.observe(updater, |_, _, cx| cx.notify()).detach();
+}

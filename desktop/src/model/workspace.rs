@@ -489,6 +489,17 @@ impl Workspace {
     ///
     /// Nothing is re-armed. The pump reads the interval on each pass, so the
     /// next event to land uses whatever this leaves behind.
+    /// Which builds this machine updates itself to. The bar along the bottom
+    /// of the window reads it back on the next frame and asks the new
+    /// channel's feed what it has.
+    pub fn set_update_channel(&mut self, channel: arbos_update::Channel, cx: &mut Context<Self>) {
+        if settings::set_update_channel(channel).is_err() {
+            return;
+        }
+        self.settings.update.channel = channel.as_str().to_owned();
+        cx.notify();
+    }
+
     pub fn set_watch_bounce(&mut self, ms: u64, cx: &mut Context<Self>) {
         let ms = ms.clamp(watch::BOUNCE_RANGE.0, watch::BOUNCE_RANGE.1);
         if settings::set_watch_bounce(ms).is_err() {

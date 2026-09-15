@@ -9,6 +9,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo::rustc-env=ARBOS_COMMIT={}", commit());
+    println!("cargo::rustc-env=ARBOS_BUILD={}", build());
     println!("cargo::rustc-env=ARBOS_KERNEL_VERSION={}", kernel_version());
     println!("cargo::rerun-if-changed=../crates/arbos-kernel/Cargo.toml");
     // Cargo has no reason of its own to look at git, so without these the
@@ -38,6 +39,17 @@ fn commit() -> String {
         true => short,
         false => format!("{short}-dirty"),
     }
+}
+
+/// Commits on the branch — the same number `desktop/Makefile` stamps
+/// `CFBundleVersion` with, and the half of the version that moves between two
+/// builds of one `0.2.0`. It is what the update feed orders on, so a build
+/// that does not know it can never be told it is behind.
+///
+/// `0` where there is no repository to count, which sorts under every build
+/// that had one.
+fn build() -> String {
+    git(&["rev-list", "--count", "HEAD"]).unwrap_or_else(|| "0".into())
 }
 
 /// The kernel this build was cut beside: the `version` line of

@@ -262,6 +262,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "arbos-core",
+ "arbos-update",
  "base64 0.22.1",
  "bezel",
  "bezel-editor",
@@ -292,6 +293,17 @@ dependencies = [
  "toml 0.8.23",
  "toml_edit 0.22.27",
  "ureq",
+]
+
+[[package]]
+name = "arbos-update"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "ring",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
