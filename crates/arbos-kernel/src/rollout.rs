@@ -226,6 +226,7 @@ fn replies_from_trace(dir: &Path, agent: &str) -> Result<Vec<Reply>> {
             calls,
             agent: Some(agent.to_string()),
             source: Some(format!("trace:{purpose}")),
+            cost: None,
         });
     }
     Ok(out)
@@ -255,6 +256,7 @@ fn replies_from_transcript(events: &[Event], agent: &str) -> Vec<Reply> {
                     }],
                     agent: Some(agent.to_string()),
                     source: Some("transcript".into()),
+                    cost: None,
                 });
             }
             EventKind::TurnComplete { .. } | EventKind::User { .. } => {
@@ -277,6 +279,7 @@ fn text_only(content: String, agent: &str) -> Reply {
         calls: Vec::new(),
         agent: Some(agent.to_string()),
         source: Some("transcript".into()),
+        cost: None,
     }
 }
 

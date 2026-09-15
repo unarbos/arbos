@@ -363,6 +363,35 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             return;
         }
         let id = wake.agent.to_string();
+        // Over the spend cap only the user's own words to a top-level agent
+        // open a turn (so the cap can be raised); a worker's brief, a
+        // done, or a subscription is refused with a notice on its
+        // transcript.
+        if arbos_core::spend::over_cap(&place) {
+            let top_level = load_agent(&place, &wake.agent).is_ok_and(|a| a.parent.is_none());
+            let from_user = wake.kind == arbos_core::WakeKind::User && !wake.steer;
+            if !(top_level && from_user) {
+                let why = arbos_core::spend::refusal(&place);
+                let _ = arbos_core::append_event(
+                    &Layout::new(&place, &id).transcript(),
+                    &arbos_core::Event::new(arbos_core::EventKind::Notice {
+                        text: format!(
+                            "[kernel] turn not started — {why}{}",
+                            wake.text
+                                .as_deref()
+                                .map(|t| format!(
+                                    " The message was: {}",
+                                    arbos_core::text::clip(t, 200)
+                                ))
+                                .unwrap_or_default()
+                        ),
+                        failed: true,
+                    }),
+                );
+                klog::warn("turn_refused_spend_cap", Some(&id), why);
+                return;
+            }
+        }
         // Notes waiting in the inbox (wake = false) go on the transcript
         // before the model reads it, whatever started this turn.
         hooks.take_notes(&id);

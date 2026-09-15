@@ -569,6 +569,7 @@ pub fn finish_turn(hooks: &KernelHooks, agent: &str) {
     crate::chatdoor::reply_if_door_turn(hooks, agent);
     notify_parent_done(hooks, agent);
     verify_reply_links(hooks, agent);
+    record_spend(hooks, agent);
     close_turn_folder(hooks, agent, None);
     hooks.broadcast(hooks.plan_frame(agent));
     // Waited-for children that finished during this turn go to the
@@ -587,6 +588,58 @@ pub fn finish_turn(hooks: &KernelHooks, agent: &str) {
     };
     if !waited.is_empty() {
         archive_finished(hooks, &waited);
+    }
+}
+
+/// The turn's cost joins the place's spend (`spend.toml`); the user hears
+/// once at 80 % of the cap and once at the cap (Cursor's "spend caps
+/// checked mid-run; stop at the cap and report").
+fn record_spend(hooks: &KernelHooks, agent: &str) {
+    let _one_at_a_time = hooks.spend_lock.lock().unwrap_or_else(|p| p.into_inner());
+    let events = load_transcript(&hooks.layout(agent).transcript()).unwrap_or_default();
+    let lo = hooks
+        .turn_lo
+        .lock()
+        .unwrap()
+        .get(agent)
+        .copied()
+        .unwrap_or(0);
+    let cost = events
+        .iter()
+        .filter(|e| e.seq >= lo)
+        .rev()
+        .find_map(|e| match &e.kind {
+            EventKind::TurnComplete { usage } => usage.as_ref().and_then(|u| u.cost),
+            _ => None,
+        })
+        .unwrap_or(0.0);
+    let (spend, crossed) = match arbos_core::spend::add_turn(&hooks.place, cost) {
+        Ok(x) => x,
+        Err(e) => {
+            crate::klog::warn("spend_record_failed", Some(agent), format!("{e:#}"));
+            return;
+        }
+    };
+    let Some(cap) = arbos_core::spend::cap_usd(&hooks.place) else {
+        return;
+    };
+    let note = match crossed {
+        Some(true) => format!(
+            "Spend cap reached: ${:.2} of ${cap:.2} over {} turns. Workers, subscriptions, and spawns are refused until cap_usd under [spend] in .arbos/project.toml is raised or removed; your own messages to the main chat still run.",
+            spend.spent_usd, spend.turns
+        ),
+        Some(false) => format!(
+            "Spend is at ${:.2} of the ${cap:.2} cap ({:.0} %); work stops at the cap.",
+            spend.spent_usd,
+            spend.spent_usd / cap * 100.0
+        ),
+        None => return,
+    };
+    crate::klog::info("spend_mark", Some(agent), note.clone());
+    // From the agent whose turn crossed the mark: the notice lands on its
+    // top-level chat, where the user reads.
+    if let Err(e) = hooks.notify_user(agent, &note) {
+        crate::klog::warn("spend_notice_failed", Some(agent), format!("{e:#}"));
     }
 }
 
