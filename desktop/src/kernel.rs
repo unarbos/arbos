@@ -2364,9 +2364,40 @@ fn attach_remote_cached(key: &str, create: impl FnOnce() -> Result<Tunnel>) -> R
     Ok(info)
 }
 
+/// What the connect to a remote place is doing right now, by host: the
+/// window shows it where "connecting…" would be ("Installing Arbos on
+/// arboslife…"). Cleared when the tunnel is up or the attempt failed.
+fn connect_steps() -> &'static Mutex<HashMap<String, String>> {
+    static STEPS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    STEPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn set_connect_step(host: &str, step: Option<String>) {
+    let mut steps = connect_steps().lock().unwrap_or_else(|e| e.into_inner());
+    match step {
+        Some(step) => {
+            steps.insert(host.to_string(), step);
+        }
+        None => {
+            steps.remove(host);
+        }
+    }
+}
+
+/// The connect step for `host`, if one is in progress.
+pub fn connect_step(host: &str) -> Option<String> {
+    connect_steps()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(host)
+        .cloned()
+}
+
 fn open_remote_tunnel(host_name: &str, path: &Path) -> Result<Tunnel> {
     let target = remote_target(host_name);
     let host = target.ssh.as_str();
+    let _clear = ClearStep(host_name.to_string());
+    set_connect_step(host_name, Some(format!("Checking {}…", target.name)));
     let mut probe = ssh_probe(&target, path)?;
     // No binary, or one that is not this window's version and no kernel
     // running from it: put ours there (same machine type), so a place never
@@ -2375,6 +2406,14 @@ fn open_remote_tunnel(host_name: &str, path: &Path) -> Result<Tunnel> {
         && probe.running.is_none()
         && probe.version.as_deref() != Some(local_kernel_version().as_str());
     if !probe.has_bin || stale {
+        set_connect_step(
+            host_name,
+            Some(if stale {
+                format!("Updating Arbos on {}…", target.name)
+            } else {
+                format!("Installing Arbos on {}…", target.name)
+            }),
+        );
         ssh_install_kernel(&target, &probe.arch, stale)?;
         probe = ssh_probe(&target, path)?;
         if !probe.has_bin {
@@ -2389,6 +2428,7 @@ fn open_remote_tunnel(host_name: &str, path: &Path) -> Result<Tunnel> {
     let remote_port = if let Some(info) = probe.running {
         port_of(&info.url).ok_or_else(|| anyhow!("arbos on {host} announced no port"))?
     } else {
+        set_connect_step(host_name, Some(format!("Starting Arbos on {}…", target.name)));
         let port = random_port();
         ssh_launch(&target, path)?;
         let info = wait_remote_json(host, path)?;
@@ -2418,6 +2458,15 @@ fn open_remote_tunnel(host_name: &str, path: &Path) -> Result<Tunnel> {
     wait_alive(&tunnel.info)
         .with_context(|| format!("arbos on {host} did not answer through the tunnel"))?;
     Ok(tunnel)
+}
+
+/// Clears a host's connect step when the attempt ends, however it ends.
+struct ClearStep(String);
+
+impl Drop for ClearStep {
+    fn drop(&mut self) {
+        set_connect_step(&self.0, None);
+    }
 }
 
 /// Live HTTP gateway on the host (`web.json`), if its pid still answers.
@@ -2673,19 +2722,44 @@ fn kernel_workspace_toml(root: &Path) -> Result<String> {
 }
 
 fn ssh_put(host: &str, local: &Path, remote: &str) -> Result<()> {
-    remember_mux_host(host);
+    // scp over SFTP (OpenSSH 9+) takes the remote path as it is: no shell
+    // there to turn `$HOME` or `~` into a directory. Ask the host once.
+    let remote = if remote.starts_with("$HOME") || remote.starts_with('~') {
+        let home = ssh_run(host, r#"printf %s "$HOME""#)?;
+        if home.status != 0 || home.stdout.trim().is_empty() {
+            return Err(anyhow!("could not read $HOME on {host}: {}", home.problem()));
+        }
+        let rest = remote
+            .trim_start_matches("$HOME")
+            .trim_start_matches('~');
+        format!("{}{}", home.stdout.trim(), rest)
+    } else {
+        remote.to_string()
+    };
     let dest = format!("{host}:{remote}");
-    let status = Command::new("scp")
-        .args(ssh_shared())
-        .arg("-q")
-        .arg(local)
-        .arg(&dest)
-        .status()
-        .context("scp")?;
-    if !status.success() {
-        return Err(anyhow!("scp {} to {host} failed", local.display()));
+    // Its own connection, not the probe's mux: with ControlPersist=no the
+    // probe's master is closing as scp starts, and scp through that socket
+    // died with "Connection closed" every time on arboslife (cycle 11).
+    let mut last = String::new();
+    for attempt in 0..2 {
+        let out = Command::new("scp")
+            .args(ssh_base())
+            .arg("-q")
+            .arg(local)
+            .arg(&dest)
+            .stdin(Stdio::null())
+            .output()
+            .context("scp")?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        last = if err.is_empty() { out.status.to_string() } else { err };
+        if attempt == 0 {
+            thread::sleep(Duration::from_millis(500));
+        }
     }
-    Ok(())
+    Err(anyhow!("scp {} to {host} failed: {last}", local.display()))
 }
 
 fn local_os_arch() -> String {

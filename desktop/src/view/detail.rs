@@ -516,8 +516,16 @@ impl Arbos {
                     .is_some_and(|question| prompt.draft(&question.id).other)
             })
         });
+        // A remote place being reached says what it is doing ("Installing
+        // Arbos on arboslife…"); a local one just connects.
+        let connect_step = chat
+            .and_then(|chat| chat.host.as_deref())
+            .and_then(crate::kernel::connect_step);
         // Cursor's composer hint after a turn: "Send follow-up".
         let placeholder = match chat.map(|chat| &chat.connection) {
+            Some(Connection::Connecting) if connect_step.is_some() => {
+                connect_step.as_deref().unwrap_or("connecting…")
+            }
             Some(Connection::Connecting) => "connecting…",
             Some(Connection::Reconnecting(_)) => "reconnecting…",
             Some(Connection::Lost) => "reconnecting…",
@@ -911,6 +919,16 @@ impl Arbos {
                 }
                 (Connection::Connecting, _) if chat.reconnect_attempt > 0 => {
                     machine = format!("{machine} · reconnecting, try {}…", chat.reconnect_attempt);
+                }
+                // A remote place being set up: the step beside the machine,
+                // with the braille tick so it reads as work in progress.
+                (Connection::Connecting, _) => {
+                    if let Some(step) =
+                        chat.host.as_deref().and_then(crate::kernel::connect_step)
+                    {
+                        machine = format!("{machine} · {}", step.trim_end_matches('…'));
+                        Painter::of(cx).lease(1.0, Duration::from_millis(1100), cx);
+                    }
                 }
                 _ => {}
             }
@@ -2311,7 +2329,15 @@ impl Arbos {
             .and_then(|chat| chat.kickoff_at)
             .and_then(|at| at.elapsed().ok());
         let busy = workspace.active_session().is_some_and(|chat| chat.busy());
-        let setting_up = asked.is_some_and(|since| busy || since < Duration::from_secs(20));
+        // A remote place still being reached shows that step here, in the
+        // same shimmer ("Installing Arbos on arboslife…").
+        let connecting = workspace.active_session().and_then(|chat| {
+            matches!(chat.connection, Connection::Connecting)
+                .then(|| chat.host.as_deref().and_then(crate::kernel::connect_step))
+                .flatten()
+        });
+        let setting_up = connecting.is_some() || asked.is_some_and(|since| busy || since < Duration::from_secs(20));
+        let shimmer_text = connecting.clone().unwrap_or_else(|| "Setting up environment".to_string());
         let greeting = format!(
             "{name} is ready. Drag in files, or just tell me what you want to build and I'll get it moving.\n\nAnytime you want me to work differently, say so and I'll remember."
         );
@@ -2345,7 +2371,7 @@ impl Arbos {
                             .text_size(px(root::CURSOR_PROSE_SIZE))
                             .text_color(theme.text_muted)
                             .child(transcript::shimmer_line(
-                                "Setting up environment",
+                                &shimmer_text,
                                 asked.unwrap_or_default(),
                                 theme,
                                 cx,
