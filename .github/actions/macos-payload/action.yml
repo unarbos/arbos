@@ -113,9 +113,23 @@ runs:
         security list-keychains -d user -s "$keychain" $(security list-keychains -d user | xargs)
         rm -f "$p12"
 
+        # `find-identity -v` lists only identities whose chain validates, so an
+        # empty answer here usually means the export carried the leaf and the
+        # key and no intermediate — which is what Keychain Access produces.
+        # Apple publishes the intermediates; fetch them and look again.
         identities="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(.*\)".*/\1/p')"
         if [ -z "$identities" ]; then
-          echo "::error title=No signing identity::The .p12 imported but holds no code-signing identity."
+          echo "no valid identity yet; adding Apple's intermediate certificates"
+          for ca in DeveloperIDG2CA AppleWWDRCAG3; do
+            if curl -fsS -o "$RUNNER_TEMP/$ca.cer" "https://www.apple.com/certificateauthority/$ca.cer"; then
+              security import "$RUNNER_TEMP/$ca.cer" -t cert -f DER -k "$keychain" >/dev/null 2>&1 || true
+              rm -f "$RUNNER_TEMP/$ca.cer"
+            fi
+          done
+          identities="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(.*\)".*/\1/p')"
+        fi
+        if [ -z "$identities" ]; then
+          echo "::error title=No usable signing identity::The .p12 imported, but no identity in it has a chain this machine can validate. A Keychain Access export contains the leaf and its key only; if Apple's \"Developer ID Certification Authority\" could not be fetched, there is nothing to chain it to."
           exit 1
         fi
         developer_id="$(printf '%s\n' "$identities" | grep '^Developer ID Application:' | head -1 || true)"

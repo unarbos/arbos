@@ -195,6 +195,16 @@ notarize:
 # whichever bytes are published, and these are simply better bytes.
 notarize-zip: zip
 	$(MAKE) --no-print-directory notarize NOTARIZE_FILE=$(ZIP)
+	@# The last word on whether this would be rejected, asked of the thing
+	@# that does the rejecting. `notarytool --wait` already fails on a
+	@# refusal and `stapler validate` on a missing ticket, but neither is
+	@# Gatekeeper; this is. A payload that cannot pass here must not be
+	@# published, so the failure is the build's.
+	@spctl -a -vv -t exec $(APP) 2>&1 | tee $(OUT)/gatekeeper.txt
+	@grep -q "source=Notarized Developer ID" $(OUT)/gatekeeper.txt || { \
+		echo "notarize-zip: Gatekeeper did not accept $(APP) as notarized"; \
+		rm -f $(OUT)/gatekeeper.txt; exit 1; }
+	@rm -f $(OUT)/gatekeeper.txt
 	rm -f $(ZIP)
 	ditto -c -k --sequesterRsrc --keepParent $(APP) $(ZIP)
 	@echo "notarized $(ZIP)"

@@ -50,10 +50,17 @@
 set -euo pipefail
 
 VAULT="Arbos"
-# "Appe Cert Apple Developer" — the .p12 and the two passwords.
+# "Appe Cert Apple Developer" — the certificates and the two passwords.
 CERT_ITEM="phsrnmu3qfpqx6lbumafjo3uom"
-CERT_FILE="AppCert.p12"
+# The item carries two exports. `IDApple.p12` is the Developer ID Application
+# certificate, the only kind Apple will notarize, so it is the one to use.
+# `AppCert.p12` is an Apple Development certificate: it can sign and can never
+# be notarized, and is the fallback only for a vault that has not been given
+# the other one yet.
+CERT_FILES="IDApple.p12 AppCert.p12"
 # The two CONCEALED fields on that item share a label, so they are named by id.
+# The first opens both .p12 exports; the second is the app-specific password
+# notarytool submits with.
 CERT_P12_PASSWORD_FIELD="kt3mumvelyuuk7vhzy5yi5sfwi"
 CERT_APP_PASSWORD_FIELD="lubqkq5h7qlwttdbdg3w3i476e"
 # "Apple id" — the address notarytool submits as.
@@ -97,7 +104,6 @@ say ""
 
 # ── 2. the Apple certificate ─────────────────────────────────────────────────
 say "certificate: reading it out of the $VAULT vault."
-op read "op://$VAULT/$CERT_ITEM/$CERT_FILE" --out-file "$work/cert.p12" >/dev/null
 op item get "$CERT_ITEM" --vault "$VAULT" --format json --reveal \
   | python3 -c "
 import json, sys
@@ -111,17 +117,57 @@ for field in item['fields']:
 test -s "$work/p12-password" || { say "no .p12 password on that vault item"; exit 1; }
 test -s "$work/app-password" || { say "no app-specific password on that vault item"; exit 1; }
 
-# What kind of certificate is it? This decides which secret it belongs in, and
-# whether notarization is possible at all.
-subject="$(openssl pkcs12 -in "$work/cert.p12" -passin "file:$work/p12-password" \
-  -nokeys -clcerts -legacy 2>/dev/null \
-  | openssl x509 -noout -subject 2>/dev/null || true)"
-if [ -z "$subject" ]; then
-  say "            the .p12 would not open with the password on the item."
+# Read the leaf's common name out of a .p12.
+#
+# Three ways, because there is no one way that works everywhere. The exports
+# are old-format PKCS#12: OpenSSL 3 needs `-legacy` for that, LibreSSL — which
+# is what `/usr/bin/openssl` is on a Mac — has no such flag and reads them
+# without one. And `security` reads them natively, which is both the last
+# resort and the same thing CI does.
+cert_common_name() {
+  local p12="$1" subject=""
+  subject="$(openssl pkcs12 -in "$p12" -passin "file:$work/p12-password" \
+    -nokeys -clcerts -legacy 2>/dev/null | openssl x509 -noout -subject 2>/dev/null || true)"
+  if [ -z "$subject" ]; then
+    subject="$(openssl pkcs12 -in "$p12" -passin "file:$work/p12-password" \
+      -nokeys -clcerts 2>/dev/null | openssl x509 -noout -subject 2>/dev/null || true)"
+  fi
+  if [ -n "$subject" ]; then
+    printf '%s' "$subject" | sed 's/.*CN *= *\([^,]*\).*/\1/'
+    return 0
+  fi
+  if have security; then
+    local keychain="$work/read.keychain-db" pass
+    pass="$(openssl rand -hex 16)"
+    security create-keychain -p "$pass" "$keychain" >/dev/null 2>&1 || return 1
+    security unlock-keychain -p "$pass" "$keychain" >/dev/null 2>&1 || true
+    security import "$p12" -P "$(cat "$work/p12-password")" -A -t cert -f pkcs12 \
+      -k "$keychain" >/dev/null 2>&1 || true
+    security find-identity -v -p codesigning "$keychain" \
+      | sed -n 's/.*"\(.*\)".*/\1/p' | head -1
+    security delete-keychain "$keychain" >/dev/null 2>&1 || true
+    return 0
+  fi
+  return 1
+}
+
+# Take the first export on the item that opens, preferring the Developer ID.
+common_name=""
+chosen=""
+for name in $CERT_FILES; do
+  op read "op://$VAULT/$CERT_ITEM/$name" --out-file "$work/cert.p12" >/dev/null 2>&1 || continue
+  common_name="$(cert_common_name "$work/cert.p12" || true)"
+  if [ -n "$common_name" ]; then
+    chosen="$name"
+    break
+  fi
+  say "            $name would not open with the password on the item; skipping."
+done
+if [ -z "$chosen" ]; then
+  say "            no usable .p12 on that vault item."
   exit 1
 fi
-common_name="$(printf '%s' "$subject" | sed 's/.*CN *= *\([^,]*\).*/\1/')"
-say "            $common_name"
+say "            $chosen — $common_name"
 
 base64 -w0 < "$work/cert.p12" > "$work/cert.b64" 2>/dev/null \
   || base64 < "$work/cert.p12" | tr -d '\n' > "$work/cert.b64"
@@ -144,6 +190,10 @@ case "$common_name" in
     notarizes=no
     ;;
 esac
+# The Developer ID export carries the leaf and the key and no intermediate, so
+# `codesign` needs Apple's "Developer ID Certification Authority" in the
+# keychain to build a chain to the root. A Mac has it; a fresh runner keychain
+# may not, and the workflow fetches it there. Nothing to do here.
 say ""
 
 # ── 3. notarization credentials ──────────────────────────────────────────────
