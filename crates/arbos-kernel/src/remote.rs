@@ -189,6 +189,10 @@ impl Carrier {
 #[derive(Default)]
 pub struct RemoteHub {
     links: Mutex<HashMap<String, Arc<Link>>>,
+    /// Remote children whose kernel says their root has a turn in flight.
+    /// The scheduler's `is_live` reads it: a done wake's "still working"
+    /// counts a remote worker like a local one (mobile cycle 1, M-11).
+    running: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Link {
@@ -203,6 +207,11 @@ impl Link {
 impl RemoteHub {
     pub fn link(&self, agent: &str) -> Option<Arc<Link>> {
         self.links.lock().unwrap().get(agent).cloned()
+    }
+
+    /// The remote kernel reports a turn in flight for this child.
+    pub fn is_running(&self, agent: &str) -> bool {
+        self.running.lock().unwrap().contains(agent)
     }
 
     /// Words for a remote child: mirrored on its local transcript for the
@@ -812,13 +821,17 @@ async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::Unbounded
             frame = rx.recv() => {
                 let Some(frame) = frame else { break };
                 match frame {
-                    Frame::Turn { agent, state, .. } if agent == "root" => {
+                    Frame::Turn { agent, state, budget } if agent == "root" => {
                         if state == "running" {
                             running = true;
                             idle_at = None;
                         } else if state == "idle" && running {
                             idle_at = Some(Instant::now());
                         }
+                        mirror_turn(&hooks, &link.record.agent, &state, budget);
+                    }
+                    Frame::Status { agent, step, source, .. } if agent == "root" => {
+                        mirror_status(&hooks, &link.record.agent, &step, &source);
                     }
                     Frame::Replayed { agent, event } if agent == "root" => {
                         if let Some(buf) = collecting.as_mut() {
@@ -897,6 +910,7 @@ async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::Unbounded
         .lock()
         .unwrap()
         .remove(&link.record.agent);
+    mirror_turn(&hooks, &link.record.agent, "idle", None);
     if let Route::Ssh { tunnel, .. } = &link.route
         && let Some(mut t) = tunnel.lock().unwrap().take()
     {
@@ -920,6 +934,69 @@ async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::Unbounded
             link.record.machine
         ),
     );
+}
+
+/// The remote root's `turn` frame, as the local child's: the window and
+/// the phone see "Working" and idle for a remote worker the way they do
+/// for a local one, and the scheduler counts it as live. Idle also ends
+/// its live line (the remote's status.toml is not here to clear itself).
+fn mirror_turn(hooks: &KernelHooks, local: &str, state: &str, budget: Option<arbos_core::Usage>) {
+    let was = {
+        let mut running = hooks.remotes.running.lock().unwrap();
+        if state == "running" {
+            !running.insert(local.to_string())
+        } else {
+            running.remove(local)
+        }
+    };
+    if state != "running" && arbos_core::status::clear(&hooks.place, local) {
+        hooks.broadcast(Frame::Status {
+            agent: local.to_string(),
+            step: String::new(),
+            since: String::new(),
+            source: String::new(),
+        });
+    }
+    hooks.broadcast(Frame::Turn {
+        agent: local.to_string(),
+        state: state.to_string(),
+        budget,
+    });
+    // A tree with the step cleared, once per change of state.
+    if was != (state == "running") {
+        hooks.broadcast_tree();
+    }
+}
+
+/// The remote root's live line, as the local child's: written to the
+/// child's `status.toml` here (so the tree's `step` has it) and sent as a
+/// `status` frame under the local id. The remote already applied the
+/// agent-over-derived rule; here the latest line wins.
+fn mirror_status(hooks: &KernelHooks, local: &str, step: &str, source: &str) {
+    if step.trim().is_empty() {
+        if arbos_core::status::clear(&hooks.place, local) {
+            hooks.broadcast(Frame::Status {
+                agent: local.to_string(),
+                step: String::new(),
+                since: String::new(),
+                source: String::new(),
+            });
+        }
+        return;
+    }
+    let source = if source.is_empty() { "remote" } else { source };
+    match arbos_core::status::write(&hooks.place, local, step, source) {
+        Ok(s) => {
+            hooks.broadcast(Frame::Status {
+                agent: local.to_string(),
+                step: s.step,
+                since: s.since,
+                source: s.source,
+            });
+            hooks.broadcast_tree();
+        }
+        Err(e) => crate::klog::warn("remote_status_failed", Some(local), format!("{e:#}")),
+    }
 }
 
 /// New remote lines: onto the child's local transcript, the mirror mark
@@ -1499,5 +1576,114 @@ mod os_arch_tests {
         assert_eq!(os_arch_of("Darwin arm64"), "darwin-arm64");
         assert_eq!(os_arch_of("Linux aarch64"), "linux-arm64");
         assert_eq!(os_arch_of(""), "-");
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::{mirror_status, mirror_turn};
+    use arbos_core::{Place, wire::Frame};
+
+    fn place(name: &str) -> Place {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-remote-mirror-{name}-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join(".arbos/runtime")).unwrap();
+        let p = Place::new(dir);
+        arbos_core::Agent::root("root")
+            .save(&p.agent_dir("root"))
+            .unwrap();
+        let mut w = arbos_core::Agent::root("far-worker");
+        w.parent = Some(arbos_core::AgentId::new("root"));
+        w.remote = Some("arboslife:/home/u/arbos/demo".into());
+        w.save(&p.agent_dir("far-worker")).unwrap();
+        p
+    }
+
+    /// M-11: a remote child's `status` and `turn` frames arrive under the
+    /// remote root's name; a phone on the parent's kernel saw no step and
+    /// no turn for it. Mirrored, they come out under the local child's
+    /// id, the tree row carries the step, and the scheduler counts the
+    /// child as live until the remote says idle.
+    #[test]
+    fn remote_status_and_turn_frames_come_out_under_the_local_child() {
+        let p = place("frames");
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (kick_tx, _kick_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = crate::hooks::KernelHooks::new(p.clone(), wake_tx, kick_tx);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Frame>();
+        hooks.frames.lock().unwrap().push(tx);
+
+        mirror_turn(&hooks, "far-worker", "running", None);
+        assert!(
+            hooks.is_live("far-worker"),
+            "running on the far side is live here"
+        );
+        mirror_status(&hooks, "far-worker", "Reading the tests", "agent");
+        assert_eq!(
+            arbos_core::status::read(&p, "far-worker").map(|s| s.step),
+            Some("Reading the tests".into())
+        );
+
+        let mut frames = Vec::new();
+        while let Ok(f) = rx.try_recv() {
+            frames.push(f);
+        }
+        assert!(
+            frames.iter().any(|f| matches!(f, Frame::Turn { agent, state, .. } if agent == "far-worker" && state == "running")),
+            "{frames:?}"
+        );
+        assert!(
+            frames.iter().any(|f| matches!(f, Frame::Status { agent, step, source, .. } if agent == "far-worker" && step == "Reading the tests" && source == "agent")),
+            "{frames:?}"
+        );
+        let tree = frames
+            .iter()
+            .rev()
+            .find_map(|f| match f {
+                Frame::Tree { tree } => Some(tree.clone()),
+                _ => None,
+            })
+            .expect("a tree follows the status");
+        let row = tree.iter().find(|n| n.id == "far-worker").unwrap();
+        assert_eq!(row.step.as_deref(), Some("Reading the tests"));
+        assert!(
+            !frames.iter().any(|f| matches!(f, Frame::Status { agent, .. } | Frame::Turn { agent, .. } if agent == "root")),
+            "nothing is said under the remote root's name: {frames:?}"
+        );
+
+        mirror_turn(&hooks, "far-worker", "idle", None);
+        assert!(!hooks.is_live("far-worker"));
+        assert!(
+            arbos_core::status::read(&p, "far-worker").is_none(),
+            "idle ends the live line"
+        );
+        let mut frames = Vec::new();
+        while let Ok(f) = rx.try_recv() {
+            frames.push(f);
+        }
+        assert!(
+            frames.iter().any(|f| matches!(f, Frame::Status { agent, step, .. } if agent == "far-worker" && step.is_empty()))
+        );
+        assert!(
+            frames.iter().any(|f| matches!(f, Frame::Turn { agent, state, .. } if agent == "far-worker" && state == "idle"))
+        );
+        let tree = frames
+            .iter()
+            .rev()
+            .find_map(|f| match f {
+                Frame::Tree { tree } => Some(tree.clone()),
+                _ => None,
+            })
+            .expect("a tree follows idle");
+        assert!(
+            tree.iter()
+                .find(|n| n.id == "far-worker")
+                .unwrap()
+                .step
+                .is_none()
+        );
     }
 }

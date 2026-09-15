@@ -473,6 +473,9 @@ impl KernelHooks {
         if !arbos_core::waiting::list(&self.place, agent).is_empty() {
             return true;
         }
+        if self.remotes.is_running(agent) {
+            return true;
+        }
         inbox::list(&self.place, agent).iter().any(|f| f.msg.wake)
     }
 }
