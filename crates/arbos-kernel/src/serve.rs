@@ -214,6 +214,17 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     }
     crate::remote::RemoteHub::restore(&hooks);
 
+    // A folder under agents/ with no readable agent.md is not an agent:
+    // list_agents leaves it out, and nothing else would say so
+    // (ba2262db79). Named once at boot; `arbos-kernel check` reports it too.
+    for line in arbos_core::unlisted_agent_dirs(&place) {
+        klog::warn(
+            "agent_unlisted",
+            None,
+            format!("{line} — not an agent, not listed; remove the folder or give it an agent.md"),
+        );
+    }
+
     // Jobs left running by an earlier kernel (parent pid 1) end now: the
     // Mac wake-up incident had one appending to .arbos/user.md every 30 s
     // for three days across restarts. A `keep` file in the job folder

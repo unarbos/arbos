@@ -670,6 +670,39 @@ pub fn list_agents(place: &Place) -> Result<Vec<Agent>> {
     Ok(agents)
 }
 
+/// Folders under `agents/` that `list_agents` leaves out, with the reason
+/// (`agents/<name>: no agent.md`, `…: agent.md: <parse error>`). The
+/// kernel logs them at boot so a folder that silently vanished from the
+/// roster (ba2262db79) is named somewhere a person looks; `check` reports
+/// the same set. Root's folder before bootstrap is not one of them.
+pub fn unlisted_agent_dirs(place: &Place) -> Vec<String> {
+    let dir = place.agents_dir();
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<_> = rd.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    let mut out = Vec::new();
+    for entry in entries {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        let md = path.join("agent.md");
+        if !md.exists() {
+            if name != ROOT_ID {
+                out.push(format!("agents/{name}: no agent.md"));
+            }
+            continue;
+        }
+        if let Err(e) = Agent::load(&path) {
+            out.push(format!("agents/{name}: agent.md: {e:#}"));
+        }
+    }
+    out
+}
+
 pub fn load_agent(place: &Place, id: &AgentId) -> Result<Agent> {
     Agent::load(&place.agent_dir(id.as_str()))
 }
