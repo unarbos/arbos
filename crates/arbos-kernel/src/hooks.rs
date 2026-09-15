@@ -447,6 +447,25 @@ impl KernelHooks {
         self.waits.lock().unwrap().remove(child);
     }
 
+    /// `child`'s report to a `parent` blocked in `spawn wait=true`: the
+    /// tool result gets it. True when a wait was resolved; the child is
+    /// then marked as reported so its done is not said a second time.
+    pub fn resolve_wait(&self, child: &str, parent: &str, text: &str) -> bool {
+        let mut waits = self.waits.lock().unwrap();
+        if !waits.get(child).is_some_and(|(p, _)| p == parent) {
+            return false;
+        }
+        let Some((_, tx)) = waits.remove(child) else {
+            return false;
+        };
+        drop(waits);
+        if tx.send(text.to_string()).is_err() {
+            return false;
+        }
+        self.waited.lock().unwrap().insert(child.to_string());
+        true
+    }
+
     /// Children of `parent` that are still doing something: a turn in
     /// flight, a message waiting to wake them, or a parked ask/approve.
     /// A finished worker is not one (the multitasking audit: counting

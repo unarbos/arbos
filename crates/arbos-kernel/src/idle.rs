@@ -19,6 +19,12 @@ use arbos_core::{list_agents, subscription};
 use crate::hooks::KernelHooks;
 
 pub const UNTIL_IDLE_ENV: &str = "ARBOS_UNTIL_IDLE";
+/// `serve --leash <duration>`: the kernel exits once no client has been
+/// attached for that long and no turn is in flight. A kernel a parent
+/// started on another machine for one child lives while the parent's
+/// link is up and goes when the parent is gone (qa-038); a place the
+/// user opened has no leash.
+pub const LEASH_ENV: &str = "ARBOS_LEASH";
 pub const HORIZON_ENV: &str = "ARBOS_HORIZON";
 const DEFAULT_HORIZON_MS: i64 = 3_600_000;
 /// Consecutive quiet checks (one per second) before the kernel believes it.
@@ -133,4 +139,60 @@ pub fn verdict(hooks: &Arc<KernelHooks>, horizon_ms: i64) -> Verdict {
         return Verdict::Waiting(waiting);
     }
     Verdict::Idle
+}
+
+/// `--leash`: exit when unattended. See `LEASH_ENV`.
+pub struct Leash {
+    after: std::time::Duration,
+    /// When the last client went (None while one is attached).
+    alone_since: Option<Instant>,
+}
+
+impl Leash {
+    pub fn from_env() -> Option<Self> {
+        let raw = std::env::var(LEASH_ENV).ok()?;
+        let ms = subscription::parse_duration_ms(raw.trim())
+            .or_else(|| raw.trim().parse::<u64>().ok().map(|s| s * 1000))?;
+        Some(Self {
+            after: std::time::Duration::from_millis(ms.max(1000)),
+            alone_since: Some(Instant::now()),
+        })
+    }
+
+    pub fn after(&self) -> std::time::Duration {
+        self.after
+    }
+
+    /// One check: `clients` attached now, `busy` when any turn is in
+    /// flight. True when the leash has run out.
+    pub fn poll(&mut self, clients: usize, busy: bool) -> bool {
+        if clients > 0 || busy {
+            self.alone_since = None;
+            return false;
+        }
+        let since = *self.alone_since.get_or_insert_with(Instant::now);
+        since.elapsed() >= self.after
+    }
+}
+
+#[cfg(test)]
+mod leash_tests {
+    use super::Leash;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_leash_runs_out_only_while_alone_and_idle() {
+        let mut l = Leash {
+            after: Duration::from_millis(50),
+            alone_since: Some(Instant::now()),
+        };
+        assert!(!l.poll(1, false), "a client resets it");
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(!l.poll(0, false), "alone only since the client left");
+        assert!(!l.poll(0, true), "a turn in flight resets it");
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(!l.poll(0, false), "the clock restarted at the turn");
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(l.poll(0, false));
+    }
 }

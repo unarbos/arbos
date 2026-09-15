@@ -47,6 +47,12 @@ const CLAIM_READY: Duration = Duration::from_secs(150);
 const SETTLE: Duration = Duration::from_millis(1500);
 /// Transcript lines fetched per `history` request over the hub.
 const HISTORY_LIMIT: u32 = 2000;
+/// `serve --leash` for a kernel this kernel starts on another machine:
+/// it exits once no client (this kernel's link) has been attached for
+/// this long and nothing runs there. The parent stopping cleanly stops
+/// it at once (`stop_all`); this covers a parent that crashed (qa-038).
+/// A parent that restarts inside the span re-attaches to the same one.
+const CHILD_LEASH: &str = "10m";
 
 /// One remote child, as remembered across kernel restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +260,30 @@ impl RemoteHub {
         if file.remotes.is_empty() {
             return;
         }
+        let total = file.remotes.len();
+        let mut kept: Vec<Record> = Vec::new();
+        for record in file.remotes {
+            // A child whose folder left agents/ (archived, deleted) is
+            // finished: its kernel is not started again, its record goes.
+            if !arbos_core::agent_exists(&hooks.place, &record.agent) {
+                crate::klog::info(
+                    "remote_forgotten",
+                    Some(&record.agent),
+                    format!("no longer an agent here; {} not restarted", record.path),
+                );
+                continue;
+            }
+            kept.push(record);
+        }
+        if kept.len() != total {
+            let _ = RecordsFile {
+                remotes: kept.clone(),
+            }
+            .save(&hooks.place);
+        }
+        if kept.is_empty() {
+            return;
+        }
         let machines = match Machines::load() {
             Ok(m) => m,
             Err(e) => {
@@ -261,7 +291,7 @@ impl RemoteHub {
                 return;
             }
         };
-        for record in file.remotes {
+        for record in kept {
             if record.via_hub() {
                 let hooks = Arc::clone(hooks);
                 tokio::spawn(async move {
@@ -331,6 +361,94 @@ impl RemoteHub {
                 }
             });
         }
+    }
+}
+
+/// The kernel is stopping: every kernel it started over ssh for a child
+/// stops too, as local jobs do (#97). Their places stay; a restart of
+/// this kernel starts them again for children that are not finished.
+/// Hub-route children belong to their machine's worker and are left to
+/// their own leash.
+pub async fn stop_all(hooks: &KernelHooks) {
+    let links: Vec<Arc<Link>> = hooks
+        .remotes
+        .links
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect();
+    let mut tasks = Vec::new();
+    for link in links {
+        let Route::Ssh { machine, tunnel } = &link.route else {
+            continue;
+        };
+        if let Some(mut t) = tunnel.lock().unwrap().take() {
+            let _ = t.kill();
+        }
+        let m = machine.clone();
+        let path = link.record.path.clone();
+        let agent = link.record.agent.clone();
+        tasks.push(tokio::task::spawn_blocking(move || {
+            (agent, stop_remote_kernel(&m, &path))
+        }));
+    }
+    for t in tasks {
+        match tokio::time::timeout(Duration::from_secs(30), t).await {
+            Ok(Ok((agent, Ok(line)))) => crate::klog::info("remote_stopped", Some(&agent), line),
+            Ok(Ok((agent, Err(e)))) => {
+                crate::klog::warn("remote_stop_failed", Some(&agent), format!("{e:#}"))
+            }
+            _ => crate::klog::warn("remote_stop_failed", None, "timed out"),
+        }
+    }
+}
+
+/// Stop the kernel serving `path` on `machine` (the desktop's stop
+/// script: TERM, wait, report). Ok(last step line).
+fn stop_remote_kernel(machine: &Machine, path: &str) -> Result<String> {
+    let out = ssh_run(machine, &arbos_core::remote_kernel::stop_script(path))?;
+    Ok(arbos_core::remote_kernel::steps_in(&out)
+        .last()
+        .cloned()
+        .unwrap_or_else(|| out.trim().to_string()))
+}
+
+/// A remote child is archived or deleted: its kernel over there stops,
+/// its record goes, so a restart does not start it again.
+pub fn forget(hooks: &KernelHooks, agent: &str) {
+    let link = hooks.remotes.links.lock().unwrap().remove(agent);
+    // A forgotten child is not live, whatever its last turn frame said.
+    hooks.remotes.running.lock().unwrap().remove(agent);
+    let mut file = RecordsFile::load(&hooks.place);
+    let before = file.remotes.len();
+    let records: Vec<Record> = file
+        .remotes
+        .iter()
+        .filter(|r| r.agent == agent)
+        .cloned()
+        .collect();
+    file.remotes.retain(|r| r.agent != agent);
+    if file.remotes.len() != before {
+        let _ = file.save(&hooks.place);
+    }
+    if let Some(link) = link
+        && let Route::Ssh { tunnel, .. } = &link.route
+        && let Some(mut t) = tunnel.lock().unwrap().take()
+    {
+        let _ = t.kill();
+    }
+    let machines = Machines::load().ok();
+    for r in records.into_iter().filter(|r| !r.via_hub()) {
+        let Some(m) = machines.as_ref().and_then(|ms| ms.get(&r.machine).cloned()) else {
+            continue;
+        };
+        let agent = agent.to_string();
+        // Off the caller's thread: an ssh round trip.
+        std::thread::spawn(move || match stop_remote_kernel(&m, &r.path) {
+            Ok(line) => crate::klog::info("remote_stopped", Some(&agent), line),
+            Err(e) => crate::klog::warn("remote_stop_failed", Some(&agent), format!("{e:#}")),
+        });
     }
 }
 
@@ -926,7 +1044,7 @@ async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::Unbounded
             failed: true,
         }),
     );
-    let _ = deliver(
+    let _ = deliver_note(
         &hooks,
         &link.record,
         &format!(
@@ -1040,16 +1158,42 @@ fn mirror(hooks: &KernelHooks, link: &Link, events: Vec<Event>, mirrored: usize)
     hooks.broadcast_tree();
 }
 
-/// The remote reply as a message from the child on the parent's
-/// transcript, and a turn for the parent — `say mode=request` from the child.
+/// The remote root's turn ended: its last words reach the parent the way
+/// a local child's do — as the tool result when the parent is blocked in
+/// `spawn wait=true` (qa-037), else as a `done` message that opens a
+/// turn for it (and lets the child be archived, which stops the kernel
+/// over there, qa-038). The claim of the message puts the words on the
+/// parent's transcript once; only the waited path writes them here.
 fn deliver(hooks: &KernelHooks, record: &Record, text: &str) -> Result<()> {
-    append_event(
-        &hooks.layout(&record.parent).transcript(),
-        &Event::new(EventKind::Say {
-            from: record.agent.clone(),
-            text: text.to_string(),
-        }),
-    )?;
+    if hooks.resolve_wait(&record.agent, &record.parent, text) {
+        append_event(
+            &hooks.layout(&record.parent).transcript(),
+            &Event::new(EventKind::Say {
+                from: record.agent.clone(),
+                text: text.to_string(),
+            }),
+        )?;
+        return Ok(());
+    }
+    let msg = arbos_core::inbox::Message {
+        from: format!("agent:{}", record.agent),
+        kind: "done".into(),
+        wake: true,
+        hops: 0,
+        body: format!(
+            "Turn ended. Last words: {text}\n(transcript: .arbos/agents/{}/transcript.jsonl; it ran on {})",
+            record.agent, record.machine
+        ),
+        ..arbos_core::inbox::Message::default()
+    };
+    hooks.deliver(&record.parent, &msg)?;
+    hooks.plan_changed(&record.parent);
+    Ok(())
+}
+
+/// A word from the kernel about the link (lost, re-attached): a note to
+/// the parent that opens a turn, not a done.
+fn deliver_note(hooks: &KernelHooks, record: &Record, text: &str) -> Result<()> {
     hooks.inbox(
         &record.parent,
         text,
@@ -1442,12 +1586,13 @@ fn start_remote_kernel(machine: &Machine, path: &str) -> Result<u16> {
         r#"cd {p} && mkdir -p .arbos && \
 if test -f .arbos/kernel.json && pid=$(sed -n 's/.*"pid": *\([0-9]*\).*/\1/p' .arbos/kernel.json) && test -n "$pid" && kill -0 "$pid" 2>/dev/null; then :; else \
   rm -f .arbos/kernel.json; \
-  if command -v setsid >/dev/null 2>&1; then ( {env} setsid nohup {k} serve {p} > .arbos/kernel.log 2>&1 < /dev/null & ); \
-  else ( {env} nohup {k} serve {p} > .arbos/kernel.log 2>&1 < /dev/null & ); fi; \
+  if command -v setsid >/dev/null 2>&1; then ( {env} setsid nohup {k} serve {p} --leash {leash} > .arbos/kernel.log 2>&1 < /dev/null & ); \
+  else ( {env} nohup {k} serve {p} --leash {leash} > .arbos/kernel.log 2>&1 < /dev/null & ); fi; \
   for i in $(seq 1 60); do test -f .arbos/kernel.json && grep -q tcp .arbos/kernel.json && break; sleep 1; done; \
 fi; cat .arbos/kernel.json"#,
         p = sq(path),
-        k = sq(&kernel)
+        k = sq(&kernel),
+        leash = CHILD_LEASH
     );
     let started = Instant::now();
     loop {
@@ -1685,5 +1830,127 @@ mod mirror_tests {
                 .step
                 .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::{Record, RecordsFile, RemoteHub, deliver, forget};
+    use arbos_core::{EventKind, Place};
+    use std::sync::Arc;
+
+    fn place(name: &str) -> Place {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-remote-life-{name}-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join(".arbos/runtime")).unwrap();
+        let p = Place::new(dir);
+        arbos_core::Agent::root("root")
+            .save(&p.agent_dir("root"))
+            .unwrap();
+        let mut w = arbos_core::Agent::root("far");
+        w.parent = Some(arbos_core::AgentId::new("root"));
+        w.remote = Some("loop:/tmp/place--far".into());
+        w.save(&p.agent_dir("far")).unwrap();
+        p
+    }
+
+    fn hooks(p: &Place) -> Arc<crate::hooks::KernelHooks> {
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (kick_tx, _kick_rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::hooks::KernelHooks::new(p.clone(), wake_tx, kick_tx)
+    }
+
+    fn record() -> Record {
+        Record {
+            agent: "far".into(),
+            parent: "root".into(),
+            machine: "loop".into(),
+            path: "/tmp/place--far".into(),
+            mirrored: 0,
+            route: String::new(),
+            project: String::new(),
+        }
+    }
+
+    /// qa-037: a parent blocked in `spawn wait=true` gets the remote
+    /// worker's report as the tool result — one Say on its transcript,
+    /// no inbox message. Without a wait, the report is a `done` message
+    /// that opens a turn, and the claim writes the words (not here).
+    #[test]
+    fn a_remote_report_answers_the_waiting_spawn_or_files_a_done() {
+        let p = place("wait");
+        let h = hooks(&p);
+        let rx = h.wait_for("root", "far");
+        deliver(
+            &h,
+            &record(),
+            "hostname: loop\nwhoami: u\npwd: /tmp/place--far",
+        )
+        .unwrap();
+        assert_eq!(
+            rx.blocking_recv().unwrap(),
+            "hostname: loop\nwhoami: u\npwd: /tmp/place--far"
+        );
+        let events = arbos_core::load_transcript(&h.layout("root").transcript()).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(&e.kind, EventKind::Say { from, .. } if from == "far"))
+                .count(),
+            1
+        );
+        assert!(
+            arbos_core::inbox::list(&p, "root").is_empty(),
+            "the waited report is not also a message"
+        );
+
+        // No one waiting: a done message, words once at claim time.
+        deliver(&h, &record(), "second report").unwrap();
+        let filed = arbos_core::inbox::list(&p, "root");
+        assert_eq!(filed.len(), 1, "{filed:?}");
+        assert_eq!(filed[0].msg.kind, "done");
+        assert_eq!(filed[0].msg.from, "agent:far");
+        assert!(filed[0].msg.wake);
+        assert!(
+            filed[0]
+                .msg
+                .body
+                .starts_with("Turn ended. Last words: second report")
+        );
+        assert!(filed[0].msg.body.contains("it ran on loop"));
+        let events = arbos_core::load_transcript(&h.layout("root").transcript()).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(&e.kind, EventKind::Say { text, .. } if text == "second report")),
+            "not written twice"
+        );
+    }
+
+    /// qa-038: an archived remote child's record goes, so a restart does
+    /// not start its kernel again; a record whose agent folder is gone
+    /// is dropped at restore.
+    #[test]
+    fn forgetting_a_remote_child_drops_its_record_and_restore_skips_the_gone() {
+        let p = place("forget");
+        let h = hooks(&p);
+        let mut file = RecordsFile::default();
+        file.remotes.push(record());
+        file.remotes.push(Record {
+            agent: "other".into(),
+            ..record()
+        });
+        file.save(&p).unwrap();
+        forget(&h, "far");
+        let left = RecordsFile::load(&p);
+        assert_eq!(left.remotes.len(), 1);
+        assert_eq!(left.remotes[0].agent, "other");
+        // `other` has no agent folder here: restore drops it too.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { RemoteHub::restore(&h) });
+        assert!(RecordsFile::load(&p).remotes.is_empty());
     }
 }

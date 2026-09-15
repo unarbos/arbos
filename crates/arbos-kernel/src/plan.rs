@@ -405,6 +405,9 @@ fn archive_finished(hooks: &KernelHooks, reported: &[String]) {
         if !src.join("agent.md").exists() {
             continue;
         }
+        let remote = arbos_core::load_agent(&hooks.place, &arbos_core::AgentId::new(id))
+            .ok()
+            .is_some_and(|a| a.remote.is_some());
         let dir = arbos_core::project::archive_agents_dir(&hooks.place);
         let dest = dir.join(id);
         let result = std::fs::create_dir_all(&dir).and_then(|_| {
@@ -418,6 +421,11 @@ fn archive_finished(hooks: &KernelHooks, reported: &[String]) {
                 moved = true;
                 crate::klog::info("child_archived", Some(id), dest.display().to_string());
                 retire_page_rows(hooks, id, &dest);
+                // A child on another machine: its kernel there stops and
+                // its record goes, or every spawn left one running (qa-038).
+                if remote {
+                    crate::remote::forget(hooks, id);
+                }
                 // Its worktree goes with it when nothing would be lost
                 // (K-01c); commits stay on the branch.
                 match crate::worktree::remove_if_clean(hooks.place.path(), id) {

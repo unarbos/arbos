@@ -123,7 +123,7 @@ pub fn start_kernel_with(name: &str, config: &str) -> Kernel {
     spawn(scratch)
 }
 
-fn scratch_dir(name: &str) -> PathBuf {
+pub fn scratch_dir(name: &str) -> PathBuf {
     let scratch = std::env::temp_dir().join(format!(
         "arbos-kernel-{name}-{}-{}",
         std::process::id(),
