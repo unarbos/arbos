@@ -506,6 +506,8 @@ pub struct ChatSession {
     /// How long the kickoff turn took, once it ended: the turn has no
     /// prompt to stamp, so its "Worked Ns" lives here.
     pub kickoff_secs: Option<u32>,
+    /// The kickoff is due as soon as the kernel reports a provider key.
+    pub kickoff_wanted: bool,
     /// What the agent says it is doing right now (the kernel's `status`
     /// event); cleared when the turn ends.
     pub status: Option<String>,
@@ -629,6 +631,7 @@ impl ChatSession {
             thought_carry: 0,
             kickoff_at: None,
             kickoff_secs: None,
+            kickoff_wanted: false,
             status: None,
             turn_open: false,
             turn_ended: None,
@@ -706,6 +709,7 @@ impl ChatSession {
             thought_carry: 0,
             kickoff_at: None,
             kickoff_secs: None,
+            kickoff_wanted: false,
             status: None,
             turn_open: false,
             turn_ended: None,
@@ -783,6 +787,7 @@ impl ChatSession {
             thought_carry: 0,
             kickoff_at: None,
             kickoff_secs: None,
+            kickoff_wanted: false,
             status: None,
             turn_open: false,
             turn_ended: None,
@@ -1412,6 +1417,24 @@ impl ChatSession {
             return;
         }
         self.prompt(content);
+    }
+
+    /// Ask for the kickoff turn when it is wanted and the kernel has a
+    /// provider key; once.
+    fn send_kickoff_if_ready(&mut self) {
+        if !self.kickoff_wanted || self.kickoff_at.is_some() || !self.items.is_empty() {
+            return;
+        }
+        let keyed = self.kernel_provider.as_ref().is_some_and(|p| p.key);
+        if !keyed {
+            return;
+        }
+        if let Connection::Live(session) = &self.connection
+            && session.kickoff().is_ok()
+        {
+            self.kickoff_at = Some(SystemTime::now());
+            self.kickoff_wanted = false;
+        }
     }
 
     /// The kickoff turn (asked for by this window, no prompt of the user's
@@ -2058,6 +2081,7 @@ impl ChatSession {
                         );
                         self.flush();
                     }
+                    self.send_kickoff_if_ready();
                 } else {
                     self.provider_missing = Some(provider);
                 }
@@ -2110,18 +2134,20 @@ impl ChatSession {
             }
             Event::Handshake { protocol, kernel } => {
                 let ok = protocol.is_some_and(|p| p >= crate::kernel::PROTOCOL);
-                // An empty root on a place opened for the first time: ask
-                // for the kickoff turn once. The kernel files nothing when
-                // root has a turn on record already.
+                // An empty root on a place opened for the first time wants
+                // the kickoff turn once. It goes when the kernel says it has
+                // a key (the `provider` frame follows hello): on a fresh
+                // machine without one the turn only failed, twice (templar,
+                // cycle 11). The kernel files nothing when root has a turn
+                // on record already.
                 if ok
                     && self.parent.is_none()
                     && self.items.is_empty()
                     && self.kickoff_at.is_none()
                     && self.agent_session.as_deref().is_none_or(|id| id == "root")
-                    && let Connection::Live(session) = &self.connection
-                    && session.kickoff().is_ok()
                 {
-                    self.kickoff_at = Some(SystemTime::now());
+                    self.kickoff_wanted = true;
+                    self.send_kickoff_if_ready();
                 }
                 if !ok {
                     let where_ = match &self.host {
@@ -2799,6 +2825,12 @@ impl ChatSession {
             self.items.retain(|item| {
                 !matches!(item, ChatItem::Notice { text: t, failed: false } if is_page_nudge(t))
             });
+        }
+        // The same words twice in a row (a turn that failed the same way
+        // again) read once; Cursor never stacks identical lines.
+        if matches!(self.items.last(), Some(ChatItem::Notice { text: t, failed: f }) if t == text && *f == failed)
+        {
+            return;
         }
         self.items.push(ChatItem::Notice {
             text: text.to_owned(),
