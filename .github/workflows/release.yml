@@ -27,6 +27,16 @@ on:
         description: "Tag to build and attach to (e.g. v0.2.0)"
         required: true
 
+# The tagged releases are also the *stable* update channel, which is what a
+# machine follows unless it has been switched to dev in Settings. The three
+# jobs at the bottom build the same payloads dev-channel.yml builds, sign them
+# with the Arbos update key, and write `arbos-stable.json` onto the release —
+# so an app on stable reads
+#   https://github.com/unarbos/arbos/releases/latest/download/arbos-stable.json
+# which GitHub resolves to the newest published release without the URL ever
+# naming a version. See .github/workflows/dev-channel.yml for the whole scheme,
+# and .github/setup-publishing.sh for the one command that sets the secrets.
+
 permissions:
   contents: write
 
@@ -133,7 +143,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp desktop/target/bundle/Arbos-*-arm64.dmg dist/
+          cp desktop/target/bundle.noindex/Arbos-*-arm64.dmg dist/
           cp target/release/arbos-kernel "dist/arbos-kernel-${TAG#v}-macos-arm64"
           (cd dist && for f in *; do shasum -a 256 "$f" > "$f.sha256"; done)
           ls -la dist
@@ -148,3 +158,203 @@ jobs:
           else
             gh release create "$TAG" --draft --title "$TAG" --generate-notes dist/*
           fi
+
+  # ── the stable update channel ───────────────────────────────────────────────
+  # What the tag is, in the two numbers the feed orders on. Worked out once so
+  # the payload jobs and the feed job name the same files.
+  plan:
+    name: what to publish
+    runs-on: ubuntu-latest
+    env:
+      HAVE_KEY: ${{ secrets.ARBOS_UPDATE_SIGNING_KEY != '' }}
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      version: ${{ steps.plan.outputs.version }}
+      build: ${{ steps.plan.outputs.build }}
+      short: ${{ steps.plan.outputs.short }}
+      minimum: ${{ steps.plan.outputs.minimum }}
+      notes: ${{ steps.plan.outputs.notes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - id: plan
+        run: |
+          set -euo pipefail
+          if [ "$HAVE_KEY" != "true" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=No update feed written::ARBOS_UPDATE_SIGNING_KEY is not set, so the release was built but the stable channel was not updated. Run .github/setup-publishing.sh once."
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          # The version the app compares on is the one compiled into it, which
+          # comes from desktop/Cargo.toml — not from the tag, which is only how
+          # a person refers to it.
+          echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' desktop/Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+          echo "build=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "minimum=$(sed -n '/LSMinimumSystemVersion/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' desktop/bundle/Info.plist)" >> "$GITHUB_OUTPUT"
+          printf 'notes=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
+
+  stable-macos:
+    name: update payload (macOS arm64)
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: macos-14
+    outputs:
+      signing: ${{ steps.payload.outputs.signing }}
+      notarized: ${{ steps.payload.outputs.notarized }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-macos
+          workspaces: |
+            .
+            desktop
+      - id: payload
+        uses: ./.github/actions/macos-payload
+        with:
+          build: ${{ needs.plan.outputs.build }}
+          developer-id-p12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          developer-id-p12-password: ${{ secrets.P12_PASSWORD }}
+          signing-p12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
+          signing-p12-password: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+          notary-key-p8: ${{ secrets.NOTARY_KEY_P8 }}
+          notary-key-id: ${{ secrets.NOTARY_KEY_ID }}
+          notary-issuer-id: ${{ secrets.NOTARY_ISSUER_ID }}
+          apple-id: ${{ secrets.APPLE_ID }}
+          apple-team-id: ${{ secrets.APPLE_TEAM_ID }}
+          apple-app-password: ${{ secrets.APPLE_APP_PASSWORD }}
+      - run: mkdir -p dist && cp "${{ steps.payload.outputs.path }}" dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stable-payload-macos
+          path: dist/*.zip
+          retention-days: 7
+          if-no-files-found: error
+
+  stable-linux:
+    name: update payload (Linux x86_64)
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux-desktop
+          workspaces: |
+            .
+            desktop
+      - uses: ./.github/actions/linux-payload
+        with:
+          version: ${{ needs.plan.outputs.version }}
+          build: ${{ needs.plan.outputs.build }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stable-payload-linux
+          path: dist/*.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+
+  stable-feed:
+    name: sign and write the stable feed
+    needs: [plan, stable-macos, stable-linux]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-feed
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: stable-payload-*
+          merge-multiple: true
+      # The feed already on the newest published release carries the versions
+      # before this one, which is what lets a machine that skipped a release
+      # still find the newest.
+      - name: Last feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --pattern arbos-stable.json --dir dist \
+            || echo "no stable feed yet; starting one"
+      - name: Measure, sign, and write the feed
+        env:
+          ARBOS_UPDATE_SIGNING_KEY: ${{ secrets.ARBOS_UPDATE_SIGNING_KEY }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          BUILD: ${{ needs.plan.outputs.build }}
+          SHORT: ${{ needs.plan.outputs.short }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          mac="$(ls dist/Arbos-*-macos-arm64.zip)"
+          linux="$(ls dist/arbos-*-linux-x86_64.tar.gz)"
+          printf '%s\n' "$TAG" > dist/notes.txt
+          cargo run -q --release -p arbos-update --bin arbos-updatectl -- add \
+            --feed dist/arbos-stable.json \
+            --channel stable \
+            --version "$VERSION" \
+            --build "$BUILD" \
+            --commit "$SHORT" \
+            --base-url "https://github.com/${{ github.repository }}/releases/download/$TAG" \
+            --notes-file dist/notes.txt \
+            --notes-url "https://github.com/${{ github.repository }}/releases/tag/$TAG" \
+            --minimum-system-version "${{ needs.plan.outputs.minimum }}" \
+            --keep 20 \
+            --artifact "macos/arm64=$mac" \
+            --artifact "linux/x86_64=$linux"
+          rm -f dist/notes.txt
+          cargo run -q --release -p arbos-update --bin arbos-updatectl -- show \
+            --feed dist/arbos-stable.json \
+            --current "$VERSION+$((BUILD - 1))" \
+            --platform macos --arch arm64 | tee dist/check.txt
+          grep -q "would be offered" dist/check.txt
+          rm -f dist/check.txt
+      # Attached to *this* tag's release. `releases/latest/download/...`
+      # resolves to whichever release is newest and published, so the shipped
+      # app's feed URL never has to name a version — but a draft release is not
+      # "latest", so the stable channel only moves when the steward publishes.
+      - name: Attach
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" dist/* --clobber
+      - name: Say what went out
+        env:
+          SIGNING: ${{ needs.stable-macos.outputs.signing }}
+          NOTARIZED: ${{ needs.stable-macos.outputs.notarized }}
+        run: |
+          {
+            echo "### stable channel"
+            echo
+            echo "\`${{ needs.plan.outputs.version }}+${{ needs.plan.outputs.build }}\` attached to \`$TAG\`."
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| macOS signature | \`${SIGNING:-unknown}\` |"
+            echo "| Notarized | \`${NOTARIZED:-false}\` |"
+            echo
+            echo "The stable feed moves when this release is published, not while it is a draft."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -105,6 +105,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbos-update"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "ring",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
