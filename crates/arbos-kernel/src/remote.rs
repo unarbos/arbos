@@ -73,6 +73,11 @@ pub struct Record {
     /// Hub route: the project name the remote kernel registered under.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub project: String,
+    /// Hub route: the child's own store as every node addresses it,
+    /// `arbos://<machine>/<project>/`. Its plan and record are read there
+    /// by address; its deliverables go into the parent's store.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub store: String,
 }
 
 impl Record {
@@ -612,15 +617,38 @@ fn project_name(place: &Place) -> String {
         .to_string()
 }
 
+/// The parent's and the child's stores, as addresses, when both nodes are
+/// on the hub. The brief's store paths are rewritten to the parent's, and
+/// the first prompt says which store is which.
+struct Stores {
+    parent: arbos_core::hub::StoreAddress,
+    child: arbos_core::hub::StoreAddress,
+}
+
 fn first_prompt(
     parent: &Agent,
     brief: &str,
     remote_path: &str,
     machine: &str,
     how: &str,
+    stores: Option<&Stores>,
 ) -> String {
+    let brief_text = match stores {
+        Some(st) => arbos_core::hub::address_brief(brief, &st.parent),
+        None => brief.to_string(),
+    };
+    let store_note = match stores {
+        Some(st) => format!(
+            " Your parent's project store is {parent} — the Project's memory (docs/project-context.md, notes.md, docs/, internal/, media/) lives there, not here; `read` and `ls` take those addresses. Your own store here is {child} (plain paths): your plan and transcript stay in it. Deliverables go into the parent's store by address (`write {parent}docs/…`, `{parent}internal/…`, `{parent}media/<topic>/…`) — a file left only on this machine is not delivered. Its notes.md is its root's: propose a change with `say to={pm}/{pp}/root`.",
+            parent = st.parent,
+            child = st.child,
+            pm = st.parent.machine,
+            pp = st.parent.project
+        ),
+        None => String::new(),
+    };
     format!(
-        "You were spawned by agent {} on another machine for this mission:\n\n{brief}\n\nYou work in {remote_path} on {machine}, {how}. Do it now; report results in your final reply — it is delivered to your parent as a message from you. If you change files, commit them on a branch and name it in the report.",
+        "You were spawned by agent {} on another machine for this mission:\n\n{brief_text}\n\nYou work in {remote_path} on {machine}, {how}.{store_note} Do it now; report results in your final reply — it is delivered to your parent as a message from you. If you change files, commit them on a branch and name it in the report.",
         parent.id
     )
 }
@@ -689,6 +717,7 @@ async fn spawn_ssh(
         mirrored: already,
         route: String::new(),
         project: String::new(),
+        store: String::new(),
     };
     remember(&place, &record)?;
     append_event(
@@ -707,6 +736,7 @@ async fn spawn_ssh(
         &remote_path,
         &machine.name,
         "a copy of the project synced from the parent's machine",
+        None,
     );
     let stream = TcpStream::connect(("127.0.0.1", local_port))
         .await
@@ -822,6 +852,15 @@ async fn spawn_hub(
         a.remote = Some(format!("{}:{remote_path}", info.name));
         let _ = a.save(&place.agent_dir(&id));
     }
+    // Both nodes are on the hub: the brief's store paths become this
+    // node's addresses (the child reads the Project's memory and delivers
+    // into it), and the child's own store gets an address too.
+    let stores = Stores {
+        parent: hub_link::self_store().unwrap_or_else(|| {
+            arbos_core::hub::StoreAddress::root(&cfg.machine, &hub_link::project_name(&place))
+        }),
+        child: arbos_core::hub::StoreAddress::root(&info.name, &served),
+    };
     let record = Record {
         agent: id.clone(),
         parent: parent.id.to_string(),
@@ -830,14 +869,15 @@ async fn spawn_hub(
         mirrored: 0,
         route: "hub".into(),
         project: served.clone(),
+        store: stores.child.to_string(),
     };
     remember(&place, &record)?;
     append_event(
         &Layout::new(&place, &id).transcript(),
         &Event::new(EventKind::Notice {
             text: format!(
-                "Worker on {} started a kernel for {served} at {remote_path}; attached through the hub (no ssh, no open port).",
-                info.name
+                "Worker on {} started a kernel for {served} at {remote_path}; attached through the hub (no ssh, no open port). Its store: {}; it reads this project's store at {} and delivers there.",
+                info.name, stores.child, stores.parent
             ),
             failed: false,
         }),
@@ -848,6 +888,7 @@ async fn spawn_hub(
         &remote_path,
         &info.name,
         "a git worktree of that machine's own checkout of the project",
+        Some(&stores),
     );
     attach(
         Arc::clone(&hooks),
@@ -861,8 +902,8 @@ async fn spawn_hub(
     Ok((
         AgentId::new(id),
         format!(
-            "on {} at {remote_path} through the hub (its reports arrive here as messages from it; say to={} reaches it)",
-            info.name, child.id
+            "on {} at {remote_path} through the hub (its reports arrive here as messages from it; say to={} reaches it; its own store reads by address at {}; it delivers into this store by address)",
+            info.name, child.id, stores.child
         ),
     ))
 }
@@ -1228,8 +1269,17 @@ fn deliver(hooks: &KernelHooks, record: &Record, text: &str) -> Result<()> {
         wake: true,
         hops: 0,
         body: format!(
-            "Turn ended. Last words: {text}\n(transcript: .arbos/agents/{}/transcript.jsonl; it ran on {})",
-            record.agent, record.machine
+            "Turn ended. Last words: {text}\n(transcript: .arbos/agents/{}/transcript.jsonl; it ran on {}{})",
+            record.agent,
+            record.machine,
+            if record.store.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; its own store: {} — its plan and record read by address, e.g. `read {}agents/root/plan.md`",
+                    record.store, record.store
+                )
+            }
         ),
         ..arbos_core::inbox::Message::default()
     };
@@ -1882,7 +1932,7 @@ mod mirror_tests {
 
 #[cfg(test)]
 mod lifecycle_tests {
-    use super::{Record, RecordsFile, RemoteHub, deliver, forget};
+    use super::{Record, RecordsFile, RemoteHub, Stores, deliver, first_prompt, forget};
     use arbos_core::{EventKind, Place};
     use std::sync::Arc;
 
@@ -1919,7 +1969,107 @@ mod lifecycle_tests {
             mirrored: 0,
             route: String::new(),
             project: String::new(),
+            store: String::new(),
         }
+    }
+
+    /// Decision 3 (Jacob, 2026-09-15): a child on the hub gets the brief
+    /// with the parent's store paths as addresses, and is told which store
+    /// is which and where deliverables go. An ssh child's brief is left as
+    /// it was: the kernel over there is on no hub.
+    #[test]
+    fn a_hub_childs_brief_names_the_parents_store_by_address() {
+        let parent = arbos_core::Agent::root("root");
+        let brief = "Read first: .arbos/docs/project-context.md, then .arbos/notes.md\nTask: fix src/x.rs\nOutput: under .arbos/docs/, notes under .arbos/internal/\n";
+        let stores = Stores {
+            parent: arbos_core::hub::StoreAddress::root("cloud", "demo"),
+            child: arbos_core::hub::StoreAddress::root("arboslife", "demo--c1"),
+        };
+        let text = first_prompt(
+            &parent,
+            brief,
+            "/home/u/demo/.arbos/worktrees/c1",
+            "arboslife",
+            "a worktree",
+            Some(&stores),
+        );
+        assert!(
+            text.contains("Read first: arbos://cloud/demo/docs/project-context.md, then arbos://cloud/demo/notes.md"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "Output: under arbos://cloud/demo/docs/, notes under arbos://cloud/demo/internal/"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("Task: fix src/x.rs"),
+            "code paths stay: {text}"
+        );
+        assert!(
+            text.contains("Your parent's project store is arbos://cloud/demo/"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Your own store here is arbos://arboslife/demo--c1/"),
+            "{text}"
+        );
+        assert!(text.contains("`write arbos://cloud/demo/docs/…`"), "{text}");
+        assert!(text.contains("say to=cloud/demo/root"), "{text}");
+        let ssh = first_prompt(
+            &parent,
+            brief,
+            "/home/u/arbos-remote/demo--c1",
+            "box",
+            "a copy",
+            None,
+        );
+        assert!(
+            ssh.contains(".arbos/docs/project-context.md") && !ssh.contains("arbos://"),
+            "{ssh}"
+        );
+    }
+
+    /// Decision 3 (Jacob, 2026-09-15): the done message of a child on the
+    /// hub names its own store root, so the parent reads its plan and
+    /// record by address; an ssh child (no hub there) names none.
+    #[test]
+    fn a_hub_childs_done_names_its_store_by_address() {
+        let p = place("store");
+        let h = hooks(&p);
+        let rec = Record {
+            route: "hub".into(),
+            project: "demo--c1".into(),
+            store: "arbos://loop/demo--c1/".into(),
+            ..record()
+        };
+        deliver(&h, &rec, "done here").unwrap();
+        let filed = arbos_core::inbox::list(&p, "root");
+        assert_eq!(filed.len(), 1, "{filed:?}");
+        assert!(
+            filed[0]
+                .msg
+                .body
+                .contains("its own store: arbos://loop/demo--c1/"),
+            "{}",
+            filed[0].msg.body
+        );
+        assert!(
+            filed[0]
+                .msg
+                .body
+                .contains("`read arbos://loop/demo--c1/agents/root/plan.md`"),
+            "{}",
+            filed[0].msg.body
+        );
+        deliver(&h, &record(), "ssh done").unwrap();
+        let filed = arbos_core::inbox::list(&p, "root");
+        let ssh = filed
+            .iter()
+            .find(|m| m.msg.body.contains("ssh done"))
+            .unwrap();
+        assert!(!ssh.msg.body.contains("its own store"), "{}", ssh.msg.body);
     }
 
     /// qa-037: a parent blocked in `spawn wait=true` gets the remote
@@ -2056,6 +2206,7 @@ mod relay_tests {
                 mirrored: 0,
                 route: "hub".into(),
                 project: "demo--c1".into(),
+                store: "arbos://box/demo--c1/".into(),
             },
             route: Route::Hub,
             to_remote: to_remote_tx,
