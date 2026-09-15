@@ -91,6 +91,48 @@ pub struct ProjectConfig {
     /// `crate::spend`). Absent: counted, never capped.
     #[serde(default, skip_serializing_if = "SpendConfig::is_empty")]
     pub spend: SpendConfig,
+    /// `[share] mode = "private" | "mesh" | "open"`: who on the hub may
+    /// reach this project's store by address (`arbos://<machine>/<project>/…`).
+    /// Absent: `mesh` — every admitted identity at its token's role. See
+    /// `crate::hub::store_access`.
+    #[serde(default, skip_serializing_if = "ShareConfig::is_empty")]
+    pub share: ShareConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ShareConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+impl ShareConfig {
+    fn is_empty(&self) -> bool {
+        self.mode.is_none()
+    }
+
+    /// The mode as a known word; anything else, or nothing, is `mesh`.
+    pub fn mode(&self) -> &'static str {
+        match self.mode.as_deref().map(str::trim) {
+            Some(crate::hub::SHARE_PRIVATE) => crate::hub::SHARE_PRIVATE,
+            Some(crate::hub::SHARE_OPEN) => crate::hub::SHARE_OPEN,
+            _ => crate::hub::SHARE_MESH,
+        }
+    }
+}
+
+/// The sharing mode of the place's store.
+pub fn share_mode(place: &Place) -> &'static str {
+    load(place).share.mode()
+}
+
+/// The sharing mode of a project folder that may have no `.arbos/` yet
+/// (a worker's checkout, listed for the roster); `mesh` when unreadable.
+pub fn share_mode_at(project_dir: &Path) -> &'static str {
+    std::fs::read_to_string(project_dir.join(".arbos").join("project.toml"))
+        .ok()
+        .and_then(|t| toml::from_str::<ProjectConfig>(&t).ok())
+        .map(|c| c.share.mode())
+        .unwrap_or(crate::hub::SHARE_MESH)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -193,6 +235,7 @@ pub fn write_for_new_place(place: &Place, name: &str) -> Result<()> {
             permission: Some("auto".into()),
         },
         spend: SpendConfig::default(),
+        share: ShareConfig::default(),
     };
     save(place, &cfg)
 }
@@ -364,6 +407,35 @@ mod tests {
         assert!(identity_at(&bare.path).is_none());
         let json = serde_json::to_string(&d).unwrap();
         assert_eq!(json, r#"{"icon":"folder"}"#);
+    }
+
+    #[test]
+    fn the_share_mode_reads_from_project_toml_and_defaults_to_mesh() {
+        let p = place("share");
+        assert_eq!(share_mode(&p), "mesh");
+        assert_eq!(share_mode_at(&p.path), "mesh");
+        std::fs::write(path(&p), "schema = 2\n\n[share]\nmode = \"private\"\n").unwrap();
+        assert_eq!(share_mode(&p), "private");
+        assert_eq!(share_mode_at(&p.path), "private");
+        std::fs::write(path(&p), "[share]\nmode = \"bogus\"\n").unwrap();
+        assert_eq!(share_mode(&p), "mesh");
+        // A kernel rewrite keeps the line.
+        std::fs::write(path(&p), "[share]\nmode = \"open\"\n").unwrap();
+        let cfg = load(&p);
+        save(&p, &cfg).unwrap();
+        assert!(
+            std::fs::read_to_string(path(&p))
+                .unwrap()
+                .contains("mode = \"open\"")
+        );
+        // A new place writes no [share] table: mesh is the default in code.
+        let n = place("share-new");
+        write_for_new_place(&n, "demo").unwrap();
+        assert!(
+            !std::fs::read_to_string(path(&n))
+                .unwrap()
+                .contains("[share]")
+        );
     }
 
     #[test]

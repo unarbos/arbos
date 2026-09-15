@@ -519,6 +519,11 @@ pub struct ChatSession {
     /// Seconds a thought had before a later step reopened it; added back
     /// when it settles again.
     pub thought_carry: u32,
+    /// This turn's streamed items by model step (`step` on the deltas):
+    /// the settled line of a step replaces the item it opened, in place.
+    /// Runtime only; cleared when a turn ends.
+    pub step_items: HashMap<u64, usize>,
+    pub step_thoughts: HashMap<u64, usize>,
     /// When this window asked the kernel for the kickoff turn on an empty
     /// root (Cursor's "Setting up environment"). Runtime only.
     pub kickoff_at: Option<SystemTime>,
@@ -648,6 +653,8 @@ impl ChatSession {
             status_only: false,
             live_since: None,
             thought_carry: 0,
+            step_items: HashMap::new(),
+            step_thoughts: HashMap::new(),
             kickoff_at: None,
             kickoff_secs: None,
             kickoff_wanted: false,
@@ -726,6 +733,8 @@ impl ChatSession {
             status_only: false,
             live_since: None,
             thought_carry: 0,
+            step_items: HashMap::new(),
+            step_thoughts: HashMap::new(),
             kickoff_at: None,
             kickoff_secs: None,
             kickoff_wanted: false,
@@ -804,6 +813,8 @@ impl ChatSession {
             status_only: false,
             live_since: None,
             thought_carry: 0,
+            step_items: HashMap::new(),
+            step_thoughts: HashMap::new(),
             kickoff_at: None,
             kickoff_secs: None,
             kickoff_wanted: false,
@@ -910,7 +921,10 @@ impl ChatSession {
         // The kickoff turn has no prompt: its time is the chat's, measured
         // from the ask to the last turn end before the user's first line.
         if let Some(at) = self.kickoff_at
-            && !self.items.iter().any(|item| matches!(item, ChatItem::User(_)))
+            && !self
+                .items
+                .iter()
+                .any(|item| matches!(item, ChatItem::User(_)))
         {
             self.kickoff_secs = Some(at.elapsed().map(|d| d.as_secs() as u32).unwrap_or(0));
             return;
@@ -1422,7 +1436,9 @@ impl ChatSession {
             // one runs; its own record of the line lands the card in order,
             // after the greeting, so nothing is drawn here now.
             let held = match &self.connection {
-                Connection::Live(session) if !session.is_closed() => session.prompt(&content).is_ok(),
+                Connection::Live(session) if !session.is_closed() => {
+                    session.prompt(&content).is_ok()
+                }
                 _ => false,
             };
             if !held {
@@ -1451,17 +1467,36 @@ impl ChatSession {
         if let Connection::Live(session) = &self.connection
             && session.kickoff().is_ok()
         {
-            self.kickoff_at = Some(SystemTime::now());
+            let now = SystemTime::now();
+            self.kickoff_at = Some(now);
             self.kickoff_wanted = false;
+            // The kickoff is a turn like any other for the clock: its
+            // "Worked Ns" is stamped when it ends, from here.
+            self.flight = Some(Flight {
+                at: now,
+                used: self.usage.map_or(0, |usage| usage.used),
+            });
+            self.new_turn_steps();
         }
     }
 
     /// The kickoff turn (asked for by this window, no prompt of the user's
     /// yet) is still running.
     pub fn kickoff_running(&self) -> bool {
-        self.kickoff_at.is_some()
-            && self.busy()
-            && !self.items.iter().any(|item| matches!(item, ChatItem::User(_)))
+        // Asked and not yet ended: the first model call can take twenty
+        // seconds before anything arrives to make the chat look busy, and
+        // a prompt typed in that quiet must still wait its turn (else its
+        // card lands above the kickoff's work). A kickoff with no turn end
+        // after long enough is given up on.
+        let Some(at) = self.kickoff_at else {
+            return false;
+        };
+        self.kickoff_secs.is_none()
+            && (self.busy() || at.elapsed().is_ok_and(|d| d < KICKOFF_QUIET))
+            && !self
+                .items
+                .iter()
+                .any(|item| matches!(item, ChatItem::User(_)))
     }
 
     /// Hold the words for the next turn. The kernel keeps them as an inbox
@@ -1553,6 +1588,7 @@ impl ChatSession {
     /// is a turn this window did not start: the card goes up, and the pane
     /// is working until the kernel says idle.
     fn foreign_prompt(&mut self, text: String, attachments: Vec<String>, ts: i64, channel: String) {
+        self.new_turn_steps();
         let squash = |s: &str| s.split_whitespace().collect::<String>();
         let echo = self
             .items
@@ -1600,9 +1636,18 @@ impl ChatSession {
         self.flush();
     }
 
+    /// A turn boundary: the step numbers start again at 1, so the maps of
+    /// the last turn's items go. Not at turn end — the settled records of
+    /// the final step can arrive after `turn_complete`.
+    fn new_turn_steps(&mut self) {
+        self.step_items.clear();
+        self.step_thoughts.clear();
+    }
+
     /// Put the user card in the pane this frame — before the kernel
     /// answers, and before a reconnect finishes.
     fn land_turn(&mut self, content: &Prompt) {
+        self.new_turn_steps();
         self.flight = Some(Flight {
             at: SystemTime::now(),
             used: self.usage.map_or(0, |usage| usage.used),
@@ -1847,12 +1892,17 @@ impl ChatSession {
         } else {
             question.prompt.as_str()
         };
-        let call = words.trim().strip_prefix("allow ").or_else(|| words.trim().strip_prefix("Allow "))?;
+        let call = words
+            .trim()
+            .strip_prefix("allow ")
+            .or_else(|| words.trim().strip_prefix("Allow "))?;
         let find = |want: &str| {
             question
                 .options
                 .iter()
-                .find(|o| o.id.eq_ignore_ascii_case(want) || o.label.trim().eq_ignore_ascii_case(want))
+                .find(|o| {
+                    o.id.eq_ignore_ascii_case(want) || o.label.trim().eq_ignore_ascii_case(want)
+                })
                 .map(|o| o.id.clone())
         };
         Some((call.trim().to_string(), find("allow")?, find("deny")?))
@@ -1863,7 +1913,12 @@ impl ChatSession {
         let Some((_, allow_id, deny_id)) = self.approval_ask() else {
             return;
         };
-        let Some(question_id) = self.questions.as_ref().and_then(|p| p.current()).map(|q| q.id.clone()) else {
+        let Some(question_id) = self
+            .questions
+            .as_ref()
+            .and_then(|p| p.current())
+            .map(|q| q.id.clone())
+        else {
             return;
         };
         let pick = if allow { allow_id } else { deny_id };
@@ -2147,7 +2202,9 @@ impl ChatSession {
                 self.questions = None;
                 let what = match restored {
                     Some(_) => rewound_line(dropped, true),
-                    None if pending => format!("rewound: {dropped} transcript lines cut; {RESTORING}"),
+                    None if pending => {
+                        format!("rewound: {dropped} transcript lines cut; {RESTORING}")
+                    }
                     None => rewound_line(dropped, false),
                 };
                 self.notice(false, &what);
@@ -2202,9 +2259,140 @@ impl ChatSession {
                     self.flush();
                 }
             }
-            Event::AssistantFinal(text) => {
+            Event::Woke => self.new_turn_steps(),
+            Event::TextDelta { text, step } => {
+                self.turn_alive();
+                self.finish_thinking();
+                let at = self.step_items.get(&step).copied();
+                match at.and_then(|ix| self.items.get_mut(ix)) {
+                    Some(ChatItem::Agent(body)) => merge_stream_text(body, &text),
+                    _ => {
+                        if !text.is_empty() {
+                            self.items.push(ChatItem::Agent(text));
+                            let ix = self.items.len() - 1;
+                            self.step_items.insert(step, ix);
+                            self.streaming_agent = Some(ix);
+                        }
+                    }
+                }
+                self.updated = SystemTime::now();
+            }
+            Event::ThoughtDelta { text, step } => {
+                self.turn_alive();
+                let at = self.step_thoughts.get(&step).copied();
+                match at.and_then(|ix| self.items.get_mut(ix)) {
+                    Some(ChatItem::Thinking { text: body, .. }) => merge_stream_text(body, &text),
+                    _ => {
+                        if !text.is_empty() {
+                            self.thought_at = Some(SystemTime::now());
+                            self.items.push(ChatItem::Thinking {
+                                text,
+                                done: false,
+                                secs: None,
+                            });
+                            self.step_thoughts.insert(step, self.items.len() - 1);
+                        }
+                    }
+                }
+                self.updated = SystemTime::now();
+            }
+            Event::ThoughtFinal { text, step, secs } => {
+                // The settled thought of a step: its words whole and its
+                // seconds, on the item its deltas opened; a new item only
+                // when none streamed (attached late).
+                let at = self.step_thoughts.get(&step).copied();
+                match at.and_then(|ix| self.items.get_mut(ix)) {
+                    Some(ChatItem::Thinking {
+                        text: body,
+                        done,
+                        secs: held,
+                    }) => {
+                        if !text.trim().is_empty() {
+                            *body = text;
+                        }
+                        *done = true;
+                        *held = secs;
+                    }
+                    _ => {
+                        // No item by step (a record from before the maps, a
+                        // settled line arriving after the turn's end): the
+                        // last thought of this turn with the same words takes
+                        // the stamp; a new item only when there is none.
+                        let same = self
+                            .items
+                            .iter()
+                            .rposition(|item| matches!(item, ChatItem::Thinking { text: t, .. } if same_words(t, &text)));
+                        let boundary = self
+                            .items
+                            .iter()
+                            .rposition(|item| matches!(item, ChatItem::User(_)))
+                            .unwrap_or(0);
+                        match same
+                            .filter(|ix| *ix >= boundary)
+                            .and_then(|ix| self.items.get_mut(ix))
+                        {
+                            Some(ChatItem::Thinking {
+                                done, secs: held, ..
+                            }) => {
+                                *done = true;
+                                *held = secs;
+                            }
+                            _ => {
+                                if !text.trim().is_empty() {
+                                    self.items.push(ChatItem::Thinking {
+                                        text,
+                                        done: true,
+                                        secs,
+                                    });
+                                    self.step_thoughts.insert(step, self.items.len() - 1);
+                                }
+                            }
+                        }
+                    }
+                }
+                self.flush();
+            }
+            Event::AssistantFinal { text, step } => {
                 self.finish_thinking();
                 let text = text.trim_matches('\n').to_string();
+                // The settled line of a numbered step replaces the item its
+                // deltas built, wherever it sits; nothing is doubled and a
+                // late final goes to its own step, not the last one.
+                if step > 0
+                    && let Some(ix) = self.step_items.get(&step).copied()
+                    && let Some(ChatItem::Agent(body)) = self.items.get_mut(ix)
+                {
+                    if let Some(step_text) = status_line(&text) {
+                        self.items.remove(ix);
+                        self.step_items.remove(&step);
+                        for at in self
+                            .step_items
+                            .values_mut()
+                            .chain(self.step_thoughts.values_mut())
+                        {
+                            if *at > ix {
+                                *at -= 1;
+                            }
+                        }
+                        if self.streaming_agent == Some(ix) {
+                            self.streaming_agent = None;
+                        }
+                        if self.busy() {
+                            self.status = Some(step_text);
+                        }
+                        self.status_only = true;
+                        self.flush();
+                        return;
+                    }
+                    if !text.is_empty() {
+                        *body = text;
+                    }
+                    if self.streaming_agent == Some(ix) {
+                        self.streaming_agent = None;
+                    }
+                    self.flush();
+                    return;
+                }
                 // The kernel records a `status` call as an assistant line
                 // "status: <step>". It is the live step, shown in the worker
                 // line and the panel, not a paragraph of the reply.
@@ -2397,7 +2585,9 @@ impl ChatSession {
                     Ok(StopReason::Refusal) => self.notice(false, "the agent refused to continue"),
                     Ok(StopReason::MaxTokens) => self.notice(false, "stopped: max tokens"),
                     Ok(StopReason::MaxTurnRequests) => self.notice(false, "stopped: max steps"),
-                    Ok(StopReason::Other(reason)) => self.notice(false, &format!("stopped: {reason}")),
+                    Ok(StopReason::Other(reason)) => {
+                        self.notice(false, &format!("stopped: {reason}"))
+                    }
                     Err(e) => {
                         self.fail_running_tools();
                         self.notice(true, &format!("turn failed: {}", acp::error_text(&e)));
@@ -2866,7 +3056,9 @@ impl ChatSession {
             .items
             .iter()
             .rposition(|item| matches!(item, ChatItem::Thinking { done: false, .. }));
-        if let Some(ChatItem::Thinking { done, secs, .. }) = open.and_then(|at| self.items.get_mut(at)) {
+        if let Some(ChatItem::Thinking { done, secs, .. }) =
+            open.and_then(|at| self.items.get_mut(at))
+        {
             *done = true;
             let took = self
                 .thought_at
@@ -3044,6 +3236,18 @@ fn content_text(block: &ContentBlock) -> String {
 
 /// Live deltas and the persisted full line can both arrive. Do not
 /// print the reply twice.
+/// How long a kickoff may stay silent before a typed prompt stops waiting
+/// for it.
+const KICKOFF_QUIET: Duration = Duration::from_secs(90);
+
+/// The streamed and the settled copy of one thought: the same words, or
+/// one the other with the trailing whitespace the stream had.
+fn same_words(a: &str, b: &str) -> bool {
+    let a = a.trim();
+    let b = b.trim();
+    !a.is_empty() && (a == b || a.starts_with(b) || b.starts_with(a))
+}
+
 fn merge_stream_text(body: &mut String, text: &str) {
     if text.is_empty() || body == text || body.starts_with(text) {
         return;
@@ -3441,7 +3645,11 @@ pub(crate) fn worker_name(id: &str) -> Option<String> {
 /// The line under a rewind, in the reader's words: what came back, not
 /// the commit hashes the kernel reports (they are in the kernel's log).
 fn rewound_line(dropped: u64, files: bool) -> String {
-    let lines = if dropped == 1 { "1 line".to_string() } else { format!("{dropped} lines") };
+    let lines = if dropped == 1 {
+        "1 line".to_string()
+    } else {
+        format!("{dropped} lines")
+    };
     if files {
         format!("Rewound to before this prompt: {lines} of chat cut, files restored")
     } else {

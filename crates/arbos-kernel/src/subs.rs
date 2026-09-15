@@ -66,6 +66,7 @@ pub fn ensure_chores(place: &arbos_core::Place) {
         path: None,
         repo: None,
         pr: None,
+        author: None,
 
         branch: None,
 
@@ -603,6 +604,34 @@ fn fire_with_note(
                 hooks.kick();
             });
         }
+        "github_prs" => {
+            let key = format!("{id}#{}", sub.id);
+            {
+                let mut set = in_flight().lock().unwrap();
+                if set.contains(&key) {
+                    return;
+                }
+                set.insert(key.clone());
+            }
+            let hooks = Arc::clone(hooks);
+            let agent_id = id.to_string();
+            tokio::task::spawn_blocking(move || {
+                let outcome = poll_github_prs(&hooks, &agent_id, &sub);
+                in_flight().lock().unwrap().remove(&key);
+                if let Some(mut current) = subscription::get(&hooks.place, &agent_id, sub.id) {
+                    current.seen = outcome.seen.or(current.seen);
+                    current.error = outcome.error;
+                    settle(
+                        &hooks,
+                        &agent_id,
+                        current,
+                        arbos_core::now_ms(),
+                        outcome.last,
+                    );
+                }
+                hooks.kick();
+            });
+        }
         "github_pr" | "github_ci" => {
             let key = format!("{id}#{}", sub.id);
             {
@@ -664,6 +693,82 @@ struct Polled {
     last: String,
     /// The pull request is merged or closed: stop watching.
     closed: bool,
+}
+
+/// One look at a repository's pull requests (`github_prs`): what opened,
+/// merged, closed, got commits, or went red since the last look is the
+/// message. The first look only remembers. An error is said once.
+fn poll_github_prs(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
+    let repo = sub.repo.clone().unwrap_or_default();
+    let author = sub
+        .author
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty());
+    let subject = match author {
+        Some(a) => format!("{repo} (PRs by {a})"),
+        None => format!("{repo} (all PRs)"),
+    };
+    let env = arbos_engine::secrets::store().env_for(&arbos_core::lineage(&hooks.place, agent));
+    match crate::github::repo_snapshot(&repo, author, &env) {
+        Ok(now) => {
+            let prev: Option<crate::github::ReposSnapshot> = sub
+                .seen
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            let lines = match &prev {
+                Some(p) => crate::github::repo_diff(p, &now),
+                None => Vec::new(),
+            };
+            let last = if lines.is_empty() {
+                if prev.is_none() {
+                    format!("watching {} pull request(s)", now.prs.len())
+                } else {
+                    "no change".to_string()
+                }
+            } else {
+                let text = format!(
+                    "{subject}: {}{}",
+                    lines.join("; "),
+                    if sub.prompt.is_empty() {
+                        String::new()
+                    } else {
+                        format!(". You asked: {}", sub.prompt)
+                    }
+                );
+                let mut msg = message(sub, true, text);
+                msg.from = "github".into();
+                match inbox::deliver(&hooks.place, agent, &msg) {
+                    Ok(_) => text::clip(&lines.join("; "), 200),
+                    Err(e) => format!("could not deliver: {e:#}"),
+                }
+            };
+            Polled {
+                seen: serde_json::to_string(&now).ok(),
+                error: None,
+                last,
+                closed: false,
+            }
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if sub.error.as_deref() != Some(&msg) {
+                let text = format!(
+                    "{subject}: the subscription cannot be checked: {msg}. It stays until you remove it (subscribe remove {}).",
+                    sub.id
+                );
+                let mut m = message(sub, true, text);
+                m.from = "github".into();
+                let _ = inbox::deliver(&hooks.place, agent, &m);
+            }
+            Polled {
+                seen: None,
+                error: Some(msg.clone()),
+                last: format!("error: {}", text::clip(&msg, 120)),
+                closed: false,
+            }
+        }
+    }
 }
 
 /// One look at the pull request; the diff against `seen` is the message.

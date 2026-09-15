@@ -106,6 +106,10 @@ pub struct RunCx {
     pub agent: Agent,
     pub cwd: PathBuf,
     pub call_id: String,
+    /// The model step within the turn this call belongs to (1-based);
+    /// the turn sets it before each model call. On every event the step
+    /// writes.
+    pub step: u64,
     pub cancel: CancellationToken,
     pub grep: Arc<dyn Grep>,
     pub hooks: Arc<dyn Hooks>,
@@ -396,11 +400,100 @@ impl Registry {
             .filter(|t| agent.may(t.name()))
             .cloned()
             .collect();
-        let schemas = tools.iter().map(|t| t.schema()).collect();
+        let coordinator = agent.role.as_deref() == Some(arbos_core::project::COORDINATOR);
+        let schemas = tools
+            .iter()
+            .map(|t| {
+                let schema = t.schema();
+                if coordinator {
+                    coordinator_schema(t.name(), schema)
+                } else {
+                    schema
+                }
+            })
+            .collect();
         View {
             tools: Arc::new(tools),
             schemas: Arc::new(schemas),
         }
+    }
+}
+
+/// What a coordinator reads on the editing tools and on `spawn`, ahead
+/// of the tool's own description. The contract says a code change is a
+/// spawn; the model still reached for `edit` on `main.py` first and met
+/// the refusal (F-46). The line at the point of choice — the tool list —
+/// is the one it reads when choosing.
+pub const COORDINATOR_EDIT_NOTE: &str = "COORDINATOR: project store only (.arbos/notes.md, docs/, internal/, media/). Code and every other file are a worker's — on a request that changes code, call spawn first, never this; the kernel refuses it here.";
+pub const COORDINATOR_SPAWN_NOTE: &str = "COORDINATOR: your first call on any request that changes code, fixes a bug, adds a feature, or runs a build or tests — before any read, grep, or edit. wait=true for a one-off, then relay its result.";
+
+fn coordinator_schema(name: &str, mut schema: Value) -> Value {
+    let note = match name {
+        "write" | "edit" | "apply_patch" | "delete" => COORDINATOR_EDIT_NOTE,
+        "spawn" => COORDINATOR_SPAWN_NOTE,
+        _ => return schema,
+    };
+    if let Some(desc) = schema
+        .get_mut("function")
+        .and_then(|f| f.get_mut("description"))
+    {
+        let own = desc.as_str().unwrap_or("").to_string();
+        *desc = Value::String(if own.is_empty() {
+            note.to_string()
+        } else {
+            format!("{note} {own}")
+        });
+    }
+    schema
+}
+
+#[cfg(test)]
+mod coordinator_view_tests {
+    use super::*;
+
+    /// F-46: the coordinator edited `main.py` itself and was refused
+    /// instead of spawning. The tool list it chooses from now says so on
+    /// the editing tools and on spawn; a worker's list is unchanged.
+    #[test]
+    fn a_coordinator_reads_the_role_note_on_editing_tools_and_spawn() {
+        let reg = Registry::builtin();
+        let mut coord = Agent::root("root");
+        coord.role = Some(arbos_core::project::COORDINATOR.to_string());
+        let worker = Agent::root("w");
+        let desc = |view: &View, name: &str| -> String {
+            view.schemas()
+                .iter()
+                .find(|s| s["function"]["name"] == name)
+                .map(|s| {
+                    s["function"]["description"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .unwrap_or_default()
+        };
+        let cv = reg.view(&coord);
+        let wv = reg.view(&worker);
+        for name in ["write", "edit", "apply_patch"] {
+            assert!(
+                desc(&cv, name).starts_with(COORDINATOR_EDIT_NOTE),
+                "{name}: {}",
+                desc(&cv, name)
+            );
+            assert!(!desc(&wv, name).contains("COORDINATOR"), "{name}");
+        }
+        // `spawn` is a kernel tool (see coordinator_spawn_first_e2e); the
+        // note is applied by name here.
+        let spawn = coordinator_schema(
+            "spawn",
+            serde_json::json!({"function": {"name": "spawn", "description": "Start a worker."}}),
+        );
+        assert_eq!(
+            spawn["function"]["description"],
+            format!("{COORDINATOR_SPAWN_NOTE} Start a worker.")
+        );
+        // Other tools keep their own words.
+        assert_eq!(desc(&cv, "read"), desc(&wv, "read"));
     }
 }
 

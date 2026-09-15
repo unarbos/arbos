@@ -1111,13 +1111,13 @@ impl Tool for SubscribeTool {
             "type": "function",
             "function": {
                 "name": "subscribe",
-                "description": "The only clock; a firing arrives as a message from subscription:N. add kind: timer (every|after, prompt); shell (cmd, every: no model turn, wakes you on failure; deliver_to user + notify \"…{output}\" sends the reading to the user); goal (prompt = what must become true, cmd = the check, exit 0 closes it; you are woken with the goal while it fails, every 30m unless every says otherwise); github_pr (repo, pr); github_ci (repo, pr | branch: a branch's workflow runs); inbox (path, every); chat (channel a door polls, optional thread and match: each human message there wakes you). list; remove|pause|resume id.",
+                "description": "The only clock; a firing arrives as a message from subscription:N. add kind: timer (every|after, prompt); shell (cmd, every: no model turn, wakes you on failure; deliver_to user + notify \"…{output}\" sends the reading to the user); goal (prompt = what must become true, cmd = the check, exit 0 closes it; you are woken with the goal while it fails, every 30m unless every says otherwise); github_pr (repo, pr); github_prs (repo; author \"@me\" or a login, optional: every pull request of the repository — opened, merged, closed, new commits, a check going red on an open one; \"follow all my PRs\" is this with author @me); github_ci (repo, pr | branch: a branch's workflow runs); inbox (path, every); chat (channel a door polls, optional thread and match: each human message there wakes you). list; remove|pause|resume id.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "op": {"type": "string", "enum": ["add", "list", "remove", "pause", "resume"]},
                         "id": {"type": "integer", "description": "remove/pause/resume."},
-                        "kind": {"type": "string", "enum": ["timer", "shell", "goal", "github_pr", "github_ci", "inbox", "chat"]},
+                        "kind": {"type": "string", "enum": ["timer", "shell", "goal", "github_pr", "github_prs", "github_ci", "inbox", "chat"]},
                         "prompt": {"type": "string", "description": "what you are told."},
                         "every": {"type": "string", "description": "e.g. 1h, 10m."},
                         "after": {"type": "string", "description": "once, e.g. 30m."},
@@ -1127,6 +1127,7 @@ impl Tool for SubscribeTool {
                         "continuity": {"type": "boolean", "description": "timer|shell: each firing carries the last one's output (or your last words), so you can compare."},
                         "repo": {"type": "string", "description": "owner/name."},
                         "pr": {"type": "integer", "description": "PR number."},
+                        "author": {"type": "string", "description": "github_prs: only this login's pull requests; @me for yours."},
                         "branch": {"type": "string", "description": "github_ci: watch this branch's runs instead of a PR."},
                         "path": {"type": "string", "description": "inbox: folder."},
                         "channel": {"type": "string", "description": "chat: a channel a door in doors.toml polls (discord:<id>, slack:<id>, or the id)."},
@@ -1166,6 +1167,10 @@ impl Tool for SubscribeTool {
                         path: opt_str(&args, "path").map(str::to_string),
                         repo: opt_str(&args, "repo").map(str::to_string),
                         pr: args.get("pr").and_then(|v| v.as_u64()).filter(|n| *n > 0),
+                        author: opt_str(&args, "author")
+                            .map(str::trim)
+                            .filter(|a| !a.is_empty())
+                            .map(str::to_string),
                         branch: opt_str(&args, "branch")
                             .map(str::trim)
                             .filter(|b| !b.is_empty())

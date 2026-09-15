@@ -536,7 +536,9 @@ impl Arbos {
             }
             // Cursor's subagent chat takes no follow-ups; a worker the
             // kernel archived is that here.
-            _ if chat.is_some_and(|chat| chat.agent_gone()) => "Follow-ups aren't available for this worker",
+            _ if chat.is_some_and(|chat| chat.agent_gone()) => {
+                "Follow-ups aren't available for this worker"
+            }
             // Cursor's new Project: the first message seeds the project.
             _ if chat.is_some_and(|chat| chat.items.is_empty() && chat.parent.is_none()) => {
                 "What are you working on?"
@@ -895,7 +897,11 @@ impl Arbos {
             .active_project()
             .filter(|project| !project.is_remote())
             .and_then(|project| self.branch_of(&project.path));
-        let here = if cfg!(target_os = "macos") { "This Mac" } else { "This Computer" };
+        let here = if cfg!(target_os = "macos") {
+            "This Mac"
+        } else {
+            "This Computer"
+        };
         let (glyph, mut machine) = match host {
             Some(alias) => (icons::devices::CLOUD, alias),
             None => (icons::devices::LAPTOP, here.to_owned()),
@@ -923,9 +929,7 @@ impl Arbos {
                 // A remote place being set up: the step beside the machine,
                 // with the braille tick so it reads as work in progress.
                 (Connection::Connecting, _) => {
-                    if let Some(step) =
-                        chat.host.as_deref().and_then(crate::kernel::connect_step)
-                    {
+                    if let Some(step) = chat.host.as_deref().and_then(crate::kernel::connect_step) {
                         machine = format!("{machine} · {}", step.trim_end_matches('…'));
                         Painter::of(cx).lease(1.0, Duration::from_millis(1100), cx);
                     }
@@ -957,7 +961,9 @@ impl Arbos {
                     .max_w(px(220.))
                     .text_style(TextStyle::Caption)
                     .text_color(theme.text_faint)
-                    .tooltip(|window, cx| Tooltip::text("Branch checked out in this project", window, cx))
+                    .tooltip(|window, cx| {
+                        Tooltip::text("Branch checked out in this project", window, cx)
+                    })
                     .child(
                         icons::icon(icons::editing::GIT_BRANCH)
                             .size(px(11.))
@@ -987,8 +993,17 @@ impl Arbos {
                     .hover(|el| el.bg(theme.element_hover))
                     .text_style(TextStyle::Caption)
                     .text_color(theme.text_faint)
-                    .tooltip(|window, cx| Tooltip::with_keystroke("Where the agent runs. Open another machine or folder", "⌘T", window, cx))
-                    .on_click(cx.listener(|this, _, window, cx| this.new_tab_action(&crate::view::root::NewTab, window, cx)))
+                    .tooltip(|window, cx| {
+                        Tooltip::with_keystroke(
+                            "Where the agent runs. Open another machine or folder",
+                            "⌘T",
+                            window,
+                            cx,
+                        )
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.new_tab_action(&crate::view::root::NewTab, window, cx)
+                    }))
                     .child(
                         icons::icon(glyph)
                             .size(px(11.))
@@ -1949,7 +1964,13 @@ impl Arbos {
                 .take_while(|item| !matches!(item, crate::model::session::ChatItem::User(_)))
                 .any(|item| matches!(item, crate::model::session::ChatItem::Notice { text, .. } if crate::model::session::is_interrupt_notice(text)));
         let has_agents = project.sessions.iter().any(|c| c.parent == Some(chat.id));
-        if working.is_empty() && !has_agents && prs.is_empty() && changes.is_none() && ahead.is_none() && !stopped {
+        if working.is_empty()
+            && !has_agents
+            && prs.is_empty()
+            && changes.is_none()
+            && ahead.is_none()
+            && !stopped
+        {
             return None;
         }
         let root = project.path.clone();
@@ -2000,7 +2021,8 @@ impl Arbos {
             .map(|c| (c.id, c.label(), Duration::ZERO, c.busy()))
             .collect();
         agents.sort_by_key(|(id, ..)| *id);
-        let agents_open = working.is_empty() && !agents.is_empty() && self.agents_card_open == Some(main_id);
+        let agents_open =
+            working.is_empty() && !agents.is_empty() && self.agents_card_open == Some(main_id);
         let row = div()
                 .w_full()
                 .flex()
@@ -2224,30 +2246,31 @@ impl Arbos {
                     .h(px(28.))
                     .text_style(TextStyle::Body)
                     .text_size(px(root::CURSOR_PROSE_SIZE))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_color(theme.text_muted)
-                            .child(if live { "Working" } else { "Agents" }),
-                    )
-                    .when(live, |head| head.child(
-                        div()
-                            .id("working-stop-all")
-                            .px(px(4.))
-                            .rounded(px(4.))
-                            .cursor_pointer()
-                            .text_color(theme.text_muted)
-                            .hover(|el| el.text_color(theme.text))
-                            .child("Stop All")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let ids = ids.clone();
-                                this.workspace.update(cx, |workspace, cx| {
-                                    for id in ids {
-                                        workspace.cancel(id, cx);
-                                    }
-                                });
-                            })),
-                    ))
+                    .child(div().flex_1().text_color(theme.text_muted).child(if live {
+                        "Working"
+                    } else {
+                        "Agents"
+                    }))
+                    .when(live, |head| {
+                        head.child(
+                            div()
+                                .id("working-stop-all")
+                                .px(px(4.))
+                                .rounded(px(4.))
+                                .cursor_pointer()
+                                .text_color(theme.text_muted)
+                                .hover(|el| el.text_color(theme.text))
+                                .child("Stop All")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let ids = ids.clone();
+                                    this.workspace.update(cx, |workspace, cx| {
+                                        for id in ids {
+                                            workspace.cancel(id, cx);
+                                        }
+                                    });
+                                })),
+                        )
+                    })
                     .child(
                         div()
                             .id("working-card-close")
@@ -2336,8 +2359,11 @@ impl Arbos {
                 .then(|| chat.host.as_deref().and_then(crate::kernel::connect_step))
                 .flatten()
         });
-        let setting_up = connecting.is_some() || asked.is_some_and(|since| busy || since < Duration::from_secs(20));
-        let shimmer_text = connecting.clone().unwrap_or_else(|| "Setting up environment".to_string());
+        let setting_up = connecting.is_some()
+            || asked.is_some_and(|since| busy || since < Duration::from_secs(20));
+        let shimmer_text = connecting
+            .clone()
+            .unwrap_or_else(|| "Setting up environment".to_string());
         let greeting = format!(
             "{name} is ready. Drag in files, or just tell me what you want to build and I'll get it moving.\n\nAnytime you want me to work differently, say so and I'll remember."
         );
@@ -2464,7 +2490,12 @@ impl Arbos {
 
     /// Open the working tree's diff (one file, or all of it) in the column
     /// as a code view — Cursor's Review.
-    pub(crate) fn review_changes(&mut self, root: &std::path::Path, file: Option<&str>, cx: &mut Context<Self>) {
+    pub(crate) fn review_changes(
+        &mut self,
+        root: &std::path::Path,
+        file: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         self.workspace
             .update(cx, |workspace, cx| workspace.review_changes(root, file, cx));
     }
@@ -2762,9 +2793,19 @@ impl Arbos {
                 .gap(px(8.))
                 .child(answer("deny", deny.id(false), "Skip", ButtonStyle::Ghost))
                 .children(allow.always.map(|always| {
-                    answer("allow-always", always.to_owned(), "Always Run", ButtonStyle::Ghost)
+                    answer(
+                        "allow-always",
+                        always.to_owned(),
+                        "Always Run",
+                        ButtonStyle::Ghost,
+                    )
                 }))
-                .child(answer("allow", allow.id(false), "Run ↵", ButtonStyle::Prominent))
+                .child(answer(
+                    "allow",
+                    allow.id(false),
+                    "Run ↵",
+                    ButtonStyle::Prominent,
+                ))
                 .into_any_element(),
             // Every option the agent sent, one full-width row each. A label of
             // any length reads here, which is the whole point of stacking them.
@@ -2836,7 +2877,10 @@ impl Arbos {
         // The kernel's ask-mode approval ("allow bash: ls -la" with allow /
         // deny) is Cursor's approval card: the call, then Skip · Run ↵.
         if let Some((call, _, _)) = chat.approval_ask() {
-            return Some(self.approval_ask_card(id, call, &theme, cx).into_any_element());
+            return Some(
+                self.approval_ask_card(id, call, &theme, cx)
+                    .into_any_element(),
+            );
         }
         let question = prompt.current()?;
         let draft = prompt.draft(&question.id);
@@ -3065,7 +3109,13 @@ impl Arbos {
 
     /// Cursor's approval card for an approval-shaped ask: the call's words
     /// under a key glyph, "Skip" and "Run ↵" at the trailing edge.
-    fn approval_ask_card(&self, id: u64, call: String, theme: &Theme, cx: &Context<Self>) -> impl IntoElement + use<> {
+    fn approval_ask_card(
+        &self,
+        id: u64,
+        call: String,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
         let painter = Painter::of(cx);
         let answer = |key: &str, allow: bool, label: &str, style| {
             let fade = Fade::new(painter, format!("approval-ask-{id}-{key}"));
@@ -3118,7 +3168,12 @@ impl Arbos {
                     .justify_end()
                     .gap(px(8.))
                     .child(answer("ask-skip", false, "Skip", ButtonStyle::Ghost))
-                    .child(answer("ask-continue", true, "Run ↵", ButtonStyle::Prominent)),
+                    .child(answer(
+                        "ask-continue",
+                        true,
+                        "Run ↵",
+                        ButtonStyle::Prominent,
+                    )),
             )
     }
 
@@ -3303,10 +3358,18 @@ pub(crate) fn diff_marks(theme: &Theme, add: u32, del: u32) -> AnyElement {
         .gap(px(4.))
         .text_style(TextStyle::Caption)
         .when(add > 0, |el| {
-            el.child(div().text_color(theme.diff_add).child(SharedString::from(format!("+{add}"))))
+            el.child(
+                div()
+                    .text_color(theme.diff_add)
+                    .child(SharedString::from(format!("+{add}"))),
+            )
         })
         .when(del > 0, |el| {
-            el.child(div().text_color(theme.diff_del).child(SharedString::from(format!("\u{2212}{del}"))))
+            el.child(
+                div()
+                    .text_color(theme.diff_del)
+                    .child(SharedString::from(format!("\u{2212}{del}"))),
+            )
         })
         .into_any_element()
 }
