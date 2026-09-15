@@ -158,6 +158,9 @@ pub struct Incoming {
     pub text: String,
     pub from_bot: bool,
     pub mentions_me: bool,
+    /// Slack: the `thread_ts` of a reply. Discord threads are channels of
+    /// their own, so this stays empty there.
+    pub thread: Option<String>,
 }
 
 /// What the kernel knows of a door once it runs: enough to post back.
@@ -243,11 +246,24 @@ async fn poll_loop(live: Live, hooks: Arc<KernelHooks>) {
                         continue;
                     }
                     for m in msgs {
-                        if m.from_bot || (live.door.mention_only && !m.mentions_me) {
+                        if m.from_bot {
                             continue;
                         }
                         let text = m.text.trim();
                         if text.is_empty() {
+                            continue;
+                        }
+                        // Agents that subscribed to this channel (`subscribe
+                        // kind=chat`) hear every human message in it, whatever
+                        // the door's own agent and mention rule.
+                        crate::subs::fire_chat(
+                            &hooks,
+                            &live.door.channel_tag(ch),
+                            m.thread.as_deref(),
+                            &m.author,
+                            text,
+                        );
+                        if live.door.mention_only && !m.mentions_me {
                             continue;
                         }
                         if let Err(e) = hooks.inbox_user(
@@ -416,6 +432,7 @@ pub fn parse_discord(v: &Value, me: Option<&str>) -> Vec<Incoming> {
                             .to_string(),
                         from_bot,
                         mentions_me,
+                        thread: None,
                     })
                 })
                 .collect()
@@ -446,6 +463,11 @@ pub fn parse_slack(v: &Value, me: Option<&str>) -> Vec<Incoming> {
                         .unwrap_or("")
                         .to_string();
                     let mentions_me = me.is_some_and(|me| text.contains(&format!("<@{me}>")));
+                    let thread = m
+                        .get("thread_ts")
+                        .and_then(Value::as_str)
+                        .filter(|t| *t != id)
+                        .map(str::to_string);
                     Some(Incoming {
                         id,
                         author: if user.is_empty() {
@@ -456,6 +478,7 @@ pub fn parse_slack(v: &Value, me: Option<&str>) -> Vec<Incoming> {
                         text,
                         from_bot,
                         mentions_me,
+                        thread,
                     })
                 })
                 .collect()

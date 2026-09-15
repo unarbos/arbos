@@ -21,7 +21,15 @@ pub const GITHUB_DEFAULT_EVERY_MS: u64 = 60_000;
 /// How often a goal's check runs when `every` is absent.
 pub const GOAL_DEFAULT_EVERY_MS: u64 = 30 * 60_000;
 
-pub const KINDS: &[&str] = &["timer", "shell", "github_pr", "github_ci", "inbox", "goal"];
+pub const KINDS: &[&str] = &[
+    "timer",
+    "shell",
+    "github_pr",
+    "github_ci",
+    "inbox",
+    "goal",
+    "chat",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Subscription {
@@ -65,6 +73,18 @@ pub struct Subscription {
     /// watched (`gh run list --branch`). A "keep main green" loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// `chat`: the channel a door polls (`discord:<id>`, `slack:<id>`, or
+    /// the bare id) whose new messages wake this agent (Cursor's Slack
+    /// channel subscription).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// `chat`: only messages in this thread (Slack `thread_ts`; a Discord
+    /// thread is a channel of its own, so name it as the channel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+    /// `chat`: only messages whose text contains this (case-insensitive).
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "match")]
+    pub match_text: Option<String>,
     /// `agent` (an inbox file, a turn), `user` (a line to the user, no
     /// model turn), or `none` (a quiet chore: nothing on success). `user`
     /// and `none` are for `shell`; a failure always wakes the agent.
@@ -201,10 +221,44 @@ impl Subscription {
             format!("{r}@{b}")
         } else if let Some(p) = &self.path {
             p.clone()
+        } else if let Some(c) = &self.channel {
+            match &self.thread {
+                Some(t) => format!("{c} thread {t}"),
+                None => c.clone(),
+            }
         } else {
             self.kind.clone()
         };
         crate::text::clip(&text, 60)
+    }
+
+    /// `chat`: does a message in `channel_tag` (`discord:<id>`) with this
+    /// thread and text fall under this subscription?
+    pub fn matches_chat(&self, channel_tag: &str, thread: Option<&str>, text: &str) -> bool {
+        if self.kind != "chat" || self.paused {
+            return false;
+        }
+        let Some(want) = self.channel.as_deref().map(str::trim) else {
+            return false;
+        };
+        let bare = channel_tag
+            .split_once(':')
+            .map(|(_, id)| id)
+            .unwrap_or(channel_tag);
+        if want != channel_tag && want != bare {
+            return false;
+        }
+        if let Some(t) = self.thread.as_deref().filter(|t| !t.trim().is_empty())
+            && thread != Some(t.trim())
+        {
+            return false;
+        }
+        if let Some(m) = self.match_text.as_deref().filter(|m| !m.trim().is_empty())
+            && !text.to_lowercase().contains(&m.trim().to_lowercase())
+        {
+            return false;
+        }
+        true
     }
 
     /// `every 1h · next 15:04`, `once at 15:04`, `paused`, `watching …/inbox`.
@@ -221,6 +275,10 @@ impl Subscription {
             _ => match self.next_due_ms() {
                 Some(d) => format!("once at {}", clock(d)),
                 None => match self.kind.as_str() {
+                    "chat" => match &self.thread {
+                        Some(t) => format!("on each message in thread {t}"),
+                        None => "on each message".to_string(),
+                    },
                     "github_pr" | "github_ci" => format!(
                         "every {}{next}",
                         human_ms(self.every_ms().unwrap_or(GITHUB_DEFAULT_EVERY_MS))
@@ -300,6 +358,14 @@ impl Subscription {
                 }
                 if self.every.is_none() {
                     bail!("inbox needs every: how often to look");
+                }
+            }
+            "chat" => {
+                if self.channel.as_deref().unwrap_or("").trim().is_empty() {
+                    bail!("chat needs channel: a channel a door in doors.toml polls");
+                }
+                if self.every.is_some() || self.next_due.is_some() {
+                    bail!("chat has no schedule: the door's messages fire it");
                 }
             }
             _ => {}
@@ -483,7 +549,8 @@ pub fn add(
     if sub.created.is_empty() {
         sub.created = crate::inbox::rfc3339(now);
     }
-    if sub.next_due.is_none() {
+    // Event kinds have no schedule: a door's message fires a `chat`.
+    if sub.next_due.is_none() && sub.kind != "chat" {
         if after.is_none()
             && sub.every_ms().is_none()
             && matches!(sub.kind.as_str(), "timer" | "shell")
@@ -636,6 +703,12 @@ mod tests {
             pr: None,
 
             branch: None,
+
+            channel: None,
+
+            thread: None,
+
+            match_text: None,
             deliver_to: "agent".into(),
             notify: None,
             expires: None,
@@ -786,6 +859,9 @@ mod branch_tests {
             repo: Some("o/r".into()),
             pr: None,
             branch: Some("main".into()),
+            channel: None,
+            thread: None,
+            match_text: None,
             deliver_to: "agent".into(),
             notify: None,
             expires: None,

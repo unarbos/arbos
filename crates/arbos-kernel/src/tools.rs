@@ -701,13 +701,13 @@ impl Tool for SubscribeTool {
             "type": "function",
             "function": {
                 "name": "subscribe",
-                "description": "The only clock; a firing arrives as a message from subscription:N. add kind: timer (every|after, prompt); shell (cmd, every: no model turn, wakes you on failure; deliver_to user + notify \"…{output}\" sends the reading to the user); goal (prompt = what must become true, cmd = the check, exit 0 closes it; you are woken with the goal while it fails, every 30m unless every says otherwise); github_pr (repo, pr); github_ci (repo, pr | branch: a branch's workflow runs); inbox (path, every). list; remove|pause|resume id.",
+                "description": "The only clock; a firing arrives as a message from subscription:N. add kind: timer (every|after, prompt); shell (cmd, every: no model turn, wakes you on failure; deliver_to user + notify \"…{output}\" sends the reading to the user); goal (prompt = what must become true, cmd = the check, exit 0 closes it; you are woken with the goal while it fails, every 30m unless every says otherwise); github_pr (repo, pr); github_ci (repo, pr | branch: a branch's workflow runs); inbox (path, every); chat (channel a door polls, optional thread and match: each human message there wakes you). list; remove|pause|resume id.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "op": {"type": "string", "enum": ["add", "list", "remove", "pause", "resume"]},
                         "id": {"type": "integer", "description": "remove/pause/resume."},
-                        "kind": {"type": "string", "enum": ["timer", "shell", "goal", "github_pr", "github_ci", "inbox"]},
+                        "kind": {"type": "string", "enum": ["timer", "shell", "goal", "github_pr", "github_ci", "inbox", "chat"]},
                         "prompt": {"type": "string", "description": "what you are told."},
                         "every": {"type": "string", "description": "e.g. 1h, 10m."},
                         "after": {"type": "string", "description": "once, e.g. 30m."},
@@ -718,7 +718,10 @@ impl Tool for SubscribeTool {
                         "repo": {"type": "string", "description": "owner/name."},
                         "pr": {"type": "integer", "description": "PR number."},
                         "branch": {"type": "string", "description": "github_ci: watch this branch's runs instead of a PR."},
-                        "path": {"type": "string", "description": "inbox: folder."}
+                        "path": {"type": "string", "description": "inbox: folder."},
+                        "channel": {"type": "string", "description": "chat: a channel a door in doors.toml polls (discord:<id>, slack:<id>, or the id)."},
+                        "thread": {"type": "string", "description": "chat: only replies in this Slack thread (its ts)."},
+                        "match": {"type": "string", "description": "chat: only messages containing this text."}
                     },
                     "required": ["op"]
                 }
@@ -757,6 +760,9 @@ impl Tool for SubscribeTool {
                             .map(str::trim)
                             .filter(|b| !b.is_empty())
                             .map(str::to_string),
+                        channel: opt_str(&args, "channel").map(str::to_string),
+                        thread: opt_str(&args, "thread").map(str::to_string),
+                        match_text: opt_str(&args, "match").map(str::to_string),
                         deliver_to: opt_str(&args, "deliver_to").unwrap_or("agent").to_string(),
                         notify: opt_str(&args, "notify").map(str::to_string),
                         expires: opt_str(&args, "expires").map(str::to_string),
@@ -771,8 +777,28 @@ impl Tool for SubscribeTool {
                         seen: None,
                     };
                     let sub = hooks.subscribe(agent, sub, opt_str(&args, "after"))?;
+                    let door_note = if sub.kind == "chat" {
+                        let want = sub.channel.clone().unwrap_or_default();
+                        let polled = crate::chatdoor::load(&hooks.place)
+                            .unwrap_or_default()
+                            .iter()
+                            .any(|d| {
+                                d.channels
+                                    .iter()
+                                    .any(|c| *c == want || d.channel_tag(c) == want)
+                            });
+                        if polled {
+                            String::new()
+                        } else {
+                            format!(
+                                " No door in .arbos/doors.toml polls {want:?} yet; it fires once one does."
+                            )
+                        }
+                    } else {
+                        String::new()
+                    };
                     format!(
-                        "Subscribed #{} ({} · {}). It fires as a message from subscription:{}; end the turn — you are woken when it does.",
+                        "Subscribed #{} ({} · {}). It fires as a message from subscription:{}; end the turn — you are woken when it does.{door_note}",
                         sub.id,
                         sub.kind,
                         sub.when_line(),
