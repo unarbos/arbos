@@ -18,9 +18,13 @@
 #      macOS payload. The certificate never touches the working tree.
 #
 #   3. Puts the Apple ID, team, and app-specific password in as well, which is
-#      what notarization needs.
+#      what notarization needs, and the App Store Connect key for uploading
+#      the iOS build to TestFlight.
 #
 #   4. Says what is set and what is still missing.
+#
+# Safe to run again. Every secret is written from the vault each time, so
+# re-running after a key is added or rotated is how the change lands.
 #
 # Needs: the GitHub CLI signed in with admin on this repository (`gh auth
 # login`), and the 1Password CLI signed in to the Arbos vault (`op signin`, or
@@ -63,6 +67,19 @@ CERT_FILES="IDApple.p12 AppCert.p12"
 # notarytool submits with.
 CERT_P12_PASSWORD_FIELD="kt3mumvelyuuk7vhzy5yi5sfwi"
 CERT_APP_PASSWORD_FIELD="lubqkq5h7qlwttdbdg3w3i476e"
+# The two App Store Connect API keys on that item, named rather than found.
+# They are not interchangeable and both end in `.p8`, so anything that picks
+# "the .p8" picks a coin toss.
+#
+#   XANFG7S7YS  notarizing the macOS app        → NOTARY_*
+#   ZV82D3ZWRT  "Arbos IOS", Admin, uploading   → IOS_ASC_*
+#               to TestFlight. A separate key
+#               because the first has no access
+#               to cloud-managed distribution
+#               certificates, and that cannot be
+#               added to a key after it is made.
+NOTARY_KEY_FILE="AuthKey_XANFG7S7YS.p8"
+IOS_KEY_FILE="AuthKey_ZV82D3ZWRT.p8"
 # "Apple id" — the address notarytool submits as.
 APPLE_ID_ITEM="irqui2abi45albacpga432mana"
 APPLE_TEAM_ID="25SCF3Q2AK"
@@ -203,23 +220,15 @@ say ""
 # material exists, and the build prefers the key.
 say "notarize:   setting the credentials."
 
-# The App Store Connect API key. The key id is in the file's own name —
-# `AuthKey_XANFG7S7YS.p8` is key `XANFG7S7YS` — which is how Apple ships it.
-key_file="$(op item get "$CERT_ITEM" --vault "$VAULT" --format json \
+# The issuer id is the team's, so one value serves every App Store Connect
+# key on the item. Read once, before anything that needs it.
+#
+# A field of its own is the tidy place for it; the note is where it is today,
+# so it is read from there when there is exactly one UUID in it and nothing to
+# mistake it for.
+issuer_source="a labelled field"
+op item get "$CERT_ITEM" --vault "$VAULT" --format json --reveal \
   | python3 -c "
-import json, sys
-print(next((f['name'] for f in json.load(sys.stdin).get('files', [])
-            if f['name'].endswith('.p8')), ''))
-")"
-if [ -n "$key_file" ]; then
-  op read "op://$VAULT/$CERT_ITEM/$key_file" --out-file "$work/notary.p8" >/dev/null
-  key_id="$(printf '%s' "$key_file" | sed -n 's/^AuthKey_\([A-Z0-9]*\)\.p8$/\1/p')"
-  # The issuer id is a UUID. A field of its own is the tidy place for it; the
-  # note is where it is today, so it is read from there when there is exactly
-  # one UUID in it and nothing to mistake it for.
-  issuer_source="a labelled field"
-  op item get "$CERT_ITEM" --vault "$VAULT" --format json --reveal \
-    | python3 -c "
 import json, re, sys, uuid
 item = json.load(sys.stdin)
 def is_uuid(v):
@@ -239,21 +248,45 @@ if len(found) == 1:
     open('$work/issuer', 'w').write(found.pop())
     open('$work/issuer-from-note', 'w').write('yes')
 "
-  [ -f "$work/issuer-from-note" ] && issuer_source="the item's note"
-  if [ -s "$work/issuer" ] && [ -n "$key_id" ]; then
-    gh secret set NOTARY_KEY_P8 --repo "$repo" < "$work/notary.p8"
-    printf '%s' "$key_id" | gh secret set NOTARY_KEY_ID --repo "$repo"
-    gh secret set NOTARY_ISSUER_ID --repo "$repo" < "$work/issuer"
-    say "            $key_file → NOTARY_KEY_P8, NOTARY_KEY_ID (key $key_id),"
-    say "            NOTARY_ISSUER_ID (issuer id read from $issuer_source)."
-  else
-    say "            $key_file is there but its issuer id is not — App Store"
+[ -f "$work/issuer-from-note" ] && issuer_source="the item's note"
+
+# One App Store Connect key, by name, into three secrets.
+#
+# By name and never "the first .p8 on the item": there are two keys now, they
+# are not interchangeable, and picking whichever the vault listed first would
+# quietly hand the desktop's notarisation the iOS key. The key id is in the
+# file's own name — `AuthKey_XANFG7S7YS.p8` is key `XANFG7S7YS` — which is how
+# Apple ships it.
+#
+#   asc_key <file> <P8 secret> <key-id secret> <issuer secret> <what it is for>
+asc_key() {
+  local file="$1" p8_secret="$2" id_secret="$3" issuer_secret="$4" purpose="$5"
+  local key_id
+  key_id="$(printf '%s' "$file" | sed -n 's/^AuthKey_\([A-Z0-9]*\)\.p8$/\1/p')"
+  if [ -z "$key_id" ]; then
+    say "            $file is not named AuthKey_<id>.p8; skipping $purpose."
+    return
+  fi
+  if ! op read "op://$VAULT/$CERT_ITEM/$file" --out-file "$work/$key_id.p8" >/dev/null 2>&1; then
+    say "            no $file on the vault item; $purpose not set."
+    return
+  fi
+  if [ ! -s "$work/issuer" ]; then
+    say "            $file is there but the issuer id is not — App Store"
     say "            Connect › Users and Access › Integrations shows it. Put it"
     say "            on the vault item as its own field and re-run."
+    return
   fi
-else
-  say "            no App Store Connect .p8 on the vault item."
-fi
+  gh secret set "$p8_secret" --repo "$repo" < "$work/$key_id.p8"
+  printf '%s' "$key_id" | gh secret set "$id_secret" --repo "$repo"
+  gh secret set "$issuer_secret" --repo "$repo" < "$work/issuer"
+  rm -f "$work/$key_id.p8"
+  say "            $file → $p8_secret, $id_secret (key $key_id),"
+  say "            $issuer_secret — $purpose."
+}
+
+asc_key "$NOTARY_KEY_FILE" NOTARY_KEY_P8 NOTARY_KEY_ID NOTARY_ISSUER_ID \
+  "notarizing the macOS app"
 
 # The Apple ID fallback.
 op item get "$APPLE_ID_ITEM" --vault "$VAULT" --format json --reveal \
@@ -269,6 +302,20 @@ printf '%s' "$APPLE_TEAM_ID" | gh secret set APPLE_TEAM_ID --repo "$repo"
 gh secret set APPLE_APP_PASSWORD --repo "$repo" < "$work/app-password"
 say "            APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD set as the"
 say "            fallback."
+say "            (issuer id read from $issuer_source.)"
+say ""
+
+# ── 4. TestFlight ────────────────────────────────────────────────────────────
+# A second App Store Connect key, and it has to be a second one: the
+# notarization key has no access to cloud-managed distribution certificates,
+# App Store Connect refuses to sign an iOS export with it, and that access
+# cannot be added to a key after it is made. So "Arbos IOS" exists alongside
+# it, and the two are kept apart on purpose — .github/workflows/ios-testflight.yml
+# reads only the IOS_ASC_* names, and nothing wired to the notarization key
+# changes.
+say "testflight: setting the iOS upload credentials."
+asc_key "$IOS_KEY_FILE" IOS_ASC_KEY_P8 IOS_ASC_KEY_ID IOS_ASC_ISSUER_ID \
+  "uploading the iOS build to TestFlight"
 say ""
 
 # ── 4. where that leaves us ──────────────────────────────────────────────────
@@ -278,6 +325,8 @@ say "  merge to main      → .github/workflows/dev-channel.yml publishes a"
 say "                       signed build and updates the dev feed"
 say "  push a v* tag      → .github/workflows/release.yml publishes the"
 say "                       tagged release and updates the stable feed"
+say "  the iOS loop       → .github/workflows/ios-testflight.yml uploads the"
+say "                       build to TestFlight"
 say ""
 if [ "$notarizes" = "no" ]; then
   say "still missing: a Developer ID Application certificate. Without it the"
