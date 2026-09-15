@@ -37,7 +37,7 @@ struct RootView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            ProjectsView()
+            ProjectsView(path: $path)
                 .navigationDestination(for: KernelTarget.self) { target in
                     ProjectChatView(target: target)
                 }

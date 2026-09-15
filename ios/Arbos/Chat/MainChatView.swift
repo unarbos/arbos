@@ -1,18 +1,22 @@
 import SwiftUI
 
-/// A project's main chat — the desktop's Project chat, on a phone. The
-/// header block names the project the way its tab does; prompts are
-/// right-aligned cards; the agent's words are plain prose; a "Worked Ns"
-/// line closes each turn; workers show as the desktop's worker lines and
-/// open their own chat. The handset opens the call.
+/// A project's main chat, in the shape of Cursor's chat page on the
+/// phone (Jacob's reference, 2026-09-15) with the Arbos palette: a round
+/// back chevron, the project's name centred, a round ⋯ menu; prose with
+/// a "Worked Ns" line after each turn; a pill above the composer that
+/// opens the workers; the composer with `+`, "Follow up…" and the mic,
+/// which is the call.
 struct ProjectChatView: View {
     let target: KernelTarget
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var chat: ChatStore
     @EnvironmentObject private var projects: ProjectStore
+    @Environment(\.dismiss) private var dismiss
 
     @State private var draft = ""
     @State private var showCall = false
+    @State private var showSettings = false
+    @State private var showWorkers = false
     @State private var worker: WorkerStatus?
     @FocusState private var composing: Bool
 
@@ -29,36 +33,35 @@ struct ProjectChatView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            transcript
-            composer
-        }
-        .background(ArbosTheme.bg.ignoresSafeArea())
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                HStack(spacing: 8) {
-                    ProjectGlyph(identity: identity, size: 22, working: chat.busy || chat.running > 0)
-                    Text(title)
-                        .font(ArbosTheme.bodyMedium)
-                        .foregroundStyle(ArbosTheme.text)
-                        .lineLimit(1)
-                }
+        ZStack(alignment: .bottom) {
+            ArbosTheme.bg.ignoresSafeArea()
+            VStack(spacing: 0) {
+                topBar
+                transcript
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showCall = true
-                } label: {
-                    Image(systemName: "phone")
-                        .foregroundStyle(ArbosTheme.text)
-                }
-                .disabled(!settings.isConfigured)
+            VStack(spacing: 8) {
+                pills
+                ComposerBar(
+                    text: $draft,
+                    placeholder: chat.items.isEmpty ? "Plan, ask, build…" : "Follow up…",
+                    canSend: canSend,
+                    onSend: send,
+                    onMic: { showCall = true },
+                    micEnabled: settings.isConfigured,
+                    focus: $composing
+                )
             }
         }
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(ArbosTheme.bg, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
-        .fullScreenCover(isPresented: $showCall) {
-            CallScreen()
+        .toolbar(.hidden, for: .navigationBar)
+        .fullScreenCover(isPresented: $showCall) { CallScreen() }
+        .sheet(isPresented: $showSettings) { SettingsView().environmentObject(settings) }
+        .sheet(isPresented: $showWorkers) {
+            WorkersSheet(workers: chat.workers) { picked in
+                showWorkers = false
+                worker = picked
+            }
+            .presentationDetents([.medium, .large])
+            .presentationBackground(ArbosTheme.surface)
         }
         .navigationDestination(item: $worker) { worker in
             WorkerChatView(worker: worker, project: identity)
@@ -69,13 +72,92 @@ struct ProjectChatView: View {
         }
     }
 
+    // MARK: - Chrome
+
+    private var topBar: some View {
+        ZStack {
+            HStack(spacing: 8) {
+                ProjectGlyph(identity: identity, size: 22, working: chat.busy || chat.running > 0)
+                Text(title)
+                    .font(ArbosTheme.bodyMedium)
+                    .foregroundStyle(ArbosTheme.text)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: 200)
+            HStack {
+                RoundButton(symbol: "chevron.left") { dismiss() }
+                Spacer()
+                Menu {
+                    Button {
+                        showCall = true
+                    } label: {
+                        Label("Call \(title)", systemImage: "phone")
+                    }
+                    .disabled(!settings.isConfigured)
+                    Button {
+                        Task { await chat.reconnect() }
+                    } label: {
+                        Label("Reconnect", systemImage: "arrow.clockwise")
+                    }
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Label("Settings", systemImage: "gearshape")
+                    }
+                } label: {
+                    RoundButton(symbol: "ellipsis") {}.allowsHitTesting(false)
+                }
+            }
+        }
+        .padding(.horizontal, ArbosTheme.gutter + 6)
+        .padding(.top, 6)
+        .padding(.bottom, 10)
+    }
+
+    /// The reference's pill row above the composer: here, the workers.
+    @ViewBuilder
+    private var pills: some View {
+        if !chat.workers.isEmpty {
+            HStack {
+                Button {
+                    showWorkers = true
+                } label: {
+                    HStack(spacing: 6) {
+                        if chat.running > 0 {
+                            BrailleSpinner(tint: ArbosTheme.textMuted)
+                                .font(.system(size: 12, design: .monospaced))
+                        } else {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        Text(chat.running > 0 ? "Working \(chat.running)" : "Agents \(chat.workers.count)")
+                    }
+                    .font(ArbosTheme.callout)
+                    .foregroundStyle(ArbosTheme.text)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(ArbosTheme.raised))
+                    .overlay(Capsule().strokeBorder(ArbosTheme.border, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                Spacer()
+            }
+            .padding(.horizontal, ArbosTheme.gutter + 6)
+        }
+    }
+
     // MARK: - Transcript
 
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: ArbosTheme.itemGap) {
-                    header
+                    if chat.items.isEmpty, chat.mode != .connecting {
+                        Text(emptyLine)
+                            .font(ArbosTheme.body)
+                            .foregroundStyle(ArbosTheme.textFaint)
+                            .padding(.top, 8)
+                    }
                     ForEach(chat.items) { item in
                         ChatRow(item: item).id(item.id)
                     }
@@ -89,10 +171,10 @@ struct ProjectChatView: View {
                             .foregroundStyle(ArbosTheme.textDim)
                             .padding(.top, 4)
                     }
-                    Color.clear.frame(height: 8).id("tail")
+                    Color.clear.frame(height: chat.workers.isEmpty ? 76 : 120).id("tail")
                 }
-                .padding(.horizontal, ArbosTheme.gutter)
-                .padding(.vertical, 8)
+                .padding(.horizontal, ArbosTheme.gutter + 6)
+                .padding(.top, 4)
             }
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: chat.items) { _, _ in
@@ -105,36 +187,10 @@ struct ProjectChatView: View {
         }
     }
 
-    /// The desktop's header block: glyph, name, one line about the place.
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ProjectGlyph(identity: identity, size: 44)
-            Text(title)
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(ArbosTheme.text)
-            Text(headerLine)
-                .font(ArbosTheme.callout)
-                .foregroundStyle(ArbosTheme.textFaint)
-        }
-        .padding(.top, 18)
-        .padding(.bottom, 14)
-    }
-
-    private var headerLine: String {
-        var parts: [String] = []
-        if let entry {
-            parts.append(entry.machine)
-            if !entry.place.isEmpty { parts.append(entry.place) }
-        } else {
-            parts.append(target.label)
-        }
-        switch chat.mode {
-        case .connecting: parts.append("connecting…")
-        case .offline: parts.append("offline")
-        case .mock: parts.append("demo")
-        case .server, .live: break
-        }
-        return parts.joined(separator: " · ")
+    private var emptyLine: String {
+        var line = "\(title) is ready."
+        if let entry, !entry.place.isEmpty { line += " \(entry.machine) · \(entry.place)." }
+        return line
     }
 
     /// One row per running worker, as the desktop draws them: the first
@@ -162,51 +218,12 @@ struct ProjectChatView: View {
         switch chat.mode {
         case .mock: return "No kernel reachable — a scripted chat is answering."
         case .offline: return "Kernel offline."
-        case .connecting, .server, .live: return nil
+        case .connecting: return "Connecting…"
+        case .server, .live: return nil
         }
     }
 
     // MARK: - Composer
-
-    /// The desktop's composer pill: radius 14, a hairline, the field, the
-    /// send disc at the trailing edge. Stop while a turn runs.
-    private var composer: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            TextField(placeholder, text: $draft, axis: .vertical)
-                .font(ArbosTheme.body)
-                .lineLimit(1...6)
-                .focused($composing)
-                .foregroundStyle(ArbosTheme.text)
-                .tint(ArbosTheme.accent)
-                .padding(.leading, 6)
-                .padding(.vertical, 6)
-            Button(action: send) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(canSend ? Color.black : ArbosTheme.textDim)
-                    .frame(width: 28, height: 28)
-                    .background(Circle().fill(canSend ? ArbosTheme.text : ArbosTheme.raisedHover))
-            }
-            .disabled(!canSend)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: ArbosTheme.composerRadius, style: .continuous)
-                .fill(ArbosTheme.inputBg)
-                .overlay(
-                    RoundedRectangle(cornerRadius: ArbosTheme.composerRadius, style: .continuous)
-                        .strokeBorder(ArbosTheme.border, lineWidth: 1)
-                )
-        )
-        .padding(.horizontal, ArbosTheme.gutter)
-        .padding(.top, 6)
-        .padding(.bottom, 8)
-    }
-
-    private var placeholder: String {
-        chat.items.isEmpty ? "What are you working on?" : "Send follow-up"
-    }
 
     private var canSend: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.mode != .offline && chat.mode != .connecting
@@ -216,6 +233,69 @@ struct ProjectChatView: View {
         guard canSend else { return }
         chat.send(draft)
         draft = ""
+    }
+}
+
+/// The workers behind the pill: one row each, spinner or check, the
+/// step; a row opens the worker's chat.
+struct WorkersSheet: View {
+    let workers: [WorkerStatus]
+    let open: (WorkerStatus) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Agents")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(ArbosTheme.text)
+                .padding(.horizontal, ArbosTheme.gutter + 6)
+                .padding(.top, 22)
+                .padding(.bottom, 12)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(workers) { worker in
+                        Button {
+                            open(worker)
+                        } label: {
+                            HStack(spacing: 12) {
+                                if worker.running {
+                                    BrailleSpinner(tint: ArbosTheme.textMuted)
+                                        .font(.system(size: 13, design: .monospaced))
+                                        .frame(width: 18)
+                                } else {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(ArbosTheme.textFaint)
+                                        .frame(width: 18)
+                                }
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(worker.name)
+                                        .font(ArbosTheme.body)
+                                        .foregroundStyle(ArbosTheme.text)
+                                        .lineLimit(1)
+                                    Text(worker.running ? (worker.step.isEmpty ? "Working" : worker.step) : "Done")
+                                        .font(ArbosTheme.callout)
+                                        .foregroundStyle(ArbosTheme.textFaint)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(ArbosTheme.textDim)
+                            }
+                            .padding(.horizontal, ArbosTheme.gutter + 6)
+                            .padding(.vertical, 12)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .overlay(alignment: .bottom) {
+                            Rectangle().fill(ArbosTheme.border).frame(height: 0.5)
+                                .padding(.leading, ArbosTheme.gutter + 6 + 30)
+                        }
+                    }
+                }
+            }
+        }
+        .background(ArbosTheme.surface)
     }
 }
 
@@ -267,8 +347,9 @@ struct WorkerLine: View {
 }
 
 /// One row, in the desktop's shapes. A prompt is a right-aligned card
-/// (`#212121`, radius 10, 70 % max width). The agent's words are prose.
-/// Tool lines, worker reports and notices are one dim line each.
+/// (`#212121`, radius 10, 78 % max width). The agent's words are prose
+/// with links in the accent. Tool lines, worker reports and notices are
+/// one dim line each; "Worked Ns" closes a turn.
 struct ChatRow: View {
     let item: ChatItem
 
@@ -291,10 +372,11 @@ struct ChatRow: View {
             .padding(.top, 6)
         case .agent(let text, let streaming):
             HStack(alignment: .lastTextBaseline, spacing: 2) {
-                Text(text)
+                Text(Self.prose(text))
                     .font(ArbosTheme.body)
                     .lineSpacing(5)
                     .foregroundStyle(ArbosTheme.text)
+                    .tint(ArbosTheme.accent)
                     .textSelection(.enabled)
                 if streaming { Caret() }
             }
@@ -335,6 +417,14 @@ struct ChatRow: View {
 
     static func duration(_ seconds: Int) -> String {
         seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s"
+    }
+
+    /// Markdown as the model writes it — links, `code`, **bold** — so PR
+    /// numbers and paths read as on the desktop. Plain text if it does
+    /// not parse.
+    static func prose(_ text: String) -> AttributedString {
+        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(text)
     }
 
     private func line(
