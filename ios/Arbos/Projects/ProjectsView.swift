@@ -125,15 +125,9 @@ struct ProjectsView: View {
                 if !searching { query = "" }
             }
             Menu {
-                Button {
-                    liveOnly = false
-                } label: {
-                    Label("All projects", systemImage: liveOnly ? "" : "checkmark")
-                }
-                Button {
-                    liveOnly = true
-                } label: {
-                    Label("Live only", systemImage: liveOnly ? "checkmark" : "")
+                Picker("Show", selection: $liveOnly) {
+                    Text("All projects").tag(false)
+                    Text("Live only").tag(true)
                 }
             } label: {
                 RoundButton(symbol: "line.3.horizontal.decrease") {}
