@@ -44,7 +44,7 @@ struct CallView: View {
             // + 14 pt) and stays put when the composer comes up.
             VStack(spacing: 28) {
                 VoiceOrb(level: model.level, phase: model.phase)
-                    .frame(width: 195, height: 195)
+                    .frame(width: 200, height: 200)
                     .onTapGesture(perform: tapOrb)
                 if let hint {
                     Text(hint)
@@ -55,6 +55,7 @@ struct CallView: View {
                 }
             }
             .offset(y: 14)
+            .ignoresSafeArea(.keyboard)
             VStack(spacing: 0) {
                 topBar
                 Spacer(minLength: 0)
@@ -300,9 +301,9 @@ struct LevelGauge: View {
 
 /// The orb: one soft disc that moves with the live voice. White ink while
 /// Jacob talks, the accent while Arbos speaks, a slow muted pulse while it
-/// thinks, still and faint when idle. Its size follows the level (0.78 …
-/// 1.0 of the frame) with a soft halo, the way the reference's orb
-/// swells; no ring, no word — the colour and the motion are the state.
+/// thinks, still and faint when idle. Its size follows the level (0.90 …
+/// 1.0 of the frame, the reference's 189 pt at rest) with a soft halo;
+/// no ring, no word — the colour and the motion are the state.
 struct VoiceOrb: View {
     let level: Float
     let phase: CallViewModel.Phase
@@ -338,9 +339,9 @@ struct VoiceOrb: View {
 
     private func discScale(pulse: Double) -> CGFloat {
         switch phase {
-        case .listening, .speaking: return 0.78 + 0.22 * CGFloat(min(1, max(0, shown)))
-        case .thinking, .connecting: return 0.80 + 0.06 * CGFloat(pulse)
-        case .idle, .unconfigured, .failed: return 0.80
+        case .listening, .speaking: return 0.90 + 0.10 * CGFloat(min(1, max(0, shown)))
+        case .thinking, .connecting: return 0.90 + 0.04 * CGFloat(pulse)
+        case .idle, .unconfigured, .failed: return 0.90
         }
     }
 
