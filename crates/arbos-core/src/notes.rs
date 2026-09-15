@@ -54,7 +54,19 @@ impl Item {
 pub struct Notes {
     /// The file's lines. Items are edited in place so prose survives.
     lines: Vec<String>,
+    /// Checked items that left the page because their section already
+    /// kept `DONE_KEPT`: `(section, item line)`, oldest first. The saver
+    /// moves them to `archived.md` (the protocol: move, never delete).
+    overflow: Vec<(String, String)>,
 }
+
+/// `<tldr>` is kept by the tool only once the page is big: this many
+/// `##` sections and this many items (Cursor's rule: several sub-projects
+/// and six or more items). Above it, at most `TLDR_CAP` bullets, the most
+/// recently touched workstream first.
+pub const TLDR_SECTIONS: usize = 2;
+pub const TLDR_ITEMS: usize = 6;
+pub const TLDR_CAP: usize = 4;
 
 /// Root's checklist is the project page, `.arbos/notes.md` (one per
 /// project, like Cursor's Agent Store `notes.md`; decided 2026-09-13).
@@ -88,7 +100,59 @@ pub fn load(place: &Place, agent: &str) -> Notes {
 }
 
 pub fn save(place: &Place, agent: &str, notes: &Notes) -> Result<()> {
-    save_path(&path(place, agent), notes)
+    save_path(&path(place, agent), notes)?;
+    // The project page's finished items are moved, never dropped: each
+    // one lands in `archived.md` under its section.
+    if agent == crate::ROOT_ID && !notes.overflow.is_empty() {
+        archive_overflow(&crate::store::archived_path(place), &notes.overflow)?;
+    }
+    Ok(())
+}
+
+/// Append `(section, line)` pairs to the archive, each under a `##` of its
+/// section (made at the end when new), newest last within the section.
+pub fn archive_overflow(archived: &Path, overflow: &[(String, String)]) -> Result<()> {
+    let mut lines: Vec<String> = std::fs::read_to_string(archived)
+        .unwrap_or_else(|_| crate::store::ARCHIVED_TEMPLATE.to_string())
+        .lines()
+        .map(str::to_string)
+        .collect();
+    for (section, line) in overflow {
+        let heading = if section.trim().is_empty() {
+            "## Archived".to_string()
+        } else {
+            format!("## {}", section.trim())
+        };
+        let at = match lines.iter().position(|l| l.trim() == heading) {
+            Some(h) => {
+                let mut end = h + 1;
+                while end < lines.len() && !lines[end].starts_with("## ") {
+                    end += 1;
+                }
+                while end > h + 1 && lines[end - 1].trim().is_empty() {
+                    end -= 1;
+                }
+                end
+            }
+            None => {
+                if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+                    lines.push(String::new());
+                }
+                lines.push(heading);
+                lines.len()
+            }
+        };
+        lines.insert(at, line.clone());
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    if let Some(dir) = archived.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = archived.with_extension(format!("md.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, archived).with_context(|| format!("replace {}", archived.display()))?;
+    Ok(())
 }
 
 /// `agents/<id>/todo.md`: the agent's own working checklist for the thread
@@ -203,7 +267,27 @@ impl Notes {
     pub fn parse(text: &str) -> Self {
         Self {
             lines: text.lines().map(str::to_string).collect(),
+            overflow: Vec::new(),
         }
+    }
+
+    /// Checked items that left the page since the last `take_overflow`,
+    /// oldest first, with the section each sat in.
+    pub fn take_overflow(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.overflow)
+    }
+
+    /// The `##`/`###` heading text above line `ix`, or empty.
+    fn section_at(&self, ix: usize) -> String {
+        (0..ix.min(self.lines.len()))
+            .rev()
+            .find_map(|i| {
+                let l = &self.lines[i];
+                l.strip_prefix("### ")
+                    .or_else(|| l.strip_prefix("## "))
+                    .map(|h| h.trim().to_string())
+            })
+            .unwrap_or_default()
     }
 
     pub fn render(&self) -> String {
@@ -483,7 +567,9 @@ impl Notes {
                 .collect();
             while done_ixs.len() > DONE_KEPT {
                 let drop = done_ixs.remove(0);
-                self.lines.remove(drop);
+                let section = self.section_at(drop);
+                let gone = self.lines.remove(drop);
+                self.overflow.push((section, gone));
                 done_ixs.iter_mut().for_each(|i| *i -= 1);
             }
         } else {
@@ -501,34 +587,97 @@ impl Notes {
             .context("item lost while moving")
     }
 
-    /// The `<tldr>` bullet that names the same `[label]` as `text` becomes
-    /// `text`: a tldr entry is a fresh readout, rewritten on every state
-    /// change, and points where the item points (the deliverable once it
-    /// exists). Nothing happens without a tldr or without a matching label.
+    /// The `<tldr>` after a touch of the item `text` (Cursor's rule): the
+    /// bullet with the same `[label]` is rewritten fresh and moved to the
+    /// top (the most recently touched workstream first), bullets whose
+    /// item is no longer on the page are dropped, at most `TLDR_CAP`
+    /// bullets stay. A page without a tldr gets one only once it is big
+    /// (`TLDR_SECTIONS` sections and `TLDR_ITEMS` items); a tldr the
+    /// coordinator wrote by hand on a small page is kept as it is.
     fn refresh_tldr(&mut self, text: &str) {
         let Some(label) = link_label(text).map(str::to_string) else {
             return;
         };
-        let mut in_tldr = false;
-        for line in self.lines.iter_mut() {
-            let t = line.trim();
-            if t == "<tldr>" {
-                in_tldr = true;
-                continue;
+        let (open, close) = match self.tldr_span() {
+            Some(span) => span,
+            None => {
+                if !self.page_is_big() {
+                    return;
+                }
+                let at = self.tldr_insert_at();
+                self.lines.insert(at, "<tldr>".to_string());
+                self.lines.insert(at + 1, "</tldr>".to_string());
+                self.lines.insert(at + 2, String::new());
+                (at, at + 1)
             }
-            if t == "</tldr>" {
-                break;
-            }
-            if !in_tldr {
-                continue;
-            }
-            if let Some(rest) = t.strip_prefix("- ")
-                && link_label(rest).is_some_and(|l| l.eq_ignore_ascii_case(&label))
-            {
-                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-                *line = format!("{indent}- {text}");
+        };
+        let labels_on_page: Vec<String> = self.items().iter().map(Item::label).collect();
+        let mut bullets: Vec<String> = self.lines[open + 1..close]
+            .iter()
+            .filter_map(|l| l.trim().strip_prefix("- ").map(str::to_string))
+            .filter(|b| {
+                let same = link_label(b).is_some_and(|l| l.eq_ignore_ascii_case(&label));
+                let alive = link_label(b)
+                    .is_none_or(|l| labels_on_page.iter().any(|p| p.eq_ignore_ascii_case(l)));
+                !same && alive
+            })
+            .collect();
+        bullets.insert(0, text.to_string());
+        bullets.truncate(TLDR_CAP);
+        let mut fresh: Vec<String> = bullets.into_iter().map(|b| format!("- {b}")).collect();
+        self.lines.splice(open + 1..close, fresh.drain(..));
+    }
+
+    /// `(open, close)` line indices of `<tldr>` … `</tldr>`.
+    fn tldr_span(&self) -> Option<(usize, usize)> {
+        let open = self.lines.iter().position(|l| l.trim() == "<tldr>")?;
+        let close = self.lines[open..]
+            .iter()
+            .position(|l| l.trim() == "</tldr>")
+            .map(|c| open + c)?;
+        Some((open, close))
+    }
+
+    /// Cursor's threshold for a tldr: several sub-projects, six or more items.
+    pub fn page_is_big(&self) -> bool {
+        let sections = self.lines.iter().filter(|l| l.starts_with("## ")).count();
+        sections >= TLDR_SECTIONS && self.items().len() >= TLDR_ITEMS
+    }
+
+    /// Where a new tldr goes: after the preamble (front matter, title,
+    /// the top link line), before the first heading or item.
+    fn tldr_insert_at(&self) -> usize {
+        let mut ix = 0;
+        // Skip front matter.
+        if self
+            .lines
+            .first()
+            .is_some_and(|l| l.trim() == "+++" || l.trim() == "---")
+        {
+            let fence = self.lines[0].trim().to_string();
+            if let Some(end) = self.lines[1..].iter().position(|l| l.trim() == fence) {
+                ix = end + 2;
             }
         }
+        while ix < self.lines.len() {
+            let t = self.lines[ix].trim();
+            if t.starts_with("## ")
+                || t.starts_with("### ")
+                || parse_item_line(&self.lines[ix]).is_some()
+            {
+                break;
+            }
+            ix += 1;
+        }
+        // Back over trailing blanks so the block sits under the prose.
+        while ix > 0
+            && self.lines[ix - 1].trim().is_empty()
+            && ix > 1
+            && self.lines[ix - 2].trim().is_empty()
+        {
+            ix -= 1;
+        }
+        ix
     }
 
     pub fn remove(&mut self, n: usize) -> Result<Item> {
@@ -784,6 +933,111 @@ mod tests {
         assert_eq!(done.last().unwrap().text, "t2");
         assert!(
             n.items().iter().any(|i| i.section == "Desktop"),
+            "{}",
+            n.render()
+        );
+    }
+
+    #[test]
+    fn a_fourth_checked_item_leaves_the_section_as_overflow_not_thin_air() {
+        let mut n = Notes::parse(
+            "## Work\n- [ ] [a](x) — 1\n- [ ] [b](x) — 2\n- [ ] [c](x) — 3\n- [ ] [d](x) — 4\n",
+        );
+        for _ in 0..4 {
+            n.check(1, true, Some("done")).unwrap();
+        }
+        let text = n.render();
+        assert!(
+            !text.contains("[a](x)"),
+            "the oldest checked item left: {text}"
+        );
+        assert!(text.contains("[b](x)") && text.contains("[d](x)"), "{text}");
+        let gone = n.take_overflow();
+        assert_eq!(
+            gone,
+            vec![("Work".to_string(), "- [x] [a](x) — done".to_string())]
+        );
+        assert!(n.take_overflow().is_empty(), "drained once");
+
+        let dir = std::env::temp_dir().join(format!("arbos-notes-archive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let archived = dir.join("archived.md");
+        archive_overflow(&archived, &gone).unwrap();
+        archive_overflow(
+            &archived,
+            &[
+                ("Work".to_string(), "- [x] [b](x) — done".to_string()),
+                ("Other".to_string(), "- [x] [z](x) — done".to_string()),
+            ],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&archived).unwrap();
+        assert!(text.starts_with("# Archived"), "template head kept: {text}");
+        let work = text.find("## Work").unwrap();
+        let other = text.find("## Other").unwrap();
+        assert!(work < other);
+        let a = text.find("[a](x)").unwrap();
+        let b = text.find("[b](x)").unwrap();
+        assert!(
+            work < a && a < b && b < other,
+            "newest last within its section: {text}"
+        );
+    }
+
+    #[test]
+    fn a_tldr_is_made_once_the_page_is_big_and_keeps_the_freshest_four() {
+        let small = "[project context](docs/project-context.md)\n\n## Work\n- [ ] [a](agents/a) — running\n- [ ] [b](agents/b) — running\n";
+        let mut n = Notes::parse(small);
+        n.check(1, true, Some("landed")).unwrap();
+        assert!(
+            !n.render().contains("<tldr>"),
+            "a small page gets no tldr: {}",
+            n.render()
+        );
+
+        let big = "+++\nowner = \"root\"\n+++\n# Notes\n\n[project context](docs/project-context.md)\n\n## Voice\n- [ ] [a](agents/a) — 1\n- [ ] [b](agents/b) — 2\n- [ ] [c](agents/c) — 3\n\n## Loops\n- [ ] [d](agents/d) — 4\n- [ ] [e](agents/e) — 5\n- [ ] [f](agents/f) — 6\n";
+        let mut n = Notes::parse(big);
+        assert!(n.page_is_big());
+        n.update(4, "[d](agents/d) — d moved").unwrap();
+        let text = n.render();
+        let tldr_at = text.find("<tldr>").unwrap();
+        assert!(
+            tldr_at > text.find("project-context").unwrap()
+                && tldr_at < text.find("## Voice").unwrap(),
+            "after the preamble, before the first section: {text}"
+        );
+        assert!(
+            text.contains("<tldr>\n- [d](agents/d) — d moved\n</tldr>"),
+            "{text}"
+        );
+        for (k, label) in [(1, "a"), (2, "b"), (3, "c"), (5, "e")] {
+            n.update(k, &format!("[{label}](agents/{label}) — {label} moved"))
+                .unwrap();
+        }
+        let text = n.render();
+        let open = text.find("<tldr>").unwrap();
+        let close = text.find("</tldr>").unwrap();
+        let block = &text[open..close];
+        let bullets: Vec<&str> = block.lines().filter(|l| l.starts_with("- ")).collect();
+        assert_eq!(bullets.len(), TLDR_CAP, "{block}");
+        assert!(bullets[0].starts_with("- [e]"), "freshest first: {block}");
+        assert!(!block.contains("[d]"), "the oldest touch fell off: {block}");
+        // Checking with a target rewrites the bullet and moves it up; a
+        // bullet whose item is gone from the page is dropped.
+        n.check_with_target(1, true, Some("landed"), Some("docs/a.md"))
+            .unwrap();
+        let text = n.render();
+        assert!(
+            text.contains("<tldr>\n- [a](docs/a.md) — landed\n"),
+            "{text}"
+        );
+        n.remove(n.items().iter().find(|i| i.label() == "e").unwrap().n)
+            .unwrap();
+        n.update(1, "[b](agents/b) — b again").unwrap();
+        assert!(
+            !n.render()[n.render().find("<tldr>").unwrap()..n.render().find("</tldr>").unwrap()]
+                .contains("[e]"),
             "{}",
             n.render()
         );

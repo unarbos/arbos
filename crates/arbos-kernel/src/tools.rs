@@ -641,8 +641,13 @@ impl Tool for PlanTool {
             }
         })
     }
-    fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
-        Ok(Plan::access(Access::none()))
+    fn plan(&self, cx: &PlanCx, _args: &Value) -> Result<Plan> {
+        // Four checks in one response are four edits of one file: they
+        // run in order, not at once (a race scrambled the sink order).
+        Ok(Plan::access(Access::write_path(&arbos_core::notes::path(
+            &self.0.place,
+            cx.agent.id.as_str(),
+        ))))
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         let hooks = Arc::clone(&self.0);
@@ -681,8 +686,10 @@ impl Tool for TodoTool {
             }
         })
     }
-    fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
-        Ok(Plan::access(Access::none()))
+    fn plan(&self, cx: &PlanCx, _args: &Value) -> Result<Plan> {
+        Ok(Plan::access(Access::write_path(
+            &arbos_core::notes::todo_path(&self.0.place, cx.agent.id.as_str()),
+        )))
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         let hooks = Arc::clone(&self.0);
