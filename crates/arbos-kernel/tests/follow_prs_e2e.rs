@@ -184,18 +184,22 @@ fn a_merged_pr_ends_its_subscriptions() {
     // Each is waited on, not read once.
     let transcript = k.place.join(".arbos/agents/root/transcript.jsonl");
     assert!(
-        wait_for(Duration::from_secs(20), || std::fs::read_to_string(&transcript)
-            .unwrap_or_default()
-            .contains("state: OPEN → MERGED")),
+        wait_for(Duration::from_secs(20), || std::fs::read_to_string(
+            &transcript
+        )
+        .unwrap_or_default()
+        .contains("state: OPEN → MERGED")),
         "the agent heard about the merge: {}",
         std::fs::read_to_string(&transcript).unwrap_or_default()
     );
     let log_path = k.place.join(".arbos/runtime/kernel.log");
     assert!(
-        wait_for(Duration::from_secs(20), || std::fs::read_to_string(&log_path)
-            .unwrap_or_default()
-            .matches("subscription_closed")
-            .count()
+        wait_for(Duration::from_secs(20), || std::fs::read_to_string(
+            &log_path
+        )
+        .unwrap_or_default()
+        .matches("subscription_closed")
+        .count()
             == 2),
         "both closes are logged: {}",
         std::fs::read_to_string(&log_path).unwrap_or_default()
