@@ -368,10 +368,15 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         hooks.take_notes(&id);
         hooks.turn_started(&id);
         hooks.broadcast(Frame::Turn {
-            agent: id,
+            agent: id.clone(),
             state: "running".into(),
             budget: None,
         });
+        // The sender's label for this turn is the live line until the
+        // agent says a step of its own.
+        if !wake.title.is_empty() {
+            let _ = hooks.set_status(&id, &wake.title, "title");
+        }
         // Read afresh each turn: a `configure` frame may have changed the
         // key (in the file, or in memory only).
         let host_now = Host::load().unwrap_or_else(|_| host.clone());

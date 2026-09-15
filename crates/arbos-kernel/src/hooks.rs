@@ -712,7 +712,7 @@ impl KernelHooks {
         if source == "derived" && self.status_said.lock().unwrap().contains(agent) {
             return Ok(());
         }
-        if source == "agent" {
+        if source == "agent" || source == "title" {
             self.status_said.lock().unwrap().insert(agent.to_string());
         }
         let s = arbos_core::status::write(&self.place, agent, step, source)?;
@@ -1019,6 +1019,27 @@ impl KernelHooks {
         isolate: Isolate,
         kind: Option<&str>,
     ) -> Result<(AgentId, Option<Worktree>)> {
+        self.spawn_based(
+            parent, name, brief, model, allowlist, readonly, cwd, isolate, kind, None,
+        )
+    }
+
+    /// `spawn_named` with the worktree's base: the branch, tag, or sha the
+    /// child's branch is cut from (Cursor's base branch). `None` is HEAD.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_based(
+        &self,
+        parent: &Agent,
+        name: Option<&str>,
+        brief: &str,
+        model: Option<&str>,
+        allowlist: Option<Vec<String>>,
+        readonly: bool,
+        cwd: Option<PathBuf>,
+        isolate: Isolate,
+        kind: Option<&str>,
+        base: Option<&str>,
+    ) -> Result<(AgentId, Option<Worktree>)> {
         // A definition fills in what the call left out; the call's own
         // model wins, the def's readonly cannot be switched off. Models fill
         // every optional field: `kind: "default"` (or none/null/auto) is not
@@ -1087,22 +1108,22 @@ impl KernelHooks {
         // Two children with the same name get distinct ids (`-2`, `-3`, …)
         // rather than the second one failing.
         let label = name.map(str::trim).filter(|n| !n.is_empty());
-        let base = match label {
+        let stem = match label {
             Some(label) => name_slug(label),
             None => slug(brief),
         };
-        let mut id = base.clone();
+        let mut id = stem.clone();
         let mut n = 1;
         while self.place.agent_dir(&id).exists() {
             n += 1;
-            id = format!("{}-{n}", base.chars().take(20).collect::<String>());
+            id = format!("{}-{n}", stem.chars().take(20).collect::<String>());
         }
         validate_id(&id)?;
         // The worktree comes first: if git refuses, no agent folder is
         // left behind for a child that never existed.
         let worktree = match (&cwd, isolate) {
             (Some(_), Isolate::Worktree) | (_, Isolate::None) => None,
-            (None, Isolate::Worktree) => Some(worktree::create(self.place.path(), &id)?),
+            (None, Isolate::Worktree) => Some(worktree::create_from(self.place.path(), &id, base)?),
         };
         // The parent's list as saved, not as narrowed for this turn: a
         // coordinator's children are the ones that edit.
@@ -1207,10 +1228,76 @@ impl KernelHooks {
         mode: SayMode,
         hops_in: u8,
     ) -> Result<String> {
+        self.say_titled(from, to, text, mode, hops_in, None, None)
+    }
+
+    /// `say` with Cursor's two extras: `title`, the short label of the turn
+    /// this message opens (the child's live line until it says a step of
+    /// its own), and `rename`, a new durable name for a worker of yours,
+    /// for when its assignment changed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn say_titled(
+        &self,
+        from: &AgentId,
+        to: &str,
+        text: &str,
+        mode: SayMode,
+        hops_in: u8,
+        title: Option<&str>,
+        rename: Option<&str>,
+    ) -> Result<String> {
         let text = text.trim();
         if text.is_empty() {
             bail!("say: text must not be empty");
         }
+        let title = title.map(str::trim).filter(|t| !t.is_empty());
+        let rename = rename.map(str::trim).filter(|t| !t.is_empty());
+        if (title.is_some() || rename.is_some()) && to.trim().eq_ignore_ascii_case("user") {
+            bail!("say: title and rename are for a worker of yours, not the user");
+        }
+        let renamed = match rename {
+            Some(new_name) => Some(self.rename_worker(from, to, new_name)?),
+            None => None,
+        };
+        let mut receipt = self.say_inner(from, to, text, mode, hops_in, title)?;
+        if let Some(line) = renamed {
+            receipt.push(' ');
+            receipt.push_str(&line);
+        }
+        Ok(receipt)
+    }
+
+    /// A new durable name for a worker of the sender's (any depth). The id
+    /// stays; the row, the roster, and the done messages use the new name.
+    fn rename_worker(&self, from: &AgentId, to: &str, new_name: &str) -> Result<String> {
+        let target = self.resolve(from, to)?;
+        let tid = target.id.as_str();
+        if !self.descendants(from.as_str()).iter().any(|a| a == tid) {
+            bail!(
+                "say rename: {} ({tid}) is not a worker of yours",
+                target.name
+            );
+        }
+        let new_name: String = new_name.chars().take(48).collect();
+        if new_name == target.name {
+            return Ok(String::new());
+        }
+        let mut agent = arbos_core::load_agent(&self.place, &target.id)?;
+        let old = std::mem::replace(&mut agent.name, new_name.clone());
+        agent.save(&self.place.agent_dir(tid))?;
+        self.broadcast_tree();
+        Ok(format!("Renamed {old:?} to {new_name:?}."))
+    }
+
+    fn say_inner(
+        &self,
+        from: &AgentId,
+        to: &str,
+        text: &str,
+        mode: SayMode,
+        hops_in: u8,
+        title: Option<&str>,
+    ) -> Result<String> {
         if to.trim().eq_ignore_ascii_case("user") {
             self.dedupe(from, "user", text)?;
             self.notify_user(from.as_str(), text)?;
@@ -1289,8 +1376,16 @@ impl KernelHooks {
             } else {
                 inbox::DEFAULT_HOPS
             };
+            msg.title = title.unwrap_or_default().to_string();
             inbox::deliver(&self.place, tid, &msg)?;
             self.plan_changed(tid);
+            // A running turn takes the new label now; an idle one takes it
+            // when the steer opens its turn.
+            if let Some(t) = title
+                && self.is_running(tid)
+            {
+                let _ = self.set_status(tid, t, "title");
+            }
             return Ok(if self.is_running(tid) {
                 format!(
                     "Sent to {label} as a steer: it is running now and reads this at its next tool boundary, in the same turn. Its reply, if any, arrives here as a message from it."
@@ -1340,6 +1435,7 @@ impl KernelHooks {
         // the peer's transcript from here: its own turn does that.
         let mut note = inbox::Message::new(format!("agent:{from}"), "message", text);
         note.wake = false;
+        note.title = title.unwrap_or_default().to_string();
         if !request {
             inbox::deliver(&self.place, tid, &note)?;
             self.broadcast(self.plan_frame(tid));
@@ -1374,6 +1470,7 @@ impl KernelHooks {
         let mut msg = inbox::Message::new(format!("agent:{from}"), "request", text.to_string());
         msg.wake = true;
         msg.hops = hops;
+        msg.title = title.unwrap_or_default().to_string();
         self.deliver(tid, &msg)?;
         Ok(match (mode, busy) {
             (SayMode::Steer, _) => format!(

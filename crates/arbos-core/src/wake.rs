@@ -24,6 +24,8 @@ pub struct Wake {
     /// A model for this turn only (the composer's "switch to <vision
     /// model> for this turn"). Empty: the agent's own.
     pub model: String,
+    /// The sender's label for this turn (`say title=`), or empty.
+    pub title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +65,7 @@ impl Wake {
             channel: String::new(),
             device: String::new(),
             model: String::new(),
+            title: String::new(),
         }
     }
 
