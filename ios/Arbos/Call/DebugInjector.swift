@@ -42,7 +42,9 @@ final class DebugInjector {
             print("metric inject_missing \(path)")
             return nil
         }
-        return pcmPayload(of: wav)
+        let payload = pcmPayload(of: wav)
+        if payload == nil { print("metric inject_unreadable \(path) bytes=\(wav.count)") }
+        return payload
     }
 
     func start() {

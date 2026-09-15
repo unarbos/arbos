@@ -108,3 +108,88 @@ arbos-kernel worker --dir ~/arbos-hub/projects --machine mac --cap xcode --cap i
 ```
 
 Other kernels now see the machine in `.arbos/machines/` and can `spawn host=mac`, `say to=mac/<project>/<agent>`, or `arbos-kernel attach --hub mac/<project>`.
+## Part 3. Federated stores: context crosses machines by address (2026-09-15)
+
+Jacob's decision: **every node keeps its own `.arbos/` on its own machine.** No central store, no copying the parent's store around. When nodes discover each other they learn *where* each other's stores are, and read and write across the link.
+
+Closes gap 1 of `internal/projects-post-gaps-2026-09-15.md` (a remote worker sees the code but never the Project's memory) with federation instead of sync, mount, or relay.
+
+Terms:
+
+- **Node**: one kernel serving one place on one machine. It owns that place's `.arbos/` (its **store**).
+- **Address**: a name for a file or folder in some node's store that any node on the same hub can resolve.
+- **Fast path**: the local store, read and written as plain files, as today. The address form is only for a store on another machine.
+
+### 1. The store address
+
+```
+arbos://<machine>/<project>/<path>
+```
+
+- `<machine>`: the hub roster name (`MachineInfo.name`; `cloud`, `arboslife`, `mac`).
+- `<project>`: the name the kernel registered under (`ProjectInfo.name`; the place's folder name or `--project`; a worktree kernel is `<project>--<claim>`).
+- `<path>`: relative to that place's `.arbos/`: `notes.md`, `docs/project-context.md`, `internal/x.md`, `media/mesh/1.txt`, `agents/root/plan.md`. Empty path = the store root (a listing).
+
+The same two names already identify a node in `say to=<machine>/<project>/<agent>` (`MeshTarget`) and in `hello` (#233 puts the project's face on `hello`; `hello.store` now carries the node's own address). No second naming scheme: `arbos://cloud/demo/docs/x.md` is the URL form of the `machine/project` tuple plus a store path. Names are Jacob's; renaming a machine renames its addresses, on purpose.
+
+Why the store only: the checkout is *work*, and each machine has its own (Cursor's rule too). Context is the store. An address never points into a checkout.
+
+### 2. Discovery carries store locations and rights
+
+The roster already lists machines and projects. Each `ProjectInfo` gains:
+
+- `store`: the project's address root, `arbos://<machine>/<project>/`, filled by the hub.
+- `share`: the project's sharing mode from its `project.toml` `[share] mode` (`private`, `mesh` = default, `open`), sent by the registering kernel or worker like the face is.
+- `access`: what the *recipient* of this roster may do there: `owner`, `writer`, `reader`, or `none`. The hub computes it per recipient when it pushes the roster (rosters were already sent per registrant), and per requester on `GET /list`.
+
+On disk, `.arbos/machines/<name>.toml` therefore shows every peer store and the node's rights on it, and `machines.md` renders `- arboslife — arbos://arboslife/demo/ (owner)`. `ls .arbos/machines/` answers "what stores exist on my peers and which may I touch".
+
+### 3. Read and write across the link
+
+- `read`, `ls`, `tail` (and `grep --scope`, later) accept an address. `write` and `edit` accept one too.
+- Resolution order in the engine's path resolver: a plain path is the local store or checkout as today (fast path, unchanged). An `arbos://` address whose machine is *this* node's name resolves to the local file (fast path again). Any other address goes through a new `Hooks::store_read / store_list / store_write` the kernel implements: attach through the hub to `<machine>/<project>` (an existing `/attach` route) and send `read`/`tail`/`list` (#78/#88) or the new `put` frame.
+- **Failure is loud.** A peer that is unreachable, or a hub that is down, returns a tool error: `arbos://arboslife/demo/notes.md: arboslife is not reachable through the hub (connect timed out after 10 s); nothing was read`. There is no cache to fall back to in this design, so an agent can never get stale or empty context and think it is current. (An offline read-through cache marked `stale` is a later, opt-in slice.)
+- **Write** is `put {path, text, base_hash?}` → `written {path, size, hash}`: compare-and-swap on the sha-256 of the current content (`base_hash = ""` means "must not exist yet"); a mismatch returns `conflict {current_hash}` and the writer re-reads and retries. One writer per file at a time, no lost updates, and the receiving kernel does the write with its own atomic rules (`.tmp` + rename), so a remote `put` is indistinguishable from a local `write` to everyone else on that machine.
+- The receiving kernel applies the **same rules as a local write**: `notes.md`, `docs/project-context.md`, `archived.md` are root-owned → a peer's `put` is refused with the same words (propose with `say to=<machine>/<project>/root`); `PROTECTED` files (`project.toml`, `access.toml`, skills, hooks) are never served or written; `agents/<id>/` is read-only from outside.
+
+### 4. Permission
+
+Two layers, as in the file-system design:
+
+1. **Who you are**: the hub token (later the Cloudflare Access email). Every `hub-server.toml` row gains `user` (default `owner`, the hub's operator). A machine token is `user = owner` unless the row says otherwise; a person's client token names them (`user = "alice"`, `role = "writer"`).
+2. **What you may do** on a project = `min(token role, project share mode)`: `private` → owner-user identities keep their role, everyone else `none`; `mesh` (default) → your token's role; `open` → at least `reader` for anyone the hub admits. Then the per-file rules above.
+
+Today all of Jacob's machines hold `user = owner` tokens, so they read and write each other's `docs/`, `internal/`, `media/` freely, and none may rewrite another node's `notes.md` (that stays the local root's). When Alice connects with her own client token, a `mesh` project gives her `writer` on `docs/…`; a `private` one gives her nothing; and every file she writes lands with her name in the receiving kernel's log.
+
+### 5. What a spawn brief becomes
+
+A kickoff brief already carries paths, not content (`Read first: .arbos/docs/project-context.md, then .arbos/notes.md`, `Output: … under .arbos/docs/`). For a remote child those paths are rewritten to the parent's addresses before the brief leaves:
+
+```
+Read first: arbos://cloud/demo/docs/project-context.md, then arbos://cloud/demo/notes.md
+Output: deliverables under arbos://cloud/demo/docs/, notes under arbos://cloud/demo/internal/, captures under arbos://cloud/demo/media/<topic>/
+```
+
+and the first prompt tells the child: your parent's store is `arbos://cloud/demo/`; your own is `arbos://arboslife/demo--c1/`. A child then reads the Project's memory by address and cannot mistake its fresh worktree store for the Project. Rule: every store-relative token in a brief (`.arbos/…`, `docs/…`, `internal/…`, `media/…`, `notes.md`, `archived.md`) is prefixed with the parent's store address; anything else (code paths) stays as it is, because code is on the child's machine.
+
+### 6. Where a remote child's outputs live
+
+- **Deliverables** (`docs/`, `internal/`, `media/`): written by address into the **parent's** store, because that is the Project the user opens, and a worktree kernel's store is short-lived (archived, then removed). The `Output:` line says so (above). The done report names the addresses it wrote; the parent reads them as local files.
+- **The child's own record** (its `agents/root/` folder: transcript, plan, jobs, images) stays on its machine. The parent's local stand-in already mirrors the transcript (#237, #239, #243); anything else the parent wants it reads by address: `arbos://arboslife/demo--c1/agents/root/plan.md`. The done report includes the child's store root so the parent can.
+- Large media (a recording) over the link: `put` is one message today; a chunked `put` (`from`, `append`) is the follow-up when the first recording hits the cap.
+
+### Slices
+
+| # | Slice | Touches | Status |
+| --- | --- | --- | --- |
+| 1 | **Addressing and discovery**: `StoreAddress` parse/format; `ProjectInfo.{store,share,access}`; `[share] mode` in `project.toml`; hub computes `access` per recipient; `hello.store`; `.arbos/machines/` and `machines.md` show addresses and rights | `arbos-core::hub`, `project`, `wire`; `arbos-hub`; `hub_link`, `worker`, `serve` (one line) | PR on `main` (this slice) |
+| 2 | **Read by address**: `read`/`ls`/`tail` on `arbos://`; `Hooks::store_read/list`; kernel client with 10 s timeout and loud failure; `arbos-kernel store read <address>` for people | `arbos-engine::tools::fs`, `tool.rs`; kernel `hub_link`, `tools.rs` | next |
+| 3 | **Write by address**: `put`/`written`/`conflict` frames; receiving rules; `write`/`edit` on addresses | `wire`, kernel `files.rs`, engine | after 2 |
+| 4 | **Briefs by address**: rewrite store paths in remote kickoffs; store sentence in `first_prompt`; done report names addresses | `remote.rs` (coordinate with the features agent: #243 mid-rebase, #237/#239 today), `tools.rs` | after 3; after #243 lands |
+| 5 | Later: opt-in stale cache for offline reads; chunked media `put`; Cloudflare Access identities replacing tokens | | not planned yet |
+
+### Needs Jacob
+
+1. **May a remote owner write another node's `notes.md`?** Design says no: root-owned files are the local root's, and a peer proposes with `say`. If Jacob wants his desktop's root to edit a remote project's page directly, `owner` must bypass root-ownership for peers.
+2. **Default share mode** for existing projects: `mesh` (any admitted identity gets its token's role) is proposed. `private` is the safer default if other people will be on the hub before per-project settings are in use.
+3. **Deliverables land in the parent's store** (6) — confirm this is the wanted default over "child writes locally, parent reads by address".

@@ -214,6 +214,7 @@ fn migrate_plan(hooks: &crate::hooks::KernelHooks, agent: &str, path: &Path) -> 
                 path: None,
                 repo: None,
                 pr: None,
+                author: None,
 
                 branch: None,
 
@@ -378,6 +379,7 @@ fn migrate_github(place: &Place, path: &Path) -> Option<String> {
             path: None,
             repo: Some(old.repo.clone()),
             pr: Some(old.pr),
+            author: None,
 
             branch: None,
 

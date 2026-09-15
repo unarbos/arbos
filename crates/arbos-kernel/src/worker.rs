@@ -137,6 +137,17 @@ async fn session(cfg: &HubConfig, dir: &Path, args: &Args) -> Result<()> {
         .iter()
         .filter_map(|p| arbos_core::project::identity_at(&dir.join(p)).map(|i| (p.clone(), i)))
         .collect();
+    // And each checkout's sharing mode, so the hub can say who may reach
+    // its store by address once a kernel serves it.
+    let shares: std::collections::BTreeMap<_, _> = projects
+        .iter()
+        .map(|p| {
+            (
+                p.clone(),
+                arbos_core::project::share_mode_at(&dir.join(p)).to_string(),
+            )
+        })
+        .collect();
     let id = hub_link::register(
         &mut ws,
         cfg,
@@ -147,6 +158,7 @@ async fn session(cfg: &HubConfig, dir: &Path, args: &Args) -> Result<()> {
         &args.labels,
         args.capabilities.clone(),
         identities,
+        shares,
     )
     .await?;
     println!(

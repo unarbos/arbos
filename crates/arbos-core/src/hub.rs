@@ -72,6 +72,10 @@ pub enum HubFrame {
         /// checkouts), by project name, from each `project.toml`.
         #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         identities: std::collections::BTreeMap<String, crate::project::ProjectIdentity>,
+        /// Each named project's sharing mode (`[share] mode` in its
+        /// `project.toml`), by project name; absent = `mesh`.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        shares: std::collections::BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         labels: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -149,6 +153,20 @@ pub struct ProjectInfo {
     /// A kernel serves it now.
     #[serde(default)]
     pub live: bool,
+    /// Where this project's store is, as every node addresses it:
+    /// `arbos://<machine>/<project>/`. Filled by the hub. See
+    /// [`StoreAddress`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub store: String,
+    /// The project's sharing mode from its `project.toml` (`[share] mode`):
+    /// `private`, `mesh` (the default), or `open`. See [`store_access`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub share: String,
+    /// What the recipient of this roster may do in that store: `owner`,
+    /// `writer`, `reader`, or `none`. The hub computes it for each
+    /// recipient from its token and the project's `share`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub access: String,
     /// The project's face from its `project.toml` (name, glyph, colour),
     /// as the registering kernel or worker read it; absent when the
     /// folder has no file. A phone draws its list from this.
@@ -190,6 +208,18 @@ pub struct MachineInfo {
 }
 
 impl MachineInfo {
+    /// The stores on this machine the roster's recipient may read:
+    /// `(address, access)` pairs, live kernels first.
+    pub fn readable_stores(&self) -> Vec<(String, String)> {
+        self.projects
+            .iter()
+            .filter(|p| {
+                !p.store.is_empty() && matches!(p.access.as_str(), "owner" | "writer" | "reader")
+            })
+            .map(|p| (p.store.clone(), p.access.clone()))
+            .collect()
+    }
+
     /// One roster line for the prompt and `machines.md`.
     pub fn describe(&self) -> String {
         let mut s = self.name.clone();
@@ -352,6 +382,165 @@ pub fn default_machine_name() -> String {
     }
 }
 
+// ── store addresses ─────────────────────────────────────────────────────
+
+/// The scheme of a store address.
+pub const STORE_SCHEME: &str = "arbos://";
+
+/// A file or folder in some node's store, named so any node on the same
+/// hub can resolve it: `arbos://<machine>/<project>/<path>`.
+///
+/// `machine` is the hub roster name, `project` the name the kernel
+/// registered under (the two names `say to=<machine>/<project>/<agent>`
+/// and `hello` already use), and `path` is relative to that place's
+/// `.arbos/` (`notes.md`, `docs/project-context.md`, `agents/root/plan.md`;
+/// empty for the store root). An address never points into a checkout:
+/// the checkout is work and each machine has its own; the store is the
+/// context that crosses machines.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StoreAddress {
+    pub machine: String,
+    pub project: String,
+    pub path: String,
+}
+
+impl StoreAddress {
+    /// The root of `project`'s store on `machine`.
+    pub fn root(machine: &str, project: &str) -> Self {
+        Self {
+            machine: machine.to_string(),
+            project: project.to_string(),
+            path: String::new(),
+        }
+    }
+
+    /// Does `s` look like a store address (whatever its validity)?
+    pub fn looks_like(s: &str) -> bool {
+        s.trim_start().starts_with(STORE_SCHEME)
+    }
+
+    /// Parse `arbos://<machine>/<project>[/<path>]`. `..` in the path,
+    /// an empty machine or project, and a path into `../` are refused;
+    /// the receiving kernel confines again, this is the first gate.
+    pub fn parse(s: &str) -> Result<Self> {
+        let s = s.trim();
+        let rest = s
+            .strip_prefix(STORE_SCHEME)
+            .with_context(|| format!("{s:?}: a store address starts with {STORE_SCHEME}"))?;
+        let mut parts = rest.splitn(3, '/');
+        let machine = parts.next().unwrap_or("").trim();
+        let project = parts.next().unwrap_or("").trim();
+        let path = parts.next().unwrap_or("").trim().trim_start_matches('/');
+        if machine.is_empty() || project.is_empty() {
+            bail!("{s:?}: a store address is {STORE_SCHEME}<machine>/<project>/<path>");
+        }
+        let bad = |c: char| c == '/' || c == ' ' || c == ':' || c == '@';
+        if machine.contains(bad) || project.contains(bad) {
+            bail!("{s:?}: machine and project names hold no space, slash, colon, or @");
+        }
+        if path.split('/').any(|seg| seg == "..") {
+            bail!("{s:?}: a store path does not climb out with ..");
+        }
+        let path = path.strip_prefix(".arbos/").unwrap_or(path);
+        Ok(Self {
+            machine: machine.to_string(),
+            project: project.to_string(),
+            path: path.trim_end_matches('/').to_string(),
+        })
+    }
+
+    /// The address of `rel` under this address.
+    pub fn join(&self, rel: &str) -> Self {
+        let rel = rel.trim().trim_start_matches("./").trim_matches('/');
+        let path = if self.path.is_empty() {
+            rel.to_string()
+        } else if rel.is_empty() {
+            self.path.clone()
+        } else {
+            format!("{}/{rel}", self.path)
+        };
+        Self {
+            machine: self.machine.clone(),
+            project: self.project.clone(),
+            path,
+        }
+    }
+
+    /// Is this address on the node named `machine` serving `project`?
+    /// Then it is a local file, and the fast path applies.
+    pub fn is_node(&self, machine: &str, project: &str) -> bool {
+        self.machine.eq_ignore_ascii_case(machine) && self.project == project
+    }
+
+    /// The local file for an address on this very node: `<arbos>/<path>`.
+    pub fn local_path(&self, place: &Place) -> PathBuf {
+        if self.path.is_empty() {
+            place.arbos()
+        } else {
+            place.arbos().join(&self.path)
+        }
+    }
+}
+
+impl std::fmt::Display for StoreAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{STORE_SCHEME}{}/{}/{}",
+            self.machine, self.project, self.path
+        )
+    }
+}
+
+/// Sharing modes a project may set in `project.toml` `[share] mode`.
+pub const SHARE_PRIVATE: &str = "private";
+pub const SHARE_MESH: &str = "mesh";
+pub const SHARE_OPEN: &str = "open";
+
+/// What a viewer may do in a project's store: `min(token role, share
+/// mode)`.
+///
+/// - `private`: identities of the project's owner user keep their role;
+///   everyone else gets `none`.
+/// - `mesh` (the default, and any unknown word): the viewer's token role.
+/// - `open`: the token role, but never below `reader` for anyone the hub
+///   admitted.
+///
+/// `viewer_user` and `owner_user` are the `user` of the hub tokens (the
+/// viewer's, and the one the project's machine registered with). Roles
+/// are `owner`, `writer`, `reader`. Per-file rules (root-owned pages,
+/// protected files) apply on top, at the receiving kernel.
+pub fn store_access(
+    share: &str,
+    viewer_user: &str,
+    viewer_role: &str,
+    owner_user: &str,
+) -> &'static str {
+    let role = match viewer_role {
+        "owner" => "owner",
+        "writer" => "writer",
+        "reader" => "reader",
+        _ => "none",
+    };
+    match share {
+        SHARE_PRIVATE => {
+            if viewer_user == owner_user {
+                role
+            } else {
+                "none"
+            }
+        }
+        SHARE_OPEN => {
+            if role == "none" {
+                "reader"
+            } else {
+                role
+            }
+        }
+        _ => role,
+    }
+}
+
 /// A `to=` target of the form `<machine>/<agent>` or
 /// `<machine>/<project>/<agent>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,8 +622,11 @@ pub fn write_roster(place: &Place, hub_url: &str, machines: &[MachineInfo]) -> R
         md.push_str("- ");
         md.push_str(&m.describe());
         md.push('\n');
+        for (store, access) in m.readable_stores() {
+            md.push_str(&format!("  - store {store} ({access})\n"));
+        }
     }
-    md.push_str("\n`spawn host=<name>` runs a child on a machine with a worker, in a worktree of its checkout of this project. `say to=<name>/<agent>` (or `<name>/<project>/<agent>`) messages an agent there.\n");
+    md.push_str("\n`spawn host=<name>` runs a child on a machine with a worker, in a worktree of its checkout of this project. `say to=<name>/<agent>` (or `<name>/<project>/<agent>`) messages an agent there. A store address `arbos://<machine>/<project>/<path>` names a file in that node's .arbos/ (notes.md, docs/…, internal/…, media/…, agents/<id>/…); `read`/`ls` take one. Your own store is the plain path.\n");
     let md_path = place.arbos().join("machines.md");
     let tmp = place.arbos().join(".machines.md.tmp");
     std::fs::write(&tmp, md)?;
@@ -472,13 +664,21 @@ pub fn roster_line(place: &Place) -> Option<String> {
     if machines.is_empty() {
         return None;
     }
+    let stores = machines.iter().flat_map(|m| m.readable_stores()).count();
     Some(format!(
-        "Hub machines (spawn host=<name>, say to=<name>/<agent>; details in .arbos/machines/): {}",
+        "Hub machines (spawn host=<name>, say to=<name>/<agent>; details in .arbos/machines/): {}{}",
         machines
             .iter()
             .map(|m| m.name.as_str())
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", "),
+        if stores > 0 {
+            format!(
+                ". Their stores read by address (arbos://<machine>/<project>/<path>, listed in .arbos/machines.md): {stores}"
+            )
+        } else {
+            String::new()
+        }
     ))
 }
 
@@ -506,6 +706,82 @@ mod tests {
         );
         assert_eq!(MeshTarget::parse("root"), None);
         assert_eq!(MeshTarget::parse("a//b"), None);
+    }
+
+    #[test]
+    fn a_store_address_names_machine_project_and_a_path_in_the_store() {
+        let a = StoreAddress::parse("arbos://cloud/demo/docs/project-context.md").unwrap();
+        assert_eq!(
+            a,
+            StoreAddress {
+                machine: "cloud".into(),
+                project: "demo".into(),
+                path: "docs/project-context.md".into()
+            }
+        );
+        assert_eq!(a.to_string(), "arbos://cloud/demo/docs/project-context.md");
+        // The root, with and without the trailing slash; `.arbos/` folded.
+        let root = StoreAddress::parse("arbos://arboslife/demo--c1").unwrap();
+        assert_eq!(root, StoreAddress::root("arboslife", "demo--c1"));
+        assert_eq!(root.to_string(), "arbos://arboslife/demo--c1/");
+        assert_eq!(
+            StoreAddress::parse("arbos://arboslife/demo/").unwrap().path,
+            ""
+        );
+        assert_eq!(
+            StoreAddress::parse("arbos://cloud/demo/.arbos/notes.md")
+                .unwrap()
+                .path,
+            "notes.md"
+        );
+        assert_eq!(
+            root.join("agents/root/plan.md").to_string(),
+            "arbos://arboslife/demo--c1/agents/root/plan.md"
+        );
+        assert_eq!(a.join("").path, "docs/project-context.md");
+        // The same node's address is the local file.
+        assert!(a.is_node("Cloud", "demo"));
+        assert!(!a.is_node("cloud", "other"));
+        let place = Place::new(std::path::PathBuf::from("/p/demo"));
+        assert_eq!(
+            a.local_path(&place),
+            std::path::PathBuf::from("/p/demo/.arbos/docs/project-context.md")
+        );
+        assert_eq!(
+            root.local_path(&place),
+            std::path::PathBuf::from("/p/demo/.arbos")
+        );
+        // Refusals.
+        for bad in [
+            "docs/x.md",
+            "arbos://cloud",
+            "arbos:///demo/x",
+            "arbos://cloud/demo/../secret",
+            "arbos://a b/demo/x",
+        ] {
+            assert!(StoreAddress::parse(bad).is_err(), "{bad}");
+        }
+        assert!(StoreAddress::looks_like("  arbos://x/y/z"));
+        assert!(!StoreAddress::looks_like("/tmp/arbos://x"));
+    }
+
+    #[test]
+    fn store_access_is_the_token_role_capped_by_the_share_mode() {
+        // mesh (default, and any unknown word): the token's role.
+        assert_eq!(store_access("mesh", "alice", "writer", "owner"), "writer");
+        assert_eq!(store_access("", "owner", "owner", "owner"), "owner");
+        assert_eq!(store_access("weird", "bob", "reader", "owner"), "reader");
+        assert_eq!(store_access("mesh", "bob", "bogus", "owner"), "none");
+        // private: only the owner user's identities, at their role.
+        assert_eq!(store_access("private", "owner", "owner", "owner"), "owner");
+        assert_eq!(
+            store_access("private", "owner", "reader", "owner"),
+            "reader"
+        );
+        assert_eq!(store_access("private", "alice", "owner", "owner"), "none");
+        // open: never below reader for anyone admitted.
+        assert_eq!(store_access("open", "alice", "bogus", "owner"), "reader");
+        assert_eq!(store_access("open", "alice", "writer", "owner"), "writer");
     }
 
     #[test]
@@ -537,6 +813,9 @@ mod tests {
                 name: "demo".into(),
                 place: "/x/demo".into(),
                 live: false,
+                store: "arbos://arboslife/demo/".into(),
+                share: "mesh".into(),
+                access: "owner".into(),
                 kind: String::new(),
                 parent: None,
             }],
@@ -544,6 +823,35 @@ mod tests {
         };
         write_roster(&place, "wss://hub", &[m.clone()]).unwrap();
         assert_eq!(read_roster(&place), vec![m.clone()]);
+        // The store's address and the reader's rights are on disk and in
+        // the rendered page, so `ls .arbos/machines/` answers "what stores
+        // exist on my peers and which may I touch".
+        let file = std::fs::read_to_string(machines_dir(&place).join("arboslife.toml")).unwrap();
+        assert!(
+            file.contains("store = \"arbos://arboslife/demo/\""),
+            "{file}"
+        );
+        assert!(file.contains("access = \"owner\""), "{file}");
+        let md = std::fs::read_to_string(place.arbos().join("machines.md")).unwrap();
+        assert!(
+            md.contains("- store arbos://arboslife/demo/ (owner)"),
+            "{md}"
+        );
+        assert_eq!(
+            m.readable_stores(),
+            vec![("arbos://arboslife/demo/".to_string(), "owner".to_string())]
+        );
+        let mut none = m.clone();
+        none.projects[0].access = "none".into();
+        assert!(none.readable_stores().is_empty());
+        // An old roster without the fields still reads.
+        let old: ProjectInfo = serde_json::from_str(r#"{"name":"demo","live":true}"#).unwrap();
+        assert!(old.store.is_empty() && old.access.is_empty());
+        assert!(
+            roster_line(&place)
+                .unwrap()
+                .contains("arbos://<machine>/<project>/<path>")
+        );
         // The face rides in the roster as the phone reads it.
         let json = serde_json::to_value(&m.projects[0]).unwrap();
         assert_eq!(json["identity"]["icon"], "terminal");

@@ -115,7 +115,7 @@ async fn handle(
     match (parts.as_slice(), req.wants_websocket()) {
         (["list"], false) => {
             let body = serde_json::to_string_pretty(&serde_json::json!({
-                "machines": hub.roster(),
+                "machines": hub.roster_for(Some((who.user(), who.role()))),
             }))?;
             http::respond(&mut stream, 200, "application/json", &body).await
         }

@@ -67,7 +67,7 @@ impl Tool for Bash {
                 ),
                 (
                     "background",
-                    "Return at once; keep running as a job.",
+                    "Return at once; keep running as a job. For a server or watcher only (something that never ends by itself); a loop, script, build, or test run is not, and runs attached whatever this says.",
                     false,
                     "boolean",
                 ),
@@ -160,10 +160,20 @@ impl Tool for Bash {
                     cx.cwd.display()
                 );
             }
-            let background = opt_bool(&args, "background").unwrap_or(false);
+            // `background:true` is for a server. A loop, a script, a build
+            // marked background came back after its first line ("step 1")
+            // and the user saw one line of six (F-37, F-43): for anything
+            // that is not a server the call stays attached to the floor.
+            let asked_background = opt_bool(&args, "background").unwrap_or(false);
+            let background = asked_background && looks_like_server(cmd);
+            let background_ignored = asked_background && !background;
             let timeout_ms = opt_u64(&args, "timeout_ms");
             let wait = if background {
                 BACKGROUND_GRACE
+            } else if background_ignored {
+                // Attached, but not for the whole default: a long build
+                // the model wanted out of the way becomes a job at the floor.
+                ATTACHED_WAIT_FLOOR
             } else {
                 Duration::from_millis(opt_u64(&args, "wait_ms").unwrap_or(cx.bash_wait_ms))
                     .max(ATTACHED_WAIT_FLOOR)
@@ -233,6 +243,11 @@ impl Tool for Bash {
             // Finished (or finished in the same instant the wait expired).
             let (text, skipped) = root.read_new(&job);
             let mut body = format_tail(&text, "(no output)", &journal, skipped);
+            if background_ignored {
+                body.push_str(
+                    "\n[background:true is for a server; this command is not one, so it ran attached to its end and the output above is all of it]",
+                );
+            }
             match job.status {
                 Status::Exited(0) => {
                     if let Some(file) = viewed_file(cmd) {
@@ -768,6 +783,57 @@ const WRITE_MARKERS: &[&str] = &[
     ">", "$(", "`", "tee ", "xargs", "sudo ", "sed -i", "-exec", "-delete",
 ];
 
+/// Whether `cmd` is the kind of command `background:true` exists for: a
+/// server or watcher that would never end on its own. A loop, a script,
+/// a test or build run is not — the model marks those background too,
+/// and the user then sees one line of the output (F-37).
+pub fn looks_like_server(cmd: &str) -> bool {
+    let lower = cmd.to_ascii_lowercase();
+    let trimmed = lower.trim_end_matches([' ', ';']);
+    if trimmed.ends_with('&') || lower.contains("while true") || lower.contains("while :") {
+        return true;
+    }
+    // A bare `sleep N`: a wait with nothing to show, not a loop of output.
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    if words.len() == 2 && words[0] == "sleep" {
+        return true;
+    }
+    let markers = [
+        "serve",
+        "server",
+        "--port",
+        "-p ",
+        "--host",
+        "listen",
+        "watch",
+        "tail -f",
+        "tail -F",
+        "npm start",
+        "npm run dev",
+        "pnpm dev",
+        "yarn dev",
+        "yarn start",
+        "vite",
+        "uvicorn",
+        "gunicorn",
+        "flask run",
+        "manage.py runserver",
+        "rails s",
+        "cargo run",
+        "node ",
+        "docker run",
+        "docker compose up",
+        "docker-compose up",
+        "nohup",
+        "daemon",
+        "ngrok",
+        "cloudflared",
+        "ssh -n",
+        "sleep infinity",
+    ];
+    markers.iter().any(|m| lower.contains(m))
+}
+
 /// The build and test runners a coordinator hands to a worker: what the
 /// command is, in words for the refusal, when its first program (after
 /// `cd x &&`, env assignments, `time`, `nice`) is one of them.
@@ -853,4 +919,38 @@ fn segment_is_readonly(seg: &str) -> bool {
             .any(|g| sub == *g || sub.starts_with(&format!("{g} ")));
     }
     READONLY_CMDS.contains(&first)
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::looks_like_server;
+
+    /// F-37 / F-43: a six-step loop marked `background:true` came back
+    /// after "step 1". Only a server or watcher is a background command.
+    #[test]
+    fn only_a_server_or_watcher_is_background() {
+        for cmd in [
+            "for i in 1 2 3 4 5 6; do echo \"step $i\"; sleep 2; done",
+            "python3 script.py",
+            "cargo test",
+            "make build",
+            "ls -la && git log --oneline | head",
+            "sleep 12; echo done",
+        ] {
+            assert!(!looks_like_server(cmd), "{cmd}");
+        }
+        for cmd in [
+            "python3 -m http.server 8000",
+            "npm run dev",
+            "uvicorn app:app --port 8080",
+            "cargo run --bin arbos-kernel serve .",
+            "tail -f /var/log/syslog",
+            "while true; do date; sleep 5; done",
+            "node index.js &",
+            "docker compose up",
+            "sleep 600",
+        ] {
+            assert!(looks_like_server(cmd), "{cmd}");
+        }
+    }
 }

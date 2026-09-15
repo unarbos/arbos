@@ -31,6 +31,10 @@ struct MachineRow {
     token: Option<String>,
     #[serde(default)]
     token_env: Option<String>,
+    /// Whose machine this is. Projects registered from it belong to this
+    /// user for `[share] mode = "private"`. Default: the hub's operator.
+    #[serde(default = "owner_user")]
+    user: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -42,10 +46,20 @@ struct ClientRow {
     token_env: Option<String>,
     #[serde(default = "owner")]
     role: String,
+    /// The person behind the token; `owner` is the hub's operator.
+    #[serde(default = "owner_user")]
+    user: String,
 }
 
 fn owner() -> String {
     "owner".into()
+}
+
+/// The hub operator's user name: what every row means when it names none.
+pub const OWNER_USER: &str = "owner";
+
+fn owner_user() -> String {
+    OWNER_USER.into()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -62,16 +76,36 @@ struct File {
 /// Who a token turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Identity {
-    Machine(String),
-    Client { name: String, role: String },
+    /// A machine's own token: registers as `name`, attaches as owner.
+    Machine { name: String, user: String },
+    Client {
+        name: String,
+        role: String,
+        user: String,
+    },
 }
 
 impl Identity {
     /// The `who` and `role` the kernel is told when this identity attaches.
     pub fn as_client(&self) -> (String, String) {
         match self {
-            Identity::Machine(name) => (format!("machine:{name}"), "owner".into()),
-            Identity::Client { name, role } => (name.clone(), role.clone()),
+            Identity::Machine { name, .. } => (format!("machine:{name}"), "owner".into()),
+            Identity::Client { name, role, .. } => (name.clone(), role.clone()),
+        }
+    }
+
+    /// The person behind the token, for `[share] mode = "private"`.
+    pub fn user(&self) -> &str {
+        match self {
+            Identity::Machine { user, .. } | Identity::Client { user, .. } => user,
+        }
+    }
+
+    /// The token's role: a machine is an owner of its user's stores.
+    pub fn role(&self) -> &str {
+        match self {
+            Identity::Machine { .. } => "owner",
+            Identity::Client { role, .. } => role,
         }
     }
 }
@@ -108,7 +142,10 @@ impl Auth {
             )?;
             entries.push(Entry {
                 token,
-                identity: Identity::Machine(row.name.clone()),
+                identity: Identity::Machine {
+                    name: row.name.clone(),
+                    user: row.user.clone(),
+                },
             });
         }
         for row in &file.client {
@@ -130,6 +167,7 @@ impl Auth {
                 identity: Identity::Client {
                     name: row.name.clone(),
                     role: row.role.clone(),
+                    user: row.user.clone(),
                 },
             });
         }

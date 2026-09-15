@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::{
     attach::Frame,
     browser::{BrowserHub, BrowserOut},
-    sched::{MAX_CHILDREN, MAX_DEPTH},
+    sched::{MAX_CHILDREN, MAX_CHILDREN_CAP, MAX_DEPTH},
     worktree::{self, Worktree},
 };
 
@@ -124,7 +124,7 @@ impl Caps {
             } else {
                 MAX_DEPTH
             },
-            children: if (1..=64).contains(&cfg.max_children) {
+            children: if (1..=MAX_CHILDREN_CAP).contains(&cfg.max_children) {
                 cfg.max_children
             } else {
                 MAX_CHILDREN
@@ -144,6 +144,10 @@ pub const STATUS_DEBOUNCE_MS: i64 = 300;
 pub const NOTES_NUDGE: &str = "project page not updated last turn: a worker was started or reported and .arbos/notes.md did not change — update it (plan add/check) before or with your reply";
 /// The same, in the few words a window's notice line has room for.
 pub const NOTES_NUDGE_REASON: &str = "project page not updated";
+/// What the model reads when the user corrected it or stated a way of
+/// working last turn and nothing was kept. `{line}` is the user's line.
+pub const CORRECTION_NUDGE: &str = "correction not kept: last turn the user corrected you or stated a way of working (\"{line}\") and nothing was saved — keep it now, in one call, before your reply: remember (scope:user when it is how they want to work everywhere; the place's memory when it is about this project), or an edit to docs/project-context.md when it is a goal, constraint, or decision.";
+pub const CORRECTION_NUDGE_REASON: &str = "correction not kept";
 
 pub struct KernelHooks {
     pub place: Place,
@@ -362,6 +366,7 @@ impl KernelHooks {
         } else if agent == arbos_core::ROOT_ID {
             self.notes_nudge_check(agent);
         }
+        self.correction_nudge_check(agent);
         // A child whose turn ended without a report: its last words, or its
         // failure, are what the waiting parent gets.
         if let Some((_, tx)) = self.waits.lock().unwrap().remove(agent) {
@@ -425,6 +430,70 @@ impl KernelHooks {
             reason: NOTES_NUDGE_REASON.to_string(),
         });
         let _ = append_event(&self.layout(agent).transcript(), &nudge);
+    }
+
+    /// Projects-post gap 3: "with each turn of feedback, the Project
+    /// learns." The prompt says to save a preference when the user states,
+    /// corrects, or repeats one; nothing checked that it happened. A turn
+    /// opened (or steered) by a user line that reads as a correction, with
+    /// no successful `remember` and no edit to the context or memory file
+    /// in it, gets one reminder at its end — the next turn reads it, as
+    /// the notes reminder is read.
+    fn correction_nudge_check(&self, agent: &str) {
+        let lo = self
+            .turn_lo
+            .lock()
+            .unwrap()
+            .get(agent)
+            .copied()
+            .unwrap_or(0);
+        let events =
+            arbos_core::load_transcript(&self.layout(agent).transcript()).unwrap_or_default();
+        let turn: Vec<&Event> = events.iter().filter(|e| e.seq >= lo).collect();
+        let Some(line) = turn.iter().find_map(|e| match &e.kind {
+            EventKind::User { text, .. } if arbos_core::correction::reads_as_correction(text) => {
+                Some(text.clone())
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        let kept = turn.iter().any(|e| match &e.kind {
+            EventKind::Tool(rec) if rec.error.is_some() => false,
+            EventKind::Tool(rec) if rec.name == "remember" => true,
+            EventKind::Tool(rec)
+                if matches!(rec.name.as_str(), "write" | "edit" | "apply_patch") =>
+            {
+                let touches = |p: &str| {
+                    p.ends_with("project-context.md")
+                        || p.ends_with("memory.md")
+                        || p.ends_with("preferences.md")
+                };
+                rec.paths.iter().any(|p| touches(p))
+                    || rec
+                        .args
+                        .as_ref()
+                        .and_then(|a| a.get("path"))
+                        .and_then(|v| v.as_str())
+                        .is_some_and(touches)
+            }
+            _ => false,
+        });
+        if kept {
+            return;
+        }
+        let shown: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let shown = if shown.chars().count() > 120 {
+            format!("{}…", shown.chars().take(120).collect::<String>())
+        } else {
+            shown
+        };
+        let nudge = Event::new(EventKind::Nudge {
+            text: CORRECTION_NUDGE.replace("{line}", &shown),
+            reason: CORRECTION_NUDGE_REASON.to_string(),
+        });
+        let _ = append_event(&self.layout(agent).transcript(), &nudge);
+        crate::klog::info("correction_not_kept", Some(agent), shown);
     }
 
     /// Whether a reminder is owed (for the window's status; cleared when
@@ -2060,5 +2129,37 @@ mod spoken_name_tests {
         assert_eq!(spoken_name("Review math_utils.py"), "Review math_utils.py");
         assert_eq!(spoken_name("Changelog draft"), "Changelog draft");
         assert_eq!(spoken_name("  "), "");
+    }
+}
+
+#[cfg(test)]
+mod caps_tests {
+    use super::Caps;
+    use crate::sched::{MAX_CHILDREN, MAX_CHILDREN_CAP};
+
+    /// Projects-post gap 4: the default cap of 8 live children stalled a
+    /// coordinator on its ninth spawn; Jacob's Projects run wide. The
+    /// default is 24, a config value holds up to 256, and zero or absurd
+    /// values fall back to the default.
+    #[test]
+    fn the_children_cap_defaults_wide_and_takes_config_up_to_the_ceiling() {
+        assert_eq!(MAX_CHILDREN, 24);
+        assert_eq!(Caps::default().children, 24);
+        let mut cfg = arbos_core::HostConfig::default();
+        assert_eq!(cfg.max_children, 24, "config default matches");
+        cfg.max_children = 100;
+        assert_eq!(Caps::from_config(&cfg).children, 100);
+        cfg.max_children = MAX_CHILDREN_CAP;
+        assert_eq!(Caps::from_config(&cfg).children, 256);
+        cfg.max_children = MAX_CHILDREN_CAP + 1;
+        assert_eq!(
+            Caps::from_config(&cfg).children,
+            24,
+            "past the ceiling: the default"
+        );
+        cfg.max_children = 0;
+        assert_eq!(Caps::from_config(&cfg).children, 24);
+        cfg.max_children = 3;
+        assert_eq!(Caps::from_config(&cfg).children, 3);
     }
 }
