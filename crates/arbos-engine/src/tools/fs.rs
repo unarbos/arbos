@@ -1718,6 +1718,7 @@ mod store_address_tests {
             bash_wait_ms: 0,
             hops: 0,
             web: Arc::new(WebCfg::default()),
+            step: 0,
         }
     }
 
