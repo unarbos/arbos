@@ -2364,57 +2364,94 @@ fn attach_remote_cached(key: &str, create: impl FnOnce() -> Result<Tunnel>) -> R
     Ok(info)
 }
 
-/// What the connect to a remote place is doing right now, by host: the
-/// window shows it where "connecting…" would be ("Installing Arbos on
-/// arboslife…"). Cleared when the tunnel is up or the attempt failed.
-fn connect_steps() -> &'static Mutex<HashMap<String, String>> {
-    static STEPS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    STEPS.get_or_init(|| Mutex::new(HashMap::new()))
+/// The step a remote place's connect is on, by place key, for the window
+/// to draw ("Installing arbos-kernel 0.2.1…", "Updating 0.2.0 → 0.2.1…").
+/// Set by `open_remote_tunnel` as it goes; `Ready` when the tunnel is up;
+/// `Failed` with the step when it is not. Read with `remote_progress`.
+fn progress_lock() -> &'static Mutex<HashMap<String, arbos_core::remote_kernel::Progress>> {
+    static P: OnceLock<Mutex<HashMap<String, arbos_core::remote_kernel::Progress>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn set_connect_step(host: &str, step: Option<String>) {
-    let mut steps = connect_steps().lock().unwrap_or_else(|e| e.into_inner());
-    match step {
-        Some(step) => {
-            steps.insert(host.to_string(), step);
-        }
-        None => {
-            steps.remove(host);
-        }
-    }
-}
-
-/// The connect step for `host`, if one is in progress.
-pub fn connect_step(host: &str) -> Option<String> {
-    connect_steps()
+fn set_progress(key: &str, step: arbos_core::remote_kernel::Progress) {
+    eprintln!("remote {key}: {step}");
+    progress_lock()
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(host)
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key.to_string(), step);
+}
+
+/// Where a remote place's connect stands, if one is or was under way.
+pub fn remote_progress(host: &str, path: &Path) -> Option<arbos_core::remote_kernel::Progress> {
+    progress_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&Place::remote(host, path).encode())
         .cloned()
 }
 
 fn open_remote_tunnel(host_name: &str, path: &Path) -> Result<Tunnel> {
+    use arbos_core::remote_kernel::Progress;
+    let key = Place::remote(host_name, path).encode();
+    let step = |p: Progress| set_progress(&key, p);
+    match open_remote_tunnel_steps(host_name, path, &step) {
+        Ok(t) => {
+            step(Progress::Ready);
+            Ok(t)
+        }
+        Err(e) => {
+            let at = remote_progress(host_name, path)
+                .map(|p| p.to_string().trim_end_matches('…').to_string())
+                .unwrap_or_else(|| "Connecting".into());
+            step(Progress::Failed {
+                step: at,
+                why: format!("{e:#}"),
+            });
+            Err(e)
+        }
+    }
+}
+
+fn open_remote_tunnel_steps(
+    host_name: &str,
+    path: &Path,
+    step: &dyn Fn(arbos_core::remote_kernel::Progress),
+) -> Result<Tunnel> {
+    use arbos_core::remote_kernel::{KernelVersion, Progress};
     let target = remote_target(host_name);
     let host = target.ssh.as_str();
-    let _clear = ClearStep(host_name.to_string());
-    set_connect_step(host_name, Some(format!("Checking {}…", target.name)));
+    step(Progress::Probing);
     let mut probe = ssh_probe(&target, path)?;
-    // No binary, or one that is not this window's version and no kernel
-    // running from it: put ours there (same machine type), so a place never
-    // runs a kernel older than the window that opens it.
-    let stale = probe.has_bin
-        && probe.running.is_none()
-        && probe.version.as_deref() != Some(local_kernel_version().as_str());
-    if !probe.has_bin || stale {
-        set_connect_step(
-            host_name,
-            Some(if stale {
-                format!("Updating Arbos on {}…", target.name)
-            } else {
-                format!("Installing Arbos on {}…", target.name)
+    // The version rule: the remote's kernel is replaced when it is older
+    // than this window's (semver), or the same version from another
+    // build; a newer remote is left alone. A running older kernel is
+    // stopped first — that process alone; its jobs go with it — so a
+    // place never runs a kernel older than the window that opens it.
+    let mine = KernelVersion::parse(&local_kernel_version());
+    let theirs = probe.version.as_deref().and_then(KernelVersion::parse);
+    let wants_update = match (&theirs, &mine) {
+        (Some(t), Some(m)) => t.needs_update_to(m),
+        // Ours is not a version we can read (a dev build with no line):
+        // an unreadable remote is replaced, a readable one kept.
+        (None, _) => probe.has_bin,
+        (Some(_), None) => false,
+    };
+    if !probe.has_bin || wants_update {
+        match (&theirs, &mine) {
+            (Some(t), Some(m)) => step(Progress::Updating {
+                from: t.short(),
+                to: m.short(),
             }),
-        );
-        ssh_install_kernel(&target, &probe.arch, stale)?;
+            _ => step(Progress::Installing {
+                version: mine.as_ref().map(|m| m.short()).unwrap_or_else(|| "this build".into()),
+            }),
+        }
+        if probe.running.is_some() {
+            step(Progress::Stopping);
+            ssh_stop_kernel(&target, path)?;
+            probe.running = None;
+        }
+        ssh_install_kernel(&target, &probe.arch, probe.has_bin, step)?;
         probe = ssh_probe(&target, path)?;
         if !probe.has_bin {
             return Err(anyhow!(
@@ -2428,12 +2465,13 @@ fn open_remote_tunnel(host_name: &str, path: &Path) -> Result<Tunnel> {
     let remote_port = if let Some(info) = probe.running {
         port_of(&info.url).ok_or_else(|| anyhow!("arbos on {host} announced no port"))?
     } else {
-        set_connect_step(host_name, Some(format!("Starting Arbos on {}…", target.name)));
+        step(Progress::Starting);
         let port = random_port();
         ssh_launch(&target, path)?;
         let info = wait_remote_json(host, path)?;
         port_of(&info.url).unwrap_or(port)
     };
+    step(Progress::Connecting);
 
     let local_port = stable_local_port(host, path, "tcp");
     let mut forwards = vec![(local_port, remote_port)];
@@ -2460,13 +2498,22 @@ fn open_remote_tunnel(host_name: &str, path: &Path) -> Result<Tunnel> {
     Ok(tunnel)
 }
 
-/// Clears a host's connect step when the attempt ends, however it ends.
-struct ClearStep(String);
-
-impl Drop for ClearStep {
-    fn drop(&mut self) {
-        set_connect_step(&self.0, None);
-    }
+/// The connect step for any place on `host` that is under way, as the
+/// line the window shows where "connecting…" would be. A view over
+/// `remote_progress`, keyed `host:path`; nothing once the tunnel is up or
+/// the attempt has failed (the failure is reported on its own).
+pub fn connect_step(host: &str) -> Option<String> {
+    use arbos_core::remote_kernel::Progress;
+    let prefix = format!("{host}:");
+    progress_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .filter(|(key, _)| key.starts_with(&prefix))
+        .find_map(|(_, step)| match step {
+            Progress::Ready | Progress::Failed { .. } => None,
+            step => Some(step.to_string()),
+        })
 }
 
 /// Live HTTP gateway on the host (`web.json`), if its pid still answers.
@@ -2474,7 +2521,7 @@ fn ssh_gateway_info(host: &str, path: &Path) -> Option<WebInfo> {
     let dir = shell_path(&path.to_string_lossy());
     let script = format!(
         r#"f={dir}/.arbos/web.json
-if [ -f "$f" ]; then pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$f"); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then cat "$f"; fi; fi"#,
+if [ -f "$f" ]; then pid=$(tr -d '\n' < "$f" | sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n1); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then cat "$f"; fi; fi"#,
         dir = dir,
     );
     let out = ssh_run(host, &script).ok()?;
@@ -2496,7 +2543,7 @@ fn ssh_probe(target: &RemoteTarget, path: &Path) -> Result<Probe> {
 if [ -x "{bin}" ]; then sha=$(sha256sum "{bin}" 2>/dev/null | cut -d" " -f1); ver=$("{bin}" --version 2>/dev/null | head -n1 || echo -); else sha=-; ver=-; fi
 echo "$sha"; echo "${{ver:--}}"
 f={dir}/.arbos/runtime/kernel.json; [ -f "$f" ] || f={dir}/.arbos/kernel.json
-if [ -f "$f" ]; then pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$f"); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then cat "$f"; fi; fi"#,
+if [ -f "$f" ]; then pid=$(tr -d '\n' < "$f" | sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n1); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then cat "$f"; fi; fi"#,
         bin = target.bin,
         dir = dir,
     );
@@ -2553,7 +2600,12 @@ fn local_kernel_version() -> String {
 /// type: copy this window's binary (also over a stale one). Different
 /// type: build from source only when the machine allows it in
 /// `machines.toml` (`build = true`); otherwise say where a binary must go.
-fn ssh_install_kernel(target: &RemoteTarget, remote_arch: &str, replacing: bool) -> Result<()> {
+fn ssh_install_kernel(
+    target: &RemoteTarget,
+    remote_arch: &str,
+    replacing: bool,
+    step: &dyn Fn(arbos_core::remote_kernel::Progress),
+) -> Result<()> {
     let host = target.ssh.as_str();
     let bin_dir = parent_of(&target.bin);
     let mkdir = ssh_run(
@@ -2593,8 +2645,51 @@ fn ssh_install_kernel(target: &RemoteTarget, remote_arch: &str, replacing: bool)
             ));
         }
     }
-    if replacing {
-        // A stale kernel of another architecture: leave it, say so.
+    // Another machine type: the release cut for it, from GitHub, checked
+    // against its .sha256 and moved into place as <bin>.new → <bin>; then
+    // the source build when the machine allows it. The script says which.
+    {
+        let mine = arbos_core::remote_kernel::KernelVersion::parse(&local_kernel_version());
+        let version = mine.as_ref().map(|m| m.short()).unwrap_or_default();
+        let sha = mine.as_ref().map(|m| m.sha.clone()).unwrap_or_default();
+        if !version.is_empty() {
+            let script = arbos_core::remote_kernel::install_script(
+                &target.bin,
+                &version,
+                if sha.is_empty() { "main" } else { &sha },
+                remote_arch,
+                target.build,
+            );
+            if target.build && arbos_core::remote_kernel::release_asset(remote_arch, &version).is_none() {
+                step(arbos_core::remote_kernel::Progress::Building);
+            }
+            let out = ssh_run(host, &script)?;
+            let steps = arbos_core::remote_kernel::steps_in(&out.stdout);
+            for line in &steps {
+                eprintln!("remote {}: install: {line}", target.name);
+            }
+            if out.status == 0 {
+                return Ok(());
+            }
+            if !target.build {
+                return Err(anyhow!(
+                    "arbos-kernel {version} for {there} could not be placed on {name} at {bin}: {}",
+                    steps.last().cloned().unwrap_or_else(|| out.problem()),
+                    there = remote_arch,
+                    name = target.name,
+                    bin = target.bin,
+                ));
+            }
+            // Fall through: the machine allows a build; the old tarred
+            // source route below is the last resort.
+            eprintln!(
+                "remote {}: release and cargo install did not land ({}); building from this window's source",
+                target.name,
+                steps.last().cloned().unwrap_or_default()
+            );
+        }
+    }
+    if replacing && !target.build {
         return Err(anyhow!(
             "arbos-kernel on {name} ({bin}) is not this window's version and cannot be replaced from here ({here} vs {there}); update it there, or set build = true for {name} in machines.toml",
             name = target.name,
@@ -2635,6 +2730,28 @@ test -x "{bin}"
     let out = ssh_run(host, &script)?;
     if out.status != 0 {
         return Err(anyhow!("build arbos-kernel on {host}: {}", out.problem()));
+    }
+    Ok(())
+}
+
+/// Stop the kernel serving `path` on the host so a newer binary can take
+/// its place: TERM to that one process (its jobs die with it through
+/// their leash), then wait for it to leave. An error names the pid when
+/// it would not.
+fn ssh_stop_kernel(target: &RemoteTarget, path: &Path) -> Result<()> {
+    let host = target.ssh.as_str();
+    let dir = shell_path(&path.to_string_lossy());
+    let script = arbos_core::remote_kernel::stop_script(&dir);
+    let out = ssh_run(host, &script)?;
+    for line in arbos_core::remote_kernel::steps_in(&out.stdout) {
+        eprintln!("remote {}: stop: {line}", target.name);
+    }
+    if out.status != 0 {
+        return Err(anyhow!(
+            "the kernel on {} did not stop for the update: {}",
+            target.name,
+            out.problem()
+        ));
     }
     Ok(())
 }
@@ -2791,12 +2908,18 @@ fn ssh_launch(target: &RemoteTarget, path: &Path) -> Result<()> {
         bin = target.bin,
     );
     let inner = launch.replace('\'', "'\\''");
+    // The launch log lives under ~/.cache/arbos, which the install makes;
+    // ~/.arbos is the home place and may be anything (on templar a symlink
+    // to a folder that is gone — the redirect failed and the kernel never
+    // started, cycle 11). A log dir that cannot be made is a failure here,
+    // not a 60 s wait for a file that never comes.
     let script = format!(
-        r#"umask 077 && mkdir -p "$HOME/.arbos"
+        r#"umask 077 && mkdir -p "$HOME/.cache/arbos" || {{ echo "cannot make $HOME/.cache/arbos" >&2; exit 1; }}
+log="$HOME/.cache/arbos/web.log"
 if command -v setsid >/dev/null 2>&1; then
-  setsid nohup sh -c '{inner}' >>"$HOME/.arbos/web.log" 2>&1 </dev/null &
+  setsid nohup sh -c '{inner}' >>"$log" 2>&1 </dev/null &
 else
-  nohup sh -c '{inner}' >>"$HOME/.arbos/web.log" 2>&1 </dev/null &
+  nohup sh -c '{inner}' >>"$log" 2>&1 </dev/null &
 fi
 echo started"#
     );
@@ -2825,7 +2948,7 @@ fn wait_remote_json(host: &str, path: &Path) -> Result<WebInfo> {
         thread::sleep(Duration::from_millis(500));
     }
     Err(anyhow!(
-        "arbos did not start within 60 s (see ~/.arbos/web.log on {host})"
+        "arbos did not start within 60 s (see ~/.cache/arbos/web.log on {host})"
     ))
 }
 
