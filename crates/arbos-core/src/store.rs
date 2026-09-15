@@ -368,9 +368,17 @@ pub const KICKOFF_SHOW: &str = "The user asked to see this. An image of the resu
 /// brief whose user had said "show me the output" (kickoff item 3).
 pub fn names_an_image(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
-    ["screenshot", "screen shot", "image", "picture", ".png", ".jpg", "render"]
-        .iter()
-        .any(|w| t.contains(w))
+    [
+        "screenshot",
+        "screen shot",
+        "image",
+        "picture",
+        ".png",
+        ".jpg",
+        "render",
+    ]
+    .iter()
+    .any(|w| t.contains(w))
 }
 
 pub fn asks_to_see(text: &str) -> bool {
@@ -436,7 +444,7 @@ pub fn current_branch(place: &Path) -> Option<String> {
 }
 
 pub const KICKOFF_READ_FIRST: &str = ".arbos/docs/project-context.md, then .arbos/notes.md";
-pub const KICKOFF_RULES: &str = "Stay on the base branch you are given; never merge. No extra documents beyond what the task needs. Secrets come through `secret` by name, never printed; redact them in captures.";
+pub const KICKOFF_RULES: &str = "Start from the base branch you are given; a code fix goes on its own branch (`git checkout -b fix/<what>`), committed and pushed there, and comes back as a draft pull request (`pr create`) against that base — never a commit on the base branch; never merge. No extra documents beyond what the task needs. Secrets come through `secret` by name, never printed; redact them in captures.";
 pub const KICKOFF_OUTPUT: &str = "Deliverables under .arbos/docs/, working notes under .arbos/internal/, captures under .arbos/media/<topic>/. Verify each file exists before you report it.";
 pub const KICKOFF_REPORT: &str = "A few lines: the outcome, a link to every file and PR you made, and open questions (at most four).";
 
@@ -776,7 +784,14 @@ mod tests {
             brief.contains("Do: \n  1. Read gateway.rs\n  2. Add the gate\n  3. Test\n"),
             "{brief}"
         );
-        assert!(brief.contains("Rules: Stay on the base branch"), "{brief}");
+        assert!(
+            brief.contains("Rules: Start from the base branch"),
+            "{brief}"
+        );
+        assert!(
+            brief.contains("never a commit on the base branch"),
+            "{brief}"
+        );
         assert!(
             brief.contains("Output: .arbos/docs/echo-gate.md\n"),
             "{brief}"
@@ -894,7 +909,9 @@ mod show_tests {
 
     #[test]
     fn only_picture_words_mean_the_brief_asks_for_an_image() {
-        assert!(!names_an_image("1. Run python3 hello.py.\n2. Capture output.\n3. Report."));
+        assert!(!names_an_image(
+            "1. Run python3 hello.py.\n2. Capture output.\n3. Report."
+        ));
         assert!(!names_an_image("capture the log and the exit code"));
         assert!(names_an_image("take a screenshot of the page"));
         assert!(names_an_image("save the result as an image under media/"));

@@ -83,6 +83,9 @@ pub fn check(place: &Path, cwd: &Path, command: &str) -> Result<()> {
     // `git config user.email … && git commit` sets the identity in the
     // same command: the check must see what the earlier segment does.
     let mut configured = (false, false);
+    // `git checkout -b fix/x && git commit`: the commit lands on fix/x,
+    // whatever the checkout says now.
+    let mut switched: Option<String> = None;
     for segment in segments(command) {
         let words = shell_words(&segment);
         let Some(call) = GitCall::parse(&words) else {
@@ -93,13 +96,31 @@ pub fn check(place: &Path, cwd: &Path, command: &str) -> Result<()> {
                 configured.0 |= name;
                 configured.1 |= email;
             }
+            GitCall::Switch { branch, .. } => switched = Some(branch),
             GitCall::Commit { dir, sets_author } => {
-                if sets_author {
-                    continue;
-                }
                 let dir = dir
                     .map(|d| cwd.join(d))
                     .unwrap_or_else(|| cwd.to_path_buf());
+                // A fix lands on a branch and reaches the base through a
+                // pull request; a commit straight onto main is refused
+                // (kickoff item 8: root fixed the bug on main, no branch,
+                // no PR).
+                let on = switched.clone().or_else(|| current_branch(&dir));
+                if let Some(b) = on.as_deref().filter(|b| rules.is_protected(b)) {
+                    bail!(
+                        "git guard: the checkout {} is on `{b}`, a protected branch here ({}); a fix is committed on its own branch and opened as a pull request, never on `{b}`. Run: git checkout -b fix/<what-it-fixes> && git commit …, then push it and `pr create` against `{}`.",
+                        dir.display(),
+                        rules.protected.join(", "),
+                        if rules.base.is_empty() {
+                            b.to_string()
+                        } else {
+                            rules.base.clone()
+                        }
+                    );
+                }
+                if sets_author {
+                    continue;
+                }
                 let (name, email) = identity(&dir);
                 let name = if configured.0 {
                     "set".to_string()
@@ -159,6 +180,19 @@ pub fn check(place: &Path, cwd: &Path, command: &str) -> Result<()> {
 }
 
 /// The `user.name` and `user.email` git would use in `dir`.
+/// The branch `dir` has checked out; None outside a repository or when
+/// detached (a detached head is nobody's protected branch).
+fn current_branch(dir: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!b.is_empty()).then_some(b)
+}
+
 fn identity(dir: &Path) -> (String, String) {
     let get = |key: &str| -> String {
         Command::new("git")
@@ -193,6 +227,12 @@ enum GitCall {
     Config {
         name: bool,
         email: bool,
+    },
+    /// `git checkout -b X`, `git switch -c X`, `git checkout X`, `git
+    /// switch X` earlier in the command: a later commit lands on `X`.
+    Switch {
+        dir: Option<String>,
+        branch: String,
     },
 }
 
@@ -271,6 +311,33 @@ impl GitCall {
                     sets_author = true;
                 }
                 Some(Self::Commit { dir, sets_author })
+            }
+            "checkout" | "switch" => {
+                // The branch created (`-b`/`-c <name>`) or moved to (the
+                // first bare word). `checkout -- file` and `checkout
+                // <commit> -- file` are not branch moves.
+                if rest.iter().any(|w| w == "--") {
+                    return None;
+                }
+                let mut k = 0;
+                while k < rest.len() {
+                    let w = rest[k].as_str();
+                    if w == "-b" || w == "-B" || w == "-c" || w == "-C" {
+                        return rest.get(k + 1).map(|b| Self::Switch {
+                            dir,
+                            branch: b.to_string(),
+                        });
+                    }
+                    if w.starts_with('-') {
+                        k += 1;
+                        continue;
+                    }
+                    return Some(Self::Switch {
+                        dir,
+                        branch: w.to_string(),
+                    });
+                }
+                None
             }
             "config" => {
                 let setting = rest
@@ -524,5 +591,100 @@ mod tests {
             segments("a && b || c; d | e \"x && y\""),
             vec!["a", "b", "c", "d", "e \"x && y\""]
         );
+    }
+
+    #[test]
+    fn recognises_a_branch_switch() {
+        let sw = |b: &str| {
+            Some(GitCall::Switch {
+                dir: None,
+                branch: b.into(),
+            })
+        };
+        assert_eq!(call("git checkout -b fix/paren"), sw("fix/paren"));
+        assert_eq!(call("git switch -c fix/paren"), sw("fix/paren"));
+        assert_eq!(call("git checkout main"), sw("main"));
+        assert_eq!(call("git switch -q main"), sw("main"));
+        // Files, not branches.
+        assert_eq!(call("git checkout -- hello.py"), None);
+        assert_eq!(call("git checkout abc123 -- hello.py"), None);
+    }
+
+    fn repo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-guard-{tag}-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&dir)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "start"]);
+        dir
+    }
+
+    /// Kickoff item 8: the fix was committed straight onto main.
+    #[test]
+    fn a_commit_on_a_protected_branch_is_refused_and_a_branch_first_is_not() {
+        let dir = repo("main");
+        let err = check(&dir, &dir, "git add -A && git commit -m fix")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("on `main`, a protected branch"), "{err}");
+        assert!(err.contains("git checkout -b fix/"), "{err}");
+        assert!(err.contains("pr create"), "{err}");
+        // The same command, branching first: the commit lands on the branch.
+        assert!(
+            check(
+                &dir,
+                &dir,
+                "git checkout -b fix/paren && git add -A && git commit -m fix"
+            )
+            .is_ok()
+        );
+        // Already on a branch: fine.
+        assert!(
+            Command::new("git")
+                .args(["checkout", "-q", "-b", "fix/other"])
+                .current_dir(&dir)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(check(&dir, &dir, "git commit -m fix").is_ok());
+        // A nested repository under the place (the kickoff's toy-repo),
+        // reached with -C or by cwd, is judged by its own branch.
+        let nested = dir.join("toy-repo");
+        std::fs::create_dir_all(&nested).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.name", "t"],
+            vec!["config", "user.email", "t@t"],
+            vec!["commit", "-q", "--allow-empty", "-m", "start"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(&args)
+                    .current_dir(&nested)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        assert!(check(&dir, &dir, "git -C toy-repo commit -m fix").is_err());
+        assert!(check(&dir, &nested, "git commit -m fix").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
