@@ -568,6 +568,7 @@ fn notify_parent_done(hooks: &KernelHooks, agent: &str) {
 pub fn finish_turn(hooks: &KernelHooks, agent: &str) {
     crate::chatdoor::reply_if_door_turn(hooks, agent);
     notify_parent_done(hooks, agent);
+    verify_reply_links(hooks, agent);
     close_turn_folder(hooks, agent, None);
     hooks.broadcast(hooks.plan_frame(agent));
     // Waited-for children that finished during this turn go to the
@@ -587,6 +588,114 @@ pub fn finish_turn(hooks: &KernelHooks, agent: &str) {
     if !waited.is_empty() {
         archive_finished(hooks, &waited);
     }
+}
+
+/// The head of the kernel's own note about links to missing files; a
+/// turn opened by that note is not checked again, so a reply that keeps
+/// pointing at a file that never comes cannot loop.
+pub const MISSING_LINKS: &str = "[kernel] your reply links files that do not exist";
+
+/// Cursor's rule: verify an artifact before showing it. When a top-level
+/// agent's turn ends, every local path its last reply links (`[x](p)`,
+/// `![x](p)`) is checked against the store and the place; a missing one
+/// goes back to the agent as a wake so it fixes the path or makes the
+/// file, and the user is told the link is not there yet. Workers report
+/// to a parent, not the user, so only top-level agents are checked.
+fn verify_reply_links(hooks: &KernelHooks, agent: &str) {
+    let Ok(me) = arbos_core::load_agent(&hooks.place, &arbos_core::AgentId::new(agent)) else {
+        return;
+    };
+    if me.parent.is_some() {
+        return;
+    }
+    let events = load_transcript(&hooks.layout(agent).transcript()).unwrap_or_default();
+    let lo = hooks
+        .turn_lo
+        .lock()
+        .unwrap()
+        .get(agent)
+        .copied()
+        .unwrap_or(0);
+    let turn: Vec<&Event> = events.iter().filter(|e| e.seq >= lo).collect();
+    // A turn the kernel opened for this very reason is not checked again.
+    let opened_by_us = turn.iter().any(|e| match &e.kind {
+        EventKind::Wake { text: Some(t), .. } => t.starts_with(MISSING_LINKS),
+        EventKind::User { text, .. } => text.starts_with(MISSING_LINKS),
+        _ => false,
+    });
+    if opened_by_us {
+        return;
+    }
+    let Some(reply) = turn.iter().rev().find_map(|e| match &e.kind {
+        EventKind::Assistant { text, .. } if !text.trim().is_empty() => Some(text.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+    let missing = missing_links(&hooks.place, &reply);
+    if missing.is_empty() {
+        return;
+    }
+    let list = missing
+        .iter()
+        .map(|p| format!("`{p}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = format!(
+        "{MISSING_LINKS}: {list}. The user cannot open them. Read each path you meant, make the file or fix the link, then tell the user again in one line — or say plainly that the artifact is not ready."
+    );
+    let mut msg = inbox::Message::new("kernel", "wake", body);
+    msg.wake = true;
+    match inbox::deliver(&hooks.place, agent, &msg) {
+        Ok(_) => {
+            hooks.plan_changed(agent);
+            crate::klog::info("reply_links_missing", Some(agent), missing.join(","));
+        }
+        Err(e) => crate::klog::warn("reply_links_check_failed", Some(agent), format!("{e:#}")),
+    }
+}
+
+/// Local paths in `text`'s markdown links and images that exist neither
+/// under the store (`.arbos/`), nor under the place, nor as given. URLs,
+/// anchors, mailto, and `agents/…` (a worker, not a file) are not checked.
+pub fn missing_links(place: &arbos_core::Place, text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find("](") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find(')') else {
+            break;
+        };
+        let raw = after[..close]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim();
+        rest = &after[close + 1..];
+        if raw.is_empty()
+            || raw.contains("://")
+            || raw.starts_with("mailto:")
+            || raw.starts_with('#')
+            || raw.starts_with("agents/")
+            || raw.starts_with(".arbos/agents/")
+            || raw.starts_with("archive/agents/")
+        {
+            continue;
+        }
+        let path = raw.split('#').next().unwrap_or(raw);
+        let candidates = [
+            std::path::PathBuf::from(path),
+            place.arbos().join(path.trim_start_matches("./")),
+            place.path.join(path.trim_start_matches("./")),
+        ];
+        if candidates.iter().any(|c| c.exists()) {
+            continue;
+        }
+        if !out.iter().any(|p| p == path) {
+            out.push(path.to_string());
+        }
+    }
+    out
 }
 
 /// The turn's last words and whether it ended well, from the transcript
