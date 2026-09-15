@@ -85,6 +85,11 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   TAG: dev
+  # The iPhone app is not a payload — TestFlight installs it, and this only
+  # says where. One URL per app rather than per build, so every release in the
+  # feed carries the same link and the newest build behind it is whatever the
+  # iOS loop last uploaded. App Store id 6812503407.
+  IOS_TESTFLIGHT_URL: "https://beta.itunes.apple.com/v1/app/6812503407"
 
 jobs:
   # What is being published, worked out once so the three jobs below name the
@@ -274,7 +279,8 @@ jobs:
             --minimum-system-version "${{ needs.plan.outputs.minimum }}" \
             --keep 10 \
             --artifact "macos/arm64=$mac" \
-            --artifact "linux/x86_64=$linux"
+            --artifact "linux/x86_64=$linux" \
+            --link "ios:testflight=$IOS_TESTFLIGHT_URL"
           rm -f dist/notes.txt
           # What an app one build behind would be offered. A feed that answers
           # "up to date" here was written wrong, and saying so now beats an

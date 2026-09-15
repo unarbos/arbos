@@ -40,6 +40,13 @@ on:
 permissions:
   contents: write
 
+env:
+  # The iPhone app is not a payload — TestFlight installs it, and this only
+  # says where. One URL per app rather than per build, so every release in the
+  # feed carries the same link and the newest build behind it is whatever the
+  # iOS loop last uploaded. App Store id 6812503407.
+  IOS_TESTFLIGHT_URL: "https://beta.itunes.apple.com/v1/app/6812503407"
+
 jobs:
   linux-kernel:
     name: arbos-kernel (Linux x86_64)
@@ -323,7 +330,8 @@ jobs:
             --minimum-system-version "${{ needs.plan.outputs.minimum }}" \
             --keep 20 \
             --artifact "macos/arm64=$mac" \
-            --artifact "linux/x86_64=$linux"
+            --artifact "linux/x86_64=$linux" \
+            --link "ios:testflight=$IOS_TESTFLIGHT_URL"
           rm -f dist/notes.txt
           cargo run -q --release -p arbos-update --bin arbos-updatectl -- show \
             --feed dist/arbos-stable.json \
