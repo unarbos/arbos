@@ -86,8 +86,20 @@ pub fn check(place: &Path, cwd: &Path, command: &str) -> Result<()> {
     // `git checkout -b fix/x && git commit`: the commit lands on fix/x,
     // whatever the checkout says now.
     let mut switched: Option<String> = None;
+    // `cd toy-repo && git commit …`: the commit runs in toy-repo, so its
+    // branch and identity are toy-repo's, not the place's (kickoff item 8:
+    // the guard asked for an identity the repo already had).
+    let mut here = cwd.to_path_buf();
     for segment in segments(command) {
         let words = shell_words(&segment);
+        if let Some(dir) = cd_target(&words) {
+            here = if dir.is_absolute() {
+                dir
+            } else {
+                here.join(dir)
+            };
+            continue;
+        }
         let Some(call) = GitCall::parse(&words) else {
             continue;
         };
@@ -98,9 +110,7 @@ pub fn check(place: &Path, cwd: &Path, command: &str) -> Result<()> {
             }
             GitCall::Switch { branch, .. } => switched = Some(branch),
             GitCall::Commit { dir, sets_author } => {
-                let dir = dir
-                    .map(|d| cwd.join(d))
-                    .unwrap_or_else(|| cwd.to_path_buf());
+                let dir = dir.map(|d| here.join(d)).unwrap_or_else(|| here.clone());
                 // A fix lands on a branch and reaches the base through a
                 // pull request; a commit straight onto main is refused
                 // (kickoff item 8: root fixed the bug on main, no branch,
@@ -177,6 +187,17 @@ pub fn check(place: &Path, cwd: &Path, command: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `cd <dir>` / `pushd <dir>` as a segment of its own: where the later
+/// segments run. `cd` alone (home) and `cd -` are not followed.
+fn cd_target(words: &[String]) -> Option<std::path::PathBuf> {
+    let first = words.first()?.as_str();
+    if first != "cd" && first != "pushd" {
+        return None;
+    }
+    let dir = words.iter().skip(1).find(|w| !w.starts_with('-'))?;
+    Some(std::path::PathBuf::from(dir))
 }
 
 /// The `user.name` and `user.email` git would use in `dir`.
@@ -633,6 +654,34 @@ mod tests {
         git(&["config", "user.email", "t@t"]);
         git(&["commit", "-q", "--allow-empty", "-m", "start"]);
         dir
+    }
+
+    /// Kickoff item 8 on main: the worker ran `cd toy-repo && git commit …`
+    /// from the place; the guard read the place's (missing) identity and
+    /// asked the user for an author the repo already had.
+    #[test]
+    fn a_cd_segment_moves_the_check_into_that_repo() {
+        let place = std::env::temp_dir().join(format!(
+            "arbos-guard-place-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(&place).unwrap();
+        let repo_dir = repo("cd");
+        let name = repo_dir.file_name().unwrap().to_str().unwrap().to_string();
+        std::fs::rename(&repo_dir, place.join(&name)).unwrap();
+        // The place itself is no repository and has no identity; toy-repo has both.
+        let cmd =
+            format!("cd {name} && git checkout -b fix/paren && git add -A && git commit -m fix");
+        check(&place, &place, &cmd).unwrap_or_else(|e| panic!("{e}"));
+        // And the branch check follows the cd too: a commit on toy-repo's main is refused.
+        let cmd = format!("cd {name} && git add -A && git commit -m fix");
+        let err = check(&place, &place, &cmd).unwrap_err().to_string();
+        assert!(err.contains("protected branch"), "{err}");
+        assert!(
+            err.contains(&name),
+            "the refusal names the repo, not the place: {err}"
+        );
     }
 
     /// Kickoff item 8: the fix was committed straight onto main.
