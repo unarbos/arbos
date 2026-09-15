@@ -7,13 +7,17 @@ struct HubMachine: Decodable, Identifiable, Equatable {
         var place: String
         /// A kernel serves it now; only these can be attached to.
         var live: Bool
+        /// The face from the project's `project.toml`, as the hub relays it
+        /// (#233); absent when nobody has read the file.
+        var identity: ProjectIdentity?
 
         var id: String { name }
 
-        init(name: String, place: String = "", live: Bool = false) {
+        init(name: String, place: String = "", live: Bool = false, identity: ProjectIdentity? = nil) {
             self.name = name
             self.place = place
             self.live = live
+            self.identity = identity
         }
 
         // Fields the hub leaves out when empty must decode as defaults.
@@ -22,9 +26,10 @@ struct HubMachine: Decodable, Identifiable, Equatable {
             name = try c.decode(String.self, forKey: .name)
             place = try c.decodeIfPresent(String.self, forKey: .place) ?? ""
             live = try c.decodeIfPresent(Bool.self, forKey: .live) ?? false
+            identity = try c.decodeIfPresent(ProjectIdentity.self, forKey: .identity)
         }
 
-        private enum CodingKeys: String, CodingKey { case name, place, live }
+        private enum CodingKeys: String, CodingKey { case name, place, live, identity }
     }
 
     var name: String

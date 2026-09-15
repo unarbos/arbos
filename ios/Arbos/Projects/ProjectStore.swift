@@ -46,14 +46,21 @@ final class ProjectStore: ObservableObject {
                     // `<project>--<child>` is a worker's worktree place, not a
                     // project of Jacob's: it belongs under its parent's chat.
                     for project in machine.projects where !project.name.contains("--") {
-                        list.append(entry(
-                            target: .hub(machine: machine.name, project: project.name),
+                        let target = KernelTarget.hub(machine: machine.name, project: project.name)
+                        var row = entry(
+                            target: target,
                             folder: project.name,
                             machine: machine.name,
                             place: project.place,
                             live: project.live,
                             remote: true
-                        ))
+                        )
+                        // The roster's face (#233) beats the cache and the default.
+                        if let face = project.identity?.filled(key: target.stored) {
+                            row.identity = face
+                            remember(face, for: target)
+                        }
+                        list.append(row)
                     }
                 }
             } catch {

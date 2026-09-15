@@ -115,7 +115,7 @@ struct KernelToolRecord: Equatable {
 /// tagged by `type` in snake_case.
 enum KernelFrame {
     /// First frame from a 0.2 kernel over WebSocket.
-    case hello(focus: String, kernel: String)
+    case hello(focus: String, kernel: String, identity: ProjectIdentity?)
     /// The agent tree and which agent the desktop last focused.
     case snapshot(focus: String, agents: [KernelAgent])
     case tree([KernelAgent])
@@ -161,9 +161,18 @@ enum KernelFrame {
                 text: object["text"] as? String ?? ""
             )
         case "hello":
+            var identity: ProjectIdentity?
+            if let face = object["identity"] as? [String: Any] {
+                identity = ProjectIdentity(
+                    name: face["name"] as? String,
+                    icon: face["icon"] as? String ?? ProjectIdentity.glyphs[0].name,
+                    color: face["color"] as? String ?? ""
+                )
+            }
             self = .hello(
                 focus: object["focus"] as? String ?? "root",
-                kernel: object["kernel"] as? String ?? ""
+                kernel: object["kernel"] as? String ?? "",
+                identity: identity
             )
         case "replayed":
             self = .replayed(

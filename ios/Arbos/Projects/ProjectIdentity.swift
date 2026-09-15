@@ -10,6 +10,23 @@ struct ProjectIdentity: Equatable, Codable {
     var icon: String
     var color: String
 
+    init(name: String?, icon: String, color: String) {
+        self.name = name
+        self.icon = icon
+        self.color = color
+    }
+
+    /// The hub's shape (#233): `icon` always, `name` and `color` only when
+    /// the file says so.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+        icon = try c.decodeIfPresent(String.self, forKey: .icon) ?? Self.glyphs[0].name
+        color = try c.decodeIfPresent(String.self, forKey: .color) ?? ""
+    }
+
+    private enum CodingKeys: String, CodingKey { case name, icon, color }
+
     /// The desktop's glyph names → SF Symbols with the same meaning.
     static let glyphs: [(name: String, symbol: String)] = [
         ("folder", "folder"),
@@ -38,13 +55,24 @@ struct ProjectIdentity: Equatable, Codable {
         ("yellow", 0xE0B23C),
     ]
 
-    /// What a project wears before anyone chose: a globe for a folder on
-    /// another machine, a folder otherwise, and a colour picked by the
-    /// key so two projects do not come up the same (FNV-1a, as the
-    /// desktop hashes its place).
+    /// What a project wears before anyone chose: a glyph and a colour
+    /// both picked from its name, so every row has a face of its own and
+    /// the same project gets the same face on every device (FNV-1a, as
+    /// the desktop hashes its place for the colour).
     static func defaults(key: String, remote: Bool) -> ProjectIdentity {
-        let index = Int(fnv1a(key) % UInt64(colors.count))
-        return ProjectIdentity(name: nil, icon: remote ? "globe" : "folder", color: colors[index].name)
+        let hash = fnv1a(key)
+        let color = colors[Int(hash % UInt64(colors.count))].name
+        // The home glyph is the home tab's alone.
+        let choices = glyphs.filter { $0.name != "home" }
+        let icon = choices[Int((hash >> 8) % UInt64(choices.count))].name
+        return ProjectIdentity(name: nil, icon: icon, color: color)
+    }
+
+    /// A roster face filled out: a missing colour takes the name-derived one.
+    func filled(key: String) -> ProjectIdentity {
+        var face = self
+        if face.color.isEmpty { face.color = Self.defaults(key: key, remote: true).color }
+        return face
     }
 
     var symbol: String {
