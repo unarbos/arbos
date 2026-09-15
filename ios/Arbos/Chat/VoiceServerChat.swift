@@ -47,7 +47,7 @@ final class VoiceServerChat: ChatSource {
     private func handle(_ event: VoiceEvent) {
         switch event {
         case .textDelta(let delta):
-            stream?.yield(.agentDelta(delta))
+            stream?.yield(.agentDelta(delta, step: 0))
         case .textDone(_, let cancelled):
             stream?.yield(.agentDone)
             if cancelled { stream?.yield(.item(ChatItem(.notice("stopped", failed: false)))) }
@@ -85,7 +85,7 @@ final class VoiceServerChat: ChatSource {
                 stream?.yield(.item(ChatItem(.user(trimmed))))
             case "assistant":
                 guard !trimmed.isEmpty else { return }
-                stream?.yield(.agentDelta(trimmed))
+                stream?.yield(.agentDelta(trimmed, step: 0))
                 stream?.yield(.agentDone)
             case "say":
                 stream?.yield(.item(ChatItem(.subagent(name: name(of: from ?? agent), status: trimmed))))

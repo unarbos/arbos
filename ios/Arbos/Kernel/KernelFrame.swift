@@ -16,7 +16,8 @@ struct KernelAgent: Identifiable, Equatable {
 /// flattened beside it.
 enum KernelEvent: Equatable {
     case user(text: String)
-    case assistant(text: String)
+    /// `step` is the model step within the turn (#247); 0 = unknown.
+    case assistant(text: String, step: Int)
     case thinking
     case tool(KernelToolRecord)
     case ask(question: String)
@@ -33,7 +34,7 @@ enum KernelEvent: Equatable {
         let text = object["text"] as? String ?? ""
         switch kind {
         case "user": self = .user(text: text)
-        case "assistant": self = .assistant(text: text)
+        case "assistant": self = .assistant(text: text, step: object["step"] as? Int ?? 0)
         case "thinking": self = .thinking
         case "tool": self = .tool(KernelToolRecord(json: object))
         case "ask": self = .ask(question: object["question"] as? String ?? "")
@@ -124,7 +125,7 @@ enum KernelFrame {
     case historyEnd(agent: String)
     case event(agent: String, event: KernelEvent)
     /// One streamed token of the reply being written.
-    case assistantDelta(agent: String, text: String)
+    case assistantDelta(agent: String, text: String, step: Int)
     /// `running` or `idle`.
     case turn(agent: String, state: String)
     case ask(agent: String, question: String, options: [String])
@@ -174,7 +175,8 @@ enum KernelFrame {
         case "assistant_delta":
             self = .assistantDelta(
                 agent: object["agent"] as? String ?? "",
-                text: object["text"] as? String ?? ""
+                text: object["text"] as? String ?? "",
+                step: object["step"] as? Int ?? 0
             )
         case "snapshot":
             self = .snapshot(

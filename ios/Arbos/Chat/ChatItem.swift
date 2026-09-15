@@ -17,14 +17,24 @@ struct ChatItem: Identifiable, Equatable {
 
     let id: UUID
     var kind: Kind
+    /// The model step this agent text belongs to (#247); 0 when unknown.
+    /// The settled `assistant` line of a step replaces the text streamed
+    /// for the same step, never a neighbour's.
+    var step: Int = 0
 
-    init(id: UUID = UUID(), _ kind: Kind) {
+    init(id: UUID = UUID(), _ kind: Kind, step: Int = 0) {
         self.id = id
         self.kind = kind
+        self.step = step
     }
 
     var isStreamingAgent: Bool {
         if case .agent(_, streaming: true) = kind { return true }
+        return false
+    }
+
+    var isAgent: Bool {
+        if case .agent = kind { return true }
         return false
     }
 }
@@ -43,13 +53,14 @@ enum ChatUpdate {
     /// Replace everything shown (mock seed; later, a transcript replay).
     case history([ChatItem])
     case item(ChatItem)
-    /// Append to the open agent message, opening one if there is none.
-    case agentDelta(String)
+    /// Append to the open agent message of this step, opening one if there is none.
+    case agentDelta(String, step: Int)
     /// Close the open agent message.
     case agentDone
-    /// The kernel's final text for the message just streamed. Replaces what
-    /// the deltas built, so the same words do not show twice.
-    case agentReplace(String)
+    /// The kernel's settled text for one step. Replaces what the deltas
+    /// built for that step, so the same words never show twice; a step
+    /// nothing was streamed for becomes a new message.
+    case agentReplace(String, step: Int)
     case turn(running: Bool)
     case agents([KernelAgent])
     /// The root's workers and what each is doing now.

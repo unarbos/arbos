@@ -187,36 +187,44 @@ final class ChatStore: ObservableObject {
         case .item(let item):
             closeOpenAgentMessage()
             items.append(item)
-        case .agentDelta(let delta):
+        case .agentDelta(let delta, let step):
             if let sentAt {
                 lastFirstToken = Date().timeIntervalSince(sentAt)
                 self.sentAt = nil
             }
-            if let index = items.indices.last, case .agent(let text, streaming: true) = items[index].kind {
+            if let index = items.indices.last, case .agent(let text, streaming: true) = items[index].kind,
+               step == 0 || items[index].step == 0 || items[index].step == step {
                 items[index].kind = .agent(text + delta, streaming: true)
+                if items[index].step == 0 { items[index].step = step }
             } else {
-                items.append(ChatItem(.agent(delta, streaming: true)))
+                closeOpenAgentMessage()
+                items.append(ChatItem(.agent(delta, streaming: true), step: step))
             }
         case .agentDone:
             closeOpenAgentMessage()
-        case .agentReplace(let text):
-            // `turn idle` usually closed (and announced) the streamed
-            // message already; only announce here if it is still open.
-            if let index = items.lastIndex(where: { if case .agent = $0.kind { return true } else { return false } }) {
+        case .agentReplace(let text, let step):
+            // The step's own item when the kernel numbers steps; the last
+            // agent item when it does not (older kernels).
+            let index = step > 0
+                ? items.lastIndex(where: { $0.isAgent && $0.step == step })
+                : items.lastIndex(where: \.isAgent)
+            if let index {
                 let wasOpen = items[index].isStreamingAgent
                 // The kernel's whole text for one step can land after the
-                // next step's tokens already started: when the streamed
-                // text runs past it, keep streaming instead of cutting.
-                if wasOpen, case .agent(let streamedText, _) = items[index].kind,
+                // next step's tokens already started (step 0 only): when the
+                // streamed text runs past it, keep streaming instead of cutting.
+                if wasOpen, step == 0, case .agent(let streamedText, _) = items[index].kind,
                    streamedText.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(text),
                    streamedText.trimmingCharacters(in: .whitespacesAndNewlines).count > text.count {
                     break
                 }
                 items[index].kind = .agent(text, streaming: false)
                 if wasOpen, !text.isEmpty { onAgentMessage?(text) }
-            } else {
-                items.append(ChatItem(.agent(text, streaming: false)))
-                if !text.isEmpty { onAgentMessage?(text) }
+            } else if !text.isEmpty {
+                // Nothing streamed for this step (attached mid-turn): a new message.
+                closeOpenAgentMessage()
+                items.append(ChatItem(.agent(text, streaming: false), step: step))
+                onAgentMessage?(text)
             }
         case .turn(let running):
             busy = running

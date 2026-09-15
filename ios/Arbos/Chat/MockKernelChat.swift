@@ -64,7 +64,7 @@ final class MockKernelChat: ChatSource {
             try? await Task.sleep(for: .milliseconds(500))
             for word in answer.split(separator: " ", omittingEmptySubsequences: false) {
                 guard !Task.isCancelled else { return }
-                self.stream?.yield(.agentDelta(String(word) + " "))
+                self.stream?.yield(.agentDelta(String(word) + " ", step: 0))
                 try? await Task.sleep(for: .milliseconds(70))
             }
             self.stream?.yield(.agentDone)
