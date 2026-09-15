@@ -61,6 +61,12 @@ final class CallViewModel: ObservableObject {
     /// The live level, 0…1: the microphone while Jacob talks, the reply
     /// while Arbos speaks. Drives the ring on the call screen.
     @Published private(set) var level: Float = 0
+    /// The microphone is muted: silence goes to the server instead.
+    @Published var muted = false {
+        didSet { mutedNow = muted }
+    }
+    /// Read off the audio thread; mirrors `muted`.
+    nonisolated(unsafe) private var mutedNow = false
     /// Where the sound goes: `speaker`, `AirPods`, `headphones`, …
     var outputRoute: String { route }
 
@@ -176,7 +182,12 @@ final class CallViewModel: ObservableObject {
         }
         guard phase.inCall else { return }
         if let info = link.info { server = info }
-        audio.onCapture = link.audioSink()
+        let sink = link.audioSink()
+        // Muted: the same frames go out as silence, so the duplex model
+        // keeps its clock and nothing of the room is heard.
+        audio.onCapture = { [weak self] frame in
+            sink(self?.mutedNow == true ? Data(count: frame.count) : frame)
+        }
         route = audio.outputRoute
         startedAt = Date()
         phase = .listening
@@ -245,6 +256,17 @@ final class CallViewModel: ObservableObject {
     private func meter(_ value: Float) {
         // Rise at once, fall over ~0.2 s: word gaps show, syllables do not flicker.
         level = value >= level ? value : max(value, level - 0.3)
+    }
+
+    /// Words typed in the pulled-down composer: to the project's chat, as
+    /// a typed turn would be. In the pipeline shape the reply is spoken.
+    func sendTyped(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        lines.append(TranscriptLine(speaker: .user, text: trimmed))
+        trimLines()
+        if !server.answersItself { kernelBusy = true; phase = .thinking }
+        chat.send(trimmed)
     }
 
     /// Phone speaker instead of a connected headset, and back.
