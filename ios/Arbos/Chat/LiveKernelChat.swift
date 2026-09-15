@@ -220,16 +220,22 @@ final class LiveKernelChat: ChatSource {
         "status", "plan", "todo", "say", "subscribe", "remember", "notes", "page", "title",
     ]
 
+    /// The tree names a worker the way the desktop's panel does; the
+    /// spawn record's brief only stands in until the tree arrives.
     private func remember(_ agents: [KernelAgent]) {
         for agent in agents where agent.parent == focus {
             children.insert(agent.id)
-            if childNames[agent.id] == nil || childNames[agent.id] == agent.id { childNames[agent.id] = agent.name }
+            childNames[agent.id] = agent.name
             if workers[agent.id] == nil {
                 workers[agent.id] = WorkerStatus(id: agent.id, name: agent.name, step: "", running: false)
                 workerOrder.append(agent.id)
             } else {
                 workers[agent.id]?.name = agent.name
             }
+        }
+        // A worker gone from the tree is archived: no longer running.
+        for id in workerOrder where !agents.contains(where: { $0.id == id }) {
+            workers[id]?.running = false
         }
         publishWorkers()
     }

@@ -116,6 +116,13 @@ final class ArbosKernelClient {
 
     private func receive(_ message: URLSessionWebSocketTask.Message) {
         guard let (_, object) = decodeTypedJSON(message), let frame = KernelFrame(json: object) else { return }
+        #if DEBUG
+        if let type = object["type"] as? String, ["turn", "status", "tree", "snapshot", "ask", "working"].contains(type) {
+            let agent = object["agent"] as? String ?? ""
+            let extra = (object["state"] as? String) ?? (object["step"] as? String) ?? ""
+            print("frame \(type) \(agent) \(extra.prefix(60))")
+        }
+        #endif
         switch frame {
         case .hello(let focus, let version):
             self.focus = focus
