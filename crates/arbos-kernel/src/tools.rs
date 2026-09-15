@@ -543,10 +543,7 @@ impl Tool for Spawn {
                 && !["task", "do", "brief"]
                     .iter()
                     .filter_map(|k| opt_str(&args, k))
-                    .any(|t| {
-                        let t = t.to_ascii_lowercase();
-                        t.contains("screenshot") || t.contains("image") || t.contains("capture")
-                    });
+                    .any(arbos_core::store::names_an_image);
             // The template wins when a task is given; a raw brief is the
             // fallback. Neither is an error the model can act on.
             let rendered = match (opt_str(&args, "task"), opt_str(&args, "brief")) {

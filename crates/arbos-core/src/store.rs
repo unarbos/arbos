@@ -358,10 +358,21 @@ pub struct Kickoff<'a> {
 }
 
 /// The line a brief gets when the user asked to see the result.
-pub const KICKOFF_SHOW: &str = "The user asked to see this. An image of the result is owed: `browser screenshot` for a page, `screenshot` for a window, or the terminal output saved as an image under .arbos/media/<topic>/. Name its path in your report; words alone do not close the task.";
+pub const KICKOFF_SHOW: &str = "The user asked to see this. An image of the result is owed: `browser action:screenshot` for a page, `screenshot target:window` for a window, `screenshot target:text title:\"<the command>\" text:\"<its output>\"` for a command's output (no display needed). Name the image path in your report; words alone do not close the task.";
 
 /// Does this message ask to be shown something? Judged on the user's own
 /// words: "show me", "let me see", "screenshot", "I want to see it".
+/// Does a brief already ask for an image itself, so the kernel's `Show`
+/// line would repeat it? Only words that mean a picture count: "Capture
+/// output" in a `do` step means stdout, and it kept the line out of a
+/// brief whose user had said "show me the output" (kickoff item 3).
+pub fn names_an_image(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    ["screenshot", "screen shot", "image", "picture", ".png", ".jpg", "render"]
+        .iter()
+        .any(|w| t.contains(w))
+}
+
 pub fn asks_to_see(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
     let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -879,6 +890,15 @@ mod show_tests {
         ] {
             assert!(!asks_to_see(no), "{no}");
         }
+    }
+
+    #[test]
+    fn only_picture_words_mean_the_brief_asks_for_an_image() {
+        assert!(!names_an_image("1. Run python3 hello.py.\n2. Capture output.\n3. Report."));
+        assert!(!names_an_image("capture the log and the exit code"));
+        assert!(names_an_image("take a screenshot of the page"));
+        assert!(names_an_image("save the result as an image under media/"));
+        assert!(names_an_image("send a picture of the dashboard"));
     }
 
     #[test]

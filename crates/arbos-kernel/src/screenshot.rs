@@ -1,5 +1,9 @@
 //! `screenshot`: a picture of the machine's screen, for the model and the
-//! window. Not a browser page — `browser screenshot` does that.
+//! window. Not a browser page — `browser screenshot` does that. `target:
+//! text` renders words (a command's output) as a terminal-styled image
+//! with headless Chrome: what "show me the output" needs on a machine
+//! with no screen, and what a worker improvised with ImageMagick and lost
+//! to its security policy (kickoff item 3).
 //!
 //! The file lands in the agent's `images/` like a browser shot, so the
 //! transcript cite survives and the desktop can open it. The model gets it
@@ -22,6 +26,8 @@ pub struct Screenshot;
 enum Target {
     Screen,
     Window,
+    /// Words rendered as an image; no display involved.
+    Text,
 }
 
 impl Target {
@@ -29,10 +35,16 @@ impl Target {
         match s.trim().to_ascii_lowercase().as_str() {
             "" | "screen" | "display" | "full" => Some(Self::Screen),
             "window" | "active" | "frontmost" => Some(Self::Window),
+            "text" | "output" | "render" => Some(Self::Text),
             _ => None,
         }
     }
 }
+
+/// Widest rendering of a text image, in CSS pixels.
+const TEXT_IMAGE_WIDTH: u32 = 960;
+/// Longest text rendered; more is cut with a note in the image.
+const TEXT_IMAGE_MAX_LINES: usize = 200;
 
 impl Tool for Screenshot {
     fn name(&self) -> &'static str {
@@ -41,9 +53,26 @@ impl Tool for Screenshot {
     fn schema(&self) -> Value {
         typed_schema(
             "screenshot",
-            "Capture the screen or frontmost window; the image is shown to you and the user. Web pages: browser screenshot.",
+            "Capture the screen or frontmost window, or render text (a command's output) as an image; the image is shown to you and the user. Web pages: browser screenshot.",
             &[
-                ("target", "screen (default) or window.", false, "string"),
+                (
+                    "target",
+                    "screen (default), window, or text (render `text` as a terminal-styled image; needs no display).",
+                    false,
+                    "string",
+                ),
+                (
+                    "text",
+                    "With target text: the words to render, e.g. a command and its output.",
+                    false,
+                    "string",
+                ),
+                (
+                    "title",
+                    "With target text: a title line (the command, a file name).",
+                    false,
+                    "string",
+                ),
                 (
                     "display",
                     "1-based display index (macOS).",
@@ -67,16 +96,43 @@ impl Tool for Screenshot {
             })?;
             let display = args.get("display").and_then(Value::as_u64);
             let dir = Layout::new(&cx.place, cx.agent.id.as_str()).images();
-            let out = tokio::task::spawn_blocking(move || capture(&dir, target, display))
-                .await
-                .map_err(|e| anyhow::anyhow!("screenshot task: {e}"))??;
+            let out = if target == Target::Text {
+                let text = args
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::trim_end)
+                    .filter(|t| !t.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "screenshot: target text needs `text` (the words to render)"
+                        )
+                    })?
+                    .to_string();
+                let title = args
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                tokio::task::spawn_blocking(move || render_text(&dir, &title, &text))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("screenshot task: {e}"))??
+            } else {
+                tokio::task::spawn_blocking(move || capture(&dir, target, display))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("screenshot task: {e}"))??
+            };
             let shown = out.path.display().to_string();
             let dims = arbos_engine::image::dimensions(&out.png)
                 .map(|(w, h)| format!(", {w}x{h}"))
                 .unwrap_or_default();
+            let what = if target == Target::Text {
+                "rendered"
+            } else {
+                "screenshot"
+            };
             Ok(ToolOut {
                 body: format!(
-                    "screenshot {shown} (image/png{dims}, {} KB, via {}) — attached below",
+                    "{what} {shown} (image/png{dims}, {} KB, via {}) — attached below; put this path in your reply",
                     out.png.len().div_ceil(1024),
                     out.backend
                 ),
@@ -151,14 +207,174 @@ pub fn grab_screen(place: &arbos_core::Place) -> Result<(Vec<u8>, &'static str, 
 /// A fresh file name under `dir`. Two calls in one step can share a
 /// millisecond; the suffix keeps them apart.
 fn fresh_path(dir: &Path) -> PathBuf {
+    fresh_named(dir, "screen")
+}
+
+fn fresh_named(dir: &Path, stem: &str) -> PathBuf {
     let ms = arbos_core::now_ms();
-    let mut path = dir.join(format!("screen-{ms}.png"));
+    let mut path = dir.join(format!("{stem}-{ms}.png"));
     let mut n = 1;
     while path.exists() {
         n += 1;
-        path = dir.join(format!("screen-{ms}-{n}.png"));
+        path = dir.join(format!("{stem}-{ms}-{n}.png"));
     }
     path
+}
+
+/// `text` as a terminal-styled PNG under `dir`, drawn by headless Chrome
+/// from a one-page HTML file (removed afterwards). Chrome is what the
+/// browser tool already needs, so no new dependency; a machine without it
+/// gets told what to install and what to do instead.
+fn render_text(dir: &Path, title: &str, text: &str) -> Result<Captured> {
+    let Some(chrome) = chrome_binary() else {
+        bail!(
+            "screenshot target text needs chromium or google-chrome on this machine (none found); save the output to a file under .arbos/media/<topic>/ and name it in your reply instead"
+        );
+    };
+    std::fs::create_dir_all(dir)?;
+    let path = fresh_named(dir, "text");
+    let html_path = path.with_extension("html");
+    let (html, lines) = text_page(title, text);
+    std::fs::write(&html_path, html)?;
+    // 22 px a line at 14 px monospace, a title band, padding; capped so a
+    // long log does not make a 40 000-pixel image.
+    let height = (lines as u32 * 22 + if title.is_empty() { 40 } else { 76 }).clamp(120, 4600);
+    // Its own profile: the browser tool's Chrome holds the default one,
+    // and two Chromes on one profile wait on each other's lock.
+    let profile = std::env::temp_dir().join(format!(
+        "arbos-textshot-{}-{}",
+        std::process::id(),
+        arbos_core::now_ms()
+    ));
+    std::fs::create_dir_all(&profile)?;
+    let mut cmd = Command::new(chrome);
+    cmd.args([
+        "--headless=new",
+        "--disable-gpu",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--hide-scrollbars",
+        "--no-first-run",
+        "--force-device-scale-factor=1",
+    ])
+    .arg(format!("--user-data-dir={}", profile.display()))
+    .arg(format!("--window-size={TEXT_IMAGE_WIDTH},{height}"))
+    .arg(format!("--screenshot={}", path.display()))
+    .arg(format!("file://{}", html_path.display()));
+    let result = run_until_file(&mut cmd, &path);
+    let _ = std::fs::remove_file(&html_path);
+    let _ = std::fs::remove_dir_all(&profile);
+    result.map_err(|e| anyhow::anyhow!("chrome could not render the text: {e:#}"))?;
+    let png = std::fs::read(&path)
+        .with_context(|| format!("chrome wrote nothing to {}", path.display()))?;
+    if png.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        bail!("chrome wrote an empty file");
+    }
+    Ok(Captured {
+        path,
+        png,
+        backend: "chrome (text)",
+    })
+}
+
+/// Run `cmd` until it exits or `file` is written whole, whichever first.
+/// Headless Chrome writes the screenshot and then may sit on its exit;
+/// the file is the result, so a written file ends the wait and the
+/// process is killed. The time cap kills it too.
+fn run_until_file(cmd: &mut Command, file: &Path) -> Result<()> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("start {}", cmd.get_program().to_string_lossy()))?;
+    let started = std::time::Instant::now();
+    let mut last_len: Option<u64> = None;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if status.success() || file.is_file() {
+                return Ok(());
+            }
+            let mut err = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                use std::io::Read;
+                let _ = e.read_to_string(&mut err);
+            }
+            bail!("{status}: {}", err.trim().lines().last().unwrap_or(""));
+        }
+        // Written and no longer growing across two looks: done.
+        let len = std::fs::metadata(file)
+            .map(|m| m.len())
+            .ok()
+            .filter(|&n| n > 0);
+        if len.is_some() && len == last_len {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(());
+        }
+        last_len = len;
+        if started.elapsed() > CAPTURE_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            if file.is_file() {
+                return Ok(());
+            }
+            bail!("took longer than {CAPTURE_TIMEOUT:?}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The page: dark terminal, monospace, the title as a band. Returns the
+/// HTML and how many lines the body has (after the cap).
+fn text_page(title: &str, text: &str) -> (String, usize) {
+    fn esc(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+    let mut lines: Vec<&str> = text.lines().collect();
+    let mut cut = None;
+    if lines.len() > TEXT_IMAGE_MAX_LINES {
+        cut = Some(lines.len() - TEXT_IMAGE_MAX_LINES);
+        lines.truncate(TEXT_IMAGE_MAX_LINES);
+    }
+    let mut body = esc(&lines.join("\n"));
+    if let Some(n) = cut {
+        body.push_str(&format!("\n… {n} more line(s) not shown"));
+    }
+    let n = lines.len() + usize::from(cut.is_some());
+    let title_html = if title.trim().is_empty() {
+        String::new()
+    } else {
+        format!("<div class=t>{}</div>", esc(title.trim()))
+    };
+    let html = format!(
+        "<!doctype html><html><head><meta charset=utf-8><style>\
+html,body{{margin:0;background:#1e1e1e}}\
+body{{padding:14px 18px;font:14px/22px ui-monospace,SFMono-Regular,Menlo,Consolas,\"DejaVu Sans Mono\",monospace;color:#e6e6e6}}\
+.t{{color:#9da5b4;border-bottom:1px solid #333;padding-bottom:8px;margin-bottom:10px;white-space:pre-wrap}}\
+pre{{margin:0;white-space:pre-wrap;word-break:break-word}}\
+</style></head><body>{title_html}<pre>{body}</pre></body></html>"
+    );
+    (html, n)
+}
+
+/// The Chrome the browser tool uses, if any.
+fn chrome_binary() -> Option<PathBuf> {
+    [
+        "chromium",
+        "google-chrome",
+        "chromium-browser",
+        "google-chrome-stable",
+    ]
+    .iter()
+    .find_map(|name| which(std::ffi::OsStr::new(name)))
+    .or_else(|| {
+        let mac = Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+        mac.is_file().then(|| mac.to_path_buf())
+    })
 }
 
 fn capture(dir: &Path, target: Target, display: Option<u64>) -> Result<Captured> {
@@ -235,7 +451,9 @@ fn backends(target: Target, display: Option<u64>, path: &Path) -> Vec<(&'static 
         let mut c = Command::new("import");
         c.arg("-window");
         match target {
-            Target::Screen => c.arg("root"),
+            // Text never reaches a display backend (`render_text`); the
+            // root window is the harmless reading of it.
+            Target::Screen | Target::Text => c.arg("root"),
             Target::Window => c.arg(focused_x11_window().unwrap_or_else(|| "root".into())),
         };
         c.arg(&out);
