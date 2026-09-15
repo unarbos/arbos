@@ -21,6 +21,12 @@ pub enum Frame {
         /// the first round trip. `changed project.toml` follows a rewrite.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         identity: Option<crate::project::ProjectIdentity>,
+        /// This node's store as every node on the hub addresses it,
+        /// `arbos://<machine>/<project>/`; absent when the kernel is on no
+        /// hub. A client hands it to others (a brief, a link) instead of
+        /// a machine-local path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        store: Option<String>,
         protocol: u32,
         kernel: String,
         tail: u32,

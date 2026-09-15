@@ -44,6 +44,8 @@ type Ws = WebSocketStream<TcpStream>;
 pub struct Registrant {
     pub id: u64,
     pub machine: String,
+    /// The `user` of the token it registered with.
+    pub user: String,
     pub project: Option<String>,
     pub place: Option<String>,
     to_socket: mpsc::UnboundedSender<HubFrame>,
@@ -94,6 +96,11 @@ struct MachineEntry {
     kernels: HashMap<String, Arc<Registrant>>,
     /// Each project's face, by name, as its registrants read it.
     identities: HashMap<String, arbos_core::project::ProjectIdentity>,
+    /// Each project's sharing mode (`[share] mode`), by name; absent = mesh.
+    shares: HashMap<String, String>,
+    /// Whose machine this is: the `user` of the token it registered with.
+    /// Its projects' stores belong to this user.
+    owner_user: String,
     /// Worktree places a claim with `isolate` made, by the name their
     /// kernel registers under → the project they were cut from. A phone
     /// saw `demo--c616190-1` beside `demo` as a second project (M-12).
@@ -119,16 +126,40 @@ impl MachineEntry {
         (known && !tail.is_empty()).then(|| head.to_string())
     }
 
-    fn info(&self, name: &str) -> MachineInfo {
+    /// The sharing mode of a project here: its own, else its parent
+    /// project's for a worktree, else mesh.
+    fn share_of(&self, project: &str, parent: Option<&str>) -> String {
+        self.shares
+            .get(project)
+            .or_else(|| parent.and_then(|pp| self.shares.get(pp)))
+            .cloned()
+            .unwrap_or_else(|| arbos_core::hub::SHARE_MESH.to_string())
+    }
+
+    /// This machine as `viewer` (a `(user, role)` from its token) sees
+    /// it: every project carries its store address and, with a viewer,
+    /// what that viewer may do there.
+    fn info(&self, name: &str, viewer: Option<(&str, &str)>) -> MachineInfo {
+        let access = |share: &str| match viewer {
+            Some((user, role)) => {
+                arbos_core::hub::store_access(share, user, role, &self.owner_user).to_string()
+            }
+            None => String::new(),
+        };
+        let store = |p: &str| arbos_core::hub::StoreAddress::root(name, p).to_string();
         let mut projects: Vec<ProjectInfo> = self
             .kernels
             .iter()
             .map(|(p, r)| {
                 let parent = self.worktree_of(p);
+                let share = self.share_of(p, parent.as_deref());
                 ProjectInfo {
                     name: p.clone(),
                     place: r.place.clone().unwrap_or_default(),
                     live: true,
+                    store: store(p),
+                    access: access(&share),
+                    share,
                     identity: self
                         .identities
                         .get(p)
@@ -145,10 +176,14 @@ impl MachineEntry {
             .collect();
         for p in &self.worker_projects {
             if !self.kernels.contains_key(p) {
+                let share = self.share_of(p, None);
                 projects.push(ProjectInfo {
                     name: p.clone(),
                     place: String::new(),
                     live: false,
+                    store: store(p),
+                    access: access(&share),
+                    share,
                     identity: self.identities.get(p).cloned(),
                     kind: String::new(),
                     parent: None,
@@ -186,16 +221,20 @@ pub struct Hub {
 }
 
 impl Hub {
-    pub fn roster(&self) -> Vec<MachineInfo> {
+    /// The roster as `viewer` (a token's `(user, role)`) sees it: with
+    /// each store's address and the viewer's access to it. `None` leaves
+    /// `access` empty.
+    pub fn roster_for(&self, viewer: Option<(&str, &str)>) -> Vec<MachineInfo> {
         let g = self.inner.lock().unwrap();
-        let mut out: Vec<MachineInfo> = g.machines.iter().map(|(n, e)| e.info(n)).collect();
+        let mut out: Vec<MachineInfo> = g.machines.iter().map(|(n, e)| e.info(n, viewer)).collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
 
-    /// Every registrant hears the roster after a change.
+    /// Every registrant hears the roster after a change, each with its own
+    /// access to every store (a machine token is an owner of its user's
+    /// stores; a private project of another user reads `none`).
     fn broadcast_roster(&self) {
-        let roster = self.roster();
         let targets: Vec<Arc<Registrant>> = {
             let g = self.inner.lock().unwrap();
             g.machines
@@ -204,9 +243,8 @@ impl Hub {
                 .collect()
         };
         for r in targets {
-            r.send(HubFrame::Roster {
-                machines: roster.clone(),
-            });
+            let machines = self.roster_for(Some((&r.user, "owner")));
+            r.send(HubFrame::Roster { machines });
         }
     }
 
@@ -303,7 +341,11 @@ async fn send_json<T: serde::Serialize>(ws: &mut Ws, v: &T) -> bool {
 // ── /register ───────────────────────────────────────────────────────────
 
 pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
-    let Identity::Machine(token_machine) = who else {
+    let Identity::Machine {
+        name: token_machine,
+        user: token_user,
+    } = who
+    else {
         let _ = send_json(
             &mut ws,
             &HubFrame::Error {
@@ -326,6 +368,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         place,
         projects,
         identities,
+        shares,
         labels,
         capabilities,
         version,
@@ -375,6 +418,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         let reg = Arc::new(Registrant {
             id: g.next_id,
             machine: machine.clone(),
+            user: token_user.clone(),
             project: project.clone(),
             place: place.clone(),
             to_socket,
@@ -385,6 +429,9 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         if entry.is_empty() {
             entry.since = arbos_core::now_ms();
         }
+        // The token says whose machine it is; every project here is that
+        // user's for `[share] mode = "private"`.
+        entry.owner_user = token_user.clone();
         // A machine is described by every registrant on it: the worker
         // says `gpu`, a kernel says the version. Words add up; none erase.
         if !user.is_empty() {
@@ -410,6 +457,9 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         // older worker's, a re-registration over the last).
         for (name, face) in identities {
             entry.identities.insert(name, face);
+        }
+        for (name, mode) in shares {
+            entry.shares.insert(name, mode);
         }
         match kind {
             RegistrantKind::Worker => {
@@ -765,6 +815,7 @@ mod roster_face_tests {
         let reg = Arc::new(Registrant {
             id: 1,
             machine: "mac".into(),
+            user: "owner".into(),
             project: Some("arbos".into()),
             place: Some("/Users/jacob/Code/arbos".into()),
             to_socket: tx,
@@ -790,7 +841,7 @@ mod roster_face_tests {
                 color: "#336699".into(),
             },
         );
-        let info = entry.info("mac");
+        let info = entry.info("mac", None);
         let by_name = |n: &str| info.projects.iter().find(|p| p.name == n).unwrap().clone();
         let arbos = by_name("arbos");
         assert!(arbos.live);
@@ -824,6 +875,7 @@ mod roster_face_tests {
             Arc::new(Registrant {
                 id,
                 machine: "arboslife".into(),
+                user: "owner".into(),
                 project: Some(project.into()),
                 place: Some(format!("/home/u/arbos/{project}")),
                 to_socket: tx,
@@ -852,7 +904,7 @@ mod roster_face_tests {
                 color: "teal".into(),
             },
         );
-        let info = entry.info("arboslife");
+        let info = entry.info("arboslife", None);
         let by_name = |n: &str| info.projects.iter().find(|p| p.name == n).unwrap().clone();
         let demo = by_name("demo");
         assert!(demo.kind.is_empty() && demo.parent.is_none());
@@ -875,5 +927,69 @@ mod roster_face_tests {
         let json = serde_json::to_value(&wt).unwrap();
         assert_eq!(json["kind"], "worktree");
         assert_eq!(json["parent"], "demo");
+    }
+
+    /// Federation (2026-09-15): every project carries its store address,
+    /// and the roster each recipient gets says what *it* may do there:
+    /// `min(token role, share mode)`. Jacob's machines (user `owner`) own
+    /// each other's stores; Alice's writer token gets `writer` on a mesh
+    /// project, nothing on a private one, and `reader` at least on an
+    /// open one. A worktree inherits its parent project's mode.
+    #[test]
+    fn the_roster_names_each_store_and_the_viewers_access_to_it() {
+        let reg = |id: u64, project: &str| {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            Arc::new(Registrant {
+                id,
+                machine: "arboslife".into(),
+                user: "owner".into(),
+                project: Some(project.into()),
+                place: Some(format!("/home/u/arbos/{project}")),
+                to_socket: tx,
+                chans: Mutex::new(HashMap::new()),
+                next_chan: AtomicU64::new(1),
+            })
+        };
+        let mut entry = MachineEntry::default();
+        entry.owner_user = "owner".into();
+        entry.worker_projects = vec!["demo".into(), "diary".into(), "blog".into()];
+        entry.kernels.insert("demo".into(), reg(1, "demo"));
+        entry.kernels.insert("demo--c1".into(), reg(2, "demo--c1"));
+        entry.shares.insert("diary".into(), "private".into());
+        entry.shares.insert("blog".into(), "open".into());
+        // No viewer: addresses and modes, no access.
+        let plain = entry.info("arboslife", None);
+        let by = |info: &MachineInfo, n: &str| {
+            info.projects.iter().find(|p| p.name == n).unwrap().clone()
+        };
+        let demo = by(&plain, "demo");
+        assert_eq!(demo.store, "arbos://arboslife/demo/");
+        assert_eq!(demo.share, "mesh");
+        assert!(demo.access.is_empty());
+        assert_eq!(by(&plain, "demo--c1").store, "arbos://arboslife/demo--c1/");
+        assert_eq!(by(&plain, "diary").share, "private");
+        // Jacob's other machine: owner everywhere, private included.
+        let mine = entry.info("arboslife", Some(("owner", "owner")));
+        assert_eq!(by(&mine, "demo").access, "owner");
+        assert_eq!(by(&mine, "diary").access, "owner");
+        assert_eq!(by(&mine, "blog").access, "owner");
+        // Alice, a writer client of another user.
+        let alice = entry.info("arboslife", Some(("alice", "writer")));
+        assert_eq!(by(&alice, "demo").access, "writer");
+        assert_eq!(
+            by(&alice, "demo--c1").access,
+            "writer",
+            "a worktree shares its parent's mode"
+        );
+        assert_eq!(by(&alice, "diary").access, "none");
+        assert_eq!(by(&alice, "blog").access, "writer");
+        // A private worktree of a private project stays private.
+        entry.shares.insert("demo".into(), "private".into());
+        let alice = entry.info("arboslife", Some(("alice", "writer")));
+        assert_eq!(by(&alice, "demo--c1").access, "none");
+        let json = serde_json::to_value(&by(&alice, "blog")).unwrap();
+        assert_eq!(json["store"], "arbos://arboslife/blog/");
+        assert_eq!(json["access"], "writer");
+        assert_eq!(json["share"], "open");
     }
 }

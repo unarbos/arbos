@@ -1733,6 +1733,7 @@ pub async fn serve_client(
             let focus_agent = focus_agent(&accept_place);
             let _ = out_tx.send(Frame::Hello {
                 identity: Some(arbos_core::project::identity(&accept_place)),
+                store: crate::hub_link::self_store().map(|a| a.to_string()),
                 protocol: PROTOCOL,
                 kernel: env!("CARGO_PKG_VERSION").to_string(),
                 tail: ATTACH_TAIL,
