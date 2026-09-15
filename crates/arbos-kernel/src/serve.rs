@@ -1617,6 +1617,8 @@ pub fn kernel_registry(hooks: &Arc<KernelHooks>, ptys: &Arc<PtyHub>) -> Registry
         .with(tools::TodoTool(Arc::clone(hooks)))
         .with(tools::Ask(Arc::clone(hooks)))
         .with(tools::StatusTool(Arc::clone(hooks)))
+        .with(tools::Agents(Arc::clone(hooks)))
+        .with(tools::Transcript(Arc::clone(hooks)))
         .with(tools::Browser(Arc::clone(hooks)))
         .with(crate::screenshot::Screenshot)
         .with(crate::secret_tool::Secret)

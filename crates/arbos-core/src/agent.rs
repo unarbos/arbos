@@ -51,6 +51,9 @@ pub const ALL_TOOLS: &[&str] = &[
     "record",
     "status",
     "todo",
+    "delete",
+    "agents",
+    "transcript",
 ];
 
 /// How much an agent may do without asking. `agent.md` `mode:`.
@@ -404,6 +407,16 @@ impl Agent {
         // The thread checklist goes with the plan. Old agent.md files
         // predate the tool.
         if tool == "todo" && self.allowlist.iter().any(|t| t == "plan") {
+            return true;
+        }
+        // Deleting a file is the write surface. Old agent.md files
+        // predate the tool.
+        if tool == "delete" && self.allowlist.iter().any(|t| t == "write") {
+            return true;
+        }
+        // Looking at one's workers goes with spawning them. Old agent.md
+        // files predate the tools.
+        if matches!(tool, "agents" | "transcript") && self.allowlist.iter().any(|t| t == "spawn") {
             return true;
         }
         // Visible shell. Old agent.md files list bash only.

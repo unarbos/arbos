@@ -43,14 +43,17 @@ enum Op {
     Start,
     Stop,
     Status,
+    /// Cursor's DISCARD_RECORDING: end it and keep nothing.
+    Discard,
 }
 
 impl Op {
     fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "start" | "begin" => Some(Self::Start),
-            "stop" | "end" | "finish" => Some(Self::Stop),
+            "stop" | "end" | "finish" | "save" => Some(Self::Stop),
             "status" => Some(Self::Status),
+            "discard" | "cancel" | "abort" => Some(Self::Discard),
             _ => None,
         }
     }
@@ -65,7 +68,12 @@ impl Tool for Record {
             "record",
             "Screen recording for the user: start (returns at once), do the steps, stop (video path + last frame). status. Ends by itself at max_secs.",
             &[
-                ("op", "start|stop|status", true, "string"),
+                (
+                    "op",
+                    "start|stop|discard|status (discard ends it and keeps no file)",
+                    true,
+                    "string",
+                ),
                 (
                     "max_secs",
                     "start: cap in seconds (120, max 600).",
@@ -89,7 +97,7 @@ impl Tool for Record {
         Box::pin(async move {
             let raw = args.get("op").and_then(Value::as_str).unwrap_or("");
             let op = Op::parse(raw).ok_or_else(|| {
-                anyhow::anyhow!("record: op must be start, stop, or status, not {raw:?}")
+                anyhow::anyhow!("record: op must be start, stop, discard, or status, not {raw:?}")
             })?;
             let agent = cx.agent.id.to_string();
             let dir = Layout::new(&cx.place, cx.agent.id.as_str())
@@ -109,6 +117,7 @@ impl Tool for Record {
                 Op::Start => start(&live, &agent, &dir, max_secs, display),
                 Op::Stop => stop(&live, &agent),
                 Op::Status => status(&live, &agent),
+                Op::Discard => discard(&live, &agent),
             })
             .await
             .map_err(|e| anyhow::anyhow!("record task: {e}"))?
@@ -196,6 +205,24 @@ fn stop(live: &Mutex<HashMap<String, Recording>>, agent: &str) -> Result<ToolOut
         bail!("record: nothing is recording for this agent; call record start first");
     };
     finish(rec)
+}
+
+/// End the recording and remove what it wrote: nothing to show.
+fn discard(live: &Mutex<HashMap<String, Recording>>, agent: &str) -> Result<ToolOut> {
+    let rec = live.lock().unwrap().remove(agent);
+    let Some(mut rec) = rec else {
+        bail!("record: nothing is recording for this agent; nothing to discard");
+    };
+    if rec.child.try_wait()?.is_none() {
+        let _ = rec.child.kill();
+        let _ = rec.child.wait();
+    }
+    let _ = std::fs::remove_file(&rec.path);
+    let _ = std::fs::remove_file(&rec.log);
+    Ok(ToolOut::text(format!(
+        "discarded the recording after {}s; no file kept",
+        rec.started.elapsed().as_secs()
+    )))
 }
 
 fn status(live: &Mutex<HashMap<String, Recording>>, agent: &str) -> Result<ToolOut> {

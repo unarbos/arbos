@@ -67,6 +67,357 @@ impl Tool for StatusTool {
         })
     }
 }
+/// `agents [ids]`: Cursor's GetAgentStatus — non-blocking, per worker of
+/// yours: lifecycle (running / idle / archived), the live step, the last
+/// turn's verdict and last words, and the PR it opened, if any.
+pub struct Agents(pub Arc<KernelHooks>);
+
+impl Tool for Agents {
+    fn name(&self) -> &'static str {
+        "agents"
+    }
+    fn schema(&self) -> Value {
+        typed_schema(
+            "agents",
+            "Status of your workers, without waiting: running or idle (or archived), what each is doing now, how its last turn ended and its last words, and its PR when it opened one. ids to name some; leave out for all your workers. Read it when you need a result now and no [done] has come; never in a loop.",
+            &[(
+                "ids",
+                "Agent ids (or names). Default: every worker of yours.",
+                false,
+                "array",
+            )],
+        )
+    }
+    fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
+        Ok(Plan::access(Access::none()))
+    }
+    fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
+        let hooks = Arc::clone(&self.0);
+        Box::pin(async move {
+            let me = cx.agent.id.as_str();
+            let wanted: Vec<String> = args
+                .get("ids")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mine: Vec<String> = hooks
+                .descendants(me)
+                .into_iter()
+                .filter(|id| id != me)
+                .collect();
+            let all = arbos_core::list_agents(&hooks.place).unwrap_or_default();
+            let prs = arbos_core::load_prs(&hooks.place);
+            let mut rows: Vec<String> = Vec::new();
+            let targets: Vec<String> = if wanted.is_empty() {
+                mine.clone()
+            } else {
+                wanted
+                    .iter()
+                    .map(|w| {
+                        all.iter()
+                            .find(|a| a.id.as_str() == w || a.name == *w)
+                            .map(|a| a.id.to_string())
+                            .unwrap_or_else(|| w.clone())
+                    })
+                    .collect()
+            };
+            for id in &targets {
+                let live = all.iter().find(|a| a.id.as_str() == id);
+                let archived_dir = hooks.place.arbos().join("archive").join("agents").join(id);
+                let (name, dir, lifecycle) = match live {
+                    Some(a) => (
+                        a.name.clone(),
+                        hooks.place.agent_dir(id),
+                        if hooks.is_running(id) {
+                            "running"
+                        } else if a.paused {
+                            "paused"
+                        } else {
+                            "idle"
+                        },
+                    ),
+                    None if archived_dir.is_dir() => {
+                        let name = arbos_core::Agent::load(&archived_dir)
+                            .map(|a| a.name)
+                            .unwrap_or_else(|_| id.clone());
+                        (name, archived_dir.clone(), "archived")
+                    }
+                    None => {
+                        rows.push(format!("{id}: no such agent"));
+                        continue;
+                    }
+                };
+                let mut line = format!("{id} ({name}) — {lifecycle}");
+                if lifecycle == "running"
+                    && let Some(st) = arbos_core::status::read(&hooks.place, id)
+                {
+                    line.push_str(&format!(", now: {}", st.step));
+                }
+                if let Some((verdict, outcome, ended)) = last_turn(&dir) {
+                    line.push_str(&format!(
+                        "; last turn {verdict}{}: {}",
+                        ended.map(|e| format!(" at {e}")).unwrap_or_default(),
+                        arbos_core::text::clip(&outcome, 160)
+                    ));
+                }
+                if let Some(pr) = prs.iter().rev().find(|p| p.agent == *id) {
+                    line.push_str(&format!("; PR {}", pr.url));
+                }
+                rows.push(line);
+            }
+            if rows.is_empty() {
+                return Ok(ToolOut::text("You have no workers."));
+            }
+            Ok(ToolOut::text(rows.join("\n")))
+        })
+    }
+}
+
+/// `(verdict, outcome, ended)` of the newest closed turn folder under an
+/// agent dir, from its `meta.toml`.
+fn last_turn(agent_dir: &std::path::Path) -> Option<(String, String, Option<String>)> {
+    let turns = agent_dir.join("turns");
+    let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&turns)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    for dir in dirs.into_iter().rev() {
+        let Ok(meta) = std::fs::read_to_string(dir.join("meta.toml")) else {
+            continue;
+        };
+        let Ok(v) = toml::from_str::<toml::Value>(&meta) else {
+            continue;
+        };
+        let get = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+        if get("ended").is_none() {
+            return Some(("in flight".into(), String::new(), None));
+        }
+        return Some((
+            get("verdict").unwrap_or_else(|| "ended".into()),
+            get("outcome").unwrap_or_default(),
+            get("ended"),
+        ));
+    }
+    None
+}
+
+/// `transcript agent [mode] [max_turns]`: Cursor's ReadAgentTranscript —
+/// a worker's transcript rendered readably: the last N turns inline
+/// (tail), or the whole thing written to a file whose path leads the
+/// result (full).
+pub struct Transcript(pub Arc<KernelHooks>);
+
+const TRANSCRIPT_INLINE_CAP: usize = 12_000;
+
+impl Tool for Transcript {
+    fn name(&self) -> &'static str {
+        "transcript"
+    }
+    fn schema(&self) -> Value {
+        typed_schema(
+            "transcript",
+            "Read a worker's transcript as prose: what it was asked, said, and ran. mode tail (default) shows its last max_turns turns (default 10, max 50) inline; mode full writes the whole rendering to a file and returns the path with the head. One bounded look when a result is needed now — never a loop; the [done] message is the normal way to hear from a worker.",
+            &[
+                (
+                    "agent",
+                    "A worker of yours (id or name), or yourself.",
+                    true,
+                    "string",
+                ),
+                ("mode", "tail (default) or full.", false, "string"),
+                (
+                    "max_turns",
+                    "tail: how many turns (default 10, max 50).",
+                    false,
+                    "integer",
+                ),
+            ],
+        )
+    }
+    fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
+        Ok(Plan::access(Access::none()))
+    }
+    fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
+        let hooks = Arc::clone(&self.0);
+        Box::pin(async move {
+            let me = cx.agent.id.as_str();
+            let who = req(&args, "agent")?.trim().to_string();
+            let all = arbos_core::list_agents(&hooks.place).unwrap_or_default();
+            let id = all
+                .iter()
+                .find(|a| a.id.as_str() == who || a.name == who)
+                .map(|a| a.id.to_string())
+                .unwrap_or(who.clone());
+            let mine = hooks.descendants(me);
+            let dir = if mine.iter().any(|m| *m == id) {
+                hooks.place.agent_dir(&id)
+            } else if hooks
+                .place
+                .arbos()
+                .join("archive/agents")
+                .join(&id)
+                .is_dir()
+            {
+                hooks.place.arbos().join("archive/agents").join(&id)
+            } else {
+                anyhow::bail!(
+                    "transcript: {who} is not a worker of yours (or you); a peer's transcript is theirs"
+                );
+            };
+            let events =
+                arbos_core::load_transcript(&dir.join("transcript.jsonl")).unwrap_or_default();
+            let mode = opt_str(&args, "mode")
+                .unwrap_or("tail")
+                .trim()
+                .to_ascii_lowercase();
+            let max_turns = args
+                .get("max_turns")
+                .and_then(Value::as_u64)
+                .map(|n| (n as usize).clamp(1, 50))
+                .unwrap_or(10);
+            let rendered = render_transcript(&events);
+            match mode.as_str() {
+                "full" | "all" => {
+                    let results = hooks.place.agent_dir(me).join("results");
+                    std::fs::create_dir_all(&results)?;
+                    let path = results.join(format!("transcript-{id}.txt"));
+                    std::fs::write(&path, &rendered)?;
+                    let head: String = rendered.chars().take(2_000).collect();
+                    Ok(ToolOut::with_paths(
+                        format!(
+                            "{} ({} turns, {} lines). Head:\n{head}{}",
+                            path.display(),
+                            events
+                                .iter()
+                                .filter(|e| matches!(
+                                    e.kind,
+                                    arbos_core::EventKind::TurnComplete { .. }
+                                ))
+                                .count(),
+                            rendered.lines().count(),
+                            if rendered.chars().count() > 2_000 {
+                                "\n…"
+                            } else {
+                                ""
+                            }
+                        ),
+                        vec![path.display().to_string()],
+                    ))
+                }
+                "tail" | "" => {
+                    // The last N turns: cut at the wake lines from the end.
+                    let mut starts: Vec<usize> = events
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| matches!(e.kind, arbos_core::EventKind::Wake { .. }))
+                        .map(|(i, _)| i)
+                        .collect();
+                    let from = if starts.len() > max_turns {
+                        starts.drain(..starts.len() - max_turns);
+                        starts.first().copied().unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let tail = render_transcript(&events[from..]);
+                    let shown = if tail.chars().count() > TRANSCRIPT_INLINE_CAP {
+                        let cut: String = tail
+                            .chars()
+                            .rev()
+                            .take(TRANSCRIPT_INLINE_CAP)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        format!("…{cut}")
+                    } else {
+                        tail
+                    };
+                    Ok(ToolOut::text(format!(
+                        "{id}: last {} turn(s) of {}\n{shown}",
+                        starts
+                            .len()
+                            .max(if from == 0 { 1 } else { 0 })
+                            .min(max_turns),
+                        events
+                            .iter()
+                            .filter(|e| matches!(e.kind, arbos_core::EventKind::Wake { .. }))
+                            .count()
+                    )))
+                }
+                other => anyhow::bail!("transcript: mode must be tail or full, not {other:?}"),
+            }
+        })
+    }
+}
+
+/// A transcript as prose: who said what, which tools ran (with an error
+/// when one failed), how each turn ended. Thinking and folds are left out.
+fn render_transcript(events: &[arbos_core::Event]) -> String {
+    use arbos_core::EventKind;
+    let mut out = String::new();
+    for e in events {
+        match &e.kind {
+            EventKind::Wake { wake, text } => {
+                out.push_str(&format!("\n== turn ({wake})\n"));
+                if let Some(t) = text {
+                    out.push_str(&format!("wake: {}\n", arbos_core::text::clip(t, 400)));
+                }
+            }
+            EventKind::User { text, .. } => {
+                out.push_str(&format!("user: {}\n", arbos_core::text::clip(text, 600)));
+            }
+            EventKind::Assistant { text, .. } if !text.trim().is_empty() => {
+                out.push_str(&format!("agent: {text}\n"));
+            }
+            EventKind::Tool(t) => {
+                out.push_str(&format!("tool {}", t.name));
+                if !t.paths.is_empty() {
+                    out.push_str(&format!(" {}", t.paths.join(" ")));
+                }
+                if let Some(err) = &t.error {
+                    out.push_str(&format!(" — error: {}", arbos_core::text::clip(err, 200)));
+                }
+                out.push('\n');
+            }
+            EventKind::Say { from, text } => {
+                out.push_str(&format!("[{from}] {}\n", arbos_core::text::clip(text, 400)));
+            }
+            EventKind::Ask { question, .. } => out.push_str(&format!("ask: {question}\n")),
+            EventKind::Answer { text } => out.push_str(&format!("answer: {text}\n")),
+            EventKind::Interrupted { detail } => {
+                out.push_str(&format!("interrupted: {detail}\n"));
+            }
+            EventKind::Notice { text, failed } => {
+                out.push_str(&format!(
+                    "{}: {}\n",
+                    if *failed { "failed" } else { "notice" },
+                    text
+                ));
+            }
+            EventKind::TurnComplete { usage } => {
+                out.push_str(&format!(
+                    "-- turn complete{}\n",
+                    usage
+                        .as_ref()
+                        .and_then(|u| u.cost)
+                        .map(|c| format!(" (${c:.2})"))
+                        .unwrap_or_default()
+                ));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 pub struct Browser(pub Arc<KernelHooks>);
 pub struct Terminal {
     pub hooks: Arc<KernelHooks>,
