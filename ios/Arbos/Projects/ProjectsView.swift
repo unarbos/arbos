@@ -29,11 +29,11 @@ struct ProjectsView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     topBar
                     Text("Projects")
-                        .font(.system(size: 26, weight: .semibold))
+                        .font(ArbosTheme.title)
                         .foregroundStyle(ArbosTheme.text)
-                        .padding(.horizontal, ArbosTheme.gutter + 6)
-                        .padding(.top, 2)
-                        .padding(.bottom, 18)
+                        .padding(.horizontal, ArbosTheme.gutter)
+                        .padding(.top, 0)
+                        .padding(.bottom, 22)
                     if searching { searchField }
                     if !working.isEmpty {
                         section("Working", open: $workingOpen, rows: working)
@@ -86,14 +86,14 @@ struct ProjectsView: View {
                 HStack(spacing: 6) {
                     Text(title)
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 12, weight: .medium))
                         .rotationEffect(.degrees(open.wrappedValue ? 0 : -90))
                 }
-                .font(ArbosTheme.callout)
+                .font(ArbosTheme.body)
                 .foregroundStyle(ArbosTheme.textFaint)
-                .padding(.horizontal, ArbosTheme.gutter + 6)
-                .padding(.top, 10)
-                .padding(.bottom, 8)
+                .padding(.horizontal, ArbosTheme.gutter)
+                .padding(.top, 8)
+                .padding(.bottom, 10)
             }
             .buttonStyle(.plain)
             if open.wrappedValue {
@@ -107,7 +107,7 @@ struct ProjectsView: View {
                 }
             }
         }
-        .padding(.bottom, 10)
+        .padding(.bottom, 28)
     }
 
     private func step(for entry: ProjectEntry) -> String? {
@@ -139,9 +139,9 @@ struct ProjectsView: View {
                     .allowsHitTesting(false)
             }
         }
-        .padding(.horizontal, ArbosTheme.gutter + 6)
-        .padding(.top, 6)
-        .padding(.bottom, 12)
+        .padding(.horizontal, ArbosTheme.gutter)
+        .padding(.top, 4)
+        .padding(.bottom, 2)
     }
 
     private var searchField: some View {
@@ -160,7 +160,7 @@ struct ProjectsView: View {
             RoundedRectangle(cornerRadius: ArbosTheme.promptRadius, style: .continuous)
                 .fill(ArbosTheme.inputBg)
         )
-        .padding(.horizontal, ArbosTheme.gutter + 6)
+        .padding(.horizontal, ArbosTheme.gutter)
         .padding(.bottom, 8)
     }
 
@@ -177,7 +177,7 @@ struct ProjectsView: View {
         }
         .font(ArbosTheme.callout)
         .foregroundStyle(ArbosTheme.textFaint)
-        .padding(.horizontal, ArbosTheme.gutter + 6)
+        .padding(.horizontal, ArbosTheme.gutter)
         .padding(.top, 8)
     }
 
@@ -212,11 +212,10 @@ struct ProjectRow: View {
     var step: String?
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: 8) {
             statusGlyph
-                .frame(width: 22, height: 22)
-                .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 4) {
+                .frame(width: 20, height: 22)
+            VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(entry.title)
                         .font(ArbosTheme.body)
@@ -241,13 +240,13 @@ struct ProjectRow: View {
                 .font(ArbosTheme.callout)
             }
         }
-        .padding(.horizontal, ArbosTheme.gutter + 6)
-        .padding(.vertical, 12)
+        .padding(.horizontal, ArbosTheme.gutter)
+        .padding(.vertical, 15)
         .contentShape(Rectangle())
         .overlay(alignment: .bottom) {
             Rectangle().fill(ArbosTheme.border).frame(height: 0.5)
-                .padding(.leading, ArbosTheme.gutter + 6 + 34)
-                .padding(.trailing, ArbosTheme.gutter + 6)
+                .padding(.leading, ArbosTheme.gutter + 28)
+                .padding(.trailing, ArbosTheme.gutter)
         }
     }
 
@@ -255,15 +254,15 @@ struct ProjectRow: View {
     private var statusGlyph: some View {
         if working {
             BrailleSpinner(tint: entry.identity.tint)
-                .font(.system(size: 13, design: .monospaced))
+                .font(.system(size: 15, design: .monospaced))
         } else if entry.live {
             Image(systemName: entry.identity.symbol)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(entry.identity.tint)
         } else {
             Circle()
                 .fill(ArbosTheme.textDim.opacity(0.6))
-                .frame(width: 8, height: 8)
+                .frame(width: 9, height: 9)
         }
     }
 
@@ -287,7 +286,7 @@ struct RoundButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(ArbosTheme.text)
                 .frame(width: 44, height: 44)
                 .background(Circle().fill(ArbosTheme.raised))
@@ -312,10 +311,11 @@ struct ComposerBar: View {
     var body: some View {
         HStack(alignment: .bottom, spacing: 10) {
             Image(systemName: "plus")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(ArbosTheme.textDim)
-                .frame(width: 30, height: 30)
+                .font(.system(size: 17, weight: .regular))
+                .foregroundStyle(ArbosTheme.textMuted)
+                .frame(width: 28, height: 28)
                 .background(Circle().fill(ArbosTheme.raisedHover))
+                .padding(.bottom, 1)
             Group {
                 if let focus {
                     TextField(placeholder, text: $text, axis: .vertical).focused(focus)
@@ -327,41 +327,43 @@ struct ComposerBar: View {
             .lineLimit(1...6)
             .foregroundStyle(ArbosTheme.text)
             .tint(ArbosTheme.accent)
-            .padding(.vertical, 5)
+            .padding(.vertical, 4)
             .submitLabel(.send)
             .onSubmit { if canSend { onSend() } }
             if canSend {
                 Button(action: onSend) {
                     Image(systemName: "arrow.up")
-                        .font(.system(size: 13, weight: .bold))
+                        .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(Color.black)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 28, height: 28)
                         .background(Circle().fill(ArbosTheme.text))
+                        .padding(.bottom, 1)
                 }
                 .buttonStyle(.plain)
             } else {
                 Button(action: onMic) {
                     Image(systemName: "mic.fill")
-                        .font(.system(size: 15, weight: .medium))
+                        .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(micEnabled ? ArbosTheme.text : ArbosTheme.textDim)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 28, height: 28)
+                        .padding(.bottom, 1)
                 }
                 .buttonStyle(.plain)
                 .disabled(!micEnabled)
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
         .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .fill(ArbosTheme.inputBg)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
                         .strokeBorder(ArbosTheme.border, lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
         )
-        .padding(.horizontal, ArbosTheme.gutter)
-        .padding(.bottom, 8)
+        .padding(.horizontal, ArbosTheme.barMargin)
+        .padding(.bottom, 10)
     }
 }
