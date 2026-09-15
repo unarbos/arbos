@@ -289,6 +289,17 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                     webhook(req, peer, &accept_access, &accept_hooks).await;
                     return;
                 }
+                // A plain GET (a health probe, a browser): a small HTTP
+                // reply, then closed — not an attach, not a refusal.
+                if let attach::Conn::Http { stream, path } = conn {
+                    let auth = if accept_access.has_clients() {
+                        "token"
+                    } else {
+                        "loopback"
+                    };
+                    attach::answer_http(stream, &path, klog::version(), PROTOCOL, auth).await;
+                    return;
+                }
                 let (r, w, who) = match admit(conn, peer, &accept_access).await {
                     Ok(x) => x,
                     Err(e) => {
@@ -1487,7 +1498,7 @@ async fn admit(
     // A WebSocket peer may have logged in on the upgrade request itself.
     let presented = match &conn {
         attach::Conn::Ws(_, up) => access::token_from_request(&up.uri, up.authorization.as_deref()),
-        attach::Conn::Tcp(_) | attach::Conn::Hook(_) => None,
+        attach::Conn::Tcp(_) | attach::Conn::Hook(_) | attach::Conn::Http { .. } => None,
     };
     let (mut r, mut w) = conn.split();
     let token = match presented {
