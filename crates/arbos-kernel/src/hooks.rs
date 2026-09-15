@@ -604,6 +604,28 @@ impl KernelHooks {
         self.inbox_with(agent, text, from, attachments, "", "", "")
     }
 
+    /// Root's kickoff turn for a place opened for the first time: filed
+    /// once, only while root has no turn on record and is not running.
+    /// True when it was filed.
+    pub fn kickoff(&self, agent: &str) -> Result<bool> {
+        let transcript = self.layout(agent).transcript();
+        let has_turns = arbos_core::load_transcript(&transcript)
+            .map(|events| events.iter().any(|e| e.is_wake()))
+            .unwrap_or(false);
+        if has_turns || self.is_live(agent) {
+            return Ok(false);
+        }
+        let mut msg = inbox::Message::new(
+            "kernel".to_string(),
+            "kickoff",
+            arbos_core::store::place_kickoff_brief(&self.place),
+        );
+        msg.wake = true;
+        msg.hops = 0;
+        self.deliver(agent, &msg)?;
+        Ok(true)
+    }
+
     /// The user's own prompt, with where it came from: `channel` (voice |
     /// text) and `device`, as the `user` frame carries them (#99).
     pub fn inbox_user(

@@ -291,6 +291,15 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         model: String,
     },
+    /// Client → kernel: a place was just opened for the first time; run
+    /// root's kickoff turn (read the folder, seed the context file and
+    /// the page, greet in two lines, no spawns, no questions). A no-op
+    /// once root has any turn on record, so a second open sends nothing
+    /// twice. Cursor's "Setting up environment" turn on a new Project.
+    Kickoff {
+        #[serde(default = "root_agent")]
+        agent: String,
+    },
     Pause {
         agent: String,
         paused: bool,
@@ -452,4 +461,8 @@ pub struct Entry {
     /// Unix millis of the last write, when the file system says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified: Option<i64>,
+}
+
+fn root_agent() -> String {
+    crate::ROOT_ID.to_string()
 }

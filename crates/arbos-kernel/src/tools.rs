@@ -531,6 +531,11 @@ impl Tool for Spawn {
             if arbos_core::spend::over_cap(&hooks.place) {
                 anyhow::bail!("spawn: {}", arbos_core::spend::refusal(&hooks.place));
             }
+            if arbos_core::store::turn_is_kickoff(&cx.place, cx.agent.id.as_str()) {
+                anyhow::bail!(
+                    "spawn: not in the kickoff turn — look at the folder, seed the context file and the page, greet, and end; the user's first ask is what workers are for"
+                );
+            }
             let name = opt_str(&args, "name")
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
@@ -1246,6 +1251,11 @@ impl Tool for Ask {
         let hooks = Arc::clone(&self.0);
         Box::pin(async move {
             let q = req(&args, "question")?;
+            if arbos_core::store::turn_is_kickoff(&cx.place, cx.agent.id.as_str()) {
+                anyhow::bail!(
+                    "ask: not in the kickoff turn — the greeting's second line asks what to work on; end the turn and the user's reply opens the next"
+                );
+            }
             let options = opt_strings(&args, "options");
             let wait = opt_bool(&args, "wait").unwrap_or(true);
             // The question is a file either way (restart-safe). Parked: the

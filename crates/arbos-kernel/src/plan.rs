@@ -216,6 +216,7 @@ fn wake_from_message(
             hooks.notes_nudge.lock().unwrap().remove(agent.id.as_str());
             (WakeKind::User, Some(msg.body.clone()))
         }
+        ("kickoff", "kernel") => (WakeKind::Kickoff, Some(msg.body.clone())),
         (_, "kernel") => (WakeKind::Plan, Some(msg.body.clone())),
         (_, who) if who.starts_with("subscription:") => (WakeKind::Plan, Some(msg.body.clone())),
         (_, who) if who.starts_with("user:") => (WakeKind::User, Some(msg.body.clone())),

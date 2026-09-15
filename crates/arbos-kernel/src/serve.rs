@@ -687,6 +687,7 @@ fn handle_frame(
         | Frame::Compact { agent }
         | Frame::Answer { agent, .. }
         | Frame::Approve { agent, .. }
+        | Frame::Kickoff { agent }
         | Frame::Undo { agent }
         | Frame::SetModel { agent, .. }
         | Frame::PlanOp { agent, .. } => Some(agent.clone()),
@@ -938,6 +939,14 @@ fn handle_frame(
             }
             resolve_approve(hooks, place, agent, call_id, allow);
         }
+        Frame::Kickoff { agent } => match hooks.kickoff(&agent) {
+            Ok(true) => {
+                crate::klog::info("kickoff", Some(&agent), "first open: kickoff turn filed");
+                hooks.kick();
+            }
+            Ok(false) => {}
+            Err(e) => refuse(hooks, Some(&agent), format!("kickoff: {e:#}")),
+        },
         Frame::Undo { agent } => {
             let cwd = load_agent(place, &arbos_core::AgentId::new(&agent))
                 .ok()
