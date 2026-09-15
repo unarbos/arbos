@@ -4,7 +4,9 @@
 //! signed app bundle talks to Apple Speech. Live partials land in a file.
 //! Stop writes a sentinel and waits for the transcript.
 
-use anyhow::{Context, Result, anyhow};
+#[cfg(target_os = "macos")]
+use anyhow::Context;
+use anyhow::{Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -16,8 +18,10 @@ use std::hash::{Hash, Hasher};
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
+#[cfg(target_os = "macos")]
 const SWIFT: &str = include_str!("voice_dictate.swift");
 
+#[cfg(target_os = "macos")]
 const PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
