@@ -68,6 +68,12 @@ pub fn is_repo(place: &Path) -> bool {
 /// Make the worktree. Fails, leaving nothing behind, when the place is not
 /// a repository, has no commit yet, or the branch or folder already exists.
 pub fn create(place: &Path, id: &str) -> Result<Worktree> {
+    create_from(place, id, None)
+}
+
+/// `create`, cutting the branch from `base` (a branch, tag, or sha; Cursor's
+/// "base branch" on `CreateAgent`) instead of HEAD. `None` is HEAD.
+pub fn create_from(place: &Path, id: &str, base: Option<&str>) -> Result<Worktree> {
     let out = git(place, &["rev-parse", "--is-inside-work-tree"])?;
     if !out.status.success() || String::from_utf8_lossy(&out.stdout).trim() != "true" {
         bail!(
@@ -75,11 +81,25 @@ pub fn create(place: &Path, id: &str) -> Result<Worktree> {
             place.display()
         );
     }
-    let head = git(place, &["rev-parse", "--short", "HEAD"])?;
+    let start = base
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .unwrap_or("HEAD");
+    let head = git(
+        place,
+        &["rev-parse", "--short", &format!("{start}^{{commit}}")],
+    )?;
     if !head.status.success() {
+        if start == "HEAD" {
+            bail!(
+                "isolate=worktree needs at least one commit in {}; HEAD has none",
+                place.display()
+            );
+        }
         bail!(
-            "isolate=worktree needs at least one commit in {}; HEAD has none",
-            place.display()
+            "base {start:?} is not a commit in {}: {}",
+            place.display(),
+            String::from_utf8_lossy(&head.stderr).trim()
         );
     }
     let base = String::from_utf8_lossy(&head.stdout).trim().to_string();
@@ -105,7 +125,7 @@ pub fn create(place: &Path, id: &str) -> Result<Worktree> {
     let _ = git(place, &["worktree", "prune"]);
     std::fs::create_dir_all(path.parent().expect("worktrees dir"))?;
     let path_s = path.to_string_lossy().into_owned();
-    let added = git(place, &["worktree", "add", "-b", &branch, &path_s, "HEAD"])?;
+    let added = git(place, &["worktree", "add", "-b", &branch, &path_s, start])?;
     if !added.status.success() {
         let _ = std::fs::remove_dir_all(&path);
         bail!(
@@ -289,6 +309,36 @@ mod cleanup_tests {
             assert!(git(&dir, &args).unwrap().status.success(), "git {args:?}");
         }
         dir
+    }
+
+    #[test]
+    fn a_worktree_is_cut_from_the_base_it_is_given() {
+        let dir = repo("base");
+        for args in [
+            vec!["branch", "-q", "release"],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "later on main",
+            ],
+        ] {
+            assert!(git(&dir, &args).unwrap().status.success(), "git {args:?}");
+        }
+        let release = git(&dir, &["rev-parse", "--short", "release"]).unwrap();
+        let release = String::from_utf8_lossy(&release.stdout).trim().to_string();
+        let wt = create_from(&dir, "w-base", Some("release")).unwrap();
+        assert_eq!(wt.base, release, "the branch starts at the base, not HEAD");
+        let head = git(&wt.path, &["rev-parse", "--short", "HEAD"]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), release);
+        let err = create_from(&dir, "w-nope", Some("no-such-branch")).unwrap_err();
+        assert!(err.to_string().contains("is not a commit"), "{err}");
+        assert!(!Worktree::path_for(&dir, "w-nope").exists());
     }
 
     fn branch_exists(place: &Path, branch: &str) -> bool {

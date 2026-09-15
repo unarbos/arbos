@@ -242,10 +242,15 @@ fn wake_from_message(
     let lo = load_transcript(&hooks.layout(agent.id.as_str()).transcript())
         .map(|e| e.len() as u64)
         .unwrap_or(0);
+    let title_line = if msg.title.is_empty() {
+        String::new()
+    } else {
+        format!("title = {}\n", toml_string(&msg.title))
+    };
     let _ = std::fs::write(
         turn_dir.join("meta.toml"),
         format!(
-            "started = \"{}\"\nfrom = \"{}\"\nkind = \"{}\"\ntranscript_lo = {lo}\n",
+            "started = \"{}\"\nfrom = \"{}\"\nkind = \"{}\"\n{title_line}transcript_lo = {lo}\n",
             inbox::rfc3339(arbos_core::now_ms()),
             msg.from,
             msg.kind
@@ -261,6 +266,7 @@ fn wake_from_message(
         channel: msg.channel.clone(),
         device: msg.device.clone(),
         model: msg.model.clone(),
+        title: msg.title.clone(),
     })
 }
 

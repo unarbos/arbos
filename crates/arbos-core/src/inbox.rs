@@ -60,6 +60,11 @@ pub struct Message {
     /// A model for the turn this message opens, and that turn only.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
+    /// The short label of the turn this message opens (Cursor's
+    /// `SendToAgent … title`): shown as the agent's live line until it
+    /// says a step of its own, and kept in the turn's `meta.toml`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
     #[serde(skip)]
     pub body: String,
 }
@@ -77,6 +82,7 @@ impl Default for Message {
             channel: String::new(),
             device: String::new(),
             model: String::new(),
+            title: String::new(),
             body: String::new(),
         }
     }

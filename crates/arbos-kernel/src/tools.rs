@@ -140,6 +140,12 @@ impl Tool for Spawn {
                     "string",
                 ),
                 (
+                    "base",
+                    "With isolate=worktree: the branch, tag, or sha the worker's branch is cut from (default HEAD).",
+                    false,
+                    "string",
+                ),
+                (
                     "host",
                     "Leave out to run here. Else a name from Machines.",
                     false,
@@ -258,9 +264,10 @@ impl Tool for Spawn {
             let brief_owned = brief.to_string();
             let name_owned = name.map(str::to_string);
             let model_owned = model.map(str::to_string);
+            let base_owned = opt_str(&args, "base").map(str::to_string);
             let spawner = Arc::clone(&hooks);
             let (id, worktree) = tokio::task::spawn_blocking(move || {
-                spawner.spawn_named(
+                spawner.spawn_based(
                     &agent,
                     name_owned.as_deref(),
                     &brief_owned,
@@ -270,6 +277,7 @@ impl Tool for Spawn {
                     cwd,
                     isolate,
                     kind_owned.as_deref(),
+                    base_owned.as_deref(),
                 )
             })
             .await
@@ -344,6 +352,16 @@ impl Tool for Say {
                     "note (default), request, steer, or stop (end a worker's turn now; its done brings what it had).",
                     false,
                 ),
+                (
+                    "title",
+                    "Short label of the turn this opens for a worker of yours (\"Add the echo gate\"): its live line until it says a step; kept on the turn. Not for the user.",
+                    false,
+                ),
+                (
+                    "rename",
+                    "A new durable name for a worker of yours, only when its assignment changed.",
+                    false,
+                ),
             ],
         )
     }
@@ -388,7 +406,15 @@ impl Tool for Say {
                 .await?;
                 return Ok(ToolOut::text(receipt));
             }
-            let receipt = hooks.say(&cx.agent.id, to, text, mode, cx.hops)?;
+            let receipt = hooks.say_titled(
+                &cx.agent.id,
+                to,
+                text,
+                mode,
+                cx.hops,
+                opt_str(&args, "title"),
+                opt_str(&args, "rename"),
+            )?;
             Ok(ToolOut::text(receipt))
         })
     }
