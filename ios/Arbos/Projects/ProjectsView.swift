@@ -32,8 +32,8 @@ struct ProjectsView: View {
                         .font(ArbosTheme.title)
                         .foregroundStyle(ArbosTheme.text)
                         .padding(.horizontal, ArbosTheme.gutter)
-                        .padding(.top, 4)
-                        .padding(.bottom, 20)
+                        .padding(.top, 0)
+                        .padding(.bottom, 22)
                     if searching { searchField }
                     if !working.isEmpty {
                         section("Working", open: $workingOpen, rows: working)
@@ -141,7 +141,7 @@ struct ProjectsView: View {
         }
         .padding(.horizontal, ArbosTheme.gutter)
         .padding(.top, 4)
-        .padding(.bottom, 14)
+        .padding(.bottom, 2)
     }
 
     private var searchField: some View {
