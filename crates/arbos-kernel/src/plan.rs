@@ -477,7 +477,14 @@ fn retire_page_rows(hooks: &KernelHooks, id: &str, archived: &std::path::Path) {
     } else {
         format!("worker stopped: {}", arbos_core::text::clip(&outcome, 100))
     };
-    let target = format!("archive/agents/{id}");
+    // A worker's code change shows its PR when it opened one, else the
+    // worker (its archive); never both (Cursor's page rule).
+    let target = arbos_core::load_prs(&hooks.place)
+        .into_iter()
+        .rev()
+        .find(|pr| pr.agent == id)
+        .map(|pr| pr.url)
+        .unwrap_or_else(|| format!("archive/agents/{id}"));
     // Numbers shift as rows are checked (done ones sink), so each pass
     // looks the row up again by its target.
     for _ in 0..rows.len() {
