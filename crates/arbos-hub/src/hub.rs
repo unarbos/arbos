@@ -127,19 +127,20 @@ impl MachineEntry {
     }
 
     /// The sharing mode of a project here: its own, else its parent
-    /// project's for a worktree, else mesh.
-    fn share_of(&self, project: &str, parent: Option<&str>) -> String {
+    /// project's for a worktree, else the hub's default (`mesh` while one
+    /// user holds every token, `private` once another person's joins).
+    fn share_of(&self, project: &str, parent: Option<&str>, default: &str) -> String {
         self.shares
             .get(project)
             .or_else(|| parent.and_then(|pp| self.shares.get(pp)))
             .cloned()
-            .unwrap_or_else(|| arbos_core::hub::SHARE_MESH.to_string())
+            .unwrap_or_else(|| default.to_string())
     }
 
     /// This machine as `viewer` (a `(user, role)` from its token) sees
     /// it: every project carries its store address and, with a viewer,
     /// what that viewer may do there.
-    fn info(&self, name: &str, viewer: Option<(&str, &str)>) -> MachineInfo {
+    fn info(&self, name: &str, viewer: Option<(&str, &str)>, default_share: &str) -> MachineInfo {
         let access = |share: &str| match viewer {
             Some((user, role)) => {
                 arbos_core::hub::store_access(share, user, role, &self.owner_user).to_string()
@@ -152,7 +153,7 @@ impl MachineEntry {
             .iter()
             .map(|(p, r)| {
                 let parent = self.worktree_of(p);
-                let share = self.share_of(p, parent.as_deref());
+                let share = self.share_of(p, parent.as_deref(), default_share);
                 ProjectInfo {
                     name: p.clone(),
                     place: r.place.clone().unwrap_or_default(),
@@ -176,7 +177,7 @@ impl MachineEntry {
             .collect();
         for p in &self.worker_projects {
             if !self.kernels.contains_key(p) {
-                let share = self.share_of(p, None);
+                let share = self.share_of(p, None, default_share);
                 projects.push(ProjectInfo {
                     name: p.clone(),
                     place: String::new(),
@@ -218,17 +219,49 @@ struct Inner {
 #[derive(Default)]
 pub struct Hub {
     inner: Mutex<Inner>,
+    /// The share mode of a project that sets none: from the token file's
+    /// user count at start (`Auth::default_share`).
+    default_share: &'static str,
 }
 
 impl Hub {
+    pub fn new(default_share: &'static str) -> Self {
+        Self {
+            inner: Mutex::default(),
+            default_share,
+        }
+    }
+
     /// The roster as `viewer` (a token's `(user, role)`) sees it: with
     /// each store's address and the viewer's access to it. `None` leaves
     /// `access` empty.
     pub fn roster_for(&self, viewer: Option<(&str, &str)>) -> Vec<MachineInfo> {
         let g = self.inner.lock().unwrap();
-        let mut out: Vec<MachineInfo> = g.machines.iter().map(|(n, e)| e.info(n, viewer)).collect();
+        let mut out: Vec<MachineInfo> = g
+            .machines
+            .iter()
+            .map(|(n, e)| e.info(n, viewer, self.default_share))
+            .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
+    }
+
+    /// What `who` may do in `machine`'s `project` store: its token role
+    /// capped by the project's share mode. `none` when the machine or
+    /// project is unknown, so a name that is not there reads as no access.
+    pub fn access_of(&self, machine: &str, project: &str, who: &Identity) -> String {
+        let g = self.inner.lock().unwrap();
+        let Some(entry) = g
+            .machines
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(machine))
+            .map(|(_, e)| e)
+        else {
+            return "none".into();
+        };
+        let parent = entry.worktree_of(project);
+        let share = entry.share_of(project, parent.as_deref(), self.default_share);
+        arbos_core::hub::store_access(&share, who.user(), who.role(), &entry.owner_user).to_string()
     }
 
     /// Every registrant hears the roster after a change, each with its own
@@ -606,13 +639,45 @@ pub async fn attach(
             return;
         }
     };
-    proxy(ws, who, kernel).await;
+    // The project's share mode caps the token: a private project of
+    // another user is closed to this client; a writer on an open project
+    // stays a writer.
+    let access = hub.access_of(
+        &kernel.machine,
+        kernel.project.as_deref().unwrap_or_default(),
+        &who,
+    );
+    if access == "none" {
+        let (name, _) = who.as_client();
+        eprintln!(
+            "hub: {name} refused on {}/{}: the project is not shared with them",
+            kernel.machine,
+            kernel.project.as_deref().unwrap_or("-")
+        );
+        let _ = send_json(
+            &mut ws,
+            &Frame::Error {
+                agent: None,
+                detail: format!(
+                    "hub: no access to {}/{}: the project is not shared with you",
+                    kernel.machine,
+                    kernel.project.as_deref().unwrap_or("-")
+                ),
+            },
+        )
+        .await;
+        return;
+    }
+    proxy(ws, who, kernel, &access).await;
 }
 
 /// Join one client socket to one kernel channel until either side ends.
-async fn proxy(mut ws: Ws, who: Identity, kernel: Arc<Registrant>) {
+/// `role` is what the client may do there: its token role capped by the
+/// project's share mode.
+async fn proxy(mut ws: Ws, who: Identity, kernel: Arc<Registrant>, role: &str) {
     let (to_client, mut from_kernel) = mpsc::unbounded_channel::<Frame>();
-    let (name, role) = who.as_client();
+    let (name, _) = who.as_client();
+    let role = role.to_string();
     let chan = kernel.open(to_client, &name, &role);
     eprintln!(
         "hub: {name} ({role}) attached to {}/{} chan {chan}",
@@ -799,7 +864,14 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
     if !send_json(&mut ws, &answer).await {
         return;
     }
-    proxy(ws, who, kernel).await;
+    let access = hub.access_of(&kernel.machine, &served, &who);
+    let access = if access == "none" {
+        // The claimer started this kernel; it is at least a writer there.
+        "writer".to_string()
+    } else {
+        access
+    };
+    proxy(ws, who, kernel, &access).await;
 }
 
 #[cfg(test)]
@@ -841,7 +913,7 @@ mod roster_face_tests {
                 color: "#336699".into(),
             },
         );
-        let info = entry.info("mac", None);
+        let info = entry.info("mac", None, "mesh");
         let by_name = |n: &str| info.projects.iter().find(|p| p.name == n).unwrap().clone();
         let arbos = by_name("arbos");
         assert!(arbos.live);
@@ -904,7 +976,7 @@ mod roster_face_tests {
                 color: "teal".into(),
             },
         );
-        let info = entry.info("arboslife", None);
+        let info = entry.info("arboslife", None, "mesh");
         let by_name = |n: &str| info.projects.iter().find(|p| p.name == n).unwrap().clone();
         let demo = by_name("demo");
         assert!(demo.kind.is_empty() && demo.parent.is_none());
@@ -958,7 +1030,7 @@ mod roster_face_tests {
         entry.shares.insert("diary".into(), "private".into());
         entry.shares.insert("blog".into(), "open".into());
         // No viewer: addresses and modes, no access.
-        let plain = entry.info("arboslife", None);
+        let plain = entry.info("arboslife", None, "mesh");
         let by = |info: &MachineInfo, n: &str| {
             info.projects.iter().find(|p| p.name == n).unwrap().clone()
         };
@@ -969,12 +1041,12 @@ mod roster_face_tests {
         assert_eq!(by(&plain, "demo--c1").store, "arbos://arboslife/demo--c1/");
         assert_eq!(by(&plain, "diary").share, "private");
         // Jacob's other machine: owner everywhere, private included.
-        let mine = entry.info("arboslife", Some(("owner", "owner")));
+        let mine = entry.info("arboslife", Some(("owner", "owner")), "mesh");
         assert_eq!(by(&mine, "demo").access, "owner");
         assert_eq!(by(&mine, "diary").access, "owner");
         assert_eq!(by(&mine, "blog").access, "owner");
         // Alice, a writer client of another user.
-        let alice = entry.info("arboslife", Some(("alice", "writer")));
+        let alice = entry.info("arboslife", Some(("alice", "writer")), "mesh");
         assert_eq!(by(&alice, "demo").access, "writer");
         assert_eq!(
             by(&alice, "demo--c1").access,
@@ -985,8 +1057,25 @@ mod roster_face_tests {
         assert_eq!(by(&alice, "blog").access, "writer");
         // A private worktree of a private project stays private.
         entry.shares.insert("demo".into(), "private".into());
-        let alice = entry.info("arboslife", Some(("alice", "writer")));
+        let alice = entry.info("arboslife", Some(("alice", "writer")), "mesh");
         assert_eq!(by(&alice, "demo--c1").access, "none");
+        // The hub's default for an unset project: mesh with one user on the
+        // hub, private once another person's token exists. `demo` above is
+        // set private now; `demo--c1` follows it; an unset project follows
+        // the default.
+        entry.shares.remove("demo");
+        let private_default = entry.info("arboslife", Some(("alice", "writer")), "private");
+        assert_eq!(by(&private_default, "demo").share, "private");
+        assert_eq!(by(&private_default, "demo").access, "none");
+        assert_eq!(by(&private_default, "demo--c1").access, "none");
+        assert_eq!(
+            by(&private_default, "blog").access,
+            "writer",
+            "an explicit open stays open"
+        );
+        let owner_default = entry.info("arboslife", Some(("owner", "owner")), "private");
+        assert_eq!(by(&owner_default, "demo").access, "owner");
+        entry.shares.insert("demo".into(), "private".into());
         let json = serde_json::to_value(&by(&alice, "blog")).unwrap();
         assert_eq!(json["store"], "arbos://arboslife/blog/");
         assert_eq!(json["access"], "writer");

@@ -49,12 +49,14 @@ async fn serve(auth: Arc<auth::Auth>, bind: String) -> Result<()> {
     let listener = TcpListener::bind(&bind)
         .await
         .with_context(|| format!("bind {bind}"))?;
-    let hub = Arc::new(hub::Hub::default());
+    let hub = Arc::new(hub::Hub::new(auth.default_share()));
     println!(
-        "arbos-hub {} listening on {} with {} identities",
+        "arbos-hub {} listening on {} with {} identities of {} user(s); an unset project's store is {} by default",
         env!("CARGO_PKG_VERSION"),
         listener.local_addr()?,
-        auth.len()
+        auth.len(),
+        auth.user_count(),
+        auth.default_share()
     );
     loop {
         let Ok((stream, peer)) = listener.accept().await else {
