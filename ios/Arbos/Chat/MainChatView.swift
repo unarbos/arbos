@@ -311,7 +311,7 @@ struct WorkingLine: View {
         TimelineView(.animation(minimumInterval: 1 / 30)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             let pulse = 0.55 + 0.45 * (sin(t * 2.2) * 0.5 + 0.5)
-            Text(step.isEmpty ? "Working" : "Working \(step)")
+            Text(step.isEmpty || step == "Starting" ? (step.isEmpty ? "Working" : "Starting") : "Working \(step)")
                 .font(ArbosTheme.body)
                 .foregroundStyle(ArbosTheme.textMuted.opacity(pulse))
                 .lineLimit(1)
