@@ -321,3 +321,267 @@ mod branch_tests {
         );
     }
 }
+
+/// One pull request as a repository-wide look records it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct PrRow {
+    pub title: String,
+    /// `OPEN` | `MERGED` | `CLOSED`.
+    pub state: String,
+    pub head: String,
+    pub author: String,
+    /// RFC 3339 when merged / closed, else empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub merged_at: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub closed_at: String,
+    /// check name → conclusion, for open pull requests.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub checks: BTreeMap<String, String>,
+    pub url: String,
+}
+
+/// One look at a repository's pull requests (`github_prs`): the newest
+/// `PRS_WINDOW` by update, every state, optionally one author's.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ReposSnapshot {
+    /// When the look was taken (ms): a merge or close older than the
+    /// previous look is history, not news.
+    pub at_ms: i64,
+    pub prs: BTreeMap<u64, PrRow>,
+}
+
+/// How many pull requests one look covers.
+pub const PRS_WINDOW: usize = 100;
+
+pub fn repo_snapshot(
+    repo: &str,
+    author: Option<&str>,
+    env: &[(String, String)],
+) -> Result<ReposSnapshot> {
+    let mut args: Vec<String> = vec![
+        "pr".into(),
+        "list".into(),
+        "--repo".into(),
+        repo.into(),
+        "--state".into(),
+        "all".into(),
+        "--limit".into(),
+        PRS_WINDOW.to_string(),
+        "--json".into(),
+        "number,title,state,headRefOid,author,mergedAt,closedAt,url,statusCheckRollup".into(),
+    ];
+    if let Some(a) = author.map(str::trim).filter(|a| !a.is_empty()) {
+        args.push("--author".into());
+        args.push(a.into());
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let v = gh(&refs, env)?;
+    Ok(rows_snapshot(&v, arbos_core::now_ms()))
+}
+
+/// The snapshot from `gh pr list --json …` output, at `at_ms`.
+pub fn rows_snapshot(list: &Value, at_ms: i64) -> ReposSnapshot {
+    let mut prs = BTreeMap::new();
+    for row in list.as_array().into_iter().flatten() {
+        let Some(number) = row.get("number").and_then(Value::as_u64) else {
+            continue;
+        };
+        let s = |k: &str| row.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let mut checks = BTreeMap::new();
+        if let Some(rollup) = row.get("statusCheckRollup").and_then(Value::as_array) {
+            for c in rollup {
+                let name = c
+                    .get("name")
+                    .or_else(|| c.get("context"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("check")
+                    .to_string();
+                let outcome = c
+                    .get("conclusion")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| c.get("state").and_then(Value::as_str))
+                    .or_else(|| c.get("status").and_then(Value::as_str))
+                    .unwrap_or("PENDING")
+                    .to_string();
+                checks.insert(name, outcome);
+            }
+        }
+        prs.insert(
+            number,
+            PrRow {
+                title: s("title"),
+                state: s("state").to_ascii_uppercase(),
+                head: s("headRefOid").chars().take(7).collect(),
+                author: row
+                    .get("author")
+                    .and_then(|a| a.get("login"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                merged_at: s("mergedAt"),
+                closed_at: s("closedAt"),
+                checks,
+                url: s("url"),
+            },
+        );
+    }
+    ReposSnapshot { at_ms, prs }
+}
+
+/// The news between two repository looks, one line each: `opened #N`,
+/// `merged #N`, `closed #N`, `new commits on #N`, `check X failed on
+/// #N` (and back to green). A pull request that only entered the window
+/// because something old about it was touched is not news; a merge or
+/// close counts only when it happened after the previous look.
+pub fn repo_diff(old: &ReposSnapshot, new: &ReposSnapshot) -> Vec<String> {
+    let mut lines = Vec::new();
+    let since = old.at_ms;
+    let after_prev = |ts: &str| -> bool {
+        arbos_core::parse_instant_ms(ts).is_some_and(|t| t >= since - 60_000)
+    };
+    let label = |n: u64, row: &PrRow| -> String {
+        let who = if row.author.is_empty() {
+            String::new()
+        } else {
+            format!(" by {}", row.author)
+        };
+        format!("#{n} {:?}{who} {}", row.title, row.url)
+            .trim_end()
+            .to_string()
+    };
+    for (n, row) in &new.prs {
+        match old.prs.get(n) {
+            None => match row.state.as_str() {
+                "OPEN" => lines.push(format!("opened {}", label(*n, row))),
+                "MERGED" if after_prev(&row.merged_at) => {
+                    lines.push(format!("merged {}", label(*n, row)))
+                }
+                "CLOSED" if after_prev(&row.closed_at) => {
+                    lines.push(format!("closed {}", label(*n, row)))
+                }
+                _ => {}
+            },
+            Some(prev) => {
+                if prev.state != row.state {
+                    match row.state.as_str() {
+                        "MERGED" => lines.push(format!("merged {}", label(*n, row))),
+                        "CLOSED" => lines.push(format!("closed {}", label(*n, row))),
+                        "OPEN" => lines.push(format!("reopened {}", label(*n, row))),
+                        other => lines.push(format!("#{n}: state {} → {other}", prev.state)),
+                    }
+                } else if row.state == "OPEN" && prev.head != row.head && !row.head.is_empty() {
+                    lines.push(format!("new commits on #{n} (head {})", row.head));
+                }
+                if row.state == "OPEN" {
+                    for (name, outcome) in &row.checks {
+                        let red = |o: &str| {
+                            matches!(
+                                o.to_ascii_uppercase().as_str(),
+                                "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
+                            )
+                        };
+                        match prev.checks.get(name) {
+                            Some(p) if p == outcome => {}
+                            Some(p) if red(outcome) => {
+                                lines.push(format!("check {name} failed on #{n} ({p} → {outcome})"))
+                            }
+                            Some(p) if red(p) && outcome.eq_ignore_ascii_case("success") => {
+                                lines.push(format!("check {name} green again on #{n}"))
+                            }
+                            None if red(outcome) => {
+                                lines.push(format!("check {name} failed on #{n}"))
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    lines
+}
+
+#[cfg(test)]
+mod repo_tests {
+    use super::{repo_diff, rows_snapshot};
+    use serde_json::json;
+
+    fn row(
+        n: u64,
+        state: &str,
+        head: &str,
+        merged: &str,
+        checks: serde_json::Value,
+    ) -> serde_json::Value {
+        json!({
+            "number": n, "title": format!("PR {n}"), "state": state, "headRefOid": head,
+            "author": {"login": "jacob"}, "mergedAt": merged, "closedAt": "",
+            "url": format!("https://github.com/o/r/pull/{n}"), "statusCheckRollup": checks
+        })
+    }
+
+    /// Projects-post gap 2: "follow all my PRs" fires on open, merge, new
+    /// commits, and a check going red on any of them — and not on a
+    /// pull request merged long before the subscription looked.
+    #[test]
+    fn the_repository_diff_reports_opens_merges_commits_and_red_checks_only() {
+        let t0 = 1_700_000_000_000i64;
+        let old = rows_snapshot(
+            &json!([
+                row(
+                    1,
+                    "OPEN",
+                    "aaaaaaa",
+                    "",
+                    json!([{"name": "build", "conclusion": "SUCCESS"}])
+                ),
+                row(2, "OPEN", "bbbbbbb", "", json!([])),
+            ]),
+            t0,
+        );
+        let new = rows_snapshot(
+            &json!([
+                row(
+                    1,
+                    "OPEN",
+                    "aaaaaaa",
+                    "",
+                    json!([{"name": "build", "conclusion": "FAILURE"}])
+                ),
+                row(2, "MERGED", "bbbbbbb", "2026-09-15T18:00:00Z", json!([])),
+                row(3, "OPEN", "ccccccc", "", json!([])),
+                // Merged years ago, touched today (a comment): history.
+                row(4, "MERGED", "ddddddd", "2020-01-01T00:00:00Z", json!([])),
+            ]),
+            t0 + 600_000,
+        );
+        let lines = repo_diff(&old, &new);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("check build failed on #1")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("merged #2 \"PR 2\" by jacob")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("opened #3")),
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("#4")), "{lines:?}");
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        // New commits on an open one.
+        let newer = rows_snapshot(
+            &json!([row(3, "OPEN", "eeeeeee", "", json!([]))]),
+            t0 + 1_200_000,
+        );
+        let lines = repo_diff(&new, &newer);
+        assert_eq!(lines, vec!["new commits on #3 (head eeeeeee)".to_string()]);
+    }
+}

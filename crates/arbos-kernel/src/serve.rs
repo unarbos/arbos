@@ -1426,6 +1426,7 @@ pub(crate) fn follow_prs(hooks: &Arc<KernelHooks>, agent: &str, opened: &[arbos_
                 path: None,
                 repo: Some(pr.repo.clone()),
                 pr: Some(pr.number),
+                author: None,
                 branch: None,
                 channel: None,
                 thread: None,
