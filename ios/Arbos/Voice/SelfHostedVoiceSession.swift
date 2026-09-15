@@ -187,7 +187,8 @@ final class SelfHostedVoiceSession: VoiceSession {
                     name: row["name"] as? String ?? id,
                     parent: row["parent"] as? String,
                     paused: false,
-                    model: ""
+                    model: "",
+                    step: row["step"] as? String
                 )
             }))
         case "error":
