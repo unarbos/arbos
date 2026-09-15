@@ -977,7 +977,8 @@ impl Arbos {
                     f32::from(bounds.size.width),
                     f32::from(bounds.size.height),
                 ];
-                this.workspace.update(cx, |workspace, _| workspace.set_frame(frame));
+                this.workspace
+                    .update(cx, |workspace, _| workspace.set_frame(frame));
             }
             cx.notify();
         })
@@ -1286,7 +1287,12 @@ impl Arbos {
         }
     }
 
-    fn dismiss_menu_action(&mut self, _: &DismissMenu, window: &mut Window, cx: &mut Context<Self>) {
+    fn dismiss_menu_action(
+        &mut self,
+        _: &DismissMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.menu.is_some() {
             self.dismiss_menu(cx);
             return;

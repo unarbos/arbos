@@ -39,7 +39,17 @@ fn junk(path: &str) -> bool {
     path.split('/').any(|part| {
         matches!(
             part,
-            "__pycache__" | ".venv" | "venv" | "node_modules" | "target" | ".arbos" | ".git" | ".mypy_cache" | ".pytest_cache" | "dist" | "build"
+            "__pycache__"
+                | ".venv"
+                | "venv"
+                | "node_modules"
+                | "target"
+                | ".arbos"
+                | ".git"
+                | ".mypy_cache"
+                | ".pytest_cache"
+                | "dist"
+                | "build"
         )
     }) || name.ends_with(".pyc")
         || name == ".DS_Store"
@@ -109,7 +119,13 @@ impl GitChanges {
         }
         // A tree with hundreds of changed files or a million changed lines
         // is not a change anyone means to review from a chat: no pill.
-        if files.len() > HUGE_FILES || files.iter().map(|f| u64::from(f.add) + u64::from(f.del)).sum::<u64>() > HUGE_LINES {
+        if files.len() > HUGE_FILES
+            || files
+                .iter()
+                .map(|f| u64::from(f.add) + u64::from(f.del))
+                .sum::<u64>()
+                > HUGE_LINES
+        {
             return None;
         }
         let ahead = git(root, &["rev-list", "--count", "@{u}..HEAD"])
@@ -129,13 +145,19 @@ impl GitChanges {
         if path.is_none() {
             out = strip_junk_hunks(&out);
         }
-        let untracked = git(root, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+        let untracked =
+            git(root, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
         for file in untracked.lines().map(str::trim).filter(|p| !p.is_empty()) {
-            if path.is_some_and(|wanted| wanted != file) || junk(file) || root.join(file).is_symlink() {
+            if path.is_some_and(|wanted| wanted != file)
+                || junk(file)
+                || root.join(file).is_symlink()
+            {
                 continue;
             }
             if let Ok(text) = std::fs::read_to_string(root.join(file)) {
-                out.push_str(&format!("diff --git a/{file} b/{file}\nnew file\n--- /dev/null\n+++ b/{file}\n"));
+                out.push_str(&format!(
+                    "diff --git a/{file} b/{file}\nnew file\n--- /dev/null\n+++ b/{file}\n"
+                ));
                 for line in text.lines() {
                     out.push('+');
                     out.push_str(line);
@@ -153,7 +175,10 @@ impl GitChanges {
             Some(p) => format!("{}.diff", p.replace('/', "__")),
             None => "changes.diff".to_string(),
         };
-        root.join(".arbos").join("desktop").join("review").join(name)
+        root.join(".arbos")
+            .join("desktop")
+            .join("review")
+            .join(name)
     }
 }
 
