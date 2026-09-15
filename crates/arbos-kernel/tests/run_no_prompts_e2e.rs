@@ -35,11 +35,13 @@ fn run_with_no_prompts_denies_an_approval_and_answers_a_question_itself() {
         "{\"agent\":\"root\",\"content\":\"asking\",\"calls\":[{\"name\":\"ask\",\"arguments\":{\"question\":\"Which region?\"}}]}\n",
         "{\"agent\":\"root\",\"content\":\"picked a default and finished\"}\n",
     );
+    // Ask mode: the default, auto, refuses `sudo` outright with no card
+    // (2026-09-15), so there would be nothing for --no-prompts to deny.
     let k = start_kernel_replay_prepared("run-noprompts", replies, "", |place| {
         std::fs::create_dir_all(place.join(".arbos")).unwrap();
         std::fs::write(
             place.join(".arbos/project.toml"),
-            "schema = 2\nname = \"r\"\n",
+            "schema = 2\nname = \"r\"\n\n[root]\npermission = \"ask\"\n",
         )
         .unwrap();
     });
@@ -85,7 +87,10 @@ fn run_with_no_prompts_denies_an_approval_and_answers_a_question_itself() {
         .find(|e| e["kind"] == "tool" && e["name"] == "bash")
         .expect("bash line");
     assert!(
-        bash["error"].as_str().unwrap_or("").contains("denied bash"),
+        bash["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("did not allow bash"),
         "{bash:#?}"
     );
     assert!(

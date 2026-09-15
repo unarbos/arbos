@@ -46,6 +46,12 @@ impl Tool for Bash {
             "Run a shell command. Output returns within wait_ms; otherwise it continues as a job (await/jobs). Only timeout_ms kills. background:true for servers.",
             &[
                 ("command", "", true, "string"),
+                (
+                    "description",
+                    "What this command does, 5–10 words, for the line the user sees (\"List repo contents and recent commits\").",
+                    false,
+                    "string",
+                ),
                 ("cwd", "", false, "string"),
                 (
                     "wait_ms",
@@ -91,11 +97,15 @@ impl Tool for Bash {
             Access::exclusive()
         };
         let plan = Plan::access(access);
-        Ok(if needs_approval(cmd) {
-            plan.interactive()
-        } else {
-            plan
-        })
+        // Interactive only when it will wait on a card (ask mode); in
+        // auto the same command is refused in `run`, no card.
+        Ok(
+            if needs_approval(cmd) && cx.agent.mode == arbos_core::Mode::Ask {
+                plan.interactive()
+            } else {
+                plan
+            },
+        )
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         Box::pin(async move {
@@ -124,15 +134,15 @@ impl Tool for Bash {
                 .await
                 .map_err(|e| anyhow::anyhow!("git guard task: {e}"))??;
             }
-            // In ask mode the call was already allowed before it ran.
+            // A wipe of the filesystem root, sudo, mkfs, a fork bomb: in
+            // auto mode nothing waits on a card (decision 2026-09-15), so
+            // these are refused outright with the reason — the model can
+            // ask the user in words if it truly needs one. In ask mode
+            // the call was already allowed before it ran.
             if needs_approval(cmd) && cx.agent.mode != arbos_core::Mode::Ask {
-                let allowed = tokio::select! {
-                    r = cx.hooks.approve(&cx.agent.id, "bash", cmd) => r?,
-                    _ = cx.cancel.cancelled() => bail!("interrupted while waiting for approval"),
-                };
-                if !allowed {
-                    bail!("user denied bash");
-                }
+                bail!(
+                    "bash: refused — this command wipes a system path, escalates with sudo, or formats a disk, and the default mode runs without approval cards. Do it another way, or ask the user in words and have them run it; ask mode (the mode chip) asks per command instead."
+                );
             }
             let dir = opt_str(&args, "cwd")
                 .map(|c| cx.cwd.join(c))
