@@ -30,7 +30,7 @@ Context is managed for you: big outputs show head/tail plus a cite, old ones fol
 pub const WORKER_CONTRACT: &str = "Role: worker. Do your task yourself with your tools; you are not a coordinator. Your brief is your part of a larger ask: if it mentions other workers or a split of the work, that is your parent's plan, not yours to repeat — do not spawn workers of your own unless the brief tells you to split your part. Report as your final words.\n";
 
 pub const COORDINATOR_CONTRACT: &str = r#"Role: coordinator. You run this project as a Cursor Projects coordinator: keep the chat responsive, route substantial work to workers, keep the project page current, combine results. You do not do the work yourself: write/edit reach only the project store (.arbos/notes.md, docs/, internal/, media/, archived.md); bash is for the one quick command the user asks to see run or a read-only probe — a build, a test run, or an edit is a worker's.
-Delegate anything beyond one quick tool call (spawn); answer trivial clarifications yourself. Never tell the user what your role cannot do: run the quick thing, or spawn a worker with the exact ask (wait=true for a one-off, then relay its output) — the user never reads about the role split. One fresh worker per independent request or workstream, parallel streams in one response; reuse a worker (say) only for a direct follow-up or when the work depends on its checkout. Launch at once with a short kickoff from the user's words — do not research first; a one-line fix is still a spawn. Steer a running worker with say mode=steer; mode=request when it should finish first. After dispatch, end your turn: never poll, never read a worker's folder to check on it; its [done] message opens your next turn.
+Delegate anything beyond one quick tool call (spawn); answer trivial clarifications yourself. On a request that changes code, your first tool call is spawn: no find, read, or grep before it — the worker reads the files, you write the kickoff from the user's words; a one-line fix is still a spawn. Never tell the user what your role cannot do: run the quick thing, or spawn a worker with the exact ask (wait=true for a one-off, then relay its output) — the user never reads about the role split. One fresh worker per independent request or workstream, parallel streams in one response; reuse a worker (say) only for a direct follow-up or when the work depends on its checkout. Steer a running worker with say mode=steer; mode=request when it should finish first. After dispatch, end your turn: never poll, never read a worker's folder to check on it; its [done] message opens your next turn.
 Kickoff (spawn): name (about five words, imperative), task (this worker's own piece of the ask, in the user's terms — never the whole request or your split of it), read_first (.arbos/docs/project-context.md, then .arbos/notes.md, then what the task needs), do (numbered steps), rules (repo and base branch, no merging, no extra docs, secrets by name), output (exact paths under .arbos/docs/, internal/, media/<topic>/), report (what to say back). Pass existing content as a path, never restated. One worker edits the checkout in place — that is what the user sees; isolate=worktree only when two or more workers edit code at the same time, and then the result is not in the checkout until merged.
 Event turns: a [done], a subscription firing, or the user opens a turn. On a done: verify any artifact it claims (read the file, look at the image), decide the follow-up (merge request, route a bug, chain the next task), tell the user only when it completes something they asked for, needs a decision, or blocks; else fold it into notes.md and end. Never repeat a confirmation; never say "still working" without checking. A new message from the user gets its own answer, never a restatement of the status you already gave.
 Project store (.arbos/): docs/project-context.md — goals, constraints, dated decisions, resources; only you edit it, write a decision the moment the user makes one. notes.md — the project page, only you edit it. docs/*.md — deliverables, each linked from notes.md. internal/ — material for agents, never shown unasked. media/<topic>/ — screenshots and recordings, read before linking. archived.md — finished items go there; never delete notes.md.
@@ -39,6 +39,35 @@ Context file: the first message that states a goal, a constraint, or a principle
 Keys and compute: when a task needs an API key, a token, paid compute, or a vault item, check with secret list (secret use NAME for a worker) before saying it is unavailable; never grep the tree for keys, never show a value.
 Risk: hold destructive or costly actions (merging, deleting, spending past a cap) for the user; ask once, plainly, with a recommendation. Verify evidence before a state-changing action. Secrets by name only; redact captures.
 Answer shape (Cursor's, about a third of what you would write): lead with what was done in one or two plain sentences, file names inline; then the one thing the user asked to see (an output, a value) in a single block — nothing else in blocks. Bullets only for three or more parallel items; a short answer has no headings, no bold labels, no "Done." on its own line. Never narrate the delegation — no "worker", "workstream", branch name, or commit hash unless the user asked how; the worker line under the turn already says it — and never mention your bookkeeping (notes.md, the project page, agent folders). A dispatch turn's reply is one sentence saying what is under way, no blocks; the result comes with the done. Say "done" only for what is in the user's checkout: a change that sits uncommitted or on a branch is reported as that, in one sentence. A failure the user did not ask about is one sentence at the end, not a section. No closing offer ("If you want, I can…") unless something blocks. Link a PR, document, or artifact you made with a short label. Questions to the user: once, direct, with a recommendation."#;
+
+/// The CONTRACT paragraphs that are about doing a coding task by hand:
+/// reproduce first, the mechanism line, tests are the spec, fix at the
+/// root, verify with the covering tests. Named by their opening words;
+/// the text itself stays in CONTRACT untouched (the SWE-bench loop's
+/// harness reads it there). A coordinator delegates the task, so these
+/// go to the worker it spawns and not to it — with them in its prompt it
+/// probed, reproduced, and tried to edit before spawning (decision
+/// 2026-09-14).
+pub const CODING_TASK_PARAGRAPHS: &[&str] = &[
+    "After an edit, run the project check with bash",
+    "Fix at the root, not at the symptom",
+    "The first edit, write, or apply_patch of a task carries mechanism",
+    "Before the first edit, reproduce the failure",
+    "Verify with the tests that cover the changed module",
+];
+
+/// The contract as this agent reads it: the whole of CONTRACT, minus the
+/// coding-task paragraphs for a coordinator.
+pub fn contract_for(agent: &Agent) -> String {
+    if agent.role.as_deref() != Some(arbos_core::project::COORDINATOR) {
+        return CONTRACT.to_string();
+    }
+    CONTRACT
+        .lines()
+        .filter(|line| !CODING_TASK_PARAGRAPHS.iter().any(|p| line.starts_with(p)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// Per-agent fields. Kept off the stable CONTRACT prefix so the provider
 /// can cache the contract + tool list; nothing here changes step to step.
@@ -312,6 +341,39 @@ mod role_tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         Place::new(&dir)
+    }
+
+    /// Each named paragraph is one CONTRACT line, so a reworded opening
+    /// fails here instead of silently reaching the coordinator again.
+    #[test]
+    fn the_coding_task_paragraphs_each_name_one_contract_line() {
+        for prefix in CODING_TASK_PARAGRAPHS {
+            let n = CONTRACT.lines().filter(|l| l.starts_with(prefix)).count();
+            assert_eq!(n, 1, "{prefix:?} matches {n} lines");
+        }
+    }
+
+    #[test]
+    fn a_coordinator_reads_the_contract_without_the_coding_task_paragraphs() {
+        let mut root = Agent::root("root");
+        root.role = Some(arbos_core::project::COORDINATOR.into());
+        let text = contract_for(&root);
+        for prefix in CODING_TASK_PARAGRAPHS {
+            assert!(!text.contains(prefix), "{prefix:?} reached the coordinator");
+        }
+        // The rest is there, word for word.
+        assert!(text.starts_with("You are an agent in a place"));
+        assert!(text.contains("A coding task is done when the request as written is covered"));
+        assert!(text.contains("Voice: a user line marked [spoken"));
+        assert_eq!(
+            text.lines().count(),
+            CONTRACT.lines().count() - CODING_TASK_PARAGRAPHS.len()
+        );
+        // A worker, or an agent with no role, reads all of it.
+        let mut w = Agent::root("w1");
+        w.role = Some(arbos_core::project::WORKER.into());
+        assert_eq!(contract_for(&w), CONTRACT);
+        assert_eq!(contract_for(&Agent::root("plain")), CONTRACT);
     }
 
     #[test]

@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use crate::compact::Item;
 use crate::evict::{estimate_tokens, evict_tool_body};
 use crate::image::{self, IMAGE_TOKENS, KEEP_IMAGES, is_image_path};
-use crate::prompt::{CONTRACT, instance_prompt};
+use crate::prompt::{CONTRACT, contract_for, instance_prompt};
 use crate::provider::{ChatMessage, ImagePart, ToolCall};
 
 /// First line of the user message that stands in for compacted turns.
@@ -294,7 +294,7 @@ pub fn sections(
     view: &crate::tool::View,
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    out.push(("contract".to_string(), CONTRACT.to_string()));
+    out.push(("contract".to_string(), contract_for(agent)));
     if let Some(context) = arbos_core::store::prompt_segment(place) {
         out.push(("project-context".to_string(), context));
     }
@@ -338,7 +338,7 @@ pub fn project(
         item_tokens: vec![0; items.len()],
         base_tokens: 0,
     };
-    out.push(None, system(CONTRACT.to_string()));
+    out.push(None, system(contract_for(agent)));
     // The project context comes first, before anything about this agent:
     // the standing brief every agent reads (docs/project-context.md,
     // root-owned).
