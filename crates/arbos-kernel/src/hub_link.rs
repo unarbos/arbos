@@ -143,6 +143,7 @@ pub async fn register(
     extra_labels: &[String],
     capabilities: Vec<String>,
     identities: std::collections::BTreeMap<String, arbos_core::project::ProjectIdentity>,
+    shares: std::collections::BTreeMap<String, String>,
 ) -> Result<u64> {
     send_json(
         ws,
@@ -155,6 +156,7 @@ pub async fn register(
             place,
             projects,
             identities,
+            shares,
             labels: labels(extra_labels),
             capabilities,
             version: klog::version().to_string(),
@@ -186,6 +188,20 @@ pub fn backoff(attempt: u32) -> Duration {
     })
 }
 
+/// The node this kernel is on the hub, `(machine, project)`, once the link
+/// has started; `None` on a kernel with no hub. Read for `hello.store`
+/// and to tell a local address from a remote one.
+static SELF_NODE: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+
+pub fn self_node() -> Option<(&'static str, &'static str)> {
+    SELF_NODE.get().map(|(m, p)| (m.as_str(), p.as_str()))
+}
+
+/// This node's store as every node addresses it: `arbos://<machine>/<project>/`.
+pub fn self_store() -> Option<arbos_core::hub::StoreAddress> {
+    self_node().map(|(m, p)| arbos_core::hub::StoreAddress::root(m, p))
+}
+
 /// Register this kernel with the hub and keep it registered. Returns at
 /// once; the link lives in its own task for the life of the kernel.
 pub fn start(
@@ -195,6 +211,7 @@ pub fn start(
     cfg: HubConfig,
     project: String,
 ) {
+    let _ = SELF_NODE.set((cfg.machine.clone(), project.clone()));
     tokio::spawn(async move {
         let mut attempt = 0u32;
         loop {
@@ -233,6 +250,11 @@ async fn session(
     let mut ws = connect(&cfg.register_url(), &token).await?;
     let mut identities = std::collections::BTreeMap::new();
     identities.insert(project.to_string(), arbos_core::project::identity(place));
+    let mut shares = std::collections::BTreeMap::new();
+    shares.insert(
+        project.to_string(),
+        arbos_core::project::share_mode(place).to_string(),
+    );
     let id = register(
         &mut ws,
         cfg,
@@ -243,6 +265,7 @@ async fn session(
         &[],
         Vec::new(),
         identities,
+        shares,
     )
     .await?;
     klog::info(
