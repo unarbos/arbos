@@ -8,7 +8,13 @@ use tokio::sync::mpsc;
 
 use crate::hooks::KernelHooks;
 
-pub const MAX_CHILDREN: usize = 8;
+/// Live children one agent may have at once, by default. Jacob's Projects
+/// run wide (the Cursor Projects post: "more subagents in parallel than
+/// your laptop could support"); 8 stalled a coordinator on its ninth
+/// spawn. `max_children` in config.toml overrides, up to MAX_CHILDREN_CAP.
+pub const MAX_CHILDREN: usize = 24;
+/// The most `max_children` may be set to.
+pub const MAX_CHILDREN_CAP: usize = 256;
 pub const MAX_DEPTH: usize = 3;
 
 /// One in-flight turn per agent, each with its own control handle.

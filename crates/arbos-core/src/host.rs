@@ -176,7 +176,7 @@ pub struct HostConfig {
     /// (Cursor's shape), 2 = children may spawn grandchildren, 3 = one more
     /// (a coordinator that delegates delegation). Default 3.
     pub max_depth: usize,
-    /// Live children one agent may have at once. Default 8.
+    /// Live children one agent may have at once. Default 24, at most 256.
     pub max_children: usize,
     /// What a subscription does when the kernel finds it overdue by more
     /// than one period (the kernel was down, the agent was paused):
@@ -271,7 +271,7 @@ impl Default for HostConfig {
             // each slice is a model call. Servers still use background:true.
             bash_wait_ms: 600_000,
             max_depth: 3,
-            max_children: 8,
+            max_children: 24,
             catch_up: "once".into(),
             transcript_roll_lines: 10_000,
             fallback_models: Vec::new(),
