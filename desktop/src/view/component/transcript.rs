@@ -2540,6 +2540,7 @@ struct WorkStats {
     /// spawned — which Cursor would fold into the run line rather than
     /// list as rows.
     plans: usize,
+    todos: usize,
     spawns: usize,
     add: usize,
     del: usize,
@@ -2578,6 +2579,7 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
         secs: 0,
         last_label: None,
         plans: 0,
+        todos: 0,
         spawns: 0,
     };
     let mut edited: HashSet<String> = HashSet::new();
@@ -2633,6 +2635,7 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
                 ToolKind::Execute => stats.commands += 1,
                 _ => match label.split_whitespace().next().unwrap_or(label) {
                     "plan" => stats.plans += 1,
+                    "todo" => stats.todos += 1,
                     "spawn" => stats.spawns += 1,
                     _ => {}
                 },
@@ -2844,6 +2847,20 @@ pub fn render(
                         .size_full()
                         .overflow_y_scroll()
                         .track_scroll(&chat.transcript.scroll)
+                        // The wheel decides the follow: up while a turn
+                        // streams unpins (Cursor lets you read back and
+                        // shows ↓); back to the end pins again. Without
+                        // this, growing content kept the old pin and
+                        // snapped the reader to the bottom.
+                        .on_scroll_wheel({
+                            let handle = chat.transcript.scroll.clone();
+                            let follow = chat.transcript.follow.clone();
+                            move |_, _, _| {
+                                let max = handle.max_offset().y;
+                                let now = handle.offset().y.clamp(-max, px(0.));
+                                follow.0.set((at_bottom(max, now, FOLLOW_SLACK), max));
+                            }
+                        })
                         .px(px(root::CHAT_GUTTER))
                         .pt(px(PAD))
                         .pb(px(PAD))
@@ -4081,6 +4098,9 @@ fn work_summary(
         .trim_end()
         .to_string());
     }
+    if stats.todos > 0 {
+        parts.push("kept its checklist".to_string());
+    }
     if parts.is_empty() {
         return if running {
             match stats.last_label.as_deref() {
@@ -5290,15 +5310,16 @@ fn is_status_call(label: &str) -> bool {
     label.split_whitespace().next().is_some_and(|first| first == "status")
 }
 
-/// Cursor's TodoWrite card, from the root's `plan` calls in a run: the
-/// section the kernel echoed back, one row per item with its box. The last
-/// call's echo is the list's state.
+/// Cursor's TodoWrite card, from the root's `todo` calls in a run (the
+/// thread's own checklist, `agents/root/todo.md`): the list the kernel
+/// echoed back, one row per item with its box. The last call's echo is the
+/// list's state. `plan` edits the project page, which the panel shows.
 fn todo_card(chat: &ChatSession, range: Range<usize>, theme: &Theme) -> Option<AnyElement> {
     let key = range.start;
     let (title, items) = range
         .rev()
         .filter_map(|ix| match &chat.items[ix] {
-            ChatItem::Tool { label, output, .. } if label.starts_with("plan ") => plan_items(output),
+            ChatItem::Tool { label, output, .. } if is_todo_call(label) => plan_items(output),
             _ => None,
         })
         .next()?;
@@ -5373,7 +5394,13 @@ fn todo_card(chat: &ChatSession, range: Range<usize>, theme: &Theme) -> Option<A
     Some(card.into_any_element())
 }
 
-/// The kernel's echo of a notes section after a `plan` call:
+/// The kernel names a call by its tool and first argument: `todo`,
+/// `todo add`, `todo check 2`.
+fn is_todo_call(label: &str) -> bool {
+    label == "todo" || label.starts_with("todo ")
+}
+
+/// The kernel's echo of a checklist after a `todo` (or `plan`) call:
 /// "## Maintenance" then lines "[ ] 1 - [ ] [label](target) — readout".
 /// Returns the section title and (done, words) per item.
 fn plan_items(output: &str) -> Option<(String, Vec<(bool, String)>)> {

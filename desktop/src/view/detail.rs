@@ -1430,10 +1430,22 @@ impl Arbos {
 /// otherwise from scanning this chat's and its children's tool output, for
 /// kernels that predate the file. The driver reports the same numbers.
 pub fn pill_counts(project: &Project, chat: &ChatSession) -> (Vec<u64>, Vec<String>) {
+    // A worker just spawned and not yet on its first token counts too
+    // while the parent's turn runs: Cursor lists it under Working from the
+    // spawn. An idle sub-chat under an idle parent is nobody's work.
+    let parent_busy = chat.busy();
     let mut working: Vec<u64> = project
         .sessions
         .iter()
-        .filter(|c| c.parent == Some(chat.id) && c.busy())
+        .filter(|c| {
+            c.parent == Some(chat.id)
+                && match c.child_state() {
+                    crate::model::session::ChildState::Working => true,
+                    crate::model::session::ChildState::Waiting => parent_busy,
+                    crate::model::session::ChildState::Asking
+                    | crate::model::session::ChildState::Done => false,
+                }
+        })
         .map(|c| c.id)
         .collect();
     working.sort_unstable();
@@ -1874,7 +1886,6 @@ impl Arbos {
         }
         let root = project.path.clone();
         let main_id = chat.id;
-        let first_working = working.first().copied();
         let newest_pr = prs.last().cloned();
         let pr_list = prs.join("\n");
         let pill = |id: &'static str, glyph: AnyElement, label: String| {
@@ -1897,8 +1908,22 @@ impl Arbos {
                 .child(glyph)
                 .child(SharedString::from(label))
         };
-        Some(
-            div()
+        // Cursor's Working card: above the pills while workers run, one
+        // row per worker with its spinner, Stop All on the right. It opens
+        // by itself at fan-out; × puts it away until the next one; the
+        // Working pill brings it back.
+        let closed = self
+            .working_card_closed
+            .as_ref()
+            .is_some_and(|(id, ids)| *id == main_id && working.iter().all(|w| ids.contains(w)));
+        let card_open = !working.is_empty() && !closed;
+        let pill_ids = working.clone();
+        let workers: Vec<(u64, String, Duration)> = working
+            .iter()
+            .filter_map(|id| project.sessions.iter().find(|c| c.id == *id))
+            .map(|c| (c.id, c.label(), c.elapsed().unwrap_or_default()))
+            .collect();
+        let row = div()
                 .w_full()
                 .flex()
                 .flex_row()
@@ -1920,9 +1945,12 @@ impl Arbos {
                             Tooltip::text("Sub-agents with a turn running", window, cx)
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(id) = first_working {
-                                this.select_session(id, cx);
-                            }
+                            this.working_card_closed = if closed {
+                                None
+                            } else {
+                                Some((main_id, pill_ids.clone()))
+                            };
+                            cx.notify();
                         })),
                     )
                 })
@@ -2043,9 +2071,115 @@ impl Arbos {
                             }
                         }),
                     )
-                })
+                });
+        let card = card_open.then(|| self.working_card(&workers, main_id, &theme, cx));
+        Some(
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .children(card)
+                .child(row)
                 .into_any_element(),
         )
+    }
+
+    /// The card over the pills during a fan-out: "Working" and "Stop All ×"
+    /// on one line, then a braille spinner and the worker's name per row.
+    /// A row opens the worker; Stop All cancels every running one.
+    fn working_card(
+        &self,
+        workers: &[(u64, String, Duration)],
+        main_id: u64,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ids: Vec<u64> = workers.iter().map(|(id, _, _)| *id).collect();
+        let close_ids = ids.clone();
+        let mut card = div()
+            .id("working-card")
+            .w_full()
+            .rounded(px(Theme::surface_radius()))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised.opacity(0.6))
+            .flex()
+            .flex_col()
+            .py(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .px(px(12.))
+                    .h(px(28.))
+                    .text_style(TextStyle::Callout)
+                    .child(div().flex_1().text_color(theme.text_muted).child("Working"))
+                    .child(
+                        div()
+                            .id("working-stop-all")
+                            .px(px(4.))
+                            .rounded(px(4.))
+                            .cursor_pointer()
+                            .text_color(theme.text_muted)
+                            .hover(|el| el.text_color(theme.text))
+                            .child("Stop All")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let ids = ids.clone();
+                                this.workspace.update(cx, |workspace, cx| {
+                                    for id in ids {
+                                        workspace.cancel(id, cx);
+                                    }
+                                });
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("working-card-close")
+                            .ml(px(6.))
+                            .size(px(18.))
+                            .rounded(px(4.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .text_color(theme.text_muted)
+                            .hover(|el| el.text_color(theme.text).bg(theme.element_hover))
+                            .child(
+                                icons::icon(icons::system::CLOSE)
+                                    .size(px(11.))
+                                    .text_color(theme.text_muted),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.working_card_closed = Some((main_id, close_ids.clone()));
+                                cx.notify();
+                            })),
+                    ),
+            );
+        for (id, label, since) in workers {
+            let (id, since) = (*id, *since);
+            card = card.child(
+                div()
+                    .id(("working-row", id))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .mx(px(6.))
+                    .px(px(6.))
+                    .h(px(29.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(theme.element_hover))
+                    .text_style(TextStyle::Callout)
+                    .text_color(theme.text)
+                    .child(transcript::spinner(since, theme.text_muted, cx))
+                    .child(SharedString::from(label.clone()))
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_session(id, cx))),
+            );
+        }
+        card.into_any_element()
     }
 
     /// Cursor's Project chat header, over the root chat's first turn: the

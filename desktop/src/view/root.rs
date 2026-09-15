@@ -547,6 +547,10 @@ pub struct Arbos {
     /// The panel's "N archived" row is unfolded: finished workers the
     /// kernel moved to `archive/agents/` are listed, faint.
     pub(crate) archived_open: bool,
+    /// The Working card the user closed (× or the pill): the root chat and
+    /// the workers that were running. A new worker after that reopens it,
+    /// so the next fan-out shows the card again.
+    pub(crate) working_card_closed: Option<(u64, Vec<u64>)>,
     pub(crate) composer: Entity<Composer>,
     pub(crate) opener: Entity<Opener>,
     /// The sheet a tab's name, glyph and colour are set in.
@@ -814,6 +818,7 @@ impl Arbos {
             active_terminal: None,
             panel_open: true,
             archived_open: false,
+            working_card_closed: None,
             composer,
             opener,
             tab_sheet,
