@@ -65,7 +65,7 @@ impl GitRules {
             format!("`{}`: open PRs against it, never push to it", self.base)
         };
         format!(
-            "Git: base branch {base}. Protected: {}. Commits need a configured user.name/user.email, and never an identity you have not confirmed with the user — when the repo's identity may be someone else's, ask once who the author should be.",
+            "Git: base branch {base}. Protected: {}. A commit takes the machine's configured user.name/user.email; where none is configured it is authored as Arbos <unarbos@users.noreply.github.com> by the kernel — never set someone else's identity yourself, and never ask the user for one (they configure git if they want their name).",
             self.protected.join(", ")
         )
     }
@@ -80,9 +80,6 @@ pub fn check(place: &Path, cwd: &Path, command: &str) -> Result<()> {
     if !rules.enabled {
         return Ok(());
     }
-    // `git config user.email … && git commit` sets the identity in the
-    // same command: the check must see what the earlier segment does.
-    let mut configured = (false, false);
     // `git checkout -b fix/x && git commit`: the commit lands on fix/x,
     // whatever the checkout says now.
     let mut switched: Option<String> = None;
@@ -104,12 +101,12 @@ pub fn check(place: &Path, cwd: &Path, command: &str) -> Result<()> {
             continue;
         };
         match call {
-            GitCall::Config { name, email } => {
-                configured.0 |= name;
-                configured.1 |= email;
-            }
+            // `git config user.*`: the worker's own choice of author; the
+            // kernel's default covers a repository with none (mobile
+            // cycle 1, item 3), so nothing here asks the user for one.
+            GitCall::Config { .. } => {}
             GitCall::Switch { branch, .. } => switched = Some(branch),
-            GitCall::Commit { dir, sets_author } => {
+            GitCall::Commit { dir, .. } => {
                 let dir = dir.map(|d| here.join(d)).unwrap_or_else(|| here.clone());
                 // A fix lands on a branch and reaches the base through a
                 // pull request; a commit straight onto main is refused
@@ -125,31 +122,6 @@ pub fn check(place: &Path, cwd: &Path, command: &str) -> Result<()> {
                             b.to_string()
                         } else {
                             rules.base.clone()
-                        }
-                    );
-                }
-                if sets_author {
-                    continue;
-                }
-                let (name, email) = identity(&dir);
-                let name = if configured.0 {
-                    "set".to_string()
-                } else {
-                    name
-                };
-                let email = if configured.1 {
-                    "set".to_string()
-                } else {
-                    email
-                };
-                if name.is_empty() || email.is_empty() {
-                    bail!(
-                        "git guard: {} has no {} configured, so this commit would be attributed to nobody or to a machine default. Ask the user who the author is, then run: git config user.name \"<name>\" && git config user.email \"<email>\" — or pass --author=\"Name <email>\" on the commit.",
-                        dir.display(),
-                        match (name.is_empty(), email.is_empty()) {
-                            (true, true) => "user.name or user.email",
-                            (true, false) => "user.name",
-                            _ => "user.email",
                         }
                     );
                 }
@@ -212,20 +184,6 @@ fn current_branch(dir: &Path) -> Option<String> {
         .filter(|o| o.status.success())?;
     let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!b.is_empty()).then_some(b)
-}
-
-fn identity(dir: &Path) -> (String, String) {
-    let get = |key: &str| -> String {
-        Command::new("git")
-            .args(["config", "--get", key])
-            .current_dir(dir)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default()
-    };
-    (get("user.name"), get("user.email"))
 }
 
 #[derive(Debug, PartialEq, Eq)]

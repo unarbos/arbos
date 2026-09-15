@@ -33,6 +33,12 @@ pub const PASS_THROUGH: &[&str] = &[
     // but cargo-run children do.
     "CARGO_HOME",
     "RUSTUP_HOME",
+    // A git identity the user exported is theirs to pass on; a job with
+    // none gets the kernel's default (`jobs::git_identity_env`).
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
 ];
 
 /// Prefixes passed through: locale, XDG folders, our own knobs.

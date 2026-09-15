@@ -27,6 +27,73 @@ use std::{
 };
 use tokio::process::{Child, Command};
 
+/// The author a commit gets when the machine has none: workers on a
+/// fresh machine reported "the author identity (user.name / user.email)
+/// is not configured" and asked the user (mobile cycle 1, item 3).
+pub const DEFAULT_GIT_AUTHOR: (&str, &str) = ("Arbos", "unarbos@users.noreply.github.com");
+
+/// `GIT_AUTHOR_*` and `GIT_COMMITTER_*` for a job in `cwd`: nothing when
+/// git has an identity there (the user's config, or an exported variable
+/// the allowlist passes), the default otherwise. One `git config` read
+/// per cwd per minute.
+pub fn git_identity_env(cwd: &Path) -> Vec<(String, String)> {
+    for var in ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"] {
+        if std::env::var_os(var).is_some_and(|v| !v.is_empty()) {
+            return Vec::new();
+        }
+    }
+    static SEEN: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, (std::time::Instant, bool)>>,
+    > = std::sync::OnceLock::new();
+    let cache = SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let key = cwd.to_path_buf();
+    let cached = cache
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&key).copied())
+        .filter(|(at, _)| at.elapsed() < Duration::from_secs(60))
+        .map(|(_, has)| has);
+    let has_identity = match cached {
+        Some(v) => v,
+        None => {
+            let has = git_has_identity(cwd);
+            if let Ok(mut m) = cache.lock() {
+                m.insert(key, (std::time::Instant::now(), has));
+            }
+            has
+        }
+    };
+    if has_identity {
+        return Vec::new();
+    }
+    let (name, email) = DEFAULT_GIT_AUTHOR;
+    vec![
+        ("GIT_AUTHOR_NAME".into(), name.into()),
+        ("GIT_AUTHOR_EMAIL".into(), email.into()),
+        ("GIT_COMMITTER_NAME".into(), name.into()),
+        ("GIT_COMMITTER_EMAIL".into(), email.into()),
+    ]
+}
+
+/// Whether `git commit` in `cwd` would find a user.name and user.email
+/// (repository, global, or system config). No git at all reads as
+/// "has" — nothing to default for.
+fn git_has_identity(cwd: &Path) -> bool {
+    let read = |key: &str| {
+        std::process::Command::new("git")
+            .args(["config", "--get", key])
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+    };
+    match (read("user.name"), read("user.email")) {
+        (Some(n), Some(e)) => n && e,
+        _ => true,
+    }
+}
+
 /// Only this much of a journal is ever loaded for one read.
 pub const JOURNAL_WINDOW: u64 = 4 * 1024 * 1024;
 /// `out.log` is cut back to empty (with a notice line) when it passes this
@@ -200,6 +267,7 @@ impl JobsRoot {
         // shell-side scrub which secret-looking names to keep.
         cmd.env_clear();
         cmd.envs(arbos_core::envsafe::filtered(&[]));
+        cmd.envs(git_identity_env(cwd));
         cmd.env(
             "ARBOS_GRANTED",
             granted
@@ -758,5 +826,100 @@ mod tests {
         fs::write(root.dir().join("j1/out.log"), "[cut]\nbb").unwrap();
         let (after, _) = root.read_new(&job);
         assert_eq!(after, "[cut]\nbb");
+    }
+}
+
+#[cfg(test)]
+mod git_identity_tests {
+    use super::{DEFAULT_GIT_AUTHOR, git_has_identity, git_identity_env};
+    use std::process::Command;
+
+    fn repo(tag: &str, with_identity: bool) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-git-id-{tag}-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&dir)
+                    // No global config: what a fresh machine has.
+                    .env("HOME", &dir)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", dir.join("no-such-gitconfig"))
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        if with_identity {
+            git(&["config", "user.name", "Jacob"]);
+            git(&["config", "user.email", "j@example.com"]);
+        }
+        dir
+    }
+
+    /// Mobile cycle 1, item 3: workers on a machine with no git identity
+    /// asked the user for one. A job there gets the Arbos default in its
+    /// environment; a repository with an identity gets nothing.
+    #[test]
+    fn a_job_gets_the_default_author_only_where_git_has_none() {
+        // The test process itself must not carry an identity in env.
+        for v in [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ] {
+            // SAFETY: test-local; other tests in this module do not read these.
+            unsafe { std::env::remove_var(v) };
+        }
+        let with = repo("with", true);
+        assert!(git_has_identity(&with));
+        assert!(git_identity_env(&with).is_empty());
+
+        let without = repo("without", false);
+        // The kernel's own global config, if any, would count: make sure
+        // the check sees none.
+        // SAFETY: test-local.
+        unsafe {
+            std::env::set_var("GIT_CONFIG_GLOBAL", without.join("no-such-gitconfig"));
+            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+        }
+        assert!(!git_has_identity(&without));
+        let env = git_identity_env(&without);
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("GIT_AUTHOR_NAME"), Some(DEFAULT_GIT_AUTHOR.0));
+        assert_eq!(get("GIT_AUTHOR_EMAIL"), Some(DEFAULT_GIT_AUTHOR.1));
+        assert_eq!(get("GIT_COMMITTER_NAME"), Some(DEFAULT_GIT_AUTHOR.0));
+        assert_eq!(get("GIT_COMMITTER_EMAIL"), Some(DEFAULT_GIT_AUTHOR.1));
+        // And a commit with that environment succeeds and says so.
+        std::fs::write(without.join("a.txt"), "a\n").unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "git add a.txt && git commit -q -m one && git log -1 --format=%an,%ae",
+        ])
+        .current_dir(&without)
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            format!("{},{}", DEFAULT_GIT_AUTHOR.0, DEFAULT_GIT_AUTHOR.1)
+        );
+        unsafe {
+            std::env::remove_var("GIT_CONFIG_GLOBAL");
+            std::env::remove_var("GIT_CONFIG_NOSYSTEM");
+        }
     }
 }
