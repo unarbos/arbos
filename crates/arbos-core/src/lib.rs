@@ -25,6 +25,7 @@ pub mod project;
 pub mod protocol;
 pub mod prs;
 pub mod skills;
+pub mod spend;
 pub mod status;
 pub mod store;
 pub mod subscription;

@@ -62,7 +62,7 @@ pub const COORDINATOR_TOOLS: &[&str] = &[
     "transcript",
 ];
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<u32>,
@@ -76,6 +76,23 @@ pub struct ProjectConfig {
     pub follow_prs: Option<bool>,
     #[serde(default)]
     pub root: RootConfig,
+    /// `[spend] cap_usd = 20.0`: the most the place's turns may cost in
+    /// total before workers, subscriptions, and spawns are refused (see
+    /// `crate::spend`). Absent: counted, never capped.
+    #[serde(default, skip_serializing_if = "SpendConfig::is_empty")]
+    pub spend: SpendConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SpendConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cap_usd: Option<f64>,
+}
+
+impl SpendConfig {
+    fn is_empty(&self) -> bool {
+        self.cap_usd.is_none()
+    }
 }
 
 impl ProjectConfig {
@@ -147,6 +164,7 @@ pub fn write_for_new_place(place: &Place, name: &str) -> Result<()> {
             role: Some(COORDINATOR.into()),
             archive_children: Some(true),
         },
+        spend: SpendConfig::default(),
     };
     save(place, &cfg)
 }

@@ -185,6 +185,9 @@ pub struct KernelHooks {
     /// `notes.md`'s (size, mtime) when each top-level turn began: the
     /// status page's `changed` frame goes out the moment the turn ends.
     notes_at_start: Mutex<HashMap<String, Option<(u64, i64)>>>,
+    /// Two turns ending at once must add to `spend.toml` and tell the
+    /// user one after the other, or a line is lost.
+    pub spend_lock: Mutex<()>,
     /// Agents whose last turn dispatched or received work and left the
     /// project page untouched (the notice is on their transcript, which is
     /// the first thing the next turn's model reads after the history).
@@ -246,6 +249,7 @@ impl KernelHooks {
             status_pending: Arc::new(Mutex::new(HashMap::new())),
             turn_lo: Mutex::new(HashMap::new()),
             notes_at_start: Mutex::new(HashMap::new()),
+            spend_lock: Mutex::new(()),
             notes_nudge: Mutex::new(HashSet::new()),
             approves: Mutex::new(HashMap::new()),
             browsers: BrowserHub::new(),

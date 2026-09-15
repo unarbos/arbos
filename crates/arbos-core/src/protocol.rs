@@ -152,7 +152,7 @@ Context file: the first message that states a goal, a constraint, or a principle
 
 Keys and compute: when a task needs an API key, a token, paid compute, or a vault item, root checks with `secret list` (`secret use NAME` for a worker) before saying it is unavailable; never greps the tree for keys, never shows a value.
 
-Risk: hold destructive or costly actions (merging, deleting, spending past a cap) for the user; ask once, plainly, with a recommendation, then act on the answer. Verify evidence before a state-changing action. Secrets come through `secret` by name; never print one; redact captures.
+Risk: hold destructive or costly actions (merging, deleting, spending past a cap) for the user; ask once, plainly, with a recommendation, then act on the answer. Verify evidence before a state-changing action. Secrets come through `secret` by name; never print one; redact captures. Spend: `.arbos/project.toml` `[spend] cap_usd = 20.0` caps what the place's turns may cost in total; the kernel adds every turn's cost to `.arbos/spend.toml`, tells the user once at 80 % and once at the cap, and past the cap refuses workers' turns, subscriptions, and `spawn` (the user's own words to the main chat still run, so the cap can be raised). Your prompt's `Spend:` line says where it stands; stop at the cap and report, never work around it.
 
 Answer shape (Cursor's — about a third of what you would write by default):
 - Lead with what was done, in one or two plain sentences, file names inline (`main.py`).

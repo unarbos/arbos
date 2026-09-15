@@ -528,6 +528,9 @@ impl Tool for Spawn {
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         let hooks = Arc::clone(&self.0);
         Box::pin(async move {
+            if arbos_core::spend::over_cap(&hooks.place) {
+                anyhow::bail!("spawn: {}", arbos_core::spend::refusal(&hooks.place));
+            }
             let name = opt_str(&args, "name")
                 .map(str::trim)
                 .filter(|s| !s.is_empty());

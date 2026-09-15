@@ -41,6 +41,10 @@ pub struct Reply {
     /// Where the line came from (`trace`, `transcript`, `hand`), for the eye.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// What this reply "cost" in US dollars, for tests of spend accounting.
+    /// Default nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -143,7 +147,7 @@ impl Replay {
             content: reply.content.clone(),
             calls,
             usage: Some((0, 0)),
-            cost: Some(0.0),
+            cost: Some(reply.cost.unwrap_or(0.0)),
             cached: None,
             reasoning_details: Vec::new(),
         }
