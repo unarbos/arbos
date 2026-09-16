@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 
 /// Builds the call from the environment so a project chat can present it
@@ -31,6 +32,10 @@ struct CallView: View {
     @State private var showSettings = false
     @State private var pulledDown = false
     @State private var draft = ""
+    @State private var attachments: [PendingAttachment] = []
+    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var showPhotos = false
+    @State private var showFiles = false
     @FocusState private var typing: Bool
 
     init(settings: AppSettings, chat: ChatStore, link: VoiceLink) {
@@ -64,6 +69,7 @@ struct CallView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
+            pickers
         }
         .contentShape(Rectangle())
         .gesture(pullGesture)
@@ -131,12 +137,22 @@ struct CallView: View {
                     .truncationMode(.head)
                     .padding(.horizontal, 36)
             }
+            if !attachments.isEmpty {
+                AttachmentChips(attachments: $attachments)
+            }
             HStack(spacing: 10) {
                 HStack(spacing: 10) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 20, weight: .regular))
-                        .foregroundStyle(ArbosTheme.textMuted)
-                        .frame(width: 24, height: 24)
+                    // The same `+` as the chat's: a photo or a file rides
+                    // with the typed words to the kernel.
+                    Menu {
+                        Button { showPhotos = true } label: { Label("Photo Library", systemImage: "photo.on.rectangle") }
+                        Button { showFiles = true } label: { Label("Files", systemImage: "folder") }
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 20, weight: .regular))
+                            .foregroundStyle(attachments.isEmpty ? ArbosTheme.textMuted : ArbosTheme.accent)
+                            .frame(width: 24, height: 24)
+                    }
                     TextField("Type to \(projectName)", text: $draft)
                         .font(ArbosTheme.body)
                         .foregroundStyle(ArbosTheme.text)
@@ -144,7 +160,7 @@ struct CallView: View {
                         .focused($typing)
                         .submitLabel(.send)
                         .onSubmit(sendTyped)
-                    if draft.isEmpty {
+                    if draft.isEmpty && attachments.isEmpty {
                         LevelGauge(level: model.muted ? 0 : model.level, muted: model.muted)
                             .frame(width: 22, height: 22)
                     } else {
@@ -204,9 +220,32 @@ struct CallView: View {
     }
 
     private func sendTyped() {
-        guard !draft.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        model.sendTyped(draft)
+        guard !draft.trimmingCharacters(in: .whitespaces).isEmpty || !attachments.isEmpty else { return }
+        model.sendTyped(draft, attachments: attachments)
         draft = ""
+        attachments = []
+    }
+
+    /// The pickers behind the call's `+`.
+    private var pickers: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .photosPicker(isPresented: $showPhotos, selection: $photoItems, maxSelectionCount: 4, matching: .images)
+            .onChange(of: photoItems) { _, items in
+                guard !items.isEmpty else { return }
+                Task {
+                    for item in items {
+                        if let file = await PendingAttachment.photo(item) { attachments.append(file) }
+                    }
+                    photoItems = []
+                }
+            }
+            .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+                guard case .success(let urls) = result else { return }
+                for url in urls {
+                    if let file = PendingAttachment.file(url) { attachments.append(file) }
+                }
+            }
     }
 
     /// Swipe down to pull the composer up; swipe up to put it away.
