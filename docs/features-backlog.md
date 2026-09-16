@@ -266,6 +266,7 @@ What Hermes, Codex, Cursor (editor agent), and Claude Code have that a coordinat
 | 2026-09-16 | F-57 | [#287](https://github.com/unarbos/arbos/pull/287) | `<<archived>>` in the coordinator's standing context; `agents` lists archived children by default. `archived_children_e2e`. |
 | 2026-09-16 | F-66 | [#289](https://github.com/unarbos/arbos/pull/289) | `say to=user` refused — the user reads the reply; a worker is pointed at its parent. `say_user_refused_e2e`. |
 | 2026-09-16 | notifications | [#293](https://github.com/unarbos/arbos/pull/293) | `notify` frames (reply / ask / error / notice) recorded in `.arbos/notifications.jsonl`, unseen replayed on attach, `seen` broadcast; client notes in `internal/features-inbox/2026-09-16-notify-frame-for-clients.md`. `notifications_e2e`. |
+| 2026-09-16 | Code2 first turn | [#298](https://github.com/unarbos/arbos/pull/298) | A refused provider family is remembered per host and skipped (`blocked-models.json`); the kickoff probes the key before the first word; fallback and failure notices are one plain sentence, provider words go to the log; `first_byte_ms` (30 s) bounds the wait for a first byte. `fallback_403_e2e` (four cases). |
 
 ## Next up (in order)
 
@@ -324,6 +325,7 @@ Check `internal/features-inbox/` every turn for QA proposals.
 
 ## Learned (2026-09-16)
 
+- On OpenRouter, an account-level provider block (`openai/*` 403) is invisible to `/key` and `/models`; the only truthful probe is a call. Learn from refusals, remember them per API host, and probe once at kickoff (#298).
 - A store-service fault can take a whole top-level directory of the Project store; the store is not a backup. Every document worth keeping should also live in a PR (this file's Shipped rows all do) — and a whole-file write goes to `/tmp` first, then a copy, so the old content survives until the new is durable.
 - `cargo fmt --all` in the workspace root reformats files unrelated to the change; check `git status` before `git add -A` (it slipped a dozen desktop files into one commit once; reset and redone).
 - Switching git branches while `cargo test` compiles in the same tree builds a mixed binary; run a full suite in a `git worktree` with its own `CARGO_TARGET_DIR`.
