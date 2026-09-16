@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
-const USAGE: &str = "arbos-hub [--config FILE] [--bind HOST:PORT]\n  FILE (or ARBOS_HUB_CONFIG): TOML with bind, [[machine]] name/token|token_env, [[client]] name/token|token_env/role. Default ~/.config/arbos/hub-server.toml.\n  Routes: GET /healthz; GET /list (token); WS /register (machine token); WS /attach/<machine>[/<project>]; WS /claim/<machine>.";
+const USAGE: &str = "arbos-hub [--config FILE] [--bind HOST:PORT]\n  FILE (or ARBOS_HUB_CONFIG): TOML with bind, [[machine]] name/token|token_env, [[client]] name/token|token_env/role. Default ~/.config/arbos/hub-server.toml.\n  Routes: GET /healthz; GET /list (token); GET /push, GET /push/test[/<token-tail>] (token); WS /register (machine token); WS /attach/<machine>[/<project>]; WS /claim/<machine>.";
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -60,6 +60,14 @@ async fn serve(auth: Arc<auth::Auth>, bind: String, config_dir: PathBuf) -> Resu
         println!(
             "arbos-hub: push to Apple enabled for topic {} ({} device(s) registered)",
             auth.push.topic,
+            push.device_count()
+        );
+    } else {
+        // Loud, and the hub serves anyway: a wrong key path must not take
+        // the hub down for everyone. GET /push says the same.
+        eprintln!(
+            "arbos-hub: push disabled — {} ({} device(s) registered and waiting)",
+            push.reason().unwrap_or("no key"),
             push.device_count()
         );
     }
@@ -134,6 +142,40 @@ async fn handle(
                 "machines": hub.roster_for(Some((who.user(), who.role()))),
             }))?;
             http::respond(&mut stream, 200, "application/json", &body).await
+        }
+        // Push state, for the person adding the key and the phone loop:
+        // enabled and why not, the devices (token tails), the last attempts.
+        (["push"], false) => {
+            let all = matches!(who.role(), "owner" | "admin");
+            let body = serde_json::to_string_pretty(&hub.push.status(who.user(), all))?;
+            http::respond(&mut stream, 200, "application/json", &body).await
+        }
+        // A test alert to the caller's devices (or the one whose token ends
+        // in the tail): see a push arrive the day the key is set.
+        (["push", "test"], false) | (["push", "test", _], false) => {
+            let tail = parts.get(2).copied().unwrap_or("");
+            let deliveries = hub.push.test(who.user(), tail).await;
+            let body = serde_json::to_string_pretty(&serde_json::json!({
+                "enabled": hub.push.enabled(),
+                "reason": hub.push.reason(),
+                "sent": deliveries.len(),
+                "deliveries": deliveries.iter().map(|d| serde_json::json!({
+                    "token": &d.token[d.token.len().saturating_sub(8)..],
+                    "status": d.status,
+                    "detail": d.detail.trim(),
+                })).collect::<Vec<_>>(),
+            }))?;
+            let code = if hub.push.enabled()
+                && deliveries.iter().all(|d| d.status == 200)
+                && !deliveries.is_empty()
+            {
+                200
+            } else if !hub.push.enabled() {
+                503
+            } else {
+                502
+            };
+            http::respond(&mut stream, code, "application/json", &body).await
         }
         (["register"], true) => {
             let ws = http::upgrade(stream, &req).await?;

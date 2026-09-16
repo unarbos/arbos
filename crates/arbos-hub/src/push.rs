@@ -89,20 +89,49 @@ pub struct Push {
     path: PathBuf,
     devices: Mutex<Registry>,
     signer: Option<Signer>,
+    /// Why pushes are off when they are: no key, or a key that did not
+    /// load. Shown on `GET /push` and in the `pushed` reply, so a bad
+    /// path or a malformed .p8 is seen the day it is set.
+    reason: Option<String>,
     http: reqwest::Client,
+    /// The last attempts, newest last, for `GET /push`: the first place
+    /// to look when a push did not arrive.
+    journal: Mutex<Vec<Attempt>>,
+}
+
+/// How many attempts `GET /push` remembers.
+const JOURNAL_LEN: usize = 50;
+
+/// One attempt as the journal keeps it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Attempt {
+    pub ts: i64,
+    /// What was sent: `alert`, `background`, `test`.
+    pub kind: String,
+    pub project: String,
+    /// The token's last eight characters, never the whole.
+    pub token: String,
+    /// The device's user, kept here so a forgotten device's attempts
+    /// still show to its owner.
+    pub user: String,
+    pub status: u16,
+    pub detail: String,
 }
 
 impl Push {
     /// `cfg` from the hub's config; `dir` is where `hub-push.json` lives.
     /// Without a key the registry still works (tokens are kept for when a
-    /// key is configured) and nothing is sent.
+    /// key is configured) and nothing is sent. A key that does not load —
+    /// a wrong path, a malformed .p8, an id missing — does not stop the
+    /// hub: pushes are off with the reason kept, and the hub serves.
     pub fn new(cfg: PushConfig, dir: &Path) -> Result<Self> {
-        let signer = match key_text(&cfg)? {
-            Some(pem) if !cfg.key_id.is_empty() && !cfg.team_id.is_empty() => {
-                Some(Signer::from_pem(&pem, &cfg.key_id, &cfg.team_id)?)
-            }
-            Some(_) => bail!("[push]: apns_key is set but key_id or team_id is empty"),
-            None => None,
+        let (signer, reason) = match load_signer(&cfg) {
+            Ok(Some(s)) => (Some(s), None),
+            Ok(None) => (
+                None,
+                Some("no APNs key on the hub: set [push] apns_key, key_id and team_id in hub-server.toml".to_string()),
+            ),
+            Err(e) => (None, Some(format!("{e:#}"))),
         };
         let path = dir.join("hub-push.json");
         let devices = std::fs::read_to_string(&path)
@@ -114,15 +143,89 @@ impl Push {
             path,
             devices: Mutex::new(devices),
             signer,
+            reason,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(15))
                 .build()?,
+            journal: Mutex::new(Vec::new()),
         })
     }
 
     /// Whether a key is configured: pushes go out.
     pub fn enabled(&self) -> bool {
         self.signer.is_some()
+    }
+
+    /// Why pushes are off, when they are.
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+
+    /// The state for `GET /push`: whether pushes go out and why not, the
+    /// topic, the devices (token tails only) for `user` — every user's
+    /// for an owner or admin — and the last attempts.
+    pub fn status(&self, user: &str, all_users: bool) -> serde_json::Value {
+        let devices: Vec<serde_json::Value> = self
+            .devices
+            .lock()
+            .unwrap()
+            .devices
+            .iter()
+            .filter(|d| all_users || d.user == user)
+            .map(|d| {
+                serde_json::json!({
+                    "token": tail(&d.token),
+                    "platform": d.platform,
+                    "sandbox": d.sandbox,
+                    "projects": d.projects,
+                    "user": d.user,
+                    "since_ms": d.since_ms,
+                })
+            })
+            .collect();
+        let attempts: Vec<Attempt> = self
+            .journal
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| all_users || a.user == user)
+            .cloned()
+            .collect();
+        serde_json::json!({
+            "enabled": self.enabled(),
+            "reason": self.reason,
+            "topic": self.cfg.topic,
+            "key_id": self.cfg.key_id,
+            "sandbox_default": self.cfg.sandbox,
+            "url": self.cfg.url,
+            "devices": devices,
+            "attempts": attempts,
+        })
+    }
+
+    /// A test alert to `user`'s devices whose token ends in `token_tail`
+    /// (all of the user's when empty): the way to see a push arrive the
+    /// day the key is set, without waiting for a worker to finish.
+    pub async fn test(&self, user: &str, token_tail: &str) -> Vec<Delivery> {
+        let payload = serde_json::json!({
+            "aps": {
+                "alert": {"title": "Arbos", "body": "Push works. This is a test from the hub."},
+                "sound": "default",
+            },
+            "target": "hub:test",
+            "kind": "test",
+        });
+        let targets: Vec<Device> = self
+            .devices
+            .lock()
+            .unwrap()
+            .devices
+            .iter()
+            .filter(|d| d.user == user && (token_tail.is_empty() || tail(&d.token) == token_tail))
+            .cloned()
+            .collect();
+        self.send_to(&targets, "test", "test", &payload, "alert", None)
+            .await
     }
 
     pub fn device_count(&self) -> usize {
@@ -253,11 +356,34 @@ impl Push {
         push_type: &str,
         collapse: Option<&str>,
     ) -> Vec<Delivery> {
+        let targets = self.devices_for(project, user);
+        self.send_to(&targets, project, push_type, payload, push_type, collapse)
+            .await
+    }
+
+    async fn send_to(
+        &self,
+        targets: &[Device],
+        project: &str,
+        journal_kind: &str,
+        payload: &serde_json::Value,
+        push_type: &str,
+        collapse: Option<&str>,
+    ) -> Vec<Delivery> {
         let mut out = Vec::new();
         let Some(signer) = &self.signer else {
+            for d in targets {
+                self.record(
+                    journal_kind,
+                    project,
+                    d,
+                    0,
+                    self.reason.clone().unwrap_or_default(),
+                );
+            }
             return out;
         };
-        for d in self.devices_for(project, user) {
+        for d in targets.iter().cloned() {
             let base = match (&self.cfg.url, d.sandbox) {
                 (Some(u), _) => u.trim_end_matches('/').to_string(),
                 (None, true) => SANDBOX_URL.into(),
@@ -311,9 +437,49 @@ impl Push {
                     detail: e.to_string(),
                 },
             };
+            self.record(
+                journal_kind,
+                project,
+                &d,
+                delivery.status,
+                delivery.detail.clone(),
+            );
             out.push(delivery);
         }
         out
+    }
+
+    fn record(&self, kind: &str, project: &str, device: &Device, status: u16, detail: String) {
+        let mut j = self.journal.lock().unwrap();
+        j.push(Attempt {
+            ts: arbos_core::now_ms(),
+            kind: kind.to_string(),
+            project: project.to_string(),
+            token: tail(&device.token),
+            user: device.user.clone(),
+            status,
+            detail: detail.trim().chars().take(300).collect(),
+        });
+        let extra = j.len().saturating_sub(JOURNAL_LEN);
+        j.drain(..extra);
+    }
+}
+
+/// The last eight characters of a token: enough to tell devices apart in
+/// a status page, never the whole.
+fn tail(token: &str) -> String {
+    let n = token.len().saturating_sub(8);
+    token[n..].to_string()
+}
+
+/// The signer from the config, or `None` when no key is named.
+fn load_signer(cfg: &PushConfig) -> Result<Option<Signer>> {
+    match key_text(cfg)? {
+        Some(pem) if !cfg.key_id.is_empty() && !cfg.team_id.is_empty() => {
+            Ok(Some(Signer::from_pem(&pem, &cfg.key_id, &cfg.team_id)?))
+        }
+        Some(_) => bail!("[push]: apns_key is set but key_id or team_id is empty"),
+        None => Ok(None),
     }
 }
 
@@ -658,5 +824,126 @@ mod tests {
             serde_json::from_str(req.split("\r\n\r\n").nth(1).unwrap()).unwrap();
         assert_eq!(body["aps"]["content-available"], 1);
         assert_eq!(body["aps"]["badge"], 0);
+
+        // The journal and the status page: token tails only, the 410 on
+        // record, and a test alert for the day the key is set.
+        let status = push.status("jacob", false);
+        assert_eq!(status["enabled"], true);
+        assert!(status["reason"].is_null());
+        let devices = status["devices"].as_array().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(
+            devices[0]["token"], "abc123",
+            "a short token is its own tail"
+        );
+        let attempts = status["attempts"].as_array().unwrap();
+        assert!(
+            attempts
+                .iter()
+                .any(|a| a["token"] == "dead" && a["status"] == 410),
+            "{attempts:?}"
+        );
+        assert!(
+            attempts
+                .iter()
+                .any(|a| a["kind"] == "background" && a["status"] == 200),
+            "{attempts:?}"
+        );
+        assert!(status.to_string().contains("abc123"));
+        let other = push.status("someone-else", false);
+        assert!(
+            other["devices"].as_array().unwrap().is_empty(),
+            "another user sees no devices"
+        );
+        let t = push.test("jacob", "").await;
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].status, 200);
+        let req = seen.lock().unwrap().last().cloned().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(req.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["kind"], "test");
+        assert!(
+            body["aps"]["alert"]["body"]
+                .as_str()
+                .unwrap()
+                .contains("Push works")
+        );
+        assert!(
+            push.test("jacob", "zzz").await.is_empty(),
+            "no device with that tail"
+        );
+    }
+
+    /// A key that does not load must not take the hub down: pushes are
+    /// off with the reason kept, registrations still work, and a test
+    /// push says why nothing went.
+    #[tokio::test]
+    async fn a_bad_key_leaves_the_hub_up_with_push_off_and_the_reason_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = PushConfig {
+            apns_key: Some(dir.path().join("does-not-exist.p8")),
+            apns_key_env: None,
+            key_id: "ABC123DEFG".into(),
+            team_id: "25SCF3Q2AK".into(),
+            topic: default_topic(),
+            sandbox: false,
+            url: None,
+        };
+        let push = Push::new(cfg, dir.path()).expect("the hub still constructs");
+        assert!(!push.enabled());
+        let why = push.reason().unwrap();
+        assert!(why.contains("does-not-exist.p8"), "{why}");
+        push.register("abcdef1234567890", "apns", None, "arboslife/demo", "jacob")
+            .unwrap();
+        assert_eq!(push.device_count(), 1);
+        let t = push.test("jacob", "").await;
+        assert!(t.is_empty(), "nothing is sent without a key");
+        let status = push.status("jacob", false);
+        assert_eq!(status["enabled"], false);
+        assert!(
+            status["reason"]
+                .as_str()
+                .unwrap()
+                .contains("does-not-exist.p8")
+        );
+        assert_eq!(
+            status["devices"][0]["token"], "34567890",
+            "the tail, not the token"
+        );
+        let attempts = status["attempts"].as_array().unwrap();
+        assert_eq!(
+            attempts.len(),
+            1,
+            "the refused attempt is on record: {attempts:?}"
+        );
+        assert_eq!(attempts[0]["status"], 0);
+        assert!(
+            attempts[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("does-not-exist.p8")
+        );
+
+        // A malformed .p8 is the same story, with its own reason.
+        let bad = dir.path().join("bad.p8");
+        std::fs::write(
+            &bad,
+            "-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        let cfg = PushConfig {
+            apns_key: Some(bad),
+            apns_key_env: None,
+            key_id: "ABC123DEFG".into(),
+            team_id: "25SCF3Q2AK".into(),
+            topic: default_topic(),
+            sandbox: false,
+            url: None,
+        };
+        let push = Push::new(cfg, dir.path()).unwrap();
+        assert!(!push.enabled() && push.reason().is_some());
+        // No key named at all: the plain reason.
+        let push = Push::new(PushConfig::default(), dir.path()).unwrap();
+        assert!(push.reason().unwrap().starts_with("no APNs key on the hub"));
     }
 }
