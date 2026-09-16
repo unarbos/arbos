@@ -51,7 +51,7 @@ pub use tools::{
     Grep, GrepHit, Hooks, NO_MESH, PromptSize, StoreFile, StoreWritten, is_readonly_command,
     kill_job,
 };
-pub use turn::{TurnOpts, brief_output_paths, turn};
+pub use turn::{TurnOpts, brief_output_paths, turn, written_this_turn};
 
 /// What an agent's prompt costs before any conversation: the system
 /// prefix (contract, project, page, peers) and the tool schemas, in

@@ -119,3 +119,125 @@ fn a_worker_that_wrote_the_output_file_is_not_nudged() {
     assert!(k.place.join(".arbos/docs/research.md").exists());
     let _ = k.child.kill();
 }
+
+/// qal-j04: the brief says `Output: .arbos/docs/CHANGELOG.md`; the worker
+/// writes `CHANGELOG.md` at the project root, where the user asked for
+/// it. That is delivered — no nudge. And a worker that is nudged anyway
+/// (an older path) may not move or delete the file to match the brief:
+/// the bash is refused and the file stays.
+#[test]
+fn a_deliverable_written_where_the_task_put_it_is_delivered_and_never_moved() {
+    // Delivered by name at the repo root: no nudge, the file stays.
+    let worker = concat!(
+        "{\"content\":\"writing\",\"calls\":[{\"name\":\"write\",\"arguments\":{\"path\":\"CHANGELOG.md\",\"contents\":\"## Fix\\n- area() corrected\\n\"}}]}\n",
+        "{\"content\":\"done; CHANGELOG.md at the repo root\"}\n",
+    );
+    let replies = format!(
+        concat!(
+            "{{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{{\"name\":\"spawn\",\"arguments\":{{\"name\":\"w1\",\"task\":\"add a CHANGELOG.md at the repo root describing the fix\",\"output\":\".arbos/docs/CHANGELOG.md\"}}}}]}}\n",
+            "{{\"agent\":\"root\",\"content\":\"started\"}}\n",
+            "{worker}",
+            "{{\"agent\":\"root\",\"content\":\"noted\"}}\n",
+        ),
+        worker = worker
+    );
+    let mut k = start_kernel_replay_prepared("output-delivered-elsewhere", &replies, "", |place| {
+        std::fs::create_dir_all(place.join(".arbos")).unwrap();
+        std::fs::write(
+            place.join(".arbos/project.toml"),
+            "schema = 2\n[root]\nrole = \"coordinator\"\narchive_children = false\n",
+        )
+        .unwrap();
+    });
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "add a changelog"}));
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    assert!(
+        wait_for(Duration::from_secs(40), || transcript(&k.place, "w1")
+            .iter()
+            .any(|e| e["kind"] == "turn_complete")),
+        "w1's turn ends"
+    );
+    let w1 = transcript(&k.place, "w1");
+    assert!(
+        !w1.iter()
+            .any(|e| e["kind"] == "nudge" && e["reason"] == "output owed"),
+        "the file exists where the task put it: {w1:#?}"
+    );
+    assert!(k.place.join("CHANGELOG.md").exists());
+    assert!(
+        !k.place.join(".arbos/docs/CHANGELOG.md").exists(),
+        "not copied into the store"
+    );
+    let _ = k.child.kill();
+
+    // Nudged anyway (the file was written under a different name), the
+    // worker tries to move the user's file to the brief's path: refused;
+    // the file stays; the worker reports the real path.
+    let worker = concat!(
+        "{\"content\":\"writing\",\"calls\":[{\"name\":\"write\",\"arguments\":{\"path\":\"CHANGES.md\",\"contents\":\"## Fix\\n\"}}]}\n",
+        "{\"content\":\"done; CHANGES.md\"}\n",
+        "{\"content\":\"moving it\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"mkdir -p .arbos/docs && mv CHANGES.md .arbos/docs/CHANGELOG.md\",\"description\":\"Move to the brief's path\"}}]}\n",
+        "{\"content\":\"CHANGES.md stays at the repo root; that is the changelog.\"}\n",
+    );
+    let replies = format!(
+        concat!(
+            "{{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{{\"name\":\"spawn\",\"arguments\":{{\"name\":\"w1\",\"task\":\"add a changelog\",\"output\":\".arbos/docs/CHANGELOG.md\"}}}}]}}\n",
+            "{{\"agent\":\"root\",\"content\":\"started\"}}\n",
+            "{worker}",
+            "{{\"agent\":\"root\",\"content\":\"noted\"}}\n",
+        ),
+        worker = worker
+    );
+    let mut k = start_kernel_replay_prepared("output-never-moved", &replies, "", |place| {
+        std::fs::create_dir_all(place.join(".arbos")).unwrap();
+        std::fs::write(
+            place.join(".arbos/project.toml"),
+            "schema = 2\n[root]\nrole = \"coordinator\"\narchive_children = false\n",
+        )
+        .unwrap();
+    });
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "add a changelog"}));
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    assert!(
+        wait_for(Duration::from_secs(40), || transcript(&k.place, "w1")
+            .iter()
+            .any(|e| e["kind"] == "turn_complete")),
+        "w1's turn ends"
+    );
+    let w1 = transcript(&k.place, "w1");
+    let nudge = w1
+        .iter()
+        .find(|e| e["kind"] == "nudge" && e["reason"] == "output owed")
+        .expect("nudged: a different name");
+    assert!(
+        nudge["text"]
+            .as_str()
+            .unwrap()
+            .contains("never move or delete a file"),
+        "{nudge}"
+    );
+    let mv = w1
+        .iter()
+        .find(|e| e["kind"] == "tool" && e["name"] == "bash")
+        .expect("the move was attempted");
+    let err = mv["error"].as_str().expect("and refused");
+    assert!(
+        err.contains("refused")
+            && err.contains("CHANGES.md")
+            && err.contains("never a reason to relocate"),
+        "{err}"
+    );
+    assert!(k.place.join("CHANGES.md").exists(), "the user's file stays");
+    assert!(!k.place.join(".arbos/docs/CHANGELOG.md").exists());
+    let _ = k.child.kill();
+}

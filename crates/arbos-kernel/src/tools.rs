@@ -480,7 +480,7 @@ impl Tool for Spawn {
                 ),
                 (
                     "output",
-                    "Exact output paths under .arbos/docs|internal|media.",
+                    "Exact paths under .arbos/docs|internal|media for artefacts agents read (research, reports, captures). Not for a file the user asked to exist in their project — put that in the task.",
                     false,
                     "string",
                 ),
