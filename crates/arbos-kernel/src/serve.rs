@@ -520,8 +520,18 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             // end before its next tick, or the cut file would be read again
             // from the top and replayed to every window.
             Some(frame) = frame_in_rx.recv() => {
-                if let Frame::Rewind { agent, turn, files } = frame {
-                    rewind_live(&place, &hooks, &mut tails, &agent, turn, files);
+                if let Frame::Rewind {
+                    agent,
+                    turn,
+                    files,
+                    line,
+                } = frame
+                {
+                    let target = match line {
+                        Some(line) => rewind::Target::Line(line),
+                        None => rewind::Target::Turn(turn),
+                    };
+                    rewind_live(&place, &hooks, &mut tails, &agent, target, files);
                 } else {
                     handle_frame(
                         &place,
@@ -2292,7 +2302,7 @@ fn rewind_live(
     hooks: &Arc<KernelHooks>,
     tails: &mut std::collections::HashMap<String, TranscriptTail>,
     agent: &str,
-    turn: u32,
+    target: rewind::Target,
     files: bool,
 ) {
     let refuse = |detail: String| {
@@ -2305,7 +2315,7 @@ fn rewind_live(
     if hooks.is_running(agent) {
         return refuse("rewind: the agent is running; stop the turn first".into());
     }
-    let done = match rewind::cut(place, agent, rewind::Target::Turn(turn)) {
+    let done = match rewind::cut(place, agent, target) {
         Ok(c) => c,
         Err(e) => return refuse(format!("rewind: {e:#}")),
     };
@@ -2318,7 +2328,7 @@ fn rewind_live(
         "rewind",
         Some(agent),
         format!(
-            "turn={turn} line={} dropped={} files={files} archive={}",
+            "target={target:?} line={} dropped={} files={files} archive={}",
             done.checkpoint.line,
             done.dropped,
             done.archive.display()

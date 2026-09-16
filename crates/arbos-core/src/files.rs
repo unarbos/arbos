@@ -347,6 +347,17 @@ pub fn fork_chat(place: &Place, source_id: &str) -> Result<Agent> {
         std::fs::write(&to, "")?;
         append_events(&to, &copied)?;
     }
+    // The checkpoints go with the transcript they index: line for line the
+    // copy is the same file, so the fork's earlier turns stay rewindable.
+    // Without them a rewind on a fork found no checkpoint before its own
+    // first turn (F-103).
+    let cps_from = Layout::new(place, source_id).dir.join("checkpoints.jsonl");
+    if cps_from.exists() {
+        let cps_to = Layout::new(place, agent.id.as_str())
+            .dir
+            .join("checkpoints.jsonl");
+        std::fs::copy(&cps_from, &cps_to)?;
+    }
     Ok(agent)
 }
 

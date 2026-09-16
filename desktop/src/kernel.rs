@@ -3159,11 +3159,18 @@ impl SshOut {
 const REMOTE_DIR_CAP: usize = 200;
 
 pub fn list_remote_dirs(host: &str, path: &str) -> Result<Vec<String>> {
-    // `ls -1p` is one level, no hidden (`-A`/`-a` omitted). `grep '/$'` keeps
-    // directories only, so files never cross SSH. `head` caps the payload.
+    // One level, directories only (`*/` skips hidden names), so files never
+    // cross SSH; beside each name, the `kind` its `.arbos/project.toml`
+    // declares, so a service or a worktree can be kept off the list on the
+    // folder's own word. `head` caps the payload.
     let script = format!(
-        "cd {} && {{ ls -1p 2>/dev/null | grep '/$' || true; }} | head -n {REMOTE_DIR_CAP}",
-        shell_path(path)
+        concat!(
+            "cd {} && for d in */; do d=${{d%/}}; ",
+            "k=$(grep -m1 '^kind' \"$d/.arbos/project.toml\" 2>/dev/null); ",
+            "printf '%s\\t%s\\n' \"$d\" \"$k\"; done 2>/dev/null | head -n {}"
+        ),
+        shell_path(path),
+        REMOTE_DIR_CAP
     );
     let out = ssh_run_with(host, &script, &ssh_listing())?;
     if out.status != 0 {
@@ -3173,8 +3180,12 @@ pub fn list_remote_dirs(host: &str, path: &str) -> Result<Vec<String>> {
         .stdout
         .lines()
         .filter_map(|line| {
-            let name = line.trim().trim_end_matches('/');
-            if name.is_empty() || name == "." || name == ".." || name.starts_with('.') {
+            let (name, kind) = line.split_once('\t').unwrap_or((line, ""));
+            let name = name.trim().trim_end_matches('/');
+            if name.is_empty() || name == "." || name == ".." || name.starts_with('.') || name == "*" {
+                return None;
+            }
+            if crate::model::place::hidden_kind(crate::model::place::kind_in(kind).as_deref()) {
                 return None;
             }
             Some(name.to_string())

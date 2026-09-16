@@ -811,11 +811,14 @@ fn list_local(dir: &str) -> Vec<String> {
             if name.starts_with('.') {
                 return None;
             }
-            if entry.path().is_dir() {
-                Some(name)
-            } else {
-                None
+            if !entry.path().is_dir() {
+                return None;
             }
+            // A service or a worktree is not a project of his to open.
+            if place::hidden_kind(place::declared_kind(&entry.path()).as_deref()) {
+                return None;
+            }
+            Some(name)
         })
         .collect();
     names.sort_unstable();

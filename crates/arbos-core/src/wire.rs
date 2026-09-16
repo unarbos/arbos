@@ -298,6 +298,13 @@ pub enum Frame {
         turn: u32,
         #[serde(default)]
         files: bool,
+        /// The transcript line of the prompt to rewind to, when the client
+        /// knows it. Preferred over `turn`: a window's count of prompt
+        /// cards can differ from the transcript's count of `user` lines
+        /// (ask answers, skipped questions, a fork's copied history), and a
+        /// count that is off by one restores the wrong turn or none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        line: Option<u64>,
     },
     /// Kernel → every client: the transcript of `agent` now ends before
     /// `line`; `dropped` lines went to the archive; `restored` names the

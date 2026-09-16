@@ -232,6 +232,23 @@ impl Project {
         self.sessions.iter().find(|chat| chat.id == id)
     }
 
+    /// Every session under `id` — children, their children — that is still
+    /// working. Cursor's composer keeps its stop disc while any of a chat's
+    /// delegated work runs, and Stop there stops the workers too.
+    pub fn running_descendants(&self, id: u64) -> Vec<u64> {
+        let mut out = Vec::new();
+        let mut frontier = vec![id];
+        while let Some(parent) = frontier.pop() {
+            for chat in self.sessions.iter().filter(|chat| chat.parent == Some(parent)) {
+                if chat.busy() {
+                    out.push(chat.id);
+                }
+                frontier.push(chat.id);
+            }
+        }
+        out
+    }
+
     pub fn session_mut(&mut self, id: u64) -> Option<&mut ChatSession> {
         self.sessions.iter_mut().find(|chat| chat.id == id)
     }

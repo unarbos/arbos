@@ -219,6 +219,35 @@ fn expand_include(pattern: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Kinds of place the opener keeps out of a folder list: a worker's git
+/// worktree of another project, and a place that declares itself
+/// infrastructure (`kind = "service"` in its `.arbos/project.toml` — the
+/// feedback inbox is one). The hub's roster says the same word for the
+/// same folders; the desktop lists folders itself, so it reads the same
+/// file rather than guessing from a name.
+pub const HIDDEN_KINDS: [&str; 2] = ["service", "worktree"];
+
+/// The `kind` a project folder declares, read from its `.arbos/project.toml`
+/// without the rest of the file mattering; `None` for a plain project or
+/// a folder that is not a place.
+pub fn declared_kind(project_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(project_dir.join(".arbos").join("project.toml")).ok()?;
+    kind_in(&text)
+}
+
+/// `kind = "service"` on a line of its own, as the roster reads it.
+pub fn kind_in(project_toml: &str) -> Option<String> {
+    project_toml.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("kind")?.trim_start().strip_prefix('=')?;
+        let word = rest.trim().trim_matches('"').trim();
+        (!word.is_empty()).then(|| word.to_string())
+    })
+}
+
+pub fn hidden_kind(kind: Option<&str>) -> bool {
+    kind.is_some_and(|k| HIDDEN_KINDS.contains(&k))
+}
+
 fn trimmed_path(path: &Path) -> String {
     path.to_string_lossy().trim_end_matches('/').to_string()
 }
