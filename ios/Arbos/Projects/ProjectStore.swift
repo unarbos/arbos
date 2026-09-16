@@ -53,9 +53,10 @@ final class ProjectStore: ObservableObject {
                 print("roster: \(machines.count) machines, \(machines.flatMap(\.projects).count) projects")
                 #endif
                 for machine in machines {
-                    // `<project>--<child>` is a worker's worktree place, not a
-                    // project of Jacob's: it belongs under its parent's chat.
-                    for project in machine.projects where !project.name.contains("--") {
+                    // The hub says what a place is (#346): a worker's worktree
+                    // or a service (the feedback pipe) is not a project of
+                    // Jacob's, whatever its name looks like.
+                    for project in machine.projects where project.kind.isEmpty {
                         let target = KernelTarget.hub(machine: machine.name, project: project.name)
                         var row = entry(
                             target: target,
