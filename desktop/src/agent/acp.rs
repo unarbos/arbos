@@ -11,7 +11,7 @@ use crate::{
         session::{Artifact, ArtifactKind},
     },
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use arbos_core::wire::Frame;
 use cacp::{
     Error,
@@ -22,7 +22,11 @@ use cacp::{
     },
 };
 use serde_json::Value;
-use std::{path::PathBuf, sync::OnceLock, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
@@ -242,6 +246,9 @@ pub struct Session {
     out: mpsc::UnboundedSender<String>,
     pub session_id: String,
     pub cwd: PathBuf,
+    /// The kernel runs on another machine: a path here means nothing
+    /// there, so attachments travel as bytes (`put` with `data`).
+    remote: bool,
 }
 
 #[derive(Default)]
@@ -351,6 +358,7 @@ impl Session {
                 reader,
                 out,
                 session_id,
+                remote: launch.place.is_remote(),
                 cwd: launch.place.path,
             },
             rx,
@@ -376,24 +384,68 @@ impl Session {
         // — a leftover from the base64 `parts` wire — made screenshots
         // arrive as text only. Absolute paths, since the agent's cwd is
         // the place, not wherever the file was picked from.
+        //
+        // On a remote place the file is sent first: a `put` with its bytes
+        // lands it under `.arbos/attachments/` on the kernel's machine, and
+        // the user frame names that path. The kernel takes frames in order,
+        // so the file is there before the words are. A refusal comes back
+        // as a `written` frame with `error`, shown in the chat.
+        let attachments = content
+            .attachments
+            .iter()
+            .map(|a| {
+                if self.remote {
+                    match self.put_attachment(&a.path) {
+                        Ok(stored) => return stored,
+                        Err(err) => eprintln!("attachment {}: {err:#}; sending the path", a.path.display()),
+                    }
+                }
+                std::path::absolute(&a.path)
+                    .unwrap_or_else(|_| a.path.clone())
+                    .display()
+                    .to_string()
+            })
+            .collect();
         self.send_frame(&Frame::User {
             agent: self.session_id.clone(),
             text: content.text.clone(),
             steer,
-            attachments: content
-                .attachments
-                .iter()
-                .map(|a| {
-                    std::path::absolute(&a.path)
-                        .unwrap_or_else(|_| a.path.clone())
-                        .display()
-                        .to_string()
-                })
-                .collect(),
+            attachments,
             channel: content.channel.clone(),
             device: content.device.clone(),
             model: content.model.clone().unwrap_or_default(),
         })
+    }
+
+    /// Send a file's bytes ahead of the prompt that names it. Returns the
+    /// relative path the kernel will know it by.
+    fn put_attachment(&self, path: &Path) -> Result<String> {
+        use base64::Engine;
+        let bytes = std::fs::read(path)?;
+        if bytes.len() > arbos_core::wire::PUT_MAX_BYTES {
+            bail!(
+                "{} is {} MB; the kernel takes at most {} MB",
+                path.display(),
+                bytes.len() / (1024 * 1024),
+                arbos_core::wire::PUT_MAX_BYTES / (1024 * 1024)
+            );
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".into());
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let stored = format!("attachments/{stamp}-{name}");
+        self.send_frame(&Frame::Put {
+            path: stored.clone(),
+            text: String::new(),
+            data: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
+            base_hash: None,
+        })?;
+        Ok(stored)
     }
 
     pub fn cancel(&self) -> Result<(), Error> {
@@ -692,6 +744,18 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             agent: Some(id),
             detail,
         } if id == agent => vec![Event::Refused(detail)],
+        // A `put` of an attachment's bytes the kernel would not take (too
+        // large, a bad path): the words went through without the file, and
+        // the chat says so.
+        Frame::Written {
+            path,
+            error: Some(error),
+            ..
+        } if path.starts_with("attachments/") => {
+            let name = path.rsplit('/').next().unwrap_or(&path);
+            let name = name.split_once('-').map_or(name, |(_, rest)| rest);
+            vec![Event::Refused(format!("attachment {name} not sent: {error}"))]
+        }
         Frame::Plan { agent: id, nodes } if id == agent => vec![Event::Plan(nodes)],
         // The agent's own line on what it is doing (or the kernel's guess
         // from the tool in flight); an empty step means idle.
