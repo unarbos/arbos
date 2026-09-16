@@ -52,7 +52,7 @@ final class MockKernelChat: ChatSource {
         ]
     }
 
-    func send(text: String, steer: Bool) async throws {
+    func send(text: String, steer: Bool, attachments: [PendingAttachment]) async throws {
         reply?.cancel()
         stream?.yield(.item(ChatItem(.user(text))))
         stream?.yield(.turn(running: true))

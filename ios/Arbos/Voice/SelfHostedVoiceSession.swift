@@ -42,9 +42,14 @@ final class SelfHostedVoiceSession: VoiceSession {
 
     var events: AsyncStream<VoiceEvent> { sink.stream }
 
-    init(serverURL: String, token: String) {
+    /// `mode`: `voice` (the call) or `dictation` (words only: the server
+    /// transcribes and answers nothing).
+    private let mode: String
+
+    init(serverURL: String, token: String, mode: String = "voice") {
         self.serverURL = serverURL
         self.token = token
+        self.mode = mode
     }
 
     func connect() async throws {
@@ -71,11 +76,13 @@ final class SelfHostedVoiceSession: VoiceSession {
                 self.close()
             }
         )
-        socket.send(json: [
+        var start: [String: Any] = [
             "type": "session.start",
             "format": ["type": "audio/pcm", "rate": Int(AudioEngine.sampleRate)],
-            "agents": true,
-        ])
+            "agents": mode == "voice",
+        ]
+        if mode != "voice" { start["mode"] = mode }
+        socket.send(json: start)
     }
 
     func send(audio frame: Data) {

@@ -82,7 +82,7 @@ enum ChatUpdate {
 protocol ChatSource: AnyObject {
     var updates: AsyncStream<ChatUpdate> { get }
     func start() async throws
-    func send(text: String, steer: Bool) async throws
+    func send(text: String, steer: Bool, attachments: [PendingAttachment]) async throws
     func stop()
     /// A worker's transcript, replayed once. Sources without workers
     /// return nothing.

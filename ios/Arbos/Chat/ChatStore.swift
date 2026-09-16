@@ -203,6 +203,11 @@ final class ChatStore: ObservableObject {
 
     var running: Int { workers.filter(\.running).count }
 
+    /// A line the app itself has to say (a picker or dictation problem).
+    func notice(_ text: String) {
+        items.append(ChatItem(.notice(text, failed: true)))
+    }
+
     /// Open another kernel: the pod, or a machine/project on the hub.
     func switchTarget(_ target: KernelTarget) async {
         guard target != settings.kernelTarget || mode != .live else { return }
@@ -224,14 +229,15 @@ final class ChatStore: ObservableObject {
         return agent == "main" ? target : "\(target) · \(agent)"
     }
 
-    func send(_ text: String) {
+    func send(_ text: String, attachments: [PendingAttachment] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty || !attachments.isEmpty else { return }
         // Shown at once, as pending; the kernel's echo of the same words
         // makes it real. A turn already running gets the new words as a
         // steer at its next tool boundary; otherwise this starts one.
         let steer = busy
-        let card = ChatItem(.user(trimmed, pending: true))
+        let shown = attachments.isEmpty ? trimmed : (trimmed.isEmpty ? "" : trimmed + "\n") + attachments.map { "📎 \($0.name)" }.joined(separator: "\n")
+        let card = ChatItem(.user(shown, pending: true))
         closeOpenAgentMessage()
         items.append(card)
         pendingSends.append((card.id, trimmed, steer))
@@ -240,7 +246,7 @@ final class ChatStore: ObservableObject {
         sentAt = Date()
         Task {
             do {
-                try await source.send(text: trimmed, steer: steer)
+                try await source.send(text: trimmed, steer: steer, attachments: attachments)
             } catch {
                 busy = false
             }
@@ -255,7 +261,7 @@ final class ChatStore: ObservableObject {
         busy = true
         Task {
             for entry in queue {
-                try? await source.send(text: entry.text, steer: false)
+                try? await source.send(text: entry.text, steer: false, attachments: [])
                 try? await Task.sleep(for: .milliseconds(200))
             }
         }
@@ -282,11 +288,11 @@ final class ChatStore: ObservableObject {
             items = seed + stillPending
             earlierLines = earlier
         case .item(let item):
-            if case .user(let text, _) = item.kind, let index = pendingSends.firstIndex(where: { $0.text == text }) {
+            if case .user(let text, _) = item.kind, let index = pendingSends.firstIndex(where: { $0.text == text || ($0.text.isEmpty && text.isEmpty) }) {
                 // The kernel echoed a line typed here: the pending card is real now.
                 let pending = pendingSends.remove(at: index)
-                if let row = items.firstIndex(where: { $0.id == pending.id }) {
-                    items[row].kind = .user(text)
+                if let row = items.firstIndex(where: { $0.id == pending.id }), case .user(let shown, _) = items[row].kind {
+                    items[row].kind = .user(shown)
                     return
                 }
             }

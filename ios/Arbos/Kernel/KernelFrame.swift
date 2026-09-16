@@ -137,6 +137,8 @@ enum KernelFrame {
     /// A file under `.arbos/`, answering a `read`.
     case file(path: String, text: String, error: String?)
     case thinkingDelta(agent: String, text: String)
+    /// The kernel refused something ("unknown frame", "auth required", …).
+    case error(detail: String)
     case other(type: String)
 
     init?(json object: [String: Any]) {
@@ -156,6 +158,8 @@ enum KernelFrame {
                 text: object["text"] as? String ?? "",
                 error: object["error"] as? String
             )
+        case "error":
+            self = .error(detail: object["detail"] as? String ?? "kernel error")
         case "thinking_delta":
             self = .thinkingDelta(
                 agent: object["agent"] as? String ?? "",

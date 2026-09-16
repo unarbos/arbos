@@ -18,6 +18,8 @@ struct ProjectChatView: View {
     @State private var showSettings = false
     @State private var showWorkers = false
     @State private var worker: WorkerStatus?
+    @State private var attachments: [PendingAttachment] = []
+    @StateObject private var dictation = Dictation()
     @FocusState private var composing: Bool
 
     private var identity: ProjectIdentity {
@@ -43,12 +45,14 @@ struct ProjectChatView: View {
                 pills
                 ComposerBar(
                     text: $draft,
-                    placeholder: chat.items.isEmpty ? "Plan, ask, build…" : "Follow up…",
+                    placeholder: dictation.active ? "Listening…" : (chat.items.isEmpty ? "Plan, ask, build…" : "Follow up…"),
                     canSend: canSend,
                     onSend: send,
                     onMic: { showCall = true },
                     micEnabled: settings.isConfigured,
-                    focus: $composing
+                    focus: $composing,
+                    attachments: $attachments,
+                    dictation: dictation
                 )
             }
         }
@@ -67,6 +71,15 @@ struct ProjectChatView: View {
             WorkerChatView(worker: worker, project: identity)
         }
         .task(id: target) { await chat.switchTarget(target) }
+        .onChange(of: dictation.text) { _, words in
+            if dictation.active || !words.isEmpty { draft = words }
+        }
+        .onChange(of: dictation.active) { _, active in
+            if !active, !dictation.text.isEmpty { draft = dictation.consume() }
+        }
+        .onChange(of: dictation.problem) { _, problem in
+            if let problem { chat.notice(problem) }
+        }
         .onChange(of: chat.identity) { _, face in
             if let face { projects.remember(face, for: target) }
         }
@@ -245,13 +258,14 @@ struct ProjectChatView: View {
     // MARK: - Composer
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.mode != .offline && chat.mode != .connecting
+        (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) && !dictation.active
     }
 
     private func send() {
         guard canSend else { return }
-        chat.send(draft)
+        chat.send(draft, attachments: attachments)
         draft = ""
+        attachments = []
     }
 }
 

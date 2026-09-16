@@ -60,8 +60,14 @@ final class LiveKernelChat: ChatSource {
         try? client.read(path: "project.toml")
     }
 
-    func send(text: String, steer: Bool) async throws {
-        try client.send(text: text, steer: steer)
+    func send(text: String, steer: Bool, attachments: [PendingAttachment]) async throws {
+        var paths: [String] = []
+        for file in attachments {
+            let path = "attachments/\(file.storedName)"
+            try client.put(path: path, data: file.data)
+            paths.append(path)
+        }
+        try client.send(text: text, steer: steer, attachments: paths)
     }
 
     func stop() {
@@ -166,6 +172,8 @@ final class LiveKernelChat: ChatSource {
             }
         case .thinkingDelta:
             break
+        case .error(let detail):
+            stream?.yield(.item(ChatItem(.notice(detail, failed: true))))
         case .other(let type):
             if type == "closed" { stream?.yield(.dropped("kernel closed")) }
         }
