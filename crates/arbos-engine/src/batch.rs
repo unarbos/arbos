@@ -469,10 +469,15 @@ fn log_speedup(agent: &arbos_core::AgentId, outcomes: &[(ToolCall, Outcome)]) {
 async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Result<ToolOut> {
     let name = call.name.clone();
     if let Some(question) = &prepared.ask {
+        // On disk as "waiting for the user" while the card is up: a
+        // kernel that dies here must not write the call up as one that
+        // may have run.
+        crate::inflight::waiting_for_approval(&cx.place, &cx.agent.id, &call.id);
         let allowed = tokio::select! {
             r = cx.hooks.approve(&cx.agent.id, &name, question) => r.unwrap_or(false),
             _ = cx.cancel.cancelled() => false,
         };
+        crate::inflight::approval_settled(&cx.place, &cx.agent.id, &call.id);
         if !allowed {
             anyhow::bail!(
                 "the user did not allow {name} ({question}). Do not retry it unchanged; say what you wanted to do and why, and go on with what is allowed."

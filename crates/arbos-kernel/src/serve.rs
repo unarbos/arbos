@@ -1929,6 +1929,29 @@ pub async fn serve_client(
                     replayed: true,
                 });
             }
+            // Questions still parked on the user: offered again, with
+            // their ids, so a client that was away — or one attaching to
+            // a kernel that restarted with the question open — has the
+            // card to answer, not only the transcript line that asked.
+            let mut asks = 0;
+            for agent in list_agents(&accept_place).unwrap_or_default() {
+                for w in accept_hooks.pending_asks(agent.id.as_str()) {
+                    asks += 1;
+                    let _ = out_tx.send(Frame::Ask {
+                        agent: agent.id.to_string(),
+                        question: w.question,
+                        options: w.options,
+                        id: Some(w.id),
+                    });
+                }
+            }
+            if asks > 0 {
+                klog::info(
+                    "asks_replayed",
+                    None,
+                    format!("who={} count={asks}", who.name),
+                );
+            }
             tokio::spawn(attach::write_loop(w, out_rx));
             // History requests are answered on this connection alone;
             // everything else goes to the kernel like before.
