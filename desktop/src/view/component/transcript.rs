@@ -488,9 +488,17 @@ fn turns(items: &[ChatItem]) -> Vec<Turn> {
     let mut turns = Vec::new();
     let mut start = 0;
     for ix in 1..=items.len() {
+        // A worker's report right after the wake it caused is that
+        // segment's first line, not a boundary of its own.
+        let report_in_segment = ix < items.len()
+            && matches!(items[ix], ChatItem::From { .. })
+            && matches!(items[ix - 1], ChatItem::Wake { .. });
         if ix < items.len()
-            && (!matches!(items[ix], ChatItem::User(_) | ChatItem::From { .. })
-                || inline_user(items, ix))
+            && (!matches!(
+                items[ix],
+                ChatItem::User(_) | ChatItem::From { .. } | ChatItem::Wake { .. }
+            ) || inline_user(items, ix)
+                || report_in_segment)
         {
             continue;
         }
@@ -1177,14 +1185,18 @@ fn worker_card(
         .iter()
         .find(|c| c.kernel_id.as_deref() == Some(who))
         .map(|c| c.id);
+    // Cursor's line for a finished sub-agent: its chip, "done —", its
+    // last words. The chip is a link to the worker's chat (`agents/<id>`
+    // dresses as an agent chip), so the name is the way in.
+    let name = chat.who_label(who);
+    let head = format!(
+        "[{name}](agents/{who}) {}",
+        if ok { "done" } else { "ended badly" }
+    );
     let words = if words.is_empty() {
-        format!(
-            "{} {}",
-            chat.who_label(who),
-            if ok { "finished" } else { "ended badly" }
-        )
+        head
     } else {
-        words.to_string()
+        format!("{head} — {words}")
     };
     div()
         .id(("worker-line", chat.id * 100_000 + ix as u64))
@@ -2861,6 +2873,7 @@ pub fn render(
         .map(|d| d.as_millis() as i64);
         let sent_at = match chat.items.get(turn.range.start) {
             Some(ChatItem::User(message)) => message.sent_at.filter(|at| *at > 0),
+            Some(ChatItem::Wake { at, .. }) => *at,
             _ => kickoff_at,
         };
         if let Some(at) = sent_at {
@@ -3511,10 +3524,16 @@ fn zone(
             chat.items.first(),
             Some(ChatItem::User(_) | ChatItem::From { .. })
         );
+    // A worker's report under the wake it caused is the segment's first
+    // line, drawn under the header where Cursor draws its "<agent> done —
+    // …" line, not inside the fold.
+    let report = (matches!(chat.items.get(first), Some(ChatItem::Wake { .. }))
+        && matches!(chat.items.get(first + 1), Some(ChatItem::From { .. })))
+    .then_some(first + 1);
     let body_start = if kickoff_turn {
         first
     } else {
-        (first + 1).min(turn.range.end)
+        (first + 1 + usize::from(report.is_some())).min(turn.range.end)
     };
     let body = body_start..turn.answer_from.max(body_start);
     let stats = work_stats(&chat.items, body.clone());
@@ -3594,6 +3613,12 @@ fn zone(
     // (`plan`, Cursor's TodoWrite) shows as a card. A worker's chat shows
     // every call.
     let project_style = chat.parent.is_none();
+    // The worker's report that woke this segment, under its header.
+    if let Some(ix) = report
+        && let Some(ChatItem::From { who, text, images }) = chat.items.get(ix)
+    {
+        zone = zone.child(from_block(chat, ix, who, text, images, &theme, window, cx));
+    }
     if open || !foldable {
         let last_run = segs.iter().rposition(|seg| matches!(seg, Seg::Run(_)));
         // A run still taking calls already shows a live line; a second
@@ -4056,6 +4081,7 @@ fn work_header(
     // tools and thoughts took.
     let stamped = match chat.items.get(turn) {
         Some(ChatItem::User(message)) => message.worked_secs.map(u64::from),
+        Some(ChatItem::Wake { secs, .. }) => secs.map(u64::from),
         // The kickoff turn opens the transcript with no prompt.
         _ if turn == 0 => chat.kickoff_secs.map(u64::from),
         _ => None,
@@ -4202,6 +4228,7 @@ fn headline_describes(chat: &ChatSession, ix: usize) -> bool {
     };
     let stamped = match chat.items.get(turn.range.start) {
         Some(ChatItem::User(message)) => message.worked_secs.unwrap_or(0),
+        Some(ChatItem::Wake { secs, .. }) => secs.unwrap_or(0),
         _ if turn.range.start == 0 => chat.kickoff_secs.unwrap_or(0),
         _ => 0,
     };

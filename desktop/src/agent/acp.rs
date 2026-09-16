@@ -109,7 +109,12 @@ pub enum Event {
     },
     /// A recorded `wake`: a turn opens (a prompt, a child's report, a
     /// subscription firing); the model's step numbers start again at 1.
-    Woke,
+    /// A kind other than `user`/`kickoff` is a segment of its own.
+    Woke {
+        kind: String,
+        text: Option<String>,
+        at: Option<i64>,
+    },
     /// The model call is alive and has been silent for this many seconds
     /// (`working` frame). Live only.
     Working(u64),
@@ -876,7 +881,11 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
         EventKind::Wake { wake, .. } if wake == "kickoff" && !recorded => {
             vec![Event::Status("Setting up environment".into())]
         }
-        EventKind::Wake { .. } if recorded => vec![Event::Woke],
+        EventKind::Wake { wake, text, .. } if recorded => vec![Event::Woke {
+            kind: wake,
+            text,
+            at: (ts > 0).then_some(ts),
+        }],
         // A transcript line (tailed or replayed) is the step's final text;
         // a live emit without a seq is a delta (older kernels send those
         // as events too).
