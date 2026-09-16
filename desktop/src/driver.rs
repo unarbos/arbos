@@ -1241,6 +1241,7 @@ fn item_json(item: &ChatItem) -> Value {
             "files": message.files.len(),
             "sent_at": message.sent_at,
             "feedback": message.feedback,
+            "seq": message.seq,
         }),
         ChatItem::From { who, text, .. } => json!({
             "kind": "from",

@@ -3805,13 +3805,11 @@ fn zone(
     // with tool rows, a checklist card. Prose alone is not folded.
     let rows_under = segs.iter().any(|seg| match seg {
         Seg::Thought(_) => true,
-        Seg::Run(range) => {
-            !project_style
-                || own_calls(&chat.items, range.clone())
-                || range.clone().any(|ix| {
-                    matches!(&chat.items[ix], ChatItem::Tool { label, .. } if is_todo_call(label))
-                })
-        }
+        Seg::Run(range) => !project_style
+            || own_calls(&chat.items, range.clone())
+            || range.clone().any(
+                |ix| matches!(&chat.items[ix], ChatItem::Tool { label, .. } if is_todo_call(label)),
+            ),
         Seg::Prose(_) | Seg::Other(_) => false,
     });
     // Cursor's live headline over the timeline: "Working <step> ⌄" — the
@@ -4188,7 +4186,26 @@ fn turn_footer(
             .hover(|el| el.bg(theme.element_hover))
             .active(|el| el.bg(theme.element_active))
             .tooltip(move |window, cx| Tooltip::text(tip, window, cx))
-            .on_click(cx.listener(move |this, _, _, cx| this.vote_turn(id, turn, value, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.vote_turn(id, turn, value, cx);
+                // 👎 asks what was wrong: the review sheet over this exchange,
+                // anchored on the prompt that began the turn.
+                if value < 0 {
+                    let seq = this.session(id).and_then(|chat| {
+                        chat.items
+                            .iter()
+                            .take(turn + 1)
+                            .rev()
+                            .find_map(|item| match item {
+                                ChatItem::User(message) => Some(message.seq),
+                                _ => None,
+                            })
+                            .flatten()
+                    });
+                    window
+                        .dispatch_action(Box::new(crate::view::root::ReportProblemAt { seq }), cx);
+                }
+            }))
             .child(svg().path(path).size(px(12.)).text_color(if lit {
                 theme.accent
             } else {
@@ -5780,6 +5797,7 @@ mod selection_tests {
                 text: String::new(),
                 images: vec![image.clone(), image],
                 described: Vec::new(),
+                seq: None,
                 steer: false,
                 files: Vec::new(),
                 worked_secs: None,

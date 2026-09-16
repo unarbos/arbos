@@ -86,6 +86,16 @@ pub struct AttachPaths {
     pub paths: Vec<String>,
 }
 
+/// Report a problem with one answer: the thumbs-down under it opens the
+/// review sheet anchored on that exchange. `seq` is the transcript line of
+/// the prompt that began the turn; without one the sheet takes the latest
+/// exchange, as Help › Report a Problem… does.
+#[derive(Clone, PartialEq, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
+#[action(namespace = arbos)]
+pub struct ReportProblemAt {
+    pub seq: Option<u64>,
+}
+
 /// Claimed on the window's rest focus so Delete/Backspace archive the
 /// highlighted chat when no field is in front.
 const WINDOW_CONTEXT: &str = "ArbosWindow";
@@ -2243,6 +2253,23 @@ impl Arbos {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_report(None, window, cx);
+    }
+
+    /// The thumbs-down under an answer: Cursor's 👎 asks what was wrong, and
+    /// so does ours — the same sheet, anchored on that exchange. The vote
+    /// itself is already recorded by the time this runs; dismissing the
+    /// sheet leaves a plain 👎 a plain 👎.
+    pub(crate) fn report_problem_at(
+        &mut self,
+        action: &ReportProblemAt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_report(action.seq, window, cx);
+    }
+
+    fn open_report(&mut self, seq: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
         let (id, agent, place) = {
             let workspace = self.workspace.read(cx);
             let id = workspace.active_id();
@@ -2262,7 +2289,7 @@ impl Arbos {
             .map(crate::feedback::load_parts)
             .unwrap_or_default();
         self.feedback_sheet.update(cx, |sheet, cx| {
-            sheet.show(agent, None, parts, window, cx);
+            sheet.show(agent, seq, parts, window, cx);
             sheet.take_session(
                 self.workspace
                     .read(cx)
@@ -2275,7 +2302,7 @@ impl Arbos {
         if let Some(id) = id {
             self.workspace.update(cx, |workspace, cx| {
                 workspace.with_session(id, cx, |chat| {
-                    chat.request_feedback(None, crate::feedback::TAIL_LINES)
+                    chat.request_feedback(seq, crate::feedback::TAIL_LINES)
                 });
             });
         }

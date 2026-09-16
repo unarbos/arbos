@@ -277,6 +277,7 @@ impl Arbos {
             // Always answerable, project or not: half of what he reports
             // is the window itself rather than an answer in it.
             .on_action(cx.listener(Self::report_problem))
+            .on_action(cx.listener(Self::report_problem_at))
             .on_action(cx.listener(Self::attach_paths_action))
             .on_action(cx.listener(Self::show_chat))
             .on_action(cx.listener(Self::show_project))
