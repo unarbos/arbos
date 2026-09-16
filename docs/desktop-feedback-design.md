@@ -295,7 +295,7 @@ one being registered here.
 
 The five rules below are the loop's conditions, and they are written as
 design because a convention is only as durable as the agent that remembers
-it. Each is enforced by `deploy/feedback/poll.py` or by the report's own
+it. Each is enforced by `deploy/feedback/desktop-feedback.py` or by the report's own
 shape.
 
 ### Rule 1 — the loop that receives a report owns the answer
@@ -305,7 +305,7 @@ turns out to be kernel behaviour, the loop files it to the features inbox
 itself, and **still writes the `fixed` marker** once the kernel's pull
 request merges. He talks to one place.
 
-`poll.py filed <report> --to features` records the hand-off in the report's
+`desktop-feedback.py filed <report> --to features` records the hand-off in the report's
 own folder and prints the obligation in as many words. The marker is written
 by whoever received the report, whatever repository the fix landed in.
 
@@ -316,7 +316,7 @@ already running finishes its gate and its pull request first. Otherwise
 half-gated work ships under his name, which is worse than a fix arriving one
 cycle later.
 
-`poll.py poll` states this in its own output every time it finds something,
+`desktop-feedback.py poll` states this in its own output every time it finds something,
 so it is in front of the agent that is about to act, not only in a document.
 
 ### Rule 3 — the report carries enough to reproduce, not only to recognise
@@ -339,7 +339,7 @@ already seen would replay every report Jacob has ever sent, at him, as new.
 
 ### Rule 5 — the marker is verified, not asserted
 
-`poll.py fixed` refuses to write anything unless the pull request really
+`desktop-feedback.py fixed` refuses to write anything unless the pull request really
 merged, its merge commit is really on the base branch, and the gate on the
 pull request's head really read success. Only then does it write the build
 number, which it computes the same way the packager stamps it — the commit
@@ -352,7 +352,7 @@ genuinely absent, and it records that it was used.
 
 ### One more thing this loop does better than the phone's
 
-The poller lives in the repository at `deploy/feedback/poll.py`, not on a
+The poller lives in the repository at `deploy/feedback/desktop-feedback.py`, not on a
 host. The phone's lives at `~/asc-feedback.py` on a rented Mac that may move
 to another provider or go away, and it is in no repository, so the machine
 going away takes it. This one is reviewed, versioned, holds no credential of
@@ -375,7 +375,7 @@ for every green commit on `main` and already has an update bar in the app.
 
 1. The fix merges. The dev channel publishes, signed and notarised, with a
    build number that is the commit count.
-2. `poll.py fixed` **checks** before it says anything: merged, on the base
+2. `desktop-feedback.py fixed` **checks** before it says anything: merged, on the base
    branch, gate green (Rule 5). It refuses otherwise.
 3. It writes `fixed.json` back into the report's own folder — the build
    number, the pull request, the gated commit, one sentence of what it was —

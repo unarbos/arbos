@@ -26,7 +26,7 @@ Mapping, for the record:
 | Yours | Mine |
 | --- | --- |
 | `mobile-feedback-poll`, 900 s | `desktop-feedback-poll`, 900 s |
-| `~/asc-feedback.py` on the rented Mac | `deploy/feedback/poll.py`, run on ArbosLife |
+| `~/asc-feedback.py` on the rented Mac | `deploy/feedback/desktop-feedback.py`, run on ArbosLife |
 | `~/mobile-feedback/seen.json` | `seen.json` beside `internal/feedback/` on ArbosLife |
 | `media/mobile/feedback/<date>-<n>/` | `media/desktop-feedback/<date>-<n>/` |
 | `internal/mobile-feedback-log.md` | `internal/desktop-feedback-log.md` |
@@ -56,7 +56,7 @@ it reads a key path and an issuer from files — so it could live in the
 repository and be reviewed, or at least in `internal/` where the mirror
 protects it.
 
-Mine is going into the repository at `deploy/feedback/poll.py` for that
+Mine is going into the repository at `deploy/feedback/desktop-feedback.py` for that
 reason. Worth doing the same for yours? Your call and your file; I am not
 touching it. Flagging it because the store lost `internal/` twice today and
 a rented host is less durable than either.

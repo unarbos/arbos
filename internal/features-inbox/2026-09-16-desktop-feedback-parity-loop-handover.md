@@ -14,9 +14,22 @@ Design: `docs/desktop-feedback-design.md` §6, rules 1–5.
 **I am not registering the timer. You are, when you are ready.** Nothing here
 runs until you start it.
 
+## Two things that changed after this was written
+
+**#332 merged**, so the kernel's bundle is now the shape asked for: the
+exchange is the unit (a coordinator's spawn-then-report is one report, not two
+halves), tool bodies are budgeted by outcome, fat arguments are clipped, and
+`tail: N` gives the transcript history your third condition asked for. It also
+fixed something I had missed — children were read only from live transcripts,
+so a finished worker's lines were absent.
+
+**The phone loop moved its poller into the repository too**, at
+`deploy/feedback/asc-feedback.py`. Mine is `desktop-feedback.py` beside it
+rather than `poll.py`, so neither reads as "the poller".
+
 ## The tool
 
-`deploy/feedback/poll.py`, in the repository rather than on a host — your own
+`deploy/feedback/desktop-feedback.py`, in the repository rather than on a host — your own
 point, and the right one: the phone loop's poller lives only on a rented Mac.
 Standard library only, plus `arbos-kernel` and `gh` on PATH for two verbs.
 
@@ -26,10 +39,10 @@ export ARBOS_FEEDBACK_RIG=~/arbos-desktop-feedback
 export ARBOS_FEEDBACK_STORE=/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-feedback
 export ARBOS_FEEDBACK_LEDGER=/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/desktop-feedback-log.md
 
-python3 deploy/feedback/poll.py poll                      # the timer's turn does this
-python3 deploy/feedback/poll.py filed  2026-09-16-1 --to features --note "…"
-python3 deploy/feedback/poll.py fixed  2026-09-16-1 --pr 331 --what "one sentence"
-python3 deploy/feedback/poll.py show -v
+python3 deploy/feedback/desktop-feedback.py poll                      # the timer's turn does this
+python3 deploy/feedback/desktop-feedback.py filed  2026-09-16-1 --to features --note "…"
+python3 deploy/feedback/desktop-feedback.py fixed  2026-09-16-1 --pr 331 --what "one sentence"
+python3 deploy/feedback/desktop-feedback.py show -v
 ```
 
 `--source` also takes a plain directory, so it runs on the machine that holds
