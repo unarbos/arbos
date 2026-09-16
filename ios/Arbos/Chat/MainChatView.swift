@@ -655,8 +655,15 @@ struct ChatRow: View {
     /// numbers and paths read as on the desktop. Plain text if it does
     /// not parse.
     static func prose(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+        var out = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
+        // Inline code sits on a soft chip, as Cursor's chat draws it (M-101):
+        // monospaced a point smaller, on a faint tile.
+        for run in out.runs where run.inlinePresentationIntent?.contains(.code) == true {
+            out[run.range].font = .system(size: ArbosTheme.bodySize - 1, design: .monospaced)
+            out[run.range].backgroundColor = ArbosTheme.codeChip
+        }
+        return out
     }
 
     private func line(
