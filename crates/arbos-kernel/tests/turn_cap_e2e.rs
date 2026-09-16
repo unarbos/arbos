@@ -52,23 +52,33 @@ fn a_turn_over_the_places_per_turn_cap_ends_with_a_plain_notice_and_workers_have
     let mut a = Attach::connect(&k.url);
     let _ = a.wait(Duration::from_secs(5), |f| f["type"] == "hello");
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "do three steps"}));
-    // What the user sees: an error notification naming the numbers.
+    // What the user sees: one plain notice — the rule working, the numbers
+    // as they are, the fix in the same breath — as a `notice`
+    // notification, not an error; no `interrupted` line beside it.
     let n = a
         .wait(Duration::from_secs(30), |f| {
-            f["type"] == "notify" && f["kind"] == "error"
+            f["type"] == "notify" && f["agent"] == "root" && f["kind"] != "reply"
         })
-        .expect("the user hears the turn stopped on cost");
+        .expect("the user hears the turn stopped at the cap");
+    assert_eq!(n["kind"], "notice", "{n}");
+    assert_eq!(n["title"], "root stopped at the per-turn cap");
     let body = n["body"].as_str().unwrap();
     assert!(
-        body.starts_with("This turn spent $1.20 on model calls, over the $1.00 cap for one turn"),
+        body.starts_with("Stopped at the per-turn cap: this turn spent $1.20 on model calls, over the $1.00 you allow for one turn."),
         "{body}"
     );
     assert!(
-        body.contains("turn_cap_usd under [spend] in .arbos/project.toml"),
+        body.contains("raise turn_cap_usd under [spend] in .arbos/project.toml"),
         "{body}"
     );
     assert!(
-        body.contains("What is in the working tree stays") && body.contains("Send a new message"),
+        body.contains("What is in the working tree stays")
+            && body.contains("A new message starts a fresh budget"),
+        "{body}"
+    );
+    let lower = body.to_ascii_lowercase();
+    assert!(
+        !lower.contains("error") && !lower.contains("fail"),
         "{body}"
     );
     assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
@@ -86,13 +96,25 @@ fn a_turn_over_the_places_per_turn_cap_ends_with_a_plain_notice_and_workers_have
     );
     let notice = root
         .iter()
-        .find(|e| e["kind"] == "notice" && e["failed"] == true)
+        .find(|e| {
+            e["kind"] == "notice"
+                && e["text"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("Stopped at the per-turn cap"))
+        })
         .unwrap();
+    assert_eq!(
+        notice["failed"], false,
+        "the rule working is not a failure: {notice}"
+    );
     assert_eq!(notice["text"], body);
     assert!(
+        root.iter().all(|e| e["kind"] != "interrupted"),
+        "one closing line, not two: {root:?}"
+    );
+    assert!(
         root.iter()
-            .any(|e| e["kind"] == "interrupted"
-                && e["detail"].as_str().unwrap().contains("cost cap")),
+            .all(|e| !(e["kind"] == "notice" && e["failed"] == true)),
         "{root:?}"
     );
     // The place's total still counts the turn.
@@ -121,35 +143,40 @@ fn a_turn_over_the_places_per_turn_cap_ends_with_a_plain_notice_and_workers_have
     );
     let wn = worker
         .iter()
-        .find(|e| e["kind"] == "notice" && e["failed"] == true)
+        .find(|e| {
+            e["kind"] == "notice"
+                && e["text"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("Stopped at the per-turn cap"))
+        })
         .expect("the worker's own notice");
-    assert!(
-        wn["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("This turn spent $1.40"),
-        "{wn}"
-    );
+    assert!(wn["text"].as_str().unwrap().contains("spent $1.40"), "{wn}");
     // The coordinator's own second turn stayed cheap: its budget is its own.
     let root = transcript(&k.place, "root");
     assert_eq!(
         root.iter()
-            .filter(|e| e["kind"] == "notice" && e["failed"] == true)
+            .filter(|e| e["kind"] == "notice"
+                && e["text"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("Stopped at the per-turn cap")))
             .count(),
         1,
         "root was capped once, in turn 1: {root:?}"
     );
+    // The parent reads the numbers and the fix in the report itself.
     let report = root
         .iter()
         .find(|e| e["kind"] == "say" && e["from"] == "pricey-worker")
         .expect("the worker's report");
+    let text = report["text"].as_str().unwrap();
     assert!(
-        report["text"].as_str().unwrap().contains("ended badly")
-            && report["text"]
-                .as_str()
-                .unwrap()
-                .contains("over the $1.00 cap"),
+        text.contains("Stopped at the per-turn cap: this turn spent $1.40")
+            && text.contains("$1.00 you allow"),
         "{report}"
+    );
+    assert!(
+        !text.contains("ended badly"),
+        "a cap is not a failure: {report}"
     );
     let _ = k.child.kill();
 }

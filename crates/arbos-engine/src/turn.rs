@@ -1360,16 +1360,18 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                             cap,
                             where_set,
                         ),
-                        failed: true,
+                        failed: false,
                     }),
                 )?;
+                // The notice is the turn's one closing line: a rule the
+                // user set working, not an interruption or a failure.
                 return end(
                     usage.map(|mut u| {
                         u.cost = turn_cost;
                         u.cached = turn_cached;
                         u
                     }),
-                    Some("over the turn's cost cap"),
+                    None,
                 );
             }
             end(
@@ -1502,7 +1504,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                         cap,
                         where_set,
                     ),
-                    failed: true,
+                    failed: false,
                 }),
             )?;
             return end(
@@ -1511,7 +1513,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     u.cached = turn_cached;
                     u
                 }),
-                Some("over the turn's cost cap"),
+                None,
             );
         }
         events = load_transcript(&transcript)?;
