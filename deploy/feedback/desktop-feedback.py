@@ -282,7 +282,8 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
     print(f"NEW {len(taken)} report(s)")
     for r in taken:
-        print(f"  {r['name']}  build {r['build']}  {human_time(r['sent_ms'])}")
+        mark = "" if r["real"] else "  [FIXTURE — invented words and events; do not diagnose from it]"
+        print(f"  {r['name']}  build {r['build']}  {human_time(r['sent_ms'])}{mark}")
         print(f"    words: {r['note'] or '(none)'}")
         print(f"    kept: {r['kept']}")
         if r["missing"]:
@@ -394,6 +395,7 @@ def take_one(
         "name": name,
         "sent_ms": sent_ms,
         "note": (report.get("note") or "").strip().replace("\n", " ")[:200],
+        "real": is_real(report),
         "build": build_label(report),
         "kept": kept,
         "missing": missing,
@@ -438,6 +440,21 @@ def build_label(report: dict) -> str:
     return f"{version} ({build})"
 
 
+def is_real(report: dict) -> bool:
+    """Whether the Arbos app wrote this report.
+
+    Two signals, because one is not enough. `written_by` catches a report the
+    app never wrote at all. `fixture` catches the harder case: a report written
+    by the app's own on-demand writer, which carries every mark of being
+    genuine while its words and events are invented and do not correspond.
+    Both smoke reports in the Project store are of that second kind.
+
+    A fixture is invaluable for exercising the loop and poisonous left lying
+    beside real reports, because the first person to read one cold cannot tell.
+    """
+    return report.get("written_by") == "arbos-desktop" and not report.get("fixture")
+
+
 def plural(n: int, one: str, many: str = "") -> str:
     """`1 line`, `2 lines`. A report is read by a person and quoted by an agent,
     and "1 tool calls" reads as carelessness in both."""
@@ -459,6 +476,22 @@ def summarise(report: dict, name: str, report_id: str, shot: bool) -> str:
     lines = [
         f"# {name} — {report.get('note') or '(no words)'}",
         "",
+    ]
+    if not is_real(report):
+        lines += [
+            "> **Not a real report.** "
+            + (
+                "It is marked `fixture`: written by the app's own on-demand writer"
+                " to exercise the loop."
+                if report.get("fixture")
+                else "Nothing in it says the Arbos app wrote it (`written_by`)."
+            )
+            + " Its words and its events are invented and may not even correspond"
+            " to each other. Do not diagnose from it, and do not quote it as"
+            " something Jacob saw.",
+            "",
+        ]
+    lines += [
         f"- Sent: {human_time(report.get('sent_ms'))}",
         f"- App: {build_label(report)} commit `{app.get('commit', '?')}`",
         f"- Kernel: {kernel.get('version', '?')} `{kernel.get('git_sha', '?')}` built {kernel.get('built_at', '?')}",
@@ -512,9 +545,19 @@ def summarise(report: dict, name: str, report_id: str, shot: bool) -> str:
         row("Tool arguments and outputs", "tool_io", "included"),
     ]
 
-    if any(red.get(k) for k in ("secrets", "tokens", "values", "blocks")):
-        total = sum(int(red.get(k) or 0) for k in ("secrets", "tokens", "values", "blocks"))
-        lines += ["", f"{plural(total, 'credential')} removed on the way out: `{json.dumps(red)}`."]
+    # One number, not two. The kernel counts what it took before handing the
+    # bundle over, and the app counts what it took from its own additions on the
+    # way out; a reader should not have to add them up to know whether anything
+    # was in this report that should not have been.
+    out = report.get("redacted_on_the_way_out", {})
+    kinds = ("secrets", "tokens", "values", "blocks")
+    total = sum(int(red.get(k) or 0) for k in kinds) + sum(int(out.get(k) or 0) for k in kinds)
+    if total:
+        lines += [
+            "",
+            f"**{plural(total, 'credential')} removed** — "
+            f"kernel `{json.dumps(red)}`, app `{json.dumps(out)}`.",
+        ]
 
     if failed:
         lines += ["", "## The calls that failed", ""]
@@ -538,10 +581,11 @@ def summarise(report: dict, name: str, report_id: str, shot: bool) -> str:
 def append_ledger(ledger: Path, taken: Iterable[dict]) -> None:
     """One row per report, above the marker, so the newest is at the bottom."""
     rows = [
-        "| {name} | {build} | {note} | _reading_ | — | — |".format(
+        "| {name} | {build} | {note} | {what} | — | — |".format(
             name=r["name"],
             build=r["build"],
             note=(r["note"] or "(no words)").replace("|", "\\|"),
+            what="_reading_" if r["real"] else "**fixture, not a real report**",
         )
         for r in taken
     ]
