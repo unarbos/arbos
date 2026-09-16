@@ -188,6 +188,9 @@ final class LiveKernelChat: ChatSource {
             // line for the transcript: the store's one calm line covers it.
             if detail.contains("went away") || detail.contains("closed") {
                 stream?.yield(.dropped(detail))
+            } else if detail.contains("no machine named") || detail.contains("no project named") || detail.contains("not registered") {
+                // The hub knows nothing by that name: retrying will not help.
+                stream?.yield(.refused(detail))
             } else {
                 stream?.yield(.item(ChatItem(.notice(detail, failed: true))))
             }
@@ -224,7 +227,7 @@ final class LiveKernelChat: ChatSource {
             }
             return
         }
-        if case .tool(let record) = event, record.name == "spawn", let child = record.child {
+        if case .tool(let record) = event, record.name == "spawn", let child = record.child ?? (record.args?["name"] as? String) {
             children.insert(child)
             childNames[child] = record.args?["brief"] as? String ?? child
             setWorker(child, running: true, step: "Starting")
@@ -256,10 +259,15 @@ final class LiveKernelChat: ChatSource {
             let trimmed = ToolMarkup.strip(text)
             return trimmed.isEmpty ? nil : ChatItem(.agent(trimmed, streaming: false), step: step)
         case .tool(let record):
-            if record.name == "spawn", let child = record.child {
+            // Older kernels name the child only in the call's arguments.
+            if record.name == "spawn", let child = record.child ?? (record.args?["name"] as? String) {
                 let brief = record.args?["brief"] as? String ?? child
                 children.insert(child)
                 childNames[child] = brief
+                // A replayed spawn is a finished worker until the tree or a
+                // status frame says otherwise: the phone keeps its archived
+                // children in the pill and the sheet, as the desktop does.
+                if replaying, !worker, workers[child] == nil { setWorker(child, running: false, step: "") }
                 return ChatItem(.subagent(name: brief, status: "spawned"))
             }
             if !worker, Self.hiddenRootTools.contains(record.name) { return nil }

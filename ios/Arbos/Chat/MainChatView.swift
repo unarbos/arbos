@@ -63,6 +63,17 @@ struct ProjectChatView: View {
                         dictation: dictation
                     )
                 }
+                // Scrolled text passes under the inset; the pill and the
+                // composer sit on the background, not on the words.
+                .background(
+                    ArbosTheme.bg
+                        .padding(.top, -14)
+                        .mask(
+                            LinearGradient(colors: [.clear, .black, .black], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.12))
+                                .padding(.top, -14)
+                        )
+                        .ignoresSafeArea(edges: .bottom)
+                )
             }
         }
         .toolbar(.hidden, for: .navigationBar)
@@ -291,6 +302,7 @@ struct ProjectChatView: View {
         switch chat.mode {
         case .mock: return "No kernel reachable — a scripted chat is answering."
         case .offline:
+            if let refusal = chat.refusal { return refusal }
             if let seconds = chat.reconnectIn { return "Link lost — reconnecting in \(seconds)s" }
             return "Kernel offline."
         case .connecting: return "Reconnecting…"

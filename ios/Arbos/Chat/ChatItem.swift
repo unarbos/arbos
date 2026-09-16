@@ -75,6 +75,8 @@ enum ChatUpdate {
     case identity(ProjectIdentity)
     /// The link to the kernel went; the store reconnects on its own.
     case dropped(String)
+    /// The hub or kernel refused this target for good; no retry.
+    case refused(String)
 }
 
 /// Where the main chat comes from: the live kernel, or a scripted stand-in

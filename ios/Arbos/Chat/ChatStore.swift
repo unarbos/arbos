@@ -47,6 +47,9 @@ final class ChatStore: ObservableObject {
     private var firstSeq = 0
     /// Seconds until the next reconnect try, while the link is down.
     @Published private(set) var reconnectIn: Int?
+    /// Why this target cannot be reached at all (the hub does not know
+    /// it); shown in place of the countdown, no retry.
+    @Published private(set) var refusal: String?
 
     /// Fires with each finished agent message. The call speaks it when the
     /// server does not.
@@ -95,33 +98,78 @@ final class ChatStore: ObservableObject {
         mode = .connecting
         if let endpoint = settings.chatEndpoint {
             if await attachKernel(endpoint) { return }
-            if let directory = await EndpointDirectory.fetch() {
-                if let fresh = directory.kernelURL, fresh != settings.kernelURL { settings.kernelURL = fresh }
-                if let hub = directory.hubURL, hub != settings.hubURL { settings.hubURL = hub }
-                if let moved = settings.chatEndpoint, moved != endpoint, await attachKernel(moved) { return }
+            // The configured address is the user's; it moves only when the
+            // host itself is gone (a quick tunnel that rotated) and the
+            // published directory names another — and then the chat says
+            // so. A hub that answers but refuses (a token, a machine that is
+            // not there) or a kernel that is slow is an outage: keep the
+            // address, keep retrying (M-63).
+            if await Self.hostGone(endpoint.url), let directory = await EndpointDirectory.fetch() {
+                var moved = false
+                if case .pod = settings.kernelTarget, let fresh = directory.kernelURL, fresh != settings.kernelURL {
+                    settings.kernelURL = fresh
+                    moved = true
+                }
+                if case .hub = settings.kernelTarget, let hub = directory.hubURL, hub != settings.hubURL {
+                    settings.hubURL = hub
+                    moved = true
+                }
+                if moved, let next = settings.chatEndpoint, next != endpoint {
+                    items.append(ChatItem(.notice("The kernel moved to \(next.url.host ?? "a new address"); following it.", failed: false)))
+                    if await attachKernel(next) { return }
+                }
             }
-        } else if case .hub = settings.kernelTarget {
-            // The hub target is gone or unconfigured: fall back to the pod.
-            settings.kernelTarget = .pod
-            if let endpoint = settings.chatEndpoint, await attachKernel(endpoint) { return }
+            // A configured kernel that is not answering is an outage, not a
+            // reason to show a stand-in: stay offline and retry.
+            mode = .offline
+            return
         }
+        if case .hub(let machine, let project) = settings.kernelTarget {
+            // The hub target has no hub any more (Settings cleared it):
+            // say so instead of quietly opening some other project.
+            items.append(ChatItem(.notice("\(project) on \(machine) needs the hub — set it in Settings.", failed: true)))
+            mode = .offline
+            return
+        }
+        // Nothing configured at all: the speech server can carry a chat
+        // (it says so), else the scripted one.
         if settings.provider == .selfHosted, settings.isConfigured {
             let server = VoiceServerChat(link: link)
             if (try? await server.start()) != nil {
                 adopt(server, mode: .server)
+                items.append(ChatItem(.notice("No kernel is set; this chat goes through the speech server.", failed: false)))
                 return
             }
             server.stop()
         }
-        // A configured kernel that is not answering is an outage, not a
-        // reason to show scripted answers: stay offline and retry.
-        if settings.chatEndpoint != nil {
-            mode = .offline
-            return
-        }
         let mock = MockKernelChat()
         try? await mock.start()
         adopt(mock, mode: .mock)
+    }
+
+    /// True when nothing answers at the address at all (no DNS, no route,
+    /// refused) — as opposed to a host that answers and says no.
+    private static func hostGone(_ url: URL) async -> Bool {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        components.scheme = components.scheme?.lowercased() == "ws" ? "http" : "https"
+        components.path = "/"
+        components.queryItems = nil
+        guard let probe = components.url else { return false }
+        var request = URLRequest(url: probe)
+        request.timeoutInterval = 6
+        do {
+            _ = try await URLSession.shared.data(for: request)
+            return false
+        } catch let error as URLError {
+            switch error.code {
+            case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed, .networkConnectionLost, .notConnectedToInternet, .timedOut:
+                return true
+            default:
+                return false
+            }
+        } catch {
+            return false
+        }
     }
 
     private func attachKernel(_ endpoint: ArbosKernelClient.Endpoint) async -> Bool {
@@ -159,7 +207,7 @@ final class ChatStore: ObservableObject {
     /// The app came back to the front (the phone woke, the user returned):
     /// a link iOS cut while the app slept is reopened at once.
     func resumeIfNeeded() {
-        guard mode == .offline || mode == .mock, settings.chatEndpoint != nil else { return }
+        guard mode == .offline || mode == .mock, settings.chatEndpoint != nil, refusal == nil else { return }
         reconnectTask?.cancel()
         reconnectIn = nil
         reconnectAttempt = 0
@@ -191,6 +239,7 @@ final class ChatStore: ObservableObject {
     /// shows an empty chat.
     func reconnect() async {
         let attempt = reconnectAttempt
+        refusal = nil
         disconnect()
         reconnectAttempt = attempt
         agents.removeAll()
@@ -245,6 +294,7 @@ final class ChatStore: ObservableObject {
         }
         settings.kernelTarget = target
         reconnectAttempt = 0
+        refusal = nil
         await reconnect()
     }
 
@@ -392,7 +442,14 @@ final class ChatStore: ObservableObject {
             guard mode != .offline || reconnectTask == nil else { return }
             mode = .offline
             busy = false
-            if settings.chatEndpoint != nil { scheduleReconnect() }
+            if settings.chatEndpoint != nil, refusal == nil { scheduleReconnect() }
+        case .refused(let why):
+            refusal = why.replacingOccurrences(of: "hub: ", with: "")
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            reconnectIn = nil
+            mode = .offline
+            busy = false
         }
         // A long project pages back 200 at a time; the cap is for a day-long
         // stream, not for the history the user asked to see.

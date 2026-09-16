@@ -8,6 +8,14 @@ struct SettingsView: View {
     @State private var kernelTokenDraft = ""
     @State private var hubTokenDraft = ""
 
+    /// "0.2.0 (920)" — what TestFlight calls this build.
+    private static var buildLine: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let version = info["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info["CFBundleVersion"] as? String ?? "?"
+        return "\(version) (\(build))"
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -66,6 +74,12 @@ struct SettingsView: View {
                     Text("Mesh hub")
                 } footer: {
                     Text("Lists the machines and projects the Projects screen shows.")
+                }
+                Section {
+                    LabeledContent("Arbos", value: Self.buildLine)
+                        .foregroundStyle(ArbosTheme.textMuted)
+                } footer: {
+                    Text("The TestFlight build on this phone.")
                 }
             }
             .scrollContentBackground(.hidden)
