@@ -2318,32 +2318,59 @@ impl Composer {
                             .and_then(|name| name.to_str())
                             .unwrap_or("file")
                             .to_string();
-                        super::attachment::chip(
-                            ("composer-file", ix),
-                            name,
-                            attachment.preview.clone(),
-                            theme,
-                        )
-                        .child(
+                        // Cursor's tray: a picture is a bare rounded thumbnail
+                        // with an ✕ badge on its corner when hovered; a file is
+                        // a small chip with its name. Neither shows the ✕ at
+                        // rest (cycle 21, `cursor-reference/composer-attachments/`).
+                        let group = SharedString::from(format!("composer-attachment-{ix}"));
+                        let close = |badge: bool| {
                             div()
                                 .id(("composer-file-x", ix))
-                                .size(px(14.))
+                                .size(px(if badge { 18. } else { 14. }))
                                 .rounded_full()
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .cursor_pointer()
+                                .when(badge, |el| {
+                                    el.absolute()
+                                        .top(px(-5.))
+                                        .right(px(-5.))
+                                        .bg(theme.surface_raised_hover)
+                                        .border_1()
+                                        .border_color(theme.border)
+                                })
+                                .invisible()
+                                .group_hover(group.clone(), |el| el.visible())
                                 .hover(|hit| hit.bg(theme.element_active))
                                 .child(
                                     icons::icon(icons::system::CLOSE)
                                         .size(px(10.))
-                                        .text_color(theme.text_faint),
+                                        .text_color(theme.text_muted),
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.remove_attachment(ix, cx);
-                                })),
-                        )
-                        .into_any_element()
+                                }))
+                        };
+                        if attachment.preview.is_some() {
+                            div()
+                                .group(group.clone())
+                                .relative()
+                                .child(super::attachment::thumb(
+                                    ("composer-file", ix),
+                                    attachment.preview.clone(),
+                                    64.,
+                                    120.,
+                                    theme,
+                                ))
+                                .child(close(true))
+                                .into_any_element()
+                        } else {
+                            super::attachment::chip(("composer-file", ix), name, None, theme)
+                                .group(group.clone())
+                                .child(close(false))
+                                .into_any_element()
+                        }
                     }),
             )
             .into_any_element()

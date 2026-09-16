@@ -290,7 +290,11 @@ fn lit(text: &str, needle: &str, theme: &Theme) -> gpui::AnyElement {
         Some(start) if start + needle.len() <= text.len() => {
             let end = start + needle.len();
             row.child(text[..start].to_string())
-                .child(div().text_color(theme.text).child(text[start..end].to_string()))
+                .child(
+                    div()
+                        .text_color(theme.text)
+                        .child(text[start..end].to_string()),
+                )
                 .child(text[end..].to_string())
                 .into_any_element()
         }
@@ -364,7 +368,11 @@ impl Render for ChatSearch {
         }
         if !hit_rows.is_empty() {
             list.push(section_label(
-                if q.is_empty() { "Recent chats" } else { "Chats" },
+                if q.is_empty() {
+                    "Recent chats"
+                } else {
+                    "Chats"
+                },
                 &theme,
             ));
             for (position, ix) in hit_rows {
@@ -373,10 +381,11 @@ impl Render for ChatSearch {
                 };
                 let is_active = position == active;
                 let row = *rows.get(position).unwrap_or(&Row::Hit(ix));
-                let dot = div()
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(if hit.running { theme.accent } else { theme.text_dim });
+                let dot = div().size(px(6.)).rounded_full().bg(if hit.running {
+                    theme.accent
+                } else {
+                    theme.text_dim
+                });
                 let showing_snippet = !q.is_empty() && !hit.snippet.is_empty();
                 let body = div()
                     .flex()
@@ -392,7 +401,11 @@ impl Render for ChatSearch {
                             .child(hit.title.clone()),
                     )
                     .when(showing_snippet, |el| {
-                        el.child(div().text_size(px(12.)).child(lit(&hit.snippet, &q, &theme)))
+                        el.child(
+                            div()
+                                .text_size(px(12.))
+                                .child(lit(&hit.snippet, &q, &theme)),
+                        )
                     });
                 list.push(
                     row_base(&theme, is_active)
@@ -441,12 +454,7 @@ impl Render for ChatSearch {
                             }
                         }))
                         .on_click(cx.listener(move |this, _, _, cx| this.confirm_row(row, cx)))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_color(theme.text)
-                                .child(action.label()),
-                        )
+                        .child(div().flex_1().text_color(theme.text).child(action.label()))
                         .child(key_caps(action.keys(), &theme))
                         .into_any_element(),
                 );
@@ -473,7 +481,10 @@ impl Render for ChatSearch {
                 let filter = *filter;
                 let on = self.filter == filter;
                 div()
-                    .id(SharedString::from(format!("palette-filter-{}", filter.label())))
+                    .id(SharedString::from(format!(
+                        "palette-filter-{}",
+                        filter.label()
+                    )))
                     .px(px(8.))
                     .h(px(22.))
                     .flex()
