@@ -915,6 +915,8 @@ fn handle_frame(
                         failed: false,
                     }),
                 );
+                // Words held in an inbox for want of a key run now.
+                hooks.kick();
             }
             Err(e) => refuse(hooks, None, format!("configure: {e:#}")),
         },
@@ -1053,14 +1055,44 @@ fn handle_frame(
             }
             resolve_approve(hooks, place, agent, call_id, allow);
         }
-        Frame::Kickoff { agent } => match hooks.kickoff(&agent) {
-            Ok(true) => {
-                crate::klog::info("kickoff", Some(&agent), "first open: kickoff turn filed");
-                hooks.kick();
+        // A `kickoff` is always answered: filed (a turn follows), refused
+        // (an `error` frame says what is missing), or declined because
+        // root has a turn on record or one running (a `turn idle` frame,
+        // so a client holding words behind the kickoff lets them go).
+        // Silence here held a new user's first line forever (qa, keyless
+        // first install).
+        Frame::Kickoff { agent } => {
+            if let Some(hint) = keyless(place) {
+                refuse(
+                    hooks,
+                    Some(&agent),
+                    format!(
+                        "kickoff not started: {hint} Your first message is kept and runs once a key is in place."
+                    ),
+                );
+                if !hooks.is_live(&agent) {
+                    hooks.broadcast(Frame::Turn {
+                        agent: agent.clone(),
+                        state: "idle".into(),
+                        budget: None,
+                    });
+                }
+                return;
             }
-            Ok(false) => {}
-            Err(e) => refuse(hooks, Some(&agent), format!("kickoff: {e:#}")),
-        },
+            match hooks.kickoff(&agent) {
+                Ok(true) => {
+                    crate::klog::info("kickoff", Some(&agent), "first open: kickoff turn filed");
+                    hooks.kick();
+                }
+                Ok(false) if hooks.is_live(&agent) => {}
+                Ok(false) => hooks.broadcast(Frame::Turn {
+                    agent: agent.clone(),
+                    state: "idle".into(),
+                    budget: None,
+                }),
+                Err(e) => refuse(hooks, Some(&agent), format!("kickoff: {e:#}")),
+            }
+        }
         Frame::Undo { agent } => {
             let cwd = load_agent(place, &arbos_core::AgentId::new(&agent))
                 .ok()
@@ -1927,18 +1959,26 @@ pub async fn serve_client(
 
 /// What this kernel can say about its model provider without saying the
 /// key: which provider and model, whether a key is there, where from.
-fn provider_frame(place: &Place) -> Frame {
-    let host = Host::load().or_else(|_| Host::peek());
-    let Ok(host) = host else {
-        return Frame::Provider {
-            provider: String::new(),
-            model: String::new(),
-            key: false,
-            source: "none".into(),
-        };
-    };
+/// Why a turn cannot start on this kernel, or `None` when a model key is
+/// in reach (config, environment, the place's secrets.toml, or the replay
+/// provider, which asks the network nothing). The text is
+/// `missing_key_hint`: what to run, set, or write, and where keys come
+/// from.
+pub fn keyless(place: &Place) -> Option<String> {
+    if arbos_engine::replay::current().ok().flatten().is_some() {
+        return None;
+    }
+    let host = Host::load().or_else(|_| Host::peek()).ok()?;
+    match key_source(place, &host) {
+        (true, _) => None,
+        (false, _) => Some(host.missing_key_hint()),
+    }
+}
+
+/// Whether a key is in reach and where from, as the `provider` frame says.
+fn key_source(place: &Place, host: &Host) -> (bool, String) {
     let env = host.config.key_env();
-    let (key, source) = match host.key_source() {
+    match host.key_source() {
         arbos_core::KeySource::Config => (
             true,
             if arbos_core::host::is_overridden() {
@@ -1955,7 +1995,20 @@ fn provider_frame(place: &Place) -> Frame {
                 _ => (false, "none".into()),
             }
         }
+    }
+}
+
+fn provider_frame(place: &Place) -> Frame {
+    let host = Host::load().or_else(|_| Host::peek());
+    let Ok(host) = host else {
+        return Frame::Provider {
+            provider: String::new(),
+            model: String::new(),
+            key: false,
+            source: "none".into(),
+        };
     };
+    let (key, source) = key_source(place, &host);
     Frame::Provider {
         provider: host.config.provider().as_str().to_string(),
         model: host.config.model(),

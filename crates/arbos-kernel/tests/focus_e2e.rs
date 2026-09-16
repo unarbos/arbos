@@ -4,12 +4,12 @@
 
 mod common;
 
-use common::{Attach, start_kernel};
+use common::{Attach, start_kernel_replay};
 use std::time::Duration;
 
 #[test]
 fn an_attach_client_cannot_point_the_focus_outside_the_agents_folder() {
-    let mut k = start_kernel("focus");
+    let mut k = start_kernel_replay("focus", "");
     let mut a = Attach::connect(&k.url);
     assert!(
         a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")

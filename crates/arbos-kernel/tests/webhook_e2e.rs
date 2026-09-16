@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{Attach, start_kernel};
+use common::{Attach, start_kernel_replay};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -31,7 +31,7 @@ fn post(url: &str, path: &str, body: &str, content_type: &str) -> (u16, String) 
 
 #[test]
 fn a_post_on_the_attach_port_is_a_message_for_the_agent() {
-    let mut k = start_kernel("webhook");
+    let mut k = start_kernel_replay("webhook", "");
     let mut a = Attach::connect(&k.url);
     assert!(
         a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")

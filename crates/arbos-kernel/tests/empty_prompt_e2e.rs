@@ -3,12 +3,12 @@
 
 mod common;
 
-use common::{Attach, start_kernel};
+use common::{Attach, start_kernel_replay};
 use std::time::Duration;
 
 #[test]
 fn a_blank_prompt_starts_no_turn_and_writes_no_node() {
-    let mut k = start_kernel("empty");
+    let mut k = start_kernel_replay("empty", "");
     let mut a = Attach::connect(&k.url);
     assert!(
         a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")

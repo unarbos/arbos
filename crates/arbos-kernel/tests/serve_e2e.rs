@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{Attach, lock_path, sigint, start_kernel, wait_exit};
+use common::{Attach, lock_path, sigint, start_kernel_replay, wait_exit};
 use std::time::{Duration, Instant};
 
 /// qa-003: a 4 MB prompt used to make the serve loop re-parse megabytes
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 /// stayed behind after the kill.
 #[test]
 fn a_huge_prompt_does_not_stop_ctrl_c_from_ending_the_kernel_cleanly() {
-    let mut k = start_kernel("huge");
+    let mut k = start_kernel_replay("huge", "");
     let mut a = Attach::connect(&k.url);
     assert!(
         a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
