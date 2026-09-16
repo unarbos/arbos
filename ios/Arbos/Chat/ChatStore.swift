@@ -447,10 +447,24 @@ final class ChatStore: ObservableObject {
             // every turn, so only this turn's items — after the last prompt
             // card — are candidates; a settled line must never reach back
             // into an earlier reply.
-            let turnStart = items.lastIndex(where: { if case .user = $0.kind { return true } else { return false } }).map { $0 + 1 } ?? 0
-            let index = step > 0
+            let userCards = items.indices.filter { if case .user = items[$0].kind { return true } else { return false } }
+            let turnStart = userCards.last.map { $0 + 1 } ?? 0
+            var index = step > 0
                 ? items[turnStart...].lastIndex(where: { $0.isAgent && $0.step == step })
                 : items[turnStart...].lastIndex(where: \.isAgent)
+            // A steer typed while the reply streamed closed its bubble and
+            // now sits between the streamed words and the settled text
+            // ("That" … steer … "That line is already…", journey run 5).
+            // Reach back one card, but only for the bubble whose words the
+            // settled text begins with — never into an earlier reply.
+            if index == nil, userCards.count >= 2, !text.isEmpty {
+                let before = (userCards[userCards.count - 2] + 1)..<userCards[userCards.count - 1]
+                index = items[before].lastIndex(where: { item in
+                    guard item.isAgent, step == 0 || item.step == step, case .agent(let streamed, _) = item.kind else { return false }
+                    let head = streamed.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return !head.isEmpty && text.hasPrefix(head)
+                })
+            }
             if let index {
                 let wasOpen = items[index].isStreamingAgent
                 // The kernel's whole text for one step can land after the
