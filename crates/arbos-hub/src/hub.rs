@@ -784,6 +784,7 @@ async fn proxy(
                                     "type": "pushed",
                                     "project": address,
                                     "enabled": hub_for_push.push.enabled(),
+                                    "reason": hub_for_push.push.reason(),
                                 }),
                                 Err(e) => serde_json::to_value(Frame::Error { agent: None, detail: format!("hub: {e}") }).unwrap_or_default(),
                             };
