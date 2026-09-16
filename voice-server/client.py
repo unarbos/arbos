@@ -364,6 +364,13 @@ async def main() -> None:
             run.metrics["text.done_ms"] = (t_done - t_text) * 1000
             run.metrics["text.answer"] = done_msg.get("text", "")[:200]
             run.log(f"<- text answer: {done_msg.get('text', '')[:200]!r}")
+            if any(k == "tool.call" and m.get("name") == "send_agent" for _, k, m in run.events):
+                agent_done = run.wait("agent.done")
+                run.log("text turn dispatched an agent; waiting for agent.done")
+                t_agent, agent_msg = await asyncio.wait_for(agent_done, args.agent_timeout)
+                run.metrics["text.agent_done_s"] = t_agent - t_text
+                run.metrics["text.agent_report"] = str(agent_msg.get("text", ""))[:200]
+                await asyncio.sleep(4.0)
 
         # 5. acting: ask for work by voice, expect a tool call and, later, the agent's report
         if args.agent_wav:

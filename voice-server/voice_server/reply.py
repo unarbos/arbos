@@ -107,6 +107,9 @@ class OpenRouterReply:
                     event = json.loads(payload)
                 except json.JSONDecodeError:
                     continue
+                if event.get("error"):  # OpenRouter reports provider refusals in-band with HTTP 200
+                    err = event["error"]
+                    raise RuntimeError(f"OpenRouter/{self.model}: {err.get('message', err) if isinstance(err, dict) else err}")
                 for choice in event.get("choices", []):
                     delta = choice.get("delta") or {}
                     if delta.get("content"):

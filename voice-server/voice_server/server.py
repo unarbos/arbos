@@ -43,7 +43,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     engine.add_argument("--instructions", default=None, help="system prompt for the duplex model (text or @file)")
 
     kernel = parser.add_argument_group("Arbos kernel (enables the agent tools and the text channel)")
-    kernel.add_argument("--kernel", default=os.environ.get("VOICE_KERNEL_URL"), help="tcp://127.0.0.1:PORT of `arbos-kernel serve`")
+    kernel.add_argument("--kernel", default=os.environ.get("VOICE_KERNEL_URL"),
+                        help="tcp://127.0.0.1:PORT of a local `arbos-kernel serve`, or wss://host[/path] of a remote one "
+                             "behind its tunnel (token via --kernel-token; a ?token= in the URL is accepted and moved to the header)")
+    kernel.add_argument("--kernel-token", default=os.environ.get("VOICE_KERNEL_TOKEN"),
+                        help="access.toml client token for a remote kernel (env VOICE_KERNEL_TOKEN); never logged")
     kernel.add_argument("--kernel-place", default=os.environ.get("VOICE_KERNEL_PLACE"), help="place dir; reads .arbos/kernel.json")
     kernel.add_argument("--no-auto-approve", action="store_true", help="do not auto-approve the kernel's 'allow ...' asks")
 
@@ -66,7 +70,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     reply.add_argument("--reply", default="none", choices=["none", "openrouter", "kernel"],
                        help="none: speech only, the client sends replies with 'speak'. openrouter: OpenRouter model with the Arbos tools "
                             "(env OPENROUTER_API_KEY). kernel: the kernel's main agent answers")
-    reply.add_argument("--reply-model", default="openai/gpt-4.1-mini", help="OpenRouter model id")
+    reply.add_argument("--reply-model", default=os.environ.get("VOICE_REPLY_MODEL", "google/gemini-2.5-flash"), help="OpenRouter model id (env VOICE_REPLY_MODEL)")
 
     turn = parser.add_argument_group("turn taking (ms)")
     turn.add_argument("--end-silence-ms", type=int, default=600, help="silence that ends an utterance")

@@ -11,6 +11,8 @@
 #   VOICE_HOME=/root/arbos-voice deploy/stack.sh up|down|status|logs
 #
 # $VOICE_HOME/env (chmod 600) holds: OPENROUTER_API_KEY=..., VOICE_TOKEN=..., VOICE_ARGS="..."
+#   and either PHONE_HOME=... (run the phone kernel here) or VOICE_KERNEL_URL=wss://... + VOICE_KERNEL_TOKEN=...
+#   (attach to a kernel elsewhere). With neither, bin/arbos-kernel serves a local place.
 set -euo pipefail
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 # Deployed layout is $VOICE_HOME/src/<this repo dir>; a bare checkout is its own home.
@@ -42,7 +44,10 @@ case "${1:-status}" in
     # job can only hurt that user. $PHONE_HOME holds bin/arbos-kernel, env (OPENROUTER_API_KEY,
     # ARBOS_PHONE_TOKEN), xdg/arbos/config.toml, homedir/, and home/ (the project folder) with
     # home/.arbos/access.toml ([[client]] name/token_env/role). The voice gateway attaches to it too.
-    if [ -n "${PHONE_HOME:-}" ] && [ -x "$PHONE_HOME/bin/arbos-kernel" ]; then
+    if [ -n "${VOICE_KERNEL_URL:-}" ]; then
+      # Remote kernel (e.g. wss://kernel-api.arbos.life behind its tunnel); VOICE_KERNEL_TOKEN in env.
+      KERNEL_ARGS="--kernel $VOICE_KERNEL_URL"
+    elif [ -n "${PHONE_HOME:-}" ] && [ -x "$PHONE_HOME/bin/arbos-kernel" ]; then
       PHONE_PORT="${PHONE_PORT:-7788}"
       start phone "runuser -u ${PHONE_USER:-arbos-phone} -- bash -c 'set -a; . $PHONE_HOME/env; set +a; \
         cd $PHONE_HOME/home && XDG_CONFIG_HOME=$PHONE_HOME/xdg HOME=$PHONE_HOME/homedir \

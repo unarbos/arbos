@@ -35,11 +35,16 @@ class Engines:
         t0 = time.monotonic()
         kernel: KernelClient | None = None
         if args.kernel or args.kernel_place:
-            kernel = KernelClient(url=args.kernel, place=args.kernel_place, auto_approve=not args.no_auto_approve)
+            kernel = KernelClient(url=args.kernel, place=args.kernel_place, token=args.kernel_token,
+                                  auto_approve=not args.no_auto_approve)
             try:
                 await kernel.connect()
-            except Exception as exc:
+            except PermissionError as exc:
                 raise SystemExit(f"could not attach to the Arbos kernel: {exc}")
+            except Exception as exc:
+                # A remote kernel may be down right now; serve calls anyway and keep dialing.
+                log.warning("kernel %s not reachable at start (%s); will keep trying", kernel.display, type(exc).__name__)
+                kernel.start_background()
 
         vad = SileroVAD(f"{args.model_dir}/silero_vad.onnx")
         asr = build_asr(
@@ -62,7 +67,8 @@ class Engines:
         log.info(
             "engines ready in %.1fs: engine=%s duplex=%s asr=%s tts=%s reply=%s kernel=%s",
             time.monotonic() - t0, engine, duplex_name or "-", asr.name, tts.name,
-            reply.name if reply else "none", "attached" if kernel else "none",
+            reply.name if reply else "none",
+            ("attached" if kernel.connected else "dialing") if kernel else "none",
         )
         return cls(vad=vad, asr=asr, tts=tts, reply=reply, kernel=kernel, engine=engine,
                    duplex_url=args.duplex_url, duplex_name=duplex_name)
