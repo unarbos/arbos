@@ -22,8 +22,12 @@ impl std::error::Error for Interrupted {}
 pub enum FailKind {
     /// Could not connect, or the connection dropped.
     Transport,
-    /// No bytes for `stream_idle`.
+    /// No bytes for `stream_idle` once the answer had started.
     Idle,
+    /// No response at all within `first_byte`: the provider queued the
+    /// request and said nothing. Another model answers now; this one may
+    /// be retried once.
+    Silent,
     /// Non-2xx response.
     Status,
     /// An `{"error": …}` frame inside the SSE stream.
@@ -54,6 +58,7 @@ impl std::fmt::Display for ProviderError {
         match (self.kind, self.status) {
             (FailKind::Status, Some(s)) => write!(f, "{} {}", s, status_label(s))?,
             (FailKind::Idle, _) => f.write_str("no data from provider")?,
+            (FailKind::Silent, _) => f.write_str("no answer from provider")?,
             (FailKind::Transport, _) => f.write_str("connection failed")?,
             (FailKind::Stream, _) => f.write_str("provider error mid-stream")?,
             (FailKind::Status, None) => f.write_str("provider error")?,
@@ -227,6 +232,11 @@ pub struct Provider {
     pub data_policy: String,
     /// Longest silence tolerated mid-stream before the call counts as lost.
     pub stream_idle: Duration,
+    /// The longest wait for the response headers before the call is
+    /// given up as `Silent`. Shorter than `stream_idle`: a provider that
+    /// has not started in half a minute is not about to (Jacob waited
+    /// 98 s on a new project's first turn, 2026-09-16).
+    pub first_byte: Duration,
     /// `max_tokens` to send. None = omit the field.
     pub max_tokens: Option<u64>,
     /// Folder that gets one JSON file per call with the request, the
@@ -495,6 +505,50 @@ impl Provider {
             .await
     }
 
+    /// Whether this key can call `self.model` at all: one token, no tools,
+    /// a short wait. Run before a new project's first turn so a blocked
+    /// family is found — and another model picked — before the user is
+    /// shown anything (Code2, 2026-09-16). Ok(()) on an answer; the
+    /// provider's error otherwise.
+    pub async fn probe(&self, cancel: &CancellationToken) -> Result<(), ProviderError> {
+        let mut p = Self {
+            base: self.base.clone(),
+            key: self.key.clone(),
+            model: self.model.clone(),
+            reasoning_effort: None,
+            cache_ttl: None,
+            data_policy: self.data_policy.clone(),
+            stream_idle: Duration::from_secs(15),
+            first_byte: Duration::from_secs(15),
+            max_tokens: Some(1),
+            trace: None,
+            trace_agent: self.trace_agent.clone(),
+            trace_purpose: "probe".into(),
+            trace_line: 0,
+            replay: self.replay.clone(),
+        };
+        p.max_tokens = Some(1);
+        let msgs = [ChatMessage::plain(
+            "user",
+            Some("Reply with one word.".into()),
+        )];
+        match p.complete_stream(&msgs, &[], cancel, |_| {}).await {
+            Ok(_) => Ok(()),
+            Err(e) => match e.downcast::<ProviderError>() {
+                Ok(pe) => Err(pe),
+                Err(other) => Err(ProviderError {
+                    kind: FailKind::Transport,
+                    status: None,
+                    message: format!("{other:#}"),
+                    retry_after: None,
+                    should_retry: None,
+                    visible: false,
+                    partial: String::new(),
+                }),
+            },
+        }
+    }
+
     pub async fn complete_stream(
         &self,
         messages: &[ChatMessage],
@@ -641,12 +695,12 @@ impl Provider {
         // silence a `Waiting` delta goes out so the wait is visible.
         let mut request = std::pin::pin!(request);
         let mut resp = loop {
-            let left = self.stream_idle.saturating_sub(call_start.elapsed());
+            let left = self.first_byte.saturating_sub(call_start.elapsed());
             if left.is_zero() {
                 return Err(ProviderError {
-                    kind: FailKind::Idle,
+                    kind: FailKind::Silent,
                     status: None,
-                    message: format!("no response headers for {}s", self.stream_idle.as_secs()),
+                    message: format!("no response headers for {}s", self.first_byte.as_secs()),
                     retry_after: None,
                     should_retry: None,
                     visible: false,

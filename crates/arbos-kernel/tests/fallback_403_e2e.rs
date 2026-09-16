@@ -64,14 +64,19 @@ fn server() -> u16 {
                         &mut stream,
                         200,
                         "application/json",
-                        r#"{"data":[{"id":"blocked","context_length":8000},{"id":"open","context_length":8000}]}"#,
+                        r#"{"data":[{"id":"blocked","context_length":8000},{"id":"open","context_length":8000},{"id":"openai/blocked","context_length":8000},{"id":"anthropic/open","context_length":8000},{"id":"slow/silent","context_length":8000}]}"#,
                     );
                     return;
                 }
                 let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
                 let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
                 let model = v["model"].as_str().unwrap_or("").to_string();
-                if model == "blocked" || model == "blocked-too" {
+                if model.ends_with("/silent") {
+                    // A provider that queues the request and says nothing.
+                    std::thread::sleep(std::time::Duration::from_secs(40));
+                    return;
+                }
+                if model.ends_with("/blocked") || model == "blocked" || model == "blocked-too" {
                     respond(
                         &mut stream,
                         403,
@@ -82,7 +87,7 @@ fn server() -> u16 {
                 }
                 let sse = format!(
                     "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
-                    serde_json::json!({"choices":[{"delta":{"role":"assistant","content":"answered by open"}}]}),
+                    serde_json::json!({"choices":[{"delta":{"role":"assistant","content":format!("answered by {model}")}}]}),
                     serde_json::json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"total_tokens":20}})
                 );
                 respond(&mut stream, 200, "text/event-stream", &sse);
@@ -125,13 +130,27 @@ fn a_403_on_the_primary_falls_through_to_the_fallback() {
             .any(|e| e["kind"] == "assistant" && e["text"] == "answered by open"),
         "{root:#?}"
     );
+    let notice = root
+        .iter()
+        .find(|e| {
+            e["kind"] == "notice"
+                && e["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("open answers this turn")
+        })
+        .unwrap_or_else(|| panic!("{root:#?}"));
+    assert_eq!(
+        notice["text"], "blocked is not available to this key, so open answers this turn.",
+        "one plain sentence"
+    );
+    let text =
+        std::fs::read_to_string(k.place.join(".arbos/agents/root/transcript.jsonl")).unwrap();
     assert!(
-        root.iter().any(|e| e["kind"] == "notice"
-            && e["text"]
-                .as_str()
-                .unwrap_or("")
-                .starts_with("switched to open for this turn: blocked")),
-        "{root:#?}"
+        !text.contains("Policy Violation")
+            && !text.contains("403")
+            && !text.contains("platform.openai.com"),
+        "the provider's words stay out of the chat: {text}"
     );
     assert!(
         !root
@@ -167,8 +186,142 @@ fn a_key_refused_everywhere_still_fails_and_names_the_model() {
         .find(|e| e["kind"] == "notice" && e["failed"] == true)
         .unwrap_or_else(|| panic!("{root:#?}"));
     let text = failed["text"].as_str().unwrap();
-    assert!(text.contains("blocked-too"), "{text}");
-    assert!(text.contains("may not call this model"), "{text}");
-    assert!(!text.contains("billing"), "{text}");
+    assert!(
+        text.starts_with("blocked-too is not available to this key."),
+        "{text}"
+    );
+    assert!(text.contains("pick another model"), "{text}");
+    assert!(
+        !text.contains("billing") && !text.contains("Policy Violation"),
+        "{text}"
+    );
+    let _ = k.child.kill();
+}
+
+/// A refused family is remembered: the next turn does not start on it,
+/// and says so in one sentence; the fallback list drops it too. A new
+/// project's kickoff probes the key first, so its very first line is
+/// the greeting, not a provider's refusal.
+#[test]
+fn a_blocked_family_is_remembered_and_a_kickoff_probes_before_the_first_word() {
+    let port = server();
+    let config = format!(
+        "api_base = \"http://127.0.0.1:{port}/v1\"\napi_key = \"k\"\nmodel = \"openai/blocked\"\nfallback_models = [\"anthropic/open\"]\nwindow_tokens = 0\n"
+    );
+    let mut k = start_kernel_with("fallback-remembered", &config);
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    // The kickoff: the probe finds the block; the greeting comes from the
+    // other family; the first notice is the plain one, and no "so …
+    // answers this turn" fallback line appears at all.
+    a.send(serde_json::json!({"type": "kickoff", "agent": "root"}));
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(60)));
+    assert!(common::wait_for(Duration::from_secs(5), || {
+        transcript(&k.place)
+            .iter()
+            .any(|e| e["kind"] == "turn_complete")
+    }));
+    let root = transcript(&k.place);
+    let first_notice = root
+        .iter()
+        .find(|e| e["kind"] == "notice")
+        .unwrap_or_else(|| panic!("{root:#?}"));
+    assert!(
+        first_notice["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("This key cannot use openai models (openai/blocked was refused by the provider), so anthropic/open answers for now."),
+        "{first_notice}"
+    );
+    assert!(
+        !root.iter().any(|e| e["kind"] == "notice"
+            && e["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("answers this turn")),
+        "no fallback happened in the turn itself: {root:#?}"
+    );
+    assert!(
+        root.iter()
+            .any(|e| e["kind"] == "assistant" && e["text"] == "answered by anthropic/open"),
+        "{root:#?}"
+    );
+    // The block is on disk for this host, and the next turn skips the
+    // family up front (one sentence, then the answer).
+    let blocked =
+        std::fs::read_to_string(k.scratch.join("xdg/arbos/runtime/blocked-models.json")).unwrap();
+    assert!(blocked.contains("\"openai\""), "{blocked}");
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "hello again"}));
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    assert!(common::wait_for(Duration::from_secs(5), || {
+        transcript(&k.place)
+            .iter()
+            .filter(|e| e["kind"] == "turn_complete")
+            .count()
+            >= 2
+    }));
+    let root = transcript(&k.place);
+    let answers: Vec<&str> = root
+        .iter()
+        .filter(|e| e["kind"] == "assistant")
+        .filter_map(|e| e["text"].as_str())
+        .collect();
+    assert!(
+        answers.iter().all(|t| *t == "answered by anthropic/open"),
+        "{answers:?}"
+    );
+    assert!(
+        !root.iter().any(|e| e["kind"] == "notice"
+            && e["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("answers this turn")),
+        "the blocked model is never tried again: {root:#?}"
+    );
+    let _ = k.child.kill();
+}
+
+/// A model that never answers is given up in `first_byte_ms`, not the
+/// two minutes of `stream_idle_ms`; the fallback takes over and the chat
+/// says so plainly.
+#[test]
+fn a_silent_model_is_given_up_fast_and_the_fallback_answers() {
+    let port = server();
+    let config = format!(
+        "api_base = \"http://127.0.0.1:{port}/v1\"\napi_key = \"k\"\nmodel = \"slow/silent\"\nfallback_models = [\"anthropic/open\"]\nwindow_tokens = 0\nfirst_byte_ms = 3000\n"
+    );
+    let mut k = start_kernel_with("fallback-silent", &config);
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    let started = std::time::Instant::now();
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "hello"}));
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "given up within first_byte_ms, not stream_idle: {:?}",
+        started.elapsed()
+    );
+    assert!(common::wait_for(Duration::from_secs(5), || {
+        transcript(&k.place)
+            .iter()
+            .any(|e| e["kind"] == "turn_complete")
+    }));
+    let root = transcript(&k.place);
+    assert!(
+        root.iter().any(|e| e["kind"] == "notice"
+            && e["text"] == "slow/silent did not answer, so anthropic/open answers this turn."),
+        "{root:#?}"
+    );
+    assert!(
+        root.iter()
+            .any(|e| e["kind"] == "assistant" && e["text"] == "answered by anthropic/open"),
+        "{root:#?}"
+    );
     let _ = k.child.kill();
 }

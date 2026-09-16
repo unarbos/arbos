@@ -198,6 +198,7 @@ pub fn run(args: Args) -> Result<()> {
         cache_ttl: None,
         data_policy: host.config.data_policy.clone(),
         stream_idle: Duration::from_secs(60),
+        first_byte: Duration::from_secs(30),
         // Reasoning models spend tokens thinking before the word.
         max_tokens: Some(512),
         trace: None,

@@ -138,6 +138,11 @@ pub async fn model_step(
         }
         let err = match streamed {
             Ok(done) => {
+                // A family marked blocked answered: the mark was wrong or
+                // the block is lifted. Cheap when nothing is marked.
+                if s.provider.replay.is_none() {
+                    crate::blocked::clear(&s.provider.base, &s.provider.model);
+                }
                 let _ = tx.send(Msg::Commit);
                 drop(tx);
                 let outcomes = executor
@@ -173,6 +178,14 @@ pub async fn model_step(
             });
         };
         let model = s.models.current().to_string();
+        // The provider's own words go to the kernel log, where a person
+        // debugging looks; the chat gets a plain sentence (below).
+        eprintln!("provider: {model}: {pe} — {}", pe.message.trim());
+        // A refusal of this key for this model: its family is remembered
+        // as blocked, so the next turn does not start here again.
+        if pe.status == Some(403) && s.provider.replay.is_none() {
+            crate::blocked::mark(&s.provider.base, &model, &pe.message);
+        }
         // A text-only model given a screenshot: the provider rejects the whole
         // request (OpenRouter: 404 "No endpoints found that support image
         // input"). A vision model puts the pictures into words and the turn
@@ -241,17 +254,16 @@ pub async fn model_step(
                         message: failure_text(&model, pe, attempt),
                     });
                 };
-                let why = if attempt > 1 {
-                    format!("{pe} after {attempt} attempts")
-                } else {
-                    pe.to_string()
-                };
                 // On the transcript: the model and the user should both know
-                // who answered this turn.
+                // who answered this turn — in one plain sentence. The
+                // provider's words are in the log (above), not here.
                 append_event(
                     s.transcript,
                     &Event::new(EventKind::Notice {
-                        text: format!("switched to {next} for this turn: {model} {why}"),
+                        text: format!(
+                            "{model} {}, so {next} answers this turn.",
+                            plain_reason(pe, attempt)
+                        ),
                         failed: false,
                     }),
                 )?;
@@ -386,17 +398,38 @@ fn strip_images(messages: &[ChatMessage]) -> Vec<ChatMessage> {
 
 /// The line the user reads when nothing more can be done. Names the model,
 /// the reason, and one thing they can do about it.
-fn failure_text(model: &str, e: &ProviderError, attempts: u32) -> String {
+/// Why a call failed, in the user's words, for the chat: what happened,
+/// not the provider's status line or policy text.
+fn plain_reason(e: &ProviderError, attempts: u32) -> String {
     let tried = if attempts > 1 {
-        format!(" after {attempts} attempts")
+        format!(" ({attempts} tries)")
     } else {
         String::new()
     };
+    let what = match (e.kind, e.status) {
+        (_, Some(401)) => "did not accept the API key".to_string(),
+        (_, Some(402)) => "needs billing on this key".to_string(),
+        (_, Some(403)) => "is not available to this key".to_string(),
+        (_, Some(404)) => "is not a model this provider serves".to_string(),
+        (_, Some(429)) => "is rate-limited right now".to_string(),
+        (_, Some(s)) if s >= 500 => "is having trouble on the provider's side".to_string(),
+        (_, Some(400)) | (_, Some(413)) | (_, Some(422)) => "rejected the request".to_string(),
+        (FailKind::Silent, _) => "did not answer".to_string(),
+        (FailKind::Idle, _) => "stopped mid-answer".to_string(),
+        (FailKind::Transport, _) => "could not be reached".to_string(),
+        (FailKind::Stream, _) => "failed mid-answer".to_string(),
+        _ => "failed".to_string(),
+    };
+    format!("{what}{tried}")
+}
+
+fn failure_text(model: &str, e: &ProviderError, attempts: u32) -> String {
     let hint = if e.visible {
         "The answer was cut off mid-stream; send the message again."
     } else if let Some(h) = e.retry_after {
         return format!(
-            "{model}: {e}{tried}. The provider asked to wait {} before retrying; try later or set fallback_models in config.toml.",
+            "{model} {}. The provider asked for a wait of {}; try again after that, or set fallback_models in config.toml.",
+            plain_reason(e, attempts),
             retry::human(h)
         );
     } else {
@@ -418,7 +451,7 @@ fn failure_text(model: &str, e: &ProviderError, attempts: u32) -> String {
             _ => "Check the network and the provider status page, then send the message again.",
         }
     };
-    format!("{model}: {e}{tried}. {hint}")
+    format!("{model} {}. {hint}", plain_reason(e, attempts))
 }
 
 #[cfg(test)]
