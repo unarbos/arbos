@@ -52,6 +52,8 @@ final class MockKernelChat: ChatSource {
         ]
     }
 
+    func answer(text: String, id: String?) { Task { try? await send(text: text, steer: false, attachments: []) } }
+
     func send(text: String, steer: Bool, attachments: [PendingAttachment]) async throws {
         reply?.cancel()
         stream?.yield(.item(ChatItem(.user(text))))

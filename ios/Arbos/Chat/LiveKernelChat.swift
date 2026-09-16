@@ -89,6 +89,10 @@ final class LiveKernelChat: ChatSource {
         try? client.seen(through: through)
     }
 
+    func answer(text: String, id: String?) {
+        try? client.answer(text, id: id)
+    }
+
     func registerPush(token: String, sandbox: Bool) {
         try? client.registerPush(token: token, sandbox: sandbox)
     }
@@ -185,10 +189,10 @@ final class LiveKernelChat: ChatSource {
             if path == "project.toml", error == nil, let identity = ProjectIdentity.parse(toml: text) {
                 stream?.yield(.identity(identity))
             }
-        case .ask(let agent, let question, _):
+        case .ask(let agent, let question, let options, let id):
             if agent == focus {
                 stream?.yield(.agentDone)
-                stream?.yield(.item(ChatItem(.agent(question, streaming: false))))
+                stream?.yield(.ask(question: question, options: options, id: id))
             }
         case .notify(let notification):
             stream?.yield(.notify(notification))
@@ -214,7 +218,9 @@ final class LiveKernelChat: ChatSource {
             }
             // The hub saying the kernel went away is the link going, not a
             // line for the transcript: the store's one calm line covers it.
-            if detail.contains("went away") || detail.contains("closed") {
+            // …and "no kernel serving" is the same link, still down, seen from
+            // the hub: the calm line covers it too (M-110).
+            if detail.contains("went away") || detail.contains("closed") || detail.contains("no kernel serving") {
                 stream?.yield(.dropped(detail))
             } else if detail.contains("no machine named") || detail.contains("no project named") || detail.contains("not registered") {
                 // The hub knows nothing by that name: retrying will not help.
@@ -300,8 +306,10 @@ final class LiveKernelChat: ChatSource {
             // 1021): the bytes were cached when this phone sent them.
             item.images = attachments.map { ($0 as NSString).lastPathComponent }.filter { AttachmentCache.has($0) }
             return item
-        case .answer(let text):
-            return ChatItem(.user(text))
+        case .answer:
+            // The kernel writes the answer twice — `answer`, then the `user`
+            // line it becomes; the user line is the card.
+            return nil
         case .assistant(let text, let step):
             // Lines from before #278 may still carry a call written as text.
             let trimmed = ToolMarkup.strip(text)
@@ -340,7 +348,7 @@ final class LiveKernelChat: ChatSource {
     /// The coordinator's bookkeeping calls: worker lines, the page, the
     /// checklist and the live step stand in for them, never a row.
     private static let hiddenRootTools: Set<String> = [
-        "status", "plan", "todo", "say", "subscribe", "remember", "notes", "page", "title",
+        "status", "plan", "todo", "say", "subscribe", "remember", "notes", "page", "title", "ask",
     ]
 
     /// The tree names a worker the way the desktop's panel does; the

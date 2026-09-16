@@ -75,7 +75,7 @@ struct ProjectChatView: View {
                     pills
                     ComposerBar(
                         text: $draft,
-                        placeholder: dictation.active ? "Listening…" : (chat.items.isEmpty ? "Plan, ask, build…" : "Follow up…"),
+                        placeholder: dictation.active ? "Listening…" : (chat.pendingAsk != nil ? "Answer…" : (chat.items.isEmpty ? "Plan, ask, build…" : "Follow up…")),
                         canSend: canSend,
                         onSend: send,
                         onMic: { showCall = true },
@@ -252,7 +252,7 @@ struct ProjectChatView: View {
                     ForEach(rows) { row in
                         switch row {
                         case .item(let item):
-                            ChatRow(item: item, waitingOn: title).id(item.id)
+                            ChatRow(item: item, waitingOn: title, onAnswer: { chat.answer($0) }).id(item.id)
                         case .tools(let items):
                             ToolFold(items: items, open: openFolds.contains(items[0].id)) {
                                 if openFolds.contains(items[0].id) { openFolds.remove(items[0].id) } else { openFolds.insert(items[0].id) }
@@ -328,8 +328,15 @@ struct ProjectChatView: View {
             }
             .onChange(of: chat.mode) { _, mode in
                 if mode == .connecting { connectingSince = Date() }
-                // The one line under the transcript changed; keep it in view.
-                if atTail { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) } }
+                // A reconnect replaced the transcript wholesale: land on the
+                // tail whatever the reader was doing (M-109 left it a screen
+                // short). Otherwise keep the one line under it in view.
+                if mode == .live || atTail {
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(250))
+                        withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
+                    }
+                }
             }
             .onChange(of: chat.earlierLines) { old, new in
                 // A long replay lands in one go; the lazy layout settles over
@@ -528,6 +535,9 @@ struct ChatRow: View {
     /// A card still pending after ten seconds has had no echo from the
     /// kernel — whether the socket knows the link is down yet or not.
     var waitingOn: String? = nil
+    /// Tapping an option on a question card answers it; nil where the
+    /// card is read-only (a worker's transcript).
+    var onAnswer: ((String) -> Void)? = nil
 
     var body: some View {
         switch item.kind {
@@ -628,6 +638,24 @@ struct ChatRow: View {
                 trailing: "",
                 tint: failed ? ArbosTheme.danger : ArbosTheme.textFaint
             )
+        case .ask(let question, let options, _, let answered):
+            // The kernel's question: the words as a reply, the options as
+            // chips to tap, or the composer ("Answer…") for a typed one.
+            VStack(alignment: .leading, spacing: 10) {
+                Text(Self.prose(question))
+                    .font(ArbosTheme.body)
+                    .foregroundStyle(ArbosTheme.text)
+                    .textSelection(.enabled)
+                if !options.isEmpty {
+                    FlowChips(options: options, enabled: !answered && onAnswer != nil) { picked in onAnswer?(picked) }
+                }
+                if !answered {
+                    Label(options.isEmpty ? "Waiting for your answer" : "Tap one, or type an answer", systemImage: "questionmark.circle")
+                        .font(ArbosTheme.caption)
+                        .foregroundStyle(ArbosTheme.textDim)
+                }
+            }
+            .padding(.top, 6)
         }
     }
 
@@ -743,6 +771,62 @@ struct ToolFold: View {
         items.reduce(0) { total, item in
             if case .tool(_, _, let seconds) = item.kind { return total + (seconds ?? 0) }
             return total
+        }
+    }
+}
+
+/// A question's options as tappable chips, wrapping to as many rows as
+/// they need.
+struct FlowChips: View {
+    let options: [String]
+    let enabled: Bool
+    let pick: (String) -> Void
+
+    var body: some View {
+        FlowLayout(spacing: 8) {
+            ForEach(options, id: \.self) { option in
+                Button { pick(option) } label: {
+                    Text(option)
+                        .font(ArbosTheme.callout)
+                        .foregroundStyle(enabled ? ArbosTheme.text : ArbosTheme.textDim)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: ArbosTheme.controlRadius, style: .continuous)
+                                .fill(ArbosTheme.elementActive)
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(!enabled)
+            }
+        }
+    }
+}
+
+/// Left-to-right, wrapping; the simplest layout that fits chips.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? 320
+        var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > width { x = 0; y += rowHeight + spacing; rowHeight = 0 }
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+        return CGSize(width: width, height: y + rowHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, rowHeight: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + size.width > bounds.maxX { x = bounds.minX; y += rowHeight + spacing; rowHeight = 0 }
+            view.place(at: CGPoint(x: x, y: y), proposal: .unspecified)
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
         }
     }
 }

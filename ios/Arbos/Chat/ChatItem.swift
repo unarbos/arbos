@@ -15,6 +15,9 @@ struct ChatItem: Identifiable, Equatable {
         case notice(String, failed: Bool)
         /// The desktop's turn headline once a live turn ends: "Worked 12s".
         case worked(seconds: Int)
+        /// A question the kernel is waiting on: options to tap, or a typed
+        /// answer; `answered` once one went. `id` is the kernel's.
+        case ask(question: String, options: [String], id: String?, answered: Bool)
     }
 
     let id: UUID
@@ -104,6 +107,8 @@ enum ChatUpdate {
     /// The hub took this phone's push token; `enabled` says whether it
     /// can actually push yet.
     case pushed(enabled: Bool, reason: String?)
+    /// The kernel asks (live, or re-offered on attach — #342).
+    case ask(question: String, options: [String], id: String?)
 }
 
 /// Where the main chat comes from: the live kernel, or a scripted stand-in
@@ -124,6 +129,8 @@ protocol ChatSource: AnyObject {
     func markSeen(through: Int)
     /// This phone's APNs token, for the hub.
     func registerPush(token: String, sandbox: Bool)
+    /// The user's answer to a pending `ask`.
+    func answer(text: String, id: String?)
 }
 
 extension ChatSource {
