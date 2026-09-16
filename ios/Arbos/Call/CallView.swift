@@ -51,6 +51,16 @@ struct CallView: View {
                 VoiceOrb(level: model.level, phase: model.phase)
                     .frame(width: 200, height: 200)
                     .onTapGesture(perform: tapOrb)
+                // Who is on the line: the gateway's own word once the call
+                // is up (`session.ready.project`), the chat's face before.
+                HStack(spacing: 8) {
+                    ProjectGlyph(identity: onTheLine, size: 22)
+                    Text(onTheLine.label ?? projectName)
+                        .font(ArbosTheme.bodySemibold)
+                        .foregroundStyle(ArbosTheme.textMuted)
+                        .lineLimit(1)
+                }
+                .padding(.top, -8)
                 if let hint {
                     Text(hint)
                         .font(ArbosTheme.callout)
@@ -209,6 +219,21 @@ struct CallView: View {
         case .failed(let reason): return reason
         case .connecting, .listening, .thinking, .speaking: return nil
         }
+    }
+
+    /// The identity to draw under the orb: the gateway's roster face when
+    /// the call is scoped, else the chat's.
+    private var onTheLine: ProjectIdentity {
+        if let p = model.server.project {
+            var face = chat.identity ?? ProjectIdentity(name: nil, icon: "", color: "").filled(key: "\(p.machine)/\(p.project)")
+            face.name = p.name
+            face.icon = p.icon
+            return face
+        }
+        if let face = chat.identity { return face }
+        var face = ProjectIdentity.defaults(key: settings.kernelTarget.stored, remote: true)
+        face.name = projectName
+        return face
     }
 
     private var projectName: String {

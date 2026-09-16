@@ -7,7 +7,7 @@ import Foundation
 /// is `python -m voice_server --print-protocol`; the frames used here:
 ///
 ///   client → server
-///     `session.start { format: { type: "audio/pcm", rate: 24000 } }`
+///     `session.start { format: { type: "audio/pcm", rate: 24000 }, project?: { machine, project } }`
 ///     <binary>                       microphone audio
 ///     `speak { text }`               voice this text (gateway TTS)
 ///     `client.speaking { speaking, route }` the phone is (not) playing a reply, and out of what
@@ -17,7 +17,8 @@ import Foundation
 ///     `session.end`
 ///
 ///   server → client
-///     `session.ready { engine, reply, tools, kernel, text }`
+///     `session.ready { engine, reply, tools, kernel, text, project? }`  — project: the kernel on the line
+///     `error { code: project_unknown|project_offline|project_unreachable|no_hub, message }` then close 4404: the target cannot be reached, no fallback
 ///     `speech.started` / `speech.stopped`      server VAD
 ///     `transcript.delta { text }`   append;  `transcript.final { text }`  replace, may be ""
 ///     `response.started`            only when the server replies on its own
@@ -45,11 +46,14 @@ final class SelfHostedVoiceSession: VoiceSession {
     /// `mode`: `voice` (the call) or `dictation` (words only: the server
     /// transcribes and answers nothing).
     private let mode: String
+    /// The project the call was opened from; the gateway dials its kernel.
+    private let project: KernelTarget?
 
-    init(serverURL: String, token: String, mode: String = "voice") {
+    init(serverURL: String, token: String, mode: String = "voice", project: KernelTarget? = nil) {
         self.serverURL = serverURL
         self.token = token
         self.mode = mode
+        self.project = project
     }
 
     func connect() async throws {
@@ -86,6 +90,12 @@ final class SelfHostedVoiceSession: VoiceSession {
         // kernel routing (PR #56) must not run on them. Observed 2026-09-16:
         // a dictated line landed in the gateway's own project, unsent.
         if mode == "dictation" { start["answerer"] = "model" }
+        // The call is scoped to the project it was opened from (JB-3): the
+        // gateway attaches to that kernel for the call's life and refuses,
+        // never falls back, when it cannot. `.pod` is the server's default.
+        if mode == "voice", case .hub(let machine, let name)? = project {
+            start["project"] = ["machine": machine, "project": name]
+        }
         socket.send(json: start)
     }
 
@@ -145,6 +155,11 @@ final class SelfHostedVoiceSession: VoiceSession {
             info.tools = object["tools"] as? [String] ?? []
             info.kernel = object["kernel"] as? Bool ?? false
             info.text = object["text"] as? String ?? ""
+            if let p = object["project"] as? [String: Any] {
+                let machine = p["machine"] as? String ?? ""
+                let name = p["project"] as? String ?? ""
+                info.project = CallProject(machine: machine, project: name, name: p["name"] as? String ?? name, icon: p["icon"] as? String ?? "folder")
+            }
             sink.emit(.connected(info))
         case "speech.started":
             sink.emit(.userSpeechStarted)
@@ -203,7 +218,21 @@ final class SelfHostedVoiceSession: VoiceSession {
                 )
             }))
         case "error":
-            sink.emit(.error(object["message"] as? String ?? "Voice server error"))
+            let message = object["message"] as? String ?? "Voice server error"
+            let code = object["code"] as? String ?? ""
+            if ["project_unknown", "project_offline", "project_unreachable", "no_hub"].contains(code) {
+                let who = (object["project"] as? String).map { $0.split(separator: "/").last.map(String.init) ?? $0 } ?? "this project"
+                let why: String
+                switch code {
+                case "project_unknown": why = "the hub knows no project by that name"
+                case "project_offline": why = "its kernel is not running"
+                case "project_unreachable": why = "its kernel did not answer"
+                default: why = "the voice server has no hub"
+                }
+                sink.emit(.error("Can't call \(who) — \(why). \(message)"))
+            } else {
+                sink.emit(.error(message))
+            }
         default:
             break
         }
