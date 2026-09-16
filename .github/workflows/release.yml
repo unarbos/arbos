@@ -328,6 +328,10 @@ jobs:
             --notes-file dist/notes.txt \
             --notes-url "https://github.com/${{ github.repository }}/releases/tag/$TAG" \
             --minimum-system-version "${{ needs.plan.outputs.minimum }}" \
+            # More than the dev channel keeps, and it costs nothing: a tagged
+            # release's payloads live on its own release page, which is the
+            # release, so nothing here ever prunes them. The only thing this
+            # number decides is how far back the feed's list reaches.
             --keep 20 \
             --artifact "macos/arm64=$mac" \
             --artifact "linux/x86_64=$linux" \
