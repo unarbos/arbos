@@ -20,6 +20,27 @@ pub fn reclaim(hooks: &KernelHooks) {
     crate::subs::ensure_chores(&hooks.place);
     for agent in list_agents(&hooks.place).unwrap_or_default() {
         let id = agent.id.as_str();
+        // Tool calls the last kernel died in the middle of: each becomes
+        // a `tool` line that says so, before the serve wake continues the
+        // turn — else the model, seeing no record, runs the command again
+        // (qal-j02: a side effect twice).
+        let now = arbos_core::now_ms();
+        let cut: Vec<arbos_core::Event> = arbos_engine::inflight::take(&hooks.place, &agent.id)
+            .into_iter()
+            .map(|rec| {
+                crate::klog::warn(
+                    "tool_cut_by_restart",
+                    Some(id),
+                    format!("{} {}", rec.name, rec.call_id),
+                );
+                arbos_core::Event::new(arbos_core::EventKind::Tool(
+                    arbos_engine::inflight::cut_record(rec, now),
+                ))
+            })
+            .collect();
+        if !cut.is_empty() {
+            let _ = arbos_core::append_events(&hooks.layout(id).transcript(), &cut);
+        }
         while close_turn_folder(hooks, id, Some("kernel restarted before this turn ended")) {}
         // A blocking allow/deny prompt does not outlive its turn; a parked
         // question does, and stays.
