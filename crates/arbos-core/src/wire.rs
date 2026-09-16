@@ -260,6 +260,30 @@ pub enum Frame {
         #[serde(default)]
         step: u64,
     },
+    /// Kernel → client: something the user should hear about even when
+    /// no window is open — a top-level agent's reply finished (`reply`),
+    /// a question or approval waits (`ask`), a turn failed (`error`), a
+    /// line was posted to the user (`notice`). Sent live to every client;
+    /// the unseen ones are replayed after `hello` with `replayed: true`,
+    /// so a client that was away shows what it missed (a badge, an OS
+    /// notification, a phone push from the client's side). Kept in
+    /// `.arbos/notifications.jsonl`.
+    Notify {
+        id: u64,
+        ts: i64,
+        agent: String,
+        kind: String,
+        title: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        replayed: bool,
+    },
+    /// Client → kernel: the user has seen every notification with id ≤
+    /// `through` (the chat was opened, the banner tapped). Kernel →
+    /// client: the same, broadcast, so every window clears its badge.
+    Seen {
+        through: u64,
+    },
     Snapshot {
         tree: Vec<TreeNode>,
         focus: String,

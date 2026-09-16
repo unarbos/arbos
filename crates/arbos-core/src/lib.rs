@@ -20,6 +20,7 @@ mod lock;
 pub mod machines;
 pub mod models;
 pub mod notes;
+pub mod notify;
 mod page;
 mod place;
 pub mod project;
