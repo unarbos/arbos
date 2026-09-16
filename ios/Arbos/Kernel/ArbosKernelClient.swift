@@ -116,6 +116,11 @@ final class ArbosKernelClient {
         try write(["type": "history", "agent": agent, "since": 0, "limit": limit])
     }
 
+    /// The `limit` lines before `seq`, oldest first (kernel #272).
+    func history(agent: String, before seq: Int, limit: Int = 200) throws {
+        try write(["type": "history", "agent": agent, "before": seq, "limit": limit])
+    }
+
     // MARK: - Private
 
     private func write(_ object: [String: Any]) throws {

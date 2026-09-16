@@ -53,8 +53,9 @@ struct WorkerStatus: Identifiable, Hashable {
 /// What a chat source tells the store, in order.
 enum ChatUpdate {
     /// Replace everything shown (mock seed; later, a transcript replay).
-    /// `earlier` is how many transcript lines lie before the first shown.
-    case history([ChatItem], earlier: Int)
+    /// `earlier` is how many transcript lines lie before the first shown;
+    /// `firstSeq` is the first shown line's seq, for paging back.
+    case history([ChatItem], earlier: Int, firstSeq: Int)
     case item(ChatItem)
     /// Append to the open agent message of this step, opening one if there is none.
     case agentDelta(String, step: Int)
@@ -87,8 +88,20 @@ protocol ChatSource: AnyObject {
     /// A worker's transcript, replayed once. Sources without workers
     /// return nothing.
     func history(agent: String) async -> [ChatItem]
+    /// The lines before `seq` of the focused transcript, oldest first;
+    /// nil where there is no paging.
+    func earlier(before seq: Int, limit: Int) async -> HistoryPage?
 }
 
 extension ChatSource {
     func history(agent: String) async -> [ChatItem] { [] }
+    func earlier(before seq: Int, limit: Int) async -> HistoryPage? { nil }
+}
+
+/// One page of a transcript: the lines and the seq range they cover.
+struct HistoryPage {
+    var items: [ChatItem]
+    var from: Int
+    var to: Int
+    var total: Int
 }

@@ -176,11 +176,22 @@ struct ProjectChatView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: ArbosTheme.itemGap) {
                     if chat.earlierLines > 0 {
-                        Text("\(chat.earlierLines) earlier lines not shown")
+                        Button {
+                            Task { await chat.loadEarlier() }
+                        } label: {
+                            HStack(spacing: 6) {
+                                if chat.loadingEarlier {
+                                    ProgressView().controlSize(.mini).tint(ArbosTheme.textDim)
+                                }
+                                Text(chat.loadingEarlier ? "Loading earlier lines…" : "Show \(min(chat.earlierLines, 200)) earlier lines")
+                            }
                             .font(ArbosTheme.caption)
-                            .foregroundStyle(ArbosTheme.textDim)
+                            .foregroundStyle(ArbosTheme.textMuted)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(chat.loadingEarlier)
                     }
                     if chat.items.isEmpty, chat.mode != .connecting {
                         Text(emptyLine)
@@ -209,7 +220,13 @@ struct ProjectChatView: View {
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: chat.items) { _, _ in
-                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
+                if let anchor = chat.anchorAfterPrepend {
+                    // Older lines came in above: hold the row that was at the top.
+                    chat.anchorAfterPrepend = nil
+                    proxy.scrollTo(anchor, anchor: .top)
+                } else {
+                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
+                }
             }
             .onChange(of: composerHeight) { _, _ in
                 proxy.scrollTo("tail", anchor: .bottom)

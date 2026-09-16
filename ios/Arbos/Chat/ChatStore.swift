@@ -40,6 +40,11 @@ final class ChatStore: ObservableObject {
     /// Transcript lines before the first one shown (the kernel replays its
     /// last 200 on attach); a long project's earlier history.
     @Published private(set) var earlierLines = 0
+    @Published private(set) var loadingEarlier = false
+    /// After older lines are prepended, the row that was at the top; the
+    /// view pins it there instead of jumping to the tail.
+    @Published var anchorAfterPrepend: UUID?
+    private var firstSeq = 0
     /// Seconds until the next reconnect try, while the link is down.
     @Published private(set) var reconnectIn: Int?
 
@@ -203,6 +208,23 @@ final class ChatStore: ObservableObject {
 
     var running: Int { workers.filter(\.running).count }
 
+    /// Older lines of a long project, 200 at a time, from the top of what
+    /// is shown; the view keeps its place.
+    func loadEarlier() async {
+        guard earlierLines > 0, !loadingEarlier, firstSeq > 1, let source else { return }
+        loadingEarlier = true
+        defer { loadingEarlier = false }
+        guard let page = await source.earlier(before: firstSeq, limit: 200) else { return }
+        if page.from > 0, page.to >= page.from, !page.items.isEmpty {
+            anchorAfterPrepend = items.first?.id
+            items.insert(contentsOf: page.items, at: 0)
+            firstSeq = page.from
+            earlierLines = max(0, page.from - 1)
+        } else {
+            earlierLines = 0
+        }
+    }
+
     /// A line the app itself has to say (a picker or dictation problem).
     func notice(_ text: String) {
         items.append(ChatItem(.notice(text, failed: true)))
@@ -283,10 +305,11 @@ final class ChatStore: ObservableObject {
 
     private func apply(_ update: ChatUpdate) {
         switch update {
-        case .history(let seed, let earlier):
+        case .history(let seed, let earlier, let first):
             let stillPending = items.filter { if case .user(_, pending: true) = $0.kind { return true } else { return false } }
             items = seed + stillPending
             earlierLines = earlier
+            firstSeq = first
         case .item(let item):
             if case .user(let text, _) = item.kind, let index = pendingSends.firstIndex(where: { $0.text == text || ($0.text.isEmpty && text.isEmpty) }) {
                 // The kernel echoed a line typed here: the pending card is real now.
@@ -348,8 +371,9 @@ final class ChatStore: ObservableObject {
             step = text
         case .identity(let face):
             identity = face
-        case .dropped(let reason):
-            items.append(ChatItem(.notice(reason, failed: true)))
+        case .dropped:
+            // One calm line under the transcript (the mode notice), not an
+            // error plus a reassurance.
             mode = .offline
             busy = false
             if settings.chatEndpoint != nil { scheduleReconnect() }

@@ -122,8 +122,9 @@ enum KernelFrame {
     /// One line of the transcript as it was before we attached.
     case replayed(agent: String, event: KernelEvent)
     /// Replay is over; what follows is live.
-    /// Replay is over; `total` is the transcript's length, `shown` how many lines came.
-    case historyEnd(agent: String, total: Int, shown: Int)
+    /// Replay is over; `total` is the transcript's length, `from`…`to` the
+    /// seq range that came (equal, at the top, when nothing did).
+    case historyEnd(agent: String, total: Int, from: Int, to: Int)
     case event(agent: String, event: KernelEvent)
     /// One streamed token of the reply being written.
     case assistantDelta(agent: String, text: String, step: Int)
@@ -137,8 +138,10 @@ enum KernelFrame {
     /// A file under `.arbos/`, answering a `read`.
     case file(path: String, text: String, error: String?)
     case thinkingDelta(agent: String, text: String)
-    /// The kernel refused something ("unknown frame", "auth required", …).
+    /// The kernel refused something ("auth required", …).
     case error(detail: String)
+    /// The outcome of a `put`: `error` says why a file did not land.
+    case written(path: String, error: String?)
     case other(type: String)
 
     init?(json object: [String: Any]) {
@@ -158,6 +161,8 @@ enum KernelFrame {
                 text: object["text"] as? String ?? "",
                 error: object["error"] as? String
             )
+        case "written":
+            self = .written(path: object["path"] as? String ?? "", error: object["error"] as? String)
         case "error":
             self = .error(detail: object["detail"] as? String ?? "kernel error")
         case "thinking_delta":
@@ -190,7 +195,8 @@ enum KernelFrame {
             self = .historyEnd(
                 agent: object["agent"] as? String ?? "",
                 total: object["total"] as? Int ?? 0,
-                shown: from > 0 && to >= from ? to - from + 1 : 0
+                from: from,
+                to: to
             )
         case "assistant_delta":
             self = .assistantDelta(
