@@ -1094,6 +1094,7 @@ async fn relay(hooks: Arc<KernelHooks>, link: Arc<Link>, mut rx: mpsc::Unbounded
                 let _ = link.to_remote.send(Frame::History {
                     agent: "root".into(),
                     since: mirrored as u64,
+                    before: None,
                     limit: HISTORY_LIMIT,
                 });
             }

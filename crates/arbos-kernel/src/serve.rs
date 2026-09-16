@@ -1172,28 +1172,45 @@ fn focus_agent(place: &Place) -> String {
 /// Send `agent`'s transcript lines to one client: the last `limit` when
 /// `since` is `None` (attach), else those with `seq > since`, oldest
 /// first, at most `limit`. Always closed by a `history_end`.
-fn replay(
-    place: &Place,
-    agent: &str,
-    since: Option<u64>,
-    limit: u32,
-    out: &mpsc::UnboundedSender<Frame>,
-) {
+/// Which lines a `history` request wants.
+#[derive(Debug, Clone, Copy)]
+enum Page {
+    /// The newest `limit` lines (attach).
+    Tail,
+    /// Lines after `seq` (paging forward).
+    After(u64),
+    /// The `limit` lines before `seq`, nearest first kept (paging back
+    /// from the top of what the client holds, M-54).
+    Before(u64),
+}
+
+fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::UnboundedSender<Frame>) {
     let events = load_transcript(&Layout::new(place, agent).transcript()).unwrap_or_default();
     let total = events.len() as u64;
-    let picked: Vec<&Event> = match since {
-        None => {
+    let picked: Vec<&Event> = match page {
+        Page::Tail => {
             let skip = events.len().saturating_sub(limit as usize);
             events[skip..].iter().collect()
         }
-        Some(since) => events
+        Page::After(since) => events
             .iter()
             .filter(|e| e.seq > since)
             .take(limit as usize)
             .collect(),
+        Page::Before(before) => {
+            let older: Vec<&Event> = events.iter().filter(|e| e.seq < before).collect();
+            let skip = older.len().saturating_sub(limit as usize);
+            older[skip..].to_vec()
+        }
     };
-    let from = picked.first().map(|e| e.seq).unwrap_or(since.unwrap_or(0));
-    let to = picked.last().map(|e| e.seq).unwrap_or(since.unwrap_or(0));
+    let anchor = match page {
+        Page::Tail => 0,
+        Page::After(s) => s,
+        // Nothing older: from = to = before, so the client knows the top.
+        Page::Before(b) => b,
+    };
+    let from = picked.first().map(|e| e.seq).unwrap_or(anchor);
+    let to = picked.last().map(|e| e.seq).unwrap_or(anchor);
     for ev in picked {
         let mut event = ev.clone();
         arbos_core::files::scrub_child_claims(place, agent, &mut event);
@@ -1762,7 +1779,13 @@ pub async fn serve_client(
                     who.role.as_str()
                 ),
             );
-            replay(&accept_place, &focus_agent, None, ATTACH_TAIL, &out_tx);
+            replay(
+                &accept_place,
+                &focus_agent,
+                Page::Tail,
+                ATTACH_TAIL,
+                &out_tx,
+            );
             tokio::spawn(attach::write_loop(w, out_rx));
             // History requests are answered on this connection alone;
             // everything else goes to the kernel like before.
@@ -1778,6 +1801,7 @@ pub async fn serve_client(
                         Frame::History {
                             agent,
                             since,
+                            before,
                             limit,
                         } => {
                             let limit = if limit == 0 {
@@ -1785,13 +1809,11 @@ pub async fn serve_client(
                             } else {
                                 limit.min(HISTORY_MAX)
                             };
-                            replay(
-                                &place_for_history,
-                                &agent,
-                                Some(since),
-                                limit,
-                                &out_for_history,
-                            );
+                            let page = match before {
+                                Some(b) => Page::Before(b),
+                                None => Page::After(since),
+                            };
+                            replay(&place_for_history, &agent, page, limit, &out_for_history);
                         }
                         // Files under .arbos/, answered here too; a slow
                         // disk stalls this client alone. `put` is a peer's
