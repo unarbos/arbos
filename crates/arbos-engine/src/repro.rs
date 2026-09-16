@@ -36,8 +36,30 @@ pub struct Repro {
     pub ts: i64,
 }
 
-fn required() -> bool {
-    std::env::var(REQUIRED_ENV).is_ok_and(|v| v == "1" || v == "true")
+/// How many distinct failing reproductions the first edit needs: `1`
+/// (or `true`) = one; `2` = the reporter's example and a second input the
+/// agent derives from the request (cycle 7 experiment against "right
+/// file, wrong mechanism"); unset or `0` = no gate.
+fn required() -> usize {
+    match std::env::var(REQUIRED_ENV).ok().as_deref().map(str::trim) {
+        Some("true") => 1,
+        Some(n) => n.parse().unwrap_or(0),
+        None => 0,
+    }
+}
+
+/// Distinct failing reproductions on record (same command text counts once).
+fn failing_distinct(place: &Place, agent: &AgentId) -> usize {
+    let mut seen: Vec<String> = Vec::new();
+    for r in list(place, agent) {
+        if r.exit != Some(0) {
+            let key = r.command.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !seen.contains(&key) {
+                seen.push(key);
+            }
+        }
+    }
+    seen.len()
 }
 
 fn path(place: &Place, agent: &AgentId) -> PathBuf {
@@ -138,27 +160,40 @@ pub fn record(
     }
 }
 
-/// Before a write tool runs: with `ARBOS_REPRO_REQUIRED=1`, the first edit
-/// of a task needs one failing reproduction on record. When none was
-/// marked but the agent's last bash command failed, that command is taken
-/// as the reproduction and the edit proceeds with a note (`Ok(Some)`).
+/// Before a write tool runs: with `ARBOS_REPRO_REQUIRED=N`, the first edit
+/// of a task needs N distinct failing reproductions on record. When fewer
+/// were marked but the agent's last bash command failed, that command is
+/// taken as one and, if the count is then met, the edit proceeds with a
+/// note (`Ok(Some)`).
 pub fn gate(place: &Place, agent: &AgentId, tool: &str) -> Result<Option<String>> {
-    if !required() || !crate::mechanism::GATED.contains(&tool) {
+    let need = required();
+    if need == 0 || !crate::mechanism::GATED.contains(&tool) {
         return Ok(None);
     }
-    if list(place, agent).iter().any(|r| r.exit != Some(0)) {
+    let mut have = failing_distinct(place, agent);
+    if have >= need {
         return Ok(None);
     }
+    let mut taken = None;
     if let Some(last) = take_last_failing(place, agent) {
         let note = record(place, agent, &last.command, &last.cwd, last.exit);
         let shown: String = last.command.chars().take(120).collect();
-        return Ok(Some(format!(
-            "Your last failing bash command was taken as the reproduction ({}): {shown}. Mark the intended one with repro:true next time.",
+        taken = Some(format!(
+            "Your last failing bash command was taken as a reproduction ({}): {shown}. Mark the intended one with repro:true next time.",
             note.split(". ").next().unwrap_or("recorded")
-        )));
+        ));
+        have = failing_distinct(place, agent);
+    }
+    if have >= need {
+        return Ok(taken);
+    }
+    if have == 0 {
+        bail!(
+            "{tool} refused: no failing reproduction is on record for this task. Before the first edit, run the failure with bash repro:true — a command you derive from the request (the reporter's example, and a second input the request implies: another edge, another caller, another type) that exits non-zero now. Then repeat this call."
+        );
     }
     bail!(
-        "{tool} refused: no failing reproduction is on record for this task. Before the first edit, run the failure with bash repro:true — a command you derive from the request (the reporter's example, and a second input the request implies: another edge, another caller, another type) that exits non-zero now. Then repeat this call."
+        "{tool} refused: {have} failing reproduction(s) on record, {need} needed before the first edit. The reporter's example is one; derive another input from the request text — an edge, caller, type, or option it names or implies — that must also fail for the same reason, and run it with bash repro:true (it must exit non-zero now). A fix that passes the example but not the second input is the wrong mechanism. Then repeat this call."
     )
 }
 
@@ -248,7 +283,7 @@ mod tests {
         // An unmarked failing command is taken as the reproduction.
         note_failing(&place, &agent, "false", &dir, Some(1));
         let taken = gate(&place, &agent, "edit").unwrap().unwrap();
-        assert!(taken.contains("taken as the reproduction"), "{taken}");
+        assert!(taken.contains("taken as a reproduction"), "{taken}");
         assert_eq!(list(&place, &agent).len(), 1);
         reset(&place, &agent);
         let flag = dir.join("fixed");
