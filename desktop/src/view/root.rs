@@ -682,6 +682,12 @@ pub struct Arbos {
     /// The sheet a tab's name, glyph and colour are set in.
     pub(crate) tab_sheet: Entity<TabSheet>,
     pub(crate) feedback_sheet: Entity<FeedbackSheet>,
+    /// What the last outbox pass found. Read by the driver so the loop can
+    /// assert the state he is in without photographing the window for it.
+    pub(crate) feedback_outbox: OutboxState,
+    /// Whether any chat held a live kernel on the last look — the edge
+    /// `drain_on_reconnect` watches for.
+    was_connected: bool,
     /// The exchange the open report is about — chat id and the prompt's
     /// `seq` — so a sent report can leave its mark on that prompt's footer.
     report_anchor: Option<(u64, u64)>,
@@ -945,6 +951,7 @@ impl Arbos {
             this.sync_composer(cx);
             this.reap_notifications(cx);
             this.collect_feedback(cx);
+            this.drain_on_reconnect(cx);
             cx.notify();
         })
         .detach();
@@ -996,6 +1003,8 @@ impl Arbos {
             opener,
             tab_sheet,
             feedback_sheet,
+            feedback_outbox: OutboxState::default(),
+            was_connected: false,
             report_anchor: None,
             permissions_sheet,
             permission_center,
@@ -1142,6 +1151,27 @@ impl Arbos {
                         }
                     });
                 });
+            }
+        })
+        .detach();
+        // The outbox, from launch onwards. A report he made before quitting, or
+        // while the link was down, goes now — and then every minute, which is
+        // what makes "it will go by itself" true rather than hopeful. The pass
+        // is a directory listing when there is nothing to do, and each report
+        // has its own widening delay, so a machine that is away is not
+        // hammered.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(3))
+                .await;
+            loop {
+                let alive = this.update(cx, |this, cx| this.drain_feedback(false, cx)).is_ok();
+                if !alive {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_secs(60))
+                    .await;
             }
         })
         .detach();
@@ -2374,6 +2404,28 @@ impl Arbos {
         }
     }
 
+    /// A kernel came back: try the outbox at once rather than waiting for the
+    /// minute to turn. This is the moment "it will go by itself when the link
+    /// is back" names, so it should not take a minute to honour.
+    ///
+    /// An edge, not a level: draining on every observer run while connected
+    /// would shell out to the kernel several times a second.
+    fn drain_on_reconnect(&mut self, cx: &mut Context<Self>) {
+        let connected = self
+            .workspace
+            .read(cx)
+            .projects
+            .iter()
+            .flat_map(|project| project.sessions.iter())
+            .any(|chat| chat.connected());
+        if connected && !self.was_connected {
+            self.was_connected = true;
+            self.drain_feedback(false, cx);
+        } else if !connected {
+            self.was_connected = false;
+        }
+    }
+
     /// Send: write the report to the outbox on his own disk. On disk is what
     /// "sent" means here — delivery reads the outbox, so a report made with
     /// the network down is already safe and goes out when the link returns.
@@ -2412,8 +2464,7 @@ impl Arbos {
         // On disk is what Send means, so say so now and carry it the rest of
         // the way behind him. Delivery shells out to the kernel and talks to
         // the hub; neither belongs on the thread drawing the window.
-        let feedback = &self.workspace.read(cx).settings.feedback;
-        let (address, hub_home) = (feedback.address.clone(), feedback.hub_home.clone());
+        let address = self.workspace.read(cx).settings.feedback.address.clone();
         sheet.update(cx, |sheet, cx| {
             sheet.settled(
                 Ok(if address.trim().is_empty() {
@@ -2428,43 +2479,85 @@ impl Arbos {
                 cx,
             )
         });
-        self.deliver_feedback(place, address, hub_home, cx);
+        self.drain_feedback(true, cx);
     }
 
-    /// Carry every waiting report to the store it goes to, off the UI thread,
-    /// and tell the sheet if the one just written would not go.
-    fn deliver_feedback(
-        &mut self,
-        place: arbos_core::Place,
-        address: String,
-        hub_home: String,
-        cx: &mut Context<Self>,
-    ) {
+    /// Carry every waiting report to the store it goes to, off the UI thread.
+    ///
+    /// `tell_him` says whether a failure should be spoken: it should when he has
+    /// just pressed Send and is looking at the sheet, and should not when this
+    /// is the timer doing its rounds behind him.
+    ///
+    /// Every open project, not only the one in front: a report filed in one
+    /// project while another is on screen is still his report.
+    ///
+    /// QA found this path had exactly one call site — Send — so "it will go by
+    /// itself when the link is back" only came true if he happened to report
+    /// something else later (qal-j06). The wording was a promise the code did
+    /// not keep, which is the one thing this feature cannot afford, so the
+    /// callers now are Send, launch, a kernel coming back, and a timer.
+    fn drain_feedback(&mut self, tell_him: bool, cx: &mut Context<Self>) {
+        let (address, hub_home) = {
+            let feedback = &self.workspace.read(cx).settings.feedback;
+            (feedback.address.clone(), feedback.hub_home.clone())
+        };
         if address.trim().is_empty() {
             return;
         }
+        let places: Vec<arbos_core::Place> = self
+            .workspace
+            .read(cx)
+            .projects
+            .iter()
+            .map(|project| arbos_core::Place::new(project.path.clone()))
+            .collect();
+        if places.is_empty() {
+            return;
+        }
         let sheet = self.feedback_sheet.clone();
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             let results = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::feedback::deliver_pending(
-                        &place,
-                        &address,
-                        std::path::Path::new(&hub_home),
-                        arbos_core::now_ms(),
-                    )
+                    let home = std::path::Path::new(&hub_home);
+                    let now = arbos_core::now_ms();
+                    places
+                        .iter()
+                        .flat_map(|place| {
+                            crate::feedback::deliver_pending(place, &address, home, now)
+                        })
+                        .collect::<Vec<_>>()
                 })
                 .await;
-            // Only a failure is worth saying: a delivered report already reads
-            // as sent, and he was told that when it hit the disk.
-            if let Some(why) = results.iter().find_map(|(_, state)| match state {
+            if results.is_empty() {
+                return;
+            }
+            let why = results.iter().find_map(|(_, state)| match state {
                 crate::feedback::Delivery::Waiting {
                     last_error: Some(why),
                     ..
                 } => Some(why.clone()),
                 _ => None,
-            }) {
+            });
+            let sent = results
+                .iter()
+                .filter(|(_, state)| matches!(state, crate::feedback::Delivery::Sent { .. }))
+                .count();
+            // Kept where the driver can read it, so the loop can assert the
+            // state Jacob is in rather than photographing the window for it.
+            let _ = this.update(cx, |this, cx| {
+                this.feedback_outbox = OutboxState {
+                    waiting: results.len() - sent,
+                    sent_this_run: sent,
+                    last_error: why.clone(),
+                    at: Some(Instant::now()),
+                };
+                cx.notify();
+            });
+            // Only a failure is worth saying to him, and only while he is
+            // looking: a delivered report already read as sent when it hit the
+            // disk, and the timer must not talk over whatever he is doing.
+            if tell_him && let Some(why) = why {
                 let _ = sheet.update(cx, |sheet, cx| {
                     sheet.settled(
                         Err(format!(
@@ -2641,6 +2734,20 @@ impl Render for Arbos {
             .child(self.permissions_sheet.clone())
             .child(self.chat_search.clone())
     }
+}
+
+/// Where the feedback outbox stands, for the driver to read and the window to
+/// draw. Its own type rather than a tuple because the parity loop asserts on
+/// these names.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct OutboxState {
+    /// Reports written and not yet delivered.
+    pub waiting: usize,
+    /// How many went on the last pass.
+    pub sent_this_run: usize,
+    /// Why the last attempt did not go, in the kernel's own words.
+    pub last_error: Option<String>,
+    pub at: Option<Instant>,
 }
 
 /// The last dictated take's clock. `pressed_at` is the Fn press; the

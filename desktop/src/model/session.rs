@@ -3216,6 +3216,11 @@ impl ChatSession {
         }
     }
 
+    /// Whether this chat holds a live kernel socket right now.
+    pub fn connected(&self) -> bool {
+        matches!(self.connection, Connection::Live(_))
+    }
+
     /// Try Live: ask the kernel for the agent's screen now.
     pub fn request_screen(&self) {
         if let Connection::Live(session) = &self.connection {
