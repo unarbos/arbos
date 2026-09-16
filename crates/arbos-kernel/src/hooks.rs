@@ -1722,6 +1722,27 @@ impl KernelHooks {
         Ok(())
     }
 
+    /// Something the user should hear about even when no window is open:
+    /// recorded in `.arbos/notifications.jsonl` and sent as a `notify`
+    /// frame to every client now; a client that attaches later gets the
+    /// unseen ones replayed. `kind`: reply | ask | error | notice.
+    pub fn notify(&self, agent: &str, kind: &str, title: &str, body: &str) {
+        match arbos_core::notify::record(&self.place, agent, kind, title, body) {
+            Ok(n) => {
+                self.broadcast(Frame::Notify {
+                    id: n.id,
+                    ts: n.ts,
+                    agent: n.agent,
+                    kind: n.kind,
+                    title: n.title,
+                    body: n.body,
+                    replayed: false,
+                });
+            }
+            Err(e) => crate::klog::warn("notify_failed", Some(agent), format!("{e:#}")),
+        }
+    }
+
     /// A durable notice for the person. It lands in `user.md` and on the
     /// transcript of the top-level chat the sender belongs to — the user
     /// reads the parent's chat, not a child's — and on the sender's own
@@ -1743,6 +1764,7 @@ impl KernelHooks {
         if top != from {
             append_event(&self.layout(from).transcript(), &event)?;
         }
+        self.notify(&top, "notice", &format!("{from}: a notice"), text);
         Ok(())
     }
 
@@ -1808,7 +1830,26 @@ impl KernelHooks {
             options: options.to_vec(),
             id: Some(id.clone()),
         });
+        self.notify(
+            agent.as_str(),
+            "ask",
+            &format!("{} asks", self.display_name(agent.as_str())),
+            question,
+        );
         Ok(id)
+    }
+
+    /// The agent's name for a notification title (its id when unnamed).
+    fn display_name(&self, agent: &str) -> String {
+        arbos_core::load_agent(&self.place, &AgentId::new(agent))
+            .map(|a| {
+                if a.name.is_empty() {
+                    a.id.to_string()
+                } else {
+                    a.name
+                }
+            })
+            .unwrap_or_else(|_| agent.to_string())
     }
 
     /// The parked questions of `agent`, oldest first.
@@ -1868,10 +1909,16 @@ impl KernelHooks {
         );
         self.broadcast(Frame::Ask {
             agent: agent.to_string(),
-            question,
+            question: question.clone(),
             options: vec!["allow".into(), "deny".into()],
             id: Some(id),
         });
+        self.notify(
+            agent.as_str(),
+            "ask",
+            &format!("{} asks to run {tool}", self.display_name(agent.as_str())),
+            &question,
+        );
         rx
     }
 

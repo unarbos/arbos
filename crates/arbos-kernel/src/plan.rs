@@ -625,10 +625,56 @@ fn notify_parent_done(hooks: &KernelHooks, agent: &str) {
     }
 }
 
+/// A top-level agent's turn ended: the user should hear about it even
+/// when no window is open — the answer as a `reply`, a failure as an
+/// `error`. A worker's end reaches the user through its parent's reply,
+/// so a child notifies nothing; a turn that ended in silence (a done
+/// wake with nothing owed) notifies nothing either.
+fn notify_reply(hooks: &KernelHooks, agent: &str) {
+    let Ok(me) = arbos_core::load_agent(&hooks.place, &arbos_core::AgentId::new(agent)) else {
+        return;
+    };
+    if me.parent.is_some() {
+        return;
+    }
+    let lo = hooks
+        .turn_lo
+        .lock()
+        .unwrap()
+        .get(agent)
+        .copied()
+        .unwrap_or(0);
+    let events = load_transcript(&hooks.layout(agent).transcript()).unwrap_or_default();
+    let turn: Vec<&Event> = events.iter().filter(|e| e.seq >= lo).collect();
+    // A question parked the turn: the ask already notified.
+    if turn.iter().any(|e| matches!(e.kind, EventKind::Ask { .. })) {
+        return;
+    }
+    let reply = turn.iter().rev().find_map(|e| match &e.kind {
+        EventKind::Assistant { text, .. } if !text.trim().is_empty() => Some(text.trim()),
+        _ => None,
+    });
+    let failed = turn.iter().rev().find_map(|e| match &e.kind {
+        EventKind::Notice { text, failed: true } => Some(text.as_str()),
+        _ => None,
+    });
+    let name = if me.name.is_empty() {
+        me.id.to_string()
+    } else {
+        me.name.clone()
+    };
+    match (reply, failed) {
+        (Some(text), _) => hooks.notify(agent, "reply", &format!("{name} replied"), text),
+        (None, Some(why)) => hooks.notify(agent, "error", &format!("{name}: turn failed"), why),
+        (None, None) => {}
+    }
+}
+
 /// A turn ended: its folder closes with what the transcript says, and a
 /// child's parent hears about it.
 pub fn finish_turn(hooks: &KernelHooks, agent: &str) {
     crate::chatdoor::reply_if_door_turn(hooks, agent);
+    notify_reply(hooks, agent);
     notify_parent_done(hooks, agent);
     verify_reply_links(hooks, agent);
     record_spend(hooks, agent);
