@@ -614,10 +614,16 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                     // transcript after every step and sees it there.
                     let jobs = JobsRoot::for_agent(&place, &agent.id);
                     // A job that outlived its tool call is a process row
-                    // under the chat until it ends.
+                    // under the chat until it ends — and so is an attached
+                    // command that has run for a while: the user sees what
+                    // it is printing instead of a silent live line.
+                    let now_ms = arbos_core::now_ms();
                     for job in jobs.list() {
                         let key = format!("{}/{}", agent.id, job.id);
-                        if !job.detached() || !job.running() || announced.contains(&key) {
+                        if !job.running() || announced.contains(&key) {
+                            continue;
+                        }
+                        if !job.detached() && now_ms - job.meta.started_ms < LONG_ATTACHED_MS {
                             continue;
                         }
                         announced.insert(key);
@@ -631,10 +637,13 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                             url: Some(job.journal().display().to_string()),
                         });
                     }
+                    // Output streams for every job, attached or detached:
+                    // an attached `python3 bubble_sort.py` held its tool
+                    // call for minutes and the window heard nothing, so
+                    // it told the user "nothing has arrived … check the
+                    // model key" while the kernel had the command's
+                    // output in its journal the whole time.
                     for job in jobs.list() {
-                        if !job.detached() {
-                            continue;
-                        }
                         let key = format!("{}/{}", agent.id, job.id);
                         if let Some(frame) = job_delta(&mut offsets, &key, &agent.id, &job) {
                             hooks.broadcast(frame);
@@ -883,6 +892,38 @@ fn handle_frame(
                 for id in hooks.stop_work(&agent) {
                     sched.stop(&id);
                 }
+                return;
+            }
+            // The same words again while the first copy still waits: a
+            // person repeating themselves into a silent turn ("run it"
+            // four times, Jacob's Mac, 2026-09-16). Not stacked — one
+            // answer is owed, not four — and told so on the transcript,
+            // where the window shows it under the bubble.
+            if attachments.is_empty()
+                && let Some(dup) = inbox::pending_duplicate(place, &agent, "user", &text)
+            {
+                let what = if inbox::is_steer_kind(&dup.msg.kind) {
+                    "waits for the running step to end and will be read then"
+                } else if dup.msg.wake {
+                    "is queued to run when this turn ends"
+                } else {
+                    "is held under the composer — Send now runs it"
+                };
+                let _ = append_event(
+                    &Layout::new(place, &agent).transcript(),
+                    &Event::new(EventKind::Notice {
+                        text: format!(
+                            "Already queued: \"{}\" {what}; it was not added again.",
+                            arbos_core::text::clip(text.trim(), 80)
+                        ),
+                        failed: false,
+                    }),
+                );
+                klog::info(
+                    "user_line_repeated",
+                    Some(&agent),
+                    format!("dup of {}", dup.name),
+                );
                 return;
             }
             // A steer is an inbox file of kind `steer`: the running turn
@@ -1398,6 +1439,11 @@ fn tree_frame(place: &Place) -> Frame {
 /// Bytes streamed per tick at most. A chatty job still shows its latest
 /// lines; the rest stays in the journal file.
 const JOB_DELTA_CAP: u64 = 16 * 1024;
+
+/// An attached command running this long gets a process row of its own,
+/// as a detached job does: what it prints is visible while the tool
+/// call holds the turn.
+const LONG_ATTACHED_MS: i64 = 20_000;
 
 /// The journal bytes appended since the last frame, and the job's state, as
 /// one `Frame::Job`. `None` when nothing changed, and never again after the

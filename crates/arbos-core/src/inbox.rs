@@ -242,6 +242,29 @@ pub fn has_steer(place: &Place, agent: &str) -> bool {
         .any(|f| is_steer_kind(&f.msg.kind))
 }
 
+/// Whether a person's own words wait for this agent's running turn: a
+/// steer from `user` (not a peer's `say mode=steer`, not the kernel's
+/// wake). What an attached tool call yields to.
+pub fn has_user_steer(place: &Place, agent: &str) -> bool {
+    list(place, agent)
+        .iter()
+        .any(|f| f.msg.kind == "steer" && (f.msg.from == "user" || f.msg.from.starts_with("user:")))
+}
+
+/// A message from the same sender with the same words already waiting
+/// (a steer or a queued prompt): the one to point at instead of filing
+/// the words again. A person who repeats "run it" four times into a
+/// silent turn wants one answer, not four stacked lines.
+pub fn pending_duplicate(place: &Place, agent: &str, from: &str, body: &str) -> Option<Filed> {
+    let want = body.trim();
+    if want.is_empty() {
+        return None;
+    }
+    list(place, agent)
+        .into_iter()
+        .find(|f| f.msg.from == from && f.msg.body.trim() == want)
+}
+
 /// Whether a steer waiting for this agent says stop (a stop word on its
 /// own, or a first line that is one). Such a steer cancels work that has
 /// not started; any other steer waits for the tool boundary and cancels
