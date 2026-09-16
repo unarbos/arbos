@@ -107,6 +107,11 @@ pub struct Workspace {
     /// Uncommitted changes per local project root, as the poll last read
     /// them — Cursor's Changes pill and Files Changed card.
     pub changes: HashMap<std::path::PathBuf, crate::model::changes::GitChanges>,
+    /// The root chat whose Working card (one row per running worker, Stop
+    /// All) is open over the pills. Cursor keeps the card behind the
+    /// "Working N" pill and never opens it by itself; neither does this.
+    /// The transcript's "N Working" line opens it too.
+    pub working_card_open: Option<u64>,
     /// The registry's mark for each configured agent, by name. Empty until the
     /// catalog lands, and stays empty offline.
     agent_icons: HashMap<String, SharedString>,
@@ -146,23 +151,32 @@ impl Workspace {
             .iter()
             .filter_map(|raw| Place::parse(raw))
             .collect();
+        // The tab that was in front when the window last closed: a launch
+        // lands there again ("close it and come back" is a step of the
+        // journey and what Jacob does all day); the home tab only when that
+        // place is gone.
+        let was_front = state
+            .projects
+            .get(state.active)
+            .and_then(|raw| Place::parse(raw));
         let mut projects: Vec<Project> = state
             .projects
             .into_iter()
             .filter_map(|raw| Place::parse(&raw).map(Project::open))
             .collect();
-        // The home tab: `~/.arbos`, the folder the app lands on. First in
-        // the strip and in front at every launch; the tabs that were open
-        // last time follow it, each with its state where it was left.
+        // The home tab: `~/.arbos`, always open and first in the strip; the
+        // tabs that were open last time follow it, each with its state
+        // where it was left.
         let home = Self::home_place().filter(|home| std::fs::create_dir_all(&home.path).is_ok());
-        let active = match home {
-            Some(home) => {
-                projects.retain(|project| project.place() != home);
-                projects.insert(0, Project::open(home));
-                Some(0)
-            }
-            None => (!projects.is_empty()).then(|| state.active.min(projects.len() - 1)),
-        };
+        if let Some(home) = home {
+            projects.retain(|project| project.place() != home);
+            projects.insert(0, Project::open(home));
+        }
+        let active = (!projects.is_empty()).then(|| {
+            was_front
+                .and_then(|front| projects.iter().position(|project| project.place() == front))
+                .unwrap_or(0)
+        });
         let restore: Vec<usize> = (0..projects.len()).collect();
         let mut this = Self {
             settings,
@@ -177,6 +191,7 @@ impl Workspace {
             tint: Tint::new(state.hue, state.chroma),
             meter: false,
             changes: HashMap::new(),
+            working_card_open: None,
             next_id: 0,
             agent_icons: HashMap::new(),
             last: state.last,
@@ -2299,12 +2314,14 @@ impl Workspace {
     /// conversation back.
     pub fn session_connected(&mut self, id: u64, cx: &mut Context<Self>) {
         self.with_session(id, cx, |chat| {
+            // The kernel's copy first: a "reconnected" line is this
+            // window's to say, not a transcript record to seed.
+            chat.sync_kernel_history();
             if chat.reconnect_attempt > 0 {
                 chat.notice(false, "reconnected");
             }
             chat.reconnect_attempt = 0;
             chat.reconnect_at = None;
-            chat.sync_kernel_history();
             // What the agent is on right now, from its status file, so a
             // fresh attach draws the line without waiting for a frame.
             if chat.host.is_none()

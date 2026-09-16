@@ -23,6 +23,8 @@ final class ProjectStore: ObservableObject {
     @Published private(set) var entries: [ProjectEntry] = []
     @Published private(set) var loading = false
     @Published private(set) var problem: String?
+    private var retryTask: Task<Void, Never>?
+    private var retryAttempt = 0
 
     private let settings: AppSettings
     private let defaults = UserDefaults.standard
@@ -42,9 +44,11 @@ final class ProjectStore: ObservableObject {
         #if DEBUG
         print("roster: hub \(settings.hubURL) configured=\(settings.hubConfigured) token=\(settings.hubToken.count) chars")
         #endif
+        var hubAnswered = !settings.hubConfigured
         if settings.hubConfigured {
             do {
                 let machines = try await HubClient.list(hubURL: settings.hubURL, token: settings.hubToken)
+                hubAnswered = true
                 #if DEBUG
                 print("roster: \(machines.count) machines, \(machines.flatMap(\.projects).count) projects")
                 #endif
@@ -76,12 +80,36 @@ final class ProjectStore: ObservableObject {
                 #endif
             }
         }
+        if !hubAnswered {
+            // The hub did not answer: its rows from last time stay, marked
+            // off, instead of the list shrinking to the pod row and that
+            // shrunken list being cached (M-88, seen after an offline cold start).
+            for var row in entries where row.target != .pod && !list.contains(where: { $0.target == row.target }) {
+                row.live = false
+                list.append(row)
+            }
+        }
         if list.isEmpty, entries.isEmpty {
             problem = problem ?? "No kernel or hub is set. Open Settings."
         }
         if !list.isEmpty { entries = list }
-        saveCache()
+        if hubAnswered { saveCache() }
         loading = false
+        // Rows marked Off come back by themselves when the link does (M-92):
+        // try again at 10, 20, 40, then every 60 s until the hub answers.
+        retryTask?.cancel()
+        retryTask = nil
+        if hubAnswered {
+            retryAttempt = 0
+        } else {
+            let delay = min(60, 10 << min(retryAttempt, 2))
+            retryAttempt += 1
+            retryTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(delay))
+                guard let self, !Task.isCancelled else { return }
+                await self.refresh()
+            }
+        }
     }
 
     /// The face a chat read off its kernel: keep it for the list.

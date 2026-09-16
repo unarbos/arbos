@@ -67,6 +67,11 @@ class ArbosHarnessConfig(HarnessConfig):
     """Tools the agent may use. Empty = the program's headless default."""
     instructions: str = ""
     """Standing instructions shown in every prompt. Empty = the program's default."""
+    repro_required: int = Field(1, ge=0)
+    """Failing reproductions the first edit needs (`ARBOS_REPRO_REQUIRED`): 0 = no gate,
+    1 = one, 2 = the reporter's example plus a second input the agent derives."""
+    mechanism_required: bool = True
+    """Refuse the first edit without a `mechanism` line (`ARBOS_MECHANISM_REQUIRED`)."""
     artifacts: str = "outputs/arbos"
     """Host folder that receives each rollout's `/logs/artifacts/arbos` (patch,
     rollout bundle, kernel log, result.json) under `<task>--<trace id>/`. Empty = keep
@@ -125,6 +130,8 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
             "ARBOS_TIMEOUT": str(int(self.config.timeout)),
             "ARBOS_TRACE": "1" if self.config.trace else "0",
             "ARBOS_WINDOW_TOKENS": str(self.config.window_tokens),
+            "ARBOS_REPRO_REQUIRED": str(self.config.repro_required),
+            "ARBOS_MECHANISM_REQUIRED": "1" if self.config.mechanism_required else "0",
             "ARBOS_OUT": OUT_DIR,
             "ARBOS_KERNEL_BIN": KERNEL_BIN,
             "XDG_CONFIG_HOME": f"/tmp/vf-arbos/{trace.id}/config",

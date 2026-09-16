@@ -188,6 +188,69 @@ pub struct ToolRec {
     /// model gave none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// A glance at the output for a small screen: the first ~400
+    /// characters, or head and tail when the body is long, the error
+    /// first when there is one. The phone folds tool calls into one line
+    /// and could show only labels when opened (F14). `body` stays the
+    /// full text; a client that has it needs nothing here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
+impl ToolRec {
+    /// The glance, from `error` and `body`.
+    pub fn digest(&self) -> Option<String> {
+        let text = match (&self.error, &self.body) {
+            (Some(e), Some(b)) if b.trim() != e.trim() && !b.trim().is_empty() => {
+                format!("{e}\n{b}")
+            }
+            (Some(e), _) => e.clone(),
+            (None, Some(b)) => b.clone(),
+            (None, None) => return None,
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        Some(tool_digest(text))
+    }
+
+    /// `output` filled from the record itself when absent (a record from
+    /// before the field existed, replayed).
+    pub fn with_output(mut self) -> Self {
+        if self.output.is_none() {
+            self.output = self.digest();
+        }
+        self
+    }
+}
+
+/// How much of a tool's output a glance shows.
+pub const DIGEST_CHARS: usize = 400;
+
+/// The first `DIGEST_CHARS` characters of `text`; past that, the first
+/// half and the last half (whole lines where they fit) around a `…` line,
+/// so both the start and the end of a long run are seen.
+pub fn tool_digest(text: &str) -> String {
+    let text = text.trim();
+    if text.chars().count() <= DIGEST_CHARS {
+        return text.to_string();
+    }
+    let half = DIGEST_CHARS / 2 - 2;
+    let head: String = text.chars().take(half).collect();
+    let tail_start = text.chars().count() - half;
+    let tail: String = text.chars().skip(tail_start).collect();
+    // Cut on line ends where a line end is near, so the glance is not
+    // two half-words.
+    let head = match head.rfind('\n') {
+        Some(i) if i > half / 2 => head[..i].to_string(),
+        _ => head,
+    };
+    let tail = match tail.find('\n') {
+        Some(i) if i < half / 2 => tail[i + 1..].to_string(),
+        _ => tail,
+    };
+    format!("{}\n…\n{}", head.trim_end(), tail.trim_start())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -248,4 +311,53 @@ impl Event {
 
 fn is_zero_u64(n: &u64) -> bool {
     *n == 0
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    fn rec(body: Option<&str>, error: Option<&str>) -> ToolRec {
+        ToolRec {
+            name: "bash".into(),
+            call_id: "c1".into(),
+            step: 1,
+            paths: vec![],
+            started: None,
+            ended: None,
+            result_size: None,
+            error: error.map(str::to_string),
+            body: body.map(str::to_string),
+            args: None,
+            child: None,
+            images: vec![],
+            diff: None,
+            label: None,
+            output: None,
+        }
+    }
+
+    #[test]
+    fn a_short_output_is_itself_a_long_one_shows_head_and_tail_and_an_error_leads() {
+        assert_eq!(rec(Some("ok\n"), None).digest().as_deref(), Some("ok"));
+        assert_eq!(rec(None, None).digest(), None);
+        let lines: Vec<String> = (1..=200).map(|i| format!("line {i} of the run")).collect();
+        let long = lines.join("\n");
+        let d = tool_digest(&long);
+        assert!(
+            d.chars().count() <= DIGEST_CHARS + 8,
+            "{}",
+            d.chars().count()
+        );
+        assert!(d.starts_with("line 1 of the run"), "{d}");
+        assert!(d.ends_with("line 200 of the run"), "{d}");
+        assert!(d.contains("\n…\n"), "{d}");
+        assert!(!d.contains("line 100 "), "the middle is cut: {d}");
+        let e = rec(Some("stdout so far"), Some("exit 1: no such file"))
+            .digest()
+            .unwrap();
+        assert!(e.starts_with("exit 1: no such file\n"), "{e}");
+        let filled = rec(Some("hello"), None).with_output();
+        assert_eq!(filled.output.as_deref(), Some("hello"));
+    }
 }

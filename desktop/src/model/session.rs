@@ -30,7 +30,7 @@ use cacp::schema::{
 use serde::{Deserialize, Serialize};
 use std::{
     cell::Cell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -564,6 +564,12 @@ pub struct ChatSession {
     /// index: the deltas merge into this, and the item shows it with any
     /// tool-call markup cut (`crate::markup`). Runtime only.
     pub stream_raw: HashMap<usize, String>,
+    /// Prompts this window sent whose `user` record has not come back yet,
+    /// squashed. The kernel may hold a line in its inbox for minutes
+    /// (a turn still ending, workers running) before it runs it and writes
+    /// the record; the echo is then matched by these, not by a clock —
+    /// a two-minute window doubled two prompts after a relaunch (F-94).
+    awaiting_echo: VecDeque<String>,
     /// When this window asked the kernel for the kickoff turn on an empty
     /// root (Cursor's "Setting up environment"). Runtime only.
     pub kickoff_at: Option<SystemTime>,
@@ -698,6 +704,7 @@ impl ChatSession {
             last_frame_at: Instant::now(),
             probe_at: Cell::new(None),
             stream_raw: HashMap::new(),
+            awaiting_echo: VecDeque::new(),
             kickoff_at: None,
             kickoff_secs: None,
             readonly: false,
@@ -786,6 +793,7 @@ impl ChatSession {
             last_frame_at: Instant::now(),
             probe_at: Cell::new(None),
             stream_raw: HashMap::new(),
+            awaiting_echo: VecDeque::new(),
             kickoff_at: None,
             kickoff_secs: None,
             readonly: false,
@@ -874,6 +882,7 @@ impl ChatSession {
             last_frame_at: Instant::now(),
             probe_at: Cell::new(None),
             stream_raw: HashMap::new(),
+            awaiting_echo: VecDeque::new(),
             kickoff_at: None,
             kickoff_secs: None,
             readonly: false,
@@ -1156,9 +1165,51 @@ impl ChatSession {
     /// Push local bubbles the kernel never stored, then title from them.
     pub(crate) fn sync_kernel_history(&mut self) {
         if let Some(sid) = self.agent_session.clone() {
-            crate::kernel::seed_transcript(&self.place(), &sid, &self.items);
+            // A line typed while the socket was down has its card on the
+            // transcript already and its words still in the queue: they go
+            // as a frame when the queue drains, and the kernel records them
+            // then. Seeded here as well, the kernel held the line twice —
+            // once written by this window, once from the frame (QA,
+            // 2026-09-16, after a kernel respawn on a fresh place).
+            let unsent = self.unsent_cards();
+            if unsent.is_empty() {
+                crate::kernel::seed_transcript(&self.place(), &sid, &self.items);
+            } else {
+                let sent: Vec<ChatItem> = self
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(ix, _)| !unsent.contains(ix))
+                    .map(|(_, item)| item.clone())
+                    .collect();
+                crate::kernel::seed_transcript(&self.place(), &sid, &sent);
+            }
         }
         self.take_title_from_first_prompt();
+    }
+
+    /// The prompt cards whose words are still queued for the wire: the
+    /// newest card for each queued prompt, matched by its words.
+    fn unsent_cards(&self) -> HashSet<usize> {
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        let mut taken = HashSet::new();
+        for prompt in &self.queue {
+            let words = squash(&prompt.text);
+            let found = self
+                .items
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(ix, item)| {
+                    !taken.contains(ix)
+                        && matches!(item, ChatItem::User(message) if squash(&message.text) == words)
+                })
+                .map(|(ix, _)| ix);
+            if let Some(ix) = found {
+                taken.insert(ix);
+            }
+        }
+        taken
     }
 
     /// First user line → a short title. Skipped when they already named it.
@@ -1679,6 +1730,24 @@ impl ChatSession {
     fn foreign_prompt(&mut self, text: String, attachments: Vec<String>, ts: i64, channel: String) {
         self.new_turn_steps();
         let squash = |s: &str| s.split_whitespace().collect::<String>();
+        // A line this window sent and is still waiting to see recorded:
+        // its card is the newest with these words. However long the kernel
+        // held it, this is the echo.
+        if let Some(at) = self
+            .awaiting_echo
+            .iter()
+            .position(|sent| *sent == squash(&text))
+        {
+            self.awaiting_echo.remove(at);
+            if let Some(card) = self.items.iter_mut().rev().find_map(|item| match item {
+                ChatItem::User(message) if squash(&message.text) == squash(&text) => Some(message),
+                _ => None,
+            }) && ts > 0
+            {
+                card.sent_at = Some(ts);
+            }
+            return;
+        }
         let echo = self
             .items
             .iter_mut()
@@ -1783,20 +1852,39 @@ impl ChatSession {
     /// A streamed chunk lands on the reply item at `ix`: merged into the
     /// raw text, shown with tool-call markup cut.
     fn stream_into(&mut self, ix: usize, text: &str) {
+        let busy = self.busy();
         let Some(ChatItem::Agent(body)) = self.items.get_mut(ix) else {
             return;
         };
         let raw = self.stream_raw.entry(ix).or_insert_with(|| body.clone());
         merge_stream_text(raw, text);
-        *body = crate::markup::strip_live(raw);
+        let shown = crate::markup::strip_live(raw);
+        // A `status` call streams as the words "status: <step>" before the
+        // settled line takes them off the transcript. They are the live
+        // step for as long as they stream — Jacob's "status: Delegating to
+        // worker…" sat as a paragraph for the whole wait on the worker.
+        if let Some(step) = status_line(&shown) {
+            body.clear();
+            if busy {
+                self.status = Some(step);
+            }
+            return;
+        }
+        *body = shown;
     }
 
     /// Open a reply item for streamed text; `None` when the text shows
     /// nothing yet (markup only).
     fn open_stream(&mut self, text: String) -> Option<usize> {
-        let shown = crate::markup::strip_live(&text);
+        let mut shown = crate::markup::strip_live(&text);
         if shown.is_empty() && text.trim().is_empty() {
             return None;
+        }
+        if let Some(step) = status_line(&shown) {
+            if self.busy() {
+                self.status = Some(step);
+            }
+            shown.clear();
         }
         self.items.push(ChatItem::Agent(shown));
         let ix = self.items.len() - 1;
@@ -1884,6 +1972,16 @@ impl ChatSession {
     /// answers, and before a reconnect finishes.
     fn land_turn(&mut self, content: &Prompt) {
         self.new_turn_steps();
+        let squashed: String = content.text.split_whitespace().collect();
+        if !squashed.is_empty() {
+            self.awaiting_echo.push_back(squashed);
+            // A record that never comes back (a kernel from before the echo,
+            // a line it dropped) must not match a later prompt with the
+            // same words forever.
+            while self.awaiting_echo.len() > 8 {
+                self.awaiting_echo.pop_front();
+            }
+        }
         self.flight = Some(Flight {
             at: SystemTime::now(),
             used: self.usage.map_or(0, |usage| usage.used),
@@ -2774,6 +2872,35 @@ impl ChatSession {
             }
             Event::Refused(detail) => {
                 self.rewind_to = None;
+                // A keyless kernel (#312) answers `kickoff` with this and no
+                // turn: the setup bar under the composer is the cue, and
+                // the kickoff is over — nothing waits behind it.
+                if detail.starts_with(KICKOFF_NOT_STARTED) {
+                    if self.kickoff_at.is_some() && self.kickoff_secs.is_none() {
+                        self.kickoff_secs = Some(0);
+                    }
+                    self.flight = None;
+                    self.streaming = false;
+                    self.turn_open = false;
+                    self.flush();
+                    self.drain();
+                    return;
+                }
+                // A keyless kernel kept the typed line in its inbox instead
+                // of spending a turn on it (#312): no turn is coming, so the
+                // card must not sit under a shimmer. The line says what is
+                // missing and what became of the words (the kernel writes
+                // the same words on the transcript; identical notices read
+                // once); the pending row under the composer shows them
+                // waiting, and the setup bar says where a key goes.
+                if detail.contains(LINE_KEPT_FOR_KEY) {
+                    self.flight = None;
+                    self.streaming = false;
+                    self.turn_open = false;
+                    self.notice(true, &detail);
+                    self.flush();
+                    return;
+                }
                 self.notice(true, &detail);
                 self.flush();
                 // The kernel no longer has this agent: the row keeps its
@@ -3952,23 +4079,81 @@ pub fn is_interrupt_notice(text: &str) -> bool {
     text == STOPPED_BY_YOU || text.starts_with("Interrupted")
 }
 
+/// The kernel's answer to `kickoff` on a place with no model key (#312):
+/// no turn follows.
+const KICKOFF_NOT_STARTED: &str = "kickoff not started:";
+
+/// In the kernel's line when it kept a typed prompt in its inbox for want
+/// of a key (#312): "… Your message is kept and runs once a key is in
+/// place: <the words>".
+pub(crate) const LINE_KEPT_FOR_KEY: &str = "Your message is kept and runs once a key is in place";
+
 /// The kernel's notice while an `ask` is parked with the user.
 fn is_waiting_line(text: &str) -> bool {
     text.trim() == "Waiting for your answer"
 }
 
-/// A kernel `status` call as the transcript records it: one line,
-/// "status: <what the agent is doing>". The step, or `None` for prose.
-fn status_line(text: &str) -> Option<String> {
+/// A `status` call written as a line of the reply, in any of the forms a
+/// model produces: the kernel's own record `status: <step>`, the prompt's
+/// example `status "<step>"` (QA qal-j01: three of them over the kickoff
+/// greeting, drawn as bubbles), `status 'step'`, `status(step)`,
+/// `status = step`, with or without markdown around the word. One line
+/// only. The step, or `None` for prose — "Status quo is fine" is prose.
+pub(crate) fn status_line(text: &str) -> Option<String> {
     let line = text.trim();
     if line.contains('\n') {
         return None;
     }
-    let rest = line
-        .strip_prefix("status:")
-        .or_else(|| line.strip_prefix("Status:"))?;
-    let step = rest.trim();
+    let line = line.trim_matches(|c: char| matches!(c, '*' | '_' | '`'));
+    let rest = ["status", "Status", "STATUS"]
+        .iter()
+        .find_map(|word| line.strip_prefix(word))?;
+    let rest = rest.trim_start_matches(|c: char| matches!(c, '*' | '_' | '`'));
+    let rest = rest.trim_start();
+    let step = if let Some(r) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('=')) {
+        r.trim().to_string()
+    } else if let Some(r) = rest.strip_prefix('(') {
+        r.trim_end_matches(|c: char| matches!(c, '*' | '_' | '`'))
+            .strip_suffix(')')
+            .unwrap_or(r)
+            .trim()
+            .to_string()
+    } else if rest.starts_with(['"', '\'', '“', '‘']) {
+        rest.trim_end_matches(|c: char| matches!(c, '*' | '_' | '`' | '.'))
+            .trim_matches(|c: char| matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’'))
+            .trim()
+            .to_string()
+    } else {
+        return None;
+    };
+    let step = step
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '*' | '`' | '_'))
+        .trim();
     (!step.is_empty()).then(|| step.to_string())
+}
+
+#[cfg(test)]
+mod status_line_tests {
+    use super::status_line;
+
+    #[test]
+    fn every_form_a_model_writes_is_the_step() {
+        assert_eq!(status_line("status: Reading the file"), Some("Reading the file".into()));
+        assert_eq!(status_line("Status: Setting plan"), Some("Setting plan".into()));
+        assert_eq!(status_line("status \"Looking around the new place\""), Some("Looking around the new place".into()));
+        assert_eq!(status_line("status 'Writing project context'"), Some("Writing project context".into()));
+        assert_eq!(status_line("status(\"Spawning worker\")"), Some("Spawning worker".into()));
+        assert_eq!(status_line("**status:** Running tests"), Some("Running tests".into()));
+        assert_eq!(status_line("`status \"Setting plan\"`"), Some("Setting plan".into()));
+    }
+
+    #[test]
+    fn prose_is_not_a_step() {
+        assert_eq!(status_line("Status quo is fine."), None);
+        assert_eq!(status_line("status"), None);
+        assert_eq!(status_line("The status of the build is green."), None);
+        assert_eq!(status_line("status: Reading\nthe file"), None);
+    }
 }
 
 /// A worker's folder name as a label: "math-docstrings" → "math docstrings",

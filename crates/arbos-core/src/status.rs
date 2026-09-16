@@ -75,18 +75,32 @@ pub fn clip(step: &str) -> String {
 }
 
 /// A `status` call the model wrote as prose instead: a reply that is one
-/// line, `status: Reading project context` (any case). Some models
-/// announce the step this way before their tool calls; the kernel takes
-/// the words as the live line so the window shows the step and not a
-/// paragraph. Anything longer, or with more lines, is a real reply.
+/// line, `status: Reading project context`, `status "Setting plan"` (the
+/// prompt's own form, which Gemini copies out as text), or
+/// `status("Reading the issue")`, any case. Some models announce the
+/// step this way before their tool calls; the kernel takes the words as
+/// the live line so the window shows the step and not a paragraph — and
+/// the line is not written as a reply. Anything longer, or with more
+/// lines, is a real reply.
 pub fn spoken(text: &str) -> Option<String> {
-    let line = text.trim();
-    if line.is_empty() || line.contains('\n') {
+    let line = text.trim().trim_matches(['*', '`']).trim();
+    if line.is_empty() || line.contains('\n') || !line.get(..6)?.eq_ignore_ascii_case("status") {
         return None;
     }
-    let lower = line.to_ascii_lowercase();
-    let rest = line.get(lower.strip_prefix("status:").map(|_| "status:".len())?..)?;
-    let step = rest.trim().trim_matches(['*', '`']).trim();
+    let rest = line[6..].trim_start();
+    // `status:` / `status "…"` / `status '…'` / `status(…)`. A word that
+    // merely begins with "status" (statuses, "status of x", "status
+    // Reading the folder") is prose and stays a reply.
+    let step = if let Some(r) = rest.strip_prefix(':') {
+        r
+    } else if let Some(r) = rest.strip_prefix('(') {
+        r.strip_suffix(')').unwrap_or(r)
+    } else if rest.starts_with('"') || rest.starts_with('\'') {
+        rest
+    } else {
+        return None;
+    };
+    let step = step.trim().trim_matches(['"', '\'', '*', '`']).trim();
     (!step.is_empty() && step.chars().count() <= MAX_CHARS * 2).then(|| clip(step))
 }
 
@@ -262,5 +276,29 @@ mod tests {
         assert_eq!(spoken("status: first\nthen a paragraph"), None);
         assert_eq!(spoken("The status: all tests pass."), None);
         assert_eq!(spoken("Done on branch x"), None);
+        // The prompt's own form, copied out as text (Gemini, qal J1).
+        assert_eq!(
+            spoken("status \"Setting plan\""),
+            Some("Setting plan".into())
+        );
+        assert_eq!(
+            spoken("`status \"Reading the folder\"`"),
+            Some("Reading the folder".into())
+        );
+        assert_eq!(
+            spoken("status(\"Writing notes.md\")"),
+            Some("Writing notes.md".into())
+        );
+        assert_eq!(
+            spoken("Status 'Greeting the user'"),
+            Some("Greeting the user".into())
+        );
+        assert_eq!(
+            spoken("status Reading the folder"),
+            None,
+            "unmarked prose stays a reply"
+        );
+        assert_eq!(spoken("Statuses are green."), None);
+        assert_eq!(spoken("status \"\""), None);
     }
 }

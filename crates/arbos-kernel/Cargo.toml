@@ -12,6 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 arbos-core.workspace = true
+# `arbos-kernel update`: the channel feed, the signature over a payload, and
+# the install that cannot leave a half-replaced binary — the same code the
+# desktop updates itself with, so there is one answer to what a published
+# build is rather than two that can drift.
+arbos-update = { path = "../arbos-update" }
 arbos-engine.workspace = true
 anyhow.workspace = true
 base64 = "0.22"
@@ -20,6 +25,7 @@ portable-pty = "0.8"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tokio-util = "0.7"
 tgrep-core = { path = "../../vendor/tgrep/tgrep-core" }
 regex = "1"
 glob = "0.3"

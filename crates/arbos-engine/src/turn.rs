@@ -60,6 +60,104 @@ pub fn pick_model(wake_model: &str, agent: &Agent, host_model: &str, child_model
 /// image still owed.
 pub const SHOW_NUDGE: &str = "Your brief says the user asked to see the result (Show), and this turn made no image. Make it now: a command's output → screenshot target:\"text\" title:\"<the command>\" text:\"<its output>\"; a page → browser action:screenshot; a window → screenshot target:\"window\". Then put the image path in your report.";
 
+/// Tools whose failure means the thing was not made.
+const WRITE_CLASS: &[&str] = &["write", "edit", "bash", "apply_patch", "git", "pr"];
+
+/// Words a reply uses to claim a write happened.
+const CLAIMS: &[&str] = &[
+    "seeded",
+    "created",
+    "wrote",
+    "written",
+    "added",
+    "updated",
+    "saved",
+    "fixed",
+    "committed",
+    "pushed",
+    "applied",
+    "installed",
+    "generated",
+    "removed",
+    "deleted",
+    "renamed",
+    "moved",
+    "done",
+    "complete",
+    "finished",
+    "set up",
+    "ready",
+];
+
+/// The last tool step of this turn had a failed write-class call with no
+/// later success of the same tool, and `reply` reads as if it worked — it
+/// claims a result (`seeded`, `created`, `done`…) or names the failed
+/// call's path — without a word of failure. "Said seeded when nothing was
+/// seeded" (JB-4). A reply about something else (a read-only helper whose
+/// side `write` the kernel refused, answering from its `grep`) is left
+/// alone. Returns the failed call.
+fn unowned_failure<'a>(events: &'a [Event], reply: &str) -> Option<&'a arbos_core::ToolRec> {
+    let lower = reply.to_ascii_lowercase();
+    if [
+        "fail",
+        "error",
+        "could not",
+        "couldn't",
+        "unable",
+        "did not",
+        "didn't",
+        "refused",
+        "blocked",
+        "not written",
+        "no such",
+        "cannot",
+        "can't",
+        "denied",
+    ]
+    .iter()
+    .any(|w| lower.contains(w))
+    {
+        return None;
+    }
+    // The last batch of tool records in this turn: back from the end,
+    // over the assistant/notice lines, until the tool run before it.
+    let turn: Vec<&Event> = events.iter().rev().take_while(|e| !e.is_wake()).collect();
+    let mut seen_tools = false;
+    let mut failed: Option<&arbos_core::ToolRec> = None;
+    let mut ok_names: Vec<&str> = Vec::new();
+    for e in turn {
+        match &e.kind {
+            EventKind::Tool(rec) => {
+                seen_tools = true;
+                if !WRITE_CLASS.contains(&rec.name.as_str()) {
+                    continue;
+                }
+                if rec.error.is_some() {
+                    if !ok_names.contains(&rec.name.as_str()) {
+                        failed = Some(rec);
+                    }
+                } else {
+                    ok_names.push(rec.name.as_str());
+                }
+            }
+            EventKind::Assistant { .. } if seen_tools => break,
+            _ => {}
+        }
+    }
+    let rec = failed?;
+    let names_path = rec
+        .args
+        .as_ref()
+        .and_then(|a| a.get("path").and_then(|p| p.as_str()))
+        .map(|p| {
+            let base = p.rsplit('/').next().unwrap_or(p);
+            !base.is_empty() && lower.contains(&base.to_ascii_lowercase())
+        })
+        .unwrap_or(false);
+    let claims = CLAIMS.iter().any(|w| lower.contains(w));
+    (names_path || claims).then_some(rec)
+}
+
 /// The turn's wake carried a `Show:` line (the user asked to see the
 /// result) and no tool call since has produced an image.
 fn image_owed(events: &[Event]) -> bool {
@@ -667,6 +765,8 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     };
 
     let mut nudged = false;
+    // The reason of the last nudge, for what the next reply may not say.
+    let mut nudge_reason: Option<&'static str> = None;
     // Replies with no words and no calls in a row (a done wake's silence
     // does not count): the second one is the model failing, not
     // answering — another model takes the turn, or the user is told.
@@ -917,7 +1017,16 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         // looks broken on every client. The markup never reaches the
         // transcript; the words around it do, and the nudge below says
         // what happened (subnet120 from the phone, 2026-09-16).
-        let (content, had_markup) = crate::markup::strip_tool_markup(&content);
+        let (mut content, had_markup) = crate::markup::strip_tool_markup(&content);
+        // After "your reply was empty", an opening apology about the
+        // empty reply is the kernel's correction leaking into the chat
+        // ("Sorry — empty reply on my side, nothing blocking." was the
+        // first thing Jacob read). The answer follows it; the apology
+        // does not.
+        if nudge_reason == Some("empty reply") {
+            content = crate::apology::strip_empty_reply_apology(&content);
+            nudge_reason = None;
+        }
         // The provider's own count beats our chars/4 guess. Remember the
         // ratio against the *raw* estimate so it does not feed on itself.
         // The provider counts the tool schemas too; they go on our side as
@@ -934,8 +1043,16 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 calib = (u.used as f64 / ours as f64).clamp(CALIB_MIN, CALIB_MAX);
             }
         }
+        // A `status` written as a line of text: the live line takes the
+        // words and the line is not a reply — written as one it was a
+        // code-looking bubble before the greeting, three to eleven of
+        // them with Gemini (qal J1). With no tool call beside it the turn
+        // is nudged on, not ended.
+        let mut spoke_only = false;
         if let Some(step) = arbos_core::status::spoken(&content) {
             hooks.spoke_status(&step);
+            content = String::new();
+            spoke_only = calls.is_empty();
         }
         // A final reply that says again what this turn, or the reply
         // before this wake, already said: not written twice. The turn
@@ -991,6 +1108,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         let empty_reply = calls.is_empty()
             && content.trim().is_empty()
             && !had_markup
+            && !spoke_only
             && wake.kind != WakeKind::Done
             && wake.kind != WakeKind::Serve;
         if empty_reply {
@@ -1058,13 +1176,18 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     "That was a tool call written as text, so nothing ran (the markup was not kept). Call the tool itself: the tools are functions, not text.".to_string(),
                     "tool call written as text",
                 ))
+            } else if spoke_only {
+                Some((
+                    "That line was a status, not a reply: the live line beside your name took it and the chat does not show it. Go on with the step it named — a tool call — or answer the user.".to_string(),
+                    "status written as text",
+                ))
             } else if content.trim().is_empty() {
                 // A done wake that has nothing to add ends in silence:
                 // Cursor's coordinator says nothing between worker reports
                 // when the user is owed nothing yet (cold-p5).
                 (wake.kind != WakeKind::Done).then(|| {
                     (
-                        "Your reply was empty. Continue the task, or say what is blocking you."
+                        "Your reply was empty. Continue the task, or say what is blocking you — and do not mention the empty reply or this note: the user saw neither, and an apology about it would be the first thing they read."
                             .to_string(),
                         "empty reply",
                     )
@@ -1088,6 +1211,15 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     PR_LINK_NUDGE.replace("{urls}", &urls.join(", ")),
                     "pr link not from a tool",
                 ))
+            } else if let Some(rec) = unowned_failure(&events, &content) {
+                Some((
+                    format!(
+                        "Your last {} call failed ({}) and nothing since succeeded, but the reply reads as if it worked. Say what failed and what you will do, or fix it first — never report a failed write as done.",
+                        rec.name,
+                        arbos_core::text::clip(rec.error.as_deref().unwrap_or("error"), 160)
+                    ),
+                    "failed write reported as done",
+                ))
             } else if image_owed(&events) {
                 // The brief said the user asked to see the result and the
                 // turn is ending with no image made: once, before the
@@ -1107,6 +1239,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             };
             if let Some((text, reason)) = nudge {
                 nudged = true;
+                nudge_reason = Some(reason);
                 // The reply itself is already on the transcript (the
                 // Assistant line above); only the nudge follows it, or the
                 // window shows the same words twice.

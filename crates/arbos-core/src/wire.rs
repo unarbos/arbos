@@ -62,6 +62,78 @@ pub enum Frame {
         #[serde(default)]
         limit: u32,
     },
+    /// Client → kernel: the material for a feedback report about one
+    /// exchange of `agent` — everything that happened because the user
+    /// asked one thing, from a `user`/`kickoff` wake to the next such
+    /// wake (the `done`, `job`, `serve` wakes inside stay inside). The
+    /// exchange is the one holding `seq` (a line the user is looking at)
+    /// or the tool call `call_id` (a tool line the user clicked, carried
+    /// whole); absent both, the last the user opened. `tail` (default 0)
+    /// adds the last N lines of the agent's transcript whatever exchange
+    /// they fall in, slimmed and redacted the same — for "it keeps doing
+    /// this" and for reproducing a behaviour bug; the wake lines in them
+    /// show the turn structure. Answered with `feedback_bundle`:
+    /// the lines slimmed (tool bodies budgeted by outcome — a glance for
+    /// a call that went fine, the error uncut plus a tail-weighted 8 KB
+    /// for one that failed or the span's last, whole for the named
+    /// call; fat arguments glanced with their true length recorded), the
+    /// children spawned in the span, the kernel log for its span, and
+    /// which build answered — all redacted of credentials and bounded,
+    /// so a client can send it as it is. `note` is the user's own words,
+    /// redacted the same way and carried back.
+    Feedback {
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "is_zero_u32")]
+        tail: u32,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        note: String,
+    },
+    /// Kernel → client: the answer to `feedback`. `events` are the anchor
+    /// exchange's lines; `tail` the last N transcript lines asked for
+    /// (those already in `events` left out); `children` the spawned
+    /// agents' lines since the exchange began,
+    /// each `{agent, events}`; `log` kernel.log lines for the span (and
+    /// the log's newest few). All JSON as the files hold them, after
+    /// redaction and slimming. `redacted` counts what went; `truncated`
+    /// says the cap cut something (the tail's oldest lines first, then
+    /// children, then log lines to a floor, then the anchor's middle);
+    /// `bytes` is this frame's size.
+    FeedbackBundle {
+        agent: String,
+        turn: serde_json::Value,
+        events: Vec<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tail: Vec<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        children: Vec<serde_json::Value>,
+        log: Vec<serde_json::Value>,
+        kernel: serde_json::Value,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        note: String,
+        redacted: serde_json::Value,
+        truncated: bool,
+        bytes: u64,
+    },
+    /// Client → kernel: one tool call's whole body, redacted and capped —
+    /// the companion to a report that carried its glance, for whoever is
+    /// fixing the bug to pull later. Answered with `tool_body`.
+    ToolBody {
+        agent: String,
+        call_id: String,
+    },
+    /// Kernel → client: the answer to `tool_body`. `size` is the body's
+    /// true length; `truncated` says the cap cut the middle.
+    ToolBodyReply {
+        agent: String,
+        call_id: String,
+        body: String,
+        size: u64,
+        truncated: bool,
+    },
     /// Kernel → client: one transcript line replayed on attach or for a
     /// `history` request. Its own frame so a client that already holds the
     /// transcript (the desktop reads the files) can ignore replays while
@@ -568,4 +640,8 @@ pub struct Entry {
 
 fn root_agent() -> String {
     crate::ROOT_ID.to_string()
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }
