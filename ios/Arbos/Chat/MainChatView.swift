@@ -20,6 +20,9 @@ struct ProjectChatView: View {
     @State private var worker: WorkerStatus?
     @State private var attachments: [PendingAttachment] = []
     @StateObject private var dictation = Dictation()
+    /// The composer stack's height, so the transcript's tail clears it
+    /// however many lines and chips it holds.
+    @State private var composerHeight: CGFloat = 80
     @FocusState private var composing: Bool
 
     private var identity: ProjectIdentity {
@@ -55,6 +58,11 @@ struct ProjectChatView: View {
                     dictation: dictation
                 )
             }
+            .background(
+                GeometryReader { geo in
+                    Color.clear.onChange(of: geo.size.height, initial: true) { _, height in composerHeight = height }
+                }
+            )
         }
         .toolbar(.hidden, for: .navigationBar)
         .fullScreenCover(isPresented: $showCall) { CallScreen() }
@@ -193,7 +201,7 @@ struct ProjectChatView: View {
                             .foregroundStyle(ArbosTheme.textDim)
                             .padding(.top, 4)
                     }
-                    Color.clear.frame(height: chat.workers.isEmpty ? 80 : 132).id("tail")
+                    Color.clear.frame(height: composerHeight + 8).id("tail")
                 }
                 .padding(.horizontal, ArbosTheme.gutter)
                 .padding(.top, 4)
