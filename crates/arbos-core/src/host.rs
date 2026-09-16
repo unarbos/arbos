@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 /// Env var naming the model for this process, over `model` in config.toml.
 pub const MODEL_ENV: &str = "ARBOS_MODEL";
+/// Env var with the per-turn dollar cap, over `max_turn_cost_usd`.
+pub const MAX_TURN_COST_ENV: &str = "ARBOS_MAX_TURN_COST";
 
 /// Where model calls go. Every kind speaks the OpenAI chat-completions
 /// wire; they differ in base URL, key variable, and extra headers.
@@ -242,6 +244,10 @@ pub struct HostConfig {
     /// chunk with its arrival time, and the parsed result — under the
     /// agent's `trace/` folder. Off by default; large.
     pub trace: bool,
+    /// Dollars one turn may spend on model calls, when the provider prices
+    /// them; past it the turn ends with a notice that names the cap.
+    /// 0 = no cap. `ARBOS_MAX_TURN_COST` in the environment overrides.
+    pub max_turn_cost_usd: f64,
 }
 
 impl Default for HostConfig {
@@ -300,6 +306,7 @@ impl Default for HostConfig {
             reserve_tokens: 16_384,
             protect_tool_results: 8,
             trace: false,
+            max_turn_cost_usd: 0.0,
         }
     }
 }
@@ -358,6 +365,15 @@ impl HostConfig {
         } else {
             m.to_string()
         }
+    }
+
+    /// The per-turn dollar cap in force: `ARBOS_MAX_TURN_COST` over the file.
+    pub fn max_turn_cost(&self) -> f64 {
+        std::env::var(MAX_TURN_COST_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(self.max_turn_cost_usd)
     }
 
     /// The environment variable consulted for the key.

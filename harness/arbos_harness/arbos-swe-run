@@ -188,7 +188,8 @@ cat > "$OUT/result.json" <<EOF
   "events": ${EVENTS:-0},
   "tool_calls": ${TOOL_CALLS:-0},
   "turns": ${TURNS:-0},
-  "bundle": "$(q "$BUNDLE")"
+  "bundle": "$(q "$BUNDLE")",
+  "cost_capped": $(grep -qE '"kind":"notice".*over the \$[0-9.]+ cap' "$OUT/run.jsonl" 2>/dev/null && echo 1 || echo 0)
 }
 EOF
 
