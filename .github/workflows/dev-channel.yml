@@ -32,11 +32,21 @@ name: dev channel
 #
 # ── not fighting the steward ─────────────────────────────────────────────────
 # The release steward merges to `main` on an hourly pass, so several commits
-# can land at once and each starts a run. The concurrency group serialises them
-# and never cancels a running publish; GitHub keeps only the newest run
-# waiting, so a burst of merges collapses into the newest build rather than a
-# queue of stale ones. Tagged releases are release.yml's, under different tags
-# and a different feed file, so the two never write the same asset.
+# can land at once and each starts a run. Two things keep that from becoming a
+# queue of stale builds, and they are not the same thing:
+#
+#   * the concurrency group serialises the runs and drops all but the newest
+#     *waiting* one. It never cancels a run that is under way — a cancel could
+#     land between notarization and the feed write.
+#   * the `plan` job then skips a run whose commit `main` has already moved
+#     past, which is what stops the *first* of a batch building and notarizing
+#     a build that is superseded before it finishes.
+#
+# The first alone leaves one wasted build per batch, which is what this looked
+# like in practice.
+#
+# Tagged releases are release.yml's, under different tags and a different feed
+# file, so the two never write the same asset.
 #
 # ── signing ──────────────────────────────────────────────────────────────────
 # What makes a payload safe to install is the Ed25519 signature the feed
@@ -140,8 +150,48 @@ jobs:
             echo "::notice title=dev channel not set up::ARBOS_UPDATE_SIGNING_KEY is not set, so nothing was published. Run .github/setup-publishing.sh once."
             exit 0
           fi
+          # Has `main` already moved past the commit this run is for?
+          #
+          # A merge batch starts a run per commit. The concurrency group
+          # serialises them and GitHub drops all but the newest *waiting* run,
+          # so the first of a batch still runs to completion — a full macOS
+          # build, a real Apple notarisation, an upload — and is then replaced
+          # minutes later by the last one. That is a runner and a submission
+          # spent on a build nobody should install, and for a few minutes the
+          # feed offers it: somebody pressing Update gets a build that is
+          # already superseded.
+          #
+          # Checked here rather than by cancelling a run that is under way.
+          # Cancelling is the dangerous one: it can land between notarization
+          # and the feed write and leave assets uploaded with nothing pointing
+          # at them, or a feed entry whose asset the prune then removes.
+          # Nothing has been built, signed, submitted or uploaded at this
+          # point, so skipping here has nothing to leave half-done.
+          #
+          # `--is-ancestor` is what makes this "we are behind" rather than
+          # "we are different": a force-push or a diverged tip is not a reason
+          # to skip a commit whose CI went green.
+          #
+          # A hand-started run is never skipped. Somebody asking for this
+          # build by name has a reason.
+          git fetch --quiet origin main
+          tip="$(git rev-parse FETCH_HEAD)"
+          sha="$(git rev-parse HEAD)"
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] \
+            && [ "$sha" != "$tip" ] \
+            && git merge-base --is-ancestor "$sha" "$tip"; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Superseded::main is already at ${tip:0:7}, so this build of ${sha:0:7} was not made. The run for the newer commit publishes it."
+            {
+              echo "### dev channel"
+              echo
+              echo "Skipped \`${sha:0:7}\` — \`main\` has already moved to \`${tip:0:7}\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           echo "publish=true" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "short=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
           echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' desktop/Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
           echo "build=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
