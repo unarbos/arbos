@@ -767,6 +767,46 @@ fn handle_frame(
                 .into_iter()
                 .map(|a| store_attachment(place, &a))
                 .collect();
+            // A path that is not a file on this machine (a desktop attaching
+            // by path to a remote place, a phone that skipped `put`) used
+            // to ride to the model as a name it could not read, and nothing
+            // said so. It is dropped from the line, and the client and the
+            // transcript hear which file did not arrive and what sends it.
+            let (attachments, missing): (Vec<String>, Vec<String>) = attachments
+                .into_iter()
+                .partition(|a| attachment_present(&agent, place, a));
+            if !missing.is_empty() {
+                let names: Vec<String> = missing
+                    .iter()
+                    .map(|m| {
+                        std::path::Path::new(m)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| m.clone())
+                    })
+                    .collect();
+                let detail = format!(
+                    "{} did not reach this kernel: the path names no file on this machine ({}). Send the bytes with a `put` frame (path attachments/<name>, data base64) and name that path in `attachments`; the words went through without it.",
+                    if names.len() == 1 {
+                        "attachment"
+                    } else {
+                        "attachments"
+                    },
+                    names.join(", ")
+                );
+                klog::warn("attachment_missing", Some(&agent), &detail);
+                let _ = append_event(
+                    &Layout::new(place, &agent).transcript(),
+                    &Event::new(EventKind::Notice {
+                        text: detail.clone(),
+                        failed: true,
+                    }),
+                );
+                hooks.broadcast(Frame::Error {
+                    agent: Some(agent.clone()),
+                    detail,
+                });
+            }
             // Where the words came from. A frame without a channel is a
             // typed line (the desktop, the CLI); the voice gateway says so.
             let channel = if channel.is_empty() {
@@ -929,7 +969,13 @@ fn handle_frame(
         Frame::Seen { through } => {
             // Read on one client is read on all: every window drops its
             // badge together.
-            match arbos_core::notify::mark_seen(place, through) {
+            // A client clearing "everything" may send an id past the
+            // newest; it means the newest.
+            let newest = arbos_core::notify::load(place)
+                .last()
+                .map(|n| n.id)
+                .unwrap_or(0);
+            match arbos_core::notify::mark_seen(place, through.min(newest)) {
                 Ok(now) => hooks.broadcast(Frame::Seen { through: now }),
                 Err(e) => klog::warn("seen_failed", None, format!("{e:#}")),
             }
@@ -2140,6 +2186,23 @@ fn hostname() -> String {
 /// `put` from the phone: `attachments/<id>.jpg`, with or without the
 /// `.arbos/` head) as that file's absolute path; anything else as is
 /// (the CLI's paths relative to the cwd).
+/// Whether an attachment path names a file this kernel can read: as
+/// written when absolute, else relative to the agent's cwd (the CLI's
+/// shape). Store-relative paths were made absolute already.
+fn attachment_present(agent: &str, place: &Place, a: &str) -> bool {
+    let p = std::path::Path::new(a);
+    if a.trim().is_empty() {
+        return false;
+    }
+    if p.is_absolute() {
+        return p.is_file();
+    }
+    let cwd = load_agent(place, &arbos_core::AgentId::new(agent))
+        .map(|ag| ag.work_dir(place.path()))
+        .unwrap_or_else(|_| place.path().to_path_buf());
+    cwd.join(p).is_file()
+}
+
 pub fn store_attachment(place: &Place, a: &str) -> String {
     let p = std::path::Path::new(a);
     if p.is_absolute() || a.trim().is_empty() {
