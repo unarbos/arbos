@@ -248,8 +248,13 @@ def register(scenario, registry, transcript, now_ms, branch):
         (cx.scratch / "xdg" / "arbos-desktop" / "settings.toml").write_text(f'[feedback]\naddress = "arbos://qa-b/beta/docs/feedback"\nhub_home = "{fb_home}"\n')
         folder = cx.scratch / "reported-project"
         folder.mkdir(parents=True, exist_ok=True)
+        other = cx.scratch / "other-project"  # a second open place: the drain must see a report filed while this one is on screen (#356)
+        other.mkdir(parents=True, exist_ok=True)
         outbox = folder / ".arbos" / "desktop" / "feedback-outbox"
-        rig = Rig(cx, [folder], tag="app-feedback")
+        rig = Rig(cx, [folder, other], tag="app-feedback")
+
+        def fb_state():
+            return rig.state().get("feedback") or {}
         try:
             time.sleep(3)
             rig.focus(folder)
@@ -290,7 +295,7 @@ def register(scenario, registry, transcript, now_ms, branch):
                 rep = json.loads((d / "report.json").read_text(errors="replace"))
                 return d, rep, ms
 
-            # Phase A — no credentials: the report is on disk and waits, with the reason recorded.
+            # Phase A — no credentials: the report is on disk and waits, and the sheet says so (the promise is assertable, #356).
             got = report_once(f"QA feedback A: the answer was fine, this is a harness report.", "a")
             if got:
                 d, rep, ms = got
@@ -298,27 +303,53 @@ def register(scenario, registry, transcript, now_ms, branch):
                 parts["a"] = {"folder": d.name, "pulse_ms": ms, "note_in_report": "QA feedback A" in blob, "screenshot_b64": (d / "screenshot.b64").exists(), "keys": sorted(rep.keys())[:12], "bytes": (d / "report.json").stat().st_size}
                 cx.rec.expect("QA feedback A" in blob, "fb-01-a-note-missing", "the note typed in the sheet is not in report.json")
                 end = time.time() + 30
-                while time.time() < end and not (d / "attempts.json").exists() and not (d / "delivered").exists():
-                    time.sleep(1)
+                fb = {}
+                while time.time() < end:
+                    fb = fb_state()
+                    if (fb.get("message") or {}).get("text") or (fb.get("outbox") or {}).get("drained"):
+                        break
+                    time.sleep(0.5)
+                msg = fb.get("message") or {}
+                ob = fb.get("outbox") or {}
+                shot = fb.get("screenshot") or {}
                 att = json.loads((d / "attempts.json").read_text()) if (d / "attempts.json").exists() else None
-                parts["a"]["attempts"] = att
+                parts["a"].update({"attempts": att, "message": msg, "outbox": ob, "screenshot": shot})
+                if "message" in fb or "outbox" in fb:
+                    cx.rec.expect(msg.get("ok") is False and "waiting" in str(msg.get("text", "")).lower(), "fb-01-a-sheet-does-not-say-waiting", f"after a Send with no credentials the sheet should say saved-and-waiting; it says {msg}", "desktop feedback_sheet.rs settled (#356)")
+                    cx.rec.expect(ob.get("waiting") == 1, "fb-01-a-outbox-not-waiting-1", f"outbox.waiting should be 1 after the first unsendable report; outbox={ob}")
+                    cx.rec.expect(shot.get("attached") is True, "fb-01-a-no-screenshot", f"no picture attached to the report: {shot}")
+                    cx.rec.expect(shot.get("whole_screen") is not True, "fb-01-a-screen-grab-not-window", "the picture is a whole-screen grab, not the window (the earlier screenshot fix's unassertable half)")
+                else:
+                    parts["a"]["sheet_text"] = "unverified: this build's driver has no feedback.message/outbox surface (pre-#356); attempts.json is the record"
                 cx.rec.expect(att is not None and not (d / "delivered").exists(), "fb-01-a-not-waiting", f"without credentials the report should wait with the reason recorded; attempts.json={att}, delivered={(d / 'delivered').exists()}", "desktop feedback.rs deliver: no hub.toml → wait")
                 if att:
                     cx.rec.expect("credential" in str(att.get("error", "")).lower() or "hub" in str(att.get("error", "")).lower(), "fb-01-a-reason-unclear", f"the waiting reason does not say what is missing: {att.get('error')!r}")
-                # The sheet's own words ("Saved, and waiting: …") are not on the driver's surface; a picture stands in.
-                try:
-                    subprocess.run(["xwd", "-root", "-display", rig.display, "-out", str(cx.rec.dir / "sheet-waiting.xwd")], capture_output=True, timeout=5)
-                except Exception:  # noqa: BLE001
-                    pass
-                parts["a"]["sheet_text"] = "unverified: the driver exposes no sheet outcome text; attempts.json is the record, sheet-waiting.xwd the picture"
                 try:
                     rig.app.click("feedback-close")
                 except Exception:  # noqa: BLE001
                     pass
                 rig.pulse("closing the sheet")
 
-            # Phase B — credentials appear: a new report goes, and lands in the store's place.
+            # Phase B — the link comes back while ANOTHER place is on screen, and nothing else is sent: the drain
+            # (launch / reconnect / minute timer / Send, #356) must carry the waiting report out by itself.
+            rig.focus(other)
             (fb_home / "arbos" / "hub.toml").write_text(f'url = "ws://127.0.0.1:{port}"\nmachine = "qa-a"\ntoken = "machine-a-secret-qa-loopback-only"\n')
+            if "a" in parts:
+                da = outbox / parts["a"]["folder"]
+                folders_before = {p.name for p in outbox.iterdir()}
+                end = time.time() + 100  # the timer is a minute; the backoff after one failed attempt is 30 s
+                while time.time() < end and not (da / "delivered").exists():
+                    time.sleep(2)
+                fb = fb_state()
+                ob = fb.get("outbox") or {}
+                parts["a"].update({"delivered_later": (da / "delivered").exists(), "in_store_later": (beta / ".arbos" / "docs" / "feedback" / da.name / "report.json").exists(), "outbox_after": ob, "new_folders_written": sorted({p.name for p in outbox.iterdir()} - folders_before), "drained_while_other_place_in_front": True})
+                cx.rec.expect(parts["a"]["delivered_later"] and parts["a"]["in_store_later"], "fb-01-a-never-retried", "the report that waited did not go by itself within 100 s of the credentials appearing (another place in front, nothing sent) although the sheet promised it would", "desktop root.rs drain: launch / reconnect / minute timer / Send, every open place (#356, qal-j06)")
+                if ob:
+                    cx.rec.expect(ob.get("waiting") == 0 and (ob.get("sent_this_run") or 0) >= 1, "fb-01-a-outbox-not-moved", f"after the drain the outbox should read waiting 0, sent_this_run ≥ 1; it reads {ob}")
+                cx.rec.expect(not parts["a"]["new_folders_written"], "fb-01-a-second-report-written", f"the drain wrote a second report instead of sending the first: {parts['a']['new_folders_written']}")
+            rig.focus(folder)
+
+            # Phase B2 — a Send with credentials: delivered at once, and only Send speaks to the user.
             got = report_once("QA feedback B: delivered with credentials.", "b")
             if got:
                 d, rep, ms = got
@@ -329,17 +360,11 @@ def register(scenario, registry, transcript, now_ms, branch):
                 att = json.loads((d / "attempts.json").read_text()) if (d / "attempts.json").exists() else None
                 landed = sorted(p.name for p in (beta / ".arbos" / "docs" / "feedback").iterdir()) if (beta / ".arbos" / "docs" / "feedback").exists() else []
                 in_store = (beta / ".arbos" / "docs" / "feedback" / d.name / "report.json").exists()
-                parts["b"] = {"folder": d.name, "pulse_ms": ms, "delivered_marker": delivered, "attempts": att, "in_store": in_store, "store_folders": landed[:5]}
+                msg = (fb_state().get("message") or {})
+                parts["b"] = {"folder": d.name, "pulse_ms": ms, "delivered_marker": delivered, "attempts": att, "in_store": in_store, "store_folders": landed[:5], "message": msg}
                 cx.rec.expect(delivered and in_store, "fb-01-b-not-delivered", f"with credentials the report did not land in the store: delivered={delivered}, in_store={in_store}, attempts={att}", "desktop feedback.rs deliver → arbos-kernel store put (#345)")
-                # The report that waited goes by itself once the link is there (first retry after 30 s).
-                if "a" in parts:
-                    da = outbox / parts["a"]["folder"]
-                    end = time.time() + 75
-                    while time.time() < end and not (da / "delivered").exists():
-                        time.sleep(2)
-                    parts["a"]["delivered_later"] = (da / "delivered").exists()
-                    parts["a"]["in_store_later"] = (beta / ".arbos" / "docs" / "feedback" / da.name / "report.json").exists()
-                    cx.rec.expect(parts["a"]["delivered_later"], "fb-01-a-never-retried", "the report that waited did not go by itself within 75 s of the credentials appearing, although the sheet promised it would (backoff starts at 30 s; delivery only runs when another report is sent)", "desktop root.rs deliver_feedback: one call site, on Send (qal-j06)")
+                if msg:
+                    cx.rec.expect(msg.get("ok") is True and ("sent" in str(msg.get("text", "")).lower() or "reference" in str(msg.get("text", "")).lower()), "fb-01-b-sheet-does-not-say-sent", f"after a Send with credentials the sheet should say sent; it says {msg}")
 
             # Phase C — pickup: the poller reads the store through the hub and copies each report to its rig.
             repo = Path(os.environ.get("ARBOS_QA_REPO", str(Path(cx.binary).resolve().parents[2])))
