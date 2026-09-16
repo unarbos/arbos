@@ -3229,6 +3229,18 @@ impl ChatSession {
                 !matches!(item, ChatItem::Notice { text: t, failed: false } if is_page_nudge(t))
             });
         }
+        // A retry replaces the retry before it: "retrying in 2.4s (attempt
+        // 4/5)" is the same story one step on, and five copies with the
+        // URL in each was Jacob's first screen on a new project (F-76).
+        if is_retry_line(text)
+            && let Some(ChatItem::Notice { text: t, failed: f }) = self.items.last_mut()
+            && is_retry_line(t)
+        {
+            *t = text.to_string();
+            *f = failed;
+            self.updated = SystemTime::now();
+            return;
+        }
         // The same words twice in a row (a turn that failed the same way
         // again) read once; Cursor never stacks identical lines.
         if matches!(self.items.last(), Some(ChatItem::Notice { text: t, failed: f }) if t == text && *f == failed)
@@ -3694,6 +3706,11 @@ fn pump(
 /// after a worker started or reported.
 pub fn is_page_nudge(text: &str) -> bool {
     text.trim_start().starts_with("project page not updated")
+}
+
+/// The kernel's "… — retrying in 2.4s (attempt 4/5)" line.
+pub fn is_retry_line(text: &str) -> bool {
+    text.contains("retrying in") && text.contains("(attempt ")
 }
 
 /// An inbox node the user put there — a follow-up typed while the turn

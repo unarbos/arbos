@@ -1466,6 +1466,16 @@ fn dedupe_replay(items: &mut Vec<crate::model::session::ChatItem>, own: &str) {
             }
         }
     }
+    // A retry line replaces the retry before it, as the live session does.
+    for ix in 1..items.len() {
+        if let (ChatItem::Notice { text: prev, .. }, ChatItem::Notice { text: next, .. }) =
+            (&items[ix - 1], &items[ix])
+            && crate::model::session::is_retry_line(prev)
+            && crate::model::session::is_retry_line(next)
+        {
+            drop[ix - 1] = true;
+        }
+    }
     let mut ix = 0;
     items.retain(|_| {
         let keep = !drop[ix];
