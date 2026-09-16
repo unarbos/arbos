@@ -978,10 +978,18 @@ fn handle_frame(
                 .last()
                 .map(|n| n.id)
                 .unwrap_or(0);
+            let before = arbos_core::notify::seen_through(place);
             match arbos_core::notify::mark_seen(place, through.min(newest)) {
                 Ok(now) => {
-                    hooks.broadcast(Frame::Seen { through: now });
                     let unseen = arbos_core::notify::unseen(place).len() as u64;
+                    klog::info(
+                        "seen_marked",
+                        None,
+                        format!(
+                            "through={through} newest={newest} was={before} now={now} unseen_left={unseen}"
+                        ),
+                    );
+                    hooks.broadcast(Frame::Seen { through: now });
                     hooks.tell_hub(|project| arbos_core::hub::HubFrame::Seen {
                         project,
                         through: now,
@@ -1893,7 +1901,24 @@ pub async fn serve_client(
             );
             // What the user missed while no client was attached: the
             // unseen notifications, oldest first, marked as replayed.
-            for n in arbos_core::notify::unseen(&accept_place) {
+            // Logged with the count and the range, so "no badge after
+            // reopening" can be told apart from a client clearing it
+            // (qal-j03): this line says the kernel sent them; a
+            // `seen_marked` line after it says a client cleared them.
+            let unseen = arbos_core::notify::unseen(&accept_place);
+            klog::info(
+                "notify_replayed",
+                None,
+                format!(
+                    "who={} count={} ids={}..{} seen_through={}",
+                    who.name,
+                    unseen.len(),
+                    unseen.first().map(|n| n.id).unwrap_or(0),
+                    unseen.last().map(|n| n.id).unwrap_or(0),
+                    arbos_core::notify::seen_through(&accept_place)
+                ),
+            );
+            for n in unseen {
                 let _ = out_tx.send(Frame::Notify {
                     id: n.id,
                     ts: n.ts,
