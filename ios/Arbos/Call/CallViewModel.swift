@@ -76,7 +76,7 @@ final class CallViewModel: ObservableObject {
     private let audio = AudioEngine()
     private var subscription: UUID?
     private var busyWatch: AnyCancellable?
-    private var server = VoiceServerInfo()
+    private(set) var server = VoiceServerInfo()
     /// The speech side finished sending the reply; playback may still be
     /// draining.
     private var responseDone = true
