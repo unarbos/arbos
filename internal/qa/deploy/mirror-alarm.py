@@ -33,9 +33,15 @@ def main():
     missing = sorted(set(branch_docs) - set(store_docs or [])) if store_docs is not None else branch_docs
     line = {"ts": stamp, "exit": rc, "store_docs": None if store_docs is None else len(store_docs), "branch_docs": len(branch_docs), "missing_in_store": missing[:40], "notes_md": os.path.isfile(f"{STORE}/notes.md")}
     restore_dir = ""
-    if rc == 2 and branch_docs and (store_docs is None or len(missing) > 0):
+    if rc == 3:
+        line["note"] = "internal/mirror-docs.sh is gone from the store; the branch carries a copy (git show origin/store-docs:mirror-docs.sh)"
+    if rc in (2, 3) and branch_docs and (store_docs is None or len(missing) > 0 or rc == 3):
         restore_dir = os.path.join(os.path.dirname(loop.rstrip("/")), "state", f"store-docs-restore-{stamp}")
-        r = subprocess.run(["bash", script, "restore", restore_dir], capture_output=True, text=True, timeout=120, env={**os.environ, "REPO": repo})
+        tool = script if os.path.exists(script) else "/tmp/mirror-docs-from-branch.sh"
+        if not os.path.exists(script):
+            with open(tool, "w") as f:
+                f.write(subprocess.run(["git", "-C", repo, "show", "origin/store-docs:mirror-docs.sh"], capture_output=True, text=True, timeout=30).stdout)
+        r = subprocess.run(["bash", tool, "restore", restore_dir], capture_output=True, text=True, timeout=300, env={**os.environ, "REPO": repo})
         line["restore"] = {"dir": restore_dir, "rc": r.returncode, "log": (r.stderr or r.stdout)[-200:]}
     os.makedirs(loop, exist_ok=True)
     with open(os.path.join(loop, "store-mirror-history.jsonl"), "a") as f:

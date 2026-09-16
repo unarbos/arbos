@@ -19,6 +19,33 @@ qa_paused() {
   return 1
 }
 if qa_paused; then exit 0; fi
+# Mirror the store (docs/, notes.md, internal/ within the boundary in internal/store-docs-mirror.md
+# and the branch README) to the orphan branch store-docs. Pushes only on change; safe to run
+# concurrently. A non-zero exit is a finding, not a nuisance: the script refuses to push when the
+# store looks damaged, so a refusal means the store has faulted again or a document was deleted.
+# mirror-alarm.py records it, names what is missing against the branch, stages a restore under
+# state/ (never into the store), and drafts a bug. Run at the start and the end of every cycle, so
+# the window between a write and its copy is under an hour — two losses in five hours on 2026-09-16.
+mirror_store() {
+  local when="$1" MIRROR mrc
+  MIRROR="${ARBOS_QA_STORE_ROOT:-/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983}/internal/mirror-docs.sh"
+  if [ -f "$MIRROR" ]; then
+    set +e
+    REPO="$ROOT/repo" timeout 10m bash "$MIRROR"
+    mrc=$?
+    set -e
+    if [ "$mrc" -ne 0 ]; then
+      echo "-- mirror-docs ($when): exit $mrc (a refusal is an alarm)"
+      python3 "$ROOT/deploy/mirror-alarm.py" "$ROOT/loop" "$mrc" "$MIRROR" "$ROOT/repo" || echo "-- mirror-alarm failed"
+    fi
+  else
+    echo "-- mirror-docs ($when): store not mounted here or the script is gone; skipped"
+    [ -d "${ARBOS_QA_STORE_ROOT:-/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983}/internal" ] && python3 "$ROOT/deploy/mirror-alarm.py" "$ROOT/loop" 3 "$MIRROR" "$ROOT/repo" || true
+  fi
+}
+
+# 0. Mirror the store first: the tightest window for whatever was written since the last cycle.
+mirror_store start
 BUDGET_USD="${ARBOS_QA_BUDGET_USD:-10}"
 JOBS="${ARBOS_QA_BUILD_JOBS:-8}"
 LOG="$ROOT/logs/cycle-$(date -u +%Y%m%dT%H%M%SZ).log"
@@ -233,23 +260,6 @@ EOF
 # 5. publish
 "$ROOT/deploy/publish.sh" push || echo "-- publish failed (kept locally)"
 
-# 6. Mirror the store's docs/ to the orphan branch store-docs (internal/store-docs-mirror.md).
-# Pushes only on change; safe to run concurrently. A non-zero exit is a finding, not a nuisance:
-# the script refuses to push when the store looks damaged, so a refusal means the store has
-# faulted again or a document was deleted. mirror-alarm.py records it, names what is missing
-# against the branch, stages a restore under state/ (never into the store), and drafts a bug —
-# the alarm there was not at 07:43 UTC on 2026-09-16.
-MIRROR="${ARBOS_QA_STORE_ROOT:-/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983}/internal/mirror-docs.sh"
-if [ -f "$MIRROR" ]; then
-  set +e
-  REPO="$ROOT/repo" bash "$MIRROR"
-  mrc=$?
-  set -e
-  if [ "$mrc" -ne 0 ]; then
-    echo "-- mirror-docs: exit $mrc (a refusal is an alarm)"
-    python3 "$ROOT/deploy/mirror-alarm.py" "$ROOT/loop" "$mrc" "$MIRROR" "$ROOT/repo" || echo "-- mirror-alarm failed"
-  fi
-else
-  echo "-- mirror-docs: store not mounted here; skipped"
-fi
+# 6. Mirror the store again at the end of the cycle.
+mirror_store end
 echo "== cycle end $(date -u +%FT%TZ)"
