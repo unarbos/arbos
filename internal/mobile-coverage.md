@@ -20,7 +20,7 @@ What the loop has exercised and when, so nothing goes long untested. One row per
 | project chat — long history, scroll, older lines | 6 | simulator, `longproj` (450 lines), kernel #272 | opens at the tail; "Show N earlier lines" pages 200 back and holds the place (iOS 18+) — **due** |
 | project chat — several workers at once, archived children | 7 | simulator, `subnet120` | finished children in the sheet, kept across a reopen (M-68); older-kernel spawn names (M-67) — **due** |
 | call — voice first, orb, colours | journey ×3 (connect 0.28–0.45 s; kernel-answered first audio 5.8–6.8 s on the pod today, was 2.9 s) | simulator, injected clips, gateway PR #56 | kernel-answered first audio 2.93 s, small talk 0.70 s |
-| call — pulled down: type, mute, close, `+` | 10 | simulator | `+` live (M-79); photo path on the call to re-check once the prompt harness is fixed (M-80) |
+| call — pulled down: type, mute, close, `+` | 33 | simulator | without an injected clip the simulator has no microphone: the orb goes red with "No microphone input." and the project's name under it; pull-down shows the composer ("Type to pod"), mic and close; close returns to the chat (`media/mobile/cycle-33/01-`). Typing on the call not re-exercised (the harness missed the field — it sits at x 187–279 pt); last verified cycle 10 |
 | call — barge-in | 12 | simulator | **401/404 ms** (M-85); AirPods leg needs Jacob |
 | call — AirPods / speaker route, screen off, CallKit | — | needs the phone | **never checked**; Jacob's phone |
 | attachments (`+`), photos, files | 14 (`phone`: photo drawn on the card, model saw it), journey ×3 (`demo`: bytes lost on ArbosLife, JB-2) | simulator, library photo, kernel #270 + rebuilt hub | a 1.5 MB photo landed and reached the model; an older kernel's refusal now reads plainly (F10) — **due** for a live re-check |
@@ -35,4 +35,4 @@ What the loop has exercised and when, so nothing goes long untested. One row per
 | style pair vs Cursor stills | 2 (list, chat), 3 (call vs GPT), 4 (list), 5 (chat, four workers), 6 (composer with a chip), 7 (list search) | 17 (chat), 18 (list), 21 (call vs GPT: `media/mobile/cycle-21/01-`) | pairs in `media/mobile/cycle-N/` | next: composer with a photo chip |
 | recording | 1, 3, 6, 10, 13, 16, 28 (the photo landing and the scoped call answering from `demo`, 66 s, `media/mobile/cycle-28/recording-photo-and-scoped-call-66s.mp4`) | mp4 | next due cycle 31 |
 
-**Journey runs** (`internal/mobile-journey-runs.md`): 22 so far — 3 on `demo` (old numbering; JB-1…3 named), 3 on `pod` on QA's ids (run 4 a floundering root, runs 5–6 clean apart from the U steps). Next: `arboslife/demo` on QA's ids once its kernel is updated.
+**Journey runs** (`internal/mobile-journey-runs.md`): 23 so far — 3 on `demo` (old numbering; JB-1…3 named), 3 on `pod` on QA's ids (run 4 a floundering root, runs 5–6 clean apart from the U steps). Next: `arboslife/demo` on QA's ids once its kernel is updated.

@@ -54,7 +54,7 @@ One row per app area. "Last" is the last cycle that looked at it side by side (o
 | area | last | how | due? |
 | --- | --- | --- | --- |
 | chat: Project style (root) | 13 | p24, p13 steer; every gate | — |
-| chat: classic style (worker) | 12 | pp2/pp4 worker reopen | 15 |
+| chat: classic style (worker) | 22 (F-110 fixed; F-111 open: Files Changed card, "Worked for") | pp2/pp4 worker reopen, `cycle-22/` | — |
 | long-form project (many turns, notes restructure, workers come and go, archived, context re-found, scroll) | 14 (l1–l13), **16 running** (d1–d10, research/docs) | l1–l13, d1–d10 | — |
 | kickoff / new-project landing — the first thirty seconds, refused and silent providers | **16** (f1, f2) | f1/f2 cold, `new-project-kickoff` gate row | every cycle from now |
 | launch, first run, permissions sheet | 12 | gate `launch` phase (Linux rows only) | — |
