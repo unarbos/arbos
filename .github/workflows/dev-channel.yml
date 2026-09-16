@@ -21,10 +21,14 @@ name: dev channel
 # payload.
 #
 # ── safe to re-run ───────────────────────────────────────────────────────────
-# Re-running publishes the same version and build again: the feed entry for
-# that pair is replaced rather than added, the assets are uploaded with
-# --clobber, and the rolling release is created only if it is missing. Running
-# it twice leaves exactly what running it once leaves.
+# Re-running *the same commit* publishes the same version and build again: the
+# feed entry for that pair is replaced rather than added, the assets are
+# uploaded with --clobber, and the rolling release is created only if it is
+# missing. Running it twice leaves exactly what running it once leaves.
+#
+# A *different* commit is a different build, and does not replace the one
+# before it — see KEEP_BUILDS below. The two are easy to read as one promise
+# and they are not the same promise, which is why this says so twice.
 #
 # ── not fighting the steward ─────────────────────────────────────────────────
 # The release steward merges to `main` on an hourly pass, so several commits
@@ -85,6 +89,20 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   TAG: dev
+  # How many builds the dev channel keeps — in the feed, and as payloads on
+  # the tag. One number, read by both the step that writes the feed and the
+  # step that prunes the tag, so they cannot disagree about it.
+  #
+  # Three rather than one. The updater only ever wants the newest, so the
+  # older two are not there for it — they are there for the morning a bad
+  # build goes out and somebody needs the one before it. A rollback is
+  # downloading that zip and unpacking it over the app, and that is only
+  # possible if the zip still exists.
+  #
+  # Three rather than ten, which is what this was. Ten is about 570 MB of
+  # payloads for two builds' worth of actual use, on a channel that publishes
+  # on every merge.
+  KEEP_BUILDS: "3"
   # The iPhone app is not a payload — TestFlight installs it, and this only
   # says where. One URL per app rather than per build, so every release in the
   # feed carries the same link and the newest build behind it is whatever the
@@ -277,7 +295,7 @@ jobs:
             --notes-file dist/notes.txt \
             --notes-url "https://github.com/${{ github.repository }}/commit/${{ needs.plan.outputs.sha }}" \
             --minimum-system-version "${{ needs.plan.outputs.minimum }}" \
-            --keep 10 \
+            --keep "$KEEP_BUILDS" \
             --artifact "macos/arm64=$mac" \
             --artifact "linux/x86_64=$linux" \
             --link "ios:testflight=$IOS_TESTFLIGHT_URL"
@@ -315,8 +333,10 @@ jobs:
           } > dist/release-notes.md
           gh release edit "$TAG" --notes-file dist/release-notes.md
           rm -f dist/release-notes.md
-          # Drop the payloads no release in the feed points at any more, so the
-          # pre-release does not grow a payload per commit forever.
+          # Drop the payloads no release in the feed still points at. The feed
+          # was just truncated to KEEP_BUILDS, so this is what makes the tag
+          # agree with it — otherwise the pre-release grows a payload per
+          # merge and never sheds one.
           keep="$(jq -r '.releases[].downloads[].url | split("/") | last' dist/arbos-dev.json | sort -u)"
           gh release view "$TAG" --json assets -q '.assets[].name' | while read -r name; do
             case "$name" in
