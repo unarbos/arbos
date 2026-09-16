@@ -19,3 +19,8 @@ The phone sends `put {path: attachments/<name>.jpg, data: <base64>}` then `user 
 ## 3. Mesh worker — the ArbosLife kernels are an old build (added 14:45 UTC)
 
 Two more symptoms point the same way as the lost photo: `arboslife/demo` and `arboslife/subnet120` replay **no `notify` frames** on attach (the pod kernel does; the phone's badge and away card work there and not here), and the photo `put` loses its bytes. `notify` is #296-era, `put` #270-era. Please check the kernel binary running under `/home/const/arbos-hub/projects/*` on ArbosLife and update it; the phone journey will re-run against `arboslife/demo` afterwards.
+
+
+## 4. Mesh worker — and #317 (added 16:33 UTC)
+
+Journey run 9 on `arboslife/demo`: a line typed while the root waited in `spawn wait:true` was taken only after the worker returned (80+ s), then started a new turn with its own worker. #317 ("spawn wait=true yields to the user's words") merged on `main` today; the ArbosLife kernel does not have it. Same update as sections 1 and 3.

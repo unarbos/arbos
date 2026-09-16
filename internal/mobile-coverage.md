@@ -15,7 +15,7 @@ What the loop has exercised and when, so nothing goes long untested. One row per
 | projects list — search, filter, refresh | 7 | simulator, pod hub | search filters as typed; filter menu (All / Live only); pull-to-refresh keeps the rows — **due** |
 | list composer → names its project, rides above the keyboard | 11 | simulator | placeholder "Message demo…" (F1); bottom inset above the keyboard (F2) |
 | project chat — send, prompt card, streaming, Worked line | 13 | simulator, `demo` | a 20-line reply streamed 14 s; the view held where the reader scrolled (F12, recorded); "Sending…" → "demo is not answering — waiting" at 10 s (M-81) |
-| project chat — worker lines, Working pill, workers sheet | journey ×3 (two spawns each run; remote worker wording F15) | simulator, `demo` | "Agents 3" pill → sheet lists three finished workers |
+| project chat — worker lines, Working pill, workers sheet | 18 (M-100 fixed: Done means done on old-kernel spawns), journey ×9 | simulator, `demo` | "Agents 3" pill → sheet lists three finished workers |
 | worker chat — open from line / sheet, back | 13 | simulator, `demo` | opens; still "Nothing on record yet" for a remote worker (M-27, kernel — still open) |
 | project chat — long history, scroll, older lines | 6 | simulator, `longproj` (450 lines), kernel #272 | opens at the tail; "Show N earlier lines" pages 200 back and holds the place (iOS 18+) — **due** |
 | project chat — several workers at once, archived children | 7 | simulator, `subnet120` | finished children in the sheet, kept across a reopen (M-68); older-kernel spawn names (M-67) — **due** |
@@ -32,7 +32,7 @@ What the loop has exercised and when, so nothing goes long untested. One row per
 | network drop → reconnect | journey J8c ×4 (25 s cut mid-turn: calm line, turn resumes), 16 (roster retry) | simulator | one calm line; pending lines never cross projects (M-82, proven both ways); a project opened while down says "Opening…" then "not answering — waiting" (M-83, verified) |
 | cold start | 13 | simulator | lands on the list, four rows, 6 s |
 | TestFlight build on Jacob's phone | 956 (13 reports), 994 (fixes for F1–F6) | TestFlight | F7/F8 open until he confirms; F9–F13 land with #309 |
-| style pair vs Cursor stills | 2 (list, chat), 3 (call vs GPT), 4 (list), 5 (chat, four workers), 6 (composer with a chip), 7 (list search) | 17 (chat: `media/mobile/cycle-17/01-`) | pairs in `media/mobile/cycle-N/` | list pair next |
+| style pair vs Cursor stills | 2 (list, chat), 3 (call vs GPT), 4 (list), 5 (chat, four workers), 6 (composer with a chip), 7 (list search) | 17 (chat), 18 (list: `media/mobile/cycle-18/03-`) | pairs in `media/mobile/cycle-N/` | call pair next |
 | recording | 1, 3, 6, 10 (call), 13 (stream while scrolled up), 16 (journey run 7: the challenge and a worker appearing, 2 min, `media/mobile/journey/0916-152618/recording-challenge-workers.mp4`) | mp4 | next due cycle 19 |
 
-**Journey runs** (`internal/mobile-journey-runs.md`): 8 so far — 3 on `demo` (old numbering; JB-1…3 named), 3 on `pod` on QA's ids (run 4 a floundering root, runs 5–6 clean apart from the U steps). Next: `arboslife/demo` on QA's ids once its kernel is updated.
+**Journey runs** (`internal/mobile-journey-runs.md`): 9 so far — 3 on `demo` (old numbering; JB-1…3 named), 3 on `pod` on QA's ids (run 4 a floundering root, runs 5–6 clean apart from the U steps). Next: `arboslife/demo` on QA's ids once its kernel is updated.
