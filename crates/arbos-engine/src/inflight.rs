@@ -49,6 +49,28 @@ pub fn end(place: &Place, agent: &AgentId, call_id: &str) {
     let _ = std::fs::remove_file(file(place, agent, call_id));
 }
 
+/// The call is waiting for the user's allow/deny: a sibling marker, so a
+/// kernel that dies now writes the call up as never run, not as one that
+/// may have completed.
+pub fn waiting_for_approval(place: &Place, agent: &AgentId, call_id: &str) {
+    let _ = std::fs::write(approval_marker(place, agent, call_id), b"");
+}
+
+pub fn approval_settled(place: &Place, agent: &AgentId, call_id: &str) {
+    let _ = std::fs::remove_file(approval_marker(place, agent, call_id));
+}
+
+fn approval_marker(place: &Place, agent: &AgentId, call_id: &str) -> PathBuf {
+    let mut p = file(place, agent, call_id);
+    p.set_extension("approval");
+    p
+}
+
+/// Whether the call was waiting for the user when the kernel died.
+fn was_waiting_for_approval(place: &Place, agent: &AgentId, call_id: &str) -> bool {
+    approval_marker(place, agent, call_id).exists()
+}
+
 /// What was running when the last kernel died: every record, oldest
 /// first, and the files gone.
 pub fn take(place: &Place, agent: &AgentId) -> Vec<ToolRec> {
@@ -58,10 +80,19 @@ pub fn take(place: &Place, agent: &AgentId) -> Vec<ToolRec> {
     };
     let mut recs: Vec<ToolRec> = rd
         .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| {
             let text = std::fs::read(e.path()).ok()?;
+            let mut rec = serde_json::from_slice::<ToolRec>(&text).ok()?;
+            if was_waiting_for_approval(place, agent, &rec.call_id) {
+                // Carried on the record for `cut_record`: the body says
+                // it never ran.
+                rec.result_size = Some(0);
+                rec.error = Some(WAITING.into());
+            }
             let _ = std::fs::remove_file(e.path());
-            serde_json::from_slice::<ToolRec>(&text).ok()
+            let _ = std::fs::remove_file(approval_marker(place, agent, &rec.call_id));
+            Some(rec)
         })
         .collect();
     recs.sort_by_key(|r| r.started.unwrap_or(0));
@@ -69,10 +100,35 @@ pub fn take(place: &Place, agent: &AgentId) -> Vec<ToolRec> {
     recs
 }
 
+/// Marker `take` sets on a record that was waiting for approval.
+const WAITING: &str = "waiting for approval";
+
 /// The `tool` line the next kernel writes for a call it found cut: the
 /// same call (name, args, call id, when it started) with the result the
 /// model reads instead of an output.
 pub fn cut_record(mut rec: ToolRec, now_ms: i64) -> ToolRec {
+    if rec.error.as_deref() == Some(WAITING) {
+        let what = rec
+            .args
+            .as_ref()
+            .and_then(|a| {
+                a.get("command")
+                    .or_else(|| a.get("path"))
+                    .or_else(|| a.get("task"))
+            })
+            .and_then(|v| v.as_str())
+            .map(|s| format!(" ({})", arbos_core::text::clip(s, 120)))
+            .unwrap_or_default();
+        rec.ended = Some(now_ms);
+        rec.error = Some(
+            "not run: the kernel restarted while this waited for the user's allow/deny".into(),
+        );
+        rec.body = Some(format!(
+            "[kernel] this {} call{what} was waiting for the user to allow or deny it when the kernel restarted; it never ran, and the question is gone with the turn. Nothing changed. If the user still wants it, call it again and they will be asked afresh.",
+            rec.name
+        ));
+        return rec.with_output();
+    }
     let ran_for = rec
         .started
         .map(|s| ((now_ms - s).max(0) / 1000).to_string() + "s")
