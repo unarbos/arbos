@@ -28,6 +28,7 @@ final class LiveKernelChat: ChatSource {
     private var touched: Set<String> = []
     private var history: [ChatItem] = []
     private var replaying = true
+    private var putsInFlight = 0
     /// A reply is being streamed; the next `assistant` event is its final
     /// text, not a new message.
     private var streamed = false
@@ -65,9 +66,15 @@ final class LiveKernelChat: ChatSource {
         for file in attachments {
             let path = "attachments/\(file.storedName)"
             try client.put(path: path, data: file.data)
+            putsInFlight += 1
             paths.append(path)
         }
         try client.send(text: text, steer: steer, attachments: paths)
+        // A kernel that took the files says nothing; a refusal comes at once.
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            self?.putsInFlight = 0
+        }
     }
 
     func stop() {
@@ -173,7 +180,13 @@ final class LiveKernelChat: ChatSource {
         case .thinkingDelta:
             break
         case .error(let detail):
-            stream?.yield(.item(ChatItem(.notice(detail, failed: true))))
+            if putsInFlight > 0, detail.contains("unknown frame") {
+                // This kernel predates `put`: the words went, the files did not.
+                putsInFlight = 0
+                stream?.yield(.item(ChatItem(.notice("This kernel can't take files yet — the words went through.", failed: true))))
+            } else {
+                stream?.yield(.item(ChatItem(.notice(detail, failed: true))))
+            }
         case .other(let type):
             if type == "closed" { stream?.yield(.dropped("kernel closed")) }
         }

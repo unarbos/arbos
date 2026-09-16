@@ -211,6 +211,9 @@ struct ProjectChatView: View {
             .onChange(of: chat.items) { _, _ in
                 withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
             }
+            .onChange(of: composerHeight) { _, _ in
+                proxy.scrollTo("tail", anchor: .bottom)
+            }
             .onChange(of: chat.earlierLines) { _, _ in
                 // A long replay lands in one go; the layout settles a beat later.
                 Task { @MainActor in
