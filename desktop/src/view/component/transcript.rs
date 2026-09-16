@@ -4029,20 +4029,24 @@ fn zone(
     // the turn still runs — a long model call with nothing streaming, a
     // job in flight — an interim reply already has words, and the footer
     // under them read as "done" next to a live Stop button.
-    // Always shown, faint, as Cursor's are: copy, then fork — under the
-    // worker lines, the last thing in the turn.
-    let footer_row = (!running && footer)
-        .then(|| turn_answer(&chat.items, turn))
-        .flatten()
-        .map(|answer| turn_footer(chat, first, answer, &theme, cx));
+    // The worker lines after the prose, then the footer — copy, fork,
+    // thumbs, "2m ago" — the last thing in the turn. All inside the
+    // answer's hover group: fork and rewind show while the pointer is over
+    // the answer, and an element outside the group can never be revealed
+    // (the fork went dead for an hour when the footer sat outside, F-95).
+    if let Some((lines, _)) = workers {
+        has_tail = true;
+        tail = tail.child(lines);
+    }
+    if !running
+        && footer
+        && let Some(answer) = turn_answer(&chat.items, turn)
+    {
+        has_tail = true;
+        tail = tail.child(turn_footer(chat, first, answer, &theme, cx));
+    }
     if has_tail {
         zone = zone.child(tail);
-    }
-    if let Some((lines, _)) = workers {
-        zone = zone.child(lines);
-    }
-    if let Some(footer_row) = footer_row {
-        zone = zone.child(footer_row);
     }
     // Web WorkingIndicator: a sent prompt must not sit in silence. The
     // line is there the same frame the user message lands — before the
