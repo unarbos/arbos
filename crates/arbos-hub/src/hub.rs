@@ -399,6 +399,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
             },
         )
         .await;
+        let _ = ws.close(None).await;
         return;
     };
     let first = tokio::time::timeout(FIRST_FRAME, next_text(&mut ws))
@@ -430,6 +431,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
             },
         )
         .await;
+        let _ = ws.close(None).await;
         return;
     };
     if !machine.eq_ignore_ascii_case(&token_machine) {
@@ -440,6 +442,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
             },
         )
         .await;
+        let _ = ws.close(None).await;
         return;
     }
     if protocol > arbos_core::hub::HUB_PROTOCOL {
@@ -457,6 +460,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
             },
         )
         .await;
+        let _ = ws.close(None).await;
         return;
     }
     let (to_socket, mut from_hub) = mpsc::unbounded_channel::<HubFrame>();
@@ -720,6 +724,7 @@ pub async fn attach(
             },
         )
         .await;
+        let _ = ws.close(None).await;
         return;
     }
     proxy(Arc::clone(&hub), ws, who, kernel, &access).await;
@@ -832,6 +837,7 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
             },
         )
         .await;
+        let _ = ws.close(None).await;
         return;
     }
     let first = tokio::time::timeout(FIRST_FRAME, next_text(&mut ws))
@@ -852,6 +858,7 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
             },
         )
         .await;
+        let _ = ws.close(None).await;
         return;
     };
     let worker = match hub.worker(machine) {
@@ -903,6 +910,7 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
             },
         )
         .await;
+        let _ = ws.close(None).await;
         return;
     }
     let answer = match tokio::time::timeout(CLAIM_WAIT, rx).await {
@@ -963,6 +971,7 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
             },
         )
         .await;
+        let _ = ws.close(None).await;
         return;
     };
     if !send_json(&mut ws, &answer).await {
