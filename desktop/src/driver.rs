@@ -1173,6 +1173,8 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         "parent": chat.parent,
         "readonly": chat.readonly,
         "agent_kind": chat.agent_kind,
+        "unseen": chat.unseen.len(),
+        "seen_through": chat.seen_through,
         "draft": chat.draft,
         "queued": chat.queue.len(),
         "held": chat.plan_queued(),

@@ -11,6 +11,7 @@ pub mod kernel;
 pub mod markup;
 pub mod memory;
 pub mod model;
+pub mod notify_os;
 pub mod permissions;
 pub mod reading;
 pub mod update;

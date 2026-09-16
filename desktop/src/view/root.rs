@@ -612,6 +612,10 @@ pub struct Call {
 
 pub struct Arbos {
     pub(crate) workspace: Entity<Workspace>,
+    /// Whether this window is the active one on the desktop: a kernel
+    /// notification for a chat the person is looking at is seen at once;
+    /// one for a chat they are not goes to the OS as a notification.
+    pub(crate) window_active: bool,
     /// The open session menu was opened from the chat header's `⋯`, so it
     /// anchors there rather than at a panel row.
     pub(crate) menu_at_header: bool,
@@ -873,6 +877,7 @@ impl Arbos {
         // read back from it rather than pushed by whoever caused the change.
         cx.observe(&workspace, |this, _, cx| {
             this.sync_composer(cx);
+            this.reap_notifications(cx);
             cx.notify();
         })
         .detach();
@@ -913,6 +918,7 @@ impl Arbos {
             workspace,
             terminals: Default::default(),
             active_terminal: None,
+            window_active: true,
             panel_open: true,
             archived_open: false,
             working_card_closed: None,
@@ -972,9 +978,12 @@ impl Arbos {
         // catching, so every project is re-read on the way in — see
         // [`Workspace::reload_projects`].
         cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() {
+            this.window_active = window.is_window_active();
+            if this.window_active {
                 this.workspace
                     .update(cx, |workspace, cx| workspace.reload_projects(cx));
+                // Coming back to the window is looking at its chat.
+                this.reap_notifications(cx);
             } else {
                 this.flush_composer_draft(cx);
             }
@@ -1351,6 +1360,39 @@ impl Arbos {
         cx: &mut Context<Self>,
     ) {
         self.open_settings(Section::General, cx);
+    }
+
+    /// Kernel notifications (#293), sorted the way Cursor sorts them: one
+    /// for the chat the person is looking at, in a focused window, is seen
+    /// the moment it arrives (`seen` goes to the kernel, every client's
+    /// badge drops); any other — window unfocused, another project's tab,
+    /// another chat of this project — becomes an OS notification and stays
+    /// on the tab's badge until that chat is opened.
+    pub(crate) fn reap_notifications(&mut self, cx: &mut Context<Self>) {
+        let window_active = self.window_active;
+        let mut post: Vec<(String, String)> = Vec::new();
+        self.workspace.update(cx, |workspace, _| {
+            let active = workspace.active_id();
+            let active_ix = workspace.active;
+            for (ix, project) in workspace.projects.iter_mut().enumerate() {
+                for chat in &mut project.sessions {
+                    let looking =
+                        window_active && Some(ix) == active_ix && Some(chat.id) == active;
+                    if looking {
+                        if !chat.unseen.is_empty() {
+                            chat.mark_seen();
+                        }
+                        continue;
+                    }
+                    for note in chat.to_notify.drain(..) {
+                        post.push((note.title, note.body));
+                    }
+                }
+            }
+        });
+        for (title, body) in post {
+            crate::notify_os::post(&title, &body);
+        }
     }
 
     pub(crate) fn attach_paths_action(

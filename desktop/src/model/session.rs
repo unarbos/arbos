@@ -527,6 +527,15 @@ pub struct ChatSession {
     /// This chat's sub-agents as the transcript and the task rail show
     /// them. Runtime only: the workspace refreshes it before each draw.
     pub children: Vec<ChildSummary>,
+    /// The kernel's notifications for this agent the user has not seen
+    /// (#293): a reply, a question, a failure, a notice. The tab's badge
+    /// counts them; opening the chat sends `seen` and empties this.
+    pub unseen: Vec<Notification>,
+    /// The highest notification id any client has seen.
+    pub seen_through: u64,
+    /// Live notifications not yet offered to the OS: the window decides
+    /// (unfocused, or another project's tab) and drains this.
+    pub to_notify: Vec<Notification>,
     /// This worker cannot write (`readonly: true` on its `agent.md`): the
     /// glyph after its name in the worker line and the roster.
     pub readonly: bool,
@@ -682,6 +691,9 @@ impl ChatSession {
             kickoff_secs: None,
             readonly: false,
             agent_kind: None,
+            unseen: Vec::new(),
+            seen_through: 0,
+            to_notify: Vec::new(),
             kickoff_wanted: false,
             status: None,
             turn_open: false,
@@ -765,6 +777,9 @@ impl ChatSession {
             kickoff_secs: None,
             readonly: false,
             agent_kind: None,
+            unseen: Vec::new(),
+            seen_through: 0,
+            to_notify: Vec::new(),
             kickoff_wanted: false,
             status: None,
             turn_open: false,
@@ -848,6 +863,9 @@ impl ChatSession {
             kickoff_secs: None,
             readonly: false,
             agent_kind: None,
+            unseen: Vec::new(),
+            seen_through: 0,
+            to_notify: Vec::new(),
             kickoff_wanted: false,
             status: None,
             turn_open: false,
@@ -1319,6 +1337,17 @@ pub enum ChildState {
 }
 
 /// One sub-agent, as its parent shows it.
+/// One kernel notification (#293).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notification {
+    pub id: u64,
+    pub ts: i64,
+    /// `reply`, `ask`, `error`, `notice`.
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildSummary {
     pub id: u64,
@@ -1678,6 +1707,21 @@ impl ChatSession {
         self.updated = SystemTime::now();
         self.streaming = true;
         self.take_title_from_first_prompt();
+        self.flush();
+    }
+
+    /// The user is looking at this chat: every notification held for it is
+    /// seen, here and on every other client.
+    pub fn mark_seen(&mut self) {
+        let Some(through) = self.unseen.iter().map(|n| n.id).max() else {
+            return;
+        };
+        if let Connection::Live(session) = &self.connection {
+            let _ = session.seen(through);
+        }
+        self.seen_through = self.seen_through.max(through);
+        self.unseen.clear();
+        self.to_notify.clear();
         self.flush();
     }
 
@@ -2648,6 +2692,36 @@ impl ChatSession {
                 {
                     message.described.push(DescribedImage { path, model, text });
                 }
+                self.flush();
+            }
+            Event::Notify {
+                id,
+                ts,
+                kind,
+                title,
+                body,
+                replayed,
+            } => {
+                if id <= self.seen_through || self.unseen.iter().any(|n| n.id == id) {
+                    return;
+                }
+                let note = Notification {
+                    id,
+                    ts,
+                    kind,
+                    title,
+                    body,
+                };
+                if !replayed {
+                    self.to_notify.push(note.clone());
+                }
+                self.unseen.push(note);
+                self.flush();
+            }
+            Event::Seen(through) => {
+                self.seen_through = self.seen_through.max(through);
+                self.unseen.retain(|n| n.id > through);
+                self.to_notify.retain(|n| n.id > through);
                 self.flush();
             }
             Event::Refused(detail) => {
