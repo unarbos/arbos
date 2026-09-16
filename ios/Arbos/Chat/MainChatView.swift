@@ -237,6 +237,10 @@ struct ProjectChatView: View {
             .onChange(of: composerHeight) { _, _ in
                 proxy.scrollTo("tail", anchor: .bottom)
             }
+            .onChange(of: chat.mode) { _, _ in
+                // The one line under the transcript changed; keep it in view.
+                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
+            }
             .onChange(of: chat.earlierLines) { _, _ in
                 // A long replay lands in one go; the layout settles a beat later.
                 Task { @MainActor in
