@@ -6,6 +6,7 @@ pub mod chatdoor;
 pub mod check;
 pub mod cli;
 pub mod doors;
+pub mod feedback;
 pub mod files;
 pub mod github;
 pub mod grep;
