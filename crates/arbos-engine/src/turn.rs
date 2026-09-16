@@ -1113,30 +1113,16 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         if let Some(c) = usage.and_then(|u| u.cost) {
             turn_cost = Some(turn_cost.unwrap_or(0.0) + c);
         }
-        // A money cap, for headless runs: one SWE-bench rollout ran to $14
-        // (16x the median) and ate half a measurement. The turn ends with
-        // the reason on the transcript; the patch so far stays in the tree.
-        let cap = host.config.max_turn_cost();
-        if cap > 0.0 && turn_cost.is_some_and(|c| c > cap) {
-            let spent = turn_cost.unwrap_or(0.0);
-            append_events(
-                &transcript,
-                &[Event::new(EventKind::Notice {
-                    text: format!(
-                        "This turn has spent ${spent:.2} on model calls, over the ${cap:.2} cap (max_turn_cost_usd / ARBOS_MAX_TURN_COST); it ends here. What is in the working tree stays; a new message starts a new budget."
-                    ),
-                    failed: true,
-                })],
-            )?;
-            return end(
-                usage.map(|mut u| {
-                    u.cost = turn_cost;
-                    u.cached = turn_cached;
-                    u
-                }),
-                Some("over the turn's cost cap"),
-            );
-        }
+        // A money cap on one turn: the place's `[spend] turn_cap_usd`, or
+        // the host's knob for headless runs (one SWE-bench rollout ran to
+        // $14, 16x the median, and ate half a measurement). Every agent's
+        // turn runs against it — a worker's as much as the coordinator's;
+        // the place's `cap_usd` guards the total. The step that crossed
+        // it is already paid for and its tools have already run, so it
+        // is written like any other; the turn ends after it, with the
+        // reason on the transcript. What is in the tree stays.
+        let over_cap = arbos_core::spend::effective_turn_cap(&place, host.config.max_turn_cost())
+            .filter(|(cap, _)| turn_cost.is_some_and(|c| c > *cap));
         if let Some(n) = usage.and_then(|u| u.cached) {
             turn_cached = Some(turn_cached.unwrap_or(0) + n);
         }
@@ -1365,6 +1351,29 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             }
         }
         if calls.is_empty() {
+            if let Some((cap, where_set)) = over_cap {
+                append_event(
+                    &transcript,
+                    &Event::new(EventKind::Notice {
+                        text: arbos_core::spend::turn_cap_notice(
+                            turn_cost.unwrap_or(0.0),
+                            cap,
+                            where_set,
+                        ),
+                        failed: false,
+                    }),
+                )?;
+                // The notice is the turn's one closing line: a rule the
+                // user set working, not an interruption or a failure.
+                return end(
+                    usage.map(|mut u| {
+                        u.cost = turn_cost;
+                        u.cached = turn_cached;
+                        u
+                    }),
+                    None,
+                );
+            }
             end(
                 usage.map(|mut u| {
                     u.cost = turn_cost;
@@ -1486,6 +1495,27 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             }
         }
         append_events(&transcript, &results)?;
+        if let Some((cap, where_set)) = over_cap {
+            append_event(
+                &transcript,
+                &Event::new(EventKind::Notice {
+                    text: arbos_core::spend::turn_cap_notice(
+                        turn_cost.unwrap_or(0.0),
+                        cap,
+                        where_set,
+                    ),
+                    failed: false,
+                }),
+            )?;
+            return end(
+                usage.map(|mut u| {
+                    u.cost = turn_cost;
+                    u.cached = turn_cached;
+                    u
+                }),
+                None,
+            );
+        }
         events = load_transcript(&transcript)?;
     }
 }

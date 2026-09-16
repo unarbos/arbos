@@ -677,10 +677,13 @@ fn notify_parent_done(hooks: &KernelHooks, agent: &str) {
     // of waking at once to call the stop a failure and spawn nothing
     // (F-96, journey J09).
     let user_stop = outcome.starts_with(USER_STOPPED);
+    let capped = outcome.starts_with(arbos_core::spend::TURN_CAP_PREFIX);
     let status = if ok {
         "ended"
     } else if user_stop {
         "stopped by the user"
+    } else if capped {
+        "stopped at the per-turn cap"
     } else {
         "ended badly"
     };
@@ -736,22 +739,52 @@ fn notify_reply(hooks: &KernelHooks, agent: &str) {
     if turn.iter().any(|e| matches!(e.kind, EventKind::Ask { .. })) {
         return;
     }
-    let reply = turn.iter().rev().find_map(|e| match &e.kind {
-        EventKind::Assistant { text, .. } if !text.trim().is_empty() => Some(text.trim()),
-        _ => None,
-    });
-    let failed = turn.iter().rev().find_map(|e| match &e.kind {
-        EventKind::Notice { text, failed: true } => Some(text.as_str()),
-        _ => None,
+    let reply_at = turn.iter().rposition(
+        |e| matches!(&e.kind, EventKind::Assistant { text, .. } if !text.trim().is_empty()),
+    );
+    let failed_at = turn
+        .iter()
+        .rposition(|e| matches!(&e.kind, EventKind::Notice { failed: true, .. }));
+    let capped_at = turn.iter().rposition(|e| {
+        matches!(&e.kind, EventKind::Notice { text, failed: false } if text.starts_with(arbos_core::spend::TURN_CAP_PREFIX))
     });
     let name = if me.name.is_empty() {
         me.id.to_string()
     } else {
         me.name.clone()
     };
-    match (reply, failed) {
-        (Some(text), _) => hooks.notify(agent, "reply", &format!("{name} replied"), text),
-        (None, Some(why)) => hooks.notify(agent, "error", &format!("{name}: turn failed"), why),
+    let text_of = |i: usize| match &turn[i].kind {
+        EventKind::Assistant { text, .. } => text.trim().to_string(),
+        EventKind::Notice { text, .. } => text.clone(),
+        _ => String::new(),
+    };
+    // A turn that ended on a failure — a cost cap, a provider down — is
+    // told as one, even when it said something earlier: "step one" is
+    // not what the user needs to hear about a turn that stopped on money.
+    // The per-turn cap closing the turn: the rule working, told as a
+    // notice with the numbers and the fix — not a failure.
+    if let Some(c) = capped_at
+        && reply_at.is_none_or(|r| c > r)
+    {
+        hooks.notify(
+            agent,
+            "notice",
+            &format!("{name} stopped at the per-turn cap"),
+            &text_of(c),
+        );
+        return;
+    }
+    match (reply_at, failed_at) {
+        (Some(r), Some(f)) if f > r => hooks.notify(
+            agent,
+            "error",
+            &format!("{name}: turn stopped"),
+            &text_of(f),
+        ),
+        (Some(r), _) => hooks.notify(agent, "reply", &format!("{name} replied"), &text_of(r)),
+        (None, Some(f)) => {
+            hooks.notify(agent, "error", &format!("{name}: turn failed"), &text_of(f))
+        }
         (None, None) => {}
     }
 }
@@ -970,6 +1003,14 @@ pub fn turn_outcome(events: &[Event], lo: u64) -> (String, bool) {
             }
             EventKind::Interrupted { detail } => stopped = Some(detail.clone()),
             EventKind::Notice { text, failed: true } => failed = Some(text.clone()),
+            // The per-turn cap's closing line: a stop the user's own rule
+            // made, carried whole so the parent reads the numbers.
+            EventKind::Notice {
+                text,
+                failed: false,
+            } if text.starts_with(arbos_core::spend::TURN_CAP_PREFIX) => {
+                stopped = Some(text.clone())
+            }
             _ => {}
         }
     }
@@ -977,11 +1018,20 @@ pub fn turn_outcome(events: &[Event], lo: u64) -> (String, bool) {
         // What it had before the stop rides along: a parent that stopped a
         // worker early wants the partial result, not only the reason.
         // The user's own Stop is a pause, not a failure, and reads so.
-        let head = if user_stopped(&why) {
+        let mut head = if user_stopped(&why) {
             USER_STOPPED.to_string()
+        } else if why.starts_with(arbos_core::spend::TURN_CAP_PREFIX) {
+            why.clone()
         } else {
             format!("stopped: {why}")
         };
+        // The kernel's own reason for the stop (a cost cap, with the
+        // numbers and what to change) rides along: the parent reads the
+        // report, not the child's transcript.
+        if let Some(f) = &failed {
+            head.push_str(" — ");
+            head.push_str(&arbos_core::text::clip(f, 300));
+        }
         return (
             if last_text.is_empty() {
                 head

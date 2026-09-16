@@ -64,6 +64,73 @@ pub fn cap_usd(place: &Place) -> Option<f64> {
         .filter(|c| *c > 0.0)
 }
 
+/// The per-turn cap from `project.toml`, if the user set one.
+pub fn turn_cap_usd(place: &Place) -> Option<f64> {
+    crate::project::load(place)
+        .spend
+        .turn_cap_usd
+        .filter(|c| *c > 0.0)
+}
+
+/// The cap one turn runs against: the place's `turn_cap_usd`, the host's
+/// `max_turn_cost_usd` (a harness or machine-wide knob), or the smaller
+/// when both are set. `None` when neither is.
+pub fn effective_turn_cap(place: &Place, host_cap: f64) -> Option<(f64, &'static str)> {
+    let host = (host_cap > 0.0).then_some((
+        host_cap,
+        "max_turn_cost_usd in config.toml (or ARBOS_MAX_TURN_COST)",
+    ));
+    let place_cap =
+        turn_cap_usd(place).map(|c| (c, "turn_cap_usd under [spend] in .arbos/project.toml"));
+    match (place_cap, host) {
+        (Some(p), Some(h)) => Some(if p.0 <= h.0 { p } else { h }),
+        (Some(p), None) => Some(p),
+        (None, Some(h)) => Some(h),
+        (None, None) => None,
+    }
+}
+
+/// How a turn that stopped at the per-turn cap opens its closing line.
+/// A rule the user set working, not a failure: the line is a plain
+/// notice (`failed: false`), the turn's one closing line — no
+/// `interrupted` beside it — and the parent's report and the user's
+/// notification read it by this prefix.
+pub const TURN_CAP_PREFIX: &str = "Stopped at the per-turn cap";
+
+/// What the user reads when a turn ends on its cost cap: the rule
+/// working, the numbers as they are, what stays, and the fix in the same
+/// breath.
+pub fn turn_cap_notice(spent: f64, cap: f64, where_set: &str) -> String {
+    format!(
+        "{TURN_CAP_PREFIX}: this turn spent {} on model calls, over the {} you allow for one turn. What is in the working tree stays. A new message starts a fresh budget; to allow more per turn, raise {where_set}.",
+        money(spent),
+        money(cap)
+    )
+}
+
+/// Dollars with the precision the amount needs: cents when there are
+/// cents, more digits below that, so $0.0038 over a $0.0001 cap never
+/// reads "$0.00 over $0.00".
+pub fn money(usd: f64) -> String {
+    let v = usd.abs();
+    if v == 0.0 || !v.is_finite() {
+        return "$0.00".into();
+    }
+    if v >= 0.01 {
+        return format!("${v:.2}");
+    }
+    // Below a cent: two significant figures, trailing zeros trimmed.
+    let places = ((-v.log10().floor()) as usize + 1).clamp(3, 8);
+    let s = format!("{v:.places$}");
+    let s = s.trim_end_matches('0');
+    let s = if s.ends_with('.') {
+        format!("{s}00")
+    } else {
+        s.to_string()
+    };
+    format!("${s}")
+}
+
 /// Add one turn's cost. Returns the spend after, and which threshold this
 /// turn crossed for the first time: `Some(true)` the cap, `Some(false)`
 /// the warning mark, `None` neither.
@@ -101,7 +168,7 @@ pub fn over_cap(place: &Place) -> bool {
 /// no cap is set.
 pub fn prompt_line(place: &Place) -> String {
     let s = load(place);
-    match cap_usd(place) {
+    let line = match cap_usd(place) {
         Some(cap) => format!(
             "Spend: ${:.2} of the ${cap:.2} cap ({} turns){}\n",
             s.spent_usd,
@@ -117,6 +184,12 @@ pub fn prompt_line(place: &Place) -> String {
             s.spent_usd, s.turns
         ),
         None => String::new(),
+    };
+    match turn_cap_usd(place) {
+        Some(t) => {
+            format!("{line}Each turn may spend up to ${t:.2}; past that it ends with a notice.\n")
+        }
+        None => line,
     }
 }
 
@@ -132,6 +205,27 @@ pub fn refusal(place: &Place) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn money_shows_small_amounts_and_the_notice_reads_as_the_rule_working() {
+        assert_eq!(money(1.2), "$1.20");
+        assert_eq!(money(0.05), "$0.05");
+        assert_eq!(money(0.0038), "$0.0038");
+        assert_eq!(money(0.0001), "$0.0001");
+        assert_eq!(money(0.00001), "$0.00001");
+        assert_eq!(money(0.0), "$0.00");
+        let n = turn_cap_notice(
+            0.00377,
+            0.0001,
+            "turn_cap_usd under [spend] in .arbos/project.toml",
+        );
+        assert!(n.starts_with("Stopped at the per-turn cap: this turn spent $0.0038 on model calls, over the $0.0001 you allow"), "{n}");
+        assert!(n.contains("raise turn_cap_usd under [spend]"), "{n}");
+        assert!(
+            !n.to_ascii_lowercase().contains("error") && !n.to_ascii_lowercase().contains("fail"),
+            "{n}"
+        );
+    }
 
     fn place(tag: &str) -> Place {
         let dir = std::env::temp_dir().join(format!("arbos-spend-{tag}-{}", std::process::id()));
