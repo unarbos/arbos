@@ -64,16 +64,17 @@ One row per app area. "Last" is the last cycle that looked at it side by side (o
 | panel: agents tree, archived row, Project section, Files, Standing | 12 | gate `panel` phase | 15 |
 | settings: every section, ⌘, / Escape / ⌘W, typography stepper, bionic toggle + eyesight check | 13 | gate `settings` phase (`weight-visible`) | — |
 | mode chip, /mode, approval + ask cards per mode | 12 | p9/p10, gate `ask-*` rows | 15 |
-| under-composer pills: repo vs non-repo, Changes, Commit & Push, PRs, Working/Agents | 12 | gate `pills` rows | 15 |
+| under-composer pills: repo vs non-repo, Changes, Commit & Push, PRs, Working/Agents | 20 (F-97 stop disc over workers; Cursor's Working 2 pill in `cycle-20/`) | gate `pills` rows | — |
 | bottom bar (version, Update) | never side by side | Jacob's still `media/mac/update-bar/`; gate has no row | **14** |
-| search (⌘F chat search palette) | 10 | gate `search` row | **14** |
+| search (⌘K chat search palette) | 20 (paired; F-106 open, rebuild next) | gate `search` row | — |
 | themes: light, dark; tint | 11 | cycle-11 `13-light`; gate `appearance-*` | 15 |
 | window sizes: 900×600, panel fold, 1600×1000 | 11 | cycle-11 `14-small-window` | **14** |
 | remote places: install/update/reconnect states, kernel version handling, attachments as bytes | 15 (attachment check on Templar) | remote track scenarios 1–2; 3–4 open | 16 |
 | voice / dictation entry points (Fn, mic button, call strip) | 9 | gate `composer-voice` row; Fn via driver | **15** |
 | relaunch / replay (root + worker read like live) | 13 | l13 relaunch leg | — |
-| rewind / fork / checkpoint | 10 | p14 | 15 |
+| rewind / fork / checkpoint | 20 (F-103: rewind by line, forks keep checkpoints) | p14, gate `rewind-turn` | — |
 | notices, nudges, refused-answer shape | 13 | F-45 open | — |
+| composer attachments: file chip, image thumb, hover ×, mid-send bubble | 20 (Cursor side captured: `media/cursor-reference/composer-attachments/`; Arbos side not yet paired) | — | **21** |
 
 ## Kinds and their state
 

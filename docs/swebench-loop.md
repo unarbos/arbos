@@ -25,6 +25,7 @@ One cycle = run Arbos on 50 fresh SWE-bench Verified instances, classify every l
 | Regression 20 at `-r 2`, `N=2` reproductions (cycle 7, 32 of 40 rollouts) | 32 rollouts | **28** (13 of 17 instances both times) | — | — |
 | Cycle 7 slice (30: 12 easy / 16 medium / 2 hard) | 30 / 13 | 26 (run A, `N=1`) | 10 of 13 (run B, `N=2`; A on the same 13: 11) | not run |
 | Regression 20 at `-r 2`, cycle 8 attribution, one kernel | N=1: 32 rollouts · N=2: 18 | N=1 **23** (72%) · N=2 **15** (83%); like-for-like 13/18 vs 15/18; pooled N=2 42/49 vs N=1 45/64 | — | — |
+| Regression 20 at `-r 2`, cycle 9, kernel `e183793`, cap $4 | A: 25 · B: 22 | A (N=2) **14** (56%) · B (+`changes` before done) **15** (68%); shared 10×2: 12 vs 14 | — | — |
 | Covered so far | 346 of 500 (slice 6: 40 of 50 run; slice 7: 30) | | | |
 
 Cost per instance: Arbos $0.42–0.53 before the gates, ~$0.59 with both gates; Codex $1.72 on the same 24. Wall time per instance (median): Arbos 139–157 s; Codex 56 s.
@@ -58,6 +59,7 @@ Cost per instance: Arbos $0.42–0.53 before the gates, ~$0.59 with both gates; 
 | 6 | [#295](https://github.com/unarbos/arbos/pull/295) (harness only) | provider refusals exit 75 → verifiers error, not a zero; `vision_model` on a working route (`openai/*` is 403 on this key); `grep -c` doubling | measurement cycle: `main` `43d8569` 36/40 on slice 6; regression `-r 2` complete 28/40; #186's refinement cut reproduction refusals 2.9 → 1.05 per rollout |
 | 7 | [#314](https://github.com/unarbos/arbos/pull/314) | `ARBOS_REPRO_REQUIRED=N`: the first edit needs N distinct failing reproductions (N=2 = the reporter's example plus one the agent derives); harness knobs `repro_required`, `mechanism_required` | regression `-r 2` at N=2: **28/32** vs the 28/40 floor (like-for-like on the same 17 instances 23/34 → 28/32; the four coin-flip instances 2/2 each); slice 7 subset: A 11/13 vs B 10/13 (noise); kernel base also moved, so attribution waits for cycle 8 |
 | 8 | [#314](https://github.com/unarbos/arbos/pull/314) `3608f49` | N=2 becomes the harness default | attribution on one kernel: N=1 23/32, N=2 15/18; like-for-like 13/18 → 15/18; pooled over cycles 6–8 on the same instances N=1 45/64 (70%) vs N=2 42/49 (86%); the kernel-base change alone moved 22/32 → 23/32 |
+| 9 | [#347](https://github.com/unarbos/arbos/pull/347) | `max_turn_cost_usd` / `ARBOS_MAX_TURN_COST`: a turn past its dollar cap ends with a notice (kernel default none; harness $8 after a $4 trial); `ARBOS_CHANGES_BEFORE_DONE` nudges a final reply after edits to run `changes` once (opt-in) | cap: both arms reached 22–25 rollouts per $27 (cycle 8: 18), three hard rollouts capped and lost; `changes` before done +2 of 20 shared rollouts (noise band); N=2's cycle-8 gain did not reproduce at $4 on the new base (12/18 on the first nine vs 15/18) |
 
 ## Cycle 1 (2026-09-13) — detail
 
@@ -178,8 +180,21 @@ Like-for-like on the 9 instances with two rollouts in both arms: **N=1 13/18, N=
 
 **Spend**: $57.07 (N=1 $27.19, N=2 $29.88), both under their caps; the N=2 arm's last recorded rollout carried it from $16.45 to $29.88 in one step, which is why the watcher's threshold must account for a single expensive rollout.
 
-## Next (cycle 9)
+## Cycle 9 (2026-09-16) — the cost cap, then `changes` before done
 
-1. Per-rollout spend cap in the harness (`ARBOS_MAX_COST_USD`, read from the kernel's `turn_complete.usage.cost` or a call budget) so one instance cannot eat half a run.
-2. Resume the slices at the new default: finish slice 6 (10) and slice 7 run B (7), then slice 8 with the wrong-mechanism losses re-read under N=2.
-3. Wall time: Django `runtests.py` to the 1800 s timeout persists; `bash_wait_ms` 600 s for headless runs.
+**Kernel** `main` `e183793` (interrupted tools recorded on restart, failed-write nudge, over-budget report) + this cycle's two additions ([#347](https://github.com/unarbos/arbos/pull/347)); both arms on that one kernel. **Built first**: `max_turn_cost_usd` — a turn past its dollar cap ends with a notice naming the cap; harness knob, `result.json.cost_capped`, metric. **Experiment**: `ARBOS_CHANGES_BEFORE_DONE=1` — a final reply after edits without a `changes` since the last edit is nudged once; `changes` is where the recorded reproductions are re-run, and in cycle 6 most rollouts never called it.
+
+| Arm | Rollouts | Solved | Cost | Capped |
+|---|---|---|---|---|
+| A: N=2 (harness default), cap $4 | 25 | **14** (56%) | $27.16 | 2 |
+| B: A + `changes` before done | 22 | **15** (68%) | $25.86 | 1 |
+
+Shared (10 instances × 2 rollouts): A 12/20, B **14/20** — +2, inside the band, cost neutral; B's extra solves are astropy-13398 1/2 and django-14792 1/2 where A had 0/2. **The cap worked as an instrument**: 22–25 rollouts per $27 where cycle 8's N=2 arm managed 18, no rollout above $4.10. **And it cost score**: all three capped rollouts were on hard instances that had solved at $6–$14 in cycles 7–8 (astropy-13398 twice, django-14792), and all lost. Arm A also sits well under cycle 8's N=2 on the same first nine instances (17/18 in cycle 7, 15/18 in cycle 8, **12/18** here): part cap, part another kernel-base move, part the variance this set carries. The harness cap default is therefore **$8** (`dee617e`), and N=2 is re-measured at $8 in cycle 10 before anything more is claimed about it.
+
+**Spend**: $53.02 (A $27.16, B $25.86), both under their caps; the watchers stopped both runs politely (SIGINT) and touched nothing else. Arm B's eval sat 30 minutes on two idle containers after its 22nd rollout (no grader, no kernel process inside) before I stopped it — a verifiers-side hang to watch for.
+
+## Next (cycle 10)
+
+1. Re-measure the two-reproduction default at the $8 cap on one kernel (regression `-r 2`, $30) against an N=1 arm at the same cap; the N=2 claim from cycles 7–8 stands or falls there.
+2. If it stands, resume slices under the default; if not, the loop's next lever is a cheaper second-opinion judge on the two reproductions rather than more gates.
+3. Wall time: the Django `runtests.py` 1800 s tail persists; `bash_wait_ms` 600 s for headless runs.
