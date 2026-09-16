@@ -76,6 +76,8 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [x] Mac wake-ups — cause was a Sep 10 BTC timer agent plus an orphaned script writing `.arbos/user.md` every 30 s; both stopped; preventive kernel fixes merged in [#130](https://github.com/unarbos/arbos/pull/130); hub registration stays off on the Mac until Jacob asks; QA guard bans touching `mac`
 
 - [x] [Release integration PR v0.2.0](https://github.com/unarbos/arbos/pull/58) — superseded: everything merged to `main` and `rust` at `ab7cf62`
+- [ ] [Check if the GitHub token leaked publicly](bc-dee5ecf2-a13f-5f19-9a52-9ec12c19bce8) — scanning every branch and commit, CI logs, release feeds and GitHub's use record to settle whether the PAT went beyond the worker's transcript
+
 - [ ] Rotate leaked secrets — three leaks today, all from workers masking their own output: Jacob to change his Apple ID password, re-export the `.p12`, and rotate the GitHub PAT (`repo` + `write:packages`); also worth rotating are the AWS keys, wallet seed and API tokens that two Cursor helper processes on his Mac hold in their environment; the rule is now that no worker prints an env file or vault item at all, names only
 
 - [ ] [Launch Arbos desktop on Macbook](bc-b337f0b1-4e0b-5dcf-ae7f-b040ac2a52cd) — visit done and stopped again: his app runs `181b657` with the bar showing `0.2.0 (879)`, no button because he is on the newest build, so the click is still unproven; the notarised DMG upload and the macOS capture leg wait for his word
