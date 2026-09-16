@@ -80,6 +80,8 @@ Asked of the layout worker in
 | His words | The sheet's text field | The only thing he types |
 | The turn's trajectory, with tool calls | Kernel `feedback` frame | Tool arguments and an output glance; bodies and diffs replaced |
 | The kernel log for that turn | Same frame | The log lines inside the turn's span, plus the log's own tail |
+| The transcript tail | Same frame, `tail: N` | More history than the anchor turn, for a behaviour bug |
+| The app's own view of the chat | `.arbos/desktop/sessions/<id>.json` | So a drawing that disagrees with the transcript is visible |
 | App version, build and commit | `build::version_label()`, `ARBOS_COMMIT` | Compiled in, because a shipped bundle has no repository to ask |
 | Kernel version, commit, built-at | The bundle's `kernel` block | The running process's own commit, not the file's |
 | Machine and place | `os`, `arch`, the project's name | The place *path* is left out on purpose: it names his home directory |
@@ -110,6 +112,41 @@ about eight kilobytes of body weighted to the tail, the last call of the
 turn gets the same, everything else keeps the glance, and a call he clicked
 on comes back whole. Reasoning and the sizes are in the same inbox note.
 
+### Enough to reproduce, not only to recognise
+
+A report that shows *that* something looked wrong is enough for a rendering
+bug: the screenshot is the evidence and the fix is in the drawing code. A
+behaviour bug is different. "It said it was working and then answered
+something else" cannot be reproduced from a picture. It needs the sequence
+that led there.
+
+The parts above cover rendering. For behaviour, two additions:
+
+**The transcript tail, from the kernel.** The bundle's `events` already *are*
+lines of `agents/<id>/transcript.jsonl`, redacted and slimmed, so the source
+is right — but only the anchor turn's span of it. Reproducing a behaviour bug
+needs more history than the turn he pointed at. So the request gains
+`tail: N`: the last N lines of that agent's transcript, whatever turn they
+fall in, slimmed and redacted identically, alongside the anchor turn.
+
+`tail` also replaces a weaker idea. An earlier ask was for `turns: N` with
+the older turns thinned to one line each. `tail` is the better primitive: the
+wake lines are in the events, so an agent reading the tail can see the turn
+structure for itself, and one primitive beats two. The ask to the features
+agent was reduced accordingly.
+
+**The app's own view of the chat, from the desktop.** This one is mine, not
+the kernel's, and it matters more than it sounds. The classic desktop bug is
+that the app drew something the transcript does not say — one worker drawn
+three times, a line that says "Starting" forever, a fold split into three.
+You cannot see that from the transcript alone, because the transcript is
+right; the divergence *is* the bug. So the report carries the app's own
+session record (`.arbos/desktop/sessions/<id>.json`) beside the kernel's
+truth, and an agent can compare the two. F14 and F15 on the phone were both
+this shape.
+
+Both are parts in the sheet with their own ✕, like every other part.
+
 ---
 
 ## 4. Nothing leaves without him seeing it
@@ -123,6 +160,8 @@ per part:
 - **Screenshot** — a thumbnail that opens full size, and an ✕.
 - **Trajectory** — "14 lines, 6 tool calls", expandable, and an ✕.
 - **Kernel log** — "83 lines", expandable, and an ✕.
+- **Transcript tail** — "200 earlier lines", expandable, and an ✕.
+- **The app's own view of the chat** — expandable, and an ✕.
 - **Versions and machine** — the short line itself, and an ✕.
 
 A line reads "2 credentials were removed" when the bundle's count is not
@@ -131,6 +170,11 @@ every tool argument and output at once, for the case where he does not want
 his code leaving at all.
 
 Send is the only thing that sends. There is no silent path.
+
+**The report says what he removed.** Every part he cuts is recorded as
+`included: {"log": false, …}`, not simply left out. Otherwise the loop cannot
+tell "he did not want to send the log" from "there was no log", and it would
+chase the second while the first is the truth.
 
 ### The limits of redaction, stated honestly
 

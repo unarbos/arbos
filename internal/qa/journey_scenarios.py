@@ -97,6 +97,20 @@ class Rig:
         env["DISPLAY"] = self.display
         env["PATH"] = f"{Path(cx.binary).parent}:{env.get('PATH', '')}"
         env["ARBOS_DRIVER"] = "1"
+        # A session bus of our own and dunst on it: the app's OS notifications need a daemon, and
+        # `dunstctl history` is the daemon's own record — the cross-check that the window did not just claim a post.
+        self.dunst = None
+        self.bus_env = None
+        if shutil.which("dbus-daemon") and shutil.which("dunst"):
+            try:
+                addr = subprocess.run(["dbus-daemon", "--session", "--fork", "--print-address", "--nopidfile"], capture_output=True, text=True, timeout=10).stdout.strip()
+                if addr:
+                    env["DBUS_SESSION_BUS_ADDRESS"] = addr
+                    self.bus_env = {"DISPLAY": self.display, "DBUS_SESSION_BUS_ADDRESS": addr, "PATH": env["PATH"], "HOME": env.get("HOME", "/tmp")}
+                    self.dunst = subprocess.Popen(["dunst"], env=self.bus_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    time.sleep(0.5)
+            except Exception as e:  # noqa: BLE001
+                cx.rec.notes.setdefault("dunst_error", str(e)[:120])
         self.log = cx.rec.dir / f"{tag}.log"
         xdg = cx.scratch / "xdg"
         if reseed:
@@ -169,6 +183,20 @@ class Rig:
         self.app.click("composer-field")
         self.app.type(text + "\n")
 
+    def dunst_history(self):
+        """The daemon's record, oldest first, or None without a daemon. dunst files a notification only once it is
+        closed (so close the popups first) and keeps twenty — hence a nonce in whatever we look for."""
+        if not self.bus_env or not shutil.which("dunstctl"):
+            return None
+        try:
+            subprocess.run(["dunstctl", "close-all"], capture_output=True, timeout=5, env=self.bus_env)
+            raw = subprocess.run(["dunstctl", "history"], capture_output=True, text=True, timeout=5, env=self.bus_env).stdout
+            data = json.loads(raw).get("data", [[]])
+            entries = data[0] if data else []
+            return [f"{e.get('summary', {}).get('data', '')} | {e.get('body', {}).get('data', '')}" for e in reversed(entries)]
+        except Exception:  # noqa: BLE001
+            return None
+
     def leaves(self):
         return {str(e.get("path", "")).split(".")[-1] for e in self.app.elements("*")}
 
@@ -187,6 +215,8 @@ class Rig:
                     except ProcessLookupError:
                         pass
             time.sleep(2)
+        if self.dunst:
+            self.dunst.terminate()
         self.xvfb.terminate()
 
 
@@ -195,7 +225,10 @@ STORE = Path(os.environ.get("ARBOS_QA_STORE_ROOT", "/cursor/stores/bc-ec8c092a-3
 
 
 def notify_surface(project, chat):
-    """The unseen/notification state the driver exposes for a project or its chat, or None when it exposes none yet."""
+    """The unseen/notification state the driver exposes for a project or its chat, or None when it exposes none yet.
+    #329: per project `tab_dot` (the badge exactly as drawn) and `unseen` (summed over its chats)."""
+    if project and "tab_dot" in project:
+        return {"tab_dot": project.get("tab_dot"), "unseen": project.get("unseen")}
     for holder in (chat or {}, project or {}):
         for k in NOTIFY_KEYS:
             if k in holder:
@@ -555,6 +588,8 @@ def register(scenario, registry, transcript, now_ms, branch):
                 def seen_count(surface):
                     if not surface:
                         return 0
+                    if "tab_dot" in surface:
+                        return int(surface.get("unseen") or 0) or int(bool(surface.get("tab_dot")))
                     v = next(iter(surface.values()))
                     if isinstance(v, bool):
                         return int(v)
@@ -569,6 +604,52 @@ def register(scenario, registry, transcript, now_ms, branch):
                     mark("J6", "fail", f"the unseen mark did not clear when the user opened the tab ({notify_after_click})")
                 else:
                     mark("J6", "pass", f"tab, transcript, workers back; unseen reply shown {notify_before_click} and cleared on opening the tab" + ("" if ev["J6"]["landed_on_project"] else " (landed on the home tab)"))
+
+            # ── J6b: notified while away in another tab (the OS notification, checked against the daemon) ──
+            j6b = {}
+            st0 = rig.state()
+            if "notifications" in st0 and (rig.project(folder) or {}).get("tab_dot") is not None:
+                posted_before = len((st0.get("notifications") or {}).get("posted", []))
+                nonce = f"away{now_ms() % 100000}"
+                rig.focus(folder)
+                rig.send(f"Run `sleep 8` with bash, then reply with exactly: notification check {nonce}.")
+                rig.wait_busy(folder, 20)
+                try:
+                    rig.app.click("tab-0")  # the home tab in front; the project is now "away"
+                except Exception:  # noqa: BLE001
+                    pass
+                end = time.time() + 90
+                while time.time() < end and not any(e.get("kind") == "assistant" and nonce in e.get("text", "") for e in read_transcript(folder)):
+                    time.sleep(2)
+                time.sleep(2)
+                st1 = rig.state()
+                pr = rig.project(folder) or {}
+                posted = (st1.get("notifications") or {}).get("posted", [])[posted_before:]
+                hit = next((n for n in posted if nonce in ((n.get("body") or "") + (n.get("title") or "")).lower()), None)
+                history = rig.dunst_history()
+                daemon = None if history is None else any(nonce in e.lower() for e in history)
+                rig.focus(folder)
+                time.sleep(1)
+                pr2 = rig.project(folder) or {}
+                j6b = {"nonce": nonce, "unseen_away": pr.get("unseen"), "tab_dot_away": pr.get("tab_dot"), "posted_new": len(posted), "posted_hit": bool(hit), "post_error": (hit or {}).get("error"), "daemon_has_it": daemon, "daemon_entries": None if history is None else len(history), "unseen_after_click": pr2.get("unseen"), "tab_dot_after_click": pr2.get("tab_dot"), "notifier": (st1.get("notifications") or {}).get("notifier")}
+                ev["J6"]["away"] = j6b
+                problems = []
+                if not (pr.get("unseen") or 0) >= 1 or not pr.get("tab_dot"):
+                    problems.append(f"no badge while away (unseen={pr.get('unseen')}, tab_dot={pr.get('tab_dot')})")
+                if not hit:
+                    problems.append(f"the window posted no OS notification carrying the nonce ({len(posted)} new post(s))")
+                elif daemon is False:
+                    problems.append("the window claims a post the notification daemon never received (dunstctl history)")
+                if pr2.get("tab_dot") or (pr2.get("unseen") or 0) > 0:
+                    problems.append("the badge did not clear on opening the tab")
+                if problems and steps["J6"][0] != "fail":
+                    mark("J6", "fail", "away-tab notification: " + "; ".join(problems))
+                elif not problems and steps["J6"][0] == "pass":
+                    mark("J6", "pass", steps["J6"][1] + "; away-tab reply: badge + unseen, OS notification posted" + (" and confirmed by the daemon" if daemon else " (no daemon record to check)") + ", cleared on click")
+            else:
+                ev["J6"]["away"] = "unverified: the driver has no notifications/tab_dot surface (pre-#329 build)"
+                if steps["J6"][0] == "pass":
+                    mark("J6", "unverified", steps["J6"][1] + "; the away-tab OS notification is not checkable on this build (pre-#329)")
 
             # ── J7: the result on disk ─────────────────────────────────────
             ok, last = tests_pass(folder)

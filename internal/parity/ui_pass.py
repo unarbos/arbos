@@ -104,6 +104,27 @@ def load_driver(path: Path):
     return mod
 
 
+def dunst_history() -> list[str] | None:
+    """The notification daemon's own record, one string per entry (summary +
+    body), oldest first; None when there is no dunstctl. The proof that a
+    posted notification reached a daemon rather than a log line."""
+    if not shutil.which("dunstctl"):
+        return None
+    try:
+        # History holds notifications once they are closed; a popup still
+        # on screen is not in it yet. Close them first, then read.
+        subprocess.run(["dunstctl", "close-all"], capture_output=True, timeout=5, env=ENV)
+        raw = subprocess.run(["dunstctl", "history"], capture_output=True, text=True, timeout=5, env=ENV).stdout
+        data = json.loads(raw).get("data", [[]])
+        entries = data[0] if data else []
+        out = []
+        for e in reversed(entries):
+            out.append(f"{e.get('summary', {}).get('data', '')} | {e.get('body', {}).get('data', '')}")
+        return out
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def sessions(state: dict) -> list[dict]:
     return [c for p in state.get("projects", []) for c in p.get("sessions", [])]
 
@@ -903,29 +924,59 @@ class Pass:
         self.check("tab double-click", sc, "double-click project tab", "tab edit sheet opens (tab-sheet-done present)",
                    lambda: self.app.double_click(f"tab-{ix}"), lambda a, b: self.app.exists("tab-sheet-done") or self.app.exists("tab-sheet-cancel"))
         self.escape()
-        # Kernel notifications (#293): a reply that lands while another tab
-        # is in front stays unseen (the tab's dot) until the chat is opened,
-        # which sends `seen`. Cursor badges the chat the same way.
+        # Kernel notifications (#293/#297): a reply that lands while another
+        # tab is in front stays unseen (the tab's dot) until the chat is
+        # opened, which sends `seen`; the window posts an OS notification
+        # for it. The rig proves it can see what it asserts: the daemon's
+        # own history (dunst on Linux) must hold the alert the window says
+        # it posted — a notification check that cannot fail is no check.
         try:
             self.app.click(f"tab-{ix}"); time.sleep(0.6)
-            sent_in = self.state().get("active_session")
-            seen_at_send = next((c.get("seen_through") or 0 for pr in self.state()["projects"] for c in pr["sessions"] if c.get("id") == sent_in), 0)
-            # A reply that takes a few seconds: a one-word answer can land
-            # before the tab switch, and a reply seen in the open chat is
-            # (rightly) not a notification.
-            self.send("Run the shell command `sleep 6` and then reply with exactly: notification check done.")
+            def root_of(st):
+                pr = next((p for p in st["projects"] if p["index"] == ix), {})
+                return pr, next((c for c in pr.get("sessions", []) if c.get("parent") is None), {})
+            _, root0 = root_of(self.state())
+            seen_at_send = root0.get("seen_through") or 0
+            posted_before = len(self.state().get("notifications", {}).get("posted", []))
+            # A nonce in the reply: dunst keeps a capped history (20), so a
+            # repeat of the same words could be an old entry.
+            nonce = f"nc{int(time.time()) % 100000}"
+            self.send(f"Run the shell command `sleep 6` and then reply with exactly: notification check {nonce}.")
             time.sleep(0.3); self.app.click("tab-0"); time.sleep(0.5)
             self.wait_idle(120); time.sleep(3)
-            def root_of(st):
-                return next((c for pr in st["projects"] for c in pr["sessions"] if c.get("id") == sent_in), {})
-            away = root_of(self.state())
+            pr, away = root_of(self.state())
             verdict = "pass" if (away.get("unseen") or 0) >= 1 else ("unverified" if (away.get("seen_through") or 0) > seen_at_send else "fail")
-            self.record("notify-unseen", sc, "reply lands while the Home tab is in front", "the project's root chat holds 1+ unseen notification (tab dot); unverified when a seen from elsewhere consumed it first (F-78)",
-                        f"unseen={away.get('unseen')} seen_through={away.get('seen_through')}", verdict, self.still("notify-unseen"))
+            self.record("notify-unseen", sc, "reply lands while the Home tab is in front", "the project's root chat holds 1+ unseen notification; unverified when a seen from elsewhere consumed it first (F-78)",
+                        f"unseen={away.get('unseen')} kinds={away.get('unseen_kinds')} seen_through={away.get('seen_through')}", verdict, self.still("notify-unseen"))
+            self.record("notify-tab-dot", sc, "read the project tab while its reply is unseen", "tab_dot true (the badge Cursor draws on a chat with news)",
+                        f"tab_dot={pr.get('tab_dot')} unseen={pr.get('unseen')}", "pass" if pr.get("tab_dot") else ("unverified" if verdict == "unverified" else "fail"), "")
+            posted = self.state().get("notifications", {}).get("posted", [])
+            new_posts = posted[posted_before:]
+            hit = next((n for n in new_posts if nonce in (n.get("body") or "")), None)
+            # notify-send hands the alert to the daemon a beat after the
+            # window records the post; give the daemon a moment.
+            dunst_after, seen_by_daemon = None, False
+            for _ in range(10):
+                dunst_after = dunst_history()
+                seen_by_daemon = dunst_after is not None and any(nonce in e for e in dunst_after)
+                if seen_by_daemon or dunst_after is None:
+                    break
+                time.sleep(0.5)
+            if hit and hit.get("error"):
+                os_verdict, why = "fail", f"the window could not start {self.state()['notifications'].get('notifier')}: {hit['error']}"
+            elif hit and dunst_after is None:
+                os_verdict, why = "unverified", "posted, but no dunstctl on this rig to confirm the daemon got it"
+            elif hit and seen_by_daemon:
+                os_verdict, why = "pass", f"posted {hit.get('title')!r} and dunst's history holds it"
+            elif hit:
+                os_verdict, why = "fail", "the window says it posted, dunst's history has nothing new — the rig cannot see what it asserts"
+            else:
+                os_verdict, why = ("unverified" if verdict == "unverified" else "fail"), f"no OS notification posted for the reply (posted={len(new_posts)} new)"
+            self.record("notify-os-posted", sc, "the reply lands with the Home tab in front", "an OS notification is posted and the daemon's history shows it", why, os_verdict, "")
             self.app.click(f"tab-{ix}"); time.sleep(2.0)
-            back = root_of(self.state())
-            self.record("notify-seen", sc, "open the project's chat", "unseen 0; seen_through advanced (seen sent to the kernel)",
-                        f"unseen={back.get('unseen')} seen_through={back.get('seen_through')}", "pass" if back.get("unseen") == 0 and (back.get("seen_through") or 0) >= 1 else "fail", self.still("notify-seen"))
+            pr2, back = root_of(self.state())
+            self.record("notify-seen", sc, "open the project's chat", "unseen 0, tab_dot false; seen_through advanced (seen sent to the kernel)",
+                        f"unseen={back.get('unseen')} tab_dot={pr2.get('tab_dot')} seen_through={back.get('seen_through')}", "pass" if back.get("unseen") == 0 and not pr2.get("tab_dot") and (back.get("seen_through") or 0) >= 1 else "fail", self.still("notify-seen"))
         except Exception as err:
             self.record("notify", sc, "reply on another tab, then open", "-", f"{type(err).__name__}: {err}", "fail")
         if self.app.exists("tab-sheet-done"):
