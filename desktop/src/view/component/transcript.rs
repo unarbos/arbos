@@ -3566,9 +3566,12 @@ fn zone(
     // folds to one summary line above the answer.
     let segs = segments(&chat.items, body.clone());
     let mut live_fold_shown = false;
+    // A wake segment always carries its "Worked Ns" line, as Cursor's do,
+    // even when the coordinator only read the report and moved on.
     let foldable = segs
         .iter()
-        .any(|seg| matches!(seg, Seg::Run(_) | Seg::Prose(_)));
+        .any(|seg| matches!(seg, Seg::Run(_) | Seg::Prose(_)))
+        || matches!(chat.items.get(first), Some(ChatItem::Wake { .. }));
     let mut header_drawn = false;
     let mut open = open;
     if !running && foldable {
