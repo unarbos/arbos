@@ -745,6 +745,9 @@ impl Tool for Spawn {
                     w.base,
                     w.removal()
                 ));
+                if let Some(note) = &w.note {
+                    body.push_str(&format!("\nNote: {note}"));
+                }
                 paths.push(w.path.display().to_string());
             }
             if wait {
