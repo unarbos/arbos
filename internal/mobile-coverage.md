@@ -32,7 +32,7 @@ What the loop has exercised and when, so nothing goes long untested. One row per
 | network drop → reconnect | journey J8c ×4 (25 s cut mid-turn: calm line, turn resumes), 16 (roster retry) | simulator | one calm line; pending lines never cross projects (M-82, proven both ways); a project opened while down says "Opening…" then "not answering — waiting" (M-83, verified) |
 | cold start | 13 | simulator | lands on the list, four rows, 6 s |
 | TestFlight build on Jacob's phone | 956 (13 reports), 994 (fixes for F1–F6) | TestFlight | F7/F8 open until he confirms; F9–F13 land with #309 |
-| style pair vs Cursor stills | 2 (list, chat), 3 (call vs GPT), 4 (list), 5 (chat, four workers), 6 (composer with a chip), 7 (list search) | 17 (chat), 18 (list: `media/mobile/cycle-18/03-`) | pairs in `media/mobile/cycle-N/` | call pair next |
+| style pair vs Cursor stills | 2 (list, chat), 3 (call vs GPT), 4 (list), 5 (chat, four workers), 6 (composer with a chip), 7 (list search) | 17 (chat), 18 (list), 21 (call vs GPT: `media/mobile/cycle-21/01-`) | pairs in `media/mobile/cycle-N/` | next: composer with a photo chip |
 | recording | 1, 3, 6, 10 (call), 13 (stream while scrolled up), 16 (journey run 7: the challenge and a worker appearing, 2 min, `media/mobile/journey/0916-152618/recording-challenge-workers.mp4`) | mp4 | next due cycle 19 |
 
-**Journey runs** (`internal/mobile-journey-runs.md`): 10 so far — 3 on `demo` (old numbering; JB-1…3 named), 3 on `pod` on QA's ids (run 4 a floundering root, runs 5–6 clean apart from the U steps). Next: `arboslife/demo` on QA's ids once its kernel is updated.
+**Journey runs** (`internal/mobile-journey-runs.md`): 12 so far — 3 on `demo` (old numbering; JB-1…3 named), 3 on `pod` on QA's ids (run 4 a floundering root, runs 5–6 clean apart from the U steps). Next: `arboslife/demo` on QA's ids once its kernel is updated.

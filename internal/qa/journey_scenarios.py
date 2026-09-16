@@ -562,17 +562,22 @@ def register(scenario, registry, transcript, now_ms, branch):
             # clicks their project tab. Recorded, not scored — Jacob decides whether that is what "come back" means.
             active = rig.active_path()
             # Read the notification surface BEFORE clicking the tab (clicking marks things seen).
+            st_open = rig.state()
+            notif_open = st_open.get("notifications") or {}
+            touched_before = notif_open.get("touched")  # #336: "looked at" needs a press, a key, or a return after the first 5 s
+            posted_on_relaunch = len(notif_open.get("posted", []))  # expected 0: no OS notification for a reply that landed while the app was closed; the badge carries it
             notify_before_click = notify_surface(p, rig.root_chat(folder))
             rig.focus(folder)
             time.sleep(1)
             notify_after_click = notify_surface(rig.project(folder), rig.root_chat(folder))
+            touched_after = (rig.state().get("notifications") or {}).get("touched")
             chat = rig.root_chat(folder)
             after_items = len((chat or {}).get("items", []))
             after_sessions = len((p or {}).get("sessions", [])) if p else 0
             leaves = rig.leaves()
             worker_rows = [l for l in leaves if l.startswith(("panel-agent", "panel-archived"))]
             notes_after = (folder / ".arbos" / "notes.md").read_text(errors="replace") if (folder / ".arbos" / "notes.md").exists() else ""
-            ev["J6"] = {"tab_back": p is not None, "landed_on": active, "landed_on_project": active == str(folder).rstrip("/"), "late_reply_landed_while_closed": late_reply_landed, "notify_before_click": notify_before_click, "notify_after_click": notify_after_click, "items_before": before_items, "items_after": after_items, "sessions_before": before_sessions, "sessions_after": after_sessions, "worker_rows": len(worker_rows), "notes_unchanged": notes_before == notes_after, "notifications": "unverified: the driver exposes no unseen count"}
+            ev["J6"] = {"tab_back": p is not None, "landed_on": active, "landed_on_project": active == str(folder).rstrip("/"), "late_reply_landed_while_closed": late_reply_landed, "notify_before_click": notify_before_click, "notify_after_click": notify_after_click, "touched_before_click": touched_before, "touched_after_click": touched_after, "os_posts_on_relaunch": posted_on_relaunch, "items_before": before_items, "items_after": after_items, "sessions_before": before_sessions, "sessions_after": after_sessions, "worker_rows": len(worker_rows), "notes_unchanged": notes_before == notes_after, "notifications": "unverified: the driver exposes no unseen count"}
             if p is None:
                 mark("J6", "fail", "the project tab did not come back after relaunch")
             elif after_items < before_items:
@@ -598,12 +603,18 @@ def register(scenario, registry, transcript, now_ms, branch):
                     if isinstance(v, (list, dict)):
                         return len(v)
                     return 1 if v else 0
-                if late_reply_landed and seen_count(notify_before_click) == 0:
-                    mark("J6", "fail", f"a reply arrived while the window was closed but nothing is shown unseen on reopening ({notify_before_click})")
+                if touched_before is True:
+                    mark("J6", "fail", "the window counted itself as touched before the user pressed or typed anything after the relaunch (the qal-j03 race)")
+                elif late_reply_landed and seen_count(notify_before_click) == 0:
+                    mark("J6", "fail", f"a reply arrived while the window was closed but nothing is shown unseen on reopening ({notify_before_click}, touched={touched_before})")
+                elif posted_on_relaunch:
+                    mark("J6", "fail", f"{posted_on_relaunch} OS notification(s) posted on relaunch for a reply that landed while the app was closed — the badge should carry it, a notification could not have reached a closed app")
+                elif touched_before is False and touched_after is not True:
+                    mark("J6", "fail", "clicking the project tab did not count as touching the window")
                 elif seen_count(notify_after_click) > 0 and seen_count(notify_before_click) > 0:
                     mark("J6", "fail", f"the unseen mark did not clear when the user opened the tab ({notify_after_click})")
                 else:
-                    mark("J6", "pass", f"tab, transcript, workers back; unseen reply shown {notify_before_click} and cleared on opening the tab" + ("" if ev["J6"]["landed_on_project"] else " (landed on the home tab)"))
+                    mark("J6", "pass", f"tab, transcript, workers back; unseen reply shown {notify_before_click} before any touch" + (f" (touched={touched_before})" if touched_before is not None else "") + ", no OS post on relaunch, cleared on opening the tab" + ("" if ev["J6"]["landed_on_project"] else " (landed on the home tab)"))
 
             # ── J6b: notified while away in another tab (the OS notification, checked against the daemon) ──
             j6b = {}
