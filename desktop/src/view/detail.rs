@@ -455,8 +455,26 @@ impl Arbos {
         let Some(id) = self.workspace.read(cx).active_id() else {
             return;
         };
-        self.workspace
-            .update(cx, |workspace, cx| workspace.cancel(id, cx));
+        // Stop means the project's work under this chat as well: Cursor's
+        // disc stops the workers, and it was showing for them (F-97).
+        let (own, workers) = {
+            let workspace = self.workspace.read(cx);
+            (
+                workspace.active_session().is_some_and(|chat| chat.busy()),
+                workspace
+                    .active_project()
+                    .map(|project| project.running_descendants(id))
+                    .unwrap_or_default(),
+            )
+        };
+        self.workspace.update(cx, |workspace, cx| {
+            if own {
+                workspace.cancel(id, cx);
+            }
+            for worker in workers {
+                workspace.cancel(worker, cx);
+            }
+        });
     }
 
     /// Hold the composer's text for the next turn on this chat; the kernel
@@ -549,7 +567,14 @@ impl Arbos {
         }
         .to_owned();
         let commands = workspace.slash_commands.clone();
-        let streaming = chat.is_some_and(|chat| chat.busy());
+        // Cursor keeps the stop disc while any of the chat's delegated work
+        // runs, not only while the chat itself streams (F-97).
+        let streaming = chat.is_some_and(|chat| {
+            chat.busy()
+                || workspace
+                    .active_project()
+                    .is_some_and(|project| !project.running_descendants(chat.id).is_empty())
+        });
         let reconnect = matches!(chat.map(|chat| &chat.connection), Some(Connection::Lost));
         let current = chat.map(|_| 0);
         let live = chat.filter(|chat| chat.live());
