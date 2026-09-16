@@ -16,6 +16,8 @@ enum ArbosTheme {
     static let border = Color.white.opacity(0.11)
     static let borderStrong = Color.white.opacity(0.18)
     static let elementActive = Color.white.opacity(0.05)
+    /// Behind inline code in a reply.
+    static let codeChip = Color.white.opacity(0.09)
 
     // Ink.
     static let text = Color(hex: 0xf0f0f0)
