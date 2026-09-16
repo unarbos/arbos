@@ -5332,16 +5332,21 @@ const STALE_TAIL_MS: u128 = 1000;
 /// Web WorkingIndicator copy. A fresh prompt is "Planning next moves";
 /// a lull mid-turn is "Working".
 fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
+    // The kickoff turn (no prompt of the user's, the chat's first) reads
+    // as Cursor's "Setting up environment" whatever step the kernel derives
+    // — and whatever is running: its first `ls` left the transcript blank
+    // under the date line for the seconds it took (F-87, journey run 3).
+    let kickoff = turn.range.start == 0
+        && chat.kickoff_at.is_some()
+        && !matches!(chat.items.first(), Some(ChatItem::User(_)));
+    if kickoff {
+        return Some("Setting up environment".to_string());
+    }
     // The kernel says the model is thinking in silence: always show it,
     // whatever the last item is.
     if chat.working.is_some() {
         return Some("Thinking".to_string());
     }
-    // The kickoff turn (no prompt of the user's, the chat's first) reads
-    // as Cursor's "Setting up environment" whatever step the kernel derives.
-    let kickoff = turn.range.start == 0
-        && chat.kickoff_at.is_some()
-        && !matches!(chat.items.first(), Some(ChatItem::User(_)));
     // The agent named its step (Cursor's UpdateCurrentStep on the
     // timeline: "Copying stills to artifacts"): that is the line.
     if let Some(step) = chat
@@ -5349,7 +5354,6 @@ fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        && !kickoff
     {
         return Some(step.to_string());
     }
@@ -5387,7 +5391,6 @@ fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
     }
     Some(
         match last {
-            _ if kickoff => "Setting up environment",
             ChatItem::User(_) => "Planning next moves",
             _ => "Working",
         }

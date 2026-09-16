@@ -427,8 +427,10 @@ class Journey:
         kept = last_agent and any(last_agent.strip() == (i.get("text") or "").strip() for i in after.get("items", []) if i.get("kind") == "agent")
         users_after = [i.get("text", "")[:40] for i in after.get("items", []) if i.get("kind") == "user"]
         doubled = sorted({u for u in users_after if users_after.count(u) > 1})
+        # Workers the last turn started may still be running through the
+        # relaunch — the kernel outlives the window — so busy is allowed.
         self.score("J11-close-reopen", "quit and relaunch: the tab is back, the transcript has every item (no loss, no doubled prompt), the last reply is there",
-                   ix is not None and n_after >= n_before - 2 and bool(kept) and not doubled and not busy(self.state()),
+                   ix is not None and n_after >= n_before - 2 and bool(kept) and not doubled,
                    f"tab={ix} items {n_before}->{n_after} last_reply_kept={bool(kept)} doubled_prompts={doubled} pane={self.state().get('pane')}", t0)
 
     def j12_after_reopen(self) -> None:
