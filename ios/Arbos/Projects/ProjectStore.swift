@@ -65,6 +65,9 @@ final class ProjectStore: ObservableObject {
                 }
             } catch {
                 problem = error.localizedDescription
+                #if DEBUG
+                print("roster \(settings.hubURL): \(error)")
+                #endif
             }
         }
         if list.isEmpty, entries.isEmpty {
