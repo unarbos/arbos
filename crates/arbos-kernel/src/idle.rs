@@ -161,20 +161,59 @@ pub fn verdict(hooks: &Arc<KernelHooks>, horizon_ms: i64) -> Verdict {
 /// `horizon_ms` is the expected downtime, not `--until-idle`'s hour: a
 /// place with an hourly timer would never update otherwise.
 pub fn update_verdict(hooks: &Arc<KernelHooks>, horizon_ms: i64) -> Verdict {
+    let v = update_verdict_quiet(hooks, horizon_ms);
+    // Every asking is a line: a run of the self-updater on a real machine
+    // reads "refused because slow runs on templar" rather than infers it.
+    let (word, why) = match &v {
+        Verdict::Busy(why) => ("busy", why.as_str()),
+        Verdict::Idle => ("idle", ""),
+        Verdict::Waiting(_) => ("idle", ""),
+    };
+    crate::klog::info(
+        "update_gate",
+        None,
+        if why.is_empty() {
+            format!("verdict={word}")
+        } else {
+            format!("verdict={word} reason={why:?}")
+        },
+    );
+    v
+}
+
+/// `update_verdict` without the log line, for a status page that is
+/// polled.
+pub fn update_verdict_quiet(hooks: &Arc<KernelHooks>, horizon_ms: i64) -> Verdict {
     match verdict(hooks, horizon_ms) {
         Verdict::Busy(why) => return Verdict::Busy(why),
         Verdict::Idle | Verdict::Waiting(_) => {}
     }
-    for agent in list_agents(&hooks.place).unwrap_or_default() {
-        let id = agent.id.as_str();
-        if hooks.remotes.is_running(id) {
-            return Verdict::Busy(format!(
-                "{id}: a turn runs on {}",
-                agent.remote.as_deref().unwrap_or("another machine")
-            ));
-        }
+    let remote = hooks.remotes.running_agents();
+    if let Some(id) = remote.first() {
+        let machine = list_agents(&hooks.place)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|a| a.id.as_str() == id)
+            .and_then(|a| a.remote)
+            .unwrap_or_else(|| "another machine".into());
+        return Verdict::Busy(format!(
+            "{id}: a turn runs on {machine}{}",
+            if remote.len() > 1 {
+                format!(" (+{} more remote children mid-turn)", remote.len() - 1)
+            } else {
+                String::new()
+            }
+        ));
     }
     Verdict::Idle
+}
+
+/// The gate as JSON, for `GET /healthz`: `{"verdict":"busy","reason":…}`.
+pub fn update_gate_json(hooks: &Arc<KernelHooks>, horizon_ms: i64) -> serde_json::Value {
+    match update_verdict_quiet(hooks, horizon_ms) {
+        Verdict::Busy(why) => serde_json::json!({"verdict": "busy", "reason": why}),
+        Verdict::Idle | Verdict::Waiting(_) => serde_json::json!({"verdict": "idle"}),
+    }
 }
 
 /// `--leash`: exit when unattended. See `LEASH_ENV`.
@@ -293,5 +332,39 @@ mod update_verdict_tests {
             matches!(verdict(&hooks, 10_000), Verdict::Waiting(_)),
             "--until-idle is unchanged"
         );
+    }
+
+    /// Item 3 of the design's "watched happening" list: a remote child
+    /// mid-turn holds the gate, with the reason naming the child and its
+    /// machine — so a run on ArbosLife reads the refusal, and `/healthz`
+    /// shows the same words.
+    #[test]
+    fn a_remote_child_mid_turn_holds_the_gate_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = Place::new(dir.path());
+        std::fs::create_dir_all(place.arbos().join("runtime")).unwrap();
+        arbos_core::Agent::root("root")
+            .save(&place.agent_dir("root"))
+            .unwrap();
+        let mut slow = arbos_core::Agent::root("slow");
+        slow.parent = Some(arbos_core::AgentId::new("root"));
+        slow.remote = Some("templar".into());
+        slow.save(&place.agent_dir("slow")).unwrap();
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (kick_tx, _kick_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = crate::hooks::KernelHooks::new(place.clone(), wake_tx, kick_tx);
+        assert!(matches!(update_verdict(&hooks, 10_000), Verdict::Idle));
+        assert_eq!(update_gate_json(&hooks, 10_000)["verdict"], "idle");
+        hooks.remotes.set_running("slow", true);
+        match update_verdict(&hooks, 10_000) {
+            Verdict::Busy(why) => assert_eq!(why, "slow: a turn runs on templar"),
+            other => panic!("{other:?}"),
+        }
+        let gate = update_gate_json(&hooks, 10_000);
+        assert_eq!(gate["verdict"], "busy");
+        assert_eq!(gate["reason"], "slow: a turn runs on templar");
+        // The remote kernel says the turn ended: the gate opens.
+        hooks.remotes.set_running("slow", false);
+        assert!(matches!(update_verdict(&hooks, 10_000), Verdict::Idle));
     }
 }
