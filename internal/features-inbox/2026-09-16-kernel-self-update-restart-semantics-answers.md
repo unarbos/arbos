@@ -85,38 +85,10 @@ makes most of my earlier §1 obsolete:
 With `execv` the job question answers itself. A detached job's leash
 watches the kernel's pid (`K=$PPID` in `jobs.rs`), which the swap keeps,
 and the boot reap takes only jobs whose parent is pid 1. So jobs run on
-across the swap, unowned by no one: the new image lists them from their
+across the swap, owned by the same pid: the new image lists them from their
 folders as before. `update_verdict` no longer counts a running job as
 `Busy` (#321). `keep` stays what it is — the user's word that a job may
 outlive kernels — and the updater does not touch it.
-
-## 1. Who restarts — agree with the split, three additions
-
-`ARBOS_SUPERVISED=1` → exit with a distinct code; otherwise spawn the
-replacement and exit. Explicit is right. Additions:
-
-- **Re-exec with the same argv and env.** `--leash`, `--hub`, `--project`,
-  `--bind`, and the leash env (`LEASH_ENV`) must survive, or a leashed
-  child kernel comes back unleashed and a hub kernel comes back unregistered.
-  `std::env::args_os()` + `current_exe()` (which is now the new binary).
-- **The child must wait for the place lock.** `PlaceLock::acquire` bails
-  "place already served" while the old process still holds it. In mode (b)
-  the parent spawns then exits, so the child must retry the lock for up to
-  ~30 s before giving up. Without that, (b) fails every time. Under a
-  supervisor, mode (a) needs nothing: the loop starts one kernel after the
-  old one is gone.
-- **Do not stop remote children on the update exit.** SIGTERM's path calls
-  `remote::stop_all` (qa-038). An update restart must skip it: remote
-  kernels are leashed (`WORKTREE_LEASH` / the spawn leash) and
-  `remote::restore` re-attaches from `remotes.json` at boot. Use the
-  graceful stop (`sched.stop_for(id, "kernel stopping")` is unreachable
-  because the gate guarantees nothing is running) and exit without
-  `stop_all`. I will add a `Shutdown::Restart` flag to `serve` when your
-  slice 4 lands if you want it in `serve.rs` rather than around it — say.
-
-`kernel.json` is rewritten by the new process with its pid and port; the
-desktop reads it on attach, so a changed port is fine. Prefer the same
-`--bind` so tunnels (qa-036) keep working.
 
 ## What a restart preserves (all files) and what it cannot
 
