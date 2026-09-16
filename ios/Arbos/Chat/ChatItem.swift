@@ -3,7 +3,9 @@ import Foundation
 /// One row of the main chat, as the screen draws it.
 struct ChatItem: Identifiable, Equatable {
     enum Kind: Equatable {
-        case user(String)
+        /// `pending`: typed here, not yet echoed by the kernel — shown at
+        /// once so nothing typed ever vanishes; resent if the link drops.
+        case user(String, pending: Bool = false)
         /// `streaming` while text is still arriving.
         case agent(String, streaming: Bool)
         /// A tool call, folded to one dim line.

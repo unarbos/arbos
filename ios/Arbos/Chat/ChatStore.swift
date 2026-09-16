@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 /// The project's main agent chat, shared by the call screen (voice) and
 /// the chat sheet (text). One agent, two ways in.
@@ -53,10 +54,25 @@ final class ChatStore: ObservableObject {
     private var sentAt: Date?
     private var reconnectTask: Task<Void, Never>?
     private var reconnectAttempt = 0
+    /// Typed lines the kernel has not echoed yet, oldest first.
+    private var pendingSends: [(id: UUID, text: String, steer: Bool)] = []
+    private let pathMonitor = NWPathMonitor()
+    private var pathWasSatisfied = true
 
     init(settings: AppSettings, link: VoiceLink) {
         self.settings = settings
         self.link = link
+        // The network came back (Wi-Fi to cellular, a tunnel, a dead spot):
+        // reconnect now instead of waiting out the backoff.
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let satisfied = path.status == .satisfied
+            Task { @MainActor in
+                guard let self else { return }
+                if satisfied, !self.pathWasSatisfied || self.reconnectIn != nil { self.resumeIfNeeded() }
+                self.pathWasSatisfied = satisfied
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "arbos.path"))
     }
 
     var agentName: String {
@@ -134,15 +150,18 @@ final class ChatStore: ObservableObject {
     /// a link iOS cut while the app slept is reopened at once.
     func resumeIfNeeded() {
         guard mode == .offline || mode == .mock, settings.chatEndpoint != nil else { return }
+        reconnectTask?.cancel()
+        reconnectIn = nil
         reconnectAttempt = 0
         Task { await reconnect() }
     }
 
-    /// The link went: try again after 2 s, then 4, 8, 16, 32, capped at 60,
-    /// until it holds. `reconnectIn` counts down for the chat's notice.
+    /// The link went: try again after 2 s, then 4, 8, capped at 15, until
+    /// it holds (the path monitor cuts the wait short when the network
+    /// returns). `reconnectIn` counts down for the chat's notice.
     private func scheduleReconnect() {
         reconnectTask?.cancel()
-        let delay = min(60, 2 << min(reconnectAttempt, 5))
+        let delay = min(15, 2 << min(reconnectAttempt, 3))
         reconnectAttempt += 1
         reconnectIn = delay
         reconnectTask = Task { [weak self] in
@@ -171,6 +190,7 @@ final class ChatStore: ObservableObject {
         await connect()
         if mode == .live || mode == .server {
             reconnectAttempt = 0
+            flushPending()
         } else if settings.chatEndpoint != nil, mode != .connecting {
             scheduleReconnect()
         }
@@ -206,10 +226,16 @@ final class ChatStore: ObservableObject {
 
     func send(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let source else { return }
-        // A turn already running gets the new words as a steer at its next
-        // tool boundary; otherwise this starts one.
+        guard !trimmed.isEmpty else { return }
+        // Shown at once, as pending; the kernel's echo of the same words
+        // makes it real. A turn already running gets the new words as a
+        // steer at its next tool boundary; otherwise this starts one.
         let steer = busy
+        let card = ChatItem(.user(trimmed, pending: true))
+        closeOpenAgentMessage()
+        items.append(card)
+        pendingSends.append((card.id, trimmed, steer))
+        guard let source, mode == .live || mode == .server || mode == .mock else { return }
         busy = true
         sentAt = Date()
         Task {
@@ -217,7 +243,20 @@ final class ChatStore: ObservableObject {
                 try await source.send(text: trimmed, steer: steer)
             } catch {
                 busy = false
-                items.append(ChatItem(.notice("kernel offline", failed: true)))
+            }
+        }
+    }
+
+    /// After a reconnect: whatever was typed while the link was down goes
+    /// out now, oldest first, in one turn each.
+    private func flushPending() {
+        guard let source, !pendingSends.isEmpty else { return }
+        let queue = pendingSends
+        busy = true
+        Task {
+            for entry in queue {
+                try? await source.send(text: entry.text, steer: false)
+                try? await Task.sleep(for: .milliseconds(200))
             }
         }
     }
@@ -239,9 +278,18 @@ final class ChatStore: ObservableObject {
     private func apply(_ update: ChatUpdate) {
         switch update {
         case .history(let seed, let earlier):
-            items = seed
+            let stillPending = items.filter { if case .user(_, pending: true) = $0.kind { return true } else { return false } }
+            items = seed + stillPending
             earlierLines = earlier
         case .item(let item):
+            if case .user(let text, _) = item.kind, let index = pendingSends.firstIndex(where: { $0.text == text }) {
+                // The kernel echoed a line typed here: the pending card is real now.
+                let pending = pendingSends.remove(at: index)
+                if let row = items.firstIndex(where: { $0.id == pending.id }) {
+                    items[row].kind = .user(text)
+                    return
+                }
+            }
             closeOpenAgentMessage()
             items.append(item)
         case .agentDelta(let delta, let step):

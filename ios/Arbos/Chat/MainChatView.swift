@@ -190,6 +190,13 @@ struct ProjectChatView: View {
             .onChange(of: chat.items) { _, _ in
                 withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
             }
+            .onChange(of: chat.earlierLines) { _, _ in
+                // A long replay lands in one go; the layout settles a beat later.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(250))
+                    proxy.scrollTo("tail", anchor: .bottom)
+                }
+            }
             .onChange(of: chat.workers) { _, _ in
                 withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
             }
@@ -367,13 +374,12 @@ struct ChatRow: View {
 
     var body: some View {
         switch item.kind {
-        case .user(let text):
-            HStack {
-                Spacer(minLength: 0)
+        case .user(let text, let pending):
+            VStack(alignment: .trailing, spacing: 4) {
                 Text(text)
                     .font(ArbosTheme.body)
                     .lineSpacing(ArbosTheme.lineSpacing)
-                    .foregroundStyle(ArbosTheme.text)
+                    .foregroundStyle(pending ? ArbosTheme.textMuted : ArbosTheme.text)
                     .padding(.horizontal, ArbosTheme.promptPadX)
                     .padding(.vertical, ArbosTheme.promptPadY)
                     .background(
@@ -381,7 +387,13 @@ struct ChatRow: View {
                             .fill(ArbosTheme.card)
                     )
                     .frame(maxWidth: UIScreen.main.bounds.width * 0.78, alignment: .trailing)
+                if pending {
+                    Text("Sending…")
+                        .font(ArbosTheme.caption)
+                        .foregroundStyle(ArbosTheme.textDim)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
             .padding(.top, 6)
         case .agent(let text, let streaming):
             HStack(alignment: .lastTextBaseline, spacing: 2) {
