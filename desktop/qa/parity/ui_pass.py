@@ -301,7 +301,11 @@ class Pass:
                 self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", "Stop ended it", "pass", self.still("recover-stop"))
                 return
         # The root's turn is over but its workers run on: Cursor's card over
-        # the pills has Stop All for that (cycle 8).
+        # the pills has Stop All for that (cycle 8). The card sits behind
+        # the Working pill (F-82); open it first.
+        if not self.app.exists("working-stop-all") and self.app.exists("pill-working"):
+            self.app.click("pill-working")
+            time.sleep(0.5)
         if self.app.exists("working-stop-all"):
             self.app.click("working-stop-all")
             if self.wait(lambda s: not busy(s), 15, what="stop all"):
@@ -778,7 +782,25 @@ class Pass:
             def child_ok(a, b):
                 log(f"child-line active {a['active_session']} -> {b['active_session']}; parent of active after: {(active(b) or {}).get('parent')}")
                 return b["active_session"] != a["active_session"] and (active(b) or {}).get("parent") is not None
-            self.check("child-line", sc, "click inline sub-agent line", "active_session becomes the child", click_child, child_ok)
+            # F-82: while the root's turn waits on several workers the
+            # transcript has one "N Working  <step>" line (Cursor's shape);
+            # it opens the Working card, whose rows open the workers. The
+            # card is closed until then — a delegated task shows the line
+            # and the "Working N" pill, nothing more.
+            several = (pills or {}).get("working", 0) > 1 and child.endswith("child-line-live")
+            if several:
+                self.record("working-card-closed", sc, "read the pills row while workers run", "no Working card until the pill or the line opens it",
+                            f"working-card exists={self.app.exists('working-card')}", "fail" if self.app.exists("working-card") else "pass", "")
+                self.check("child-line", sc, "click the 'N Working' line with several workers", "the Working card opens (a row per worker)",
+                           click_child, lambda a, b: self.app.exists("working-card"), settle=0.8)
+                row = self.first("working-row-*")
+                if row:
+                    self.check("working-row", sc, "click a Working card row", "active_session becomes the child",
+                               lambda: self.app.click(row), child_ok)
+                else:
+                    self.gap("working-row", sc, "click", "no working-row-* after the line opened the card")
+            else:
+                self.check("child-line", sc, "click inline sub-agent line", "active_session becomes the child", click_child, child_ok)
             back = self.first("chat-header-crumb-*") or (self.first("panel-agent-*") if self.tabs else None)
             if back:
                 self.check("chat-header-crumb", sc, "click crumb / back", "active_session back to the parent",

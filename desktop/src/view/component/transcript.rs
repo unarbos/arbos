@@ -1460,12 +1460,20 @@ pub(crate) fn kind_chip(kind: &str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// The lines under a turn for the workers it started. While the root's own
+/// turn still runs (it is waiting on them) Cursor draws one line for all of
+/// them — `3 Working  Waiting on three writers`: the count, then the
+/// coordinator's own step — and keeps the per-worker rows behind the
+/// Working pill. Once the root's turn has ended and workers run on in the
+/// background, each has its own line with its step. Returns the element
+/// and whether a live (shimmering) line was drawn.
 fn children_lines(
     chat: &ChatSession,
     spawned: &[String],
+    running: bool,
     theme: &Theme,
     cx: &mut Context<Workspace>,
-) -> AnyElement {
+) -> (AnyElement, bool) {
     use crate::model::session::ChildState;
     let children: Vec<_> = chat
         .children
@@ -1480,6 +1488,83 @@ fn children_lines(
         .iter()
         .filter(|c| c.state == ChildState::Working)
         .count();
+    let one_line = running && working > 0;
+    let live_line = one_line.then(|| {
+        let live: Vec<_> = children
+            .iter()
+            .filter(|c| c.state == ChildState::Working)
+            .collect();
+        // One worker: its own live step (Jacob's Cursor still reads "1
+        // Working  Reading project context…"); several: the coordinator's
+        // step over all of them ("Waiting on three writers").
+        let own = chat
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let step = match live.as_slice() {
+            [only] => only
+                .step
+                .clone()
+                .or(own)
+                .unwrap_or_else(|| only.title.clone()),
+            _ => own.unwrap_or_else(|| format!("Waiting on {working} workers")),
+        };
+        let target = match live.as_slice() {
+            [only] => Some(only.id),
+            _ => None,
+        };
+        let root = chat.id;
+        div()
+            .id("child-line-live")
+            .self_start()
+            .max_w_full()
+            .flex()
+            .flex_row()
+            .items_baseline()
+            .gap(px(6.))
+            .py(px(2.))
+            .cursor_pointer()
+            .text_style(TextStyle::Body)
+            .text_size(px(root::CURSOR_PROSE_SIZE))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!("{working} Working"))),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text_faint)
+                    .child(shimmer_label(step, live_phase(), theme, cx)),
+            )
+            .when(live.len() == 1 && live[0].readonly, |el| {
+                el.child(readonly_mark(theme, 12.))
+            })
+            // One worker: the line opens it. Several: the Working card,
+            // with a row per worker, the way the pill opens it.
+            .on_mouse_down(
+                bezel::gpui::MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    match target {
+                        Some(id) => this.select_session(id, cx),
+                        None => {
+                            this.working_card_open = if this.working_card_open == Some(root) {
+                                None
+                            } else {
+                                Some(root)
+                            };
+                            cx.notify();
+                        }
+                    }
+                }),
+            )
+            .into_any_element()
+    });
     let reported: Vec<&str> = chat
         .items
         .iter()
@@ -1494,6 +1579,7 @@ fn children_lines(
         .filter_map(|child| {
             let id = child.id;
             let (verb, rest, tone) = match child.state {
+                ChildState::Working if one_line => return None,
                 ChildState::Working => {
                     let verb = if first_working && working > 1 {
                         format!("{working} Working")
@@ -1601,12 +1687,17 @@ fn children_lines(
                 .into_any_element()
         })
         .collect();
-    div()
-        .flex()
-        .flex_col()
-        .children(rows)
-        .children(gone)
-        .into_any_element()
+    let drawn_live = live_line.is_some();
+    (
+        div()
+            .flex()
+            .flex_col()
+            .children(live_line)
+            .children(rows)
+            .children(gone)
+            .into_any_element(),
+        drawn_live,
+    )
 }
 
 /// One message, selectable. The transcript's two prose items — what you asked
@@ -3704,9 +3795,31 @@ fn zone(
             None => open = true,
         }
     }
+    // Cursor's Project chat (the root) shows no tool calls at all — the
+    // coordinator's quick reads and commands are hidden work; its checklist
+    // (`plan`, Cursor's TodoWrite) shows as a card. A worker's chat shows
+    // every call.
+    let project_style = chat.parent.is_none();
+    // Whether the body draws rows a headline could fold: a thought, a run
+    // with tool rows, a checklist card. Prose alone is not folded.
+    let rows_under = segs.iter().any(|seg| match seg {
+        Seg::Thought(_) => true,
+        Seg::Run(range) => {
+            !project_style
+                || own_calls(&chat.items, range.clone())
+                || range.clone().any(|ix| {
+                    matches!(&chat.items[ix], ChatItem::Tool { label, .. } if is_todo_call(label))
+                })
+        }
+        Seg::Prose(_) | Seg::Other(_) => false,
+    });
     // Cursor's live headline over the timeline: "Working <step> ⌄" — the
-    // step the agent named, else the kernel's; the rows of work under it.
-    let live_headline = running && foldable && !kickoff_turn;
+    // step the agent named, else the kernel's; the rows of work under it,
+    // and the chevron folds them. Over nothing (a root waiting on its
+    // workers, prose alone) there is no headline: a chevron that discloses
+    // nothing is worse than none (F-82); the step is said by the workers'
+    // line or the heartbeat instead.
+    let live_headline = running && foldable && !kickoff_turn && rows_under;
     if live_headline {
         let step = chat
             .status
@@ -3714,6 +3827,14 @@ fn zone(
             .filter(|s| !s.trim().is_empty())
             .or_else(|| chat.current_step())
             .unwrap_or_else(|| "Planning next moves".to_string());
+        let id = chat.id;
+        open = chat
+            .transcript
+            .work
+            .get(&first)
+            .copied()
+            .unwrap_or_default()
+            .get(true);
         zone = zone.child(
             fold_row(
                 &theme,
@@ -3723,19 +3844,18 @@ fn zone(
                 step,
                 None,
                 true,
-                true,
+                open,
                 cx,
             )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.with_session(id, cx, |chat| {
+                    chat.transcript.work.entry(first).or_default().toggle(true);
+                });
+            }))
             .into_any_element(),
         );
         header_drawn = true;
-        open = true;
     }
-    // Cursor's Project chat (the root) shows no tool calls at all — the
-    // coordinator's quick reads and commands are hidden work; its checklist
-    // (`plan`, Cursor's TodoWrite) shows as a card. A worker's chat shows
-    // every call.
-    let project_style = chat.parent.is_none();
     // The worker's report that woke this segment, under its header.
     if let Some(ix) = report
         && let Some(ChatItem::From { who, text, images }) = chat.items.get(ix)
@@ -3826,7 +3946,11 @@ fn zone(
         }
     }
     if !spawned.is_empty() && !chat.children.is_empty() {
-        zone = zone.child(children_lines(chat, &spawned, &theme, cx));
+        let (lines, live_line) = children_lines(chat, &spawned, running, &theme, cx);
+        zone = zone.child(lines);
+        // The "N Working  <step>" line carries the shimmer while the root
+        // waits on its workers; a heartbeat under it would say it twice.
+        live_fold_shown = live_fold_shown || live_line;
     }
     // Standing work the turn set up: a small card at the moment it was made.
     zone = zone.children(subscription_cards(chat, body.clone(), &theme));
@@ -5333,6 +5457,14 @@ fn heartbeat(
     if quiet {
         Painter::of(cx).lease(2.0, Duration::from_millis(1100), cx);
     }
+    // The agent's own step reads as Cursor's "Working  Launching three
+    // sort writers": the verb a shade brighter, the step faint and
+    // shimmering, no chevron — there is nothing under it to fold.
+    let is_step = chat
+        .status
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|step| step == label);
     let label = if quiet {
         format!("{label} · {}", since_short(since))
     } else {
@@ -5342,18 +5474,32 @@ fn heartbeat(
         .flex()
         .flex_col()
         .gap(px(4.))
-        .py(px(2.))
         .child(
             div()
                 .flex()
                 .flex_row()
-                .items_center()
+                .items_baseline()
                 .gap(px(ROW_GAP))
+                .py(px(2.))
+                .text_style(TextStyle::Body)
+                .text_size(px(root::CURSOR_PROSE_SIZE))
+                .when(is_step, |el| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.text_muted)
+                            .child("Working"),
+                    )
+                })
                 .child(
                     div()
-                        .text_style(TextStyle::Body)
-                        .text_size(px(root::CURSOR_PROSE_SIZE))
-                        .text_color(theme.text_muted)
+                        .min_w_0()
+                        .truncate()
+                        .text_color(if is_step {
+                            theme.text_faint
+                        } else {
+                            theme.text_muted
+                        })
                         .child(shimmer_label(label, since, theme, cx)),
                 ),
         )

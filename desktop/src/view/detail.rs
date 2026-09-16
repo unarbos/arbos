@@ -1997,16 +1997,12 @@ impl Arbos {
                 .child(glyph)
                 .child(SharedString::from(label))
         };
-        // Cursor's Working card: above the pills while workers run, one
-        // row per worker with its spinner, Stop All on the right. It opens
-        // by itself at fan-out; × puts it away until the next one; the
-        // Working pill brings it back.
-        let closed = self
-            .working_card_closed
-            .as_ref()
-            .is_some_and(|(id, ids)| *id == main_id && working.iter().all(|w| ids.contains(w)));
-        let card_open = !working.is_empty() && !closed;
-        let pill_ids = working.clone();
+        // Cursor's Working card: one row per running worker with its
+        // spinner, Stop All on the right, over the pills. Cursor keeps it
+        // behind the "Working N" pill — a delegated task shows one "1
+        // Working" line in the transcript and the pill, nothing more
+        // (F-82) — so it opens on the pill and × puts it away.
+        let card_open = !working.is_empty() && workspace.working_card_open == Some(main_id);
         let workers: Vec<(u64, String, Duration, bool)> = working
             .iter()
             .filter_map(|id| project.sessions.iter().find(|c| c.id == *id))
@@ -2045,12 +2041,14 @@ impl Arbos {
                             Tooltip::text("Sub-agents with a turn running", window, cx)
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.working_card_closed = if closed {
-                                None
-                            } else {
-                                Some((main_id, pill_ids.clone()))
-                            };
-                            cx.notify();
+                            this.workspace.update(cx, |workspace, cx| {
+                                workspace.working_card_open = if card_open {
+                                    None
+                                } else {
+                                    Some(main_id)
+                                };
+                                cx.notify();
+                            });
                         })),
                     )
                 })
@@ -2196,9 +2194,9 @@ impl Arbos {
                     )
                 });
         let card = if card_open {
-            Some(self.working_card(&workers, main_id, true, &theme, cx))
+            Some(self.working_card(&workers, true, &theme, cx))
         } else if agents_open {
-            Some(self.working_card(&agents, main_id, false, &theme, cx))
+            Some(self.working_card(&agents, false, &theme, cx))
         } else {
             None
         };
@@ -2214,19 +2212,17 @@ impl Arbos {
         )
     }
 
-    /// The card over the pills during a fan-out: "Working" and "Stop All ×"
-    /// on one line, then a braille spinner and the worker's name per row.
-    /// A row opens the worker; Stop All cancels every running one.
+    /// The card the Working pill opens: "Working" and "Stop All ×" on one
+    /// line, then a braille spinner and the worker's name per row. A row
+    /// opens the worker; Stop All cancels every running one.
     fn working_card(
         &self,
         workers: &[(u64, String, Duration, bool)],
-        main_id: u64,
         live: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ids: Vec<u64> = workers.iter().map(|(id, ..)| *id).collect();
-        let close_ids = ids.clone();
         let mut card = div()
             .id("working-card")
             .w_full()
@@ -2290,7 +2286,10 @@ impl Arbos {
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if live {
-                                    this.working_card_closed = Some((main_id, close_ids.clone()));
+                                    this.workspace.update(cx, |workspace, cx| {
+                                        workspace.working_card_open = None;
+                                        cx.notify();
+                                    });
                                 } else {
                                     this.agents_card_open = None;
                                 }

@@ -1783,20 +1783,39 @@ impl ChatSession {
     /// A streamed chunk lands on the reply item at `ix`: merged into the
     /// raw text, shown with tool-call markup cut.
     fn stream_into(&mut self, ix: usize, text: &str) {
+        let busy = self.busy();
         let Some(ChatItem::Agent(body)) = self.items.get_mut(ix) else {
             return;
         };
         let raw = self.stream_raw.entry(ix).or_insert_with(|| body.clone());
         merge_stream_text(raw, text);
-        *body = crate::markup::strip_live(raw);
+        let shown = crate::markup::strip_live(raw);
+        // A `status` call streams as the words "status: <step>" before the
+        // settled line takes them off the transcript. They are the live
+        // step for as long as they stream — Jacob's "status: Delegating to
+        // worker…" sat as a paragraph for the whole wait on the worker.
+        if let Some(step) = status_line(&shown) {
+            body.clear();
+            if busy {
+                self.status = Some(step);
+            }
+            return;
+        }
+        *body = shown;
     }
 
     /// Open a reply item for streamed text; `None` when the text shows
     /// nothing yet (markup only).
     fn open_stream(&mut self, text: String) -> Option<usize> {
-        let shown = crate::markup::strip_live(&text);
+        let mut shown = crate::markup::strip_live(&text);
         if shown.is_empty() && text.trim().is_empty() {
             return None;
+        }
+        if let Some(step) = status_line(&shown) {
+            if self.busy() {
+                self.status = Some(step);
+            }
+            shown.clear();
         }
         self.items.push(ChatItem::Agent(shown));
         let ix = self.items.len() - 1;

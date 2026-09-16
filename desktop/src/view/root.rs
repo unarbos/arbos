@@ -630,10 +630,6 @@ pub struct Arbos {
     /// The panel's "N archived" row is unfolded: finished workers the
     /// kernel moved to `archive/agents/` are listed, faint.
     pub(crate) archived_open: bool,
-    /// The Working card the user closed (× or the pill): the root chat and
-    /// the workers that were running. A new worker after that reopens it,
-    /// so the next fan-out shows the card again.
-    pub(crate) working_card_closed: Option<(u64, Vec<u64>)>,
     /// The root chat whose idle "Agents" card is open (Cursor's Agents pill
     /// once the workers are done).
     pub(crate) agents_card_open: Option<u64>,
@@ -921,7 +917,6 @@ impl Arbos {
             window_active: true,
             panel_open: true,
             archived_open: false,
-            working_card_closed: None,
             agents_card_open: None,
             composer,
             opener,
