@@ -31,9 +31,10 @@ Jacob (2026-09-16): "The upgrade loops need to actually run full cycles of creat
 
 | run (UTC) | target | build | J1 | J2 | J3 | J4 | J5 | J6 | J7 | J8 | P1 | P2 | P3 | notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 09-16 15:00 | `pod` (direct) | #319 branch | P by eye (kernel record: `write` ×2, `git init … commit`, "seeded"; the runner's `read`-frame check is wrong — `read` is confined to `.arbos/`) | U (no worker; root did it in 24 s) | P | U (turn had ended before the line; CHANGELOG carries QA-id per the root; summary answered) | **F** as scored — but the time question never reached the kernel (runner typed three lines back to back and the third was lost) → harness | P by eye (away card "root replied" on return) | P by eye: verify paste `OK`, branch `fix-area-J150046`, 2 commits ahead of main | U/U/**c: P** | P | P | P (pod) | 7 m 8 s. **App bug found**: a steer typed mid-stream stranded the reply's first word as its own bubble ("That" … steer … "That line is already…") — fixed on the #319 branch, see M-97. The pod root behaved this time (opus-class answers, `write` worked): JB-4 did **not** repeat |
 | 09-16 14:32 | `pod` (direct) | #319 branch | **F** (kernel said "seeded"; the read frame found no `tests/test_math.py`) | U (no worker) | P | **F** (no CHANGELOG at all) | **F** (the time ask never answered) | U (chat intact; this kernel sent no `notify` during the run) | **F** (no OK, no branch) | U/U/**c: P** (calm line under the steer during the cut; turn went on after) | P | P | P (on `pod` — the gateway's own kernel, so JB-3 does not bite here) | 6 m 40 s. The pod root (gemini-2.5-flash) floundered for the whole challenge: 13 `compacted` / `over budget (~19k tokens)` notices, `write` "exit 1" failures, five `rm -rf` + `mkdir` loops, two false "seeded", never a worker. See **candidate JB-4** |
 
-Rates on QA ids after 1 run: J3 1/1, P1–P3 1/1; J1, J4, J5, J7 0/1; J2, J6, J8 unverified.
+Rates on QA ids after 2 runs (`pod`): J3 2/2, P1–P3 2/2, J1 1/2, J7 1/2, J4 0/1 (+1 U), J5 0/1 (+1 harness), J6 1/1 (+1 U), J2 and J8a/b unverified, J8c 2/2.
 
 ## Runs 1–3 (earlier 13-step numbering, `demo` on ArbosLife)
 
@@ -51,7 +52,7 @@ Rates after 3 runs: J1–J6, J8, J11, J13 **3/3**; J9 **2/2** product (one harne
 
 | id | step | what | whose |
 | --- | --- | --- | --- |
-| **JB-4?** | J1/J4/J7 on `pod` | the pod's root agent cannot carry a four-step task: its context budget reads as ~19–21k tokens ("over budget … nothing old enough to compact" 13 times in one run), the `write` tool returns exit 1 for it, and it loops (`rm -rf`, `mkdir`, "seeded" twice) without ever spawning a worker or producing the CHANGELOG. `demo` on ArbosLife (opus, workers) did the same shape of task in every earlier run | pod kernel config (root budget / model) + `write` tool on that place |
+| ~~JB-4?~~ (did not repeat in run 5 — the pod root completed the task; watching) | J1/J4/J7 on `pod` | the pod's root agent cannot carry a four-step task: its context budget reads as ~19–21k tokens ("over budget … nothing old enough to compact" 13 times in one run), the `write` tool returns exit 1 for it, and it loops (`rm -rf`, `mkdir`, "seeded" twice) without ever spawning a worker or producing the CHANGELOG. `demo` on ArbosLife (opus, workers) did the same shape of task in every earlier run | pod kernel config (root budget / model) + `write` tool on that place |
 
 ## Named bugs (failed twice running)
 

@@ -2,6 +2,7 @@
 
 - Feature: the `status` live line (kernel `StatusTool`, prompt line 22 of `crates/arbos-engine/src/prompt.rs`) as the desktop draws it; `main` @ `c964294c`, model `google/gemini-2.5-flash`
 - Severity: medium, but it is the first thing a new user sees. The kickoff turn on a fresh project shows three bubbles — `status "Looking around the new place"`, `status "Writing project context"`, `status "Setting plan"` — above the greeting, as if the agent were talking in code. The same happens on every later turn (`status "Spawning worker to fix test and add changelog"`).
+- **Closed 2026-09-16 15:20 UTC** by #320 (`main` @ `4b387fce`): a status written as text is the live line, not a reply, in every form. `status_drawn_as_reply` empty in 2/2 desktop journeys on that build (it had been 11× on `c964294c`). J3 keeps the check.
 - Journey step: **J3 (watch it work honestly — the status reads honestly)**; also visible in J1. Scenario `journey-linux`; rollouts `internal/qa/rollouts/20260916T132732Z-journey-linux/` and the run after it. Failed in two consecutive runs → named bug per `docs/acceptance-journeys.md`.
 
 ## Repro
@@ -35,4 +36,4 @@ The kernel records the line as ordinary assistant text; the desktop's `status_li
 
 ## Fix
 
-Not started. Regression check: `journey-linux` J3 (`status_drawn_as_reply` in the evidence) and a kernel e2e with a replay reply of `status "Reading the file"\n` followed by prose: the transcript's assistant line has no `status "` prefix and the agent's status reads "Reading the file".
+#320 (see the closing line above). Regression check: `journey-linux` J3 (`status_drawn_as_reply` in the evidence) and a kernel e2e with a replay reply of `status "Reading the file"\n` followed by prose: the transcript's assistant line has no `status "` prefix and the agent's status reads "Reading the file".

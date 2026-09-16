@@ -2,6 +2,7 @@
 
 - Feature: turn continuation after a kernel restart (`needs_serve()` refires the open `wake`; the model sees a turn with no tool record and calls the tool again); `main` @ `c964294c`, model `google/gemini-2.5-flash`
 - Severity: high for anything non-idempotent — a `git push`, a `curl -X POST`, an `rm`, an `echo >>`, a payment. Harmless for reads and for `git commit` ("nothing to commit"). The features agent found this while walking the journey (2026-09-16) and left it unfixed on purpose as "worth watching"; the journey's J8a now watches it and it doubled on the first try.
+- **Closed 2026-09-16 15:20 UTC** by #316 (`main` @ `4b387fce`): the tool call is on disk before it runs; after a kernel death the transcript carries `error: "interrupted: the kernel restarted while this ran"` on the call, and the continued turn checks the log and runs only the rest. `side-effects.log` holds the tag once in 3/3 headless runs (`journey-j8a-headless`, ~15 s each) and 2/2 desktop journeys (`20260916T150732Z`, `20260916T151303Z`). J8a stays in every cycle as the regression check.
 - Journey step: **J8a (kernel restart mid-turn)**. Scenario `journey-linux`; rollout `internal/qa/rollouts/20260916T134759Z-journey-linux/` (evidence `J8.restart.side_effect_runs = 2`). Related e2e: #316 pins the restart itself.
 
 ## Repro
