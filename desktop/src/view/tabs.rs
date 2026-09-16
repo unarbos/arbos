@@ -48,6 +48,8 @@ struct Tab {
     working: Option<std::time::Duration>,
     /// An agent has a question parked for the user.
     asking: bool,
+    /// Kernel notifications for this project nobody has looked at yet.
+    unseen: usize,
 }
 
 impl Arbos {
@@ -76,6 +78,12 @@ impl Arbos {
                     .iter()
                     .filter(|chat| !chat.closed)
                     .any(|chat| chat.plan_open().any(|n| n.do_kind == "ask"));
+                let unseen = project
+                    .sessions
+                    .iter()
+                    .filter(|chat| !chat.closed)
+                    .map(|chat| chat.unseen.len())
+                    .sum();
                 Tab {
                     ix,
                     label: Workspace::tab_label(project),
@@ -83,6 +91,7 @@ impl Arbos {
                     color: project.identity.hsla(),
                     working,
                     asking,
+                    unseen,
                 }
             })
             .collect();
@@ -202,8 +211,9 @@ impl Arbos {
                     .justify_center()
                     .child(glyph)
                     // Cursor's badge: a small dot at the glyph's corner when
-                    // the project wants the person.
-                    .when(tab.asking, |el| {
+                    // the project wants the person — a question waiting, or
+                    // a reply, failure or notice nobody has looked at (#293).
+                    .when(tab.asking || tab.unseen > 0, |el| {
                         el.child(
                             div()
                                 .absolute()

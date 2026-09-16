@@ -107,6 +107,20 @@ pub enum Event {
         step: u64,
         secs: Option<u32>,
     },
+    /// The kernel's notification for this agent (#293): a reply, a
+    /// question, a failure or a notice the user may have missed. Replayed
+    /// ones (unseen at attach) come oldest first with `replayed`.
+    Notify {
+        id: u64,
+        ts: i64,
+        kind: String,
+        title: String,
+        body: String,
+        replayed: bool,
+    },
+    /// The user has seen every notification with id ≤ `through`, on any
+    /// client; every window drops its badge.
+    Seen(u64),
     /// A recorded `wake`: a turn opens (a prompt, a child's report, a
     /// subscription firing); the model's step numbers start again at 1.
     /// A kind other than `user`/`kickoff` is a segment of its own.
@@ -451,6 +465,12 @@ impl Session {
         Ok(stored)
     }
 
+    /// The user has seen every notification up to `through`: the kernel
+    /// records it and tells every other client.
+    pub fn seen(&self, through: u64) -> Result<()> {
+        self.send_frame(&Frame::Seen { through })
+    }
+
     pub fn cancel(&self) -> Result<(), Error> {
         self.send_frame(&Frame::Stop {
             agent: self.session_id.clone(),
@@ -656,6 +676,23 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
         Frame::Working { agent: id, secs } if id == agent || agent.is_empty() => {
             vec![Event::Working(secs)]
         }
+        Frame::Notify {
+            id: nid,
+            ts,
+            agent: who,
+            kind,
+            title,
+            body,
+            replayed,
+        } if who == agent => vec![Event::Notify {
+            id: nid,
+            ts,
+            kind,
+            title,
+            body,
+            replayed,
+        }],
+        Frame::Seen { through } => vec![Event::Seen(through)],
         Frame::Provider {
             provider,
             model,
