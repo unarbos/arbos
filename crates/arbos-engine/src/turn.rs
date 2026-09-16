@@ -818,6 +818,12 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 return end(None, None);
             }
         };
+        // Tool-call markup written as prose (`<invoke name="bash">…`, a
+        // `<function_calls>` block, `<tool_call>`): nothing ran, and it
+        // looks broken on every client. The markup never reaches the
+        // transcript; the words around it do, and the nudge below says
+        // what happened (subnet120 from the phone, 2026-09-16).
+        let (content, had_markup) = crate::markup::strip_tool_markup(&content);
         // The provider's own count beats our chars/4 guess. Remember the
         // ratio against the *raw* estimate so it does not feed on itself.
         // The provider counts the tool schemas too; they go on our side as
@@ -896,7 +902,14 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             // A `nudge` line, not a `user` one: the model reads it as
             // `[kernel] …` either way, and the window draws it dim instead
             // of as a bubble the user never typed.
-            let nudge = if content.trim().is_empty() {
+            let nudge = if had_markup {
+                // Markup cut above: the reply may now be empty, but it was
+                // a call written as text, not silence.
+                Some((
+                    "That was a tool call written as text, so nothing ran (the markup was not kept). Call the tool itself: the tools are functions, not text.".to_string(),
+                    "tool call written as text",
+                ))
+            } else if content.trim().is_empty() {
                 // A done wake that has nothing to add ends in silence:
                 // Cursor's coordinator says nothing between worker reports
                 // when the user is owed nothing yet (cold-p5).
