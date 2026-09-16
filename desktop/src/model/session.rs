@@ -524,6 +524,10 @@ pub struct ChatSession {
     /// Runtime only; cleared when a turn ends.
     pub step_items: HashMap<u64, usize>,
     pub step_thoughts: HashMap<u64, usize>,
+    /// The streamed text of each live reply item as it arrived, by item
+    /// index: the deltas merge into this, and the item shows it with any
+    /// tool-call markup cut (`crate::markup`). Runtime only.
+    pub stream_raw: HashMap<usize, String>,
     /// When this window asked the kernel for the kickoff turn on an empty
     /// root (Cursor's "Setting up environment"). Runtime only.
     pub kickoff_at: Option<SystemTime>,
@@ -655,6 +659,7 @@ impl ChatSession {
             thought_carry: 0,
             step_items: HashMap::new(),
             step_thoughts: HashMap::new(),
+            stream_raw: HashMap::new(),
             kickoff_at: None,
             kickoff_secs: None,
             kickoff_wanted: false,
@@ -735,6 +740,7 @@ impl ChatSession {
             thought_carry: 0,
             step_items: HashMap::new(),
             step_thoughts: HashMap::new(),
+            stream_raw: HashMap::new(),
             kickoff_at: None,
             kickoff_secs: None,
             kickoff_wanted: false,
@@ -815,6 +821,7 @@ impl ChatSession {
             thought_carry: 0,
             step_items: HashMap::new(),
             step_thoughts: HashMap::new(),
+            stream_raw: HashMap::new(),
             kickoff_at: None,
             kickoff_secs: None,
             kickoff_wanted: false,
@@ -1642,6 +1649,63 @@ impl ChatSession {
     fn new_turn_steps(&mut self) {
         self.step_items.clear();
         self.step_thoughts.clear();
+        self.stream_raw.clear();
+    }
+
+    /// A streamed chunk lands on the reply item at `ix`: merged into the
+    /// raw text, shown with tool-call markup cut.
+    fn stream_into(&mut self, ix: usize, text: &str) {
+        let Some(ChatItem::Agent(body)) = self.items.get_mut(ix) else {
+            return;
+        };
+        let raw = self.stream_raw.entry(ix).or_insert_with(|| body.clone());
+        merge_stream_text(raw, text);
+        *body = crate::markup::strip_live(raw);
+    }
+
+    /// Open a reply item for streamed text; `None` when the text shows
+    /// nothing yet (markup only).
+    fn open_stream(&mut self, text: String) -> Option<usize> {
+        let shown = crate::markup::strip_live(&text);
+        if shown.is_empty() && text.trim().is_empty() {
+            return None;
+        }
+        self.items.push(ChatItem::Agent(shown));
+        let ix = self.items.len() - 1;
+        self.stream_raw.insert(ix, text);
+        Some(ix)
+    }
+
+    /// The settled line of a streamed reply is empty (a reply that was only
+    /// markup, cut by the kernel): the item it opened goes, and every index
+    /// held after it moves up.
+    fn drop_item(&mut self, ix: usize) {
+        self.items.remove(ix);
+        self.stream_raw.remove(&ix);
+        for at in self
+            .step_items
+            .values_mut()
+            .chain(self.step_thoughts.values_mut())
+        {
+            if *at > ix {
+                *at -= 1;
+            }
+        }
+        self.step_items.retain(|_, at| *at != ix);
+        self.step_thoughts.retain(|_, at| *at != ix);
+        let moved: Vec<(usize, String)> = self
+            .stream_raw
+            .drain()
+            .map(|(at, raw)| (if at > ix { at - 1 } else { at }, raw))
+            .collect();
+        self.stream_raw.extend(moved);
+        if self.streaming_agent == Some(ix) {
+            self.streaming_agent = None;
+        } else if let Some(at) = self.streaming_agent.as_mut()
+            && *at > ix
+        {
+            *at -= 1;
+        }
     }
 
     /// Put the user card in the pane this frame — before the kernel
@@ -2263,13 +2327,15 @@ impl ChatSession {
             Event::TextDelta { text, step } => {
                 self.turn_alive();
                 self.finish_thinking();
-                let at = self.step_items.get(&step).copied();
-                match at.and_then(|ix| self.items.get_mut(ix)) {
-                    Some(ChatItem::Agent(body)) => merge_stream_text(body, &text),
-                    _ => {
-                        if !text.is_empty() {
-                            self.items.push(ChatItem::Agent(text));
-                            let ix = self.items.len() - 1;
+                let at = self
+                    .step_items
+                    .get(&step)
+                    .copied()
+                    .filter(|ix| matches!(self.items.get(*ix), Some(ChatItem::Agent(_))));
+                match at {
+                    Some(ix) => self.stream_into(ix, &text),
+                    None => {
+                        if let Some(ix) = self.open_stream(text) {
                             self.step_items.insert(step, ix);
                             self.streaming_agent = Some(ix);
                         }
@@ -2354,7 +2420,9 @@ impl ChatSession {
             }
             Event::AssistantFinal { text, step } => {
                 self.finish_thinking();
-                let text = text.trim_matches('\n').to_string();
+                // The kernel cuts tool markup from the settled line (#278);
+                // the same cut here covers a kernel from before it.
+                let text = crate::markup::strip_live(text.trim_matches('\n'));
                 // The settled line of a numbered step replaces the item its
                 // deltas built, wherever it sits; nothing is doubled and a
                 // late final goes to its own step, not the last one.
@@ -2384,9 +2452,15 @@ impl ChatSession {
                         self.flush();
                         return;
                     }
-                    if !text.is_empty() {
-                        *body = text;
+                    if text.is_empty() {
+                        // The kernel cut the whole reply (tool markup written
+                        // as prose): nothing to keep, no empty bubble.
+                        self.drop_item(ix);
+                        self.flush();
+                        return;
                     }
+                    *body = text;
+                    self.stream_raw.remove(&ix);
                     if self.streaming_agent == Some(ix) {
                         self.streaming_agent = None;
                     }
@@ -2410,11 +2484,15 @@ impl ChatSession {
                     return;
                 }
                 // The deltas of this step built an item: the recorded line is
-                // the same words, whole. Replace, never append.
+                // the same words, whole. Replace, never append; an empty line
+                // (a reply the kernel cut whole) takes the item with it.
                 if let Some(ix) = self.streaming_agent.take() {
                     if let Some(ChatItem::Agent(body)) = self.items.get_mut(ix) {
-                        if !text.is_empty() {
+                        if text.is_empty() {
+                            self.drop_item(ix);
+                        } else {
                             *body = text;
+                            self.stream_raw.remove(&ix);
                         }
                         self.flush();
                         return;
@@ -2727,12 +2805,12 @@ impl ChatSession {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 self.finish_thinking();
                 let text = content_text(&chunk.content);
-                if let Some(ChatItem::Agent(body)) = self.items.last_mut() {
-                    merge_stream_text(body, &text);
-                    self.streaming_agent = Some(self.items.len() - 1);
-                } else if !text.is_empty() {
-                    self.items.push(ChatItem::Agent(text));
-                    self.streaming_agent = Some(self.items.len() - 1);
+                if matches!(self.items.last(), Some(ChatItem::Agent(_))) {
+                    let ix = self.items.len() - 1;
+                    self.stream_into(ix, &text);
+                    self.streaming_agent = Some(ix);
+                } else if let Some(ix) = self.open_stream(text) {
+                    self.streaming_agent = Some(ix);
                 }
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {

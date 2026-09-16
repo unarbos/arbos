@@ -7,6 +7,7 @@ pub mod build;
 pub mod data;
 pub mod driver;
 pub mod fonts;
+pub mod markup;
 pub mod kernel;
 pub mod memory;
 pub mod model;
