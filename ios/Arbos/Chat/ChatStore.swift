@@ -373,7 +373,9 @@ final class ChatStore: ObservableObject {
             identity = face
         case .dropped:
             // One calm line under the transcript (the mode notice), not an
-            // error plus a reassurance.
+            // error plus a reassurance. A second drop for the same close
+            // (the hub's word, then the socket) leaves the countdown alone.
+            guard mode != .offline || reconnectTask == nil else { return }
             mode = .offline
             busy = false
             if settings.chatEndpoint != nil { scheduleReconnect() }
