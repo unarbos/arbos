@@ -2655,6 +2655,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         const LIVE_CAP: usize = 64 * 1024;
+        if !delta.is_empty()
+            && let Some(chat) = self.session_mut(owner)
+        {
+            chat.mark_progress();
+        }
         let Some(ix) = self.project_of(owner) else {
             return;
         };
