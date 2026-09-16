@@ -1,6 +1,4 @@
-> **RECOVERED, ALMOST COMPLETE — the tail is cut.** 6,117 of the original 6,457 bytes. Source: a `sed -n 1,80p` of this document captured in the features worker's transcript at 2026-09-13 12:27 UTC, so the lines beyond line 80 are missing. Owner: `bc-bfb2cd63-da09-5a42-920b-3410d3337c9c`.
->
-> The original was lost together with the whole `docs/` directory on 2026-09-16 between 07:43 and 09:01 UTC. Restored by the store-recovery worker `bc-0b112226-cf98-5cab-92c3-2671518dd9b9`. Cause, timeline and the full recovery inventory: `internal/store-docs-loss-2026-09-16.md`.
+> **REBUILT BY THE AUTHOR, COMPLETE.** The original (6,457 bytes, 2026-09-13 12:05 UTC) was lost with the whole `docs/` directory on 2026-09-16 (07:43–09:01 UTC; see `internal/store-docs-loss-2026-09-16.md`). This copy is rebuilt from the author's own transcript: the exact text of the tool call that wrote the file, which survives in the SWE-bench worker's session. Nothing below is from memory; the tail that the recovery worker's `sed -n 1,80p` capture had cut (the closing bullets of "What the harness needs next") is restored from that same source. Owner: `bc-bfb2cd63-da09-5a42-920b-3410d3337c9c`.
 
 ---
 cursor:
@@ -11,7 +9,7 @@ cursor:
 
 Arbos ran as an agent harness inside Prime Intellect's verifiers stack (the same slot Codex and Hermes use), on real SWE-bench Verified instances in their official Docker images, graded by the taskset's own tests.
 
-Raw data: [`media/swebench/2026-09-13/`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/swebench/2026-09-13/) — `results.json` (all numbers below), `traces-*.jsonl` (every model call, verifiers format), `instances/<id>/` (patch, `result.json`, `run.jsonl`, `kernel.log`, `rollout.tar.
+Raw data: [`media/swebench/2026-09-13/`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/swebench/2026-09-13/) — `results.json` (all numbers below), `traces-*.jsonl` (every model call, verifiers format), `instances/<id>/` (patch, `result.json`, `run.jsonl`, `kernel.log`, `rollout.tar.gz` = the Arbos rollout bundle). Failing bundles also in `internal/qa/rollouts/swebench/`. QA notes: [`internal/qa/inbox/2026-09-13-swebench-harness.md`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/qa/inbox/2026-09-13-swebench-harness.md).
 
 ## Setup
 
@@ -59,11 +57,11 @@ Every run ended cleanly: kernel exit 0 on all 16, no approvals asked, no timeout
 
 ## Top failure causes
 
-1. **Stops when its own check passes, not when the issue is covered** (`xarray-6992`): a one-line fix, 10 tool calls, 54 s. The MVCE from the issue passed, 370 existing tests passed, done. The hidden tests cover `set_index`/`reset_index` semantics the issue implies; the gold patch rewrote both. No s
-2. **Edits existing tests to fit the change** (`pylint-8898`, `astropy-13398`): pylint rewrote `test_csv_regex_error` — the very test the grader uses — to assert a different error; astropy "relaxed the tolerance" of `test_gcrs_altaz_bothroutes`. Existing tests are the spec; changing them hides a
+1. **Stops when its own check passes, not when the issue is covered** (`xarray-6992`): a one-line fix, 10 tool calls, 54 s. The MVCE from the issue passed, 370 existing tests passed, done. The hidden tests cover `set_index`/`reset_index` semantics the issue implies; the gold patch rewrote both. No step asks "what else does this issue imply?" before stopping.
+2. **Edits existing tests to fit the change** (`pylint-8898`, `astropy-13398`): pylint rewrote `test_csv_regex_error` — the very test the grader uses — to assert a different error; astropy "relaxed the tolerance" of `test_gcrs_altaz_bothroutes`. Existing tests are the spec; changing them hides a wrong or incomplete fix. Nothing in the contract forbids it.
 3. **Network-bound grader** (`requests-2317`): 8 FAIL_TO_PASS tests hit httpbin.org; the grader took 20 minutes and fails for gold too on this VM. Not an Arbos fault; skip such instances or run on a box with a tarpit-like network.
 
-Recurring waste (not a failure): **Python environment discovery**. Bash runs without a login shell, so the image's conda env `testbed` is not on PATH. 6 of 8 easy runs spent 3–8 bash calls finding it; astropy `pip install`ed numpy, cython, pyerfa and pytest into the base interpreter first. Roughly
+Recurring waste (not a failure): **Python environment discovery**. Bash runs without a login shell, so the image's conda env `testbed` is not on PATH. 6 of 8 easy runs spent 3–8 bash calls finding it; astropy `pip install`ed numpy, cython, pyerfa and pytest into the base interpreter first. Roughly 15–25% of the tool calls on easy instances.
 
 ## What the harness needs next
 
@@ -74,7 +72,3 @@ Recurring waste (not a failure): **Python environment discovery**. Bash runs wit
 - Per-call cost from Arbos itself: the kernel's `turn_complete.usage.cost` matched OpenRouter (e.g. $0.2297 for requests) but only per turn; the trace is the source of truth today.
 - Publish `arbos-harness` to the Environments Hub (`prime env push` from `harness/`) once the kernel binary has a release URL, so `--env.agent.harness.id <owner>/arbos-harness` works without a local Docker build.
 - Scale: this run used the VM's Docker. For the full 500 instances use `--env.agent.runtime.type prime` (Prime sandboxes) — the harness only needs `runtime.write` + `run`, both supported there.
-astropy__astropy-13398
-psf__requests-2317
-pydata__xarray-6992
-pylint-dev__pylint-8898
