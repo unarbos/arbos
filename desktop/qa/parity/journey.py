@@ -93,10 +93,12 @@ class Journey:
         self.args = args
         self.run = run
         self.label = args.label
-        self.out = Path("/tmp/journey") / args.label / f"run-{run:03d}"
+        stamp = datetime.now().strftime("%H%M%S")
+        # Stamped, so a second invocation under the same label keeps the
+        # first run's stills (cycle 23 lost its before-fix set this way).
+        self.out = Path("/tmp/journey") / args.label / f"run-{stamp}-{run:03d}"
         shutil.rmtree(self.out, ignore_errors=True)
         self.out.mkdir(parents=True)
-        stamp = datetime.now().strftime("%H%M%S")
         self.proj = Path(os.path.expanduser(f"~/journeys/{args.label}-{stamp}"))
         self.xdg = Path(f"/tmp/journey-xdg-{args.label}")
         self.app = None
