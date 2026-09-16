@@ -460,6 +460,8 @@ final class ChatStore: ObservableObject {
                items.contains(where: { if case .ask(let q, _, _, _) = $0.kind { return q.trimmingCharacters(in: .whitespacesAndNewlines) == text.trimmingCharacters(in: .whitespacesAndNewlines) } else { return false } }) {
                 return
             }
+            // …and the kernel's "Waiting for your answer" notice: the card says it.
+            if case .notice(let text, false) = item.kind, text.hasPrefix("Waiting for your answer"), pendingAsk != nil { return }
             closeOpenAgentMessage()
             items.append(item)
         case .agentDelta(let delta, let step):

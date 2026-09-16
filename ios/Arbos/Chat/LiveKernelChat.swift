@@ -304,8 +304,10 @@ final class LiveKernelChat: ChatSource {
             // 1021): the bytes were cached when this phone sent them.
             item.images = attachments.map { ($0 as NSString).lastPathComponent }.filter { AttachmentCache.has($0) }
             return item
-        case .answer(let text):
-            return ChatItem(.user(text))
+        case .answer:
+            // The kernel writes the answer twice — `answer`, then the `user`
+            // line it becomes; the user line is the card.
+            return nil
         case .assistant(let text, let step):
             // Lines from before #278 may still carry a call written as text.
             let trimmed = ToolMarkup.strip(text)
