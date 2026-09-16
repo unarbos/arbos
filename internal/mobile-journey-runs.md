@@ -31,6 +31,7 @@ Jacob (2026-09-16): "The upgrade loops need to actually run full cycles of creat
 
 | run (UTC) | target | build | J1 | J2 | J3 | J4 | J5 | J6 | J7 | J8 | P1 | P2 | P3 | notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 09-16 21:31 | `arboslife/demo` | `main` 1148 | P (seed 155 s) | P (worker at 43 s) | P | U (turn ended first) | **F** (model, 9/9) | EYE | **F on the merits — JB-5, 4/4**: "the worker again did not successfully implement the changes or commit them properly … No CHANGELOG.md file found … mathlib.py is still in its initial state" | U/U/**c: P** | P | P | P | PUSH U with reason. 11 m 14 s |
 | 09-16 21:08 | `pod` (direct) | `main` 1148 | P | P (worker at 22 s) | P | U (turn ended first) | U | EYE | **P by the paste** (BRANCHES `fix-mathlib-J210834`, RETURNS `w * h`, TESTS `OK`, AHEAD 1) — the runner's branch regex on the Mac was still an old one and rejected the BRANCHES heading; fixed | U/U/**c: P** | P | P | P | PUSH U with reason. 7 m 0 s |
 | 09-16 20:50 | `arboslife/demo` | **`main` 1148** (Jacob's next build) | P (seed 135 s) | P (worker at 76 s) | P | U (turn ended first; root: "I did not instruct it … before it completed") | **F** (model, 8/8) | EYE | **F on the merits — JB-5 a third time**: the worker reported `feature/task-c39192-3` "committed locally"; the project repo has no such branch; the root redid the work in the checkout and then fought `ModuleNotFoundError` in its own throwaway worktree | U/U/**c: P** | P | P | P | PUSH U with reason. 12 m 58 s; the phone's half clean on `main` |
 | 09-16 20:38 | `pod` (direct) | #339 branch | P | P (worker at 17 s) | P | U (turn ended first) | U | EYE | **P by the full paste** (BRANCHES `fix-mathlib-J203857`, RETURNS `w * h`, TESTS `OK`, AHEAD 1); the runner read the reply before it had settled and scored F — it now waits 8 s | U/U/**c: P** | P | P | P | PUSH U with reason. 6 m 30 s |
@@ -76,7 +77,7 @@ Rates after 3 runs: J1–J6, J8, J11, J13 **3/3**; J9 **2/2** product (one harne
 
 | id | step | what | whose |
 | --- | --- | --- | --- |
-| **JB-5 — named 20:36 UTC (runs 19, 20, 22: 3/3 since)** | J7 on `demo` | the worker reports a branch, passing tests and a CHANGELOG; the project repo shows none of it (run 19). Related: run 18's worker committed on `main` (M-114); run 16's worker found an empty worktree (M-111). Three runs, three ways a worker's work and the project's repo disagree | kernel (worktree/branch model for workers) |
+| **JB-5 — named 20:36 UTC (runs 19, 20, 22, 24: 4/4 since)** | J7 on `demo` | the worker reports a branch, passing tests and a CHANGELOG; the project repo shows none of it (run 19). Related: run 18's worker committed on `main` (M-114); run 16's worker found an empty worktree (M-111). Three runs, three ways a worker's work and the project's repo disagree | kernel (worktree/branch model for workers) |
 
 ## Named bugs (failed twice running)
 
