@@ -15,15 +15,20 @@ Four verbs:
             `fixed` marker back into the report's own folder
     show    what is known about one report, or all of them
 
-Why a script in the repository rather than on the rig: the phone loop's
-poller lives only on a rented Mac, so the Mac going away takes it. This one
-is reviewed, versioned, and runs anywhere the loop happens to be.
+This is the desktop app's side. `asc-feedback.py` beside it is the phone's,
+reading App Store Connect. The two share this shape on purpose — a timer, a
+dedupe list, a folder per report, a ledger, quiet when nothing is new — and
+share nothing else.
+
+Why a script in the repository rather than on a rig: a poller that lives only
+on a rented host goes away with the host. This one is reviewed, versioned, and
+runs anywhere the loop happens to be.
 
 It has no dependencies beyond Python 3.9 and, for the two verbs that need
 them, `arbos-kernel` and `gh` on PATH.
 
-    poll.py poll   --source arbos://arboslife/feedback/internal/feedback
-    poll.py fixed  2026-09-16-1 --pr 331 --what "the composer kept focus"
+    desktop-feedback.py poll   --source arbos://arboslife/feedback/internal/feedback
+    desktop-feedback.py fixed  2026-09-16-1 --pr 331 --what "the composer kept focus"
 """
 
 from __future__ import annotations
@@ -440,7 +445,7 @@ def summarise(report: dict, name: str, report_id: str, shot: bool) -> str:
         "",
         "## Which build carries the fix",
         "",
-        "_written by `poll.py fixed` once the pull request has merged green_",
+        "_written by `desktop-feedback.py fixed` once the pull request has merged green_",
         "",
     ]
     return "\n".join(lines)
@@ -495,7 +500,7 @@ def cmd_filed(args: argparse.Namespace) -> int:
     print(f"{args.report}: filed to {args.to}")
     print(
         "This loop still owes him the answer. Watch that inbox's pull request and run\n"
-        "`poll.py fixed` yourself when it merges — he talks to one place."
+        "`desktop-feedback.py fixed` yourself when it merges — he talks to one place."
     )
     return 0
 
@@ -610,7 +615,7 @@ def cmd_fixed(args: argparse.Namespace) -> int:
         if summary.exists():
             summary.write_text(
                 summary.read_text().replace(
-                    "_written by `poll.py fixed` once the pull request has merged green_",
+                    "_written by `desktop-feedback.py fixed` once the pull request has merged green_",
                     note.strip(),
                 )
             )
@@ -697,7 +702,7 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(
-        prog="poll.py",
+        prog="desktop-feedback.py",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
