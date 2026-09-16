@@ -64,13 +64,23 @@ fn server() -> u16 {
                         &mut stream,
                         200,
                         "application/json",
-                        r#"{"data":[{"id":"blocked","context_length":8000},{"id":"open","context_length":8000},{"id":"openai/blocked","context_length":8000},{"id":"anthropic/open","context_length":8000},{"id":"slow/silent","context_length":8000}]}"#,
+                        r#"{"data":[{"id":"blocked","context_length":8000},{"id":"open","context_length":8000},{"id":"openai/blocked","context_length":8000},{"id":"anthropic/open","context_length":8000},{"id":"slow/silent","context_length":8000},{"id":"zeta/empty","context_length":8000}]}"#,
                     );
                     return;
                 }
                 let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
                 let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
                 let model = v["model"].as_str().unwrap_or("").to_string();
+                if model.ends_with("/empty") {
+                    // A model that answers with no words at all.
+                    let sse = format!(
+                        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                        serde_json::json!({"choices":[{"delta":{"role":"assistant","content":""}}]}),
+                        serde_json::json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"total_tokens":10}})
+                    );
+                    respond(&mut stream, 200, "text/event-stream", &sse);
+                    return;
+                }
                 if model.ends_with("/silent") {
                     // A provider that queues the request and says nothing.
                     std::thread::sleep(std::time::Duration::from_secs(40));
@@ -321,6 +331,101 @@ fn a_silent_model_is_given_up_fast_and_the_fallback_answers() {
     assert!(
         root.iter()
             .any(|e| e["kind"] == "assistant" && e["text"] == "answered by anthropic/open"),
+        "{root:#?}"
+    );
+    let _ = k.child.kill();
+}
+
+/// qal-040: a model that returns nothing, twice, used to end the turn
+/// with no words and no notice — a blank chat on a first-time user's
+/// kickoff. With a fallback, the next model takes the turn (as after a
+/// 403 or a silent first byte); alone, a readable notice says what
+/// happened and that the first message starts the project as usual.
+#[test]
+fn two_empty_replies_go_to_the_fallback_or_end_with_a_readable_notice() {
+    let port = server();
+    // Alone: the notice.
+    let config = format!(
+        "api_base = \"http://127.0.0.1:{port}/v1\"\napi_key = \"k\"\nmodel = \"zeta/empty\"\nfallback_models = [\"none\"]\nwindow_tokens = 0\n"
+    );
+    let mut k = start_kernel_with("empty-alone", &config);
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    a.send(serde_json::json!({"type": "kickoff", "agent": "root"}));
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(60)));
+    assert!(common::wait_for(Duration::from_secs(5), || {
+        transcript(&k.place)
+            .iter()
+            .any(|e| e["kind"] == "turn_complete")
+    }));
+    let root = transcript(&k.place);
+    let failed = root
+        .iter()
+        .find(|e| e["kind"] == "notice" && e["failed"] == true)
+        .unwrap_or_else(|| panic!("a readable notice: {root:#?}"));
+    let text = failed["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("zeta/empty returned nothing twice."),
+        "{text}"
+    );
+    assert!(text.contains("Settings › Model"), "{text}");
+    assert!(
+        text.contains("your first message starts the project as usual"),
+        "{text}"
+    );
+    assert!(
+        !root
+            .iter()
+            .any(|e| e["kind"] == "assistant" && !e["text"].as_str().unwrap_or("").is_empty()),
+        "{root:#?}"
+    );
+    // The kickoff is not taken: a second kickoff frame runs another turn.
+    a.send(serde_json::json!({"type": "kickoff", "agent": "root"}));
+    assert!(
+        a.wait(Duration::from_secs(10), |f| f["type"] == "turn"
+            && f["agent"] == "root"
+            && f["state"] == "running")
+            .is_some(),
+        "a second kickoff runs"
+    );
+    let _ = k.child.kill();
+
+    // With a fallback: the next model answers, and the transcript says why.
+    let config = format!(
+        "api_base = \"http://127.0.0.1:{port}/v1\"\napi_key = \"k\"\nmodel = \"zeta/empty\"\nfallback_models = [\"anthropic/open\"]\nwindow_tokens = 0\n"
+    );
+    let mut k = start_kernel_with("empty-fallback", &config);
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "hello"}));
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(60)));
+    assert!(common::wait_for(Duration::from_secs(5), || {
+        transcript(&k.place)
+            .iter()
+            .any(|e| e["kind"] == "turn_complete")
+    }));
+    let root = transcript(&k.place);
+    assert!(
+        root.iter().any(|e| e["kind"] == "notice"
+            && e["text"]
+                == "zeta/empty returned nothing twice, so anthropic/open answers this turn."),
+        "{root:#?}"
+    );
+    assert!(
+        root.iter()
+            .any(|e| e["kind"] == "assistant" && e["text"] == "answered by anthropic/open"),
+        "{root:#?}"
+    );
+    assert!(
+        !root
+            .iter()
+            .any(|e| e["kind"] == "notice" && e["failed"] == true),
         "{root:#?}"
     );
     let _ = k.child.kill();

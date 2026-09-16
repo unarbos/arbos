@@ -173,9 +173,15 @@ pub const OPENROUTER_FALLBACKS: &[&str] = &[
 ];
 
 /// The provider family of an OpenRouter model id: `anthropic` of
-/// `anthropic/claude-opus-5`. Empty for an id with no slash.
+/// `anthropic/claude-opus-5`. An id with no slash (a hand-written
+/// `gpt-4.1-mini`, a direct OpenAI base) is its own family, so a block on
+/// it is remembered too (qal-040's scenarios).
 pub fn family(model: &str) -> &str {
-    model.split_once('/').map(|(f, _)| f).unwrap_or("")
+    let m = model.trim();
+    match m.split_once('/') {
+        Some((f, _)) if !f.is_empty() => f,
+        _ => m,
+    }
 }
 
 /// The default fallbacks for `primary`, in the order to try them: the

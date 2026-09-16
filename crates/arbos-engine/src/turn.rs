@@ -667,6 +667,10 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     };
 
     let mut nudged = false;
+    // Replies with no words and no calls in a row (a done wake's silence
+    // does not count): the second one is the model failing, not
+    // answering — another model takes the turn, or the user is told.
+    let mut empty_in_a_row = 0u32;
     let mut cuts = 0u32;
     // Dollars over every model call of this turn, when the provider prices them.
     let mut turn_cost: Option<f64> = None;
@@ -983,6 +987,61 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                         .then(|| serde_json::Value::Array(reasoning_details.clone())),
                 }),
             )?;
+        }
+        let empty_reply = calls.is_empty()
+            && content.trim().is_empty()
+            && !had_markup
+            && wake.kind != WakeKind::Done
+            && wake.kind != WakeKind::Serve;
+        if empty_reply {
+            empty_in_a_row += 1;
+        } else {
+            empty_in_a_row = 0;
+        }
+        if empty_in_a_row >= 2 {
+            // Nudged once and still nothing: an empty answer is a model
+            // failing. The next model takes the turn as it does after a
+            // 403 or a silent first byte; alone, the user hears what
+            // happened and what to do — not a blank chat (qal-040).
+            let failed = models.current().to_string();
+            if let Some(next) = models.next().map(str::to_string) {
+                eprintln!("provider: {failed}: two empty replies in a row; switching to {next}");
+                append_event(
+                    &transcript,
+                    &Event::new(EventKind::Notice {
+                        text: format!(
+                            "{failed} returned nothing twice, so {next} answers this turn."
+                        ),
+                        failed: false,
+                    }),
+                )?;
+                nudged = false;
+                empty_in_a_row = 0;
+                events = load_transcript(&transcript)?;
+                continue;
+            }
+            let what_now = if wake.kind == WakeKind::Kickoff {
+                " Nothing was set up yet; your first message starts the project as usual."
+            } else {
+                " Try again, or pick another model."
+            };
+            append_event(
+                &transcript,
+                &Event::new(EventKind::Notice {
+                    text: format!(
+                        "{failed} returned nothing twice. Check the model in Settings › Model (or fallback_models in config.toml).{what_now}"
+                    ),
+                    failed: true,
+                }),
+            )?;
+            return end(
+                usage.map(|mut u| {
+                    u.cost = turn_cost;
+                    u.cached = turn_cached;
+                    u
+                }),
+                None,
+            );
         }
         if calls.is_empty() && !nudged && wake.kind != WakeKind::Serve {
             // No tool call and either nothing at all (Gemini does this

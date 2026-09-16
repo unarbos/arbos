@@ -179,6 +179,19 @@ mod tests {
         clear(base, "openai/gpt-5.6-terra");
         assert!(!is_blocked(base, "openai/gpt-4.1-mini"));
         assert!(families(base).is_empty());
+        // A hand-written id with no vendor prefix is its own family: a
+        // block on it is remembered too (qal-040's scenarios).
+        let direct = "https://api.openai.com/v1";
+        mark(direct, "gpt-4.1-mini", "blocked");
+        assert!(is_blocked(direct, "gpt-4.1-mini"));
+        assert!(
+            !is_blocked(direct, "gpt-5.6-terra"),
+            "another unprefixed id is another family"
+        );
+        assert_eq!(
+            alternative(direct, "gpt-4.1-mini", &["gpt-4.1-mini", "gpt-5.6-terra"]),
+            Some("gpt-5.6-terra")
+        );
         unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
     }
 }
