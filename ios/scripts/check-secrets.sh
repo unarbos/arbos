@@ -32,6 +32,19 @@ case "$HOST" in
     fail "hubURL points at a local hub ($HOST) — never for a phone build" ;;
 esac
 
+KERNEL_URL="$(read_key kernelURL)"
+case "$KERNEL_URL" in
+  ""|wss://*) ;;
+  *) fail "kernelURL is not wss:// ($KERNEL_URL)" ;;
+esac
+KHOST="$(printf '%s' "$KERNEL_URL" | sed -e 's#^wss://##' -e 's#[/:].*$##')"
+case "$KHOST" in
+  127.*|localhost|10.*|192.168.*|*.local) fail "kernelURL points at a local kernel ($KHOST)" ;;
+esac
+if [ -n "$KHOST" ]; then
+  nslookup "$KHOST" >/dev/null 2>&1 || fail "kernelURL host does not resolve ($KHOST)"
+fi
+
 [ -n "$HUB_TOKEN" ] || fail "hubToken is empty"
 [ "${#HUB_TOKEN}" -ge 16 ] || fail "hubToken is too short to be a hub token"
 case "$HUB_TOKEN" in
@@ -46,4 +59,4 @@ STATUS="$(curl -sS --max-time 15 -o /tmp/check-secrets-list.json -w '%{http_code
 MACHINES="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(" ".join(m["name"] for m in d.get("machines", [])))' /tmp/check-secrets-list.json 2>/dev/null || true)"
 rm -f /tmp/check-secrets-list.json
 [ -n "$MACHINES" ] || fail "the hub at $HOST lists no machines for the baked token"
-echo "check-secrets: ok — hub $HOST accepts the token; machines: $MACHINES"
+echo "check-secrets: ok — hub $HOST accepts the token; machines: $MACHINES; kernel host ${KHOST:-none}"
