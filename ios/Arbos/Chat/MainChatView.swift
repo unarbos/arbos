@@ -23,6 +23,8 @@ struct ProjectChatView: View {
     /// The composer stack's height, so the transcript's tail clears it
     /// however many lines and chips it holds.
     @State private var composerHeight: CGFloat = 80
+    /// The row SwiftUI keeps in place while content changes (paging back).
+    @State private var heldRow: UUID?
     @FocusState private var composing: Bool
 
     private var identity: ProjectIdentity {
@@ -218,16 +220,16 @@ struct ProjectChatView: View {
                 .padding(.top, 4)
             }
             .modifier(ChatScrollAnchor())
+            .scrollPosition(id: $heldRow, anchor: .top)
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: chat.items) { _, _ in
                 if let anchor = chat.anchorAfterPrepend {
                     // Older lines came in above: hold the row that was at the top.
                     chat.anchorAfterPrepend = nil
-                    // The bottom anchor re-pins on the size change first;
-                    // the row is put back once the layout has settled.
+                    heldRow = anchor
                     proxy.scrollTo(anchor, anchor: .top)
                     Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(80))
+                        try? await Task.sleep(for: .milliseconds(120))
                         proxy.scrollTo(anchor, anchor: .top)
                     }
                 } else {
@@ -241,10 +243,14 @@ struct ProjectChatView: View {
                 // The one line under the transcript changed; keep it in view.
                 withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
             }
-            .onChange(of: chat.earlierLines) { _, _ in
-                // A long replay lands in one go; the layout settles a beat later.
+            .onChange(of: chat.earlierLines) { old, new in
+                // A long replay lands in one go; the lazy layout settles over
+                // a few frames, so the tail is asked for twice.
+                guard new > old || old == 0 else { return }
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(250))
+                    proxy.scrollTo("tail", anchor: .bottom)
+                    try? await Task.sleep(for: .milliseconds(600))
                     proxy.scrollTo("tail", anchor: .bottom)
                 }
             }
