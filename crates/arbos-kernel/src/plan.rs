@@ -736,22 +736,36 @@ fn notify_reply(hooks: &KernelHooks, agent: &str) {
     if turn.iter().any(|e| matches!(e.kind, EventKind::Ask { .. })) {
         return;
     }
-    let reply = turn.iter().rev().find_map(|e| match &e.kind {
-        EventKind::Assistant { text, .. } if !text.trim().is_empty() => Some(text.trim()),
-        _ => None,
-    });
-    let failed = turn.iter().rev().find_map(|e| match &e.kind {
-        EventKind::Notice { text, failed: true } => Some(text.as_str()),
-        _ => None,
-    });
+    let reply_at = turn.iter().rposition(
+        |e| matches!(&e.kind, EventKind::Assistant { text, .. } if !text.trim().is_empty()),
+    );
+    let failed_at = turn
+        .iter()
+        .rposition(|e| matches!(&e.kind, EventKind::Notice { failed: true, .. }));
     let name = if me.name.is_empty() {
         me.id.to_string()
     } else {
         me.name.clone()
     };
-    match (reply, failed) {
-        (Some(text), _) => hooks.notify(agent, "reply", &format!("{name} replied"), text),
-        (None, Some(why)) => hooks.notify(agent, "error", &format!("{name}: turn failed"), why),
+    let text_of = |i: usize| match &turn[i].kind {
+        EventKind::Assistant { text, .. } => text.trim().to_string(),
+        EventKind::Notice { text, .. } => text.clone(),
+        _ => String::new(),
+    };
+    // A turn that ended on a failure — a cost cap, a provider down — is
+    // told as one, even when it said something earlier: "step one" is
+    // not what the user needs to hear about a turn that stopped on money.
+    match (reply_at, failed_at) {
+        (Some(r), Some(f)) if f > r => hooks.notify(
+            agent,
+            "error",
+            &format!("{name}: turn stopped"),
+            &text_of(f),
+        ),
+        (Some(r), _) => hooks.notify(agent, "reply", &format!("{name} replied"), &text_of(r)),
+        (None, Some(f)) => {
+            hooks.notify(agent, "error", &format!("{name}: turn failed"), &text_of(f))
+        }
         (None, None) => {}
     }
 }
@@ -977,11 +991,18 @@ pub fn turn_outcome(events: &[Event], lo: u64) -> (String, bool) {
         // What it had before the stop rides along: a parent that stopped a
         // worker early wants the partial result, not only the reason.
         // The user's own Stop is a pause, not a failure, and reads so.
-        let head = if user_stopped(&why) {
+        let mut head = if user_stopped(&why) {
             USER_STOPPED.to_string()
         } else {
             format!("stopped: {why}")
         };
+        // The kernel's own reason for the stop (a cost cap, with the
+        // numbers and what to change) rides along: the parent reads the
+        // report, not the child's transcript.
+        if let Some(f) = &failed {
+            head.push_str(" — ");
+            head.push_str(&arbos_core::text::clip(f, 300));
+        }
         return (
             if last_text.is_empty() {
                 head

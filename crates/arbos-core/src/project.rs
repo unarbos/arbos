@@ -195,11 +195,19 @@ pub fn share_mode_set_at(project_dir: &Path) -> Option<&'static str> {
 pub struct SpendConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cap_usd: Option<f64>,
+    /// `[spend] turn_cap_usd = 2.0`: the most any one turn — the
+    /// coordinator's or a worker's — may spend on model calls before it
+    /// ends with a notice. Guards against one runaway turn where
+    /// `cap_usd` guards the place's total. Absent: no per-turn cap (the
+    /// host's `max_turn_cost_usd` / `ARBOS_MAX_TURN_COST` still applies
+    /// when set; both set, the smaller wins).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_cap_usd: Option<f64>,
 }
 
 impl SpendConfig {
     fn is_empty(&self) -> bool {
-        self.cap_usd.is_none()
+        self.cap_usd.is_none() && self.turn_cap_usd.is_none()
     }
 }
 

@@ -64,6 +64,40 @@ pub fn cap_usd(place: &Place) -> Option<f64> {
         .filter(|c| *c > 0.0)
 }
 
+/// The per-turn cap from `project.toml`, if the user set one.
+pub fn turn_cap_usd(place: &Place) -> Option<f64> {
+    crate::project::load(place)
+        .spend
+        .turn_cap_usd
+        .filter(|c| *c > 0.0)
+}
+
+/// The cap one turn runs against: the place's `turn_cap_usd`, the host's
+/// `max_turn_cost_usd` (a harness or machine-wide knob), or the smaller
+/// when both are set. `None` when neither is.
+pub fn effective_turn_cap(place: &Place, host_cap: f64) -> Option<(f64, &'static str)> {
+    let host = (host_cap > 0.0).then_some((
+        host_cap,
+        "max_turn_cost_usd in config.toml (or ARBOS_MAX_TURN_COST)",
+    ));
+    let place_cap =
+        turn_cap_usd(place).map(|c| (c, "turn_cap_usd under [spend] in .arbos/project.toml"));
+    match (place_cap, host) {
+        (Some(p), Some(h)) => Some(if p.0 <= h.0 { p } else { h }),
+        (Some(p), None) => Some(p),
+        (None, Some(h)) => Some(h),
+        (None, None) => None,
+    }
+}
+
+/// What the user reads when a turn ends on its cost cap: plain, with the
+/// numbers, what stays, and what to do.
+pub fn turn_cap_notice(spent: f64, cap: f64, where_set: &str) -> String {
+    format!(
+        "This turn spent ${spent:.2} on model calls, over the ${cap:.2} cap for one turn, so it ends here. What is in the working tree stays. Send a new message to go on with a fresh budget, or raise the cap ({where_set})."
+    )
+}
+
 /// Add one turn's cost. Returns the spend after, and which threshold this
 /// turn crossed for the first time: `Some(true)` the cap, `Some(false)`
 /// the warning mark, `None` neither.
@@ -101,7 +135,7 @@ pub fn over_cap(place: &Place) -> bool {
 /// no cap is set.
 pub fn prompt_line(place: &Place) -> String {
     let s = load(place);
-    match cap_usd(place) {
+    let line = match cap_usd(place) {
         Some(cap) => format!(
             "Spend: ${:.2} of the ${cap:.2} cap ({} turns){}\n",
             s.spent_usd,
@@ -117,6 +151,12 @@ pub fn prompt_line(place: &Place) -> String {
             s.spent_usd, s.turns
         ),
         None => String::new(),
+    };
+    match turn_cap_usd(place) {
+        Some(t) => {
+            format!("{line}Each turn may spend up to ${t:.2}; past that it ends with a notice.\n")
+        }
+        None => line,
     }
 }
 
