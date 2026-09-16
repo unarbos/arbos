@@ -28,6 +28,9 @@ struct ChatItem: Identifiable, Equatable {
     /// A user line that came in by voice (the gateway's kernel-answered
     /// turn, `channel: voice`): drawn as his words with a small mark, once.
     var spoken = false
+    /// Stored names (`attachments/<name>`) of images sent with this line;
+    /// drawn as thumbnails when `AttachmentCache` still has the bytes.
+    var images: [String] = []
 
     init(id: UUID = UUID(), _ kind: Kind, step: Int = 0) {
         self.id = id
@@ -37,7 +40,7 @@ struct ChatItem: Identifiable, Equatable {
     }
 
     static func == (lhs: ChatItem, rhs: ChatItem) -> Bool {
-        lhs.id == rhs.id && lhs.kind == rhs.kind && lhs.step == rhs.step && lhs.spoken == rhs.spoken
+        lhs.id == rhs.id && lhs.kind == rhs.kind && lhs.step == rhs.step && lhs.spoken == rhs.spoken && lhs.images == rhs.images
     }
 
     var isStreamingAgent: Bool {

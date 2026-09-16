@@ -353,8 +353,12 @@ final class ChatStore: ObservableObject {
         // steer at its next tool boundary; otherwise this starts one.
         let steer = busy
         if !unseen.isEmpty { markSeen() }
-        let shown = attachments.isEmpty ? trimmed : (trimmed.isEmpty ? "" : trimmed + "\n") + attachments.map { "📎 \($0.name)" }.joined(separator: "\n")
-        let card = ChatItem(.user(shown, pending: true))
+        // Files are named on the card; photos are drawn on it.
+        let files = attachments.filter { !$0.isImage }
+        let shown = files.isEmpty ? trimmed : (trimmed.isEmpty ? "" : trimmed + "\n") + files.map { "📎 \($0.name)" }.joined(separator: "\n")
+        var card = ChatItem(.user(shown, pending: true))
+        card.images = attachments.filter(\.isImage).map(\.storedName)
+        for file in attachments where file.isImage { AttachmentCache.store(file.data, as: file.storedName) }
         closeOpenAgentMessage()
         items.append(card)
         pendingSends.append((card.id, trimmed, steer, settings.kernelTarget))
