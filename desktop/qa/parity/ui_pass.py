@@ -64,6 +64,9 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from rig import DisplayHung, pulse as display_pulse, still as display_still  # noqa: E402
+
 STORE = Path(os.environ.get("STORE", "/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983"))
 # This folder: the scripts and fake gh beside this file. The driver module
 # lives with the app at desktop/driver/arbosdriver.py.
@@ -210,7 +213,9 @@ class Pass:
         self.n += 1
         safe = re.sub(r"[^A-Za-z0-9._-]+", "-", name)[:60]
         path = self.outdir / f"{self.n:03d}-{safe}.png"
-        subprocess.run(["scrot", "-o", str(path)], env=ENV, check=True)
+        # Bounded: a hung display raises `DisplayHung`, which ends the run
+        # with a row that says so rather than a clean-looking pass.
+        display_still(path, DISPLAY)
         return str((self.store_dir / path.name).relative_to(STORE))
 
     def ids(self, pattern: str | None = None) -> list[str]:
@@ -1613,8 +1618,14 @@ def main() -> int:
             if not fn:
                 continue
             log(f"== phase {letter} {fn.__name__}")
+            # The rig's own pulse before every phase: a display that has
+            # stopped answering fails the run loudly (the ten-minute hang
+            # of 2026-09-16 would otherwise have passed as quiet).
+            display_pulse(DISPLAY)
             try:
                 fn()
+            except DisplayHung:
+                raise
             except Exception as err:
                 p.record(f"phase {letter}", fn.__name__, "-", "-", f"{type(err).__name__}: {err}\n{traceback.format_exc()[-600:]}", "fail", p.still(f"phase-{letter}-error"))
             p.save()
@@ -1636,6 +1647,14 @@ def main() -> int:
                 p.phase_provider_offer(args.binary, args.kernel, xdg)
             except Exception as err:
                 p.record("phase O", "provider-offer", "-", "-", f"{type(err).__name__}: {err}", "fail")
+    except DisplayHung as err:
+        p.record("display", "rig", "pulse", "the X display answers within 8 s", str(err), "fail")
+        log(f"DISPLAY HUNG — run aborted: {err}")
+        p.save()
+        # The app is blocked on the same display; a polite close would
+        # block with it.
+        subprocess.run(["pkill", "-x", "arbos-desktop"], check=False)
+        return 3
     finally:
         p.save()
         try:

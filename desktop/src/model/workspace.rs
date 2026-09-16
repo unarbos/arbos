@@ -2557,7 +2557,13 @@ impl Workspace {
         let in_front = self.projects[ix]
             .focused_agent()
             .is_none_or(|focused| focused == owner);
-        if in_front {
+        // A process row never takes the column on its own: the kernel opens
+        // one for any command past twenty seconds (#362), and a board over
+        // the chat, composer gone, is not what a person mid-sentence wants
+        // — Jacob's screen would have swapped to `python3 bubble_sort.py`
+        // while he typed. It lands in the panel's Processes, one click away.
+        let takes_column = in_front && surface_kind != SurfaceKind::Process;
+        if takes_column {
             self.projects[ix].focus_surface(owner, id);
             if self.active == Some(ix) {
                 cx.emit(PaneRequest::Surface(id));

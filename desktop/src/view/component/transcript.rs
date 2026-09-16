@@ -3890,6 +3890,9 @@ fn zone(
             .into_any_element(),
         );
         header_drawn = true;
+        // The headline carries the step; a heartbeat under it would say
+        // it twice, whether the fold is open or shut.
+        live_fold_shown = true;
     }
     // The worker's report that woke this segment, under its header.
     if let Some(ix) = report
@@ -3965,6 +3968,23 @@ fn zone(
             .collect();
         if !kids.is_empty() {
             zone = zone.child(div().flex().flex_col().gap(px(ITEM_GAP)).children(kids));
+        }
+    } else if header_drawn {
+        // The fold is shut, but the person's own words typed into the turn
+        // — steers — are not the agent's work to hide: they stay in view
+        // under the headline (a shut live fold swallowed three "run it"
+        // bubbles on the rig, cycle 23).
+        let steers: Vec<AnyElement> = segs
+            .iter()
+            .filter_map(|seg| match seg {
+                Seg::Other(ix) if inline_user(&chat.items, *ix) => {
+                    Some(work_other(chat, *ix, &theme, window, cx))
+                }
+                _ => None,
+            })
+            .collect();
+        if !steers.is_empty() {
+            zone = zone.child(div().flex().flex_col().gap(px(ITEM_GAP)).children(steers));
         }
     }
     // Cursor's sub-agent lines: "1 Working  <task>" per live child, and a
@@ -4071,6 +4091,12 @@ fn zone(
             ChatItem::Nudge(text) => page_nudge(text, &theme),
             ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, &theme, cx),
             ChatItem::Asked { question, answer } => asked_line(question, answer, &theme),
+            // A steer typed after the answer began streaming: its bubble,
+            // where the kernel's "Already queued" notice can hang under it
+            // (it was dropped here, and the notice stood alone, cycle 23).
+            ChatItem::User(_) if inline_user(&chat.items, ix) => {
+                work_other(chat, ix, &theme, window, cx)
+            }
             _ => div().into_any_element(),
         });
     }
