@@ -141,9 +141,14 @@ pub(crate) const COMPOSER_PAD_X: f32 = 8.;
 /// Transcript and composer share this reading column. Web: `max-w-4xl`
 /// on both `transcript-col` and `composer-col`.
 pub(crate) const CHAT_MAX_WIDTH: f32 = 720.;
-/// Cursor's chat prose: 14 px on a 23 px line (measured 14/22 on Jacob's
-/// Mac, 15/25 on the Linux build; the Mac is the reference).
-pub(crate) const CURSOR_PROSE_SIZE: f32 = 14.;
+/// Cursor's chat prose is San Francisco at 14 px on a 23 px line (measured
+/// 14/22 on Jacob's Mac). Ours is Inter (`crate::fonts`), whose lowercase
+/// is 7 % taller at the same size: x-height 0.546 em against SF's 0.508.
+/// 13 px Inter puts the lowercase where Cursor's is — rendered at 2x, 15 px
+/// x-height and 20 px caps against SF 14's 14.2 and 19.7; at 14 px Inter
+/// it would be 16 and 21, almost a pixel over at 1x. The 23 px line box is
+/// kept: the line pitch is what the eye compares across the two windows.
+pub(crate) const CURSOR_PROSE_SIZE: f32 = 13.;
 /// How often the working tree is re-read for the Changes pill.
 const CHANGES_POLL: Duration = Duration::from_secs(4);
 pub(crate) const CURSOR_PROSE_LEADING: f32 = 23.;
