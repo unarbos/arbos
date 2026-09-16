@@ -148,6 +148,47 @@ impl Platform {
     }
 }
 
+/// Which program a payload carries.
+///
+/// One release of one commit builds both, and they are updated by different
+/// things at different moments: the app by a person pressing a blue button,
+/// the kernel by itself when it is between turns. A headless box running a
+/// kernel has no use for a 32 MB tarball of which the desktop is most, so
+/// they are published separately and named here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Component {
+    /// The desktop, with the kernel inside it — a macOS bundle, or the Linux
+    /// tree with the two binaries side by side.
+    #[default]
+    App,
+    /// `arbos-kernel` on its own.
+    Kernel,
+}
+
+impl Component {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::App => "app",
+            Self::Kernel => "kernel",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "app" => Some(Self::App),
+            "kernel" => Some(Self::Kernel),
+            _ => None,
+        }
+    }
+
+    /// Whether to leave it out of the JSON, so a feed with no kernel payloads
+    /// in it is byte-for-byte what it was before this field existed.
+    fn is_app(&self) -> bool {
+        matches!(self, Self::App)
+    }
+}
+
 /// Where a build lives for a platform that installs through somebody else's
 /// store. Carried beside the downloads so one release describes every app of
 /// one commit, and shown rather than installed.
@@ -252,10 +293,15 @@ impl Release {
             .with_build(self.build))
     }
 
-    pub fn download(&self, platform: Platform, arch: &str) -> Option<&Download> {
+    pub fn download(
+        &self,
+        platform: Platform,
+        arch: &str,
+        component: Component,
+    ) -> Option<&Download> {
         self.downloads
             .iter()
-            .find(|d| d.platform == platform && d.arch == arch)
+            .find(|d| d.platform == platform && d.arch == arch && d.component == component)
     }
 
     pub fn link(&self, platform: Platform) -> Option<&Link> {
@@ -267,6 +313,12 @@ impl Release {
 pub struct Download {
     pub platform: Platform,
     pub arch: String,
+    /// Which program this payload is. Absent means [`Component::App`], which
+    /// is what every feed written before kernels could update themselves
+    /// meant — and still means, so an old app reading a new feed picks the
+    /// same download it always did.
+    #[serde(default, skip_serializing_if = "Component::is_app")]
+    pub component: Component,
     pub format: Format,
     pub url: String,
     /// Bytes. Checked before the signature so a truncated download fails with
@@ -414,6 +466,19 @@ impl Feed {
         platform: Platform,
         arch: &str,
     ) -> Option<Available> {
+        self.available_component(current, platform, arch, Component::App)
+    }
+
+    /// The same, for a named component. The app compares on the version pair
+    /// and refuses anything not strictly newer; see [`Self::newest`] for the
+    /// kernel, which has no build number of its own to compare with.
+    pub fn available_component(
+        &self,
+        current: &Version,
+        platform: Platform,
+        arch: &str,
+        component: Component,
+    ) -> Option<Available> {
         if !platform.installs_itself() {
             return None;
         }
@@ -425,7 +490,46 @@ impl Feed {
             if version <= *current {
                 continue;
             }
-            let Some(download) = release.download(platform, arch) else {
+            let Some(download) = release.download(platform, arch, component) else {
+                continue;
+            };
+            if download.check_url().is_err() {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(best, _, _)| version > *best) {
+                best = Some((version, release, download));
+            }
+        }
+        best.map(|(version, release, download)| Available {
+            version,
+            notes: release.notes.clone(),
+            notes_url: release.notes_url.clone(),
+            published: release.published.clone(),
+            commit: release.commit.clone(),
+            download: download.clone(),
+        })
+    }
+
+    /// The newest release carrying this component, whatever is running.
+    ///
+    /// The app asks [`Self::available`], which is ordered on the version pair
+    /// and refuses anything not strictly newer. A kernel cannot: it knows its
+    /// semver and the commit it was built from, and nothing tells it which
+    /// build number that was. So it asks for the newest and decides by commit
+    /// — see [`crate::kernel::behind`], which is the same rule
+    /// `remote_kernel::needs_update_to` has always used over ssh.
+    pub fn newest(
+        &self,
+        platform: Platform,
+        arch: &str,
+        component: Component,
+    ) -> Option<Available> {
+        let mut best: Option<(Version, &Release, &Download)> = None;
+        for release in &self.releases {
+            let Ok(version) = release.version() else {
+                continue;
+            };
+            let Some(download) = release.download(platform, arch, component) else {
                 continue;
             };
             if download.check_url().is_err() {
@@ -448,13 +552,16 @@ impl Feed {
 
 #[cfg(test)]
 mod tests {
-    use super::{Available, Channel, Download, Feed, Format, Link, Platform, Release};
+    use super::{
+        Available, Channel, Component, Download, Feed, Format, Link, Platform, Release,
+    };
     use crate::{sign, version::Version};
 
     fn download(platform: Platform, arch: &str, url: &str) -> Download {
         Download {
             platform,
             arch: arch.into(),
+            component: Component::App,
             format: Format::Zip,
             url: url.into(),
             size: 4,

@@ -333,7 +333,9 @@ jobs:
           set -euo pipefail
           ls -la dist
           mac="$(ls dist/Arbos-*-macos-arm64.zip)"
-          linux="$(ls dist/arbos-*-linux-x86_64.tar.gz)"
+          # Two tarballs match `arbos-*`: the app and the kernel on its own.
+          linux="$(ls dist/arbos-[0-9]*-linux-x86_64.tar.gz)"
+          kernel="$(ls dist/arbos-kernel-*-linux-x86_64.tar.gz)"
           printf '%s\n' "$NOTES" > dist/notes.txt
           cargo run -q --release -p arbos-update --bin arbos-updatectl -- add \
             --feed dist/arbos-dev.json \
@@ -348,6 +350,7 @@ jobs:
             --keep "$KEEP_BUILDS" \
             --artifact "macos/arm64=$mac" \
             --artifact "linux/x86_64=$linux" \
+            --artifact "linux/x86_64/kernel=$kernel" \
             --link "ios:testflight=$IOS_TESTFLIGHT_URL"
           rm -f dist/notes.txt
           # What an app one build behind would be offered. A feed that answers

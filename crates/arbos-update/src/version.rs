@@ -99,6 +99,24 @@ impl Version {
         self
     }
 
+    /// The same order, ignoring the build number.
+    ///
+    /// For comparing against something that has no build number to give: a
+    /// kernel knows its marketing version and the commit it was built from,
+    /// and nothing tells it which build number that was. Comparing on the
+    /// pair would make every kernel look infinitely old, since its build is
+    /// always `0`.
+    pub fn cmp_release(&self, other: &Self) -> Ordering {
+        Self {
+            build: 0,
+            ..self.clone()
+        }
+        .cmp(&Self {
+            build: 0,
+            ..other.clone()
+        })
+    }
+
     /// How a person reads it: `0.2.0 (1877)`, or just `0.2.0` where there is
     /// no build number to tell two of them apart.
     pub fn human(&self) -> String {
