@@ -145,6 +145,12 @@ async fn session(cfg: &HubConfig, dir: &Path, args: &Args) -> Result<()> {
             arbos_core::project::share_mode_set_at(&dir.join(p)).map(|m| (p.clone(), m.to_string()))
         })
         .collect();
+    let kinds: std::collections::BTreeMap<_, _> = projects
+        .iter()
+        .filter_map(|p| {
+            arbos_core::project::kind_at(&dir.join(p)).map(|k| (p.clone(), k.to_string()))
+        })
+        .collect();
     let id = hub_link::register(
         &mut ws,
         cfg,
@@ -156,6 +162,7 @@ async fn session(cfg: &HubConfig, dir: &Path, args: &Args) -> Result<()> {
         args.capabilities.clone(),
         identities,
         shares,
+        kinds,
     )
     .await?;
     println!(

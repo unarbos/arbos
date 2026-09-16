@@ -76,6 +76,10 @@ pub enum HubFrame {
         /// `project.toml`), by project name; absent = `mesh`.
         #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         shares: std::collections::BTreeMap<String, String>,
+        /// Each named project's declared kind (`kind = "service"` in its
+        /// `project.toml`), by project name; absent = a project.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        kinds: std::collections::BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         labels: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -211,8 +215,11 @@ pub struct ProjectInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<crate::project::ProjectIdentity>,
     /// `worktree` when this is a worker's git worktree of another project
-    /// on the machine (a claim with `isolate`), not a project of the
-    /// user's; absent for a project. A client nests or hides it.
+    /// on the machine (a claim with `isolate`); `service` when the place
+    /// declares itself infrastructure (`kind = "service"` in its
+    /// `project.toml` — the feedback inbox); absent for a project of the
+    /// user's. A client keeps any non-empty kind out of the human-facing
+    /// list, without guessing by name.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub kind: String,
     /// For a worktree: the project it was cut from (`demo` for
@@ -271,11 +278,17 @@ impl MachineInfo {
         if self.worker {
             bits.push("worker".into());
         }
-        let live: Vec<&str> = self
+        let live: Vec<String> = self
             .projects
             .iter()
             .filter(|p| p.live)
-            .map(|p| p.name.as_str())
+            .map(|p| {
+                if p.kind.is_empty() {
+                    p.name.clone()
+                } else {
+                    format!("{} ({})", p.name, p.kind)
+                }
+            })
             .collect();
         if !live.is_empty() {
             bits.push(format!("kernels: {}", live.join(", ")));

@@ -144,6 +144,7 @@ pub async fn register(
     capabilities: Vec<String>,
     identities: std::collections::BTreeMap<String, arbos_core::project::ProjectIdentity>,
     shares: std::collections::BTreeMap<String, String>,
+    kinds: std::collections::BTreeMap<String, String>,
 ) -> Result<u64> {
     send_json(
         ws,
@@ -157,6 +158,7 @@ pub async fn register(
             projects,
             identities,
             shares,
+            kinds,
             labels: labels(extra_labels),
             capabilities,
             version: klog::version().to_string(),
@@ -256,6 +258,10 @@ async fn session(
     if let Some(mode) = arbos_core::project::share_mode_set(place) {
         shares.insert(project.to_string(), mode.to_string());
     }
+    let mut kinds = std::collections::BTreeMap::new();
+    if let Some(kind) = arbos_core::project::kind(place) {
+        kinds.insert(project.to_string(), kind.to_string());
+    }
     let id = register(
         &mut ws,
         cfg,
@@ -267,6 +273,7 @@ async fn session(
         Vec::new(),
         identities,
         shares,
+        kinds,
     )
     .await?;
     klog::info(
