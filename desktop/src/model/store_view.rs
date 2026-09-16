@@ -545,6 +545,22 @@ impl ProjectPage {
             };
             let depth = indent_depth(line);
             let (done, rest) = checkbox(rest);
+            // `- [ ] ## Goal`: a heading the agent pushed through the plan
+            // tool as an item (F-71). It is a heading; a checkbox in front
+            // of "## Goal" is not something Cursor's page would show.
+            let heading = rest.trim_start();
+            if let Some((hashes, text)) = heading.split_once(' ')
+                && !hashes.is_empty()
+                && hashes.chars().all(|c| c == '#')
+                && !text.trim().is_empty()
+            {
+                page.blocks.push(PageBlock::Heading {
+                    level: hashes.len().clamp(2, 3) as u8,
+                    text: text.trim().to_string(),
+                });
+                seen_heading = true;
+                continue;
+            }
             // A plain bullet above the first heading is prose; under a
             // heading it is an item that lost its checkbox.
             if done.is_none() && !seen_heading {
