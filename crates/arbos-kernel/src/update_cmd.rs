@@ -70,9 +70,9 @@ impl Args {
                         Some(PathBuf::from(rest.next().context("--binary wants a path")?));
                 }
                 "--pin" => args.pin = Some(rest.next().context("--pin wants a version")?),
-                "--place" => args
-                    .places
-                    .push(PathBuf::from(rest.next().context("--place wants a directory")?)),
+                "--place" => args.places.push(PathBuf::from(
+                    rest.next().context("--place wants a directory")?,
+                )),
                 "-h" | "--help" | "help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -308,7 +308,10 @@ mod tests {
     fn reads_the_options_a_person_would_type() {
         let args = parse(&["--channel", "dev", "--binary", "/usr/bin/k", "--install"]).unwrap();
         assert_eq!(args.channel, Some(Channel::Dev));
-        assert_eq!(args.binary.as_deref(), Some(std::path::Path::new("/usr/bin/k")));
+        assert_eq!(
+            args.binary.as_deref(),
+            Some(std::path::Path::new("/usr/bin/k"))
+        );
         assert!(args.install);
 
         let args = parse(&["--pin", "0.2.0+903"]).unwrap();

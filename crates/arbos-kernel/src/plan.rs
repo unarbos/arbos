@@ -671,10 +671,27 @@ fn notify_parent_done(hooks: &KernelHooks, agent: &str) {
     let lo = hooks.turn_lo.lock().unwrap().remove(agent).unwrap_or(0);
     let events = load_transcript(&hooks.layout(agent).transcript()).unwrap_or_default();
     let (outcome, ok) = turn_outcome(&events, lo);
-    let status = if ok { "ended" } else { "ended badly" };
+    // The user's Stop paused this worker; it did not fail. Its report is
+    // a note, not a wake: the parent hears it with the user's next line
+    // ("Continue where you stopped") and picks the work back up, instead
+    // of waking at once to call the stop a failure and spawn nothing
+    // (F-96, journey J09).
+    let user_stop = outcome.starts_with(USER_STOPPED);
+    let status = if ok {
+        "ended"
+    } else if user_stop {
+        "stopped by the user"
+    } else {
+        "ended badly"
+    };
     let mut body = format!(
         "Turn {status}. Last words: {outcome}\n(transcript: .arbos/agents/{agent}/transcript.jsonl)"
     );
+    if user_stop {
+        body.push_str(&format!(
+            "\nThis is the user pausing, not a failure. Its folder and transcript are intact: when the user says to continue, `say to={agent} mode=request` with what to pick up, or spawn afresh with what is left."
+        ));
+    }
     if let Some(note) = worktree_state(hooks, agent) {
         body.push('\n');
         body.push_str(&note);
@@ -682,7 +699,7 @@ fn notify_parent_done(hooks: &KernelHooks, agent: &str) {
     let msg = inbox::Message {
         from: format!("agent:{agent}"),
         kind: "done".into(),
-        wake: true,
+        wake: !user_stop,
         hops: 0,
         body,
         ..inbox::Message::default()
@@ -930,6 +947,18 @@ pub fn missing_links(place: &arbos_core::Place, text: &str) -> Vec<String> {
 
 /// The turn's last words and whether it ended well, from the transcript
 /// lines the turn wrote (`lo` onward).
+/// How a turn the user stopped reads in its report to the parent.
+pub const USER_STOPPED: &str = "stopped by the user (Stop)";
+
+/// The `interrupted` detail of the user's own Stop — the button, a stop
+/// word, a pause — is `stop`, sometimes with where it landed ("stop
+/// during model call"). A parent's `say mode=stop` says "stopped by
+/// <who>"; the kernel's own says "kernel stopping".
+fn user_stopped(detail: &str) -> bool {
+    let d = detail.trim();
+    d == "stop" || d.starts_with("stop during")
+}
+
 pub fn turn_outcome(events: &[Event], lo: u64) -> (String, bool) {
     let mut last_text = String::new();
     let mut stopped: Option<String> = None;
@@ -947,12 +976,18 @@ pub fn turn_outcome(events: &[Event], lo: u64) -> (String, bool) {
     if let Some(why) = stopped {
         // What it had before the stop rides along: a parent that stopped a
         // worker early wants the partial result, not only the reason.
+        // The user's own Stop is a pause, not a failure, and reads so.
+        let head = if user_stopped(&why) {
+            USER_STOPPED.to_string()
+        } else {
+            format!("stopped: {why}")
+        };
         return (
             if last_text.is_empty() {
-                format!("stopped: {why}")
+                head
             } else {
                 format!(
-                    "stopped: {why}\nLast words before the stop: {}",
+                    "{head}\nLast words before the stop: {}",
                     arbos_core::text::clip(&last_text, 300)
                 )
             },
