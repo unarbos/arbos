@@ -2422,7 +2422,7 @@ fn kernel_log_tail(workspace: &Path) -> String {
     }
 }
 
-fn arbos_bin() -> Result<PathBuf> {
+pub(crate) fn arbos_bin() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("ARBOS_KERNEL_BIN") {
         let path = PathBuf::from(path);
         if path.is_file() {

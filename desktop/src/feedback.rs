@@ -39,6 +39,12 @@ pub const TOOL_IO_BY_DEFAULT: bool = true;
 /// without making the review sheet unreadable.
 pub const TAIL_LINES: u32 = 200;
 
+/// The report itself, and the picture beside it as base64 — the door it is
+/// read back through serves text. The poller keys on `report.json`, so it is
+/// written and delivered last.
+pub const REPORT_NAME: &str = "report.json";
+pub const SCREENSHOT_NAME: &str = "screenshot.b64";
+
 /// The kernel serves one file at most 1 MiB (`files::READ_CAP`), and the
 /// poller reads the picture as base64 through that door, so a picture past
 /// this arrives cut — and a cut base64 string is a broken image, which is
@@ -252,15 +258,29 @@ impl Draft {
             "redacted": b.redacted,
             "tool_io_stripped": stripped,
             "truncated": b.truncated,
-            // Every decision, true or false. A part that is merely absent
-            // would leave a loop guessing whether he cut it or it was never
-            // there, and it would chase the wrong one.
+            // What is actually in this report, true or false. A part that is
+            // merely absent would leave a loop guessing.
             "included": {
                 "screenshot": self.parts.screenshot && self.shot.is_some(),
                 "trajectory": self.parts.trajectory,
                 "log": self.parts.log,
                 "tail": self.parts.tail && self.parts.trajectory,
                 "session": self.parts.session && self.session.is_some(),
+                "tool_io": self.parts.tool_io,
+            },
+            // And what he *chose*, which is not the same thing. A part he kept
+            // that is missing anyway is a fault — the capture failed, the
+            // kernel had nothing — and a part he removed is a choice. Read
+            // together these two tell them apart; `included` alone cannot, and
+            // reading it alone had the poller printing a failed screenshot as
+            // "he removed it", inverting the one distinction the sheet exists
+            // to make.
+            "chose": {
+                "screenshot": self.parts.screenshot,
+                "trajectory": self.parts.trajectory,
+                "log": self.parts.log,
+                "tail": self.parts.tail && self.parts.trajectory,
+                "session": self.parts.session,
                 "tool_io": self.parts.tool_io,
             },
             "screenshot_error": self.shot_error,
@@ -557,7 +577,7 @@ pub fn write(place: &Place, draft: &Draft, id: &str, now_ms: i64) -> Result<Path
 
     let report = draft.report(id, now_ms);
     write_atomic(
-        &dir.join("report.json"),
+        &dir.join(REPORT_NAME),
         (serde_json::to_string_pretty(&report)? + "\n").as_bytes(),
     )?;
 
@@ -567,7 +587,7 @@ pub fn write(place: &Place, draft: &Draft, id: &str, now_ms: i64) -> Result<Path
     if draft.parts.screenshot {
         if let Some(shot) = &draft.shot {
             let text = encode_shot(shot);
-            write_atomic(&dir.join("screenshot.b64"), text.as_bytes())?;
+            write_atomic(&dir.join(SCREENSHOT_NAME), text.as_bytes())?;
             // A copy in its real form too: this folder is also what he can
             // hand to someone directly, and a person cannot open base64.
             write_atomic(
@@ -598,6 +618,229 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("place {}", path.display()))?;
     Ok(())
+}
+
+// --------------------------------------------------------------------------
+// Delivery
+//
+// A report is written to his own disk first and delivered from there, so
+// pressing Send never depends on the network. This is the part that carries it
+// the rest of the way: into a store on a machine an agent can read, using the
+// federated write that already exists.
+//
+// It goes through `arbos-kernel store put`, the binary the app already ships
+// beside itself. That is not laziness: it means one authenticated path to the
+// hub rather than two, the hub address and token come from the same
+// `hub.toml` the kernel already reads, and this app holds no credential of its
+// own. A second hub client in the desktop would be a second thing to get
+// wrong.
+// --------------------------------------------------------------------------
+
+/// Waits between attempts on a report that will not go. Doubling, to an hour:
+/// a report is not urgent to the minute, and a machine that is offline for a
+/// morning should not spend the morning retrying.
+const BACKOFF_SECS: [u64; 7] = [30, 60, 120, 300, 900, 1800, 3600];
+
+/// Where a report stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// On his disk, waiting for a link or for an address to send it to.
+    Waiting { attempts: u32, last_error: Option<String> },
+    /// In the store, where the loop can read it.
+    Sent { at_ms: i64 },
+}
+
+/// Deliver one written report. `base` is the store address its folder is made
+/// under; `hub_home` the configuration directory holding the credentials for
+/// it. `retrying` says a previous attempt has already run.
+///
+/// `report.json` goes **first**, with an empty `base_hash`, which the store
+/// reads as create-if-absent: it claims the folder, so two reports cannot land
+/// in the same one. Then the picture, as base64 text beside it.
+pub fn deliver(dir: &Path, base: &str, hub_home: &Path, retrying: bool) -> Result<()> {
+    let id = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("the outbox folder has no name")?;
+    let base = base.trim_end_matches('/');
+    let kernel = crate::kernel::arbos_bin()?;
+    let hub = hub_home.join("arbos").join("hub.toml");
+    if !hub.is_file() {
+        // Deliberately not a fallback to his own `~/.config/arbos/hub.toml`.
+        // That file can hold a token that is owner on every project he has,
+        // and a bug report must not be able to write with it. Waiting is the
+        // right failure.
+        anyhow::bail!(
+            "no feedback credentials at {} — a report will not be sent under another token",
+            hub.display()
+        );
+    }
+
+    // Claim the folder. A conflict here on a retry is our own earlier claim,
+    // since the id carries this machine's clock and a random tail; carry on to
+    // the picture rather than starting a new folder and orphaning the first.
+    match put(
+        &kernel,
+        hub_home,
+        &format!("{base}/{id}/{REPORT_NAME}"),
+        &dir.join(REPORT_NAME),
+        Some(""),
+    ) {
+        Ok(()) => {}
+        Err(e) if retrying && format!("{e:#}").contains("conflict") => {}
+        Err(e) => return Err(e),
+    }
+
+    // Then the picture, as base64 text, which is the form the poller reads it
+    // back in. No base hash: on a retry this should replace what is there.
+    let shot = dir.join(SCREENSHOT_NAME);
+    if shot.is_file() {
+        put(
+            &kernel,
+            hub_home,
+            &format!("{base}/{id}/{SCREENSHOT_NAME}"),
+            &shot,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+fn put(
+    kernel: &Path,
+    hub_home: &Path,
+    address: &str,
+    file: &Path,
+    base_hash: Option<&str>,
+) -> Result<()> {
+    let mut cmd = std::process::Command::new(kernel);
+    cmd.args(["store", "put", address])
+        .arg(file)
+        // `host_dir()` reads this, so the kernel run for a delivery looks for
+        // its hub in the feedback directory and nowhere else.
+        .env("XDG_CONFIG_HOME", hub_home);
+    if let Some(base) = base_hash {
+        cmd.args(["--base", base]);
+    }
+    let out = cmd
+        .output()
+        .with_context(|| format!("run {} store put", kernel.display()))?;
+    if !out.status.success() {
+        // The kernel's own words rather than a status code: "no hub
+        // configured", "a reader client may not send put", "conflict — the
+        // file exists now" and a dropped link all read differently, and this
+        // is what the sheet shows him.
+        let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        anyhow::bail!(
+            "{}",
+            if said.is_empty() {
+                format!("store put {address} failed")
+            } else {
+                said
+            }
+        );
+    }
+    Ok(())
+}
+
+/// Try every waiting report whose next attempt is due. Returns what happened
+/// to each, newest state last, for whoever is drawing the outbox.
+///
+/// Nothing is deleted on success: the folder stays, holding its receipt, so
+/// the loop can write `fixed.json` back into it and the app can tell him which
+/// build carries the fix.
+pub fn deliver_pending(
+    place: &Place,
+    base: &str,
+    hub_home: &Path,
+    now_ms: i64,
+) -> Vec<(String, Delivery)> {
+    let mut out = Vec::new();
+    if base.trim().is_empty() {
+        // No address yet. The reports keep, and the sheet says so; this is the
+        // same state as being offline and is not an error to report every
+        // thirty seconds.
+        return out;
+    }
+    for dir in pending(place) {
+        let state = state_of(&dir);
+        if let Delivery::Waiting { attempts, .. } = &state
+            && !due(&dir, *attempts, now_ms)
+        {
+            continue;
+        }
+        let id = dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        let retrying = matches!(state, Delivery::Waiting { attempts, .. } if attempts > 0);
+        match deliver(&dir, base, hub_home, retrying) {
+            Ok(()) => {
+                let _ = write_atomic(
+                    &dir.join("delivered"),
+                    (json!({"at_ms": now_ms, "to": base}).to_string() + "\n").as_bytes(),
+                );
+                out.push((id, Delivery::Sent { at_ms: now_ms }));
+            }
+            Err(e) => {
+                let attempts = match &state {
+                    Delivery::Waiting { attempts, .. } => attempts + 1,
+                    Delivery::Sent { .. } => 1,
+                };
+                let last_error = format!("{e:#}");
+                let _ = write_atomic(
+                    &dir.join("attempts.json"),
+                    (json!({"attempts": attempts, "at_ms": now_ms, "error": last_error})
+                        .to_string()
+                        + "\n")
+                        .as_bytes(),
+                );
+                out.push((
+                    id,
+                    Delivery::Waiting {
+                        attempts,
+                        last_error: Some(last_error),
+                    },
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn state_of(dir: &Path) -> Delivery {
+    if let Ok(text) = std::fs::read_to_string(dir.join("delivered"))
+        && let Ok(v) = serde_json::from_str::<Value>(&text)
+    {
+        return Delivery::Sent {
+            at_ms: v.get("at_ms").and_then(Value::as_i64).unwrap_or(0),
+        };
+    }
+    let (attempts, last_error) = std::fs::read_to_string(dir.join("attempts.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .map(|v| {
+            (
+                v.get("attempts").and_then(Value::as_u64).unwrap_or(0) as u32,
+                v.get("error").and_then(Value::as_str).map(str::to_string),
+            )
+        })
+        .unwrap_or((0, None));
+    Delivery::Waiting {
+        attempts,
+        last_error,
+    }
+}
+
+/// Whether a report that has failed `attempts` times may be tried again yet.
+fn due(dir: &Path, attempts: u32, now_ms: i64) -> bool {
+    if attempts == 0 {
+        return true;
+    }
+    let last = std::fs::read_to_string(dir.join("attempts.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.get("at_ms").and_then(Value::as_i64))
+        .unwrap_or(0);
+    let wait = BACKOFF_SECS[(attempts as usize - 1).min(BACKOFF_SECS.len() - 1)] as i64 * 1000;
+    now_ms - last >= wait
 }
 
 /// Reports written and not yet delivered, oldest first.
@@ -1110,6 +1353,156 @@ mod tests {
         assert_eq!(draft.note_redaction().tokens, 1);
         draft.note = "the sidebar draws twice".into();
         assert_eq!(draft.note_redaction().total(), 0);
+    }
+
+    /// A throwaway folder that clears up after itself, so these tests owe no
+    /// dependency for one directory.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            // A counter, not just the clock: tests run in parallel, and two
+            // that asked in the same millisecond got the same folder — so one
+            // test's cleanup deleted another's report and the delay assertion
+            // read a missing `attempts.json` as "never tried". It passed alone
+            // and failed in the suite, which is the shape of every flake.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let at = std::env::temp_dir().join(format!(
+                "arbos-feedback-test-{}-{name}-{}-{n}",
+                std::process::id(),
+                arbos_core::now_ms()
+            ));
+            std::fs::create_dir_all(&at).unwrap();
+            Self(at)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn outbox_with_one_report() -> (Scratch, Place) {
+        let dir = Scratch::new("outbox");
+        let place = Place::new(dir.path());
+        let mut draft = Draft::new(Parts::default());
+        draft.note = "it froze".into();
+        write(&place, &draft, "20260916T154210Z-aa11", 1_789_573_330_000).unwrap();
+        (dir, place)
+    }
+
+    /// With nowhere to send a report it must keep, quietly. This is the state
+    /// the app ships in until the store address is settled, and it is the same
+    /// state as being offline — not an error to shout about every 30 seconds.
+    #[test]
+    fn with_no_address_a_report_waits_instead_of_failing() {
+        let (_dir, place) = outbox_with_one_report();
+        assert_eq!(pending(&place).len(), 1);
+        assert!(deliver_pending(&place, "", Path::new("/nonexistent"), 0).is_empty());
+        assert!(deliver_pending(&place, "   ", Path::new("/nonexistent"), 0).is_empty());
+        // And it is still there to send later.
+        assert_eq!(pending(&place).len(), 1);
+    }
+
+    /// A report that will not go is retried on a widening delay, and its
+    /// reason is kept where the sheet can read it.
+    #[test]
+    fn a_report_that_will_not_go_backs_off_and_keeps_its_reason() {
+        let (_dir, place) = outbox_with_one_report();
+        let dir = pending(&place).remove(0);
+
+        assert_eq!(state_of(&dir), Delivery::Waiting { attempts: 0, last_error: None });
+        assert!(due(&dir, 0, 0), "a fresh report is tried at once");
+
+        // An address the kernel cannot resolve: the attempt fails, and the
+        // kernel's own words are what is kept.
+        let now = 1_789_573_400_000;
+        let out = deliver_pending(&place, "arbos://nowhere/nothing/internal/feedback", Path::new("/nonexistent"), now);
+        assert_eq!(out.len(), 1);
+        let Delivery::Waiting { attempts, last_error } = &out[0].1 else {
+            panic!("a report with no hub cannot have been sent: {:?}", out[0].1);
+        };
+        assert_eq!(*attempts, 1);
+        assert!(last_error.is_some(), "the reason is kept, not swallowed");
+
+        // Thirty seconds is the first wait, so it is not due a second later
+        // and is due a minute later.
+        assert!(!due(&dir, 1, now + 1_000));
+        assert!(due(&dir, 1, now + 31_000));
+        // And the waits widen rather than hammering a machine that is away.
+        assert!(!due(&dir, 4, now + 299_000));
+        assert!(due(&dir, 4, now + 301_000));
+        // Past the end of the table it holds at the longest wait.
+        assert!(!due(&dir, 99, now + 3_599_000));
+        assert!(due(&dir, 99, now + 3_601_000));
+
+        // It is still pending, because nothing marked it delivered.
+        assert_eq!(pending(&place).len(), 1);
+    }
+
+    /// A delivered report keeps its folder: the loop writes `fixed.json` back
+    /// into it, and the app reads that to tell him which build carries the fix.
+    #[test]
+    fn a_delivered_report_leaves_the_outbox_but_not_the_disk() {
+        let (_dir, place) = outbox_with_one_report();
+        let dir = pending(&place).remove(0);
+        std::fs::write(dir.join("delivered"), r#"{"at_ms":7,"to":"arbos://x/y/z"}"#).unwrap();
+        assert_eq!(state_of(&dir), Delivery::Sent { at_ms: 7 });
+        assert!(pending(&place).is_empty(), "not tried again");
+        assert!(dir.join(REPORT_NAME).is_file(), "still on disk for the answer");
+    }
+
+    /// A half-written report is never picked up: `ready` is the last thing
+    /// written, and the outbox only offers folders that have it.
+    #[test]
+    fn a_half_written_report_is_not_offered_for_delivery() {
+        let dir = Scratch::new("half");
+        let place = Place::new(dir.path());
+        let half = outbox(&place).join("20260916T160000Z-bb22");
+        std::fs::create_dir_all(&half).unwrap();
+        std::fs::write(half.join(REPORT_NAME), "{}").unwrap();
+        assert!(pending(&place).is_empty(), "no `ready`, so not offered");
+        std::fs::write(half.join("ready"), "").unwrap();
+        assert_eq!(pending(&place).len(), 1);
+    }
+
+    /// Not a test of behaviour: writes one report into a folder named by the
+    /// environment so the poller can be run against what the app really
+    /// produces. Ignored unless asked for by name.
+    #[test]
+    #[ignore]
+    fn write_one_report_for_the_poller() {
+        let at = std::env::var("ARBOS_FEEDBACK_PROBE").expect("ARBOS_FEEDBACK_PROBE");
+        let place = Place::new(&at);
+        let mut draft = Draft::new(Parts::default());
+        draft.note = format!("the sheet froze when I opened it, and my key {} was on screen", format!("sk-{}v1-3f8a9b2c4d5e6f7a8b9c0d1e2f3a4b5c", "or-"));
+        draft.session = Some(json!({"items": [{"User": {}}, {"Assistant": {}}]}));
+        draft.shot_error = Some("Screen Recording is not allowed for Arbos".into());
+        draft.bundle = Some(Bundle {
+            agent: "root".into(),
+            turn: json!({"from": 112, "to": 140, "complete": true}),
+            events: vec![
+                json!({"kind": "wake", "seq": 112, "wake": "user", "text": "add the retry"}),
+                json!({"kind": "tool", "seq": 118, "name": "bash",
+                       "args": {"command": "cargo test"}, "output": "test result: FAILED",
+                       "error": "exit 101", "result_size": 41233}),
+                json!({"kind": "assistant", "seq": 139, "text": "Done."}),
+            ],
+            log: vec![json!({"ts": 1_789_573_301_000i64, "level": "warn", "event": "turn.slow"})],
+            kernel: json!({"version": "0.2.0", "git_sha": "abc123def456", "os": "macos",
+                           "arch": "aarch64", "provider": "openrouter", "model": "gemini",
+                           "project": "subnet120"}),
+            redacted: json!({"secrets": 0, "tokens": 1, "values": 0, "blocks": 0}),
+            ..Default::default()
+        });
+        let id = new_id(1_789_573_330_000);
+        let dir = write(&place, &draft, &id, 1_789_573_330_000).unwrap();
+        println!("WROTE {}", dir.display());
     }
 
     #[test]

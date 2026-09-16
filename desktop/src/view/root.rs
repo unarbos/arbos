@@ -2381,20 +2381,86 @@ impl Arbos {
         };
         crate::feedback::save_parts(&place, &draft.parts);
         let id = crate::feedback::new_id(arbos_core::now_ms());
-        let outcome = match crate::feedback::write(&place, draft, &id, arbos_core::now_ms()) {
-            Ok(_) => Ok(format!(
-                "Sent. It reaches an agent within fifteen minutes, and you will be told which build carries the fix. Reference {id}."
-            )),
-            Err(e) => Err(format!("could not write the report: {e:#}")),
-        };
-        if outcome.is_ok() {
-            if let Some((chat_id, seq)) = self.report_anchor.take() {
-                self.workspace.update(cx, |workspace, cx| {
-                    workspace.with_session(chat_id, cx, |chat| chat.mark_reported(seq, &id));
+        let written = crate::feedback::write(&place, draft, &id, arbos_core::now_ms());
+        if let Err(e) = written {
+            sheet.update(cx, |sheet, cx| {
+                sheet.settled(Err(format!("could not write the report: {e:#}")), cx)
+            });
+            return;
+        }
+        // The thumbs-down he pressed now reads as reported.
+        if let Some((chat_id, seq)) = self.report_anchor.take() {
+            self.workspace.update(cx, |workspace, cx| {
+                workspace.with_session(chat_id, cx, |chat| chat.mark_reported(seq, &id));
+            });
+        }
+        // On disk is what Send means, so say so now and carry it the rest of
+        // the way behind him. Delivery shells out to the kernel and talks to
+        // the hub; neither belongs on the thread drawing the window.
+        let feedback = &self.workspace.read(cx).settings.feedback;
+        let (address, hub_home) = (feedback.address.clone(), feedback.hub_home.clone());
+        sheet.update(cx, |sheet, cx| {
+            sheet.settled(
+                Ok(if address.trim().is_empty() {
+                    format!(
+                        "Saved. It has nowhere to go yet — this machine has no feedback address — so it waits on disk. Reference {id}."
+                    )
+                } else {
+                    format!(
+                        "Sent. It reaches an agent within fifteen minutes, and you will be told which build carries the fix. Reference {id}."
+                    )
+                }),
+                cx,
+            )
+        });
+        self.deliver_feedback(place, address, hub_home, cx);
+    }
+
+    /// Carry every waiting report to the store it goes to, off the UI thread,
+    /// and tell the sheet if the one just written would not go.
+    fn deliver_feedback(
+        &mut self,
+        place: arbos_core::Place,
+        address: String,
+        hub_home: String,
+        cx: &mut Context<Self>,
+    ) {
+        if address.trim().is_empty() {
+            return;
+        }
+        let sheet = self.feedback_sheet.clone();
+        cx.spawn(async move |_, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::feedback::deliver_pending(
+                        &place,
+                        &address,
+                        std::path::Path::new(&hub_home),
+                        arbos_core::now_ms(),
+                    )
+                })
+                .await;
+            // Only a failure is worth saying: a delivered report already reads
+            // as sent, and he was told that when it hit the disk.
+            if let Some(why) = results.iter().find_map(|(_, state)| match state {
+                crate::feedback::Delivery::Waiting {
+                    last_error: Some(why),
+                    ..
+                } => Some(why.clone()),
+                _ => None,
+            }) {
+                let _ = sheet.update(cx, |sheet, cx| {
+                    sheet.settled(
+                        Err(format!(
+                            "Saved, and waiting: it could not be sent yet — {why}. It will go by itself when the link is back."
+                        )),
+                        cx,
+                    )
                 });
             }
-        }
-        sheet.update(cx, |sheet, cx| sheet.settled(outcome, cx));
+        })
+        .detach();
     }
 
     fn offer_tab_face(&mut self, window: &mut Window, cx: &mut Context<Self>) {
