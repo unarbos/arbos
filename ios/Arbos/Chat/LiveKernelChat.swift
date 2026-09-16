@@ -65,6 +65,7 @@ final class LiveKernelChat: ChatSource {
         for file in attachments {
             let path = "attachments/\(file.storedName)"
             try client.put(path: path, data: file.data)
+            if file.isImage { AttachmentCache.store(file.data, as: file.storedName) }
             paths.append(path)
         }
         try client.send(text: text, steer: steer, attachments: paths)
@@ -257,7 +258,11 @@ final class LiveKernelChat: ChatSource {
         if case .tool(let record) = event, record.name == "spawn", let child = record.child ?? (record.args?["name"] as? String) {
             children.insert(child)
             childNames[child] = record.args?["brief"] as? String ?? child
-            setWorker(child, running: true, step: "Starting")
+            // A worker on another machine sends no steps here — only its
+            // report, when it is done. "Starting" forever read as stuck
+            // (Jacob, build 1021); say where it runs instead.
+            let machine = (record.args?["machine"] as? String) ?? ""
+            setWorker(child, running: true, step: machine.isEmpty ? "Starting" : "Running on \(machine) · reports here when done")
         }
         guard let item = item(for: event, worker: false) else { return }
         if case .say = event, streamed {
@@ -279,9 +284,12 @@ final class LiveKernelChat: ChatSource {
     /// worker's chat shows every tool line.
     private func item(for event: KernelEvent, worker: Bool) -> ChatItem? {
         switch event {
-        case .user(let text, let channel):
+        case .user(let text, let channel, let attachments):
             var item = ChatItem(.user(text))
             item.spoken = channel == "voice"
+            // The photo shows as a picture, not a filename (Jacob, build
+            // 1021): the bytes were cached when this phone sent them.
+            item.images = attachments.map { ($0 as NSString).lastPathComponent }.filter { AttachmentCache.has($0) }
             return item
         case .answer(let text):
             return ChatItem(.user(text))
