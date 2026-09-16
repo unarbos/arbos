@@ -60,6 +60,104 @@ pub fn pick_model(wake_model: &str, agent: &Agent, host_model: &str, child_model
 /// image still owed.
 pub const SHOW_NUDGE: &str = "Your brief says the user asked to see the result (Show), and this turn made no image. Make it now: a command's output → screenshot target:\"text\" title:\"<the command>\" text:\"<its output>\"; a page → browser action:screenshot; a window → screenshot target:\"window\". Then put the image path in your report.";
 
+/// Tools whose failure means the thing was not made.
+const WRITE_CLASS: &[&str] = &["write", "edit", "bash", "apply_patch", "git", "pr"];
+
+/// Words a reply uses to claim a write happened.
+const CLAIMS: &[&str] = &[
+    "seeded",
+    "created",
+    "wrote",
+    "written",
+    "added",
+    "updated",
+    "saved",
+    "fixed",
+    "committed",
+    "pushed",
+    "applied",
+    "installed",
+    "generated",
+    "removed",
+    "deleted",
+    "renamed",
+    "moved",
+    "done",
+    "complete",
+    "finished",
+    "set up",
+    "ready",
+];
+
+/// The last tool step of this turn had a failed write-class call with no
+/// later success of the same tool, and `reply` reads as if it worked — it
+/// claims a result (`seeded`, `created`, `done`…) or names the failed
+/// call's path — without a word of failure. "Said seeded when nothing was
+/// seeded" (JB-4). A reply about something else (a read-only helper whose
+/// side `write` the kernel refused, answering from its `grep`) is left
+/// alone. Returns the failed call.
+fn unowned_failure<'a>(events: &'a [Event], reply: &str) -> Option<&'a arbos_core::ToolRec> {
+    let lower = reply.to_ascii_lowercase();
+    if [
+        "fail",
+        "error",
+        "could not",
+        "couldn't",
+        "unable",
+        "did not",
+        "didn't",
+        "refused",
+        "blocked",
+        "not written",
+        "no such",
+        "cannot",
+        "can't",
+        "denied",
+    ]
+    .iter()
+    .any(|w| lower.contains(w))
+    {
+        return None;
+    }
+    // The last batch of tool records in this turn: back from the end,
+    // over the assistant/notice lines, until the tool run before it.
+    let turn: Vec<&Event> = events.iter().rev().take_while(|e| !e.is_wake()).collect();
+    let mut seen_tools = false;
+    let mut failed: Option<&arbos_core::ToolRec> = None;
+    let mut ok_names: Vec<&str> = Vec::new();
+    for e in turn {
+        match &e.kind {
+            EventKind::Tool(rec) => {
+                seen_tools = true;
+                if !WRITE_CLASS.contains(&rec.name.as_str()) {
+                    continue;
+                }
+                if rec.error.is_some() {
+                    if !ok_names.contains(&rec.name.as_str()) {
+                        failed = Some(rec);
+                    }
+                } else {
+                    ok_names.push(rec.name.as_str());
+                }
+            }
+            EventKind::Assistant { .. } if seen_tools => break,
+            _ => {}
+        }
+    }
+    let rec = failed?;
+    let names_path = rec
+        .args
+        .as_ref()
+        .and_then(|a| a.get("path").and_then(|p| p.as_str()))
+        .map(|p| {
+            let base = p.rsplit('/').next().unwrap_or(p);
+            !base.is_empty() && lower.contains(&base.to_ascii_lowercase())
+        })
+        .unwrap_or(false);
+    let claims = CLAIMS.iter().any(|w| lower.contains(w));
+    (names_path || claims).then_some(rec)
+}
+
 /// The turn's wake carried a `Show:` line (the user asked to see the
 /// result) and no tool call since has produced an image.
 fn image_owed(events: &[Event]) -> bool {
@@ -1112,6 +1210,15 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 Some((
                     PR_LINK_NUDGE.replace("{urls}", &urls.join(", ")),
                     "pr link not from a tool",
+                ))
+            } else if let Some(rec) = unowned_failure(&events, &content) {
+                Some((
+                    format!(
+                        "Your last {} call failed ({}) and nothing since succeeded, but the reply reads as if it worked. Say what failed and what you will do, or fix it first — never report a failed write as done.",
+                        rec.name,
+                        arbos_core::text::clip(rec.error.as_deref().unwrap_or("error"), 160)
+                    ),
+                    "failed write reported as done",
                 ))
             } else if image_owed(&events) {
                 // The brief said the user asked to see the result and the

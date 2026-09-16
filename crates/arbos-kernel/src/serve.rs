@@ -264,6 +264,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         crate::klog::info("migrated", None, line);
     }
     plan::reclaim(&hooks);
+    warn_if_window_pinned_small(&place, &host, &registry);
     for agent in list_agents(&place)? {
         if !agent.paused && needs_serve(&place, agent.id.as_str()) {
             let _ = wake_tx.send(Wake::serve(agent.id.as_str()));
@@ -2053,6 +2054,58 @@ fn key_source(place: &Place, host: &Host) -> (bool, String) {
                 Ok(cfg) if cfg.secrets.contains_key(&env) => (true, format!("secrets:{env}")),
                 _ => (false, "none".into()),
             }
+        }
+    }
+}
+
+/// A `window_tokens` pin in config.toml smaller than the place's own
+/// standing prompt (system prefix + tool schemas, doubled for a reply and
+/// some conversation) leaves every turn over budget with nothing old
+/// enough to compact — thirteen notices in one turn on a 32k pin left
+/// over from a small-window model (JB-4). Said once, at start, on the
+/// top-level agents' transcripts and in the log; the pin is the fix.
+fn warn_if_window_pinned_small(place: &Place, host: &Host, registry: &Arc<arbos_engine::Registry>) {
+    let pinned = host.config.window_tokens;
+    if pinned == 0 {
+        return;
+    }
+    for agent in list_agents(place).unwrap_or_default() {
+        if agent.parent.is_some() {
+            continue;
+        }
+        let standing = arbos_engine::standing_tokens(place, &agent, registry);
+        if pinned >= standing.needed_window() {
+            continue;
+        }
+        let text = format!(
+            "config.toml pins window_tokens = {pinned}, but this place's standing prompt is ~{}k tokens (system ~{}k, tools ~{}k) and needs a window of about {}k: every turn would run over budget with nothing to compact. Remove the pin (the model's own window is used) or raise it.",
+            standing.total() / 1000,
+            standing.system / 1000,
+            standing.tools / 1000,
+            standing.needed_window() / 1000
+        );
+        klog::warn("window_pinned_small", Some(agent.id.as_str()), &text);
+        let transcript = Layout::new(place, agent.id.as_str()).transcript();
+        // Once per pin, not once per boot: the last notice already saying
+        // this is enough.
+        let already = load_transcript(&transcript)
+            .unwrap_or_default()
+            .iter()
+            .rev()
+            .find_map(|e| match &e.kind {
+                EventKind::Notice { text: t, .. }
+                    if t.starts_with("config.toml pins window_tokens") =>
+                {
+                    Some(t == &text)
+                }
+                _ => None,
+            })
+            .unwrap_or(false);
+        if !already {
+            let _ = append_event(
+                &transcript,
+                &Event::new(EventKind::Notice { text, failed: true }),
+            );
         }
     }
 }
