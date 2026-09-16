@@ -86,12 +86,20 @@ out because the first version of this document said the opposite of each.
   feature's blast radius, and that is precisely where the gap was. Slice 4
   would have shipped a kernel that updated itself between turns and left
   somebody holding an unanswerable question.
-- **A detached job** — *changed 2026-09-16 by [#321](https://github.com/unarbos/arbos/pull/321),
+- **A detached job** — *changed by [#321](https://github.com/unarbos/arbos/pull/321),
   and a consequence of `execv` rather than a separate decision.* The pid does
   not change, so a job's leash — which watches the kernel's pid — sees nothing
-  happen, and the boot reap only takes jobs orphaned to pid 1. Jobs survive the
-  swap. The earlier rule would have held an update behind a background server
-  for up to the 24-hour ceiling, for no gain.
+  happen. Jobs survive the swap, and the earlier rule would have held an update
+  behind a background server for up to the 24-hour ceiling for no gain.
+
+  **True from [#353](https://github.com/unarbos/arbos/pull/353) onward and
+  false before it.** The reasoning in #321 had the boot reap taking only jobs
+  orphaned to pid 1; driving it showed `reap_leftovers` killing *every* running
+  job without a `keep` file, parent or not. So the new image would have ended
+  exactly the jobs #321 decided were safe to update around — the first
+  unattended update would have killed a background server and reported success.
+  #353 inherits a job whose leash is parented to this very process instead of
+  reaping it.
 
 `keep` remains not the updater's to set.
 
@@ -189,33 +197,48 @@ Jacob's ruling. A machine on the hub is part of the mesh and is meant to track
 
 ## Slice 4 must be driven, not reasoned
 
-Three claims about what survives a restart were read out of the code this
-morning and written into this document. Two of them were wrong when somebody
-actually ran them ([#342](https://github.com/unarbos/arbos/pull/342)): a parked
-ask survived the file but was never re-offered to a reconnecting client, and a
-cut approval was described to the model as "may have completed in part or in
-full" when the call had never run at all. The third held.
+Three claims about what survives a restart were read out of the code and
+written into this document. **All three needed correcting once somebody ran
+them:**
 
-Both were correct readings of the code and both were wrong about the behaviour,
-which is the point. This design's gate — what may be updated and what may not —
-rests entirely on claims of that kind, so slice 4 does not ship on reasoning.
+| claim | read as | driven |
+| --- | --- | --- |
+| a parked ask survives | fine across a restart | the file survived; the question was never re-offered to a reconnecting client ([#342](https://github.com/unarbos/arbos/pull/342)) |
+| a cut approval does not run | true, and reported honestly | true, but the record told the model it "may have completed in part or in full" ([#342](https://github.com/unarbos/arbos/pull/342)) |
+| a detached job survives `execv` | the boot reap takes only pid-1 orphans | `reap_leftovers` killed every job without `keep`, parent or not ([#353](https://github.com/unarbos/arbos/pull/353)) |
 
-What has to be **watched happening**, on a real kernel, before it runs
-unattended:
+Every one was a correct reading of the code and wrong about the behaviour. The
+last would have killed a background server on the first unattended update and
+reported success.
 
-1. An agent parked on a question, a desktop and a phone attached, an update in
-   between. The question is re-offered to both and answering it still works.
-2. A detached job running across the swap. It is still running afterwards, and
-   its output did not stop — the claim that the leash sees an unchanged pid is
-   the reason jobs no longer hold the gate, and it is untested from this side.
-3. A remote child mid-turn. The gate refuses, and does not merely appear to.
-4. A new binary that passes the probe and then dies at boot. `<bin>.previous`
+This design's gate — what may be updated and what may not — is built entirely
+from claims of that kind. So slice 4 does not ship on reasoning.
+
+### What has to be watched happening, on a real kernel
+
+Two of these stopped being inferences when #353 added the log lines, which is
+the difference between checking and hoping:
+
+1. **A parked ask across an update**, with a desktop and a phone attached. The
+   question is re-offered to both and answering it still works.
+2. **A detached job across the swap.** *Readable now:* boot logs
+   `job_inherited` and `jobs_alive count=… <id>:pid=…`, so the run compares ids
+   and pids either side of the swap rather than inferring survival from the
+   job still looking alive.
+3. **A remote child mid-turn refuses.** *Readable now:* the gate logs
+   `update_gate verdict=… reason=…` and `/healthz` carries it, so a refusal can
+   be read from outside before any swap is attempted.
+4. **A subscription run in flight refuses.** The one gate condition nobody has
+   driven from either side. It is in `verdict` because `subs::busy()` says so,
+   which is the same kind of claim as the three above. `update_gate` on
+   `/healthz` makes it checkable the same way.
+5. **A binary that passes the probe and then dies at boot.** `<bin>.previous`
    is there and moving it back recovers the machine.
-5. `execv` on a box with no supervisor — `subnet120` is the case — with the
+6. **`execv` on a box with no supervisor** — `subnet120` is the case — with the
    path captured before the swap, confirming it comes back as the *new* build
    and not the deleted inode.
 
-Any of the five that cannot be driven is a reason to hold the slice, not a
+Any of the six that cannot be driven is a reason to hold the slice, not a
 reason to write a more confident sentence about it.
 
 ## Slices
