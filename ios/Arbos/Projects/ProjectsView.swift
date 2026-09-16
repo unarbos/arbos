@@ -24,7 +24,7 @@ struct ProjectsView: View {
     @FocusState private var searchFocus: Bool
 
     var body: some View {
-        ZStack(alignment: .bottom) {
+        ZStack {
             ArbosTheme.bg.ignoresSafeArea()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -45,7 +45,10 @@ struct ProjectsView: View {
                 }
             }
             .refreshable { await projects.refresh() }
-            composer
+            // A bottom inset, as in the chat: the list ends above the
+            // composer and the composer rides up with the keyboard
+            // (Jacob, build 956: "can't see the chat box").
+            .safeAreaInset(edge: .bottom, spacing: 0) { composer }
         }
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showSettings, onDismiss: { Task { await projects.refresh() } }) {
@@ -189,18 +192,26 @@ struct ProjectsView: View {
 
     /// The reference's bottom composer: words typed here go to the
     /// project last open and its chat opens; the mic is the call.
+    /// Where a line typed on the list goes: the last project, unless the
+    /// roster no longer has it — then the first listed one.
+    private var composerTarget: KernelTarget? {
+        let listed = projects.entries.map(\.target)
+        if listed.contains(settings.kernelTarget) { return settings.kernelTarget }
+        return listed.first
+    }
+
     private var composer: some View {
-        ComposerBar(
+        // The placeholder names the project, so a line typed here is never a
+        // mystery (Jacob, build 956: "where does this chat go?").
+        let name = composerTarget.flatMap { t in projects.entries.first { $0.target == t }?.title }
+        return ComposerBar(
             text: $draft,
-            placeholder: "Plan, ask, build…",
-            canSend: !draft.trimmingCharacters(in: .whitespaces).isEmpty && settings.chatEndpoint != nil,
+            placeholder: name.map { "Message \($0)…" } ?? "Plan, ask, build…",
+            canSend: !draft.trimmingCharacters(in: .whitespaces).isEmpty && composerTarget != nil,
             onSend: {
+                guard let target = composerTarget else { return }
                 let text = draft
                 draft = ""
-                // The last project, unless the roster no longer has it —
-                // then the first listed one, never a row that is gone.
-                let listed = projects.entries.map(\.target)
-                let target = listed.contains(settings.kernelTarget) ? settings.kernelTarget : (listed.first ?? settings.kernelTarget)
                 path.append(target)
                 Task {
                     await chat.switchTarget(target)

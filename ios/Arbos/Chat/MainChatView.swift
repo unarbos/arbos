@@ -240,6 +240,15 @@ struct ProjectChatView: View {
             .modifier(ChatScrollAnchor(followGrowth: followGrowth))
             .scrollPosition(id: $heldRow, anchor: .top)
             .scrollDismissesKeyboard(.interactively)
+            // A tap on the words puts the keyboard away (Jacob, build 956),
+            // and the tail comes back into view as the keyboard moves.
+            .onTapGesture { composing = false }
+            .onChange(of: composing) { _, _ in
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(350))
+                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
+                }
+            }
             .onChange(of: chat.items) { _, _ in
                 if let anchor = chat.anchorAfterPrepend {
                     // Older lines came in above: hold the row that was at the top.
