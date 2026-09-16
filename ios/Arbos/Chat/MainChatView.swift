@@ -217,17 +217,17 @@ struct ProjectChatView: View {
                 .padding(.horizontal, ArbosTheme.gutter)
                 .padding(.top, 4)
             }
-            // Open at the bottom; growth is followed by hand below, so older
-            // lines prepended at the top do not drag the view to the tail.
-            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: chat.items) { _, _ in
                 if let anchor = chat.anchorAfterPrepend {
                     // Older lines came in above: hold the row that was at the top.
                     chat.anchorAfterPrepend = nil
+                    // The bottom anchor re-pins on the size change first;
+                    // the row is put back once the layout has settled.
                     proxy.scrollTo(anchor, anchor: .top)
                     Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(50))
+                        try? await Task.sleep(for: .milliseconds(80))
                         proxy.scrollTo(anchor, anchor: .top)
                     }
                 } else {
