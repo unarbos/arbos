@@ -35,8 +35,9 @@ Jacob (2026-09-16): "The upgrade loops need to actually run full cycles of creat
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 09-16 13:16 | #309 branch | P | P | P | P | P | P (intact; no away card) | **F** | P | P | P | **F** | **F** (call never started: the screen waits for a tap) | P | 8 m 38 s; J10 auto-check false-positive, corrected by eye |
 | 09-16 13:27 | #309 branch | P | P | P | P (45 s) | P | P | **F** | P | P | P | **F** | **F** (call ran; the turn landed in the voice server's own kernel, not `demo`) | P | 9 m 25 s; Jacob typed "Sup" into `demo` mid-run |
+| 09-16 13:56 | #319 branch | P | P | P | P (35 s) | P | P | **F** | P | P | H (runner still expected auto-send; the words waited in the field as designed — runner now taps send) | **F** (model searched for the file: not there) | **F** (turn landed in the gateway's kernel) | P | 9 m 48 s |
 
-Rates after 2 runs: J1–J6, J8, J9, J11, J13 **2/2**; J7 **0/2**; J10 **0/2**; J12 **0/2**.
+Rates after 3 runs: J1–J6, J8, J11, J13 **3/3**; J9 **2/2** product (one harness lag); J7 **0/3**; J10 **0/3**; J12 **0/3**. H = harness, not counted against the product.
 
 ## Named bugs (failed twice running)
 
