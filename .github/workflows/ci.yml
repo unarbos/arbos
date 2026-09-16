@@ -116,7 +116,9 @@ jobs:
     name: iPhone (build, simulator)
     needs: ios-changed
     if: needs.ios-changed.outputs.ios == 'true'
-    runs-on: macos-14
+    # The same runner as ios-testflight.yml: the app needs the current iOS
+    # SDK, and macos-14's newest Xcode (16.2) is too old for it.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Select the newest Xcode on the runner
