@@ -20,9 +20,11 @@ struct ProjectChatView: View {
     @State private var worker: WorkerStatus?
     @State private var attachments: [PendingAttachment] = []
     @StateObject private var dictation = Dictation()
-    /// The composer stack's height, so the transcript's tail clears it
-    /// however many lines and chips it holds.
-    @State private var composerHeight: CGFloat = 80
+    /// The row SwiftUI keeps in place while content changes (paging back).
+    @State private var heldRow: UUID?
+    /// Growth at the bottom pins the view to the tail, until the user pages
+    /// back — then the top is theirs until they send again.
+    @State private var followGrowth = true
     @FocusState private var composing: Bool
 
     private var identity: ProjectIdentity {
@@ -38,31 +40,30 @@ struct ProjectChatView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
+        ZStack {
             ArbosTheme.bg.ignoresSafeArea()
             VStack(spacing: 0) {
                 topBar
                 transcript
             }
-            VStack(spacing: 8) {
-                pills
-                ComposerBar(
-                    text: $draft,
-                    placeholder: dictation.active ? "Listening…" : (chat.items.isEmpty ? "Plan, ask, build…" : "Follow up…"),
-                    canSend: canSend,
-                    onSend: send,
-                    onMic: { showCall = true },
-                    micEnabled: settings.isConfigured,
-                    focus: $composing,
-                    attachments: $attachments,
-                    dictation: dictation
-                )
-            }
-            .background(
-                GeometryReader { geo in
-                    Color.clear.onChange(of: geo.size.height, initial: true) { _, height in composerHeight = height }
+            // The composer is a bottom inset, not an overlay: the transcript
+            // ends above it, so the tail is the tail (M-47).
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 8) {
+                    pills
+                    ComposerBar(
+                        text: $draft,
+                        placeholder: dictation.active ? "Listening…" : (chat.items.isEmpty ? "Plan, ask, build…" : "Follow up…"),
+                        canSend: canSend,
+                        onSend: send,
+                        onMic: { showCall = true },
+                        micEnabled: settings.isConfigured,
+                        focus: $composing,
+                        attachments: $attachments,
+                        dictation: dictation
+                    )
                 }
-            )
+            }
         }
         .toolbar(.hidden, for: .navigationBar)
         .fullScreenCover(isPresented: $showCall) { CallScreen() }
@@ -212,29 +213,43 @@ struct ProjectChatView: View {
                             .foregroundStyle(ArbosTheme.textDim)
                             .padding(.top, 4)
                     }
-                    Color.clear.frame(height: composerHeight + 8).id("tail")
+                    Color.clear.frame(height: 8).id("tail")
                 }
                 .padding(.horizontal, ArbosTheme.gutter)
                 .padding(.top, 4)
             }
-            .defaultScrollAnchor(.bottom)
+            .modifier(ChatScrollAnchor(followGrowth: followGrowth))
+            .scrollPosition(id: $heldRow, anchor: .top)
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: chat.items) { _, _ in
                 if let anchor = chat.anchorAfterPrepend {
                     // Older lines came in above: hold the row that was at the top.
                     chat.anchorAfterPrepend = nil
+                    followGrowth = false
+                    heldRow = anchor
                     proxy.scrollTo(anchor, anchor: .top)
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(120))
+                        proxy.scrollTo(anchor, anchor: .top)
+                    }
                 } else {
                     withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
                 }
             }
-            .onChange(of: composerHeight) { _, _ in
-                proxy.scrollTo("tail", anchor: .bottom)
+            .onChange(of: chat.mode) { _, _ in
+                // The one line under the transcript changed; keep it in view.
+                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
             }
-            .onChange(of: chat.earlierLines) { _, _ in
-                // A long replay lands in one go; the layout settles a beat later.
+            .onChange(of: chat.earlierLines) { old, new in
+                // A long replay lands in one go; the lazy layout settles over
+                // a few frames, so the tail is asked for twice.
+                guard new > old || old == 0 else { return }
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(250))
+                    proxy.scrollTo("tail", anchor: .bottom)
+                    try? await Task.sleep(for: .milliseconds(600))
+                    proxy.scrollTo("tail", anchor: .bottom)
+                    try? await Task.sleep(for: .milliseconds(900))
                     proxy.scrollTo("tail", anchor: .bottom)
                 }
             }
@@ -291,6 +306,8 @@ struct ProjectChatView: View {
 
     private func send() {
         guard canSend else { return }
+        followGrowth = true
+        heldRow = nil
         chat.send(draft, attachments: attachments)
         draft = ""
         attachments = []
@@ -523,6 +540,26 @@ private struct Caret: View {
             RoundedRectangle(cornerRadius: 1)
                 .fill(ArbosTheme.text.opacity(on ? 0.7 : 0.1))
                 .frame(width: 2, height: 16)
+        }
+    }
+}
+
+
+/// Open at the bottom and keep short content there, but do not re-pin to
+/// the bottom when the content grows: growth is followed by hand (the tail
+/// scroll on new items), and older lines prepended at the top must not
+/// drag the view to the end. iOS 17 has only the all-roles anchor.
+private struct ChatScrollAnchor: ViewModifier {
+    let followGrowth: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *) {
+            content
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(.bottom, for: .alignment)
+                .defaultScrollAnchor(followGrowth ? .bottom : nil, for: .sizeChanges)
+        } else {
+            content.defaultScrollAnchor(.bottom)
         }
     }
 }

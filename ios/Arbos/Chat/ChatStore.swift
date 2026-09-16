@@ -373,12 +373,16 @@ final class ChatStore: ObservableObject {
             identity = face
         case .dropped:
             // One calm line under the transcript (the mode notice), not an
-            // error plus a reassurance.
+            // error plus a reassurance. A second drop for the same close
+            // (the hub's word, then the socket) leaves the countdown alone.
+            guard mode != .offline || reconnectTask == nil else { return }
             mode = .offline
             busy = false
             if settings.chatEndpoint != nil { scheduleReconnect() }
         }
-        if items.count > 200 { items.removeFirst(items.count - 200) }
+        // A long project pages back 200 at a time; the cap is for a day-long
+        // stream, not for the history the user asked to see.
+        if items.count > 2000 { items.removeFirst(items.count - 2000) }
     }
 
     private func closeOpenAgentMessage() {
