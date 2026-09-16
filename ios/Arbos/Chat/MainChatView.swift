@@ -217,7 +217,7 @@ struct ProjectChatView: View {
                 .padding(.horizontal, ArbosTheme.gutter)
                 .padding(.top, 4)
             }
-            .defaultScrollAnchor(.bottom)
+            .modifier(ChatScrollAnchor())
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: chat.items) { _, _ in
                 if let anchor = chat.anchorAfterPrepend {
@@ -533,6 +533,23 @@ private struct Caret: View {
             RoundedRectangle(cornerRadius: 1)
                 .fill(ArbosTheme.text.opacity(on ? 0.7 : 0.1))
                 .frame(width: 2, height: 16)
+        }
+    }
+}
+
+
+/// Open at the bottom and keep short content there, but do not re-pin to
+/// the bottom when the content grows: growth is followed by hand (the tail
+/// scroll on new items), and older lines prepended at the top must not
+/// drag the view to the end. iOS 17 has only the all-roles anchor.
+private struct ChatScrollAnchor: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *) {
+            content
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(.bottom, for: .alignment)
+        } else {
+            content.defaultScrollAnchor(.bottom)
         }
     }
 }

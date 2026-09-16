@@ -184,7 +184,13 @@ final class LiveKernelChat: ChatSource {
         case .thinkingDelta:
             break
         case .error(let detail):
-            stream?.yield(.item(ChatItem(.notice(detail, failed: true))))
+            // The hub saying the kernel went away is the link going, not a
+            // line for the transcript: the store's one calm line covers it.
+            if detail.contains("went away") || detail.contains("closed") {
+                stream?.yield(.dropped(detail))
+            } else {
+                stream?.yield(.item(ChatItem(.notice(detail, failed: true))))
+            }
         case .written(let path, let error):
             // A file that landed says nothing; one that did not says why.
             if let error {
