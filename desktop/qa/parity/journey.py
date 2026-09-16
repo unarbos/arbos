@@ -459,11 +459,15 @@ class Journey:
         pr = next((p for p in st["projects"] if p["index"] == ix), {})
         c = self.root() or {}
         posted = st.get("notifications", {}).get("posted", [])[posted_before:]
-        hit = next((n for n in posted if nonce in (n.get("body") or "").lower()), None)
+        # The post's body is the reply's first line; a model may put words
+        # before the nonce, so any new post from this chat counts and the
+        # daemon is checked for that post's own words.
+        hit = next((n for n in posted if nonce in (n.get("body") or "").lower()), None) or (posted[-1] if posted else None)
+        key = ((hit or {}).get("body") or nonce).strip()[:40].lower()
         after, daemon = None, False
         for _ in range(10):
             after = dunst_history()
-            daemon = after is not None and any(nonce in e.lower() for e in after)
+            daemon = after is not None and any(key in e.lower() or nonce in e.lower() for e in after)
             if daemon or after is None:
                 break
             time.sleep(0.5)
@@ -475,7 +479,7 @@ class Journey:
         seen_ok = c2.get("unseen") == 0 and not pr2.get("tab_dot") and (c2.get("seen_through") or 0) > seen_before
         self.score("J10b-notification-away", "a reply that lands while another tab is in front: unseen 1+, the tab's dot, an OS notification the daemon's history confirms; opening the chat clears it and sends seen",
                    unseen_ok and os_ok and seen_ok,
-                   f"unseen={c.get('unseen')} tab_dot={pr.get('tab_dot')} posted={bool(hit)} daemon={'n/a' if after is None else daemon} err={hit.get('error') if hit else None} | after open: unseen={c2.get('unseen')} tab_dot={pr2.get('tab_dot')} seen_through {seen_before}->{c2.get('seen_through')}", t0)
+                   f"unseen={c.get('unseen')} tab_dot={pr.get('tab_dot')} posted={bool(hit)} body={(hit or {}).get('body', '')[:50]!r} daemon={'n/a' if after is None else daemon} err={hit.get('error') if hit else None} | after open: unseen={c2.get('unseen')} tab_dot={pr2.get('tab_dot')} seen_through {seen_before}->{c2.get('seen_through')}", t0)
 
     def j11_close_reopen(self) -> None:
         t0 = time.time()
