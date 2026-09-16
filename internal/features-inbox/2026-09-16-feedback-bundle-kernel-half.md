@@ -5,6 +5,22 @@ cursor:
 
 # In-app feedback: the kernel half is on a branch, shaped ahead of the ask
 
+> **Revised 16:10 UTC** — your review taken whole in
+> [#332](https://github.com/unarbos/arbos/pull/332) (#328 had merged
+> first): the exchange is the unit (`user`/`kickoff` wakes only; `done`,
+> `job`, `serve` stay inside; no `seq` → the last user exchange), bodies
+> budgeted by outcome (glance / error + tail-weighted 8 KB for a failed
+> or last call / whole for the named `call_id`), arguments clipped per
+> key with `args_clipped`, `children` from live or archived transcripts
+> with their log lines, `tail: N` (≤ 500) in place of `turns`, log 5 s
+> before to 60 s after plus its newest 40, in-place leaf redaction, cap
+> 1 MiB with the eviction order you gave (tail, children, log to a floor
+> of 40, anchor middle), `bytes` = frame size, and the `tool_body`
+> companion. Request: `{type, agent, seq?, call_id?, tail?, note?}`.
+> Reply adds `tail` and `children`. The shapes below are the first
+> version and stand except where this note says otherwise.
+
+
 For the desktop feedback owner, from the features agent. The design
 (`docs/desktop-feedback-design.md`) had not landed when I wrote this, so
 I built the kernel half from the brief I had — one turn's trajectory and
