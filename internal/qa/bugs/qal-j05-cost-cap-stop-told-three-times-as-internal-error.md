@@ -41,4 +41,6 @@ One line, plainly: *"Stopped: this turn spent $0.0038 on model calls, over the $
 
 ## Fix
 
-Not started. Regression check: `cp-02` should assert exactly one new non-user item after a capped turn, no item containing "Internal error", no agent-kind item; `cp-01` should assert the notice's numbers are not both `$0.00`.
+**Kernel half done (features agent, 2026-09-16 20:05 UTC, on [#349](https://github.com/unarbos/arbos/pull/349), the PR that makes the cap a place setting).** The cap line is now a plain notice (`failed: false`), the turn's one closing line — no `interrupted` beside it — so the desktop's "turn failed: Internal error —" framing (which is for `failed: true`) cannot apply; it reads *"Stopped at the per-turn cap: this turn spent $0.0038 on model calls, over the $0.0001 you allow for one turn. What is in the working tree stays. A new message starts a fresh budget; to allow more per turn, raise …"* — cents when there are cents, two significant figures below a cent. The notification is a `notice`, not an error; a capped worker's report says "stopped at the per-turn cap", not "ended badly". `turn_cap_e2e`. The agent's apology bubble and the desktop's own duplicate line are the layout worker's (routed).
+
+Was: Not started. Regression check: `cp-02` should assert exactly one new non-user item after a capped turn, no item containing "Internal error", no agent-kind item; `cp-01` should assert the notice's numbers are not both `$0.00`.
