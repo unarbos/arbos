@@ -23,6 +23,8 @@ final class ProjectStore: ObservableObject {
     @Published private(set) var entries: [ProjectEntry] = []
     @Published private(set) var loading = false
     @Published private(set) var problem: String?
+    private var retryTask: Task<Void, Never>?
+    private var retryAttempt = 0
 
     private let settings: AppSettings
     private let defaults = UserDefaults.standard
@@ -93,6 +95,21 @@ final class ProjectStore: ObservableObject {
         if !list.isEmpty { entries = list }
         if hubAnswered { saveCache() }
         loading = false
+        // Rows marked Off come back by themselves when the link does (M-92):
+        // try again at 10, 20, 40, then every 60 s until the hub answers.
+        retryTask?.cancel()
+        retryTask = nil
+        if hubAnswered {
+            retryAttempt = 0
+        } else {
+            let delay = min(60, 10 << min(retryAttempt, 2))
+            retryAttempt += 1
+            retryTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(delay))
+                guard let self, !Task.isCancelled else { return }
+                await self.refresh()
+            }
+        }
     }
 
     /// The face a chat read off its kernel: keep it for the list.
