@@ -204,6 +204,13 @@ final class LiveKernelChat: ChatSource {
                 stream?.yield(.pushed(enabled: false))
                 return
             }
+            // A kernel from before #270 parses `put` as nothing it knows.
+            // The words still went; say plainly that the file did not, and
+            // why, instead of the kernel's red "unknown frame type".
+            if detail.contains("unknown frame type") {
+                stream?.yield(.item(ChatItem(.notice("This project's kernel is an older build and can't take photos or files yet — the words were sent, the file was not. Its machine needs a kernel update.", failed: false))))
+                return
+            }
             // The hub saying the kernel went away is the link going, not a
             // line for the transcript: the store's one calm line covers it.
             if detail.contains("went away") || detail.contains("closed") {

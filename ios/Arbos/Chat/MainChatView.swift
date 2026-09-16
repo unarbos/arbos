@@ -26,6 +26,24 @@ struct ProjectChatView: View {
     /// Growth at the bottom pins the view to the tail, until the user pages
     /// back — then the top is theirs until they send again.
     @State private var followGrowth = true
+    @State private var atTail = true
+    @State private var openFolds: Set<UUID> = []
+
+    /// Consecutive tool calls fold into one row: the phone shows what was
+    /// said, not every command run to say it (Jacob, build 956).
+    private var rows: [TranscriptRow] {
+        var out: [TranscriptRow] = []
+        for item in chat.items {
+            if case .tool = item.kind, case .tools(let run)? = out.last {
+                out[out.count - 1] = .tools(run + [item])
+            } else if case .tool = item.kind {
+                out.append(.tools([item]))
+            } else {
+                out.append(.item(item))
+            }
+        }
+        return out
+    }
     @FocusState private var composing: Bool
 
     private var identity: ProjectIdentity {
@@ -96,7 +114,11 @@ struct ProjectChatView: View {
             if dictation.active || !words.isEmpty { draft = words }
         }
         .onChange(of: dictation.active) { _, active in
-            if !active, !dictation.text.isEmpty { draft = dictation.consume() }
+            // The take ends on the second tap and goes as one line; the
+            // words were on screen the whole time (Jacob, build 956).
+            guard !active, !dictation.text.isEmpty else { return }
+            draft = dictation.consume()
+            if dictation.problem == nil { send() }
         }
         .onChange(of: dictation.problem) { _, problem in
             if let problem { chat.notice(problem) }
@@ -212,8 +234,16 @@ struct ProjectChatView: View {
                             .foregroundStyle(ArbosTheme.textFaint)
                             .padding(.top, 8)
                     }
-                    ForEach(chat.items) { item in
-                        ChatRow(item: item, waitingOn: title).id(item.id)
+                    ForEach(rows) { row in
+                        switch row {
+                        case .item(let item):
+                            ChatRow(item: item, waitingOn: title).id(item.id)
+                        case .tools(let items):
+                            ToolFold(items: items, open: openFolds.contains(items[0].id)) {
+                                if openFolds.contains(items[0].id) { openFolds.remove(items[0].id) } else { openFolds.insert(items[0].id) }
+                            }
+                            .id(items[0].id)
+                        }
                     }
                     if !chat.unseen.isEmpty {
                         AwayCard(notifications: chat.unseen) { chat.markSeen() }
@@ -230,6 +260,12 @@ struct ProjectChatView: View {
                             .padding(.top, 4)
                     }
                     Color.clear.frame(height: 8).id("tail")
+                        // The tail in view means he is reading the newest
+                        // words; scrolled away means he is reading older
+                        // ones, and the stream must not pull him back
+                        // (Jacob, build 956: "recenters… jerky").
+                        .onAppear { atTail = true; followGrowth = true }
+                        .onDisappear { atTail = false; followGrowth = false }
                 }
                 .padding(.horizontal, ArbosTheme.gutter)
                 .padding(.top, 4)
@@ -246,7 +282,7 @@ struct ProjectChatView: View {
                     withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
                 }
             }
-            .onChange(of: chat.items) { _, _ in
+            .onChange(of: chat.items) { old, new in
                 if let anchor = chat.anchorAfterPrepend {
                     // Older lines came in above: hold the row that was at the top.
                     chat.anchorAfterPrepend = nil
@@ -257,13 +293,16 @@ struct ProjectChatView: View {
                         try? await Task.sleep(for: .milliseconds(120))
                         proxy.scrollTo(anchor, anchor: .top)
                     }
-                } else {
+                } else if atTail, new.count != old.count {
+                    // A new row at the tail: bring it in. Text growing inside
+                    // a row is the scroll anchor's job, without animation,
+                    // so a streaming reply reads steady rather than jerky.
                     withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
                 }
             }
             .onChange(of: chat.mode) { _, _ in
                 // The one line under the transcript changed; keep it in view.
-                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
+                if atTail { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) } }
             }
             .onChange(of: chat.earlierLines) { old, new in
                 // A long replay lands in one go; the lazy layout settles over
@@ -279,7 +318,7 @@ struct ProjectChatView: View {
                 }
             }
             .onChange(of: chat.workers) { _, _ in
-                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
+                if atTail { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) } }
             }
             .onAppear { proxy.scrollTo("tail", anchor: .bottom) }
         }
@@ -597,6 +636,72 @@ private struct Caret: View {
 /// the bottom when the content grows: growth is followed by hand (the tail
 /// scroll on new items), and older lines prepended at the top must not
 /// drag the view to the end. iOS 17 has only the all-roles anchor.
+enum TranscriptRow: Identifiable {
+    case item(ChatItem)
+    case tools([ChatItem])
+
+    var id: UUID {
+        switch self {
+        case .item(let item): return item.id
+        case .tools(let items): return items[0].id
+        }
+    }
+}
+
+/// A run of tool calls as one dim line — "4 tool calls · 12s" — that opens
+/// to the calls themselves on a tap. A failure is counted, not hidden.
+struct ToolFold: View {
+    let items: [ChatItem]
+    let open: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: ArbosTheme.itemGap) {
+            Button(action: toggle) {
+                HStack(spacing: 6) {
+                    Image(systemName: open ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 12)
+                    Text(summary)
+                        .lineLimit(1)
+                    if failed > 0 {
+                        Text("· \(failed) failed")
+                            .foregroundStyle(ArbosTheme.danger)
+                    }
+                    Spacer(minLength: 0)
+                    if seconds >= 1 {
+                        Text("\(seconds)s")
+                    }
+                }
+                .font(ArbosTheme.caption)
+                .foregroundStyle(ArbosTheme.textFaint)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open {
+                ForEach(items) { item in
+                    ChatRow(item: item).padding(.leading, 18)
+                }
+            }
+        }
+    }
+
+    private var summary: String {
+        items.count == 1 ? "1 tool call" : "\(items.count) tool calls"
+    }
+
+    private var failed: Int {
+        items.filter { if case .tool(_, failed: true, _) = $0.kind { return true } else { return false } }.count
+    }
+
+    private var seconds: Int {
+        items.reduce(0) { total, item in
+            if case .tool(_, _, let seconds) = item.kind { return total + (seconds ?? 0) }
+            return total
+        }
+    }
+}
+
 private struct ChatScrollAnchor: ViewModifier {
     let followGrowth: Bool
 
