@@ -131,6 +131,31 @@ rm -f "$list"
 [ "$n_internal" -gt 0 ] || die "internal/ yielded no mirrorable files. The store view looks broken. Not touching the mirror."
 [ "$skipped_big" -gt 0 ] && log "internal/: $skipped_big file(s) over $MIRROR_MAX_BYTES bytes left out"
 
+# ---- media/desktop-feedback/: Jacob's own reports ----------------------------
+# The one folder under media/ the mirror takes (2026-09-16, QA worker, on the coordinator's
+# call): each report is a small report.json and a feedback.md — the user's own words about what
+# went wrong, the most irreplaceable content the store holds. Two of them had just been corrected
+# to say a missing screenshot was a fault, not his choice; a store fault would have undone that
+# and the reports would have come back reading as genuine. Same size and type rules as internal/:
+# screenshots and other media stay out.
+n_feedback=0
+fb="$STORE/media/desktop-feedback"
+if [ -d "$fb" ]; then
+    list="$(mktemp /tmp/mirror-docs-fb.XXXXXX)"
+    # shellcheck disable=SC2086
+    find "$fb" $prune -o -type f -size -"$((MIRROR_MAX_BYTES / 1024 + 1))"k \
+        ! \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.gif' -o -iname '*.webp' -o -iname '*.mp4' -o -iname '*.mov' -o -iname '*.wav' -o -iname '*.mp3' -o -iname '*.zip' -o -iname '*.b64' \) \
+        -print 2>/dev/null | sort > "$list"
+    if [ -s "$list" ]; then
+        paste -d' ' <(git hash-object -w --stdin-paths < "$list") "$list" | while IFS=' ' read -r blob f; do
+            rel="${f#"$STORE/"}"
+            git update-index --add --cacheinfo "100644,$blob,$rel"
+        done
+        n_feedback="$(wc -l < "$list")"
+    fi
+    rm -f "$list"
+fi
+
 # Never let the internal/ mirror shrink by accident either.
 if [ -n "$parent" ]; then
     n_internal_last="$(git ls-tree -r --name-only "$parent" internal/ 2>/dev/null | wc -l || true)"
@@ -156,6 +181,9 @@ It mirrors two things from the Arbos Project's Cursor Agent Store
 - `docs/` — the Project's written deliverables, at the same names and paths the store uses,
   so a link of the form `docs/<name>.md` means the same file here and there.
 - `notes.md` — the Project status page, for context on what the documents refer to.
+- `media/desktop-feedback/` — Jacob's own in-app reports (`report.json`, `feedback.md` per report;
+  screenshots left out). The one folder under `media/` the mirror takes: the user's own words
+  about what went wrong are the most irreplaceable content here (added 2026-09-16 23:20 UTC).
 - `internal/` — working tooling, reports, pending instructions and small state, at the store's
   own paths. Since 2026-09-16 (the second loss took `internal/parity/` and
   `internal/features-inbox/`). **Boundary:** every file under `internal/` except run output and
@@ -218,7 +246,7 @@ fi
 
 # ---- Commit and push -------------------------------------------------------
 total="$(du -sh --exclude=.git "$STORE/docs" 2>/dev/null | cut -f1 || echo '?')"
-msg="store docs mirror: $n_now documents, $total, notes.md $(stat -c%s "$STORE/notes.md") B, internal/ $n_internal files
+msg="store docs mirror: $n_now documents, $total, notes.md $(stat -c%s "$STORE/notes.md") B, internal/ $n_internal files, feedback $n_feedback files
 
 Mirrored from $STORE by ${MIRROR_BY:-$(hostname)} at $(date -u +%FT%TZ)."
 

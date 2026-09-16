@@ -8,6 +8,9 @@ It mirrors two things from the Arbos Project's Cursor Agent Store
 - `docs/` — the Project's written deliverables, at the same names and paths the store uses,
   so a link of the form `docs/<name>.md` means the same file here and there.
 - `notes.md` — the Project status page, for context on what the documents refer to.
+- `media/desktop-feedback/` — Jacob's own in-app reports (`report.json`, `feedback.md` per report;
+  screenshots left out). The one folder under `media/` the mirror takes: the user's own words
+  about what went wrong are the most irreplaceable content here (added 2026-09-16 23:20 UTC).
 - `internal/` — working tooling, reports, pending instructions and small state, at the store's
   own paths. Since 2026-09-16 (the second loss took `internal/parity/` and
   `internal/features-inbox/`). **Boundary:** every file under `internal/` except run output and
