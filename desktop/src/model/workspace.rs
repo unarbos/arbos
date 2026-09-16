@@ -107,6 +107,11 @@ pub struct Workspace {
     /// Uncommitted changes per local project root, as the poll last read
     /// them — Cursor's Changes pill and Files Changed card.
     pub changes: HashMap<std::path::PathBuf, crate::model::changes::GitChanges>,
+    /// The root chat whose Working card (one row per running worker, Stop
+    /// All) is open over the pills. Cursor keeps the card behind the
+    /// "Working N" pill and never opens it by itself; neither does this.
+    /// The transcript's "N Working" line opens it too.
+    pub working_card_open: Option<u64>,
     /// The registry's mark for each configured agent, by name. Empty until the
     /// catalog lands, and stays empty offline.
     agent_icons: HashMap<String, SharedString>,
@@ -177,6 +182,7 @@ impl Workspace {
             tint: Tint::new(state.hue, state.chroma),
             meter: false,
             changes: HashMap::new(),
+            working_card_open: None,
             next_id: 0,
             agent_icons: HashMap::new(),
             last: state.last,
@@ -2299,12 +2305,14 @@ impl Workspace {
     /// conversation back.
     pub fn session_connected(&mut self, id: u64, cx: &mut Context<Self>) {
         self.with_session(id, cx, |chat| {
+            // The kernel's copy first: a "reconnected" line is this
+            // window's to say, not a transcript record to seed.
+            chat.sync_kernel_history();
             if chat.reconnect_attempt > 0 {
                 chat.notice(false, "reconnected");
             }
             chat.reconnect_attempt = 0;
             chat.reconnect_at = None;
-            chat.sync_kernel_history();
             // What the agent is on right now, from its status file, so a
             // fresh attach draws the line without waiting for a frame.
             if chat.host.is_none()

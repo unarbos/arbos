@@ -30,7 +30,7 @@ use cacp::schema::{
 use serde::{Deserialize, Serialize};
 use std::{
     cell::Cell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -1156,9 +1156,51 @@ impl ChatSession {
     /// Push local bubbles the kernel never stored, then title from them.
     pub(crate) fn sync_kernel_history(&mut self) {
         if let Some(sid) = self.agent_session.clone() {
-            crate::kernel::seed_transcript(&self.place(), &sid, &self.items);
+            // A line typed while the socket was down has its card on the
+            // transcript already and its words still in the queue: they go
+            // as a frame when the queue drains, and the kernel records them
+            // then. Seeded here as well, the kernel held the line twice —
+            // once written by this window, once from the frame (QA,
+            // 2026-09-16, after a kernel respawn on a fresh place).
+            let unsent = self.unsent_cards();
+            if unsent.is_empty() {
+                crate::kernel::seed_transcript(&self.place(), &sid, &self.items);
+            } else {
+                let sent: Vec<ChatItem> = self
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(ix, _)| !unsent.contains(ix))
+                    .map(|(_, item)| item.clone())
+                    .collect();
+                crate::kernel::seed_transcript(&self.place(), &sid, &sent);
+            }
         }
         self.take_title_from_first_prompt();
+    }
+
+    /// The prompt cards whose words are still queued for the wire: the
+    /// newest card for each queued prompt, matched by its words.
+    fn unsent_cards(&self) -> HashSet<usize> {
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        let mut taken = HashSet::new();
+        for prompt in &self.queue {
+            let words = squash(&prompt.text);
+            let found = self
+                .items
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(ix, item)| {
+                    !taken.contains(ix)
+                        && matches!(item, ChatItem::User(message) if squash(&message.text) == words)
+                })
+                .map(|(ix, _)| ix);
+            if let Some(ix) = found {
+                taken.insert(ix);
+            }
+        }
+        taken
     }
 
     /// First user line → a short title. Skipped when they already named it.
@@ -1783,20 +1825,39 @@ impl ChatSession {
     /// A streamed chunk lands on the reply item at `ix`: merged into the
     /// raw text, shown with tool-call markup cut.
     fn stream_into(&mut self, ix: usize, text: &str) {
+        let busy = self.busy();
         let Some(ChatItem::Agent(body)) = self.items.get_mut(ix) else {
             return;
         };
         let raw = self.stream_raw.entry(ix).or_insert_with(|| body.clone());
         merge_stream_text(raw, text);
-        *body = crate::markup::strip_live(raw);
+        let shown = crate::markup::strip_live(raw);
+        // A `status` call streams as the words "status: <step>" before the
+        // settled line takes them off the transcript. They are the live
+        // step for as long as they stream — Jacob's "status: Delegating to
+        // worker…" sat as a paragraph for the whole wait on the worker.
+        if let Some(step) = status_line(&shown) {
+            body.clear();
+            if busy {
+                self.status = Some(step);
+            }
+            return;
+        }
+        *body = shown;
     }
 
     /// Open a reply item for streamed text; `None` when the text shows
     /// nothing yet (markup only).
     fn open_stream(&mut self, text: String) -> Option<usize> {
-        let shown = crate::markup::strip_live(&text);
+        let mut shown = crate::markup::strip_live(&text);
         if shown.is_empty() && text.trim().is_empty() {
             return None;
+        }
+        if let Some(step) = status_line(&shown) {
+            if self.busy() {
+                self.status = Some(step);
+            }
+            shown.clear();
         }
         self.items.push(ChatItem::Agent(shown));
         let ix = self.items.len() - 1;
@@ -2774,6 +2835,35 @@ impl ChatSession {
             }
             Event::Refused(detail) => {
                 self.rewind_to = None;
+                // A keyless kernel (#312) answers `kickoff` with this and no
+                // turn: the setup bar under the composer is the cue, and
+                // the kickoff is over — nothing waits behind it.
+                if detail.starts_with(KICKOFF_NOT_STARTED) {
+                    if self.kickoff_at.is_some() && self.kickoff_secs.is_none() {
+                        self.kickoff_secs = Some(0);
+                    }
+                    self.flight = None;
+                    self.streaming = false;
+                    self.turn_open = false;
+                    self.flush();
+                    self.drain();
+                    return;
+                }
+                // A keyless kernel kept the typed line in its inbox instead
+                // of spending a turn on it (#312): no turn is coming, so the
+                // card must not sit under a shimmer. The line says what is
+                // missing and what became of the words (the kernel writes
+                // the same words on the transcript; identical notices read
+                // once); the pending row under the composer shows them
+                // waiting, and the setup bar says where a key goes.
+                if detail.contains(LINE_KEPT_FOR_KEY) {
+                    self.flight = None;
+                    self.streaming = false;
+                    self.turn_open = false;
+                    self.notice(true, &detail);
+                    self.flush();
+                    return;
+                }
                 self.notice(true, &detail);
                 self.flush();
                 // The kernel no longer has this agent: the row keeps its
@@ -3951,6 +4041,15 @@ pub const STOPPED_BY_YOU: &str = "Stopped by you";
 pub fn is_interrupt_notice(text: &str) -> bool {
     text == STOPPED_BY_YOU || text.starts_with("Interrupted")
 }
+
+/// The kernel's answer to `kickoff` on a place with no model key (#312):
+/// no turn follows.
+const KICKOFF_NOT_STARTED: &str = "kickoff not started:";
+
+/// In the kernel's line when it kept a typed prompt in its inbox for want
+/// of a key (#312): "… Your message is kept and runs once a key is in
+/// place: <the words>".
+pub(crate) const LINE_KEPT_FOR_KEY: &str = "Your message is kept and runs once a key is in place";
 
 /// The kernel's notice while an `ask` is parked with the user.
 fn is_waiting_line(text: &str) -> bool {
