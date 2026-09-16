@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{Attach, start_kernel};
+use common::{Attach, start_kernel_replay};
 use std::time::Duration;
 
 fn set_fsize(cur: libc::rlim_t) {
@@ -19,7 +19,7 @@ fn set_fsize(cur: libc::rlim_t) {
 fn a_write_past_the_size_limit_does_not_kill_the_kernel_or_leave_half_a_line() {
     // Children inherit the limit; the test process restores its own after the spawn.
     set_fsize(256 * 1024);
-    let mut k = start_kernel("fsize");
+    let mut k = start_kernel_replay("fsize", "");
     set_fsize(libc::RLIM_INFINITY);
     let mut a = Attach::connect(&k.url);
     assert!(

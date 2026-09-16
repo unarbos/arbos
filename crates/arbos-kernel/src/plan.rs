@@ -48,6 +48,34 @@ pub fn scan(hooks: &Arc<KernelHooks>) -> Vec<Wake> {
         else {
             continue;
         };
+        // No model key: the words stay in the inbox — the pending row
+        // under the composer — and run when `configure` lands one, which
+        // kicks this scan. A turn would only burn them on a failure
+        // notice. Said once per agent, on the transcript where the
+        // window shows it.
+        if let Some(hint) = crate::serve::keyless(&hooks.place) {
+            if keyless_told(id) {
+                let text = format!(
+                    "{hint} Your message is kept and runs once a key is in place: {}",
+                    arbos_core::text::clip(filed.msg.body.trim(), 120)
+                );
+                let _ = arbos_core::append_event(
+                    &hooks.layout(id).transcript(),
+                    &arbos_core::Event::new(arbos_core::EventKind::Notice {
+                        text: text.clone(),
+                        failed: true,
+                    }),
+                );
+                hooks.broadcast(arbos_core::wire::Frame::Error {
+                    agent: Some(id.to_string()),
+                    detail: text,
+                });
+                crate::klog::warn("turn_held_keyless", Some(id), &filed.name);
+                hooks.broadcast(hooks.plan_frame(id));
+            }
+            continue;
+        }
+        keyless_forget(id);
         match inbox::claim(&hooks.place, id, &filed) {
             Ok(turn_dir) => {
                 if let Some(mut wake) = wake_from_message(hooks, &agent, &filed.msg, &turn_dir) {
@@ -87,6 +115,26 @@ pub fn scan(hooks: &Arc<KernelHooks>) -> Vec<Wake> {
         }
     }
     wakes
+}
+
+/// Agents told once that their words wait for a key. `keyless_told` is
+/// true the first time only; `keyless_forget` clears the agent when a key
+/// arrives, so a later loss of the key is told again.
+static KEYLESS_TOLD: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+    std::sync::Mutex::new(None);
+
+fn keyless_told(agent: &str) -> bool {
+    KEYLESS_TOLD
+        .lock()
+        .unwrap()
+        .get_or_insert_with(Default::default)
+        .insert(agent.to_string())
+}
+
+fn keyless_forget(agent: &str) {
+    if let Some(set) = KEYLESS_TOLD.lock().unwrap().as_mut() {
+        set.remove(agent);
+    }
 }
 
 /// This agent's other workers that are still running, queued, or parked

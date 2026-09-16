@@ -5,12 +5,12 @@
 
 mod common;
 
-use common::{Attach, start_kernel};
+use common::{Attach, start_kernel_replay};
 use std::time::Duration;
 
 #[test]
 fn frames_for_ids_the_kernel_does_not_list_write_nothing() {
-    let mut k = start_kernel("unknown");
+    let mut k = start_kernel_replay("unknown", "");
     let agents = k.place.join(".arbos").join("agents");
     // A folder the kernel skips: agent.md is not UTF-8, so Agent::load fails.
     std::fs::create_dir_all(agents.join("garbage")).unwrap();

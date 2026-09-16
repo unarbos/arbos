@@ -6,12 +6,15 @@
 
 mod common;
 
-use common::{Attach, start_kernel};
+use common::{Attach, start_kernel_replay};
 use std::time::Duration;
 
 #[test]
 fn an_unclaimable_message_is_reported_once_and_backs_off() {
-    let mut k = start_kernel("claim");
+    // A keyed kernel (replay): without a key the words are held before
+    // any claim is tried (keyless_first_line_e2e), and this test is about
+    // the claim itself.
+    let mut k = start_kernel_replay("claim", "");
     let mut a = Attach::connect(&k.url);
     assert!(
         a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
