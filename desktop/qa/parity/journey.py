@@ -181,6 +181,12 @@ class Journey:
             subprocess.run(["xdotool", "windowsize", wid[0], "1440", "900"], env=ENV)
             subprocess.run(["xdotool", "windowmove", wid[0], "200", "120"], env=ENV)
         time.sleep(1)
+        # The first launch opens the Permissions sheet over the chat, as it
+        # does for a new user; they skip it or enable rows. The journey
+        # skips it — the sheet has its own checks in ui_pass.py.
+        if self.app.exists("permissions-skip"):
+            self.app.click("permissions-skip")
+            time.sleep(0.6)
 
     # -- the journey --------------------------------------------------------
 
@@ -315,11 +321,20 @@ class Journey:
 
     def j05_live_shape(self) -> None:
         t0 = time.time()
-        line = self.wait(lambda: self.app.exists("child-line-live") or None, 30)
+        # The root either waits on its workers (one "N Working  <step>"
+        # line while its turn runs) or has ended its turn and lets them run
+        # on (a "1 Working  <step>" line per worker). Both are Cursor's.
+        def lines():
+            ids = [i.rsplit(".", 1)[-1] for i in self.app.ids()]
+            found = [i for i in ids if i.startswith("child-line-")]
+            return found or None
+        line = self.wait(lines, 30) or []
+        root_live = bool((self.root() or {}).get("turn_open") or (self.root() or {}).get("streaming"))
         card = self.app.exists("working-card")
         pill = self.app.exists("pill-working")
-        self.score("J05-live-shape-one-line", "while workers run the root shows one 'N Working  <step>' line and the Working pill; no card until asked (F-82)",
-                   bool(line) and pill and not card, f"line={bool(line)} pill={pill} card_open={card}", t0)
+        one_line_while_live = (not root_live) or line == ["child-line-live"]
+        self.score("J05-live-shape-one-line", "while workers run the root shows one 'N Working  <step>' line (or one per worker once its own turn ended) and the Working pill; no card until asked (F-82)",
+                   bool(line) and pill and not card and one_line_while_live, f"lines={line} root_live={root_live} pill={pill} card_open={card}", t0)
 
     def j06_steer(self) -> None:
         t0 = time.time()
@@ -342,8 +357,12 @@ class Journey:
         stopped = self.wait(lambda: (not busy(self.state())) or None, 12)
         c = self.root() or {}
         said = any(i.get("kind") == "notice" and ("Stopped" in (i.get("text") or "") or "Interrupted" in (i.get("text") or "")) for i in c.get("items", [])[-6:])
-        self.score("J07-interrupt", "Stop ends the turn within 10 s; the transcript says 'Stopped by you'",
-                   bool(stopped) and said, f"stopped={bool(stopped)} said={said} pills={c.get('pills')}", t0)
+        # With the root idle and only workers running, Stop stops the
+        # workers: their transcripts carry the "Stopped by you", the root's
+        # pill goes to zero.
+        workers_stopped = (c.get("pills") or {}).get("working") == 0
+        self.score("J07-interrupt", "Stop ends the turn (or the running workers) within 10 s; the transcript says 'Stopped by you', or the Working pill goes",
+                   bool(stopped) and (said or workers_stopped), f"stopped={bool(stopped)} said={said} pills={c.get('pills')}", t0)
 
     def j08_continue(self) -> None:
         t0 = time.time()

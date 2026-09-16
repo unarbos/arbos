@@ -3927,9 +3927,11 @@ fn zone(
             zone = zone.child(div().flex().flex_col().gap(px(ITEM_GAP)).children(kids));
         }
     }
-    // Cursor's sub-agent lines under the status: "1 Working  <task>" per
-    // live child, and a check for each one that finished. Under the turn
-    // that spawned them, once; the panel keeps the whole tree.
+    // Cursor's sub-agent lines: "1 Working  <task>" per live child, and a
+    // check for each one that finished. Under the turn that spawned them,
+    // once; the panel keeps the whole tree. Drawn after the turn's prose
+    // (below), where Cursor draws them — "On it — writing a bubble sort…"
+    // then "1 Working  Delegating bubble sort task" (F-85).
     let mut spawned = spawned_in(&chat.items, body.clone());
     // A `spawn wait=true` names its child only when it returns; until then
     // the worker is running under this turn with no record to hang from.
@@ -3945,12 +3947,12 @@ fn zone(
             }
         }
     }
-    if !spawned.is_empty() && !chat.children.is_empty() {
-        let (lines, live_line) = children_lines(chat, &spawned, running, &theme, cx);
-        zone = zone.child(lines);
+    let workers = (!spawned.is_empty() && !chat.children.is_empty())
+        .then(|| children_lines(chat, &spawned, running, &theme, cx));
+    if let Some((_, live_line)) = &workers {
         // The "N Working  <step>" line carries the shimmer while the root
         // waits on its workers; a heartbeat under it would say it twice.
-        live_fold_shown = live_fold_shown || live_line;
+        live_fold_shown = live_fold_shown || *live_line;
     }
     // Standing work the turn set up: a small card at the moment it was made.
     zone = zone.children(subscription_cards(chat, body.clone(), &theme));
@@ -4026,16 +4028,20 @@ fn zone(
     // the turn still runs — a long model call with nothing streaming, a
     // job in flight — an interim reply already has words, and the footer
     // under them read as "done" next to a live Stop button.
-    if !running
-        && footer
-        && let Some(answer) = turn_answer(&chat.items, turn)
-    {
-        has_tail = true;
-        // Always shown, faint, as Cursor's are: copy, then fork.
-        tail = tail.child(turn_footer(chat, first, answer, &theme, cx));
-    }
+    // Always shown, faint, as Cursor's are: copy, then fork — under the
+    // worker lines, the last thing in the turn.
+    let footer_row = (!running && footer)
+        .then(|| turn_answer(&chat.items, turn))
+        .flatten()
+        .map(|answer| turn_footer(chat, first, answer, &theme, cx));
     if has_tail {
         zone = zone.child(tail);
+    }
+    if let Some((lines, _)) = workers {
+        zone = zone.child(lines);
+    }
+    if let Some(footer_row) = footer_row {
+        zone = zone.child(footer_row);
     }
     // Web WorkingIndicator: a sent prompt must not sit in silence. The
     // line is there the same frame the user message lands — before the
