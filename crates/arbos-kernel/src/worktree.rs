@@ -18,6 +18,8 @@ pub struct Worktree {
     pub branch: String,
     /// Short sha the branch was cut from.
     pub base: String,
+    /// When the base asked for was not used: why, for the spawn result.
+    pub note: Option<String>,
 }
 
 impl Worktree {
@@ -102,7 +104,33 @@ pub fn create_from(place: &Path, id: &str, base: Option<&str>) -> Result<Worktre
             String::from_utf8_lossy(&head.stderr).trim()
         );
     }
-    let base = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    let mut base = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    let mut start = start.to_string();
+    let mut note = None;
+    // A base that has none, or few, of the checkout's files would hand
+    // the worker an empty project (M-111: the seed was committed on a side
+    // branch because the guard refuses `main`, the coordinator passed
+    // base=main, the worker found nothing and copied files from an older
+    // run's folder; JB-5, four runs). A branch that merely lags HEAD by a
+    // few commits is a base as asked — parallel work from main is a real
+    // want; a base missing most of the tree is not.
+    if start != "HEAD"
+        && let Some((base_files, head_files)) = tree_sizes(place, &start)
+        && head_files > 0
+        && base_files * 2 < head_files
+    {
+        let head_sha = git(place, &["rev-parse", "--short", "HEAD"])
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|| "HEAD".into());
+        let on = arbos_core::store::current_branch(place).unwrap_or_else(|| "HEAD".into());
+        note = Some(format!(
+            "base {start} has {base_files} tracked file(s) where the checkout ({on}) has {head_files}; a worker cut from it would find an empty project, so its branch is cut from HEAD ({head_sha}) instead. If {start} truly is the base you want, commit the project there first."
+        ));
+        start = "HEAD".into();
+        base = head_sha;
+    }
     // A folder deleted by hand leaves a stale registration that would make
     // the add fail on the same path.
     let _ = git(place, &["worktree", "prune"]);
@@ -115,7 +143,7 @@ pub fn create_from(place: &Path, id: &str, base: Option<&str>) -> Result<Worktre
     let (path, branch) = free_slot(place, id)?;
     std::fs::create_dir_all(path.parent().expect("worktrees dir"))?;
     let path_s = path.to_string_lossy().into_owned();
-    let added = git(place, &["worktree", "add", "-b", &branch, &path_s, start])?;
+    let added = git(place, &["worktree", "add", "-b", &branch, &path_s, &start])?;
     if !added.status.success() {
         let _ = std::fs::remove_dir_all(&path);
         bail!(
@@ -124,7 +152,23 @@ pub fn create_from(place: &Path, id: &str, base: Option<&str>) -> Result<Worktre
         );
     }
     exclude_arbos(place);
-    Ok(Worktree { path, branch, base })
+    Ok(Worktree {
+        path,
+        branch,
+        base,
+        note,
+    })
+}
+
+/// Tracked files in `rev` and in HEAD, when git can say.
+fn tree_sizes(place: &Path, rev: &str) -> Option<(usize, usize)> {
+    let count = |r: &str| -> Option<usize> {
+        let out = git(place, &["ls-tree", "-r", "--name-only", r]).ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).lines().count())
+    };
+    Some((count(rev)?, count("HEAD")?))
 }
 
 /// The first `(folder, branch)` pair free for `id`: `arbos/<id>` and
@@ -385,6 +429,67 @@ mod cleanup_tests {
         let err = create_from(&dir, "w-nope", Some("no-such-branch")).unwrap_err();
         assert!(err.to_string().contains("is not a commit"), "{err}");
         assert!(!Worktree::path_for(&dir, "w-nope").exists());
+        assert!(
+            wt.note.is_none(),
+            "a base with the same tree is taken as asked"
+        );
+    }
+
+    /// M-111 / JB-5: `main` holds an empty start commit; the project was
+    /// committed on a side branch (the guard refuses `main`); the
+    /// coordinator passes base=main. The worker must not find an empty
+    /// project: the branch is cut from HEAD, and the result says why.
+    #[test]
+    fn a_base_missing_most_of_the_tree_is_replaced_by_head_with_a_note() {
+        let dir = repo("seedbase");
+        assert!(
+            git(&dir, &["checkout", "-q", "-b", "fix/J1_initial_setup"])
+                .unwrap()
+                .status
+                .success()
+        );
+        for f in ["mathlib.py", "tests/test_math.py", "README.md"] {
+            let p = dir.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "x\n").unwrap();
+        }
+        for args in [
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "seed",
+            ],
+        ] {
+            assert!(git(&dir, &args).unwrap().status.success(), "git {args:?}");
+        }
+        let main = git(&dir, &["rev-parse", "--abbrev-ref", "main"]).unwrap();
+        let main_name = if main.status.success() {
+            "main"
+        } else {
+            "master"
+        };
+        let wt = create_from(&dir, "w-seed", Some(main_name)).unwrap();
+        let head = git(&dir, &["rev-parse", "--short", "HEAD"]).unwrap();
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        assert_eq!(wt.base, head, "cut from HEAD, not the empty base");
+        assert!(
+            wt.path.join("mathlib.py").exists() && wt.path.join("tests/test_math.py").exists(),
+            "the worker sees the project"
+        );
+        let note = wt.note.as_deref().expect("the result says why");
+        assert!(
+            note.contains(&format!("base {main_name} has 0 tracked file(s)")),
+            "{note}"
+        );
+        assert!(note.contains("(fix/J1_initial_setup) has 3"), "{note}");
+        assert!(note.contains("cut from HEAD"), "{note}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn branch_exists(place: &Path, branch: &str) -> bool {

@@ -565,7 +565,7 @@ fn worktree_state(hooks: &KernelHooks, agent: &str) -> Option<String> {
         .to_string();
     Some(match (left.dirty, left.ahead) {
         (0, 0) => format!(
-            "Worktree {rel} (branch {}): no changes committed or pending; the checkout is as it was.",
+            "Worktree {rel} (branch {}): no changes committed or pending; the checkout is as it was. If its report says it committed or wrote files, the work went somewhere else (another repository, a copied folder) — check before relaying it as done.",
             left.branch
         ),
         (0, ahead) => format!(
