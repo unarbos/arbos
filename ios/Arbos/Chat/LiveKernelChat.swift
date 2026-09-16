@@ -167,7 +167,7 @@ final class LiveKernelChat: ChatSource {
                     stream?.yield(.step(""))
                 }
                 stream?.yield(.turn(running: running))
-            } else if { adopt(agent); return children.contains(agent) }() {
+            } else if isChild(agent) {
                 setWorker(agent, running: running, step: running ? nil : "")
                 if !running {
                     stream?.yield(.item(ChatItem(.subagent(name: childNames[agent] ?? agent, status: "done"))))
@@ -176,7 +176,7 @@ final class LiveKernelChat: ChatSource {
         case .status(let agent, let step, _):
             if agent == focus {
                 stream?.yield(.step(step))
-            } else if { adopt(agent); return children.contains(agent) }() {
+            } else if isChild(agent) {
                 setWorker(agent, running: !step.isEmpty ? true : nil, step: step)
             }
         case .working(let agent, let secs):
@@ -384,6 +384,12 @@ final class LiveKernelChat: ChatSource {
         children.remove(old); children.insert(id)
         if childNames[id] == nil { childNames[id] = childNames[old] ?? old }
         childNames[old] = nil
+    }
+
+    /// Adopts a brief-keyed entry first, then asks whether `id` is a child.
+    private func isChild(_ id: String) -> Bool {
+        adopt(id)
+        return children.contains(id)
     }
 
     private static func slug(_ text: String) -> String {
