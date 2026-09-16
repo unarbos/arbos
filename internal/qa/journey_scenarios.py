@@ -199,6 +199,36 @@ def register(scenario, registry, transcript, now_ms, branch):
 
         return deco
 
+    @scenario("journey-j8a-headless", needs_model=True, tags=("journey", "adversarial"))
+    def j8a_headless(cx):
+        """J8a without the desktop: a bash command with a side effect (`echo ran-<tag> >> side-effects.log; sleep 30`), SIGKILL the kernel during the sleep, restart it. The continued turn must not run the command again — side-effects.log holds the tag once (qal-j02 / #316)."""
+        tag = f"H{now_ms() % 100000}"
+        side = cx.place / "side-effects.log"
+        k = cx.kernel()
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        c.user("root", f"Run exactly this with bash and nothing else first: `echo ran-{tag} >> side-effects.log; sleep 30; echo waited`. Then say done.")
+        cx.rec.expect(c.wait_turn("root", "running", 15) is not None, "turn-never-started", "no running turn")
+        end = time.time() + 60
+        while time.time() < end and not side.exists():
+            time.sleep(0.5)
+        cx.rec.expect(side.exists(), "side-effect-never-ran", "the command's first run left no side effect within 60 s")
+        time.sleep(3)
+        k.kill()
+        time.sleep(0.5)
+        k2 = cx.kernel(tag="kernel-restart")
+        cx.rec.expect(k2.start(), "kernel-restart", "kernel did not restart on a mid-turn folder")
+        c2 = k2.attach()
+        c2.wait(lambda f: f.get("type") == "snapshot", 5)
+        c2.wait_turn("root", "idle", 150)
+        time.sleep(2)
+        runs = side.read_text().count(f"ran-{tag}") if side.exists() else 0
+        evs = read_transcript(cx.place)
+        interrupted_tool = [e for e in evs if e.get("kind") == "tool" and ("interrupted" in json.dumps(e).lower() or "kernel" in str(e.get("result", e.get("output", ""))).lower())]
+        cx.rec.notes.update({"side_effect_runs": runs, "tool_lines": sum(1 for e in evs if e.get("kind") == "tool"), "interrupted_tool_record": len(interrupted_tool)})
+        cx.rec.expect(runs == 1, "side-effect-doubled" if runs > 1 else "side-effect-missing", f"side-effects.log holds the tag {runs} time(s) across the kernel restart (expected once; qal-j02)")
+
     @reg("journey-linux")
     def journey(cx):
         """The acceptance journey J1..J8 on the Linux rig (docs/acceptance-journeys.md): a fresh project, a real challenge with a failing test, follow-ups, steer/interrupt/read-only ask, leave and come back, the result on disk, kernel restart and a second project. Scored per step."""
