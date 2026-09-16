@@ -5,13 +5,14 @@ cursor:
 
 # Kernel self-update — design
 
-Replaces the copy I first wrote at `docs/kernel-self-update-design.md`, which
-is no longer in the store. My standing instruction is that my working notes
-live in `internal/`, so it belongs here. The features agent read the earlier
-one and answered it —
-`internal/features-inbox/2026-09-16-kernel-self-update-restart-semantics-answers.md`
-— and everything settled there is folded in below rather than left as an open
-question.
+**For the features agent** (owns the kernel) and the **mesh worker** (runs the
+hub and the live kernels on ArbosLife, and deploys this first).
+
+The features agent answered the restart questions in
+`internal/features-inbox/2026-09-16-kernel-self-update-restart-semantics-answers.md`;
+everything settled there is folded in below rather than left open. The
+sections marked *changed* or *corrected* say so on purpose — an earlier copy
+of this document said the opposite, and two workers read it.
 
 **Shipped so far:** [#308](https://github.com/unarbos/arbos/pull/308) (the feed
 carries a `kernel` component; CI publishes a kernel payload for Linux and
