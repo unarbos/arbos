@@ -591,7 +591,28 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // workers streamed "Please provide the sentences … once both are
     // available" five to eight times between status calls (mobile cycle
     // 1, item 4). Told once at the second; the turn ends at the third.
-    let mut said: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    // Each reply's words, in order of saying; a new reply that overlaps
+    // one of them almost entirely (reworded or not) is the same reply
+    // (`repeat::near_duplicate`).
+    let mut said: Vec<Vec<String>> = Vec::new();
+    // On a worker's done or a peer's say, the last thing said before this
+    // turn: a final reply that repeats it is not said again — the user
+    // read it once already (mobile cycle 5). A subscription's or a job's
+    // wake may report the same state again on purpose, so those are not
+    // held to it.
+    let prior_reply: Option<Vec<String>> = if !matches!(wake.kind, WakeKind::Done | WakeKind::Say) {
+        None
+    } else {
+        events
+            .iter()
+            .rev()
+            .skip_while(|e| !e.is_wake())
+            .find_map(|e| match &e.kind {
+                EventKind::Assistant { text, .. } if !text.trim().is_empty() => Some(text),
+                _ => None,
+            })
+            .and_then(|t| crate::repeat::words(t))
+    };
     let mut hidden_seen = 0usize;
     let mut first_step = true;
     loop {
@@ -816,6 +837,40 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         if let Some(step) = arbos_core::status::spoken(&content) {
             hooks.spoke_status(&step);
         }
+        // A final reply that says again what this turn, or the reply
+        // before this wake, already said: not written twice. The turn
+        // ends with a notice in its place.
+        if calls.is_empty() && !content.trim().is_empty() {
+            let earlier = said
+                .iter()
+                .any(|w| crate::repeat::near_duplicate(w, &content));
+            let before = prior_reply
+                .as_ref()
+                .is_some_and(|w| crate::repeat::near_duplicate(w, &content));
+            if earlier || before {
+                append_event(
+                    &transcript,
+                    &Event::new(EventKind::Notice {
+                        text: if before {
+                            "The reply repeated the previous message and was not said again; the turn ends here."
+                                .to_string()
+                        } else {
+                            "The reply repeated something said earlier this turn and was not said again; the turn ends here."
+                                .to_string()
+                        },
+                        failed: false,
+                    }),
+                )?;
+                return end(
+                    usage.map(|mut u| {
+                        u.cost = turn_cost;
+                        u.cached = turn_cached;
+                        u
+                    }),
+                    None,
+                );
+            }
+        }
         if !content.trim().is_empty() || !calls.is_empty() {
             // The Assistant line is the step boundary the projection and the
             // fold units cut on. A step that called tools without saying
@@ -1003,15 +1058,20 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             append_events(&transcript, &results)?;
             return end(None, None);
         }
-        if let Some(key) = repeat_key(&content) {
-            let n = said.entry(key).or_insert(0);
-            *n += 1;
-            if *n == 2 {
+        if let Some(now) = crate::repeat::words(&content) {
+            // Steps with tool calls between them: told once at the second
+            // saying, the turn ends at the third.
+            let n = 1 + said
+                .iter()
+                .filter(|w| crate::repeat::overlap(w, &now) >= crate::repeat::THRESHOLD)
+                .count();
+            said.push(now);
+            if n == 2 {
                 results.push(Event::new(EventKind::Nudge {
                     text: REPEAT_NUDGE.to_string(),
                     reason: "repeated reply".into(),
                 }));
-            } else if *n >= 3 {
+            } else if n >= 3 {
                 results.push(Event::new(EventKind::Notice {
                     text: "The same words a third time in one turn: the turn ends here. A worker's done, a subscription, or the user opens the next one.".to_string(),
                     failed: false,
@@ -1028,18 +1088,6 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
 /// What the model reads the second time it says the same thing in one
 /// turn.
 pub const REPEAT_NUDGE: &str = "You said that already this turn. Do not say it again. If you are waiting on workers, end the turn now with no tool calls — their done wakes you, and asking or polling does not bring it sooner. Otherwise do the next step.";
-
-/// The comparison form of a reply for the repeat check: whitespace and
-/// case folded, and only for a reply with something in it (a status word
-/// or a one-line answer said twice is not the loop this catches).
-fn repeat_key(content: &str) -> Option<String> {
-    let key: String = content
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    (key.chars().count() >= 40).then_some(key)
-}
 
 /// The tool schemas at the provider's rate, like the messages.
 fn scaled_tools(tokens: u64, calib: f64) -> u64 {
