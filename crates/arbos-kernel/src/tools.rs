@@ -105,11 +105,19 @@ impl Tool for Agents {
                         .collect()
                 })
                 .unwrap_or_default();
-            let mine: Vec<String> = hooks
+            let mut mine: Vec<String> = hooks
                 .descendants(me)
                 .into_iter()
                 .filter(|id| id != me)
                 .collect();
+            // Finished workers moved to the archive are still this agent's
+            // history: asked "which workers ran", the coordinator said it
+            // had none while six sat archived (F-57). Newest first.
+            for a in arbos_core::archived_children(&hooks.place, me) {
+                if !mine.iter().any(|m| *m == a.id) {
+                    mine.push(a.id.clone());
+                }
+            }
             let all = arbos_core::list_agents(&hooks.place).unwrap_or_default();
             let prs = arbos_core::load_prs(&hooks.place);
             let mut rows: Vec<String> = Vec::new();
@@ -171,7 +179,7 @@ impl Tool for Agents {
                 rows.push(line);
             }
             if rows.is_empty() {
-                return Ok(ToolOut::text("You have no workers."));
+                return Ok(ToolOut::text("You have no workers, running or archived."));
             }
             Ok(ToolOut::text(rows.join("\n")))
         })
