@@ -132,7 +132,7 @@ async def main_async(opts: argparse.Namespace) -> int:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--models", default="openai/gpt-4.1-nano,openai/gpt-4.1-mini")
+    p.add_argument("--models", default="google/gemini-2.5-flash-lite,google/gemini-2.5-flash")
     p.add_argument("--extra", nargs="*", default=[], help="more transcript.jsonl files to draw replies from")
     raise SystemExit(asyncio.run(main_async(p.parse_args())))
 
