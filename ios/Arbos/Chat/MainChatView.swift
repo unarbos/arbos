@@ -20,6 +20,7 @@ struct ProjectChatView: View {
     @State private var worker: WorkerStatus?
     @State private var attachments: [PendingAttachment] = []
     @StateObject private var dictation = Dictation()
+    @EnvironmentObject private var notifier: Notifier
     /// The row SwiftUI keeps in place while content changes (paging back).
     @State private var heldRow: UUID?
     /// Growth at the bottom pins the view to the tail, until the user pages
@@ -90,7 +91,10 @@ struct ProjectChatView: View {
         .navigationDestination(item: $worker) { worker in
             WorkerChatView(worker: worker, project: identity)
         }
-        .task(id: target) { await chat.switchTarget(target) }
+        .task(id: target) {
+            await chat.switchTarget(target)
+            notifier.requestIfNeeded()
+        }
         .onChange(of: dictation.text) { _, words in
             if dictation.active || !words.isEmpty { draft = words }
         }

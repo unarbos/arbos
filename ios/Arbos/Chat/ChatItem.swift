@@ -77,6 +77,10 @@ enum ChatUpdate {
     case dropped(String)
     /// The hub or kernel refused this target for good; no retry.
     case refused(String)
+    /// The agent asked and waits (the question is also an item).
+    case asked(String)
+    /// A worker finished with these words (the line is also an item).
+    case workerDone(name: String, words: String)
 }
 
 /// Where the main chat comes from: the live kernel, or a scripted stand-in

@@ -54,8 +54,11 @@ final class ChatStore: ObservableObject {
     /// Fires with each finished agent message. The call speaks it when the
     /// server does not.
     var onAgentMessage: ((String) -> Void)?
+    /// Something the user should hear about if they are not looking:
+    /// the turn's reply, an ask, a worker's finish.
+    var onAttention: ((Attention) -> Void)?
 
-    private let settings: AppSettings
+    let settings: AppSettings
     private let link: VoiceLink
     private var source: ChatSource?
     private var pump: Task<Void, Never>?
@@ -426,7 +429,19 @@ final class ChatStore: ObservableObject {
             }
         case .turn(let running):
             busy = running
-            if !running { closeOpenAgentMessage() }
+            if !running {
+                closeOpenAgentMessage()
+                // The turn's last reply, for a user who switched away.
+                let turnStart = items.lastIndex(where: { if case .user = $0.kind { return true } else { return false } }) ?? -1
+                if turnStart >= 0, let reply = items[(turnStart + 1)...].last(where: \.isAgent),
+                   case .agent(let text, _) = reply.kind, !text.isEmpty {
+                    onAttention?(.reply(project: title, text: text))
+                }
+            }
+        case .asked(let question):
+            onAttention?(.ask(project: title, question: question))
+        case .workerDone(let name, let words):
+            onAttention?(.workerDone(project: title, worker: name, words: words))
         case .agents(let list):
             agents = list
         case .workers(let list):

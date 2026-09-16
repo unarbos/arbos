@@ -180,6 +180,7 @@ final class LiveKernelChat: ChatSource {
             if agent == focus {
                 stream?.yield(.agentDone)
                 stream?.yield(.item(ChatItem(.agent(question, streaming: false))))
+                stream?.yield(.asked(question))
             }
         case .thinkingDelta:
             break
@@ -275,7 +276,10 @@ final class LiveKernelChat: ChatSource {
         case .say(let from, let text):
             // A worker's report is its turn's end; a remote child is not in
             // the tree, so this is the only word of its finish.
-            if !replaying, children.contains(from) { setWorker(from, running: false, step: "") }
+            if !replaying, children.contains(from) {
+                setWorker(from, running: false, step: "")
+                stream?.yield(.workerDone(name: childNames[from] ?? from, words: text))
+            }
             return ChatItem(.subagent(name: childNames[from] ?? from, status: text))
         case .ask(let question):
             return ChatItem(.agent(question, streaming: false))

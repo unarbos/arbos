@@ -6,6 +6,7 @@ struct ArbosApp: App {
     @StateObject private var link: VoiceLink
     @StateObject private var chat: ChatStore
     @StateObject private var projects: ProjectStore
+    @StateObject private var notifier = Notifier()
 
     init() {
         let settings = AppSettings()
@@ -23,6 +24,7 @@ struct ArbosApp: App {
                 .environmentObject(chat)
                 .environmentObject(link)
                 .environmentObject(projects)
+                .environmentObject(notifier)
         }
     }
 }
@@ -32,6 +34,8 @@ struct ArbosApp: App {
 /// still talks to the project last open.
 struct RootView: View {
     @EnvironmentObject private var chat: ChatStore
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var notifier: Notifier
     @Environment(\.scenePhase) private var scenePhase
     @State private var path = NavigationPath()
 
@@ -49,6 +53,22 @@ struct RootView: View {
         // then the replay, not an offline notice.
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { chat.resumeIfNeeded() }
+        }
+        .onAppear {
+            // A reply, an ask or a worker's finish while the app is not in
+            // front becomes a notification for the project it came from.
+            chat.onAttention = { [weak chat, weak notifier] attention in
+                guard let chat, let notifier else { return }
+                notifier.post(attention, target: chat.settings.kernelTarget.stored)
+            }
+        }
+        // A tapped notification lands in that project's chat.
+        .onChange(of: notifier.openTarget) { _, stored in
+            guard let stored else { return }
+            notifier.openTarget = nil
+            let target = KernelTarget(stored: stored)
+            path = NavigationPath()
+            path.append(target)
         }
     }
 }
