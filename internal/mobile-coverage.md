@@ -1,0 +1,36 @@
+---
+cursor:
+  subagentId: "bc-08d8261b-fea2-5075-9949-d45f6f9d4acc"
+---
+
+> Rebuilt 2026-09-16 12:50 UTC from the loop's context after the store lost this file (see `internal/mobile-store-loss-2026-09-16.md`). The table is as it stood at cycle 10 plus cycles 11–13.
+
+# iPhone loop — coverage record
+
+What the loop has exercised and when, so nothing goes long untested. One row per aspect; the last cycle that checked it, how (simulator / Jacob's phone), and what is still open. Rotation rule: every aspect within four cycles; anything older than that goes first in the next cycle. Standing order (Jacob, 2026-09-16): never idle, style pair + still every cycle, a recording every third, long-running projects, every aspect.
+
+| aspect | last checked | how | state / open |
+| --- | --- | --- | --- |
+| projects list — faces, rows, sections | 12, 13 | simulator, ArbosLife hub, phone token | four real projects with their faces; a project moves to "Working" while its kernel runs; a dead kernel's row vanishes (M-84, open); with the hub unreachable at launch the cached rows show "Off" (right) |
+| projects list — search, filter, refresh | 7 | simulator, pod hub | search filters as typed; filter menu (All / Live only); pull-to-refresh keeps the rows — **due** |
+| list composer → names its project, rides above the keyboard | 11 | simulator | placeholder "Message demo…" (F1); bottom inset above the keyboard (F2) |
+| project chat — send, prompt card, streaming, Worked line | 13 | simulator, `demo` | a 20-line reply streamed 14 s; the view held where the reader scrolled (F12, recorded); "Sending…" → "demo is not answering — waiting" at 10 s (M-81) |
+| project chat — worker lines, Working pill, workers sheet | 13 | simulator, `demo` | "Agents 3" pill → sheet lists three finished workers |
+| worker chat — open from line / sheet, back | 13 | simulator, `demo` | opens; still "Nothing on record yet" for a remote worker (M-27, kernel — still open) |
+| project chat — long history, scroll, older lines | 6 | simulator, `longproj` (450 lines), kernel #272 | opens at the tail; "Show N earlier lines" pages 200 back and holds the place (iOS 18+) — **due** |
+| project chat — several workers at once, archived children | 7 | simulator, `subnet120` | finished children in the sheet, kept across a reopen (M-68); older-kernel spawn names (M-67) — **due** |
+| call — voice first, orb, colours | 12 (measured) | simulator, injected clips, gateway PR #56 | kernel-answered first audio 2.93 s, small talk 0.70 s |
+| call — pulled down: type, mute, close, `+` | 10 | simulator | `+` live (M-79); photo path on the call to re-check once the prompt harness is fixed (M-80) |
+| call — barge-in | 12 | simulator | **401/404 ms** (M-85); AirPods leg needs Jacob |
+| call — AirPods / speaker route, screen off, CallKit | — | needs the phone | **never checked**; Jacob's phone |
+| attachments (`+`), photos, files | 6 | simulator, library photo, kernel #270 + rebuilt hub | a 1.5 MB photo landed and reached the model; an older kernel's refusal now reads plainly (F10) — **due** for a live re-check |
+| voice notes in the composer | 12 | simulator, injected clip | deltas append, whole sentence kept, second tap sends (F9); real mic on Jacob's phone: his report on 956 was the bug, re-check on the next build |
+| settings sheet | 7 | simulator | three sections + the build line (M-64); token fields say "saved"; editing/saving a token not exercised |
+| notifications (`notify`, push) | 9 | simulator, `simctl push` with the hub's payload | banner, badge, tap-to-project, away card, seen both ways all verified; real pushes start when Jacob's APNs key + capability land (no release needed) |
+| background 8 s → foreground | 13 | simulator | list intact (the SpringBoard kick in the harness drops the status bar; harness, not app) |
+| background minutes/hours → resume; what a returning user sees first | 5 (10 min) | simulator | intact; real suspension covered by scenePhase reconnect — check on Jacob's phone |
+| network drop → reconnect | 12 (443 cut; kernel killed), 13 (M-83) | simulator | one calm line; pending lines never cross projects (M-82, proven both ways); a project opened while down says "Opening…" then "not answering — waiting" (M-83, verified) |
+| cold start | 13 | simulator | lands on the list, four rows, 6 s |
+| TestFlight build on Jacob's phone | 956 (13 reports), 994 (fixes for F1–F6) | TestFlight | F7/F8 open until he confirms; F9–F13 land with #309 |
+| style pair vs Cursor stills | 2 (list, chat), 3 (call vs GPT), 4 (list), 5 (chat, four workers), 6 (composer with a chip), 7 (list search) | pairs in `media/mobile/cycle-N/` | **overdue** — cycles 11–13 went to Jacob's feedback; chat pair next |
+| recording | 1, 3, 6, 10 (call), 13 (stream while scrolled up, 30 s) | mp4 in `media/mobile/cycle-N/` | next due cycle 16 |
