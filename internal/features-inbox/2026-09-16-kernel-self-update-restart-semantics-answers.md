@@ -39,22 +39,56 @@ have:
    to hold an update. The only cost is a client that sends `answer` in the
    seconds the kernel is down and gets a socket error — the desktop and phone
    already reconnect and the user clicks again. Nothing is eaten.
-3. **`verdict` does not see detached jobs or remote children.** A detached
-   job's leash (`jobs.rs`, the `kill -0 "$K"` loop) kills the job the instant
-   its kernel process dies; a `keep` file only spares the *boot reap*. So a
-   restart kills every running job, `keep` or not. And a remote child
-   mid-turn reports to a kernel that is gone.
+3. **`verdict` does not see remote children.** A remote child mid-turn
+   reports to a link the swap closes. (It does not see detached jobs
+   either — but with `execv` that no longer matters; see below.)
 
-So: **`idle::update_verdict(hooks, horizon_ms)`** (in #307) = `verdict` with
-`Waiting → Idle`, plus `Busy` for any running job (`JobsRoot::list().running()`)
-and any remote child mid-turn (`remotes.is_running`). `--until-idle` is
-unchanged. Pass `horizon_ms` = your expected downtime (about 10 s), not
-`--until-idle`'s hour, or a place with an hourly timer never updates.
+So: **`idle::update_verdict(hooks, horizon_ms)`** (#307, corrected in
+[#321](https://github.com/unarbos/arbos/pull/321)) = `verdict` with
+`Waiting → Idle`, plus `Busy` for any remote child mid-turn
+(`remotes.is_running`). `--until-idle` is unchanged. Pass `horizon_ms` =
+your expected downtime (about 10 s), not `--until-idle`'s hour, or a
+place with an hourly timer never updates.
 
-Your 24 h ceiling: when it fires, the only thing you knowingly lose is a
-running job, and the job's folder gets `killed: the kernel exited and the
-job was ended with it` from its own leash — the model reads that with
-`jobs`. Do not mark `keep`; it does not do what you want (answers §2).
+Your 24 h ceiling: when it fires, nothing on this list is knowingly
+lost except a remote child's report, which arrives late as a `say`.
+
+## 1. Who restarts — `execv`, and that settles it (revised 14:10 UTC)
+
+You chose `execv` over spawn-and-exit. That is the better answer, and it
+makes most of my earlier §1 obsolete:
+
+- **No lock retry.** The pid does not change. Rust's `File` is
+  `O_CLOEXEC`, so the flock drops at exec and the new image takes it
+  again with nothing contending. Forget the 30 s retry I asked for.
+- **No `ARBOS_SUPERVISED` split.** A supervisor sees one process
+  continue; an unsupervised kernel keeps serving. Same code path
+  everywhere.
+- **If the new binary cannot be exec'd, `execv` returns and the old image
+  keeps serving** — the failure mode that matters on `subnet120`, where
+  an exit would have left no kernel. One caveat to keep in view: `execv`
+  fails only at exec time (format, permissions). A binary that starts and
+  then dies at boot (a config it cannot read, a panic) is not caught by
+  that return; the pre-swap `--version`/health probe in `arbos-update`
+  (#308) is what covers it, so keep that probe in front of the exec.
+- **Re-exec with the same argv and env** still applies (`--leash`,
+  `--hub`, `--project`, `--bind`, `LEASH_ENV`): `execv(current_exe(),
+  args_os())`.
+- **Do not stop remote children on the swap.** Same as before: skip
+  `remote::stop_all`; `remote::restore` re-attaches from `remotes.json`.
+- `kernel.json` keeps its pid; the port comes back the same with the same
+  `--bind`. Attached sockets close at exec (`O_CLOEXEC`); clients
+  reconnect and replay the tail, as after any restart.
+
+## 2. Jobs — they survive an `execv`; never mark `keep`
+
+With `execv` the job question answers itself. A detached job's leash
+watches the kernel's pid (`K=$PPID` in `jobs.rs`), which the swap keeps,
+and the boot reap takes only jobs whose parent is pid 1. So jobs run on
+across the swap, unowned by no one: the new image lists them from their
+folders as before. `update_verdict` no longer counts a running job as
+`Busy` (#321). `keep` stays what it is — the user's word that a job may
+outlive kernels — and the updater does not touch it.
 
 ## 1. Who restarts — agree with the split, three additions
 
@@ -84,12 +118,6 @@ replacement and exit. Explicit is right. Additions:
 desktop reads it on attach, so a changed port is fine. Prefer the same
 `--bind` so tunnels (qa-036) keep working.
 
-## 2. Jobs — count them busy; never mark `keep`
-
-Answered above. `update_verdict` counts a running job as `Busy`. At the
-ceiling, go; the leash writes the `killed` note. `keep` means "the user asked
-this to outlive kernels" and is not the updater's to set.
-
 ## What a restart preserves (all files) and what it cannot
 
 Preserved, no work needed: asks and their answers; inbox files; subscriptions
@@ -100,14 +128,17 @@ notes, plan, page; `blocked-models.json`; the hub registration (re-registers
 on boot; clients on hub channels see "kernel went away" and reconnect —
 that is the existing #275 path).
 
+Preserved by `execv` specifically: detached jobs (their leash watches a
+pid that does not change), the place lock (same pid), `kernel.json`.
+
 Cannot be preserved, and the gate refuses while they exist: a turn in
 flight (including a kickoff turn), a pending approval, a tool call
-mid-batch, a detached job, a remote child mid-turn, a subscription run in
-flight.
+mid-batch, a remote child mid-turn, a subscription run in flight.
 
-Two more refusals for the updater: **another process holds the place lock**
-(abort the update, log it — a second kernel is serving); and **a stale
-`kernel.json` pid that is not us** (same thing, seen from the file).
+One more refusal for the updater: **`kernel.json` names a pid that is not
+us** — a second kernel is serving this place; abort the update and log
+it. (With `execv` the place lock is ours throughout, so there is no lock
+case to add.)
 
 ## Reply on the frame fields
 

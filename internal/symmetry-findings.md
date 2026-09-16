@@ -104,6 +104,7 @@ Every gap between Arbos and Cursor, who found it, the cycle, the PR. Target: zer
 | F-91 | 09-16 | loop (journey run 4, J08) | coordinator, behaviour | after a worker asked for GitHub auth the coordinator ran `gh auth login` itself — an interactive prompt — and its turn hung on `Running 1 command` for the rest of the run (7 min +); Cursor's coordinator never runs a command that waits on a TTY | features inbox (re-filed note §F-91): refuse or time out a command that reads a TTY; the desktop shows the hang honestly already (the stall clock, F-77). journey.py puts the stand-in `gh` on PATH as the gate does |
 | F-92 | 09-16 | QA (journey J1/J3, `qal-j01`) | root chat, kickoff | the model writes `status "Setting plan"` as a reply line — the prompt's own example form — and the window hid only the `status:` colon form, so a new user saw three code-looking bubbles over the kickoff greeting | #315: `status_line` takes every form a model writes (colon, quoted, parenthesised, `=`, with markdown around the word), live, settled and on replay; kernel half with the features agent |
 | F-93 | 09-16 | QA (journey), Jacob's habit | launch | every launch landed on the Home tab by design, so "close it and come back" dropped him somewhere he was not | #315: a launch lands on the tab that was in front; Home only when that place is gone (journey step J11a scores it) |
+| F-94 | 09-16 | loop (journey runs 2 and 5, J11) | relaunch | after quit and relaunch two prompts showed twice — `Continue where you stopped.` and the follow-up — each once with the kernel's clock (from history) and once without (a local card); the kernel's transcript holds each once. Both were typed while the root was idle and its workers ran; the steer typed while the root streamed was not doubled. The local record after relaunch: `media/cursor-reference/cycle-17/f94-root-record-after-relaunch.json` | open — named BUG by the journey (J11 failed in runs 2, 3, 5); cycle 17 first item: the echo of a prompt typed under running workers is not matched to its card |
 
 ## Per-cycle count
 
@@ -118,7 +119,7 @@ Every gap between Arbos and Cursor, who found it, the cycle, the PR. Target: zer
 | 14 | 10 (F-56 … F-65) + 3 around the Inter change (F-53 … F-55) | 1 (F-52, bionic weight) |
 | 15 | 5 (F-66 … F-70) | 0 |
 | 16 | 9 (F-71 … F-75, F-78 … F-81) | 2 (F-76 raw provider error, F-77 kickoff stall) |
-| 17 (opened) | 11 so far (F-83, F-84, F-92, F-93 from QA; F-85 … F-91 from the journey's first four runs) | 1 (F-82, the bubble-sort turn) |
+| 17 (opened) | 12 so far (F-83, F-84, F-92, F-93 from QA; F-85 … F-91, F-94 from the journey's first five runs) | 1 (F-82, the bubble-sort turn) |
 
 ## Untested by decision (Linux is the rig — Jacob, 2026-09-16)
 
