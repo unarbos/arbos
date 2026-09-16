@@ -867,6 +867,11 @@ impl KernelHooks {
             if filed.msg.wake {
                 continue;
             }
+            // A follow-up the user queued and a stop put on hold is theirs
+            // to send or remove: not folded into another turn as a note.
+            if is_users_own(&filed.msg) {
+                continue;
+            }
             let event = match filed.msg.from.as_str() {
                 "kernel" => EventKind::Notice {
                     text: filed.msg.body.clone(),
@@ -1057,10 +1062,36 @@ impl KernelHooks {
                 root.kill(&job);
             }
             let mut changed = false;
-            // A queued prompt that has not run is dropped with the stop; a
+            // Stop ends the turn and keeps what the user queued: a
+            // follow-up they typed is held (wake off — the row under the
+            // composer with Send now / Remove), never deleted; nothing the
+            // user typed leaves without the user removing it (F-105: two
+            // gate runs lost his words without a word said). The machine's
+            // own queued wakes — a worker's brief, a done report, a
+            // kernel wake — are dropped with the stop, as before. A
             // standing subscription pauses until someone presses run.
-            for filed in inbox::list(&self.place, id) {
-                if filed.msg.wake && std::fs::remove_file(&filed.path).is_ok() {
+            for mut filed in inbox::list(&self.place, id) {
+                if !filed.msg.wake {
+                    continue;
+                }
+                if is_users_own(&filed.msg) {
+                    filed.msg.wake = false;
+                    match inbox::rewrite(&filed) {
+                        Ok(()) => {
+                            crate::klog::info(
+                                "follow_up_held",
+                                Some(id),
+                                format!("{}: kept on stop, waits for Send now", filed.name),
+                            );
+                            changed = true;
+                        }
+                        Err(e) => crate::klog::warn(
+                            "follow_up_hold_failed",
+                            Some(id),
+                            format!("{}: {e:#}", filed.name),
+                        ),
+                    }
+                } else if std::fs::remove_file(&filed.path).is_ok() {
                     changed = true;
                 }
             }
@@ -2074,6 +2105,13 @@ impl KernelHooks {
 /// that — no API key on a fresh machine, no model — is not root's turn,
 /// and the next `kickoff` (after the window put a key there) runs
 /// (remote track, F-34).
+/// A message the user typed themselves (a prompt, from `user` or a named
+/// person), as opposed to a worker's brief, a done report, or the
+/// kernel's own wake.
+pub fn is_users_own(msg: &inbox::Message) -> bool {
+    msg.kind == "request" && (msg.from == "user" || msg.from.starts_with("user:"))
+}
+
 pub fn kickoff_taken(events: &[Event]) -> bool {
     let mut i = 0;
     while i < events.len() {
