@@ -107,6 +107,8 @@ struct MachineEntry {
     identities: HashMap<String, arbos_core::project::ProjectIdentity>,
     /// Each project's sharing mode (`[share] mode`), by name; absent = mesh.
     shares: HashMap<String, String>,
+    /// Each project's declared kind (`kind = "service"`), by name.
+    kinds: HashMap<String, String>,
     /// Whose machine this is: the `user` of the token it registered with.
     /// Its projects' stores belong to this user.
     owner_user: String,
@@ -178,7 +180,7 @@ impl MachineEntry {
                     kind: if parent.is_some() {
                         "worktree".into()
                     } else {
-                        String::new()
+                        self.kinds.get(p).cloned().unwrap_or_default()
                     },
                     parent,
                 }
@@ -195,7 +197,7 @@ impl MachineEntry {
                     access: access(&share),
                     share,
                     identity: self.identities.get(p).cloned(),
-                    kind: String::new(),
+                    kind: self.kinds.get(p).cloned().unwrap_or_default(),
                     parent: None,
                 });
             }
@@ -415,6 +417,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         projects,
         identities,
         shares,
+        kinds,
         labels,
         capabilities,
         version,
@@ -514,6 +517,9 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         }
         for (name, mode) in shares {
             entry.shares.insert(name, mode);
+        }
+        for (name, kind) in kinds {
+            entry.kinds.insert(name, kind);
         }
         match kind {
             RegistrantKind::Worker => {
@@ -1180,6 +1186,23 @@ mod roster_face_tests {
         let owner_default = entry.info("arboslife", Some(("owner", "owner")), "private");
         assert_eq!(by(&owner_default, "demo").access, "owner");
         entry.shares.insert("demo".into(), "private".into());
+        // A place that declares itself infrastructure carries `service`; a
+        // client keeps it out of the human list without reading its name.
+        entry.kernels.insert("feedback".into(), reg(9, "feedback"));
+        entry.kinds.insert("feedback".into(), "service".into());
+        let svc = entry.info("arboslife", Some(("owner", "owner")), "mesh");
+        assert_eq!(by(&svc, "feedback").kind, "service");
+        assert_eq!(
+            by(&svc, "feedback").access,
+            "owner",
+            "the owner's rights are untouched"
+        );
+        assert!(by(&svc, "demo").kind.is_empty());
+        assert!(
+            svc.describe().contains("feedback (service)"),
+            "{}",
+            svc.describe()
+        );
         let json = serde_json::to_value(&by(&alice, "blog")).unwrap();
         assert_eq!(json["store"], "arbos://arboslife/blog/");
         assert_eq!(json["access"], "writer");

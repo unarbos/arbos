@@ -78,6 +78,13 @@ pub struct ProjectConfig {
     pub icon: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// `kind = "service"`: this place is infrastructure — a pipe or a tool
+    /// (the feedback inbox), not a project a person opens. The hub carries
+    /// it in the roster as `ProjectInfo.kind`, and clients keep such places
+    /// out of the human-facing list without guessing by name. Absent: a
+    /// project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// An agent that opens a pull request follows it: the kernel adds a
     /// `github_pr` and a `github_ci` subscription for it, so a failing
     /// check or a review comment wakes the agent that made the change.
@@ -129,6 +136,32 @@ impl ShareConfig {
             Some(crate::hub::SHARE_PRIVATE) => crate::hub::SHARE_PRIVATE,
             Some(crate::hub::SHARE_OPEN) => crate::hub::SHARE_OPEN,
             _ => crate::hub::SHARE_MESH,
+        }
+    }
+}
+
+/// A place that is infrastructure, not a project to open.
+pub const SERVICE_KIND: &str = "service";
+
+/// The place's declared kind (`service`), if any.
+pub fn kind(place: &Place) -> Option<&'static str> {
+    load(place).kind_word()
+}
+
+/// The declared kind of a project folder that may have no `.arbos/` yet.
+pub fn kind_at(project_dir: &Path) -> Option<&'static str> {
+    std::fs::read_to_string(project_dir.join(".arbos").join("project.toml"))
+        .ok()
+        .and_then(|t| toml::from_str::<ProjectConfig>(&t).ok())
+        .and_then(|c| c.kind_word())
+}
+
+impl ProjectConfig {
+    /// `kind` as a known word; anything else is no kind.
+    pub fn kind_word(&self) -> Option<&'static str> {
+        match self.kind.as_deref().map(str::trim) {
+            Some(SERVICE_KIND) => Some(SERVICE_KIND),
+            _ => None,
         }
     }
 }
@@ -250,6 +283,7 @@ pub fn write_for_new_place(place: &Place, name: &str) -> Result<()> {
         name: Some(name.to_string()),
         icon: None,
         color: None,
+        kind: None,
         follow_prs: None,
         root: RootConfig {
             role: Some(COORDINATOR.into()),
@@ -464,6 +498,29 @@ mod tests {
             !std::fs::read_to_string(path(&n))
                 .unwrap()
                 .contains("[share]")
+        );
+    }
+
+    #[test]
+    fn a_service_place_declares_itself_and_a_project_does_not() {
+        let p = place("kind");
+        assert_eq!(kind(&p), None);
+        std::fs::write(
+            path(&p),
+            "schema = 2\nname = \"Feedback\"\nkind = \"service\"\n",
+        )
+        .unwrap();
+        assert_eq!(kind(&p), Some("service"));
+        assert_eq!(kind_at(&p.path), Some("service"));
+        std::fs::write(path(&p), "kind = \"bogus\"\n").unwrap();
+        assert_eq!(kind(&p), None);
+        let cfg = load(&p);
+        save(&p, &cfg).unwrap();
+        assert!(
+            std::fs::read_to_string(path(&p))
+                .unwrap()
+                .contains("kind = \"bogus\""),
+            "a rewrite keeps the line"
         );
     }
 
