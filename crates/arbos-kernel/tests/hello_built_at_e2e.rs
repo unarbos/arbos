@@ -11,14 +11,14 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 #[test]
-fn hello_and_healthz_carry_the_git_sha_and_the_build_time() {
+fn hello_and_healthz_carry_the_git_sha_and_built_at() {
     let mut k = start_kernel_replay("hello-build", "");
     let mut a = Attach::connect(&k.url);
     let hello = a
         .wait(Duration::from_secs(5), |f| f["type"] == "hello")
         .expect("hello");
     let sha = hello["git_sha"].as_str().expect("git_sha on hello");
-    let build = hello["build"].as_str().expect("build on hello");
+    let build = hello["built_at"].as_str().expect("built_at on hello");
     assert!(!sha.is_empty() && sha != "unknown", "{hello}");
     assert!(
         sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit()),
@@ -44,6 +44,6 @@ fn hello_and_healthz_carry_the_git_sha_and_the_build_time() {
     let body = out.split("\r\n\r\n").nth(1).unwrap_or("");
     let json: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
     assert_eq!(json["git_sha"], sha);
-    assert_eq!(json["build"], build);
+    assert_eq!(json["built_at"], build);
     let _ = k.child.kill();
 }

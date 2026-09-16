@@ -1826,7 +1826,7 @@ pub async fn serve_client(
                 protocol: PROTOCOL,
                 kernel: env!("CARGO_PKG_VERSION").to_string(),
                 git_sha: klog::git_sha().to_string(),
-                build: klog::build().to_string(),
+                built_at: klog::built_at().to_string(),
                 tail: ATTACH_TAIL,
                 focus: focus_agent.clone(),
             });

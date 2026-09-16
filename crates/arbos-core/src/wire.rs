@@ -37,11 +37,13 @@ pub enum Frame {
         /// Which build answered: the short git sha and the build time
         /// (`YYYY-MM-DDTHH:MMZ`). Semver moves rarely; these tell this
         /// morning's kernel from last week's, which is what a client (or
-        /// the self-updater) needs to see skew at all.
+        /// the self-updater) needs to see skew at all. `built_at`, not
+        /// `build`: the update feed's `build` is a commit count, and a
+        /// count compared with a timestamp is a silent wrong answer.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         git_sha: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
-        build: String,
+        built_at: String,
         tail: u32,
         focus: String,
     },

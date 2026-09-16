@@ -82,13 +82,15 @@ pub enum HubFrame {
         capabilities: Vec<String>,
         #[serde(default)]
         version: String,
-        /// The registrant's build: short git sha and build time, beside
-        /// `version` (which sits still for weeks). `GET /list` shows them
-        /// so "which of my machines is stale" is one request.
+        /// The registrant's build: short git sha and build time
+        /// (`YYYY-MM-DDTHH:MMZ`), beside `version` (which sits still for
+        /// weeks). `GET /list` shows what each machine *is*; the client,
+        /// which holds the update feed, decides what is stale. `built_at`,
+        /// not `build`: the feed's `build` is a commit count.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         git_sha: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
-        build: String,
+        built_at: String,
         protocol: u32,
     },
     /// Hub → registrant: accepted under this name.
@@ -233,11 +235,12 @@ pub struct MachineInfo {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub version: String,
-    /// The newest registrant's build (short git sha, build time).
+    /// The newest registrant's build: short git sha and build time
+    /// (`YYYY-MM-DDTHH:MMZ`). Facts only; staleness is the client's call.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub git_sha: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub build: String,
+    pub built_at: String,
     /// A worker daemon is connected: `spawn host=<name>` can claim it.
     #[serde(default)]
     pub worker: bool,
@@ -987,7 +990,7 @@ Report: link [the audit](arbos://cloud/demo/docs/echo.md); read arbos://cloud/de
             capabilities: vec!["gpu".into()],
             version: "0.2.0".into(),
             git_sha: "abc123def456".into(),
-            build: "2026-09-16T11:55Z".into(),
+            built_at: "2026-09-16T11:55Z".into(),
             worker: true,
             projects: vec![ProjectInfo {
                 identity: Some(crate::project::ProjectIdentity {

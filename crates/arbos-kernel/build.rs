@@ -20,7 +20,7 @@ fn main() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    println!("cargo:rustc-env=ARBOS_BUILD={}", iso_minute(secs));
+    println!("cargo:rustc-env=ARBOS_BUILT_AT={}", iso_minute(secs));
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs");
 }

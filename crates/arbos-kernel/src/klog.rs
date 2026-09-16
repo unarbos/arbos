@@ -96,9 +96,11 @@ pub fn git_sha() -> &'static str {
     option_env!("ARBOS_GIT_SHA").unwrap_or("unknown")
 }
 
-/// When this binary was built (`YYYY-MM-DDTHH:MMZ`), from build.rs.
-pub fn build() -> &'static str {
-    option_env!("ARBOS_BUILD").unwrap_or("unknown")
+/// When this binary was built (`YYYY-MM-DDTHH:MMZ`), from build.rs. Named
+/// `built_at` on the wire: the update feed's `build` is a commit count,
+/// and a count compared with a timestamp is a silent wrong answer.
+pub fn built_at() -> &'static str {
+    option_env!("ARBOS_BUILT_AT").unwrap_or("unknown")
 }
 
 pub fn log_path_for(arbos_dir: &Path) -> PathBuf {
