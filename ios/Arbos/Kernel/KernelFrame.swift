@@ -15,7 +15,9 @@ struct KernelAgent: Identifiable, Equatable {
 /// JSON is tagged by `kind`, snake_case, with the variant's fields
 /// flattened beside it.
 enum KernelEvent: Equatable {
-    case user(text: String)
+    /// `channel` names where the words came in: `voice` for a spoken turn
+    /// the gateway routed to the kernel; empty for typed lines.
+    case user(text: String, channel: String)
     /// `step` is the model step within the turn (#247); 0 = unknown.
     case assistant(text: String, step: Int)
     case thinking
@@ -33,7 +35,7 @@ enum KernelEvent: Equatable {
         let kind = object["kind"] as? String ?? ""
         let text = object["text"] as? String ?? ""
         switch kind {
-        case "user": self = .user(text: text)
+        case "user": self = .user(text: text, channel: object["channel"] as? String ?? "")
         case "assistant": self = .assistant(text: text, step: object["step"] as? Int ?? 0)
         case "thinking": self = .thinking
         case "tool": self = .tool(KernelToolRecord(json: object))

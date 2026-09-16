@@ -25,6 +25,9 @@ struct ChatItem: Identifiable, Equatable {
     var step: Int = 0
     /// When the item appeared here — a pending card says how long it waits.
     let createdAt: Date
+    /// A user line that came in by voice (the gateway's kernel-answered
+    /// turn, `channel: voice`): drawn as his words with a small mark, once.
+    var spoken = false
 
     init(id: UUID = UUID(), _ kind: Kind, step: Int = 0) {
         self.id = id
@@ -34,7 +37,7 @@ struct ChatItem: Identifiable, Equatable {
     }
 
     static func == (lhs: ChatItem, rhs: ChatItem) -> Bool {
-        lhs.id == rhs.id && lhs.kind == rhs.kind && lhs.step == rhs.step
+        lhs.id == rhs.id && lhs.kind == rhs.kind && lhs.step == rhs.step && lhs.spoken == rhs.spoken
     }
 
     var isStreamingAgent: Bool {

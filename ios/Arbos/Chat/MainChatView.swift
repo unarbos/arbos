@@ -518,6 +518,12 @@ struct ChatRow: View {
                             .fill(ArbosTheme.card)
                     )
                     .frame(maxWidth: UIScreen.main.bounds.width * 0.78, alignment: .trailing)
+                if item.spoken, !pending {
+                    Label("Spoken", systemImage: "waveform")
+                        .labelStyle(.titleAndIcon)
+                        .font(ArbosTheme.caption)
+                        .foregroundStyle(ArbosTheme.textDim)
+                }
                 if pending {
                     // Silence reads as broken; a calm sentence reads as
                     // working. After ten seconds without the kernel's echo,

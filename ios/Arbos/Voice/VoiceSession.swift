@@ -31,9 +31,11 @@ protocol VoiceSession: AnyObject {
     func sendText(_ text: String)
     func cancelText()
 
-    /// Tell the server whether the phone's speaker is playing a reply, so
-    /// its echo gate can tighten while it is.
-    func setSpeaking(_ speaking: Bool)
+    /// Tell the server whether the phone is playing a reply, and out of
+    /// what: the echo gate tightens for `speaker` and stays off for
+    /// `airpods`, `headset`, `headphones`, `bluetooth`, `wired`, `earpiece`,
+    /// where no echo path exists (gateway PR #56).
+    func setSpeaking(_ speaking: Bool, route: String)
 
     /// The user started talking over the reply. Drop the rest of it.
     func interrupt()

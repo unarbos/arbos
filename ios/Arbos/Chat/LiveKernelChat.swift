@@ -279,7 +279,11 @@ final class LiveKernelChat: ChatSource {
     /// worker's chat shows every tool line.
     private func item(for event: KernelEvent, worker: Bool) -> ChatItem? {
         switch event {
-        case .user(let text), .answer(let text):
+        case .user(let text, let channel):
+            var item = ChatItem(.user(text))
+            item.spoken = channel == "voice"
+            return item
+        case .answer(let text):
             return ChatItem(.user(text))
         case .assistant(let text, let step):
             // Lines from before #278 may still carry a call written as text.
