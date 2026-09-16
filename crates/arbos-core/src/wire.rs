@@ -32,13 +32,18 @@ pub enum Frame {
         tail: u32,
         focus: String,
     },
-    /// Client → kernel: replay `agent`'s transcript lines with `seq` >
-    /// `since`, oldest first, at most `limit` (capped). `history_end`
-    /// follows the last one.
+    /// Client → kernel: replay `agent`'s transcript lines, oldest first,
+    /// at most `limit` (capped), `history_end` after the last one. With
+    /// `before`: the `limit` lines with `seq < before` nearest to it — the
+    /// page above what a client holds (the phone scrolling to the top of
+    /// the replayed tail, M-54). Else: lines with `seq > since`, the page
+    /// after.
     History {
         agent: String,
         #[serde(default)]
         since: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
         #[serde(default)]
         limit: u32,
     },
