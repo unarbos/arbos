@@ -197,9 +197,13 @@ struct ProjectsView: View {
             onSend: {
                 let text = draft
                 draft = ""
-                path.append(settings.kernelTarget)
+                // The last project, unless the roster no longer has it —
+                // then the first listed one, never a row that is gone.
+                let listed = projects.entries.map(\.target)
+                let target = listed.contains(settings.kernelTarget) ? settings.kernelTarget : (listed.first ?? settings.kernelTarget)
+                path.append(target)
                 Task {
-                    await chat.switchTarget(settings.kernelTarget)
+                    await chat.switchTarget(target)
                     chat.send(text)
                 }
             },

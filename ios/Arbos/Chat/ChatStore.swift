@@ -47,6 +47,9 @@ final class ChatStore: ObservableObject {
     private var firstSeq = 0
     /// Seconds until the next reconnect try, while the link is down.
     @Published private(set) var reconnectIn: Int?
+    /// Why this target cannot be reached at all (the hub does not know
+    /// it); shown in place of the countdown, no retry.
+    @Published private(set) var refusal: String?
 
     /// Fires with each finished agent message. The call speaks it when the
     /// server does not.
@@ -204,7 +207,7 @@ final class ChatStore: ObservableObject {
     /// The app came back to the front (the phone woke, the user returned):
     /// a link iOS cut while the app slept is reopened at once.
     func resumeIfNeeded() {
-        guard mode == .offline || mode == .mock, settings.chatEndpoint != nil else { return }
+        guard mode == .offline || mode == .mock, settings.chatEndpoint != nil, refusal == nil else { return }
         reconnectTask?.cancel()
         reconnectIn = nil
         reconnectAttempt = 0
@@ -236,6 +239,7 @@ final class ChatStore: ObservableObject {
     /// shows an empty chat.
     func reconnect() async {
         let attempt = reconnectAttempt
+        refusal = nil
         disconnect()
         reconnectAttempt = attempt
         agents.removeAll()
@@ -290,6 +294,7 @@ final class ChatStore: ObservableObject {
         }
         settings.kernelTarget = target
         reconnectAttempt = 0
+        refusal = nil
         await reconnect()
     }
 
@@ -437,7 +442,14 @@ final class ChatStore: ObservableObject {
             guard mode != .offline || reconnectTask == nil else { return }
             mode = .offline
             busy = false
-            if settings.chatEndpoint != nil { scheduleReconnect() }
+            if settings.chatEndpoint != nil, refusal == nil { scheduleReconnect() }
+        case .refused(let why):
+            refusal = why.replacingOccurrences(of: "hub: ", with: "")
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            reconnectIn = nil
+            mode = .offline
+            busy = false
         }
         // A long project pages back 200 at a time; the cap is for a day-long
         // stream, not for the history the user asked to see.

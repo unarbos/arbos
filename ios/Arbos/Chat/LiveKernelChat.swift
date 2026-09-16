@@ -188,6 +188,9 @@ final class LiveKernelChat: ChatSource {
             // line for the transcript: the store's one calm line covers it.
             if detail.contains("went away") || detail.contains("closed") {
                 stream?.yield(.dropped(detail))
+            } else if detail.contains("no machine named") || detail.contains("no project named") || detail.contains("not registered") {
+                // The hub knows nothing by that name: retrying will not help.
+                stream?.yield(.refused(detail))
             } else {
                 stream?.yield(.item(ChatItem(.notice(detail, failed: true))))
             }
@@ -260,6 +263,10 @@ final class LiveKernelChat: ChatSource {
                 let brief = record.args?["brief"] as? String ?? child
                 children.insert(child)
                 childNames[child] = brief
+                // A replayed spawn is a finished worker until the tree or a
+                // status frame says otherwise: the phone keeps its archived
+                // children in the pill and the sheet, as the desktop does.
+                if replaying, !worker, workers[child] == nil { setWorker(child, running: false, step: "") }
                 return ChatItem(.subagent(name: brief, status: "spawned"))
             }
             if !worker, Self.hiddenRootTools.contains(record.name) { return nil }
