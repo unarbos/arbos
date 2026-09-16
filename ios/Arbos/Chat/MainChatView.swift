@@ -216,7 +216,7 @@ struct ProjectChatView: View {
                             .padding(.top, 8)
                     }
                     ForEach(chat.items) { item in
-                        ChatRow(item: item, waitingOn: chat.mode == .live || chat.mode == .server ? nil : chat.title).id(item.id)
+                        ChatRow(item: item, waitingOn: chat.title).id(item.id)
                     }
                     if !chat.unseen.isEmpty {
                         AwayCard(notifications: chat.unseen) { chat.markSeen() }
@@ -459,8 +459,9 @@ struct WorkerLine: View {
 /// one dim line each; "Worked Ns" closes a turn.
 struct ChatRow: View {
     let item: ChatItem
-    /// The project's name while its link is down, so a pending card can
-    /// say who is not answering; nil when the link is up.
+    /// The project's name, so a pending card can say who is not answering.
+    /// A card still pending after ten seconds has had no echo from the
+    /// kernel — whether the socket knows the link is down yet or not.
     var waitingOn: String? = nil
 
     var body: some View {
@@ -480,8 +481,8 @@ struct ChatRow: View {
                     .frame(maxWidth: UIScreen.main.bounds.width * 0.78, alignment: .trailing)
                 if pending {
                     // Silence reads as broken; a calm sentence reads as
-                    // working. After ten seconds with the link down, the
-                    // card says who is not answering (Jacob, build 956).
+                    // working. After ten seconds without the kernel's echo,
+                    // the card says who is not answering (Jacob, build 956).
                     TimelineView(.periodic(from: item.createdAt, by: 1)) { context in
                         let waited = context.date.timeIntervalSince(item.createdAt)
                         if let project = waitingOn, waited >= 10 {
