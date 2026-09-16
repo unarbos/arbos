@@ -15,6 +15,7 @@ pub mod pdf;
 pub mod project;
 mod prompt;
 mod provider;
+pub mod repeat;
 pub mod replay;
 pub mod repro;
 mod retry;
