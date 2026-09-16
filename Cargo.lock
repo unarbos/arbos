@@ -103,6 +103,7 @@ dependencies = [
  "tgrep-core",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "toml",
  "tungstenite",
  "uuid",
