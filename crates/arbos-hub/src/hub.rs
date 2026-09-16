@@ -49,7 +49,9 @@ pub struct Registrant {
     pub project: Option<String>,
     pub place: Option<String>,
     to_socket: mpsc::UnboundedSender<HubFrame>,
-    chans: Mutex<HashMap<u64, mpsc::UnboundedSender<Frame>>>,
+    /// One client's outbound side per channel: the kernel's frames as the
+    /// JSON it sent them, passed through whole.
+    chans: Mutex<HashMap<u64, mpsc::UnboundedSender<serde_json::Value>>>,
     next_chan: AtomicU64,
 }
 
@@ -60,7 +62,12 @@ impl Registrant {
 
     /// A new channel toward this kernel for one client; frames the kernel
     /// sends on it arrive at `to_client`.
-    fn open(&self, to_client: mpsc::UnboundedSender<Frame>, who: &str, role: &str) -> u64 {
+    fn open(
+        &self,
+        to_client: mpsc::UnboundedSender<serde_json::Value>,
+        who: &str,
+        role: &str,
+    ) -> u64 {
         let chan = self.next_chan.fetch_add(1, Ordering::Relaxed);
         self.chans.lock().unwrap().insert(chan, to_client);
         self.send(HubFrame::Open {
@@ -675,7 +682,7 @@ pub async fn attach(
 /// `role` is what the client may do there: its token role capped by the
 /// project's share mode.
 async fn proxy(mut ws: Ws, who: Identity, kernel: Arc<Registrant>, role: &str) {
-    let (to_client, mut from_kernel) = mpsc::unbounded_channel::<Frame>();
+    let (to_client, mut from_kernel) = mpsc::unbounded_channel::<serde_json::Value>();
     let (name, _) = who.as_client();
     let role = role.to_string();
     let chan = kernel.open(to_client, &name, &role);
@@ -698,14 +705,19 @@ async fn proxy(mut ws: Ws, who: Identity, kernel: Arc<Registrant>, role: &str) {
             line = next_text(&mut ws) => {
                 let Some(line) = line else { break };
                 for l in line.lines().filter(|l| !l.trim().is_empty()) {
-                    match serde_json::from_str::<Frame>(l) {
+                    // Passed through as the JSON it is: the kernel parses it
+                    // on its own version, so a field this hub was built
+                    // before (a put's `data`, a history's `before`) arrives
+                    // whole. Only the shape is checked here; a line that is
+                    // not a frame is refused with the reason, never dropped.
+                    match relay_shape(l) {
                         Ok(frame) => {
                             if !kernel.send(HubFrame::Frame { chan, frame }) {
                                 break;
                             }
                         }
-                        Err(e) => {
-                            let _ = send_json(&mut ws, &Frame::Error { agent: None, detail: format!("hub: not a frame: {e}") }).await;
+                        Err(why) => {
+                            let _ = send_json(&mut ws, &Frame::Error { agent: None, detail: format!("hub: not relayed: {why}") }).await;
                         }
                     }
                 }
@@ -714,6 +726,19 @@ async fn proxy(mut ws: Ws, who: Identity, kernel: Arc<Registrant>, role: &str) {
     }
     kernel.close(chan, "client left");
     eprintln!("hub: {name} left {} chan {chan}", kernel.machine);
+}
+
+/// A client's line as the JSON the kernel will read: an object with a
+/// string `type`. Anything else is named back to the client.
+fn relay_shape(line: &str) -> std::result::Result<serde_json::Value, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(line).map_err(|e| format!("not JSON ({e})"))?;
+    match value.get("type") {
+        Some(serde_json::Value::String(t)) if !t.is_empty() => Ok(value),
+        Some(_) => Err("\"type\" is not a string".into()),
+        None if value.is_object() => Err("no \"type\" field".into()),
+        None => Err("not a JSON object".into()),
+    }
 }
 
 // ── /claim ──────────────────────────────────────────────────────────────
@@ -1080,5 +1105,41 @@ mod roster_face_tests {
         assert_eq!(json["store"], "arbos://arboslife/blog/");
         assert_eq!(json["access"], "writer");
         assert_eq!(json["share"], "open");
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::relay_shape;
+
+    /// A hub built before a kernel gained a field must not drop it: the
+    /// line goes through as the JSON it is. A line that is not a frame is
+    /// refused with a reason, never silently forwarded or dropped.
+    #[test]
+    fn a_frame_is_relayed_whole_and_junk_is_named() {
+        let put =
+            r#"{"type":"put","path":"attachments/a.jpg","data":"AAAA","future_field":{"x":1}}"#;
+        let v = relay_shape(put).unwrap();
+        assert_eq!(v["data"], "AAAA");
+        assert_eq!(v["future_field"]["x"], 1);
+        assert_eq!(serde_json::to_string(&v).unwrap().len(), put.len());
+        let history = r#"{"type":"history","agent":"root","before":255,"limit":3}"#;
+        assert_eq!(relay_shape(history).unwrap()["before"], 255);
+        assert!(relay_shape("hello").unwrap_err().contains("not JSON"));
+        assert!(
+            relay_shape("[1,2]")
+                .unwrap_err()
+                .contains("not a JSON object")
+        );
+        assert!(
+            relay_shape(r#"{"agent":"root"}"#)
+                .unwrap_err()
+                .contains("no \"type\"")
+        );
+        assert!(
+            relay_shape(r#"{"type":5}"#)
+                .unwrap_err()
+                .contains("not a string")
+        );
     }
 }
