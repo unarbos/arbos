@@ -1043,15 +1043,17 @@ impl Arbos {
             .items_start()
             .gap(px(if scale == PageScale::Page { 10. } else { 8. }))
             .text_style(scale.text())
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(g))
-                    .pt(px(if scale == PageScale::Page { 4. } else { 3. }))
-                    .flex()
-                    .justify_center()
-                    .child(glyph),
-            )
+            .when(!item.prose, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .w(px(g))
+                        .pt(px(if scale == PageScale::Page { 4. } else { 3. }))
+                        .flex()
+                        .justify_center()
+                        .child(glyph),
+                )
+            })
             .child(
                 div()
                     .flex_1()

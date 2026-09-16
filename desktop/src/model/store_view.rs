@@ -58,6 +58,9 @@ pub struct PageItem {
     pub target: Option<Target>,
     /// What follows the link, after the dash.
     pub readout: String,
+    /// A line of prose under a heading, not a list entry: drawn without a
+    /// glyph, flush with the heading.
+    pub prose: bool,
 }
 
 /// The page, top to bottom: headings and items.
@@ -80,13 +83,12 @@ pub struct ProjectPage {
 }
 
 impl ProjectPage {
-    /// Nothing but the template: no tldr, no items.
+    /// Nothing but the template — the title and its link line. A heading
+    /// or a line of prose the agent wrote is a page, even before the first
+    /// checklist item (F-61: "Nothing on the project page yet" beside a
+    /// turn that had just written it).
     pub fn is_empty(&self) -> bool {
-        self.tldr.is_empty()
-            && !self
-                .blocks
-                .iter()
-                .any(|block| matches!(block, PageBlock::Item(_)))
+        self.tldr.is_empty() && self.blocks.is_empty()
     }
 }
 
@@ -530,7 +532,15 @@ impl ProjectPage {
             let Some(rest) = bullet(trimmed) else {
                 // Prose above the first heading is the template's link line
                 // to the context document, which the Context row already
-                // carries. Prose elsewhere is not the page's shape; skipped.
+                // carries. Prose under a heading is the agent's — Cursor's
+                // page renders the whole document — so it stays, as a line
+                // without a checkbox.
+                if seen_heading && !trimmed.is_empty() {
+                    page.blocks.push(PageBlock::Item(PageItem {
+                        prose: true,
+                        ..item(None, 0, trimmed, store)
+                    }));
+                }
                 continue;
             };
             let depth = indent_depth(line);
@@ -636,6 +646,7 @@ fn item(done: Option<bool>, depth: u8, text: &str, store: &Path) -> PageItem {
         label: unbold(&label),
         target,
         readout: unbold(&readout),
+        prose: false,
     }
 }
 

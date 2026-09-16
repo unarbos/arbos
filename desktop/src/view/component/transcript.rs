@@ -3304,6 +3304,11 @@ const MARK_HIT: f32 = MARK_THICK + MARK_GAP;
 
 /// One dash per turn. A press jumps the transcript to that turn and unpins
 /// stick-to-bottom, the same way a scrollbar click should feel.
+///
+/// Quiet until wanted: Cursor's chat has no rail, and on a long project a
+/// dozen dashes down the right edge read as a second scrollbar (F-59). Only
+/// the turn in view is drawn, faintly; the rest appear when the pointer is
+/// over the rail's strip, where the jumps are.
 fn rail(
     id: SharedString,
     handle: &ScrollHandle,
@@ -3316,6 +3321,7 @@ fn rail(
         return Empty.into_any_element();
     }
     let at = visible_turn(handle, count);
+    let strip = SharedString::from(format!("{id}-strip"));
     div()
         .absolute()
         .top_0()
@@ -3327,7 +3333,9 @@ fn rail(
         .items_center()
         .justify_center()
         .overflow_hidden()
+        .group(strip.clone())
         .children((0..count).map(|ix| {
+            let strip = strip.clone();
             let handle = handle.clone();
             let follow = follow.clone();
             let tip = turn_label(items, &turns[ix], ix);
@@ -3353,8 +3361,11 @@ fn rail(
                         .w(px(MARK))
                         .h(px(MARK_THICK))
                         .rounded_full()
-                        .bg(if ix == at { ink(0.6) } else { ink(0.2) })
-                        .group_hover(group, |mark| mark.bg(ink(0.32))),
+                        .bg(if ix == at { ink(0.35) } else { ink(0.0) })
+                        .group_hover(strip, move |mark| {
+                            mark.bg(if ix == at { ink(0.6) } else { ink(0.2) })
+                        })
+                        .group_hover(group, |mark| mark.bg(ink(0.45))),
                 )
         }))
         .into_any_element()
