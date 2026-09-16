@@ -405,7 +405,17 @@ fn list<'a>(it: impl Iterator<Item = &'a String>) -> String {
 /// never the `error`. A short pause before the close handshake lets the
 /// proxy forward the text; refusals are rare, so the wait costs nothing.
 async fn refuse_close(ws: &mut Ws) {
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Wait for the peer to read the reason and hang up itself (its close
+    // or its socket ending) rather than guessing how long the proxy
+    // needs; two seconds is the ceiling for a peer that keeps the socket.
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            if matches!(msg, Ok(Message::Close(_)) | Err(_)) {
+                break;
+            }
+        }
+    })
+    .await;
     let _ = ws.close(None).await;
 }
 
