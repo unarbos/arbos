@@ -53,7 +53,8 @@ case "${1:-}" in
     mkdir -p "$RESULTS/bugs" "$RESULTS/rollouts"
     # Mirror: a draft removed from loop/bugs (folded into a curated file) must
     # not come back from the branch on the next pull.
-    rsync -a --delete "$ROOT/loop/bugs/" "$RESULTS/bugs/"
+    # (plain cp, not rsync: the VM has no rsync and publish had failed six cycles running on 2026-09-16)
+    rm -rf "$RESULTS/bugs" && mkdir -p "$RESULTS/bugs" && cp -r "$ROOT/loop/bugs/." "$RESULTS/bugs/"
     for f in kickoff-history.jsonl spend.jsonl call-mode-history.jsonl pod-health.jsonl store-mirror-history.jsonl store-mirror-losses.jsonl journey-history.jsonl; do
       [ -f "$ROOT/loop/$f" ] && cp "$ROOT/loop/$f" "$RESULTS/$f"
     done
