@@ -60,6 +60,8 @@ pub enum Event {
         text: String,
         attachments: Vec<String>,
         ts: i64,
+        /// The record's transcript line: what a report anchors on.
+        seq: u64,
         /// How the words arrived, from the transcript line: `voice` or `text`
         /// (empty on lines from before the kernel wrote it).
         channel: String,
@@ -979,6 +981,7 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
             text,
             attachments,
             ts,
+            seq: event.seq,
             channel,
         }],
         // The kickoff turn opening live: its step reads as Cursor's

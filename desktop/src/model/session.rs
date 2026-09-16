@@ -1734,7 +1734,14 @@ impl ChatSession {
     /// that matches the last card is the echo and is dropped. Anything else
     /// is a turn this window did not start: the card goes up, and the pane
     /// is working until the kernel says idle.
-    fn foreign_prompt(&mut self, text: String, attachments: Vec<String>, ts: i64, channel: String) {
+    fn foreign_prompt(
+        &mut self,
+        text: String,
+        attachments: Vec<String>,
+        ts: i64,
+        seq: u64,
+        channel: String,
+    ) {
         self.new_turn_steps();
         let squash = |s: &str| s.split_whitespace().collect::<String>();
         // A line this window sent and is still waiting to see recorded:
@@ -1749,9 +1756,13 @@ impl ChatSession {
             if let Some(card) = self.items.iter_mut().rev().find_map(|item| match item {
                 ChatItem::User(message) if squash(&message.text) == squash(&text) => Some(message),
                 _ => None,
-            }) && ts > 0
-            {
-                card.sent_at = Some(ts);
+            }) {
+                if ts > 0 {
+                    card.sent_at = Some(ts);
+                }
+                if seq > 0 {
+                    card.seq = Some(seq);
+                }
             }
             return;
         }
@@ -1773,9 +1784,13 @@ impl ChatSession {
             if last.sent_at.is_none() && ts > 0 {
                 last.sent_at = Some(ts);
             }
+            if seq > 0 {
+                last.seq = Some(seq);
+            }
             return;
         }
         let mut message = crate::model::attachment::UserMessage::from(text);
+        message.seq = (seq > 0).then_some(seq);
         for path in &attachments {
             message.add_file_path(path);
         }
@@ -2477,8 +2492,9 @@ impl ChatSession {
                 text,
                 attachments,
                 ts,
+                seq,
                 channel,
-            } => self.foreign_prompt(text, attachments, ts, channel),
+            } => self.foreign_prompt(text, attachments, ts, seq, channel),
             Event::Provider {
                 provider,
                 model,

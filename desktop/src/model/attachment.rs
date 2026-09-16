@@ -295,6 +295,11 @@ pub struct UserMessage {
     /// paperclip inside this card, never as a line of the transcript.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub described: Vec<DescribedImage>,
+    /// The transcript line of the kernel's `user` record for this prompt
+    /// (1-based; None until the record comes back, or on a card from before
+    /// the kernel wrote seqs). A report anchors on it (`feedback` frame).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
     /// Typed into a running turn (Cursor's steer): the card sits inside
     /// that turn's work, and the turn stays one — no second "Worked".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -371,6 +376,7 @@ impl From<StoredMessage> for UserMessage {
                 sent_at: None,
                 feedback: None,
                 described: Vec::new(),
+                seq: None,
                 steer: false,
             },
             StoredMessage::Images {
@@ -386,6 +392,7 @@ impl From<StoredMessage> for UserMessage {
                 sent_at: None,
                 feedback: None,
                 described: Vec::new(),
+                seq: None,
                 steer: false,
             },
         };
@@ -405,6 +412,7 @@ impl From<String> for UserMessage {
             sent_at: Some(arbos_core::now_ms()),
             feedback: None,
             described: Vec::new(),
+            seq: None,
             steer: false,
         };
         message.lift_files();
