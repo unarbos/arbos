@@ -610,12 +610,26 @@ pub struct Call {
     pub connecting: bool,
 }
 
+/// One OS notification the window asked the platform to show.
+#[derive(Debug, Clone)]
+pub(crate) struct PostedNotification {
+    pub at: i64,
+    pub title: String,
+    pub body: String,
+    /// The command could not be started; `None` when it was.
+    pub error: Option<String>,
+}
+
 pub struct Arbos {
     pub(crate) workspace: Entity<Workspace>,
     /// Whether this window is the active one on the desktop: a kernel
     /// notification for a chat the person is looking at is seen at once;
     /// one for a chat they are not goes to the OS as a notification.
     pub(crate) window_active: bool,
+    /// OS notifications this window posted (#293), newest last, capped:
+    /// what the driver shows a test so "an alert was posted" is a fact it
+    /// can read and check against the daemon, not a belief.
+    pub(crate) notifications_posted: Vec<PostedNotification>,
     /// The open session menu was opened from the chat header's `⋯`, so it
     /// anchors there rather than at a panel row.
     pub(crate) menu_at_header: bool,
@@ -915,6 +929,7 @@ impl Arbos {
             terminals: Default::default(),
             active_terminal: None,
             window_active: true,
+            notifications_posted: Vec::new(),
             panel_open: true,
             archived_open: false,
             agents_card_open: None,
@@ -1386,7 +1401,19 @@ impl Arbos {
             }
         });
         for (title, body) in post {
-            crate::notify_os::post(&title, &body);
+            let result = crate::notify_os::post(&title, &body);
+            self.notifications_posted.push(PostedNotification {
+                at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+                title,
+                body,
+                error: result.err(),
+            });
+            if self.notifications_posted.len() > 50 {
+                self.notifications_posted.remove(0);
+            }
         }
     }
 

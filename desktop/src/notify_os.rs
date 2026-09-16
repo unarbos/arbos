@@ -11,7 +11,17 @@
 
 use std::process::{Command, Stdio};
 
-pub fn post(title: &str, body: &str) {
+/// Which command carries the notification on this platform.
+pub const NOTIFIER: &str = if cfg!(target_os = "macos") {
+    "osascript"
+} else {
+    "notify-send"
+};
+
+/// Post it. `Ok` means the command was started, not that a daemon showed
+/// it; the driver reports the result so a test can check the daemon's own
+/// record (dunst's history on the rig) against what the window claims.
+pub fn post(title: &str, body: &str) -> Result<(), String> {
     let title = clip(title, 80);
     let body = clip(body, 240);
     let spawned = if cfg!(target_os = "macos") {
@@ -36,8 +46,12 @@ pub fn post(title: &str, body: &str) {
             .stderr(Stdio::null())
             .spawn()
     };
-    if let Err(err) = spawned {
-        eprintln!("notification: {err}");
+    match spawned {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            eprintln!("notification: {err}");
+            Err(err.to_string())
+        }
     }
 }
 
