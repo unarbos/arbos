@@ -83,7 +83,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     reply.add_argument("--reply", default="none", choices=["none", "openrouter", "kernel"],
                        help="none: speech only, the client sends replies with 'speak'. openrouter: OpenRouter model with the Arbos tools "
                             "(env OPENROUTER_API_KEY). kernel: the kernel's main agent answers")
-    reply.add_argument("--reply-model", default="openai/gpt-4.1-mini", help="OpenRouter model id")
+    reply.add_argument("--reply-model", default="google/gemini-2.5-flash", help="OpenRouter model id")
     reply.add_argument("--call-model-voice", default=os.environ.get("VOICE_CALL_MODEL_VOICE", "auto"),
                        choices=["auto", "off", "ack", "full"],
                        help="call mode, duplex engine: how much of the speech model's own voice the caller hears. "
