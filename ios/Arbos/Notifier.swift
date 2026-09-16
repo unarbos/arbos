@@ -23,8 +23,8 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
         case noToken(String)
         /// A token exists; the hub has not answered for this project yet.
         case registering
-        /// The hub holds the token but has no Apple key yet.
-        case hubNoKey
+        /// The hub holds the token but cannot push; `reason` is the hub's own words (#333).
+        case hubOff(String)
         /// The hub pushes to this phone.
         case on
     }
@@ -111,9 +111,9 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
     }
 
     /// The hub answered `push`.
-    func hubAnswered(enabled: Bool) {
+    func hubAnswered(enabled: Bool, reason: String?) {
         guard deviceToken != nil else { return }
-        pushState = enabled ? .on : .hubNoKey
+        pushState = enabled ? .on : .hubOff(reason ?? "the hub has no Apple push key yet")
     }
 
     /// One line for Settings.
@@ -123,7 +123,7 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
         case .denied: return "Off — allow notifications for Arbos in iOS Settings."
         case .noToken(let why): return "Banners only while the app is open: \(why)."
         case .registering: return "Registering this phone with the hub…"
-        case .hubNoKey: return "Banners only while the app is open — the hub has no Apple push key yet."
+        case .hubOff(let reason): return "Banners only while the app is open — push is off: \(reason)"
         case .on: return "On — the hub pushes replies, questions and failures to this phone."
         }
     }

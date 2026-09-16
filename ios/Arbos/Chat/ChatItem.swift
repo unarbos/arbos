@@ -103,7 +103,7 @@ enum ChatUpdate {
     case seen(through: Int)
     /// The hub took this phone's push token; `enabled` says whether it
     /// can actually push yet.
-    case pushed(enabled: Bool)
+    case pushed(enabled: Bool, reason: String?)
 }
 
 /// Where the main chat comes from: the live kernel, or a scripted stand-in

@@ -167,7 +167,7 @@ final class LiveKernelChat: ChatSource {
                     stream?.yield(.step(""))
                 }
                 stream?.yield(.turn(running: running))
-            } else if { adopt(agent); return children.contains(agent) }() {
+            } else if isChild(agent) {
                 setWorker(agent, running: running, step: running ? nil : "")
                 if !running {
                     stream?.yield(.item(ChatItem(.subagent(name: childNames[agent] ?? agent, status: "done"))))
@@ -176,7 +176,7 @@ final class LiveKernelChat: ChatSource {
         case .status(let agent, let step, _):
             if agent == focus {
                 stream?.yield(.step(step))
-            } else if { adopt(agent); return children.contains(agent) }() {
+            } else if isChild(agent) {
                 setWorker(agent, running: !step.isEmpty ? true : nil, step: step)
             }
         case .working(let agent, let secs):
@@ -194,15 +194,15 @@ final class LiveKernelChat: ChatSource {
             stream?.yield(.notify(notification))
         case .seen(let through):
             stream?.yield(.seen(through: through))
-        case .pushed(_, let enabled):
-            stream?.yield(.pushed(enabled: enabled))
+        case .pushed(_, let enabled, let reason):
+            stream?.yield(.pushed(enabled: enabled, reason: reason))
         case .thinkingDelta:
             break
         case .error(let detail):
             // A hub from before #301 passes `push` to the kernel, which does
             // not know it: that is "no push here", not a line for the chat.
             if detail.contains("unknown frame type \"push\"") {
-                stream?.yield(.pushed(enabled: false))
+                stream?.yield(.pushed(enabled: false, reason: "the hub is an older build that does not relay push"))
                 return
             }
             // A kernel from before #270 parses `put` as nothing it knows.
@@ -266,7 +266,10 @@ final class LiveKernelChat: ChatSource {
             // when it ends (`wait: true`). Only the first may say "running":
             // the second arrives after the child's own turn went idle and
             // was flipping a finished worker back to Working (M-100).
-            if workers[child] == nil {
+            // …and the brief may by then live under the kernel's id (adopt).
+            let want = Self.slug(child)
+            let known = workers[child] != nil || workerOrder.contains { Self.slug($0) == want || Self.slug(childNames[$0] ?? "") == want }
+            if !known {
                 setWorker(child, running: true, step: machine.isEmpty ? "Starting" : "Running on \(machine) · reports here when done")
             }
         }
@@ -384,6 +387,12 @@ final class LiveKernelChat: ChatSource {
         children.remove(old); children.insert(id)
         if childNames[id] == nil { childNames[id] = childNames[old] ?? old }
         childNames[old] = nil
+    }
+
+    /// Adopts a brief-keyed entry first, then asks whether `id` is a child.
+    private func isChild(_ id: String) -> Bool {
+        adopt(id)
+        return children.contains(id)
     }
 
     private static func slug(_ text: String) -> String {
