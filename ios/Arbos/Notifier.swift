@@ -146,6 +146,9 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
     /// chat itself is the notification), and the badge either way.
     func post(_ notification: KernelNotification, project: String, target: String, unseenCount: Int) {
         setBadge(unseenCount)
+        #if DEBUG
+        print("notify \(notification.id) \(notification.kind) state=\(UIApplication.shared.applicationState.rawValue) unseen=\(unseenCount)")
+        #endif
         guard UIApplication.shared.applicationState != .active else { return }
         let content = UNMutableNotificationContent()
         content.title = notification.title.isEmpty ? project : "\(project) · \(notification.title)"
@@ -156,7 +159,11 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
         content.threadIdentifier = target
         if notification.isAsk { content.interruptionLevel = .timeSensitive }
         let request = UNNotificationRequest(identifier: "notify-\(target)-\(notification.id)", content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+        UNUserNotificationCenter.current().add(request) { error in
+            #if DEBUG
+            print("banner \(notification.id): \(error.map { "\($0)" } ?? "posted")")
+            #endif
+        }
     }
 
     /// `seen {through}` from any client: banners up to it go, the badge
