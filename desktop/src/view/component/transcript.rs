@@ -1466,6 +1466,7 @@ fn children_lines(
     chat: &ChatSession,
     spawned: &[String],
     running: bool,
+    step_above: bool,
     theme: &Theme,
     cx: &mut Context<Workspace>,
 ) -> (AnyElement, bool) {
@@ -1499,13 +1500,23 @@ fn children_lines(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        // The coordinator's step only where nothing above says it: under a
+        // live "Working <step>" headline the line names the workers instead
+        // (cycle 23: "Working Updating the plan" over "2 Working Updating
+        // the plan" said one thing twice).
+        let own = own.filter(|_| !step_above);
         let step = match live.as_slice() {
             [only] => only
                 .step
                 .clone()
                 .or(own)
                 .unwrap_or_else(|| only.title.clone()),
-            _ => own.unwrap_or_else(|| format!("Waiting on {working} workers")),
+            _ => own.unwrap_or_else(|| {
+                live.iter()
+                    .map(|c| c.title.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            }),
         };
         let target = match live.as_slice() {
             [only] => Some(only.id),
@@ -3822,13 +3833,18 @@ fn zone(
             .or_else(|| chat.current_step())
             .unwrap_or_else(|| "Planning next moves".to_string());
         let id = chat.id;
+        // Cursor's Project chat keeps the live fold shut: "Working
+        // Planning next moves" alone, the checklist behind the chevron
+        // until asked (F-115, cycle 23). A worker's chat streams its tool
+        // rows live, so its fold starts open.
+        let auto = !project_style;
         open = chat
             .transcript
             .work
             .get(&first)
             .copied()
             .unwrap_or_default()
-            .get(true);
+            .get(auto);
         zone = zone.child(
             fold_row(
                 &theme,
@@ -3843,7 +3859,7 @@ fn zone(
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.with_session(id, cx, |chat| {
-                    chat.transcript.work.entry(first).or_default().toggle(true);
+                    chat.transcript.work.entry(first).or_default().toggle(auto);
                 });
             }))
             .into_any_element(),
@@ -3942,7 +3958,7 @@ fn zone(
         }
     }
     let workers = (!spawned.is_empty() && !chat.children.is_empty())
-        .then(|| children_lines(chat, &spawned, running, &theme, cx));
+        .then(|| children_lines(chat, &spawned, running, live_headline, &theme, cx));
     if let Some((_, live_line)) = &workers {
         // The "N Working  <step>" line carries the shimmer while the root
         // waits on its workers; a heartbeat under it would say it twice.

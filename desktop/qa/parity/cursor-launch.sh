@@ -30,7 +30,7 @@ S=cursor-app
 tmux -f /exec-daemon/tmux.portal.conf has-session -t "=$S" 2>/dev/null \
   || tmux -f /exec-daemon/tmux.portal.conf new-session -d -s "$S" -c "$CURSOR_DIR" -- bash -l
 tmux -f /exec-daemon/tmux.portal.conf send-keys -t "$S:0.0" \
-  "export DISPLAY=$DISPLAY; ./squashfs-root/AppRun --no-sandbox --disable-gpu-sandbox '$PROJ' 2>&1 | tee /tmp/cursor-app.log" C-m
+  "export DISPLAY=$DISPLAY; cd '$CURSOR_DIR' && ./squashfs-root/AppRun --no-sandbox --disable-gpu-sandbox '$PROJ' 2>&1 | tee /tmp/cursor-app.log" C-m
 
 # Wait for the keyring dialog, then pick "Use weaker encryption".
 for _ in $(seq 1 30); do
