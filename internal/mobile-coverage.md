@@ -35,4 +35,4 @@ What the loop has exercised and when, so nothing goes long untested. One row per
 | style pair vs Cursor stills | 2 (list, chat), 3 (call vs GPT), 4 (list), 5 (chat, four workers), 6 (composer with a chip), 7 (list search) | 17 (chat), 18 (list), 21 (call vs GPT: `media/mobile/cycle-21/01-`) | pairs in `media/mobile/cycle-N/` | next: composer with a photo chip |
 | recording | 1, 3, 6, 10, 13, 16, 28 (the photo landing and the scoped call answering from `demo`, 66 s, `media/mobile/cycle-28/recording-photo-and-scoped-call-66s.mp4`) | mp4 | next due cycle 31 |
 
-**Journey runs** (`internal/mobile-journey-runs.md`): 24 so far — 3 on `demo` (old numbering; JB-1…3 named), 3 on `pod` on QA's ids (run 4 a floundering root, runs 5–6 clean apart from the U steps). Next: `arboslife/demo` on QA's ids once its kernel is updated.
+**Journey runs** (`internal/mobile-journey-runs.md`): 26 so far — 3 on `demo` (old numbering; JB-1…3 named), 3 on `pod` on QA's ids (run 4 a floundering root, runs 5–6 clean apart from the U steps). Next: `arboslife/demo` on QA's ids once its kernel is updated.

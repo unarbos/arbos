@@ -31,6 +31,7 @@ Jacob (2026-09-16): "The upgrade loops need to actually run full cycles of creat
 
 | run (UTC) | target | build | J1 | J2 | J3 | J4 | J5 | J6 | J7 | J8 | P1 | P2 | P3 | notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 09-16 21:56 | `arboslife/demo` — **before #357 is deployed** (its spawn record carries no base note; the PR is open) | `main` 1148 | P (seed, git identity set again — M-113) | P (worker at 86 s) | P | U | **F** (model, 10/10) | EYE | **F — JB-5, 5/5**: the worker's whole report was "I have updated the project notes. The task is complete." — the empty-worktree shape in its purest form; the root did the work itself and fought imports | U/U/**c: P** | P | P | P | PUSH U with reason. 14 m 47 s. **The run that tests #357 is the first one after ArbosLife serves it** — the spawn record's output will carry the base-replaced note with both file counts |
 | 09-16 21:47 | `pod` (direct) | `main` 1148 | P | P (worker at 23 s) | P | U (turn ended first) | U | EYE | **P by the runner** at last (BRANCHES `fix-mathlib-J214750`, `w * h`, `OK`, ahead 1) | U/U/**c: P** | P | P | P | PUSH U with reason. 6 m 48 s |
 | 09-16 21:31 | `arboslife/demo` | `main` 1148 | P (seed 155 s) | P (worker at 43 s) | P | U (turn ended first) | **F** (model, 9/9) | EYE | **F on the merits — JB-5, 4/4**: "the worker again did not successfully implement the changes or commit them properly … No CHANGELOG.md file found … mathlib.py is still in its initial state" | U/U/**c: P** | P | P | P | PUSH U with reason. 11 m 14 s |
 | 09-16 21:08 | `pod` (direct) | `main` 1148 | P | P (worker at 22 s) | P | U (turn ended first) | U | EYE | **P by the paste** (BRANCHES `fix-mathlib-J210834`, RETURNS `w * h`, TESTS `OK`, AHEAD 1) — the runner's branch regex on the Mac was still an old one and rejected the BRANCHES heading; fixed | U/U/**c: P** | P | P | P | PUSH U with reason. 7 m 0 s |
@@ -78,7 +79,7 @@ Rates after 3 runs: J1–J6, J8, J11, J13 **3/3**; J9 **2/2** product (one harne
 
 | id | step | what | whose |
 | --- | --- | --- | --- |
-| **JB-5 — named 20:36 UTC (runs 19, 20, 22, 24: 4/4 since)** | J7 on `demo` | the worker reports a branch, passing tests and a CHANGELOG; the project repo shows none of it (run 19). Related: run 18's worker committed on `main` (M-114); run 16's worker found an empty worktree (M-111). Three runs, three ways a worker's work and the project's repo disagree | kernel (worktree/branch model for workers) |
+| **JB-5 — named 20:36 UTC; 5/5 (runs 19, 20, 22, 24, 26) before #357; diagnosed by the features agent from these tails: the seed on a side branch, the worktree cut from an empty `main`** | J7 on `demo` | the worker reports a branch, passing tests and a CHANGELOG; the project repo shows none of it (run 19). Related: run 18's worker committed on `main` (M-114); run 16's worker found an empty worktree (M-111). Three runs, three ways a worker's work and the project's repo disagree | kernel (worktree/branch model for workers) |
 
 ## Named bugs (failed twice running)
 
