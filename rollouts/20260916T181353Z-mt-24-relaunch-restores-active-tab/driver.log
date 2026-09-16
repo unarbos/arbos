@@ -1,0 +1,4 @@
+1789582434906 desktop: app pid 993052 on :9618
+1789582440261 desktop-relaunch: app pid 993194 on :9618
+1789582443350 BREAK mt-24-active-tab-not-restored: active before quit 3, after relaunch 2
+1789582443467 bugs: seen 6d5f8ef30f.md

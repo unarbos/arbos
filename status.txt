@@ -1,3 +1,3 @@
 host: cursor
-last_cycle: 2026-09-16T17:27:59Z
-built_sha: 03838b0b6cbe
+last_cycle: 2026-09-16T18:20:51Z
+built_sha: 57da33354721
