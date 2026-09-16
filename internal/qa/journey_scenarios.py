@@ -82,6 +82,10 @@ def tests_pass(folder):
     return r.returncode == 0, (r.stderr or r.stdout).strip().splitlines()[-1:] or [""]
 
 
+class Hang(Exception):
+    """The window stopped answering the driver."""
+
+
 class Rig:
     """Xvfb + the app on one or two folders, through the JSON driver."""
 
@@ -120,9 +124,42 @@ class Rig:
             env["XDG_CONFIG_HOME"] = str(xdg)
             env["XDG_DATA_HOME"] = str(xdg / "data")
             self.app = arbosdriver.Arbos.launch(binary=DESKTOP_BIN, env=env, log=self.log, xdg=None, timeout=120)
+        self.pulses = []
+        self.pulse("launch")
 
     def state(self):
         return self.app.state()
+
+    PULSE_LIMIT_S = 1.0
+
+    def pulse(self, after):
+        """Liveness: the window must answer the cheapest driver call within a second after any action that opens
+        or changes something (a sheet, a dialog, a tab, a send, a Stop). A hang there reaches Jacob instantly
+        and reads as the app being broken — and no state assertion would ever notice it, because a hung window
+        answers nothing. Returns the round-trip in ms, or raises Hang."""
+        sock = self.app._sock
+        old = sock.gettimeout()
+        t0 = time.time()
+        try:
+            sock.settimeout(self.PULSE_LIMIT_S)
+            self.app.hello()
+        except Exception as e:  # noqa: BLE001 — a timeout, a closed socket: the window is not answering
+            ms = round((time.time() - t0) * 1000)
+            self.cx.rec.log(f"HANG after {after}: no driver answer in {ms} ms ({type(e).__name__})")
+            try:
+                shot = self.cx.rec.dir / f"hang-{int(t0)}.xwd"
+                subprocess.run(["xwd", "-root", "-display", self.display, "-out", str(shot)], capture_output=True, timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+            raise Hang(f"the window stopped answering after {after} ({ms} ms, {type(e).__name__})") from e
+        finally:
+            try:
+                sock.settimeout(old)
+            except Exception:  # noqa: BLE001
+                pass
+        ms = round((time.time() - t0) * 1000)
+        self.pulses.append((after, ms))
+        return ms
 
     def active_path(self):
         st = self.state()
@@ -154,6 +191,7 @@ class Rig:
                     self.app.click(f"tab-{i}")
                 except Exception:  # noqa: BLE001
                     pass
+                self.pulse(f"click tab-{i}")
                 st = self.app.wait_state(lambda s: s.get("active_project") == i, timeout=10, what="active project")
                 return st.get("active_project") == i
         return False
@@ -182,6 +220,7 @@ class Rig:
         self.app.wait_element("composer-field", reachable=True)
         self.app.click("composer-field")
         self.app.type(text + "\n")
+        self.pulse("send")
 
     def dunst_history(self):
         """The daemon's record, oldest first, or None without a daemon. dunst files a notification only once it is
@@ -310,6 +349,7 @@ def register(scenario, registry, transcript, now_ms, branch):
         def mark(step, verdict, why):
             steps[step] = (verdict, why)
             cx.rec.log(f"{step}: {verdict} — {why}")
+
 
         def finish():
             passed = sum(1 for v, _ in steps.values() if v == "pass")
@@ -510,6 +550,7 @@ def register(scenario, registry, transcript, now_ms, branch):
                 stopped_at = time.time()
                 try:
                     rig.app.click("composer-stop")
+                    rig.pulse("Stop")
                     j5["stop_clicked"] = True
                 except Exception as e:  # noqa: BLE001
                     j5["stop_error"] = str(e)[:100]
@@ -733,6 +774,7 @@ def register(scenario, registry, transcript, now_ms, branch):
             second.mkdir(exist_ok=True)
             try:
                 rig.app.click("new-tab")
+                rig.pulse("new-tab (the opener sheet)")
                 time.sleep(1)
                 # The opener lists recent places; type-to-open is not driven here, so open via the CLI arg on relaunch instead.
                 rig.app.key("Escape")
@@ -779,12 +821,29 @@ def register(scenario, registry, transcript, now_ms, branch):
                 mark("J8", "pass", f"restart once (side effect once), second project isolated; dropped connection: pass on the phone loop's run {j8['dropped_connection'].get('ts')}")
             else:
                 mark("J8", "unverified", "restart and second project fine; dropped connection: " + str(j8["dropped_connection"].get("why", c_verdict)))
+        except Hang as e:
+            # The window stopped answering: the step in progress fails, the rest are not reached, and the
+            # journey files it as its own break — the class of bug that reads as "the app is broken".
+            cur = next((s for s in STEPS if steps[s][1] == "not reached"), None)
+            if cur:
+                mark(cur, "fail", f"window hang: {e}")
+            for s in STEPS:
+                if steps[s][1] == "not reached":
+                    steps[s] = ("unverified", f"not reached: the window hung earlier ({str(e)[:60]})")
+            cx.rec.broke("journey-hang", str(e), "the window must answer the driver within 1 s after any sheet, dialog, tab or send")
         except Exception as e:  # noqa: BLE001
             cx.rec.log(f"journey exception: {type(e).__name__}: {e}")
             for s in STEPS:
                 if steps[s][1] == "not reached":
                     steps[s] = ("unverified", f"not reached: {type(e).__name__}: {str(e)[:80]}")
         finally:
+            try:
+                pulses = getattr(rig, "pulses", [])
+                if pulses:
+                    slowest = max(pulses, key=lambda x: x[1])
+                    ev["liveness"] = {"pulses": len(pulses), "slowest_ms": slowest[1], "slowest_after": slowest[0], "limit_ms": int(Rig.PULSE_LIMIT_S * 1000)}
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 rig.close(folders=[folder, second])
             except Exception:  # noqa: BLE001
