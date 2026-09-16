@@ -1990,6 +1990,7 @@ pub async fn serve_client(
             let (local_tx, mut local_rx) = mpsc::unbounded_channel::<Frame>();
             let tx = accept_frames.clone();
             let place_for_history = accept_place.clone();
+            let hooks_for_feedback = Arc::clone(&accept_hooks);
             let out_for_history = out_tx.clone();
             let out_for_read = out_tx;
             let who_name = who.name.clone();
@@ -2065,7 +2066,12 @@ pub async fn serve_client(
                                 tail,
                                 note: &note,
                             };
-                            let b = crate::feedback::bundle(&place_for_history, &req, &host);
+                            let b = crate::feedback::bundle_with(
+                                &place_for_history,
+                                &req,
+                                &host,
+                                Some(&hooks_for_feedback),
+                            );
                             klog::info(
                                 "feedback_bundle",
                                 Some(&agent),
@@ -2091,6 +2097,8 @@ pub async fn serve_client(
                                 children: b.children,
                                 log: b.log,
                                 kernel: b.kernel,
+                                place: b.place,
+                                agents: b.agents,
                                 note: b.note,
                                 redacted: b.redacted,
                                 truncated: b.truncated,
