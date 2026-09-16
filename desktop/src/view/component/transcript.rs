@@ -1291,6 +1291,43 @@ fn spawned_in(items: &[ChatItem], body: Range<usize>) -> Vec<String> {
 /// worker whose report is on the page below says nothing here, one without
 /// a report reads `Done  <title>`. Dim, no box, no glyph; the press opens
 /// the worker.
+/// The mark after a worker that cannot write: it reads and reports, nothing
+/// more. A project whose workers all carry it is a project that will
+/// produce no code (F-56), and that should be visible while it runs.
+pub(crate) fn readonly_mark(theme: &Theme, size: f32) -> AnyElement {
+    div()
+        .id("readonly-mark")
+        .flex_none()
+        .child(
+            icons::icon(icons::system::MAGNIFER)
+                .size(px(size))
+                .text_color(theme.text_faint),
+        )
+        .tooltip(|window, cx| {
+            Tooltip::text("read-only: reads and reports, writes nothing", window, cx)
+        })
+        .into_any_element()
+}
+
+/// The kind chip's word, or none: a plain writing worker carries no kind,
+/// and a coordinator's line already reads as a sub-project.
+pub(crate) fn kind_chip_text(kind: Option<&str>) -> Option<&str> {
+    kind.filter(|k| !k.is_empty() && *k != "coordinator" && *k != "code" && *k != "default")
+}
+
+/// A low-contrast chip with the worker's kind, the model chip's weight.
+pub(crate) fn kind_chip(kind: &str, theme: &Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .px(px(5.))
+        .rounded(px(4.))
+        .bg(theme.surface_raised)
+        .text_style(TextStyle::Caption)
+        .text_color(theme.text_faint)
+        .child(SharedString::from(kind.to_string()))
+        .into_any_element()
+}
+
 fn children_lines(
     chat: &ChatSession,
     spawned: &[String],
@@ -1386,6 +1423,10 @@ fn children_lines(
                             .text_color(theme.text_faint)
                             .child(SharedString::from(rest)),
                     )
+                    .when(child.readonly, |el| el.child(readonly_mark(theme, 12.)))
+                    .when_some(kind_chip_text(child.agent_kind.as_deref()), |el, kind| {
+                        el.child(kind_chip(kind, theme))
+                    })
                     // On the press, as a source list selects: while the turn
                     // streams, the transcript grows and scrolls between a
                     // press and its release.

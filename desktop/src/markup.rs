@@ -156,7 +156,10 @@ mod tests {
 
     #[test]
     fn prose_html_and_code_are_left_alone() {
-        assert_eq!(strip_live("Call `invoke()` on the <b>client</b>."), "Call `invoke()` on the <b>client</b>.");
+        assert_eq!(
+            strip_live("Call `invoke()` on the <b>client</b>."),
+            "Call `invoke()` on the <b>client</b>."
+        );
         assert_eq!(strip_live("a < b and b > c"), "a < b and b > c");
     }
 }

@@ -801,6 +801,13 @@ pub struct SessionSummary {
     pub updated_ms: i64,
     /// Kernel id of the parent agent. Empty for a root.
     pub parent: Option<String>,
+    /// The worker cannot write (a read-only kind, or `readonly: true` on
+    /// the spawn): drawn as a glyph after its name, so a project whose
+    /// workers can all only read looks wrong at a glance (F-56).
+    pub readonly: bool,
+    /// The definition the worker was spawned from (`explore`, …), when one
+    /// was named.
+    pub agent_kind: Option<String>,
 }
 
 /// What this place still holds, and whether the listing reached a live
@@ -880,6 +887,8 @@ fn list_http_sessions(base: &str) -> Vec<SessionSummary> {
                 title: if title.is_empty() { name } else { title },
                 updated_ms: row.updated_at.unwrap_or(0),
                 parent: None,
+                readonly: false,
+                agent_kind: None,
             }
         })
         .collect()
@@ -907,8 +916,10 @@ for p in "$d"/*; do
     n=$(awk -F': *' '/^name:/ {{print $2; exit}}' "$p/agent.md")
     [ -n "$n" ] && name=$n
     parent=$(awk -F': *' '/^parent:/ {{print $2; exit}}' "$p/agent.md")
+    readonly=$(awk -F': *' '/^readonly:/ {{print $2; exit}}' "$p/agent.md")
+    kind=$(awk -F': *' '/^kind:/ {{print $2; exit}}' "$p/agent.md")
   fi
-  printf '%s\t%s\t%s\n' "$id" "$name" "$parent"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$name" "$parent" "$readonly" "$kind"
 done"#,
         dir = dir,
     );
@@ -920,10 +931,12 @@ done"#,
         out.stdout
             .lines()
             .filter_map(|line| {
-                let mut parts = line.splitn(3, '\t');
+                let mut parts = line.splitn(5, '\t');
                 let id = parts.next()?.trim();
                 let name = parts.next().unwrap_or("").trim();
                 let parent = parts.next().unwrap_or("").trim();
+                let readonly = parts.next().unwrap_or("").trim() == "true";
+                let kind = parts.next().unwrap_or("").trim();
                 if id.is_empty() || !safe_session_id(id) {
                     return None;
                 }
@@ -934,6 +947,8 @@ done"#,
                     title: String::new(),
                     updated_ms: 0,
                     parent: (!parent.is_empty()).then(|| parent.to_string()),
+                    readonly,
+                    agent_kind: (!kind.is_empty()).then(|| kind.to_string()),
                 })
             })
             .collect(),
@@ -975,6 +990,8 @@ fn list_local_agents(path: &Path) -> Option<Vec<SessionSummary>> {
             title,
             updated_ms,
             parent,
+            readonly: front.readonly,
+            agent_kind: front.kind,
         });
     }
     Some(out)
@@ -1017,6 +1034,8 @@ struct AgentFront {
     name: Option<String>,
     title: Option<String>,
     parent: Option<String>,
+    readonly: bool,
+    kind: Option<String>,
 }
 
 fn agent_front(text: &str) -> AgentFront {
@@ -1032,6 +1051,10 @@ fn agent_front(text: &str) -> AgentFront {
             front.title = field(value);
         } else if let Some(value) = line.strip_prefix("parent:") {
             front.parent = field(value);
+        } else if let Some(value) = line.strip_prefix("readonly:") {
+            front.readonly = value.trim() == "true";
+        } else if let Some(value) = line.strip_prefix("kind:") {
+            front.kind = field(value);
         }
     }
     front
@@ -1372,10 +1395,53 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
             _ => true,
         }
     });
+    dedupe_replay(&mut items, id);
     Some(crate::model::history::Replay {
         items,
         model: agent_model(&arbos_core::Place::new(&place.path), id),
     })
+}
+
+/// A paragraph once, as the live session shows it (`dedupe_settled`): a
+/// step that repeats the turn's previous prose word for word goes, and so
+/// does a `say` to the user the agent then wrote out as its reply.
+fn dedupe_replay(items: &mut Vec<crate::model::session::ChatItem>, own: &str) {
+    use crate::model::session::ChatItem;
+    let mut drop = vec![false; items.len()];
+    for ix in 0..items.len() {
+        let ChatItem::Agent(text) = &items[ix] else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        for at in (0..ix).rev() {
+            if drop[at] {
+                continue;
+            }
+            match &items[at] {
+                ChatItem::User(_) => break,
+                ChatItem::Agent(earlier) if earlier.trim() == text => {
+                    drop[ix] = true;
+                    break;
+                }
+                ChatItem::From {
+                    who, text: said, ..
+                } if said.trim() == text && (who == own || who.is_empty()) => {
+                    drop[at] = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut ix = 0;
+    items.retain(|_| {
+        let keep = !drop[ix];
+        ix += 1;
+        keep
+    });
 }
 
 /// Whole seconds from `from` to `to` (unix millis); `None` when either is
@@ -3246,6 +3312,28 @@ fn wake_brief(text: &str, brief: Option<&str>) -> String {
 /// The brief a worker was spawned with: the text of the first plan wake in
 /// its transcript. `None` for a remote place, an id that is not a folder,
 /// or a transcript that does not start with one.
+/// `readonly:` and `kind:` off a local agent's `agent.md`, live or already
+/// archived — a worker can finish before the listing next runs, and its
+/// line still has to say it could not write.
+pub fn agent_flags(place: &Place, id: &str) -> Option<(bool, Option<String>)> {
+    if place.host.is_some() || !safe_session_id(id) {
+        return None;
+    }
+    let store = place.path.join(".arbos");
+    let md = [
+        store.join("agents").join(id).join("agent.md"),
+        store
+            .join("archive")
+            .join("agents")
+            .join(id)
+            .join("agent.md"),
+    ]
+    .into_iter()
+    .find_map(|path| std::fs::read_to_string(path).ok())?;
+    let front = agent_front(&md);
+    Some((front.readonly, front.kind))
+}
+
 pub fn agent_brief(place: &Place, id: &str) -> Option<String> {
     if place.host.is_some() || !safe_session_id(id) {
         return None;

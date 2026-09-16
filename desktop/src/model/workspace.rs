@@ -1221,7 +1221,15 @@ impl Workspace {
             // Old files may still name a catalog agent. The runtime is
             // always this kernel.
             let entry = settings::kernel_agent();
-            let chat = ChatSession::restore(id, file, place.clone(), entry, stored);
+            let mut chat = ChatSession::restore(id, file, place.clone(), entry, stored);
+            // A worker's kind does not change; read it back off its
+            // `agent.md`, live or archived, so the mark survives a relaunch.
+            if let Some(sid) = chat.agent_session.clone()
+                && let Some((readonly, kind)) = kernel::agent_flags(&place, &sid)
+            {
+                chat.readonly = readonly;
+                chat.agent_kind = kind;
+            }
             self.projects[ix].sessions.push(chat);
         }
         self.resolve_parents(ix);
@@ -1377,6 +1385,12 @@ impl Workspace {
                     if chat.updated < updated {
                         chat.updated = updated;
                     }
+                    if row.readonly {
+                        chat.readonly = true;
+                    }
+                    if chat.agent_kind.is_none() {
+                        chat.agent_kind = row.agent_kind.clone();
+                    }
                     // The kernel's parent wins where it names one. Where it
                     // names none the desktop's stands: a ⌘N sub-chat is
                     // nested here and nowhere the kernel can see.
@@ -1434,6 +1448,8 @@ impl Workspace {
                 updated,
             );
             chat.parent_kernel = row.parent.filter(|p| !p.is_empty());
+            chat.readonly = row.readonly;
+            chat.agent_kind = row.agent_kind.clone();
             if let Some(model) = replay.model {
                 chat.model = Some(model);
             }
@@ -2788,6 +2804,7 @@ impl Workspace {
         // not "Delegate N", from the first frame.
         let name = kernel::agent_name(&self.projects[ix].place(), &kernel_id);
         let brief = kernel::agent_brief(&self.projects[ix].place(), &kernel_id);
+        let flags = kernel::agent_flags(&self.projects[ix].place(), &kernel_id);
         let mut chat = ChatSession::adopt(
             id,
             entry,
@@ -2798,6 +2815,10 @@ impl Workspace {
             cx,
         );
         chat.name = name;
+        if let Some((readonly, kind)) = flags {
+            chat.readonly = readonly;
+            chat.agent_kind = kind;
+        }
         // Cursor shows a subagent's brief as its first card; the kernel
         // wrote it as the worker's first wake.
         if chat.items.is_empty()
@@ -2886,6 +2907,8 @@ impl Workspace {
                 kernel_id: chat.agent_session.clone(),
                 title: self.display_label(chat.id),
                 state: chat.child_state(),
+                readonly: chat.readonly,
+                agent_kind: chat.agent_kind.clone(),
                 step: chat.current_step(),
             })
             .collect()

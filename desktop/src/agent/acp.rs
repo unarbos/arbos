@@ -397,7 +397,9 @@ impl Session {
                 if self.remote {
                     match self.put_attachment(&a.path) {
                         Ok(stored) => return stored,
-                        Err(err) => eprintln!("attachment {}: {err:#}; sending the path", a.path.display()),
+                        Err(err) => {
+                            eprintln!("attachment {}: {err:#}; sending the path", a.path.display())
+                        }
                     }
                 }
                 std::path::absolute(&a.path)

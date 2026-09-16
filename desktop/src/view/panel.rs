@@ -140,6 +140,8 @@ struct AgentLine {
     /// Cursor's task-list rows read "title — summary": the step while it
     /// works, its last words once done. None for the main chat.
     summary: Option<String>,
+    /// The worker cannot write: the same mark as on its line in the chat.
+    readonly: bool,
 }
 
 /// A worker the kernel archived that this window never had a row for:
@@ -275,6 +277,7 @@ impl Arbos {
                     // keeps its spinner turning.
                     since: chat.elapsed().unwrap_or_else(transcript::live_phase),
                     summary: (n != 0).then(|| row_summary(chat)).flatten(),
+                    readonly: chat.readonly,
                 })
             })
             .collect();
@@ -642,6 +645,14 @@ impl Arbos {
                     .flex_row()
                     .items_baseline()
                     .child(div().flex_none().truncate().text_color(tint).child(title))
+                    .when(line.readonly, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .ml(px(4.))
+                                .child(transcript::readonly_mark(theme, 10.)),
+                        )
+                    })
                     .when_some(line.summary, |el, summary| {
                         el.child(
                             div()
