@@ -514,6 +514,11 @@ pub struct ChatSession {
     /// This chat's sub-agents as the transcript and the task rail show
     /// them. Runtime only: the workspace refreshes it before each draw.
     pub children: Vec<ChildSummary>,
+    /// This worker cannot write (`readonly: true` on its `agent.md`): the
+    /// glyph after its name in the worker line and the roster.
+    pub readonly: bool,
+    /// The kind it was spawned from (`explore`, …), for the kind chip.
+    pub agent_kind: Option<String>,
     /// When `live` last became non-empty, for the braille tick.
     pub live_since: Option<SystemTime>,
     /// Seconds a thought had before a later step reopened it; added back
@@ -662,6 +667,8 @@ impl ChatSession {
             stream_raw: HashMap::new(),
             kickoff_at: None,
             kickoff_secs: None,
+            readonly: false,
+            agent_kind: None,
             kickoff_wanted: false,
             status: None,
             turn_open: false,
@@ -743,6 +750,8 @@ impl ChatSession {
             stream_raw: HashMap::new(),
             kickoff_at: None,
             kickoff_secs: None,
+            readonly: false,
+            agent_kind: None,
             kickoff_wanted: false,
             status: None,
             turn_open: false,
@@ -824,6 +833,8 @@ impl ChatSession {
             stream_raw: HashMap::new(),
             kickoff_at: None,
             kickoff_secs: None,
+            readonly: false,
+            agent_kind: None,
             kickoff_wanted: false,
             status: None,
             turn_open: false,
@@ -1290,6 +1301,8 @@ pub struct ChildSummary {
     pub kernel_id: Option<String>,
     pub title: String,
     pub state: ChildState,
+    pub readonly: bool,
+    pub agent_kind: Option<String>,
     /// What the worker is on right now: its `status` line from the kernel
     /// when it sent one, else the tool it is running or last ran.
     pub step: Option<String>,
@@ -1674,6 +1687,50 @@ impl ChatSession {
         let ix = self.items.len() - 1;
         self.stream_raw.insert(ix, text);
         Some(ix)
+    }
+
+    /// A step's settled line that says what the turn already said: the same
+    /// paragraph as the reply's previous prose (a model that repeats itself
+    /// across a tool call), or the words the agent already sent the user
+    /// with `say`. Cursor shows a paragraph once; so does the window — the
+    /// repeat goes (F-66, F-67). Exact match only; near-repeats are the
+    /// kernel's to judge.
+    fn dedupe_settled(&mut self, ix: usize) {
+        let Some(ChatItem::Agent(text)) = self.items.get(ix) else {
+            return;
+        };
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let mut same_say = None;
+        let mut same_prose = false;
+        for (at, item) in self.items[..ix].iter().enumerate().rev() {
+            match item {
+                ChatItem::User(_) => break,
+                ChatItem::Agent(earlier) if earlier.trim() == text => {
+                    same_prose = true;
+                    break;
+                }
+                ChatItem::From {
+                    who, text: said, ..
+                } if said.trim() == text
+                    && self
+                        .agent_session
+                        .as_deref()
+                        .is_none_or(|own| who == own || who.is_empty()) =>
+                {
+                    same_say = Some(at);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if same_prose {
+            self.drop_item(ix);
+        } else if let Some(at) = same_say {
+            self.drop_item(at);
+        }
     }
 
     /// The settled line of a streamed reply is empty (a reply that was only
@@ -2464,6 +2521,7 @@ impl ChatSession {
                     if self.streaming_agent == Some(ix) {
                         self.streaming_agent = None;
                     }
+                    self.dedupe_settled(ix);
                     self.flush();
                     return;
                 }

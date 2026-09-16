@@ -162,7 +162,7 @@ impl Arbos {
                     cx,
                     Plate {
                         id: "status-bar-updating",
-                    label: format!("Updating… {}%", (fraction * 100.).round() as u32),
+                        label: format!("Updating… {}%", (fraction * 100.).round() as u32),
                         icon: None,
                         fill: theme.accent,
                         progress: Some(fraction),
