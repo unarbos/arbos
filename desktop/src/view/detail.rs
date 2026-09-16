@@ -2359,11 +2359,30 @@ impl Arbos {
                 .then(|| chat.host.as_deref().and_then(crate::kernel::connect_step))
                 .flatten()
         });
+        // Asked and not yet ended is still setting up, however long it
+        // takes: a kickoff whose provider never answers must not fall to
+        // the "ready" greeting after twenty quiet seconds (F-77) — that is
+        // the lie Jacob abandoned. The clock and the hint below say what
+        // is happening instead.
+        let unfinished = workspace
+            .active_session()
+            .is_some_and(|chat| chat.kickoff_at.is_some() && chat.kickoff_secs.is_none());
         let setting_up = connecting.is_some()
-            || asked.is_some_and(|since| busy || since < Duration::from_secs(20));
+            || asked.is_some_and(|since| busy || unfinished || since < Duration::from_secs(20));
         let shimmer_text = connecting
             .clone()
             .unwrap_or_else(|| "Setting up environment".to_string());
+        // A kickoff that is producing nothing: the clock after twenty
+        // seconds, and past a minute what to do — Jacob waited 98 s on a
+        // silent shimmer and gave up (F-77).
+        let waited = asked.filter(|_| connecting.is_none()).unwrap_or_default();
+        let shimmer_text = if waited >= Duration::from_secs(20) {
+            format!("{shimmer_text} · {}", transcript::since_short(waited))
+        } else {
+            shimmer_text
+        };
+        let stalled = waited >= Duration::from_secs(60);
+
         let greeting = format!(
             "{name} is ready. Drag in files, or just tell me what you want to build and I'll get it moving.\n\nAnytime you want me to work differently, say so and I'll remember."
         );
@@ -2390,9 +2409,9 @@ impl Arbos {
                             .id("kickoff-setting-up")
                             .pt(px(28.))
                             .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.))
+                            .flex_col()
+                            .items_start()
+                            .gap(px(6.))
                             .text_style(TextStyle::Body)
                             .text_size(px(root::CURSOR_PROSE_SIZE))
                             .text_color(theme.text_muted)
@@ -2402,6 +2421,18 @@ impl Arbos {
                                 theme,
                                 cx,
                             ))
+                            .when(stalled, |el| {
+                                el.child(
+                                    div()
+                                        .id("kickoff-stall-hint")
+                                        .text_style(TextStyle::Callout)
+                                        .text_color(theme.text_faint)
+                                        .child(SharedString::from(format!(
+                                            "Nothing has arrived in {}. Stop to try again, or check the model key in Settings.",
+                                            transcript::since_short(waited)
+                                        ))),
+                                )
+                            })
                             .into_any_element()
                     } else {
                         div()

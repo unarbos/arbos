@@ -612,15 +612,23 @@ fn notice(
     if let Some(reason) = text.strip_prefix("answer refused:") {
         return asked_line("answer", &format!("refused — {}", reason.trim()), theme);
     }
+    // A failure's raw wording — a provider's refusal, two model ids, a
+    // documentation link — is never the line (F-76); Cursor shows a short
+    // sentence and keeps the detail behind a disclosure. The same for the
+    // kernel's "switched to <model> for this turn: <the whole reason>",
+    // Jacob's first line on a new project. The disclosure is there
+    // whenever the short line dropped something.
     let shown = if failed {
         short_error(text)
     } else {
-        text.to_owned()
+        short_notice(text)
     };
+    let detail = (shown.trim() != text.trim()).then(|| text.trim().to_string());
+    let open = detail.is_some() && chat.transcript.groups.contains(&ix);
     let retry = failed.then(|| last_user_prompt(&chat.items)).flatten();
     let can_retry = retry.is_some() && !chat.busy();
     let id = chat.id;
-    div()
+    let row = div()
         .self_start()
         .w_full()
         .max_w(px(root::CHAT_MAX_WIDTH))
@@ -639,6 +647,41 @@ fn notice(
                 .min_w_0()
                 .child(spaced_label(shown, theme.text_muted, theme)),
         )
+        .when(detail.is_some(), |row| {
+            row.child(
+                div()
+                    .id(SharedString::from(format!("notice-details-{id}-{ix}")))
+                    .flex_none()
+                    .cursor_pointer()
+                    .rounded(px(4.))
+                    .px(px(6.))
+                    .py(px(2.))
+                    .hover(|el| el.bg(theme.element_hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.with_session(id, cx, |chat| chat.transcript.toggle_group(ix));
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(3.))
+                            .text_style(TextStyle::Caption)
+                            .text_color(theme.text_faint)
+                            .child("Details")
+                            .child(
+                                icons::icon(if open {
+                                    icons::arrows::ALT_ARROW_DOWN
+                                } else {
+                                    icons::arrows::ALT_ARROW_RIGHT
+                                })
+                                .size(px(10.))
+                                .text_color(theme.text_faint),
+                            ),
+                    ),
+            )
+        })
         .when_some(retry, |row, prompt| {
             row.child(
                 div()
@@ -663,8 +706,29 @@ fn notice(
                             .child("Retry"),
                     ),
             )
-        })
-        .into_any_element()
+        });
+    match detail.filter(|_| open) {
+        Some(detail) => div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(row)
+            .child(
+                div()
+                    .id(SharedString::from(format!("notice-detail-{id}-{ix}")))
+                    .w_full()
+                    .max_w(px(root::CHAT_MAX_WIDTH))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(6.))
+                    .bg(theme.surface_raised)
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(detail)),
+            )
+            .into_any_element(),
+        None => row.into_any_element(),
+    }
 }
 
 fn last_user_prompt(items: &[ChatItem]) -> Option<Prompt> {
@@ -678,8 +742,64 @@ fn last_user_prompt(items: &[ChatItem]) -> Option<Prompt> {
 }
 
 /// Cursor errors are one short line, not the kernel's full wrap.
+/// A notice that is not a failure, cut to its news: "switched to
+/// <model> for this turn" without the provider's paragraph after the colon;
+/// anything else that runs long, to its first sentence. The whole text
+/// stays behind the Details disclosure.
+fn short_notice(text: &str) -> String {
+    let text = text.trim();
+    // "google/gemini-2.5-flash: connection failed: error sending request
+    // for url (…) — retrying in 2.4s (attempt 4/5)": the attempt is the
+    // news; the URL and the model id are the detail.
+    if crate::model::session::is_retry_line(text) {
+        let attempt = text
+            .split("(attempt ")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .unwrap_or("?");
+        let what = if text.contains("connection failed") {
+            "Connection failed"
+        } else {
+            "The model did not answer"
+        };
+        return format!("{what}; retrying (attempt {attempt}).");
+    }
+    if let Some(rest) = text.strip_prefix("switched to ")
+        && let Some((model, _)) = rest.split_once(" for this turn")
+    {
+        let model = model.rsplit('/').next().unwrap_or(model);
+        return format!("Switched to {model} for this turn.");
+    }
+    if text.chars().count() > 160 {
+        let first = text
+            .split_inclusive(['.', ':'])
+            .next()
+            .unwrap_or(text)
+            .trim_end_matches(':')
+            .trim();
+        return shorten(first, 100);
+    }
+    text.to_owned()
+}
+
 fn short_error(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
+    // A provider turning the request down — a policy block, a bad key, a
+    // quota, a rate limit: the model did not answer, and the reason is a
+    // sentence, not a paragraph with model ids and a documentation link
+    // (Jacob's first line on a new project, F-76).
+    if lower.contains("policy violation")
+        || lower.contains("has been blocked")
+        || lower.contains("content_policy")
+    {
+        return "The model provider refused the request.".into();
+    }
+    if lower.contains("no api key") || lower.contains("invalid api key") || lower.contains("401") {
+        return "No working model key on this kernel.".into();
+    }
+    if lower.contains("rate limit") || lower.contains("429") || lower.contains("quota") {
+        return "The model provider is rate-limiting requests.".into();
+    }
     if lower.contains("cut off") || lower.contains("mid-stream") {
         return "Answer was cut off. Send the message again.".into();
     }
@@ -3727,7 +3847,9 @@ fn zone(
         .flex_col()
         .gap(px(ITEM_GAP));
     let mut has_tail = false;
-    for ix in turn.answer_from..turn.range.end {
+    // The tail starts where the body ended: the report line under a wake
+    // segment's header is drawn above, not again here.
+    for ix in turn.answer_from.max(body_start)..turn.range.end {
         // The interruption is on the fold line already; once is enough.
         if header_drawn
             && let ChatItem::Notice { text, .. } = &chat.items[ix]
@@ -5173,24 +5295,61 @@ fn heartbeat(
             )
             .into_any_element();
     }
+    // A turn that has produced nothing for a while — a kickoff whose
+    // provider is not answering (Jacob waited 98 s on a silent shimmer and
+    // gave up, F-77) — says how long, and past a minute what to do. The
+    // clock ticks, so it never reads as frozen.
+    let quiet = since >= STALL_CLOCK_AFTER;
+    let stalled = since >= STALL_HINT_AFTER;
+    if quiet {
+        Painter::of(cx).lease(2.0, Duration::from_millis(1100), cx);
+    }
+    let label = if quiet {
+        format!("{label} · {}", since_short(since))
+    } else {
+        label
+    };
     div()
         .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(ROW_GAP))
+        .flex_col()
+        .gap(px(4.))
         .py(px(2.))
         .child(
             div()
-                .text_style(TextStyle::Body)
-                .text_size(px(root::CURSOR_PROSE_SIZE))
-                .text_color(theme.text_muted)
-                .child(shimmer_label(label, since, theme, cx)),
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(ROW_GAP))
+                .child(
+                    div()
+                        .text_style(TextStyle::Body)
+                        .text_size(px(root::CURSOR_PROSE_SIZE))
+                        .text_color(theme.text_muted)
+                        .child(shimmer_label(label, since, theme, cx)),
+                ),
         )
+        .when(stalled, |el| {
+            el.child(
+                div()
+                    .id("stall-hint")
+                    .text_style(TextStyle::Callout)
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(format!(
+                        "Nothing has arrived in {}. Stop to try again, or check the model key in Settings.",
+                        since_short(since)
+                    ))),
+            )
+        })
         .into_any_element()
 }
 
+/// When a silent turn's heartbeat starts showing its clock, and when it
+/// adds the hint.
+const STALL_CLOCK_AFTER: Duration = Duration::from_secs(20);
+const STALL_HINT_AFTER: Duration = Duration::from_secs(60);
+
 /// `42s`, `1m 05s`: the thinking clock.
-fn since_short(elapsed: Duration) -> String {
+pub(crate) fn since_short(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     if secs < 60 {
         format!("{secs}s")
