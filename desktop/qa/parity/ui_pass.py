@@ -68,7 +68,7 @@ STORE = Path(os.environ.get("STORE", "/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-
 # This folder: the scripts and fake gh beside this file. The driver module
 # lives with the app at desktop/driver/arbosdriver.py.
 PARITY = Path(os.environ.get("PARITY", Path(__file__).resolve().parent))
-DRIVER_PY = Path(os.environ.get("ARBOS_DRIVER_PY", PARITY.parent.parent / "driver" / "arbosdriver.py"))
+DRIVER_PY = Path(os.environ.get("ARBOS_DRIVER_PY", Path(__file__).resolve().parent.parent.parent / "driver" / "arbosdriver.py"))
 PROJ = Path(os.environ.get("PROJ", "/tmp/parity-proj"))
 DISPLAY = os.environ.get("DISPLAY", ":1")
 ENV = {**os.environ, "DISPLAY": DISPLAY}
