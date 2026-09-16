@@ -1238,8 +1238,8 @@ fn from_block(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    if let Some((ok, words)) = done_report(text) {
-        return worker_card(chat, ix, who, ok, &words, theme, window, cx);
+    if let Some((verdict, words)) = done_report(text) {
+        return worker_card(chat, ix, who, verdict, &words, theme, window, cx);
     }
     div()
         .self_start()
@@ -1264,23 +1264,45 @@ fn from_block(
         .into_any_element()
 }
 
+/// How a worker's turn ended, as its report to the parent says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verdict {
+    Done,
+    Failed,
+    /// Paused by the user's Stop (kernel #324): not a failure, and the
+    /// kernel's advice to the coordinator on how to resume is not for the
+    /// user's eyes.
+    Stopped,
+}
+
 /// The kernel's done file for a worker, as it lands in the parent's chat:
-/// `Turn ended. Last words: … (transcript: …)`, or `Turn ended badly.
-/// …`. The verdict and the words, without the file pointer.
-fn done_report(text: &str) -> Option<(bool, String)> {
+/// `Turn ended. Last words: … (transcript: …)`, `Turn ended badly. …`, or
+/// `Turn stopped by the user. …`. The verdict and the words, without the
+/// file pointer and whatever the kernel wrote after it (F-116).
+fn done_report(text: &str) -> Option<(Verdict, String)> {
     let text = text.trim();
-    let (ok, rest) = if let Some(rest) = text.strip_prefix("Turn ended. Last words:") {
-        (true, rest)
+    let (verdict, rest) = if let Some(rest) = text.strip_prefix("Turn ended. Last words:") {
+        (Verdict::Done, rest)
     } else if let Some(rest) = text.strip_prefix("Turn ended badly. Last words:") {
-        (false, rest)
+        (Verdict::Failed, rest)
+    } else if let Some(rest) = text.strip_prefix("Turn stopped by the user.") {
+        (Verdict::Stopped, rest.trim_start().strip_prefix("Last words:").unwrap_or(rest))
     } else {
         return None;
     };
     let mut words = rest.trim().to_string();
-    if let Some(at) = words.rfind("(transcript:") {
+    if let Some(at) = words.find("(transcript:") {
         words.truncate(at);
     }
-    Some((ok, words.trim().trim_end_matches('…').trim().to_string()))
+    let words = words.trim().trim_end_matches('…').trim().to_string();
+    // "stopped by the user (Stop)" as the last words says what the verdict
+    // already says.
+    let words = if verdict == Verdict::Stopped && words.to_lowercase().starts_with("stopped by the user") {
+        String::new()
+    } else {
+        words
+    };
+    Some((verdict, words))
 }
 
 /// A worker's completion, as Cursor draws it: the worker's last words as
@@ -1289,7 +1311,7 @@ fn worker_card(
     chat: &ChatSession,
     ix: usize,
     who: &str,
-    ok: bool,
+    verdict: Verdict,
     words: &str,
     theme: &Theme,
     window: &mut Window,
@@ -1304,10 +1326,13 @@ fn worker_card(
     // last words. The chip is a link to the worker's chat (`agents/<id>`
     // dresses as an agent chip), so the name is the way in.
     let name = chat.who_label(who);
-    let head = format!(
-        "[{name}](agents/{who}) {}",
-        if ok { "done" } else { "ended badly" }
-    );
+    let said = match verdict {
+        Verdict::Done => "done",
+        Verdict::Failed => "ended badly",
+        Verdict::Stopped => "stopped by you",
+    };
+    let head = format!("[{name}](agents/{who}) {said}");
+    let ok = verdict != Verdict::Failed;
     let words = if words.is_empty() {
         head
     } else {
@@ -3899,6 +3924,11 @@ fn zone(
             .iter()
             .enumerate()
             .map(|(n, seg)| match seg {
+                // Cursor's Project chat shows no thoughts: they live behind
+                // the "Worked" headline, and where no headline was drawn
+                // (a turn with no time to its name) they are not drawn at
+                // all (cycle 23, J08: "Thought briefly" bare over the answer).
+                Seg::Thought(_) if project_style && !header_drawn => div().into_any_element(),
                 Seg::Thought(ix) => thought(chat, *ix, false, window, cx),
                 Seg::Prose(ix) => {
                     let ChatItem::Agent(text) = &chat.items[*ix] else {
