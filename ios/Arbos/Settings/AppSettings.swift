@@ -97,15 +97,18 @@ final class AppSettings: ObservableObject {
             }
             Keychain.write(bakedValue, account: "\(account)-baked")
         }
-        // The baked hub address moves with the build too, unless typed over.
-        if !baked.hubURL.isEmpty {
-            let previous = defaults.string(forKey: "baked-hubURL")
-            if previous == nil || hubURL == previous { hubURL = baked.hubURL }
-            defaults.set(baked.hubURL, forKey: "baked-hubURL")
-        }
         voiceToken = Keychain.read(Self.voiceTokenAccount) ?? ""
         kernelToken = Keychain.read(Self.kernelTokenAccount) ?? ""
         hubToken = Keychain.read(Self.hubTokenAccount) ?? ""
+        // The baked hub address moves with the build too, unless typed over.
+        if !baked.hubURL.isEmpty {
+            let previous = defaults.string(forKey: "baked-hubURL")
+            if previous == nil || hubURL == previous {
+                hubURL = baked.hubURL
+                defaults.set(baked.hubURL, forKey: "hubURL")
+            }
+            defaults.set(baked.hubURL, forKey: "baked-hubURL")
+        }
     }
 
     var hubConfigured: Bool {
