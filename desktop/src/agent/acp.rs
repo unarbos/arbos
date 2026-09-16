@@ -11,7 +11,7 @@ use crate::{
         session::{Artifact, ArtifactKind},
     },
 };
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use arbos_core::wire::Frame;
 use cacp::{
     Error,
@@ -428,15 +428,11 @@ impl Session {
     /// relative path the kernel will know it by.
     fn put_attachment(&self, path: &Path) -> Result<String> {
         use base64::Engine;
+        // No size check here: the kernel holds the file to `PUT_MAX_BYTES`
+        // and its refusal comes back as a `written` frame the chat shows,
+        // where a silent fallback to a path the kernel cannot read would
+        // not. The tray caps the total before this point anyway.
         let bytes = std::fs::read(path)?;
-        if bytes.len() > arbos_core::wire::PUT_MAX_BYTES {
-            bail!(
-                "{} is {} MB; the kernel takes at most {} MB",
-                path.display(),
-                bytes.len() / (1024 * 1024),
-                arbos_core::wire::PUT_MAX_BYTES / (1024 * 1024)
-            );
-        }
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

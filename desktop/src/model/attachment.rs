@@ -61,12 +61,15 @@ impl Attachment {
                     path.display()
                 );
             }
+            // A file that is not an image still has a size the kernel
+            // will hold it to (`PUT_MAX_BYTES` on a remote place): count it.
+            let bytes = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
             return Ok(Self {
                 path,
                 preview: None,
                 history_image: None,
                 image: None,
-                bytes: 0,
+                bytes,
             });
         }
         let format = format.unwrap();
@@ -425,7 +428,7 @@ impl AttachmentTray {
             bail!("Attach at most 16 files per message");
         }
         if self.items.iter().map(|a| a.bytes).sum::<usize>() + attachment.bytes > MAX_TOTAL_BYTES {
-            bail!("Images in one message must total at most 20 MiB");
+            bail!("Attachments in one message must total at most 20 MiB");
         }
         self.items.push(attachment);
         Ok(())
