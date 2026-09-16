@@ -252,6 +252,8 @@ struct ProjectChatView: View {
                     proxy.scrollTo("tail", anchor: .bottom)
                     try? await Task.sleep(for: .milliseconds(600))
                     proxy.scrollTo("tail", anchor: .bottom)
+                    try? await Task.sleep(for: .milliseconds(900))
+                    proxy.scrollTo("tail", anchor: .bottom)
                 }
             }
             .onChange(of: chat.workers) { _, _ in
