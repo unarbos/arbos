@@ -336,7 +336,8 @@ final class ChatStore: ObservableObject {
             }
         case .agentDone:
             closeOpenAgentMessage()
-        case .agentReplace(let text, let step):
+        case .agentReplace(let raw, let step):
+            let text = ToolMarkup.strip(raw)
             // The step's own item when the kernel numbers steps; the last
             // agent item when it does not (older kernels).
             let index = step > 0
@@ -352,8 +353,12 @@ final class ChatStore: ObservableObject {
                    streamedText.trimmingCharacters(in: .whitespacesAndNewlines).count > text.count {
                     break
                 }
+                if text.isEmpty {
+                    items.remove(at: index)
+                    break
+                }
                 items[index].kind = .agent(text, streaming: false)
-                if wasOpen, !text.isEmpty { onAgentMessage?(text) }
+                if wasOpen { onAgentMessage?(text) }
             } else if !text.isEmpty {
                 // Nothing streamed for this step (attached mid-turn): a new message.
                 closeOpenAgentMessage()
@@ -388,8 +393,14 @@ final class ChatStore: ObservableObject {
     private func closeOpenAgentMessage() {
         guard let index = items.indices.last,
               case .agent(let text, streaming: true) = items[index].kind else { return }
-        let final = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Markup a model wrote as a call goes; a reply that was only markup
+        // settles to no line on the kernel (#278), so no bubble stays here.
+        let final = ToolMarkup.strip(text)
+        if final.isEmpty {
+            items.remove(at: index)
+            return
+        }
         items[index].kind = .agent(final, streaming: false)
-        if !final.isEmpty { onAgentMessage?(final) }
+        onAgentMessage?(final)
     }
 }

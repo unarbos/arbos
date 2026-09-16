@@ -205,13 +205,17 @@ final class LiveKernelChat: ChatSource {
     private func handleLive(_ event: KernelEvent) {
         if case .assistant(let text, let step) = event {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return }
             if step > 0 {
                 // Numbered (#247): the store replaces the step's streamed text,
                 // or adds the line when nothing was streamed for it. Never a
-                // second copy after "Worked".
+                // second copy after "Worked". An empty settled line (the
+                // step only called tools, or its words were markup the
+                // kernel cut) takes the step's streamed bubble away.
                 stream?.yield(.agentReplace(trimmed, step: step))
-            } else if streamed {
+                return
+            }
+            guard !trimmed.isEmpty else { return }
+            if streamed {
                 streamed = false
                 stream?.yield(.agentReplace(trimmed, step: 0))
             } else {
@@ -248,7 +252,8 @@ final class LiveKernelChat: ChatSource {
         case .user(let text), .answer(let text):
             return ChatItem(.user(text))
         case .assistant(let text, let step):
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Lines from before #278 may still carry a call written as text.
+            let trimmed = ToolMarkup.strip(text)
             return trimmed.isEmpty ? nil : ChatItem(.agent(trimmed, streaming: false), step: step)
         case .tool(let record):
             if record.name == "spawn", let child = record.child {

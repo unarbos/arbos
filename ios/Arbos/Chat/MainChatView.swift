@@ -455,8 +455,11 @@ struct ChatRow: View {
             .frame(maxWidth: .infinity, alignment: .trailing)
             .padding(.top, 6)
         case .agent(let text, let streaming):
+            // A call written as text streams in raw; the prose before it is
+            // shown, the markup is not (it goes for good when the bubble closes).
+            let shown = streaming ? ToolMarkup.visible(text) : text
             HStack(alignment: .lastTextBaseline, spacing: 2) {
-                Text(Self.prose(text))
+                Text(Self.prose(shown))
                     .font(ArbosTheme.body)
                     .lineSpacing(ArbosTheme.lineSpacing)
                     .foregroundStyle(ArbosTheme.text)
