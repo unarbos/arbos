@@ -78,8 +78,12 @@ jobs:
           # the next build signs with aps-environment and pushes start —
           # no release change. Until then the entitlement stays out, or the
           # export would fail on a profile without it.
-          pip3 install --quiet --disable-pip-version-check pyjwt cryptography requests >/dev/null 2>&1
-          ENT=$(python3 - <<'PY'
+          # This lookup must never stop an upload: a failed install or call
+          # leaves ENT empty and the build ships without the entitlement,
+          # as every build before it did.
+          pip3 install --quiet --disable-pip-version-check --user --break-system-packages pyjwt cryptography requests \
+            || echo "::warning::push: could not install pyjwt/requests; skipping the capability check"
+          ENT=$(python3 - <<'PY' || true
           import jwt, time, requests, os, sys
           kid = os.environ["IOS_ASC_KEY_ID"]; iss = os.environ["IOS_ASC_ISSUER_ID"]
           key = open(os.path.expanduser(f"~/.appstoreconnect/private_keys/AuthKey_{kid}.p8")).read()
