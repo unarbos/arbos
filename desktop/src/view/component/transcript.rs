@@ -1484,16 +1484,17 @@ fn children_lines(
                 .is_some_and(|id| spawned.iter().any(|s| s == id))
         })
         .collect();
-    let working = children
-        .iter()
-        .filter(|c| c.state == ChildState::Working)
-        .count();
+    // A worker just spawned and not yet on its first token is working
+    // while the root's turn runs — the pill counts it so (`pill_counts`),
+    // and Cursor says "2 Working" from the spawn; "Waiting" is for a worker
+    // idle between turns under an idle root (F-86, journey run 2).
+    let is_working = |c: &&crate::model::session::ChildSummary| {
+        c.state == ChildState::Working || (running && c.state == ChildState::Waiting)
+    };
+    let working = children.iter().filter(|c| is_working(c)).count();
     let one_line = running && working > 0;
     let live_line = one_line.then(|| {
-        let live: Vec<_> = children
-            .iter()
-            .filter(|c| c.state == ChildState::Working)
-            .collect();
+        let live: Vec<_> = children.iter().filter(|c| is_working(c)).collect();
         // One worker: its own live step (Jacob's Cursor still reads "1
         // Working  Reading project context…"); several: the coordinator's
         // step over all of them ("Waiting on three writers").
@@ -1579,7 +1580,7 @@ fn children_lines(
         .filter_map(|child| {
             let id = child.id;
             let (verb, rest, tone) = match child.state {
-                ChildState::Working if one_line => return None,
+                ChildState::Working | ChildState::Waiting if one_line => return None,
                 ChildState::Working => {
                     let verb = if first_working && working > 1 {
                         format!("{working} Working")

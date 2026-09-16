@@ -303,6 +303,13 @@ class Journey:
 
     def j03_kickoff(self) -> None:
         t0 = time.time()
+        # The kickoff turn takes a few seconds to be filed and start: wait
+        # for it to be live (or to have already greeted) before waiting for
+        # it to end, or the challenge goes out under it (run 2 did).
+        def begun():
+            c = self.root() or {}
+            return c.get("streaming") or c.get("turn_open") or any(i.get("kind") == "agent" for i in c.get("items", [])) or None
+        self.wait(begun, 30)
         settled = self.wait_root_idle(150)
         c = self.root() or {}
         greeting = any(i.get("kind") == "agent" and (i.get("text") or "").strip() for i in c.get("items", []))
@@ -419,7 +426,7 @@ class Journey:
         n_after = len(after.get("items", []))
         kept = last_agent and any(last_agent.strip() == (i.get("text") or "").strip() for i in after.get("items", []) if i.get("kind") == "agent")
         users_after = [i.get("text", "")[:40] for i in after.get("items", []) if i.get("kind") == "user"]
-        doubled = len(users_after) != len(set(users_after))
+        doubled = sorted({u for u in users_after if users_after.count(u) > 1})
         self.score("J11-close-reopen", "quit and relaunch: the tab is back, the transcript has every item (no loss, no doubled prompt), the last reply is there",
                    ix is not None and n_after >= n_before - 2 and bool(kept) and not doubled and not busy(self.state()),
                    f"tab={ix} items {n_before}->{n_after} last_reply_kept={bool(kept)} doubled_prompts={doubled} pane={self.state().get('pane')}", t0)
