@@ -560,9 +560,18 @@ final class ChatStore: ObservableObject {
             // The transcript line that asked may already be on screen (a
             // replay, or the settled text): it becomes the card, so the
             // question is not drawn twice.
-            if let last = items.lastIndex(where: \.isAgent), case .agent(let text, _) = items[last].kind,
-               text.trimmingCharacters(in: .whitespacesAndNewlines) == question.trimmingCharacters(in: .whitespacesAndNewlines) {
-                items[last].kind = .ask(question: question, options: options, id: id, answered: false)
+            let wanted = question.trimmingCharacters(in: .whitespacesAndNewlines)
+            let same = items.lastIndex(where: { item in
+                if case .agent(let text, _) = item.kind { return text.trimmingCharacters(in: .whitespacesAndNewlines) == wanted }
+                return false
+            })
+            if let same {
+                items[same].kind = .ask(question: question, options: options, id: id, answered: false)
+                // The replay's own "Waiting for your answer" line says what the card says.
+                items.removeAll { item in
+                    if case .notice(let text, false) = item.kind { return text.hasPrefix("Waiting for your answer") }
+                    return false
+                }
             } else if !items.contains(where: { if case .ask(_, _, let known, false) = $0.kind, known != nil, known == id { return true } else { return false } }) {
                 closeOpenAgentMessage()
                 items.append(ChatItem(.ask(question: question, options: options, id: id, answered: false)))

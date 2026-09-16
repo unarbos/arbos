@@ -316,8 +316,15 @@ struct ProjectChatView: View {
             }
             .onChange(of: chat.mode) { _, mode in
                 if mode == .connecting { connectingSince = Date() }
-                // The one line under the transcript changed; keep it in view.
-                if atTail { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) } }
+                // A reconnect replaced the transcript wholesale: land on the
+                // tail whatever the reader was doing (M-109 left it a screen
+                // short). Otherwise keep the one line under it in view.
+                if mode == .live || atTail {
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(250))
+                        withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
+                    }
+                }
             }
             .onChange(of: chat.earlierLines) { old, new in
                 // A long replay lands in one go; the lazy layout settles over
