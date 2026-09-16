@@ -1935,7 +1935,34 @@ pub async fn serve_client(
                         }
                         // A feedback report's material: this client's
                         // own, built here so a slow disk stalls it alone.
-                        Frame::Feedback { agent, seq, note } => {
+                        Frame::ToolBody { agent, call_id } => {
+                            match crate::feedback::tool_body(&place_for_history, &agent, &call_id) {
+                                Some((body, truncated, size)) => {
+                                    let _ = out_for_history.send(Frame::ToolBodyReply {
+                                        agent,
+                                        call_id,
+                                        body,
+                                        size,
+                                        truncated,
+                                    });
+                                }
+                                None => {
+                                    let _ = out_for_history.send(Frame::Error {
+                                        agent: Some(agent.clone()),
+                                        detail: format!(
+                                            "tool_body: no call {call_id} on {agent}'s transcript"
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                        Frame::Feedback {
+                            agent,
+                            seq,
+                            call_id,
+                            tail,
+                            note,
+                        } => {
                             if !arbos_core::agent_exists(&place_for_history, &agent) {
                                 let _ = out_for_history.send(Frame::Error {
                                     agent: Some(agent.clone()),
@@ -1951,21 +1978,25 @@ pub async fn serve_client(
                                 });
                                 continue;
                             };
-                            let b = crate::feedback::bundle(
-                                &place_for_history,
-                                &agent,
+                            let req = crate::feedback::Request {
+                                agent: &agent,
                                 seq,
-                                &note,
-                                &host,
-                            );
+                                call_id: call_id.as_deref(),
+                                tail,
+                                note: &note,
+                            };
+                            let b = crate::feedback::bundle(&place_for_history, &req, &host);
                             klog::info(
                                 "feedback_bundle",
                                 Some(&agent),
                                 format!(
-                                    "seq={} lines={} log={} bytes={} redacted={} truncated={}",
+                                    "seq={} call_id={} tail={tail} lines={} tail_lines={} children={} log={} bytes={} redacted={} truncated={}",
                                     seq.map(|s| s.to_string())
                                         .unwrap_or_else(|| "latest".into()),
+                                    call_id.as_deref().unwrap_or("-"),
                                     b.events.len(),
+                                    b.tail.len(),
+                                    b.children.len(),
                                     b.log.len(),
                                     b.bytes,
                                     b.redacted,
@@ -1976,6 +2007,8 @@ pub async fn serve_client(
                                 agent,
                                 turn: b.turn,
                                 events: b.events,
+                                tail: b.tail,
+                                children: b.children,
                                 log: b.log,
                                 kernel: b.kernel,
                                 note: b.note,
