@@ -216,15 +216,34 @@ impl Tool for Bash {
             }
 
             let mut done_rx = done_rx;
-            let finished = tokio::select! {
-                _ = &mut done_rx => true,
-                _ = tokio::time::sleep(wait) => false,
-                _ = cx.cancel.cancelled() => {
-                    // Stop while attached means stop: the user wants it gone.
-                    if let Ok(j) = root.load(&job.id) {
-                        root.kill(&j);
+            // The wait ends on the command, on `wait`, on Stop — or when
+            // the user speaks: a steer is read at the tool boundary, and
+            // an attached command can hold that boundary for ten minutes.
+            // Jacob typed "run it" four times into a worker's
+            // `python3 bubble_sort.py` and heard nothing for 2m 26s
+            // (2026-09-16); the command keeps running as a job and the
+            // turn answers now.
+            let deadline = tokio::time::Instant::now() + wait;
+            let mut tick = tokio::time::interval(Duration::from_millis(500));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut steered = false;
+            let finished = loop {
+                tokio::select! {
+                    _ = &mut done_rx => break true,
+                    _ = tokio::time::sleep_until(deadline) => break false,
+                    _ = cx.cancel.cancelled() => {
+                        // Stop while attached means stop: the user wants it gone.
+                        if let Ok(j) = root.load(&job.id) {
+                            root.kill(&j);
+                        }
+                        bail!("bash interrupted; job {} killed", job.id);
                     }
-                    bail!("bash interrupted; job {} killed", job.id);
+                    _ = tick.tick() => {
+                        if arbos_core::inbox::has_user_steer(&cx.place, cx.agent.id.as_str()) {
+                            steered = true;
+                            break false;
+                        }
+                    }
                 }
             };
 
@@ -238,9 +257,14 @@ impl Tool for Bash {
                 } else {
                     "Still running"
                 };
+                let why = if steered {
+                    " The user said something while it ran — it follows this result. Answer them, then follow the command with await."
+                } else {
+                    ""
+                };
                 return Ok(ToolOut::with_paths(
                     format!(
-                        "{body}\n\n{verb} as job {id} (pid {pid}). Follow with await {id} (optional regex pattern), list with jobs, stop with bash `kill -- -{pid}`. Log: {journal}",
+                        "{body}\n\n{verb} as job {id} (pid {pid}).{why} Follow with await {id} (optional regex pattern), list with jobs, stop with bash `kill -- -{pid}`. Log: {journal}",
                         id = job.id,
                         pid = job.meta.pid,
                     ),
