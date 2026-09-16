@@ -335,7 +335,7 @@ pub async fn run(
                     ..cx.clone()
                 };
                 let started = arbos_core::now_ms();
-                cx.hooks.emit(&Event::new(EventKind::Tool(ToolRec {
+                let rec = ToolRec {
                     name: call.name.clone(),
                     call_id: call.id.clone(),
                     step: cx.step,
@@ -350,7 +350,11 @@ pub async fn run(
                     images: vec![],
                     diff: None,
                     label: call_label(&call.arguments),
-                })));
+                };
+                // On disk before it runs: a kernel that dies mid-call
+                // leaves this for the next one to write up (qal-j02).
+                crate::inflight::start(&cx.place, &cx.agent.id, &rec);
+                cx.hooks.emit(&Event::new(EventKind::Tool(rec)));
                 for note in &prepared.notices {
                     hook_notice(&cx, note);
                 }
@@ -385,7 +389,10 @@ pub async fn run(
             },
             joined = set.join_next(), if !set.is_empty() => {
                 match joined {
-                    Some(Ok((i, outcome))) => slots[i].state = State::Done(outcome),
+                    Some(Ok((i, outcome))) => {
+                        crate::inflight::end(&cx.place, &cx.agent.id, &slots[i].call.id);
+                        slots[i].state = State::Done(outcome);
+                    }
                     Some(Err(e)) => {
                         // A panicking or aborted tool task.
                         if let Some(&i) = task_slot.get(&e.id()) {
@@ -406,6 +413,10 @@ pub async fn run(
         }
     }
 
+    // Nothing is in flight once the batch is over, whatever ended it.
+    for s in &slots {
+        crate::inflight::end(&cx.place, &cx.agent.id, &s.call.id);
+    }
     let outcomes: Vec<(ToolCall, Outcome)> = slots
         .into_iter()
         .map(|s| {
