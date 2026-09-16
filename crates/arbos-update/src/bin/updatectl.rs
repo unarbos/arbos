@@ -329,7 +329,7 @@ fn kernel(args: &Args) -> Result<()> {
         binary.display()
     );
 
-    let feed = Feed::parse(&fetch_text(channel.feed_url())?)?;
+    let feed = arbos_update::net::feed(channel)?;
     let offered = match kernel_mod::plan(&running, &feed, args.one("pin").as_deref()) {
         Ok(offered) => offered,
         Err(refusal) => {
@@ -352,7 +352,7 @@ fn kernel(args: &Args) -> Result<()> {
     let key = sign::built_in_key()
         .context("this build carries no update key, so it cannot check a payload")?;
     println!("fetching  {} bytes", offered.download.size);
-    let bytes = fetch_bytes(&offered.download.url)?;
+    let bytes = arbos_update::net::bytes(&offered.download.url)?;
     let scratch = std::env::temp_dir().join("arbos-kernel-update");
     kernel_mod::verify_and_install(&bytes, &offered, &binary, &key, &scratch)?;
     let now = kernel_mod::Running::read(&binary)?;
@@ -363,34 +363,6 @@ fn kernel(args: &Args) -> Result<()> {
          <place>/.arbos/runtime/kernel.json is the graceful stop."
     );
     Ok(())
-}
-
-fn http() -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .context("building an HTTP client")
-}
-
-fn fetch_text(url: &str) -> Result<String> {
-    http()?
-        .get(url)
-        .send()
-        .and_then(|r| r.error_for_status())
-        .with_context(|| format!("fetching {url}"))?
-        .text()
-        .with_context(|| format!("reading {url}"))
-}
-
-fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
-    Ok(http()?
-        .get(url)
-        .send()
-        .and_then(|r| r.error_for_status())
-        .with_context(|| format!("fetching {url}"))?
-        .bytes()
-        .with_context(|| format!("reading {url}"))?
-        .to_vec())
 }
 
 fn secret_key() -> Result<SecretKey> {

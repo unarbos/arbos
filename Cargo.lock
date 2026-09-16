@@ -89,6 +89,7 @@ dependencies = [
  "anyhow",
  "arbos-core",
  "arbos-engine",
+ "arbos-update",
  "base64",
  "futures-util",
  "glob",

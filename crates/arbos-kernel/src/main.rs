@@ -158,6 +158,10 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        "update" => {
+            let code = arbos_kernel::update_cmd::run(arbos_kernel::update_cmd::Args::parse(args)?)?;
+            std::process::exit(code);
+        }
         "worker" => {
             let code = arbos_kernel::worker::run(arbos_kernel::worker::Args::parse(args)?)?;
             std::process::exit(code);
@@ -173,6 +177,7 @@ fn main() -> Result<()> {
             println!("{}", arbos_kernel::setup::USAGE);
             println!("{}", arbos_kernel::cli::USAGE);
             println!("{}", arbos_kernel::rewind::USAGE);
+            println!("{}", arbos_kernel::update_cmd::USAGE);
             println!("{}", arbos_kernel::worker::USAGE);
             Ok(())
         }

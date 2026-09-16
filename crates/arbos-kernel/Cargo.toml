@@ -12,6 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 arbos-core.workspace = true
+# `arbos-kernel update`: the channel feed, the signature over a payload, and
+# the install that cannot leave a half-replaced binary — the same code the
+# desktop updates itself with, so there is one answer to what a published
+# build is rather than two that can drift.
+arbos-update = { path = "../arbos-update" }
 arbos-engine.workspace = true
 anyhow.workspace = true
 base64 = "0.22"
