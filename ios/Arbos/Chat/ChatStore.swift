@@ -83,7 +83,7 @@ final class ChatStore: ObservableObject {
     private var reconnectTask: Task<Void, Never>?
     private var reconnectAttempt = 0
     /// Typed lines the kernel has not echoed yet, oldest first.
-    private var pendingSends: [(id: UUID, text: String, steer: Bool)] = []
+    private var pendingSends: [(id: UUID, text: String, steer: Bool, target: KernelTarget)] = []
     private let pathMonitor = NWPathMonitor()
     private var pathWasSatisfied = true
 
@@ -327,6 +327,9 @@ final class ChatStore: ObservableObject {
             earlierLines = 0
             identity = nil
             unseen.removeAll()
+            // Lines typed for the old project stay with it: never carried
+            // to the next chat and sent there (Jacob, build 956).
+            pendingSends.removeAll()
         }
         settings.kernelTarget = target
         reconnectAttempt = 0
@@ -354,7 +357,7 @@ final class ChatStore: ObservableObject {
         let card = ChatItem(.user(shown, pending: true))
         closeOpenAgentMessage()
         items.append(card)
-        pendingSends.append((card.id, trimmed, steer))
+        pendingSends.append((card.id, trimmed, steer, settings.kernelTarget))
         guard let source, mode == .live || mode == .server || mode == .mock else { return }
         busy = true
         sentAt = Date()
@@ -371,6 +374,11 @@ final class ChatStore: ObservableObject {
     /// out now, oldest first, in one turn each.
     private func flushPending() {
         guard let source, !pendingSends.isEmpty else { return }
+        guard pendingSends.allSatisfy({ $0.target == settings.kernelTarget }) else {
+            pendingSends.removeAll { $0.target != settings.kernelTarget }
+            if pendingSends.isEmpty { return }
+            return flushPending()
+        }
         let queue = pendingSends
         busy = true
         Task {

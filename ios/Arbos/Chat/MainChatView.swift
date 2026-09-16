@@ -213,7 +213,7 @@ struct ProjectChatView: View {
                             .padding(.top, 8)
                     }
                     ForEach(chat.items) { item in
-                        ChatRow(item: item).id(item.id)
+                        ChatRow(item: item, waitingOn: title).id(item.id)
                     }
                     if !chat.unseen.isEmpty {
                         AwayCard(notifications: chat.unseen) { chat.markSeen() }
@@ -237,6 +237,15 @@ struct ProjectChatView: View {
             .modifier(ChatScrollAnchor(followGrowth: followGrowth))
             .scrollPosition(id: $heldRow, anchor: .top)
             .scrollDismissesKeyboard(.interactively)
+            // A tap on the words puts the keyboard away (Jacob, build 956),
+            // and the tail comes back into view as the keyboard moves.
+            .onTapGesture { composing = false }
+            .onChange(of: composing) { _, _ in
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(350))
+                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
+                }
+            }
             .onChange(of: chat.items) { _, _ in
                 if let anchor = chat.anchorAfterPrepend {
                     // Older lines came in above: hold the row that was at the top.
@@ -450,6 +459,10 @@ struct WorkerLine: View {
 /// one dim line each; "Worked Ns" closes a turn.
 struct ChatRow: View {
     let item: ChatItem
+    /// The project's name, so a pending card can say who is not answering.
+    /// A card still pending after ten seconds has had no echo from the
+    /// kernel — whether the socket knows the link is down yet or not.
+    var waitingOn: String? = nil
 
     var body: some View {
         switch item.kind {
@@ -467,9 +480,21 @@ struct ChatRow: View {
                     )
                     .frame(maxWidth: UIScreen.main.bounds.width * 0.78, alignment: .trailing)
                 if pending {
-                    Text("Sending…")
-                        .font(ArbosTheme.caption)
-                        .foregroundStyle(ArbosTheme.textDim)
+                    // Silence reads as broken; a calm sentence reads as
+                    // working. After ten seconds without the kernel's echo,
+                    // the card says who is not answering (Jacob, build 956).
+                    TimelineView(.periodic(from: item.createdAt, by: 1)) { context in
+                        let waited = context.date.timeIntervalSince(item.createdAt)
+                        if let project = waitingOn, waited >= 10 {
+                            Text("\(project) is not answering — waiting")
+                                .font(ArbosTheme.caption)
+                                .foregroundStyle(ArbosTheme.textMuted)
+                        } else {
+                            Text("Sending…")
+                                .font(ArbosTheme.caption)
+                                .foregroundStyle(ArbosTheme.textDim)
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
