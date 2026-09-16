@@ -23,11 +23,18 @@ struct ChatItem: Identifiable, Equatable {
     /// The settled `assistant` line of a step replaces the text streamed
     /// for the same step, never a neighbour's.
     var step: Int = 0
+    /// When the item appeared here — a pending card says how long it waits.
+    let createdAt: Date
 
     init(id: UUID = UUID(), _ kind: Kind, step: Int = 0) {
         self.id = id
         self.kind = kind
         self.step = step
+        self.createdAt = Date()
+    }
+
+    static func == (lhs: ChatItem, rhs: ChatItem) -> Bool {
+        lhs.id == rhs.id && lhs.kind == rhs.kind && lhs.step == rhs.step
     }
 
     var isStreamingAgent: Bool {
