@@ -944,6 +944,19 @@ impl ChatSession {
     /// Write the session extras out. The file is minted on the first write
     /// and not before — opening a project must not put an `.arbos/desktop/`
     /// in it.
+    /// A problem report about the exchange whose prompt is transcript line
+    /// `seq` has been written: leave its id on that prompt card.
+    pub fn mark_reported(&mut self, seq: u64, report: &str) {
+        let card = self.items.iter_mut().find_map(|item| match item {
+            ChatItem::User(message) if message.seq == Some(seq) => Some(message),
+            _ => None,
+        });
+        if let Some(card) = card {
+            card.reported = Some(report.to_string());
+            self.flush();
+        }
+    }
+
     pub fn flush(&mut self) {
         let worth = !self.items.is_empty()
             || self.is_delegate()
