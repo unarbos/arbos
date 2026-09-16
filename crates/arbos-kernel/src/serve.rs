@@ -976,7 +976,15 @@ fn handle_frame(
                 .map(|n| n.id)
                 .unwrap_or(0);
             match arbos_core::notify::mark_seen(place, through.min(newest)) {
-                Ok(now) => hooks.broadcast(Frame::Seen { through: now }),
+                Ok(now) => {
+                    hooks.broadcast(Frame::Seen { through: now });
+                    let unseen = arbos_core::notify::unseen(place).len() as u64;
+                    hooks.tell_hub(|project| arbos_core::hub::HubFrame::Seen {
+                        project,
+                        through: now,
+                        unseen,
+                    });
+                }
                 Err(e) => klog::warn("seen_failed", None, format!("{e:#}")),
             }
         }

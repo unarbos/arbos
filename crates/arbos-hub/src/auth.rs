@@ -71,6 +71,11 @@ struct File {
     machine: Vec<MachineRow>,
     #[serde(default)]
     client: Vec<ClientRow>,
+    /// `[push]`: the APNs key for pushing a kernel's notifications to a
+    /// phone that is asleep (see `push.rs`). Absent: tokens are kept,
+    /// nothing is sent.
+    #[serde(default)]
+    push: Option<crate::push::PushConfig>,
 }
 
 /// Who a token turned out to be.
@@ -120,6 +125,7 @@ struct Entry {
 pub struct Auth {
     pub bind: String,
     entries: Vec<Entry>,
+    pub push: crate::push::PushConfig,
 }
 
 impl Auth {
@@ -180,6 +186,7 @@ impl Auth {
         Ok(Self {
             bind: file.bind,
             entries,
+            push: file.push.unwrap_or_default(),
         })
     }
 

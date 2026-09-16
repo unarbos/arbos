@@ -220,6 +220,8 @@ async fn session(cfg: &HubConfig, dir: &Path, args: &Args) -> Result<()> {
                     | HubFrame::Frame { .. }
                     | HubFrame::Close { .. }
                     | HubFrame::Claimed { .. }
+                    | HubFrame::Notify { .. }
+                    | HubFrame::Seen { .. }
                     | HubFrame::Unknown => {}
                 }
             }
