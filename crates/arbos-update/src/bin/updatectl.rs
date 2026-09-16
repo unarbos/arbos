@@ -354,7 +354,14 @@ fn kernel(args: &Args) -> Result<()> {
     println!("fetching  {} bytes", offered.download.size);
     let bytes = arbos_update::net::bytes(&offered.download.url)?;
     let scratch = std::env::temp_dir().join("arbos-kernel-update");
-    kernel_mod::verify_and_install(&bytes, &offered, &binary, &key, &scratch)?;
+    kernel_mod::verify_and_install(
+        &bytes,
+        &offered,
+        &binary,
+        &key,
+        &scratch,
+        kernel_mod::Probe::Version,
+    )?;
     let now = kernel_mod::Running::read(&binary)?;
     println!("installed {} {}", now.version.human(), now.sha);
     println!(
