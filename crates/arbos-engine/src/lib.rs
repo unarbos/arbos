@@ -1,6 +1,7 @@
 //! One function: [`turn`]. Working set, fold, compact, tool dispatch.
 
 mod access;
+pub mod apology;
 mod batch;
 pub mod blocked;
 pub mod compact;
