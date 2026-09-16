@@ -1,0 +1,4 @@
+1789578239634 kernel started pid 953842
+1789578241046 kernel stopped with code 0
+1789578241047 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789578241052 bugs: seen adfdbf4fe2.md

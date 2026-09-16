@@ -1,0 +1,6 @@
+1789578977302 kernel started pid 960146
+1789579007934 kernel stopped with code 0
+1789579007938 kernel-after-rewind started pid 960491
+1789579011989 BREAK mt-29-rewound-prompt-refired: after a restart the dangling wake fired a turn with no prompt: [('wake', 'done')]
+1789579011997 kernel-after-rewind stopped with code 0
+1789579012015 bugs: seen 60336629f7.md

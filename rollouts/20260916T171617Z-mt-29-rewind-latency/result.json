@@ -1,0 +1,46 @@
+{
+  "scenario": "mt-29-rewind-latency",
+  "doc": "`rewind`: the first `rewound` frame arrives under 100 ms (the cut), and the file restore reports after (a second `rewound` with `restored`, or an `error`); the transcript is cut.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "mt-29-rewound-prompt-refired",
+      "detail": "after a restart the dangling wake fired a turn with no prompt: [('wake', 'done')]",
+      "where": "arbos-kernel needs_serve() on a dangling wake"
+    }
+  ],
+  "notes": {
+    "first_frame": {
+      "type": "rewound",
+      "agent": "root",
+      "line": 12,
+      "dropped": 12,
+      "pending": true
+    },
+    "first_rewound_ms": 9.2,
+    "lines_before": 22,
+    "second_frame": {
+      "type": "rewound",
+      "agent": "root",
+      "line": 12,
+      "dropped": 12,
+      "restored": "242700921902"
+    },
+    "users_after": [
+      "one"
+    ],
+    "wakes_after": [
+      "one"
+    ],
+    "refired_after_restart": [
+      "Report from rewind-latency-worker above \u2014 the last of your workers. If the user is owed an answer, give it once now, combined, in the answer shape; do not relay each report. If your last message already covered it, or the user asked for nothing further, end with no message (an empty reply is right here)."
+    ]
+  },
+  "duration_s": 34.8,
+  "place": "/tmp/arbos-qa-mt-29-rewind-latency-vt30g9td/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260916T171617Z-mt-29-rewind-latency",
+  "branch": "main",
+  "usd": 0.04926
+}

@@ -1,0 +1,7 @@
+1789578772674 kernel started pid 955460
+1789578836922 timeout waiting for turn garbage idle after 60s
+1789578836931 kernel stopped with code 0
+1789578836933 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789578836933 BREAK state:agent-parent-dangling: parent 'ghost-parent' has no folder
+1789578836934 BREAK state:transcript-bad-lines: 2 unparseable line(s): [2, 4]
+1789578836955 bugs: seen qa-006-prompt-to-unlisted-folder-parks-forever.md, seen qa-006-prompt-to-unlisted-folder-parks-forever.md, seen qa-006-prompt-to-unlisted-folder-parks-forever.md
