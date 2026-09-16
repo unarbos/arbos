@@ -88,7 +88,8 @@ enum HubClient {
     /// The WebSocket a client attaches through for one machine's project.
     static func attachURL(hubURL: String, machine: String, project: String?) -> URL? {
         guard var components = URLComponents(string: hubURL) else { return nil }
-        components.scheme = components.scheme?.lowercased() == "http" ? "ws" : "wss"
+        // A plain hub (http/ws — a machine on the same network) stays plain.
+        components.scheme = ["http", "ws"].contains(components.scheme?.lowercased() ?? "") ? "ws" : "wss"
         var path = "/attach/\(machine)"
         if let project, !project.isEmpty { path += "/\(project)" }
         components.path = path
