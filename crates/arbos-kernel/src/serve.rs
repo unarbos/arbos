@@ -1308,6 +1308,12 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
     for ev in picked {
         let mut event = ev.clone();
         arbos_core::files::scrub_child_claims(place, agent, &mut event);
+        // A record from before `output` existed gets its glance here.
+        if let EventKind::Tool(rec) = &mut event.kind
+            && rec.output.is_none()
+        {
+            rec.output = rec.digest();
+        }
         let _ = out.send(Frame::Replayed {
             agent: agent.to_string(),
             event,

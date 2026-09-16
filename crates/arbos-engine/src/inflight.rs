@@ -95,7 +95,7 @@ pub fn cut_record(mut rec: ToolRec, now_ms: i64) -> ToolRec {
     rec.ended = Some(now_ms);
     rec.error = Some("interrupted: the kernel restarted while this ran".into());
     rec.body = Some(text);
-    rec
+    rec.with_output()
 }
 
 #[cfg(test)]
@@ -118,6 +118,7 @@ mod tests {
             images: vec![],
             diff: None,
             label: None,
+            output: None,
         }
     }
 

@@ -597,6 +597,7 @@ async fn handle_incoming(
                                 images: Vec::new(),
                                 diff: None,
                                 label: None,
+                                output: None,
                             })),
                         )?;
                         // Words after a finished call are the next step's.
