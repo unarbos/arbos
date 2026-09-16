@@ -31,15 +31,20 @@ use std::path::PathBuf;
 
 pub const USAGE: &str = "\
 arbos-kernel update [--install] [--channel stable|dev] [--binary PATH] [--pin X.Y.Z+N]
+                    [--place DIR ...]
     What the channel has, and whether this binary is behind it. --install
-    replaces it; without that it only reports. The running kernel keeps the
-    code it started with until it restarts.";
+    replaces it; without that it only reports. Replacing the binary does not
+    update a running kernel: it keeps the code it started with until it
+    restarts, and --place says which ones are still serving what.";
 
 pub struct Args {
     pub install: bool,
     pub channel: Option<Channel>,
     pub binary: Option<PathBuf>,
     pub pin: Option<String>,
+    /// Places whose running kernel to report on. Defaults to the working
+    /// directory when it is one.
+    pub places: Vec<PathBuf>,
 }
 
 impl Args {
@@ -49,6 +54,7 @@ impl Args {
             channel: None,
             binary: None,
             pin: None,
+            places: Vec::new(),
         };
         let mut rest = argv.peekable();
         while let Some(arg) = rest.next() {
@@ -64,6 +70,9 @@ impl Args {
                         Some(PathBuf::from(rest.next().context("--binary wants a path")?));
                 }
                 "--pin" => args.pin = Some(rest.next().context("--pin wants a version")?),
+                "--place" => args
+                    .places
+                    .push(PathBuf::from(rest.next().context("--place wants a directory")?)),
                 "-h" | "--help" | "help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -111,6 +120,13 @@ pub fn run(args: Args) -> Result<i32> {
         Ok(offered) => offered,
         Err(refusal) => {
             println!("no update: {}", refusal.say());
+            // "Up to date" is only true if what is *serving* is up to date.
+            if report_serving(&args, &running) {
+                println!(
+                    "\nThe binary is current and a running kernel is not. Restart it, or it \n\
+                     goes on serving the older code."
+                );
+            }
             // A working copy or a pin is a decision, not a failure; being
             // current is the happy answer. Only "this channel has nothing for
             // this machine" is worth a non-zero exit, because a script asking
@@ -133,6 +149,7 @@ pub fn run(args: Args) -> Result<i32> {
     println!("          {}", offered.download.url);
 
     if !args.install {
+        report_serving(&args, &running);
         println!("\nrun again with --install to replace it");
         return Ok(0);
     }
@@ -146,9 +163,111 @@ pub fn run(args: Args) -> Result<i32> {
 
     let now = kernel::Running::read(&binary)?;
     println!("installed {} {}", now.version.human(), now.sha);
+    report_serving(&args, &now);
     println!();
     println!("{}", restart_note(&binary));
     Ok(0)
+}
+
+/// What is actually serving a place, as that process reported itself.
+///
+/// **Not the file on disk.** A kernel writes its own version and commit into
+/// `kernel.json` when it starts, so that file is the only honest answer to
+/// "what code is running here". Reading the binary instead would report a
+/// machine as current the moment its file was replaced, while the process
+/// went on serving the old image — which is exactly how `subnet120` stayed
+/// stale with nobody noticing, its `/proc/<pid>/exe` reading `(deleted)`.
+#[derive(Debug)]
+struct Serving {
+    place: PathBuf,
+    pid: i32,
+    version: String,
+    sha: String,
+}
+
+fn serving(place_dir: &std::path::Path) -> Option<Serving> {
+    let place = arbos_core::Place::new(place_dir.to_path_buf());
+    let text = std::fs::read_to_string(place.kernel_json_read()).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let pid = json.get("pid")?.as_i64()? as i32;
+    if !alive(pid) {
+        return None;
+    }
+    Some(Serving {
+        place: place_dir.to_path_buf(),
+        pid,
+        version: json
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_owned(),
+        // A kernel old enough not to write its commit is, by that alone, old.
+        sha: json
+            .get("git_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_owned(),
+    })
+}
+
+fn alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 asks whether the pid could be signalled and sends
+    // nothing.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// The places to look at: the ones named, or the working directory when it is
+/// one. A kernel binary has no register of places, so this reports on what it
+/// was pointed at rather than guessing.
+fn places(args: &Args) -> Vec<PathBuf> {
+    if !args.places.is_empty() {
+        return args.places.clone();
+    }
+    std::env::current_dir()
+        .ok()
+        .filter(|dir| dir.join(".arbos").is_dir())
+        .into_iter()
+        .collect()
+}
+
+/// Say what is serving, and whether it matches the binary now on disk.
+///
+/// Returns whether anything is running code older than the file — the state in
+/// which "the kernel is up to date" would be a lie.
+fn report_serving(args: &Args, on_disk: &kernel::Running) -> bool {
+    let running: Vec<Serving> = places(args).iter().filter_map(|dir| serving(dir)).collect();
+    if running.is_empty() {
+        return false;
+    }
+    let mut stale = false;
+    println!();
+    for one in &running {
+        let matches = same_build(&one.sha, &on_disk.sha);
+        stale |= !matches;
+        println!(
+            "serving   {} {} (pid {}) in {}{}",
+            one.version,
+            one.sha,
+            one.pid,
+            one.place.display(),
+            match matches {
+                true => "",
+                false => "  ← older than the binary on disk",
+            }
+        );
+    }
+    stale
+}
+
+fn same_build(a: &str, b: &str) -> bool {
+    if a == "unknown" || b == "unknown" || a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let n = a.len().min(b.len());
+    a[..n].eq_ignore_ascii_case(&b[..n])
 }
 
 /// What is left to do, said plainly.
