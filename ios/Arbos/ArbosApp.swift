@@ -107,17 +107,3 @@ struct RootView: View {
     }
 }
 
-/// The chat hides the navigation bar to draw its own header, and UIKit
-/// switches the edge swipe off with it. Jacob expects a swipe from the
-/// left edge to go back to the projects (build 1021), so the gesture is
-/// kept alive whenever there is somewhere to go back to.
-extension UINavigationController: @retroactive UIGestureRecognizerDelegate {
-    override open func viewDidLoad() {
-        super.viewDidLoad()
-        interactivePopGestureRecognizer?.delegate = self
-    }
-
-    public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        viewControllers.count > 1
-    }
-}
