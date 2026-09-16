@@ -90,6 +90,24 @@ folders as before. `update_verdict` no longer counts a running job as
 `Busy` (#321). `keep` stays what it is — the user's word that a job may
 outlive kernels — and the updater does not touch it.
 
+## Driven, not reasoned (added 18:20 UTC, [#342](https://github.com/unarbos/arbos/pull/342))
+
+The three claims above were tested with SIGKILL in the parked state and a
+new kernel on the same place. Two needed a fix, which is why I say so
+here rather than let the note stand on reading alone:
+
+- **Ask survives:** true for the file and the answer path. But a client
+  attaching to the new kernel was not offered the question as a card —
+  only the transcript line was replayed. Attach now re-offers pending
+  asks as `ask` frames with their ids (`asks_replayed` in the log).
+- **Approval does not survive:** true, and nothing runs without the
+  click. But the cut record said the call "may have completed"; it now
+  says "not run … waited for the user's allow/deny … Nothing changed."
+- **Parent in `spawn wait`:** held as claimed; pinned.
+
+Nothing here changes the gate (`update_verdict`): it still waits on a
+running turn, which is what an open approval is, and lets an ask through.
+
 ## What a restart preserves (all files) and what it cannot
 
 Preserved, no work needed: asks and their answers; inbox files; subscriptions
