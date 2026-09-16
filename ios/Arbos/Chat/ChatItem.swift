@@ -3,7 +3,9 @@ import Foundation
 /// One row of the main chat, as the screen draws it.
 struct ChatItem: Identifiable, Equatable {
     enum Kind: Equatable {
-        case user(String)
+        /// `pending`: typed here, not yet echoed by the kernel — shown at
+        /// once so nothing typed ever vanishes; resent if the link drops.
+        case user(String, pending: Bool = false)
         /// `streaming` while text is still arriving.
         case agent(String, streaming: Bool)
         /// A tool call, folded to one dim line.
@@ -51,7 +53,8 @@ struct WorkerStatus: Identifiable, Hashable {
 /// What a chat source tells the store, in order.
 enum ChatUpdate {
     /// Replace everything shown (mock seed; later, a transcript replay).
-    case history([ChatItem])
+    /// `earlier` is how many transcript lines lie before the first shown.
+    case history([ChatItem], earlier: Int)
     case item(ChatItem)
     /// Append to the open agent message of this step, opening one if there is none.
     case agentDelta(String, step: Int)
@@ -69,6 +72,7 @@ enum ChatUpdate {
     case step(String)
     /// `.arbos/project.toml` read off the kernel.
     case identity(ProjectIdentity)
+    /// The link to the kernel went; the store reconnects on its own.
     case dropped(String)
 }
 

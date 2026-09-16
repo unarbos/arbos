@@ -31,6 +31,8 @@ struct ArbosApp: App {
 /// start lands on the list (Jacob's reference); the list's own composer
 /// still talks to the project last open.
 struct RootView: View {
+    @EnvironmentObject private var chat: ChatStore
+    @Environment(\.scenePhase) private var scenePhase
     @State private var path = NavigationPath()
 
     var body: some View {
@@ -42,5 +44,11 @@ struct RootView: View {
         }
         .tint(ArbosTheme.accent)
         .preferredColorScheme(.dark)
+        // A phone that slept for hours comes back with its socket gone:
+        // the first thing the returning user sees is the chat as it was,
+        // then the replay, not an offline notice.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { chat.resumeIfNeeded() }
+        }
     }
 }

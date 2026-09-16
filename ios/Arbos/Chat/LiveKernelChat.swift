@@ -108,7 +108,7 @@ final class LiveKernelChat: ChatSource {
             }
             guard agent == focus else { return }
             if let item = item(for: event, worker: false) { history.append(item) }
-        case .historyEnd(let agent):
+        case .historyEnd(let agent, let total, let shown):
             if let pending = pendingHistory, pending.agent == agent {
                 pendingHistory = nil
                 pending.done.resume(returning: pending.items)
@@ -116,7 +116,9 @@ final class LiveKernelChat: ChatSource {
             }
             guard agent == focus else { return }
             replaying = false
-            stream?.yield(.history(history))
+            // The kernel replays its last 200 lines; the rest of a long
+            // project's history is before them.
+            stream?.yield(.history(history, earlier: max(0, total - max(shown, history.count))))
             history.removeAll()
         case .assistantDelta(let agent, let text, let step):
             guard agent == focus, !text.isEmpty else { return }

@@ -56,7 +56,7 @@ final class ArbosKernelClient {
                 Task { @MainActor in self?.dropped(error.localizedDescription) }
             }
         )
-        let deadline = Date().addingTimeInterval(15)
+        let deadline = Date().addingTimeInterval(8)
         while Date() < deadline {
             switch state {
             case .attached: return
