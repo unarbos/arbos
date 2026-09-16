@@ -1578,3 +1578,73 @@
 {"ts": 1789571526182, "rollout": "20260916T151155Z-mt-24-relaunch-restores-active-tab", "scenario": "mt-24-relaunch-restores-active-tab", "branch": "main", "status": "break", "breaks": ["mt-24-active-tab-not-restored"]}
 {"ts": 1789571623466, "rollout": "20260916T151206Z-xp-01-dead-kernel-line-stays-in-its-project", "scenario": "xp-01-dead-kernel-line-stays-in-its-project", "branch": "main", "status": "break", "breaks": ["xp-01-first-line-lost"]}
 {"ts": 1789571663425, "rollout": "20260916T151343Z-xp-02-queued-line-survives-close-and-reopen-in-place", "scenario": "xp-02-queued-line-survives-close-and-reopen-in-place", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572207026, "rollout": "20260916T152324Z-boot-idle", "scenario": "boot-idle", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572243533, "rollout": "20260916T152327Z-prompt-no-key", "scenario": "prompt-no-key", "branch": "rust", "status": "break", "breaks": ["turn-never-started", "turn-never-ended", "turn-contract", "restart-replays-wake"]}
+{"ts": 1789572243899, "rollout": "20260916T152403Z-second-serve", "scenario": "second-serve", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572248048, "rollout": "20260916T152403Z-concurrent-sessions", "scenario": "concurrent-sessions", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572267520, "rollout": "20260916T152408Z-rapid-create-delete", "scenario": "rapid-create-delete", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572271995, "rollout": "20260916T152427Z-huge-input", "scenario": "huge-input", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572333310, "rollout": "20260916T152432Z-malformed-folder", "scenario": "malformed-folder", "branch": "rust", "status": "break", "breaks": ["state:agent-md-missing", "state:agent-parent-dangling", "state:transcript-bad-lines"]}
+{"ts": 1789572335976, "rollout": "20260916T152533Z-malformed-frames", "scenario": "malformed-frames", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572338760, "rollout": "20260916T152535Z-readonly-arbos", "scenario": "readonly-arbos", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572340185, "rollout": "20260916T152538Z-disk-full", "scenario": "disk-full", "branch": "rust", "status": "break", "breaks": ["state:transcript-unended-turn"]}
+{"ts": 1789572340244, "rollout": "20260916T152540Z-clock-jump-cron", "scenario": "clock-jump-cron", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572340303, "rollout": "20260916T152540Z-plan-shell-verdicts", "scenario": "plan-shell-verdicts", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572340373, "rollout": "20260916T152540Z-desktop-rapid-session-switch", "scenario": "desktop-rapid-session-switch", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572340374, "rollout": "20260916T152540Z-desktop-kill-kernel-under-ui", "scenario": "desktop-kill-kernel-under-ui", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572340381, "rollout": "20260916T152540Z-desktop-user-message-card", "scenario": "desktop-user-message-card", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572340382, "rollout": "20260916T152540Z-desktop-fresh-place-no-notice", "scenario": "desktop-fresh-place-no-notice", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572340383, "rollout": "20260916T152540Z-desktop-huge-transcript-scroll", "scenario": "desktop-huge-transcript-scroll", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789572372779, "rollout": "20260916T152610Z-boot-idle", "scenario": "boot-idle", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572409288, "rollout": "20260916T152612Z-prompt-no-key", "scenario": "prompt-no-key", "branch": "main", "status": "break", "breaks": ["turn-never-started", "turn-never-ended", "turn-contract", "restart-replays-wake"]}
+{"ts": 1789572409654, "rollout": "20260916T152649Z-second-serve", "scenario": "second-serve", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572413151, "rollout": "20260916T152649Z-concurrent-sessions", "scenario": "concurrent-sessions", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572432683, "rollout": "20260916T152653Z-rapid-create-delete", "scenario": "rapid-create-delete", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572439093, "rollout": "20260916T152712Z-huge-input", "scenario": "huge-input", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572501204, "rollout": "20260916T152719Z-malformed-folder", "scenario": "malformed-folder", "branch": "main", "status": "break", "breaks": ["state:agent-md-missing", "state:agent-parent-dangling", "state:transcript-bad-lines"]}
+{"ts": 1789572503822, "rollout": "20260916T152821Z-malformed-frames", "scenario": "malformed-frames", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572505955, "rollout": "20260916T152823Z-readonly-arbos", "scenario": "readonly-arbos", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572507381, "rollout": "20260916T152825Z-disk-full", "scenario": "disk-full", "branch": "main", "status": "break", "breaks": ["state:transcript-unended-turn"]}
+{"ts": 1789572507441, "rollout": "20260916T152827Z-clock-jump-cron", "scenario": "clock-jump-cron", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572507499, "rollout": "20260916T152827Z-plan-shell-verdicts", "scenario": "plan-shell-verdicts", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572507569, "rollout": "20260916T152827Z-desktop-rapid-session-switch", "scenario": "desktop-rapid-session-switch", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572507570, "rollout": "20260916T152827Z-desktop-kill-kernel-under-ui", "scenario": "desktop-kill-kernel-under-ui", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572507577, "rollout": "20260916T152827Z-desktop-user-message-card", "scenario": "desktop-user-message-card", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572507578, "rollout": "20260916T152827Z-desktop-fresh-place-no-notice", "scenario": "desktop-fresh-place-no-notice", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572507579, "rollout": "20260916T152827Z-desktop-huge-transcript-scroll", "scenario": "desktop-huge-transcript-scroll", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572508072, "rollout": "20260916T152828Z-desktop-user-message-card@user-message-card", "scenario": "desktop-user-message-card@user-message-card", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572514717, "rollout": "20260916T152828Z-fp-authored-inbox", "scenario": "fp-authored-inbox", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572555153, "rollout": "20260916T152834Z-fp-shell-subscription", "scenario": "fp-shell-subscription", "branch": "main", "status": "break", "breaks": ["shell-sub-spent-a-turn"]}
+{"ts": 1789572606609, "rollout": "20260916T152915Z-fp-migration-legacy-plan", "scenario": "fp-migration-legacy-plan", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572631066, "rollout": "20260916T153006Z-mt-06-heartbeat-working-frames", "scenario": "mt-06-heartbeat-working-frames", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572631128, "rollout": "20260916T153031Z-mt-17-plan-strip-empty-chat", "scenario": "mt-17-plan-strip-empty-chat", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572631152, "rollout": "20260916T153031Z-mt-22-kernel-restart-with-parked-ask", "scenario": "mt-22-kernel-restart-with-parked-ask", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572631158, "rollout": "20260916T153031Z-mt-24-relaunch-restores-active-tab", "scenario": "mt-24-relaunch-restores-active-tab", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572635191, "rollout": "20260916T153031Z-mt-28-fork-claims-no-worker", "scenario": "mt-28-fork-claims-no-worker", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572659953, "rollout": "20260916T153035Z-mt-29-rewind-latency", "scenario": "mt-29-rewind-latency", "branch": "main", "status": "break", "breaks": ["mt-29-no-rewound", "mt-29-transcript-not-cut", "mt-29-dangling-wake"]}
+{"ts": 1789572690703, "rollout": "20260916T153059Z-rm-04-project-face-in-hello-and-roster", "scenario": "rm-04-project-face-in-hello-and-roster", "branch": "main", "status": "break", "breaks": ["rm-04-rewrite-not-announced"]}
+{"ts": 1789572691922, "rollout": "20260916T153130Z-bt-01-say-to-user-refused", "scenario": "bt-01-say-to-user-refused", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572693148, "rollout": "20260916T153131Z-bt-02-spawn-guard-reads-the-brief", "scenario": "bt-02-spawn-guard-reads-the-brief", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572694463, "rollout": "20260916T153133Z-bt-03-worktree-respawn-next-free-branch", "scenario": "bt-03-worktree-respawn-next-free-branch", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572695687, "rollout": "20260916T153134Z-bt-04-tool-markup-as-prose-stripped", "scenario": "bt-04-tool-markup-as-prose-stripped", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572696502, "rollout": "20260916T153135Z-bt-05-history-pages-backwards", "scenario": "bt-05-history-pages-backwards", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572697880, "rollout": "20260916T153136Z-bt-06-fallback-403-falls-through", "scenario": "bt-06-fallback-403-falls-through", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572699660, "rollout": "20260916T153137Z-bt-07-coordinator-sees-archived-workers", "scenario": "bt-07-coordinator-sees-archived-workers", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572701434, "rollout": "20260916T153139Z-bt-08-files-arrive-as-bytes", "scenario": "bt-08-files-arrive-as-bytes", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572701437, "rollout": "20260916T153141Z-fs-01-federated-store-read-write-cas", "scenario": "fs-01-federated-store-read-write-cas", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572703368, "rollout": "20260916T153141Z-fr-01-first-turn-on-a-blocked-primary", "scenario": "fr-01-first-turn-on-a-blocked-primary", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572709753, "rollout": "20260916T153143Z-fr-02-silent-primary-gives-way-fast", "scenario": "fr-02-silent-primary-gives-way-fast", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572711184, "rollout": "20260916T153149Z-fr-03-first-turn-produces-nothing", "scenario": "fr-03-first-turn-produces-nothing", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572711188, "rollout": "20260916T153151Z-xp-01-dead-kernel-line-stays-in-its-project", "scenario": "xp-01-dead-kernel-line-stays-in-its-project", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572711189, "rollout": "20260916T153151Z-xp-02-queued-line-survives-close-and-reopen-in-place", "scenario": "xp-02-queued-line-survives-close-and-reopen-in-place", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572711190, "rollout": "20260916T153151Z-xp-03-hub-attach-does-not-follow-to-another-project", "scenario": "xp-03-hub-attach-does-not-follow-to-another-project", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572758993, "rollout": "20260916T153227Z-desktop-fresh-place-no-notice", "scenario": "desktop-fresh-place-no-notice", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572768648, "rollout": "20260916T153238Z-desktop-huge-transcript-scroll", "scenario": "desktop-huge-transcript-scroll", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572782011, "rollout": "20260916T153248Z-desktop-kill-kernel-under-ui", "scenario": "desktop-kill-kernel-under-ui", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572792122, "rollout": "20260916T153302Z-desktop-rapid-session-switch", "scenario": "desktop-rapid-session-switch", "branch": "main", "status": "break", "breaks": ["driver-gap", "state:chat-folders"]}
+{"ts": 1789572804094, "rollout": "20260916T153312Z-desktop-user-message-card", "scenario": "desktop-user-message-card", "branch": "main", "status": "break", "breaks": ["driver-gap"]}
+{"ts": 1789572820431, "rollout": "20260916T153324Z-desktop-user-message-card@user-message-card", "scenario": "desktop-user-message-card@user-message-card", "branch": "main", "status": "break", "breaks": ["driver-gap"]}
+{"ts": 1789572827598, "rollout": "20260916T153340Z-mt-17-plan-strip-empty-chat", "scenario": "mt-17-plan-strip-empty-chat", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789572837830, "rollout": "20260916T153347Z-mt-24-relaunch-restores-active-tab", "scenario": "mt-24-relaunch-restores-active-tab", "branch": "main", "status": "break", "breaks": ["mt-24-active-tab-not-restored"]}
+{"ts": 1789572935974, "rollout": "20260916T153357Z-xp-01-dead-kernel-line-stays-in-its-project", "scenario": "xp-01-dead-kernel-line-stays-in-its-project", "branch": "main", "status": "break", "breaks": ["xp-01-first-line-lost"]}
+{"ts": 1789572976109, "rollout": "20260916T153535Z-xp-02-queued-line-survives-close-and-reopen-in-place", "scenario": "xp-02-queued-line-survives-close-and-reopen-in-place", "branch": "main", "status": "pass", "breaks": []}

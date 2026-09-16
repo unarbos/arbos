@@ -1,0 +1,50 @@
+{
+  "scenario": "mt-29-rewind-latency",
+  "doc": "`rewind`: the first `rewound` frame arrives under 100 ms (the cut), and the file restore reports after (a second `rewound` with `restored`, or an `error`); the transcript is cut.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "mt-29-no-rewound",
+      "detail": "no rewound frame: {'type': 'error', 'agent': 'root', 'detail': 'rewind: the agent is running; stop the turn first'}",
+      "where": ""
+    },
+    {
+      "rule": "mt-29-transcript-not-cut",
+      "detail": "user lines after rewind to turn 2: ['one', 'two', 'three'] (expected ['one'])",
+      "where": ""
+    },
+    {
+      "rule": "mt-29-dangling-wake",
+      "detail": "wake lines after the cut: ['one', 'two', 'Reports from handle-one, handle-two above \u2014 the last of your workers. If the user is owed an answer, give it once now, combined, in the answer shape; do not relay each report. If your last message already covered it, or the user asked for nothing further, end with no message (an empty reply is right here).', 'three'] vs user lines ['one', 'two', 'three']; the wake of the rewound turn survived the cut",
+      "where": "arbos-kernel rewind: cut at the turn's wake, not its user line"
+    }
+  ],
+  "notes": {
+    "first_frame": {
+      "type": "error",
+      "agent": "root",
+      "detail": "rewind: the agent is running; stop the turn first"
+    },
+    "first_rewound_ms": -0.3,
+    "lines_before": 30,
+    "users_after": [
+      "one",
+      "two",
+      "three"
+    ],
+    "wakes_after": [
+      "one",
+      "two",
+      "Reports from handle-one, handle-two above \u2014 the last of your workers. If the user is owed an answer, give it once now, combined, in the answer shape; do not relay each report. If your last message already covered it, or the user asked for nothing further, end with no message (an empty reply is right here).",
+      "three"
+    ],
+    "refired_after_restart": []
+  },
+  "duration_s": 24.7,
+  "place": "/tmp/arbos-qa-mt-29-rewind-latency-9lrmavgp/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260916T153035Z-mt-29-rewind-latency",
+  "branch": "main",
+  "usd": 0.02767
+}

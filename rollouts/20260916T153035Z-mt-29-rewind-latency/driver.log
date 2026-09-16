@@ -1,0 +1,8 @@
+1789572635224 kernel started pid 885135
+1789572654852 BREAK mt-29-no-rewound: no rewound frame: {'type': 'error', 'agent': 'root', 'detail': 'rewind: the agent is running; stop the turn first'}
+1789572655852 BREAK mt-29-transcript-not-cut: user lines after rewind to turn 2: ['one', 'two', 'three'] (expected ['one'])
+1789572655853 BREAK mt-29-dangling-wake: wake lines after the cut: ['one', 'two', 'Reports from handle-one, handle-two above — the last of your workers. If the user is owed an answer, give it once now, combined, in the answer shape; do not relay each report. If your last message already covered it, or the user asked for nothing further, end with no message (an empty reply is right here).', 'three'] vs user lines ['one', 'two', 'three']; the wake of the rewound turn survived the cut
+1789572655860 kernel stopped with code 0
+1789572655860 kernel-after-rewind started pid 885618
+1789572659914 kernel-after-rewind stopped with code 0
+1789572659936 bugs: new a8f76c4efa.md, new f4fd1b343c.md, new 6ab1ea3e17.md
