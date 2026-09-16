@@ -115,6 +115,29 @@ fn transcript(place: &std::path::Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Every string anywhere in these lines, however deep — a tool's error, a
+/// notice, an assistant's words, a nested detail. Keys as well as values: a
+/// provider that put its complaint in a field name would still be putting it
+/// in the chat.
+fn strings_of(events: &[serde_json::Value]) -> Vec<String> {
+    fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Array(items) => items.iter().for_each(|i| walk(i, out)),
+            serde_json::Value::Object(map) => {
+                for (k, value) in map {
+                    out.push(k.clone());
+                    walk(value, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    events.iter().for_each(|e| walk(e, &mut out));
+    out
+}
+
 #[test]
 fn a_403_on_the_primary_falls_through_to_the_fallback() {
     let port = server();
@@ -154,13 +177,25 @@ fn a_403_on_the_primary_falls_through_to_the_fallback() {
         notice["text"], "blocked is not available to this key, so open answers this turn.",
         "one plain sentence"
     );
-    let text =
-        std::fs::read_to_string(k.place.join(".arbos/agents/root/transcript.jsonl")).unwrap();
+    // Every string the transcript holds, and no numbers. What this asserts is
+    // that the provider's *words* never reach the chat, and `403` is three
+    // digits: read as raw file text, it matched the millisecond clock on a
+    // line — `"ts":1789575052403` — and failed the test at random, in about
+    // one run in forty (run 35119788607, on a diff that touched no Rust).
+    // Numbers are clocks, sizes and token counts; prose is what a provider
+    // sends. So this walks the strings.
+    let said = strings_of(&root).join("\n");
+    // A negative assertion over nothing passes for the wrong reason, so prove
+    // the walk found the chat before trusting it not to find the provider.
     assert!(
-        !text.contains("Policy Violation")
-            && !text.contains("403")
-            && !text.contains("platform.openai.com"),
-        "the provider's words stay out of the chat: {text}"
+        said.contains("answered by open") && said.contains("hello"),
+        "the walk reached the chat's own words: {said}"
+    );
+    assert!(
+        !said.contains("Policy Violation")
+            && !said.contains("403")
+            && !said.contains("platform.openai.com"),
+        "the provider's words stay out of the chat: {said}"
     );
     assert!(
         !root
