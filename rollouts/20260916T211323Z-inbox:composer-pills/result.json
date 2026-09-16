@@ -1,0 +1,23 @@
+{
+  "scenario": "inbox:composer-pills",
+  "doc": "From inbox note 2026-09-13-composer-pills.md: exercise feature 'composer-pills' and run every detector. Needs a kernel built from branch cursor/composer-pills-b027.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "feature composer-pills: turn never ended",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "composer-pills",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-13-composer-pills.md"
+  },
+  "duration_s": 300.4,
+  "place": "/tmp/arbos-qa-inbox:composer-pills-s9228de5/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260916T211323Z-inbox:composer-pills",
+  "branch": "main",
+  "usd": 0.05225
+}

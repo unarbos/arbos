@@ -1,0 +1,24 @@
+{
+  "scenario": "rapid-create-delete",
+  "doc": "Create and delete chats fast while the kernel runs, delete root and recreate it as the desktop does, then prompt root. Live frames must still flow.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "tail-cursor-stale",
+      "detail": "root was deleted and recreated; its new transcript has 0 lines but the attach stream broadcast 0 wake/user event frames (serve.rs keeps a per-agent line cursor that never resets)",
+      "where": "crates/arbos-kernel/src/serve.rs:277"
+    }
+  ],
+  "notes": {
+    "root_transcript_lines_before_delete": 2,
+    "root_transcript_lines_after_recreate": 0,
+    "live_wake_or_user_frames_after_recreate": 0
+  },
+  "duration_s": 123.6,
+  "place": "/tmp/arbos-qa-rapid-create-delete-o1x6d449/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260916T194720Z-rapid-create-delete",
+  "branch": "main",
+  "usd": 0.09205
+}

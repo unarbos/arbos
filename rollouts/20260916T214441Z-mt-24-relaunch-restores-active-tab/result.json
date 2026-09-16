@@ -1,0 +1,24 @@
+{
+  "scenario": "mt-24-relaunch-restores-active-tab",
+  "doc": "Item 24. Two chats, the second active; quit and relaunch: the second is active again.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "mt-24-active-tab-not-restored",
+      "detail": "active before quit 3, after relaunch 2",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "active_before": 3,
+    "active_after": 2,
+    "second": 3
+  },
+  "duration_s": 10.2,
+  "place": "/tmp/arbos-qa-mt-24-relaunch-restores-active-tab-ws2384_i/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260916T214441Z-mt-24-relaunch-restores-active-tab",
+  "branch": "main",
+  "usd": 0.0
+}

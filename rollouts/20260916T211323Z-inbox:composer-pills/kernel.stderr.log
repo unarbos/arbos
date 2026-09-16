@@ -1,0 +1,15 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-inbox:composer-pills-s9228de5/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8136 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-inbox:composer-pills-s9228de5/home/.cache/arbos/tgrep/5f09daee7b613192
+tools root: 2 calls, wall 260210ms, sum 260210ms, speedup 1.0x
+tools worker-simulated-pr: 2 calls, wall 1ms, sum 0ms, speedup 0.0x
+tools worker-simulated-pr: 2 calls, wall 255ms, sum 255ms, speedup 1.0x
+tools worker-simulated-pr: 2 calls, wall 9ms, sum 2ms, speedup 0.2x
+tools root: 2 calls, wall 12154ms, sum 12155ms, speedup 1.0x
+tools root: 3 calls, wall 255ms, sum 256ms, speedup 1.0x
+tools root: 3 calls, wall 5828ms, sum 5828ms, speedup 1.0x
+tools root: 2 calls, wall 256ms, sum 511ms, speedup 2.0x
+tools root: 2 calls, wall 2ms, sum 3ms, speedup 1.5x

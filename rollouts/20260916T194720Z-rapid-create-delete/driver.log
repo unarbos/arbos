@@ -1,0 +1,6 @@
+1789588040323 kernel started pid 1022223
+1789588101336 timeout waiting for turn root idle after 60s
+1789588162351 timeout waiting for turn root idle after 60s
+1789588163851 BREAK tail-cursor-stale: root was deleted and recreated; its new transcript has 0 lines but the attach stream broadcast 0 wake/user event frames (serve.rs keeps a per-agent line cursor that never resets)
+1789588163867 kernel stopped with code 0
+1789588163924 bugs: seen qa-002-live-events-stop-after-agent-recreate.md

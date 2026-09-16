@@ -1,0 +1,42 @@
+{
+  "scenario": "bench-fix-commit-branch",
+  "doc": "Checklist item 8: fix a planted bug on a new branch with a commit, leave main untouched, and name the PR base.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "no commit on the fix branch ahead of main: {'fix/hello-py-syntax': ''}",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "main was changed",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "hello.py on the branch is still broken: ''",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "the reply does not name the PR base branch",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "branches": [
+      "fix/hello-py-syntax"
+    ],
+    "ahead_of_main": {
+      "fix/hello-py-syntax": ""
+    }
+  },
+  "duration_s": 78.0,
+  "place": "/tmp/arbos-qa-bench-fix-commit-branch-0t77mjhy/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260916T183651Z-bench-fix-commit-branch",
+  "branch": "rust",
+  "usd": 0.02287
+}

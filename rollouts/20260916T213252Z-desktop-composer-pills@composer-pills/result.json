@@ -1,0 +1,27 @@
+{
+  "scenario": "desktop-composer-pills@composer-pills",
+  "doc": "Feature composer-pills: a PR URL printed twice by bash counts once; a URL merely read from a file is recorded; the strip above the composer must not overflow a 900 px window. (against feature branch cursor/composer-pills-b027)",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "pill-missing",
+      "detail": "no PRs pill after two bash outputs with a PR URL; pills seen: ",
+      "where": "desktop composer pills"
+    }
+  ],
+  "notes": {
+    "feature": "composer-pills",
+    "pill_ids": [],
+    "pill_elements": [],
+    "prs_pill_text": null,
+    "prs_after_read_of_markdown": null,
+    "overflow_at_900px": []
+  },
+  "duration_s": 47.2,
+  "place": "/tmp/arbos-qa-desktop-composer-pills@composer-pills-yr67iz8y/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260916T213252Z-desktop-composer-pills@composer-pills",
+  "branch": "main",
+  "usd": 0.02221
+}

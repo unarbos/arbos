@@ -1,0 +1,8 @@
+{
+  "name": "inbox:composer-pills",
+  "doc": "From inbox note 2026-09-13-composer-pills.md: exercise feature 'composer-pills' and run every detector. Needs a kernel built from branch cursor/composer-pills-b027.",
+  "tags": [
+    "inbox",
+    "composer-pills"
+  ]
+}

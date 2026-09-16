@@ -1,0 +1,43 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-research-links-8eq45v4v/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8137 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-research-links-8eq45v4v/home/.cache/arbos/tgrep/29c627bcba110630
+tools research-full-duplex: 2 calls, wall 5ms, sum 1ms, speedup 0.2x
+tools research-full-duplex: 2 calls, wall 579ms, sum 579ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 264ms, sum 257ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 960ms, sum 954ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 91ms, sum 81ms, speedup 0.9x
+tools research-full-duplex: 2 calls, wall 2084ms, sum 2068ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 410ms, sum 389ms, speedup 0.9x
+tools research-full-duplex: 2 calls, wall 93ms, sum 85ms, speedup 0.9x
+tools research-full-duplex: 2 calls, wall 2067ms, sum 2060ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 242ms, sum 238ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 83ms, sum 76ms, speedup 0.9x
+tools research-full-duplex: 2 calls, wall 2085ms, sum 2080ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 2057ms, sum 2053ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 9ms, sum 2ms, speedup 0.2x
+tools research-full-duplex: 2 calls, wall 7ms, sum 6ms, speedup 0.9x
+tools research-full-duplex: 2 calls, wall 14630ms, sum 14624ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 89ms, sum 82ms, speedup 0.9x
+tools research-full-duplex: 2 calls, wall 2095ms, sum 2082ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 80ms, sum 68ms, speedup 0.8x
+tools research-full-duplex: 2 calls, wall 2059ms, sum 2054ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 366ms, sum 358ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 76ms, sum 69ms, speedup 0.9x
+tools research-full-duplex: 2 calls, wall 2096ms, sum 2090ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 534ms, sum 534ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 268ms, sum 258ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 261ms, sum 255ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 255ms, sum 255ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 263ms, sum 255ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 261ms, sum 255ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 388ms, sum 386ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 9ms, sum 0ms, speedup 0.0x
+tools research-full-duplex: 2 calls, wall 261ms, sum 254ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 262ms, sum 256ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 265ms, sum 256ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 264ms, sum 257ms, speedup 1.0x
+tools root: 2 calls, wall 148823ms, sum 148824ms, speedup 1.0x
+tools root: 3 calls, wall 1ms, sum 2ms, speedup 2.0x

@@ -1,0 +1,5 @@
+1789587280982 kernel started pid 1013372
+1789587581366 timeout waiting for turn root idle after 300s
+1789587581366 BREAK turn-never-ended: feature swebench-loop-cycle-5: turn never ended
+1789587581382 kernel stopped with code 0
+1789587581439 bugs: seen f4502c1609.md
