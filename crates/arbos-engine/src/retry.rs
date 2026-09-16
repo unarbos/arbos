@@ -61,12 +61,23 @@ pub fn verdict(
     let transient = match e.should_retry {
         Some(explicit) => explicit,
         None => match (e.kind, e.status) {
-            (FailKind::Transport | FailKind::Idle, _) => true,
+            (FailKind::Transport | FailKind::Idle | FailKind::Silent, _) => true,
             (FailKind::Stream, _) => false,
             (FailKind::Status, Some(s)) => matches!(s, 408 | 409 | 425 | 429) || s >= 500,
             (FailKind::Status, None) => true,
         },
     };
+    // Nothing came back at all: another model answers now rather than a
+    // second wait of the same length; alone, one more try.
+    if e.kind == FailKind::Silent {
+        return if more_models {
+            Verdict::Fallback
+        } else if attempt < 2 {
+            Verdict::Retry
+        } else {
+            Verdict::Fail
+        };
+    }
     // A model the endpoint does not serve: no point retrying it.
     if e.status == Some(404) {
         return if more_models {
@@ -211,6 +222,15 @@ impl Models {
 
     pub fn current(&self) -> &str {
         &self.list[self.current]
+    }
+
+    /// Drop every fallback (never the primary) that `blocked` says the
+    /// key cannot call, so a refused family is not tried turn after turn.
+    pub fn drop_blocked(&mut self, base: &str) {
+        let primary = self.list[0].clone();
+        self.list
+            .retain(|m| *m == primary || !crate::blocked::is_blocked(base, m));
+        self.current = self.current.min(self.list.len() - 1);
     }
 
     /// The primary and every fallback, in order.

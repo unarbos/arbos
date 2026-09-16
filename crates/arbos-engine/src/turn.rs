@@ -439,12 +439,41 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         (None, _) => return refuse(&transcript, &place, &agent, host.missing_key_hint()),
         (_, Err(e)) => return refuse(&transcript, &place, &agent, format!("{e:#}")),
     };
-    let model = pick_model(
+    let picked = pick_model(
         &wake.model,
         &agent,
         &host.config.model(),
         &host.config.child_model,
     );
+    // A family this key cannot call (learned from a 403 on an earlier
+    // turn, or the kickoff probe) is not tried again turn after turn: the
+    // first model the key can use stands in, and the user hears why in
+    // one plain sentence, once per turn.
+    let mut blocked_note: Option<String> = None;
+    let model = if replay.is_none() && crate::blocked::is_blocked(&api_base, &picked) {
+        let suggested = host.config.provider().suggested_models();
+        let mut candidates: Vec<&str> = host
+            .config
+            .fallback_models
+            .iter()
+            .map(String::as_str)
+            .filter(|m| !m.is_empty() && *m != "none")
+            .collect();
+        candidates.extend(suggested.iter().copied());
+        match crate::blocked::alternative(&api_base, &picked, &candidates) {
+            Some(alt) => {
+                blocked_note = Some(format!(
+                    "This key cannot use {} models ({} was refused by the provider), so {alt} answers for now. Pick another default in Settings › Model to make it stick.",
+                    crate::retry::family(&picked),
+                    picked
+                ));
+                alt.to_string()
+            }
+            None => picked,
+        }
+    } else {
+        picked
+    };
     // The model's own context length, from the provider's model list.
     // `window_tokens = 0` uses it, capped so a 1M-token model does not turn
     // every step into a 1M-token prompt. A configured `window_tokens` is a
@@ -510,6 +539,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         &host.config.fallback_models,
         &host.config.api_base,
     );
+    if replay.is_none() {
+        models.drop_blocked(&api_base);
+    }
     let policy = crate::retry::RetryPolicy::from_config(&host.config);
     let mut provider = Provider {
         base: api_base,
@@ -519,6 +551,12 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         cache_ttl: host.config.cache_ttl.clone(),
         data_policy: host.config.data_policy.clone(),
         stream_idle: std::time::Duration::from_millis(host.config.stream_idle_ms.max(1_000)),
+        first_byte: std::time::Duration::from_millis(
+            host.config
+                .first_byte_ms
+                .max(3_000)
+                .min(host.config.stream_idle_ms.max(1_000)),
+        ),
         max_tokens: output_cap,
         trace: host.config.trace.then(|| layout.dir.join("trace")),
         trace_agent: agent.id.to_string(),
@@ -530,6 +568,58 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         max_parallel: host.config.max_parallel_tools,
         speculate: host.config.speculate,
     };
+    // A new project's first turn: ask the key whether it can call the
+    // model at all before anything is generated. A refusal marks the
+    // family, switches to a model the key can use, and says so in one
+    // sentence — instead of the provider's policy text as the project's
+    // opening line (Code2, 2026-09-16). Fifteen seconds at most; any
+    // other failure is left to the turn's own retries.
+    if wake.kind == WakeKind::Kickoff && provider.replay.is_none() && blocked_note.is_none() {
+        let api_base = provider.base.clone();
+        if let Err(pe) = provider.probe(control.cancel()).await
+            && pe.status == Some(403)
+        {
+            eprintln!(
+                "provider probe: {}: {pe} — {}",
+                provider.model,
+                pe.message.trim()
+            );
+            crate::blocked::mark(&api_base, &provider.model, &pe.message);
+            let mut candidates: Vec<&str> = host
+                .config
+                .fallback_models
+                .iter()
+                .map(String::as_str)
+                .filter(|m| !m.is_empty() && *m != "none")
+                .collect();
+            candidates.extend(host.config.provider().suggested_models().iter().copied());
+            if let Some(alt) = crate::blocked::alternative(&api_base, &provider.model, &candidates)
+            {
+                blocked_note = Some(format!(
+                    "This key cannot use {} models ({} was refused by the provider), so {alt} answers for now. Pick another default in Settings › Model to make it stick.",
+                    crate::retry::family(&provider.model),
+                    provider.model
+                ));
+                provider.model = alt.to_string();
+                models = Models::with_defaults(
+                    alt.to_string(),
+                    &host.config.fallback_models,
+                    &host.config.api_base,
+                );
+                models.drop_blocked(&api_base);
+            }
+        }
+    }
+    if let Some(note) = blocked_note.take() {
+        append_event(
+            &transcript,
+            &Event::new(EventKind::Notice {
+                text: note,
+                failed: false,
+            }),
+        )?;
+        events = load_transcript(&transcript)?;
+    }
     let mut cx = RunCx {
         place: place.clone(),
         agent: agent.clone(),

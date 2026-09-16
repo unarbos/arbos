@@ -202,6 +202,11 @@ pub struct HostConfig {
     pub max_server_delay_ms: u64,
     /// Silence mid-stream that counts as a lost connection.
     pub stream_idle_ms: u64,
+    /// The longest wait for a model's first byte before another model is
+    /// tried (default 30 s). `stream_idle_ms` bounds the silence once the
+    /// answer has started.
+    #[serde(default = "default_first_byte_ms")]
+    pub first_byte_ms: u64,
     /// What the provider may do with prompts, for OpenRouter routing:
     /// "" (account default), "deny" (only providers that do not store or
     /// train on prompts: `provider.data_collection = "deny"`), or "zdr"
@@ -280,6 +285,7 @@ impl Default for HostConfig {
             backoff_max_ms: 30_000,
             max_server_delay_ms: 60_000,
             stream_idle_ms: 120_000,
+            first_byte_ms: default_first_byte_ms(),
             compact_model: String::new(),
             data_policy: String::new(),
             child_model: String::new(),
@@ -553,6 +559,10 @@ fn write_private(path: &Path, text: &str) -> Result<()> {
     }
     std::fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
     Ok(())
+}
+
+fn default_first_byte_ms() -> u64 {
+    30_000
 }
 
 pub fn dirs_config() -> PathBuf {

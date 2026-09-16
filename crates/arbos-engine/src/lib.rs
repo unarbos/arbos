@@ -2,6 +2,7 @@
 
 mod access;
 mod batch;
+pub mod blocked;
 pub mod compact;
 mod control;
 pub mod describe;
