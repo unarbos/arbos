@@ -544,6 +544,7 @@ pub async fn store_write(
         Frame::Put {
             path: addr.path,
             text,
+            data: None,
             base_hash,
         },
     )
