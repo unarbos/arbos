@@ -24,6 +24,10 @@ base64 = "0.22"
 # is the point: a payload verifies on a Mac with no Developer ID anywhere
 # near it.
 ring = "0.17"
+# Fetching a feed and a payload, for `arbos-updatectl kernel`. The same client
+# and TLS backend the kernel already uses, so this is a line in a manifest
+# rather than a second HTTP stack in the tree.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
 
 [dev-dependencies]
 tempfile = "3"

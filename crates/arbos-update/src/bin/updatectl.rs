@@ -18,7 +18,8 @@
 //!       --base-url https://github.com/unarbos/arbos/releases/download/dev \
 //!       --notes-file dist/notes.txt --keep 10 \
 //!       --artifact macos/arm64=dist/Arbos-0.2.0-1877-macos-arm64.zip \
-//!       --artifact linux/x86_64=dist/arbos-0.2.0-1877-linux-x86_64.tar.gz
+//!       --artifact linux/x86_64=dist/arbos-0.2.0-1877-linux-x86_64.tar.gz \
+//!       --artifact linux/x86_64/kernel=dist/arbos-kernel-0.2.0-1877-linux-x86_64.tar.gz
 //!       One release into a channel's feed: each artifact measured, digested
 //!       and signed, the entry put in, older entries past `--keep` dropped.
 //!       Merges into the feed already there, so the file fetched from the last
@@ -33,8 +34,9 @@
 
 use anyhow::{Context, Result, bail};
 use arbos_update::{
-    Channel, Download, Feed, Format, Platform, Release, Version,
+    Channel, Component, Download, Feed, Format, Platform, Release, Version,
     feed::Link,
+    kernel as kernel_mod,
     sign::{self, PublicKey, SecretKey},
 };
 use std::{collections::BTreeMap, path::PathBuf, process::ExitCode};
@@ -65,6 +67,7 @@ fn run() -> Result<()> {
         "verify" => verify_file(&args),
         "add" => add(&args),
         "show" => show(&args),
+        "kernel" => kernel(&args),
         "" | "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(())
@@ -81,9 +84,11 @@ arbos-updatectl add     --feed <path> --channel <stable|dev> --version <x.y.z>
                         --build <n> --commit <sha> --base-url <url>
                         [--notes <text> | --notes-file <path>] [--notes-url <url>]
                         [--minimum-system-version <x.y>] [--keep <n>]
-                        --artifact <platform>/<arch>=<path> ...
+                        --artifact <platform>/<arch>[/<component>]=<path> ...
                         [--link <platform>:<kind>=<url> ...]
 arbos-updatectl show    --feed <path> [--current <x.y.z+n>] [--platform <p>] [--arch <a>]
+arbos-updatectl kernel  [--channel <stable|dev>] [--binary <path>] [--pin <x.y.z+n>]
+                        [--install]
 
 The signing key is read from ARBOS_UPDATE_SIGNING_KEY.";
 
@@ -219,12 +224,20 @@ fn add(args: &Args) -> Result<()> {
 /// One `--artifact macos/arm64=path/to/file` into the entry the feed carries:
 /// its length, its digest, its signature, and the URL it will be fetched from.
 fn measure(spec: &str, base_url: &str, secret: &SecretKey) -> Result<Download> {
-    let (target, path) = spec
-        .split_once('=')
-        .with_context(|| format!("--artifact {spec} is not <platform>/<arch>=<path>"))?;
-    let (platform, arch) = target
-        .split_once('/')
-        .with_context(|| format!("--artifact {spec} is not <platform>/<arch>=<path>"))?;
+    let shape = || format!("--artifact {spec} is not <platform>/<arch>[/<component>]=<path>");
+    let (target, path) = spec.split_once('=').with_context(shape)?;
+    let (platform, rest) = target.split_once('/').with_context(shape)?;
+    // The component is optional and defaults to the app, so every publish
+    // step written before kernels could update themselves still says what it
+    // always said.
+    let (arch, component) = match rest.split_once('/') {
+        Some((arch, component)) => (
+            arch,
+            Component::parse(component)
+                .with_context(|| format!("`{component}` is not a component the feed knows"))?,
+        ),
+        None => (rest, Component::App),
+    };
     let platform = Platform::parse(platform)
         .with_context(|| format!("`{platform}` is not a platform the feed knows"))?;
     let path = PathBuf::from(path);
@@ -239,6 +252,7 @@ fn measure(spec: &str, base_url: &str, secret: &SecretKey) -> Result<Download> {
     Ok(Download {
         platform,
         arch: arch.to_owned(),
+        component,
         format,
         url: format!("{base_url}/{name}"),
         size: bytes.len() as u64,
@@ -288,6 +302,95 @@ fn show(args: &Args) -> Result<()> {
         ),
     }
     Ok(())
+}
+
+/// Bring an `arbos-kernel` binary up to what the channel publishes.
+///
+/// The whole of the update, with a person choosing the moment — which is the
+/// point of it existing as a command before anything runs unattended. A
+/// kernel on a box nobody ssh's into and nobody attaches to is exactly the one
+/// that goes stale, and this fixes it today without the kernel having learned
+/// anything.
+///
+/// It refuses the same four ways a kernel updating itself would: a binary in a
+/// build tree is somebody's working copy, a pin is a pin, a newer build is
+/// left alone, and a channel with no kernel for this machine is not an error.
+fn kernel(args: &Args) -> Result<()> {
+    let channel = match args.one("channel") {
+        Some(name) => Channel::parse(&name).context("--channel is stable or dev")?,
+        None => Channel::default(),
+    };
+    let binary = kernel_mod::find(args.one("binary").map(PathBuf::from).as_deref())?;
+    let running = kernel_mod::Running::read(&binary)?;
+    println!(
+        "running   {} {} ({})",
+        running.version.human(),
+        running.sha,
+        binary.display()
+    );
+
+    let feed = Feed::parse(&fetch_text(channel.feed_url())?)?;
+    let offered = match kernel_mod::plan(&running, &feed, args.one("pin").as_deref()) {
+        Ok(offered) => offered,
+        Err(refusal) => {
+            println!("no update: {}", refusal.say());
+            return Ok(());
+        }
+    };
+    println!(
+        "available {} ({}) on the {} channel",
+        offered.version.human(),
+        offered.commit,
+        channel.as_str()
+    );
+    println!("          {}", offered.download.url);
+    if !args.flag("install") {
+        println!("\nrun again with --install to replace it");
+        return Ok(());
+    }
+
+    let key = sign::built_in_key()
+        .context("this build carries no update key, so it cannot check a payload")?;
+    println!("fetching  {} bytes", offered.download.size);
+    let bytes = fetch_bytes(&offered.download.url)?;
+    let scratch = std::env::temp_dir().join("arbos-kernel-update");
+    kernel_mod::verify_and_install(&bytes, &offered, &binary, &key, &scratch)?;
+    let now = kernel_mod::Running::read(&binary)?;
+    println!("installed {} {}", now.version.human(), now.sha);
+    println!(
+        "\nThe running kernel is still the old one until it restarts. Stop it the way it was\n\
+         started — a supervisor loop restarts it, and `kill -TERM` on the pid in\n\
+         <place>/.arbos/runtime/kernel.json is the graceful stop."
+    );
+    Ok(())
+}
+
+fn http() -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .context("building an HTTP client")
+}
+
+fn fetch_text(url: &str) -> Result<String> {
+    http()?
+        .get(url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .with_context(|| format!("fetching {url}"))?
+        .text()
+        .with_context(|| format!("reading {url}"))
+}
+
+fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
+    Ok(http()?
+        .get(url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .with_context(|| format!("fetching {url}"))?
+        .bytes()
+        .with_context(|| format!("reading {url}"))?
+        .to_vec())
 }
 
 fn secret_key() -> Result<SecretKey> {
@@ -354,11 +457,17 @@ impl Args {
                 Some(name) => {
                     let (name, value) = match name.split_once('=') {
                         Some((name, value)) => (name.to_owned(), value.to_owned()),
-                        None => (
-                            name.to_owned(),
-                            argv.next()
-                                .with_context(|| format!("--{name} wants a value"))?,
-                        ),
+                        // A flag whose next word is another flag, or which
+                        // ends the line, is a switch rather than a name with a
+                        // value. `--install` is one; everything else here
+                        // takes a value and gets the word after it.
+                        None => match argv.peek() {
+                            Some(next) if !next.starts_with("--") => (
+                                name.to_owned(),
+                                argv.next().expect("peeked"),
+                            ),
+                            _ => (name.to_owned(), String::new()),
+                        },
                     };
                     flags.entry(name).or_default().push(value);
                 }
@@ -369,7 +478,12 @@ impl Args {
     }
 
     fn one(&self, name: &str) -> Option<String> {
-        self.flags.get(name)?.last().cloned()
+        self.flags.get(name)?.last().cloned().filter(|v| !v.is_empty())
+    }
+
+    /// Whether a bare `--name` was given.
+    fn flag(&self, name: &str) -> bool {
+        self.flags.contains_key(name)
     }
 
     fn all(&self, name: &str) -> Vec<String> {
@@ -419,9 +533,23 @@ mod tests {
     }
 
     #[test]
-    fn a_flag_with_no_value_is_an_error() {
-        let args = Args::parse(["--feed"].into_iter().map(String::from));
-        assert!(args.is_err());
+    fn a_bare_flag_is_a_switch_and_not_a_missing_value() {
+        // `--install` ends the line and takes nothing; `--channel dev` after
+        // it still reads as a pair.
+        let args = Args::parse(
+            ["--channel", "dev", "--install"].into_iter().map(String::from),
+        )
+        .unwrap();
+        assert!(args.flag("install"));
+        assert_eq!(args.one("install"), None);
+        assert_eq!(args.one("channel").as_deref(), Some("dev"));
+        assert!(!args.flag("pin"));
+
+        // And a switch in the middle does not eat the flag after it.
+        let args =
+            Args::parse(["--install", "--channel", "dev"].into_iter().map(String::from)).unwrap();
+        assert!(args.flag("install"));
+        assert_eq!(args.one("channel").as_deref(), Some("dev"));
     }
 
     #[test]

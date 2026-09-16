@@ -15,8 +15,13 @@ inputs:
 
 outputs:
   path:
-    description: The tarball that was built, relative to the workspace root.
+    description: The app tarball that was built, relative to the workspace root.
     value: ${{ steps.build.outputs.path }}
+  kernel-path:
+    description: >-
+      The kernel on its own. A headless box updating its kernel has no use for
+      the desktop binary, which is most of the other tarball.
+    value: ${{ steps.build.outputs.kernel-path }}
 
 runs:
   using: composite
@@ -59,4 +64,15 @@ runs:
         tar -C dist -czf "dist/$out.tar.gz" "$out"
         rm -rf "dist/${out:?}"
         echo "path=dist/$out.tar.gz" >> "$GITHUB_OUTPUT"
+
+        # And the kernel on its own, for a kernel keeping itself current. Same
+        # binary, same commit, same release — a second archive rather than a
+        # second build, so the two can never be from different code.
+        kout="arbos-kernel-$VERSION-$BUILD-linux-x86_64"
+        mkdir -p "dist/$kout"
+        cp target/release/arbos-kernel "dist/$kout/"
+        cp LICENSE "dist/$kout/"
+        tar -C dist -czf "dist/$kout.tar.gz" "$kout"
+        rm -rf "dist/${kout:?}"
+        echo "kernel-path=dist/$kout.tar.gz" >> "$GITHUB_OUTPUT"
         ls -la dist

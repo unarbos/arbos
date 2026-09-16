@@ -11,15 +11,18 @@
 //! - [`sign`] — Ed25519 over the payload's bytes, and the key that checks it.
 //! - [`install`] — putting the new build in place, and putting the old one
 //!   back when that goes wrong.
+//! - [`kernel`] — the same, for an `arbos-kernel` binary that keeps itself
+//!   current between turns.
 //!
 //! Nothing here opens a socket. The desktop fetches with the HTTP client it
 //! already has; this crate only says what the bytes mean and where they go.
 
 pub mod feed;
 pub mod install;
+pub mod kernel;
 pub mod sign;
 pub mod version;
 
-pub use feed::{Available, Channel, Download, Feed, Format, Platform, Release};
+pub use feed::{Available, Channel, Component, Download, Feed, Format, Platform, Release};
 pub use sign::{PublicKey, SecretKey};
 pub use version::Version;
