@@ -52,7 +52,17 @@ struct RootView: View {
         // the first thing the returning user sees is the chat as it was,
         // then the replay, not an offline notice.
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { chat.resumeIfNeeded() }
+            switch phase {
+            case .active:
+                notifier.release()
+                chat.resumeIfNeeded()
+            case .background:
+                notifier.holdOpen()
+            case .inactive:
+                break
+            @unknown default:
+                break
+            }
         }
         .onAppear {
             // A reply, an ask or a worker's finish while the app is not in

@@ -22,6 +22,24 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
     /// The project a tapped notification asks the app to open.
     @Published var openTarget: String?
     private var asked = false
+    private var hold: UIBackgroundTaskIdentifier = .invalid
+
+    /// The user switched away: keep the socket alive for the half minute
+    /// iOS allows, so a reply that is already on its way still rings.
+    /// Beyond that the app is suspended and only a push could reach it.
+    func holdOpen() {
+        release()
+        hold = UIApplication.shared.beginBackgroundTask(withName: "arbos.reply") { [weak self] in
+            Task { @MainActor in self?.release() }
+        }
+    }
+
+    /// Back in front (or out of time): let go.
+    func release() {
+        guard hold != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(hold)
+        hold = .invalid
+    }
 
     override init() {
         super.init()
