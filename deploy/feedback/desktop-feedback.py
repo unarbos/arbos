@@ -58,6 +58,13 @@ FILED_NAME = "filed.json"
 
 LEDGER_MARK = "<!-- poll.py appends rows above this line; do not remove -->"
 
+# How many polls to let a picture arrive before taking the report without it.
+PICTURE_PATIENCE = 2
+
+
+class Incomplete(Exception):
+    """The folder is still arriving. Not a fault: leave it for the next poll."""
+
 
 # --------------------------------------------------------------------------
 # Transport
@@ -198,9 +205,10 @@ def load_seen(rig: Path) -> dict:
     try:
         state = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
-        return {"ids": {}, "counts": {}}
+        return {"ids": {}, "counts": {}, "waiting": {}}
     state.setdefault("ids", {})
     state.setdefault("counts", {})
+    state.setdefault("waiting", {})
     return state
 
 
@@ -249,18 +257,28 @@ def cmd_poll(args: argparse.Namespace) -> int:
         return 0
 
     taken: list[dict] = []
+    still_arriving: list[str] = []
     for report_id in sorted(fresh):
         try:
             record = take_one(src, report_id, rig, args, state)
+        except Incomplete as e:
+            # Expected, and quiet: it will be here next time.
+            still_arriving.append(f"{report_id}: {e}")
+            continue
         except Exception as e:  # noqa: BLE001 - one bad report must not stop the rest
             print(f"SKIPPED {report_id}: {e}", file=sys.stderr)
             continue
         taken.append(record)
 
-    if taken:
+    if taken or still_arriving:
         save_seen(rig, state)
-        if args.ledger:
-            append_ledger(Path(args.ledger).expanduser(), taken)
+    if taken and args.ledger:
+        append_ledger(Path(args.ledger).expanduser(), taken)
+
+    if not taken:
+        for line in still_arriving:
+            print(f"still arriving — {line}")
+        return 0
 
     print(f"NEW {len(taken)} report(s)")
     for r in taken:
@@ -269,6 +287,8 @@ def cmd_poll(args: argparse.Namespace) -> int:
         print(f"    kept: {r['kept']}")
         if r["missing"]:
             print(f"    he removed: {r['missing']}")
+        if r["faults"]:
+            print(f"    MISSING, not removed (a fault to chase): {r['faults']}")
         print(f"    rig:   {r['rig_path']}")
         if r["store_path"]:
             print(f"    store: {r['store_path']}")
@@ -293,6 +313,33 @@ def take_one(
         raise RuntimeError(f"no {REPORT_NAME}")
     report = json.loads(raw)
 
+    # The picture is fetched before a name is spent on the report.
+    #
+    # The app claims its folder with `report.json` and writes the picture after
+    # it, so a poll can land between the two. A report that says it carries a
+    # picture and has none has probably not finished arriving, so it is left for
+    # the next poll rather than recorded as a report whose screenshot was lost.
+    # `PICTURE_PATIENCE` polls later it is taken anyway, with the loss written
+    # down: a report is worth more than its picture and must not be stuck
+    # behind one for ever.
+    #
+    # And the wait happens *here*, before `next_name`, because a human number
+    # must not be spent on a report that was not taken — waiting twice used to
+    # make the first report `2026-09-16-3`.
+    shot = None
+    if report.get("included", {}).get("screenshot"):
+        shot = fetch_screenshot(src, report_id)
+        if shot is None:
+            waited = state["waiting"].get(report_id, 0) + 1
+            state["waiting"][report_id] = waited
+            if waited <= PICTURE_PATIENCE:
+                raise Incomplete(
+                    f"the picture it says it carries has not arrived yet "
+                    f"(poll {waited} of {PICTURE_PATIENCE}); leaving it"
+                )
+            report["screenshot_lost_in_transit"] = True
+    state["waiting"].pop(report_id, None)
+
     sent_ms = report.get("sent_ms")
     name = next_name(state, utc_day(sent_ms))
 
@@ -301,8 +348,10 @@ def take_one(
     (rig_dir / REPORT_NAME).write_text(json.dumps(report, indent=1) + "\n")
 
     shot_written = False
-    if report.get("included", {}).get("screenshot"):
-        shot_written = save_screenshot(src, report_id, rig_dir)
+    if shot is not None:
+        raw, suffix = shot
+        (rig_dir / f"screenshot.{suffix}").write_bytes(raw)
+        shot_written = True
 
     summary = summarise(report, name, report_id, shot_written)
     (rig_dir / "feedback.md").write_text(summary)
@@ -329,8 +378,16 @@ def take_one(
     }
 
     included = report.get("included", {})
+    chosen = report.get("chose", included)
     kept = ", ".join(k for k, v in sorted(included.items()) if v) or "words only"
-    missing = ", ".join(k for k, v in sorted(included.items()) if not v)
+    # What he took out, and what went missing although he kept it. The second
+    # is a fault worth chasing; the first is none of the loop's business.
+    missing = ", ".join(k for k, v in sorted(chosen.items()) if not v)
+    faults = ", ".join(
+        k
+        for k, v in sorted(included.items())
+        if not v and chosen.get(k, v) is not False
+    )
 
     return {
         "id": report_id,
@@ -340,36 +397,38 @@ def take_one(
         "build": build_label(report),
         "kept": kept,
         "missing": missing,
+        "faults": faults,
         "rig_path": str(rig_dir),
         "store_path": store_path,
     }
 
 
-def save_screenshot(src: Transport, report_id: str, rig_dir: Path) -> bool:
-    """The screenshot travels as base64 text, because a store read is text.
+def fetch_screenshot(src: Transport, report_id: str) -> Optional[tuple[bytes, str]]:
+    """The picture and its kind, or `None` when there is not a usable one yet.
 
-    A report past the read cap comes back cut, and a cut base64 string
-    decodes to a broken image. Better to say so than to file a corrupt
-    picture as evidence.
+    It travels as base64 text, because a store read serves text. A file past
+    the read cap comes back cut, and a cut base64 string decodes to a broken
+    image — better to say so than to file a corrupt picture as evidence.
+
+    `None` here means "not yet": the caller waits a couple of polls before
+    deciding the picture is really lost.
     """
     try:
         b64 = src.read(f"{report_id}/{SCREENSHOT_NAME}")
     except RuntimeError as e:
         print(f"WARNING {report_id}: {e}", file=sys.stderr)
-        return False
+        return None
     if not b64:
-        return False
+        return None
     try:
         raw = base64.b64decode(b64.strip(), validate=True)
     except (binascii.Error, ValueError) as e:
         print(f"WARNING {report_id}: the screenshot did not decode ({e})", file=sys.stderr)
-        return False
+        return None
     if not raw.startswith(b"\x89PNG") and not raw.startswith(b"\xff\xd8\xff"):
         print(f"WARNING {report_id}: the screenshot is neither PNG nor JPEG", file=sys.stderr)
-        return False
-    suffix = "png" if raw.startswith(b"\x89PNG") else "jpg"
-    (rig_dir / f"screenshot.{suffix}").write_bytes(raw)
-    return True
+        return None
+    return raw, "png" if raw.startswith(b"\x89PNG") else "jpg"
 
 
 def build_label(report: dict) -> str:
@@ -379,6 +438,12 @@ def build_label(report: dict) -> str:
     return f"{version} ({build})"
 
 
+def plural(n: int, one: str, many: str = "") -> str:
+    """`1 line`, `2 lines`. A report is read by a person and quoted by an agent,
+    and "1 tool calls" reads as carelessness in both."""
+    return f"{n} {one if n == 1 else (many or one + 's')}"
+
+
 def summarise(report: dict, name: str, report_id: str, shot: bool) -> str:
     """What a person reads first. The machine-readable form is beside it."""
     app = report.get("app", {})
@@ -386,6 +451,7 @@ def summarise(report: dict, name: str, report_id: str, shot: bool) -> str:
     turn = report.get("turn", {})
     red = report.get("redacted", {})
     inc = report.get("included", {})
+    chosen = report.get("chose", {})
     events = report.get("events") or []
     tools = [e for e in events if e.get("kind") == "tool"]
     failed = [e for e in tools if e.get("error")]
@@ -409,20 +475,38 @@ def summarise(report: dict, name: str, report_id: str, shot: bool) -> str:
     ]
 
     def row(label: str, key: str, detail: str) -> str:
-        if inc.get(key) is False:
+        # A part he removed and a part that failed to arrive are opposite
+        # facts, and telling them apart is the whole reason the sheet shows
+        # him the list. `included` alone cannot: it is false either way. So
+        # `chose` says what he asked for, and the two together say which
+        # happened. A report without `chose` is an early one; fall back.
+        chose = chosen.get(key, inc.get(key))
+        if chose is False:
             return f"- {label}: **he removed it**"
+        if inc.get(key) is False:
+            why = report.get("screenshot_error") if key == "screenshot" else None
+            return (
+                f"- {label}: **missing, and he did not remove it** — a fault"
+                + (f": {why}" if why else ", cause unrecorded")
+            )
         return f"- {label}: {detail}"
 
     lines += [
-        row("Screenshot", "screenshot", "saved beside this file" if shot else "claimed but did not arrive"),
+        row(
+            "Screenshot",
+            "screenshot",
+            "saved beside this file"
+            if shot
+            else "**lost in transit** — the report says it carries one and it never arrived",
+        ),
         row(
             "Trajectory",
             "trajectory",
-            f"{len(events)} lines, {len(tools)} tool calls, {len(failed)} failed"
+            f"{plural(len(events), 'line')}, {plural(len(tools), 'tool call')}, {len(failed)} failed"
             f" (turn {turn.get('from', '?')}–{turn.get('to', '?')}"
             f"{', cut' if report.get('truncated') else ''})",
         ),
-        row("Kernel log", "log", f"{len(report.get('log') or [])} lines"),
+        row("Kernel log", "log", plural(len(report.get("log") or []), "line")),
         row("Transcript tail", "tail", f"{len(report.get('tail') or [])} lines"),
         row("The app's own view", "session", "included"),
         row("Tool arguments and outputs", "tool_io", "included"),
@@ -430,7 +514,7 @@ def summarise(report: dict, name: str, report_id: str, shot: bool) -> str:
 
     if any(red.get(k) for k in ("secrets", "tokens", "values", "blocks")):
         total = sum(int(red.get(k) or 0) for k in ("secrets", "tokens", "values", "blocks"))
-        lines += ["", f"{total} credential(s) were removed on the way out: `{json.dumps(red)}`."]
+        lines += ["", f"{plural(total, 'credential')} removed on the way out: `{json.dumps(red)}`."]
 
     if failed:
         lines += ["", "## The calls that failed", ""]
