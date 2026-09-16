@@ -218,7 +218,9 @@ final class LiveKernelChat: ChatSource {
             }
             // The hub saying the kernel went away is the link going, not a
             // line for the transcript: the store's one calm line covers it.
-            if detail.contains("went away") || detail.contains("closed") {
+            // …and "no kernel serving" is the same link, still down, seen from
+            // the hub: the calm line covers it too (M-110).
+            if detail.contains("went away") || detail.contains("closed") || detail.contains("no kernel serving") {
                 stream?.yield(.dropped(detail))
             } else if detail.contains("no machine named") || detail.contains("no project named") || detail.contains("not registered") {
                 // The hub knows nothing by that name: retrying will not help.
