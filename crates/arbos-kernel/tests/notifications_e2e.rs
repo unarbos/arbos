@@ -103,5 +103,11 @@ fn replies_and_questions_notify_live_replay_when_missed_and_clear_on_seen() {
     });
     assert_eq!(replayed.len(), 1, "only the unseen one: {replayed:#?}");
     assert_eq!(replayed[0]["id"], 3);
+    // "Clear everything": an id past the newest means the newest.
+    c.send(serde_json::json!({"type": "seen", "through": 999}));
+    let s = c
+        .wait(Duration::from_secs(5), |f| f["type"] == "seen")
+        .expect("seen echoed");
+    assert_eq!(s["through"], 3, "clamped to the newest id");
     let _ = k.child.kill();
 }

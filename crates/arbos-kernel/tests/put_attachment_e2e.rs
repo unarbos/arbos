@@ -18,7 +18,7 @@ const PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42
 fn a_put_with_bytes_lands_under_attachments_and_the_user_line_points_at_it() {
     let mut k = start_kernel_replay(
         "put-attachment",
-        "{\"agent\":\"root\",\"content\":\"a tiny image\"}\n",
+        "{\"agent\":\"root\",\"content\":\"a tiny image\"}\n{\"agent\":\"root\",\"content\":\"no picture came\"}\n",
     );
     let mut a = Attach::connect(&k.url);
     assert!(
@@ -93,5 +93,46 @@ fn a_put_with_bytes_lands_under_attachments_and_the_user_line_points_at_it() {
     );
     assert!(!k.place.join(".arbos/attachments/big.bin").exists());
     assert!(!k.place.join(".arbos/secrets.png").exists());
+
+    // A path that is no file here (a desktop attaching by path to a remote
+    // place): dropped from the line, said loudly, the words still go.
+    a.send(serde_json::json!({
+        "type": "user", "agent": "root", "text": "and this one?",
+        "attachments": ["/Users/jacob/Desktop/holiday.jpg"]
+    }));
+    let err = a
+        .wait(Duration::from_secs(10), |f| {
+            f["type"] == "error" && f["agent"] == "root"
+        })
+        .expect("an error frame for the missing file");
+    let detail = err["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("holiday.jpg") && detail.contains("names no file on this machine"),
+        "{detail}"
+    );
+    assert!(detail.contains("`put` frame"), "{detail}");
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    let transcript =
+        std::fs::read_to_string(k.place.join(".arbos/agents/root/transcript.jsonl")).unwrap();
+    let events: Vec<serde_json::Value> = transcript
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let user = events
+        .iter()
+        .filter(|e| e["kind"] == "user")
+        .last()
+        .unwrap();
+    assert_eq!(user["text"], "and this one?");
+    assert!(
+        user.get("attachments").is_none() || user["attachments"].as_array().unwrap().is_empty(),
+        "the dead path is not on the line: {user}"
+    );
+    assert!(
+        events.iter().any(|e| e["kind"] == "notice"
+            && e["failed"] == true
+            && e["text"].as_str().unwrap_or("").contains("holiday.jpg")),
+        "{events:#?}"
+    );
     let _ = k.child.kill();
 }
