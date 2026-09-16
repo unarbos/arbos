@@ -424,11 +424,22 @@ impl Session {
         // the user frame names that path. The kernel takes frames in order,
         // so the file is there before the words are. A refusal comes back
         // as a `written` frame with `error`, shown in the chat.
+        // A local place gets the same treatment for a file outside it: the
+        // agent's tools are confined to the place and its `.arbos/`, so a
+        // path under ~/Desktop or /tmp was a file it could not read — it
+        // said so and answered without it, where Cursor reads the file
+        // (cycle 21). Putting the bytes lands the file under
+        // `.arbos/attachments/`, inside the fence.
+        let outside = |path: &Path| {
+            std::path::absolute(path)
+                .map(|abs| !abs.starts_with(&self.cwd))
+                .unwrap_or(true)
+        };
         let attachments = content
             .attachments
             .iter()
             .map(|a| {
-                if self.remote {
+                if self.remote || outside(&a.path) {
                     match self.put_attachment(&a.path) {
                         Ok(stored) => return stored,
                         Err(err) => {
