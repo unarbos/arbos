@@ -246,6 +246,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp "${{ steps.payload.outputs.path }}" dist/
+          cp "${{ steps.payload.outputs.kernel-path }}" dist/
           ls -la dist
       - uses: actions/upload-artifact@v4
         with:
@@ -253,7 +254,9 @@ jobs:
           # Only the zip. Nothing secret is ever in the workspace — the
           # certificate is decoded into $RUNNER_TEMP and deleted — but the glob
           # is narrow anyway.
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/arbos-kernel-*-macos-*.tar.gz
           retention-days: 7
           if-no-files-found: error
 
@@ -333,6 +336,7 @@ jobs:
           set -euo pipefail
           ls -la dist
           mac="$(ls dist/Arbos-*-macos-arm64.zip)"
+          mac_kernel="$(ls dist/arbos-kernel-*-macos-arm64.tar.gz)"
           # Two tarballs match `arbos-*`: the app and the kernel on its own.
           linux="$(ls dist/arbos-[0-9]*-linux-x86_64.tar.gz)"
           kernel="$(ls dist/arbos-kernel-*-linux-x86_64.tar.gz)"
@@ -349,6 +353,7 @@ jobs:
             --minimum-system-version "${{ needs.plan.outputs.minimum }}" \
             --keep "$KEEP_BUILDS" \
             --artifact "macos/arm64=$mac" \
+            --artifact "macos/arm64/kernel=$mac_kernel" \
             --artifact "linux/x86_64=$linux" \
             --artifact "linux/x86_64/kernel=$kernel" \
             --link "ios:testflight=$IOS_TESTFLIGHT_URL"

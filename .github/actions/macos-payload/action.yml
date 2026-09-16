@@ -69,6 +69,11 @@ outputs:
   path:
     description: The zip that was built, relative to the workspace root.
     value: ${{ steps.build.outputs.path }}
+  kernel-path:
+    description: >-
+      The kernel on its own, taken from inside the finished bundle so it is
+      the signed copy. For a Mac running a kernel outside an app.
+    value: ${{ steps.build.outputs.kernel-path }}
   signing:
     description: "`developer-id`, `other`, or `ad-hoc`."
     value: ${{ steps.build.outputs.signing }}
@@ -211,10 +216,27 @@ runs:
             make zip BUILD="$BUILD"
             ;;
         esac
+        # The kernel on its own, for a Mac running one outside an app.
+        #
+        # Taken from inside the finished bundle rather than from
+        # target/release: that copy has been through `codesign` with the
+        # bundle's identity — and, when there is a Developer ID, through
+        # notarization with it. The one in target/release is the unsigned
+        # output of `cargo build`.
+        version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+        arch="$(uname -m)"
+        kout="arbos-kernel-$version-$BUILD-macos-$arch"
+        mkdir -p "target/bundle.noindex/$kout"
+        cp "target/bundle.noindex/Arbos.app/Contents/MacOS/arbos-kernel" "target/bundle.noindex/$kout/"
+        cp ../LICENSE "target/bundle.noindex/$kout/"
+        tar -C target/bundle.noindex -czf "target/bundle.noindex/$kout.tar.gz" "$kout"
+        rm -rf "target/bundle.noindex/${kout:?}"
+
         {
           echo "signing=$kind"
           echo "notarized=$notarized"
           echo "path=desktop/$(ls target/bundle.noindex/Arbos-*-macos-*.zip)"
+          echo "kernel-path=desktop/target/bundle.noindex/$kout.tar.gz"
         } >> "$GITHUB_OUTPUT"
 
     # Always. A runner is thrown away after the job, but a certificate that

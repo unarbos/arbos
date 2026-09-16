@@ -240,11 +240,16 @@ jobs:
           apple-id: ${{ secrets.APPLE_ID }}
           apple-team-id: ${{ secrets.APPLE_TEAM_ID }}
           apple-app-password: ${{ secrets.APPLE_APP_PASSWORD }}
-      - run: mkdir -p dist && cp "${{ steps.payload.outputs.path }}" dist/
+      - run: |
+          mkdir -p dist
+          cp "${{ steps.payload.outputs.path }}" dist/
+          cp "${{ steps.payload.outputs.kernel-path }}" dist/
       - uses: actions/upload-artifact@v4
         with:
           name: stable-payload-macos
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/arbos-kernel-*-macos-*.tar.gz
           retention-days: 7
           if-no-files-found: error
 
@@ -316,6 +321,7 @@ jobs:
           set -euo pipefail
           ls -la dist
           mac="$(ls dist/Arbos-*-macos-arm64.zip)"
+          mac_kernel="$(ls dist/arbos-kernel-*-macos-arm64.tar.gz)"
           # Two tarballs match `arbos-*`: the app and the kernel on its own.
           linux="$(ls dist/arbos-[0-9]*-linux-x86_64.tar.gz)"
           kernel="$(ls dist/arbos-kernel-*-linux-x86_64.tar.gz)"
@@ -336,6 +342,7 @@ jobs:
             # number decides is how far back the feed's list reaches.
             --keep 20 \
             --artifact "macos/arm64=$mac" \
+            --artifact "macos/arm64/kernel=$mac_kernel" \
             --artifact "linux/x86_64=$linux" \
             --artifact "linux/x86_64/kernel=$kernel" \
             --link "ios:testflight=$IOS_TESTFLIGHT_URL"
