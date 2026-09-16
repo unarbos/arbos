@@ -103,26 +103,16 @@ pub fn create_from(place: &Path, id: &str, base: Option<&str>) -> Result<Worktre
         );
     }
     let base = String::from_utf8_lossy(&head.stdout).trim().to_string();
-    let path = Worktree::path_for(place, id);
-    let branch = Worktree::branch_for(id);
-    if path.exists() {
-        bail!("worktree folder {} already exists", path.display());
-    }
-    let exists = git(
-        place,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ],
-    )?;
-    if exists.status.success() {
-        bail!("branch {branch} already exists; remove it or pick another brief");
-    }
     // A folder deleted by hand leaves a stale registration that would make
     // the add fail on the same path.
     let _ = git(place, &["worktree", "prune"]);
+    // A re-spawn under a name used earlier in the project finds the old
+    // branch (its commits kept when the worker was archived) and, when the
+    // old worktree was dirty, the old folder too. Neither is the model's
+    // to manage (F-58: the turn ended on "branch-name collision"): the new
+    // worker gets the next free `-N` branch and folder, and the old work
+    // stays where it was.
+    let (path, branch) = free_slot(place, id)?;
     std::fs::create_dir_all(path.parent().expect("worktrees dir"))?;
     let path_s = path.to_string_lossy().into_owned();
     let added = git(place, &["worktree", "add", "-b", &branch, &path_s, start])?;
@@ -137,6 +127,42 @@ pub fn create_from(place: &Path, id: &str, base: Option<&str>) -> Result<Worktre
     Ok(Worktree { path, branch, base })
 }
 
+/// The first `(folder, branch)` pair free for `id`: `arbos/<id>` and
+/// `.arbos/worktrees/<id>` when neither exists, else `-2`, `-3`, … up to
+/// a limit. Both names carry the same suffix so a worktree and its
+/// branch read as one.
+fn free_slot(place: &Path, id: &str) -> Result<(PathBuf, String)> {
+    for n in 1..=50u32 {
+        let slot = if n == 1 {
+            id.to_string()
+        } else {
+            format!("{id}-{n}")
+        };
+        let path = Worktree::path_for(place, &slot);
+        let branch = Worktree::branch_for(&slot);
+        if path.exists() {
+            continue;
+        }
+        let exists = git(
+            place,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
+        )?;
+        if exists.status.success() {
+            continue;
+        }
+        return Ok((path, branch));
+    }
+    bail!(
+        "fifty worktrees and branches already exist for {id} under {}; remove some (git worktree list; git branch -D arbos/{id}-N)",
+        place.display()
+    )
+}
+
 /// What is left in a child's worktree once the child is done.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Leftover {
@@ -148,9 +174,29 @@ pub struct Leftover {
     pub ahead: usize,
 }
 
+/// The folder `id`'s worktree lives in: the agent's recorded `cwd` when
+/// it is one of ours (a re-spawn may sit in `<id>-2`), else the plain
+/// `.arbos/worktrees/<id>`. The agent is looked for live, then archived.
+pub fn folder_for(place: &Path, id: &str) -> PathBuf {
+    let plain = Worktree::path_for(place, id);
+    let dirs = [
+        place.join(".arbos").join("agents").join(id),
+        place.join(".arbos").join("archive").join("agents").join(id),
+    ];
+    for dir in dirs {
+        if let Ok(agent) = arbos_core::Agent::load(&dir)
+            && let Some(cwd) = agent.cwd.as_deref()
+            && is_worktree(place, cwd)
+        {
+            return cwd.to_path_buf();
+        }
+    }
+    plain
+}
+
 /// Look at `id`'s worktree, if the folder is there. None when it is not.
 pub fn leftover(place: &Path, id: &str) -> Option<Leftover> {
-    let path = Worktree::path_for(place, id);
+    let path = folder_for(place, id);
     if !path.is_dir() {
         return None;
     }
@@ -420,5 +466,75 @@ mod cleanup_tests {
         assert!(!wt.path.exists());
         assert!(branch_exists(&place, "arbos/w2"));
         let _ = std::fs::remove_dir_all(&place);
+    }
+
+    /// F-58: a re-spawn under a name used earlier in the project met
+    /// "branch arbos/test-fix already exists" and the turn ended with no
+    /// code changed. The new worker takes the next free `-N` branch and
+    /// folder; the old branch keeps its commits; a dirty old folder is
+    /// left alone; and the archive step finds the new folder through the
+    /// agent's recorded cwd.
+    #[test]
+    fn a_respawn_takes_the_next_free_branch_and_folder() {
+        let dir = repo("respawn");
+        let first = create(&dir, "test-fix").unwrap();
+        assert_eq!(first.branch, "arbos/test-fix");
+        // The first worker committed and was archived: folder gone, branch kept.
+        for args in [vec![
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "fix",
+        ]] {
+            assert!(git(&first.path, &args).unwrap().status.success());
+        }
+        let done = remove_if_clean(&dir, "test-fix").unwrap();
+        assert!(
+            matches!(
+                done,
+                Removed::Removed {
+                    branch_kept: true,
+                    ..
+                }
+            ),
+            "{done:?}"
+        );
+        assert!(branch_exists(&dir, "arbos/test-fix"));
+        // The re-spawn: no collision, the -2 slot.
+        let second = create(&dir, "test-fix").unwrap();
+        assert_eq!(second.branch, "arbos/test-fix-2");
+        assert!(
+            second.path.ends_with("test-fix-2"),
+            "{}",
+            second.path.display()
+        );
+        assert!(second.path.is_dir());
+        // A third while the second's folder is still there (dirty or not): -3.
+        let third = create(&dir, "test-fix").unwrap();
+        assert_eq!(third.branch, "arbos/test-fix-3");
+        // The archive step resolves the folder from the agent's cwd.
+        let place = arbos_core::Place::new(&dir);
+        let mut a = arbos_core::Agent::root("test-fix");
+        a.cwd = Some(third.path.clone());
+        a.save(&place.agent_dir("test-fix")).unwrap();
+        assert_eq!(folder_for(&dir, "test-fix"), third.path);
+        assert_eq!(
+            remove_if_clean(&dir, "test-fix").unwrap(),
+            Removed::Removed {
+                branch: "arbos/test-fix-3".into(),
+                ahead: 0,
+                branch_kept: false
+            }
+        );
+        assert!(!third.path.exists());
+        assert!(
+            second.path.exists(),
+            "the other worker's folder is untouched"
+        );
     }
 }
