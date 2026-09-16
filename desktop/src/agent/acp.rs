@@ -177,6 +177,12 @@ pub enum Event {
         title: String,
         questions: Vec<crate::model::session::AskQuestion>,
     },
+    /// The material for an in-app report, answered on this connection only:
+    /// the exchange the user pointed at, the log for its span, the earlier
+    /// transcript lines asked for, any children's lines, and which build
+    /// answered — all redacted of credentials by the kernel. Goes to the
+    /// review sheet, which shows it before anything is sent.
+    Feedback(Box<crate::feedback::Bundle>),
     /// Provider-generated pictures for the turn that just finished.
     Images(Vec<crate::model::attachment::MessageImage>),
     /// Files a tool made for the user: screenshots, screen recordings.
@@ -619,6 +625,26 @@ impl Session {
         });
     }
 
+    /// Ask for the material behind a report: the exchange holding `seq` (a
+    /// line the user is looking at) or the last one he opened, `tail` lines
+    /// of transcript before it, and `call_id`'s whole output when he pointed
+    /// at a particular call. The answer comes back as `Event::Feedback`.
+    pub fn request_feedback(
+        &self,
+        seq: Option<u64>,
+        call_id: Option<String>,
+        tail: u32,
+        note: &str,
+    ) {
+        let _ = self.send_frame(&Frame::Feedback {
+            agent: self.session_id.clone(),
+            seq,
+            call_id,
+            tail,
+            note: note.to_string(),
+        });
+    }
+
     /// Move a plan node from the window: `cancel`, `run`, `reopen`, `answer`.
     pub fn plan_op(&self, node: u64, op: &str, text: &str) {
         let _ = self.send_frame(&Frame::PlanOp {
@@ -781,8 +807,9 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
         | Frame::Configure { .. }
         | Frame::Replayed { .. }
         | Frame::HistoryEnd { .. }
+        // Client → kernel, so it never arrives here. `feedback_bundle` does,
+        // and is taken below.
         | Frame::Feedback { .. }
-        | Frame::FeedbackBundle { .. }
         | Frame::ToolBody { .. }
         | Frame::ToolBodyReply { .. }
         // A newer kernel's frame: nothing to show, nothing to lose.
@@ -863,6 +890,31 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             url,
             screenshot,
         }],
+        Frame::FeedbackBundle {
+            agent: id,
+            turn,
+            events,
+            tail,
+            children,
+            log,
+            kernel,
+            note,
+            redacted,
+            truncated,
+            bytes,
+        } if id == agent => vec![Event::Feedback(Box::new(crate::feedback::Bundle {
+            agent: id,
+            turn,
+            events,
+            tail,
+            children,
+            log,
+            kernel,
+            note,
+            redacted,
+            truncated,
+            bytes,
+        }))],
         Frame::Screenshot {
             agent: id,
             machine,

@@ -14,6 +14,7 @@ use crate::{
         component::{
             chat_search::{ChatSearch, ChatSearchEvent, Hit},
             composer::{Composer, ComposerEvent, VoiceState},
+            feedback_sheet::{FeedbackSheet, FeedbackSheetEvent},
             menu::Menu,
             meter,
             opener::{Opener, OpenerEvent},
@@ -54,6 +55,7 @@ actions!(
         PrevTab,
         OpenSettings,
         ShowPermissions,
+        ReportProblem,
         TogglePanel,
         ShowChat,
         ShowProject,
@@ -216,6 +218,7 @@ pub(crate) const TOOLBAR_INSET: f32 = if cfg!(target_os = "macos") {
 
 pub fn init(cx: &mut App) {
     crate::view::terminal::init(cx);
+    crate::view::component::feedback_sheet::init(cx);
     crate::view::component::permissions_sheet::init(cx);
     // Cursor's chat measure, taken off its screens: prose one step above
     // the UI ladder — 14 on 23 against the ladder's 13 — and fenced code
@@ -260,6 +263,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-tab", PrevTab, None),
         // What macOS binds Preferences to in every other app.
         KeyBinding::new("cmd-,", OpenSettings, None),
+        // Report a problem, from wherever he is. The moment he notices is
+        // the moment he will use it, so it answers app-wide rather than only
+        // where a turn footer happens to be on screen.
+        KeyBinding::new("cmd-shift-r", ReportProblem, None),
         // What every app with a side panel binds it to. It is claimed
         // app-wide: the menu item carries it, so AppKit takes the chord
         // before the window is offered it, and the editor's own `cmd-b` —
@@ -664,6 +671,7 @@ pub struct Arbos {
     pub(crate) opener: Entity<Opener>,
     /// The sheet a tab's name, glyph and colour are set in.
     pub(crate) tab_sheet: Entity<TabSheet>,
+    pub(crate) feedback_sheet: Entity<FeedbackSheet>,
     pub(crate) permissions_sheet: Entity<PermissionsSheet>,
     pub(crate) permission_center: Entity<PermissionCenter>,
     /// ⌘K: the palette over every open tab's chats.
@@ -779,6 +787,16 @@ impl Arbos {
                         .update(cx, |workspace, _| workspace.mark_permissions_seen());
                     this.focus_composer(window, cx);
                 }
+            },
+        )
+        .detach();
+        let feedback_sheet = cx.new(FeedbackSheet::new);
+        cx.subscribe_in(
+            &feedback_sheet,
+            window,
+            |this, sheet, event: &FeedbackSheetEvent, window, cx| match event {
+                FeedbackSheetEvent::Send(draft) => this.write_report(sheet.clone(), draft, cx),
+                FeedbackSheetEvent::Dismissed => this.focus_composer(window, cx),
             },
         )
         .detach();
@@ -901,6 +919,7 @@ impl Arbos {
         cx.observe(&workspace, |this, _, cx| {
             this.sync_composer(cx);
             this.reap_notifications(cx);
+            this.collect_feedback(cx);
             cx.notify();
         })
         .detach();
@@ -951,6 +970,7 @@ impl Arbos {
             composer,
             opener,
             tab_sheet,
+            feedback_sheet,
             permissions_sheet,
             permission_center,
             chat_search,
@@ -2212,6 +2232,132 @@ impl Arbos {
         self.show_permissions(window, cx);
     }
 
+    /// Report a problem: open the review sheet on the chat in front, ask the
+    /// kernel for the exchange behind it, and take a picture of this window.
+    ///
+    /// Nothing is sent here. The sheet shows him every part first and Send is
+    /// the only thing that writes anything.
+    pub(crate) fn report_problem(
+        &mut self,
+        _: &ReportProblem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (id, agent, place) = {
+            let workspace = self.workspace.read(cx);
+            let id = workspace.active_id();
+            let session = workspace.active_session();
+            (
+                id,
+                session.and_then(|chat| chat.agent_session.clone()),
+                workspace
+                    .active_project()
+                    .map(|project| arbos_core::Place::new(project.path.clone())),
+            )
+        };
+        // His last answer to the tool-argument control, so he does not decide
+        // it again every time.
+        let parts = place
+            .as_ref()
+            .map(crate::feedback::load_parts)
+            .unwrap_or_default();
+        self.feedback_sheet.update(cx, |sheet, cx| {
+            sheet.show(agent, None, parts, window, cx);
+            sheet.take_session(
+                self.workspace
+                    .read(cx)
+                    .active_session()
+                    .map(|chat| chat.drawn_view())
+                    .unwrap_or(serde_json::Value::Null),
+                cx,
+            );
+        });
+        if let Some(id) = id {
+            self.workspace.update(cx, |workspace, cx| {
+                workspace.with_session(id, cx, |chat| {
+                    chat.request_feedback(None, crate::feedback::TAIL_LINES)
+                });
+            });
+        }
+        // The capture runs off the UI thread: it shells out, and the window
+        // must keep drawing — a frozen window is not the window he is
+        // complaining about.
+        let size = window.viewport_size();
+        let (w, h) = (f32::from(size.width), f32::from(size.height));
+        let sheet = self.feedback_sheet.clone();
+        cx.spawn(async move |_, cx| {
+            let shot = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::feedback::capture_window(w, h).map_err(|e| format!("{e:#}"))
+                })
+                .await;
+            let _ = sheet.update(cx, |sheet, cx| sheet.take_shot(shot, cx));
+        })
+        .detach();
+    }
+
+    /// The kernel answered a `feedback` ask: hand it to the sheet.
+    fn collect_feedback(&mut self, cx: &mut Context<Self>) {
+        if !self.feedback_sheet.read(cx).is_open {
+            return;
+        }
+        let Some(id) = self.workspace.read(cx).active_id() else {
+            return;
+        };
+        // Look before taking: this runs inside the workspace's observer,
+        // and `with_session` notifies the workspace, so taking from a chat
+        // that holds nothing observed itself forever — the window froze
+        // the moment the sheet opened (found driving it on the rig).
+        if !self
+            .workspace
+            .read(cx)
+            .session(id)
+            .is_some_and(|chat| chat.feedback.is_some())
+        {
+            return;
+        }
+        let mut taken = None;
+        self.workspace.update(cx, |workspace, cx| {
+            workspace.with_session(id, cx, |chat| taken = chat.take_feedback());
+        });
+        if let Some(bundle) = taken {
+            self.feedback_sheet
+                .update(cx, |sheet, cx| sheet.take_bundle(*bundle, cx));
+        }
+    }
+
+    /// Send: write the report to the outbox on his own disk. On disk is what
+    /// "sent" means here — delivery reads the outbox, so a report made with
+    /// the network down is already safe and goes out when the link returns.
+    fn write_report(
+        &mut self,
+        sheet: Entity<FeedbackSheet>,
+        draft: &crate::feedback::Draft,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(place) = self
+            .workspace
+            .read(cx)
+            .active_project()
+            .map(|project| arbos_core::Place::new(project.path.clone()))
+        else {
+            sheet.update(cx, |sheet, cx| {
+                sheet.settled(Err("no project open to file this against".into()), cx)
+            });
+            return;
+        };
+        crate::feedback::save_parts(&place, &draft.parts);
+        let id = crate::feedback::new_id(arbos_core::now_ms());
+        let outcome = match crate::feedback::write(&place, draft, &id, arbos_core::now_ms()) {
+            Ok(_) => Ok(format!(
+                "Sent. It reaches an agent within fifteen minutes, and you will be told which build carries the fix. Reference {id}."
+            )),
+            Err(e) => Err(format!("could not write the report: {e:#}")),
+        };
+        sheet.update(cx, |sheet, cx| sheet.settled(outcome, cx));
+    }
+
     fn offer_tab_face(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let fresh = self
             .workspace
@@ -2371,6 +2517,7 @@ impl Render for Arbos {
             )
             .child(self.opener.clone())
             .child(self.tab_sheet.clone())
+            .child(self.feedback_sheet.clone())
             .child(self.permissions_sheet.clone())
             .child(self.chat_search.clone())
     }
