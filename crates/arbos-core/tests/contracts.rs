@@ -38,6 +38,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
             Frame::Put {
                 path: "docs/plan.md".into(),
                 text: "# Plan\n".into(),
+                data: None,
                 base_hash: Some(String::new()),
             },
             "put",

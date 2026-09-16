@@ -1,6 +1,11 @@
 use crate::{Event, Usage};
 use serde::{Deserialize, Serialize};
 
+/// The most one `put` may carry, decoded (the desktop's attachment cap).
+pub const PUT_MAX_BYTES: usize = 20 * 1024 * 1024;
+/// Where a client's uploaded files land under `.arbos/`.
+pub const ATTACHMENTS_DIR: &str = "attachments";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
@@ -125,6 +130,14 @@ pub enum Frame {
         path: String,
         #[serde(default)]
         text: String,
+        /// The file's bytes, base64 (standard alphabet, padding optional):
+        /// a photo or a file from a client with no path on this machine
+        /// (the phone). With `data`, `text` is ignored. Lands under
+        /// `.arbos/attachments/…` (or a shared folder), at most
+        /// `PUT_MAX_BYTES`; the following `user` frame names the same
+        /// relative path in `attachments`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_hash: Option<String>,
     },

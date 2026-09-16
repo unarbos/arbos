@@ -760,6 +760,13 @@ fn handle_frame(
             device,
             model,
         } => {
+            // A path a `put` wrote (`attachments/x.jpg`) is relative to the
+            // store, not to the agent's cwd: made absolute here so the
+            // engine reads the file the client sent.
+            let attachments: Vec<String> = attachments
+                .into_iter()
+                .map(|a| store_attachment(place, &a))
+                .collect();
             // Where the words came from. A frame without a channel is a
             // typed line (the desktop, the CLI); the voice gateway says so.
             let channel = if channel.is_empty() {
@@ -2081,4 +2088,26 @@ fn hostname() -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|h| !h.is_empty())
         .unwrap_or_else(|| "this machine".into())
+}
+
+/// An attachment path as the client wrote it: an absolute path (the
+/// desktop) as is; a relative one that names a file under `.arbos/` (a
+/// `put` from the phone: `attachments/<id>.jpg`, with or without the
+/// `.arbos/` head) as that file's absolute path; anything else as is
+/// (the CLI's paths relative to the cwd).
+pub fn store_attachment(place: &Place, a: &str) -> String {
+    let p = std::path::Path::new(a);
+    if p.is_absolute() || a.trim().is_empty() {
+        return a.to_string();
+    }
+    let rel = a.trim_start_matches("./");
+    let rel = rel.strip_prefix(".arbos/").unwrap_or(rel);
+    if rel.contains("..") {
+        return a.to_string();
+    }
+    let under_store = place.arbos().join(rel);
+    if under_store.is_file() {
+        return under_store.display().to_string();
+    }
+    a.to_string()
 }

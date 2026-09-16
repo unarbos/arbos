@@ -29,8 +29,12 @@ pub fn handle(place: &Place, frame: Frame) -> Option<Frame> {
         Frame::Put {
             path,
             text,
+            data,
             base_hash,
-        } => Some(put(place, &path, &text, base_hash.as_deref())),
+        } => Some(match data {
+            Some(b64) => put_bytes(place, &path, &b64),
+            None => put(place, &path, &text, base_hash.as_deref()),
+        }),
         _ => None,
     }
 }
@@ -120,6 +124,87 @@ fn put(place: &Place, rel: &str, text: &str, base_hash: Option<&str>) -> Frame {
         path: rel.to_string(),
         size: text.len() as u64,
         hash: arbos_core::hub::content_hash(text.as_bytes()),
+        error: None,
+    }
+}
+
+/// A client's file, as bytes: a photo attached on the phone, which has
+/// no path on this machine. Lands whole under `.arbos/attachments/…` (or
+/// one of the shared folders), never over a protected or root-owned
+/// file, at most `PUT_MAX_BYTES` decoded. The reply's `path` is what the
+/// client puts in the next `user` frame's `attachments`.
+fn put_bytes(place: &Place, rel: &str, b64: &str) -> Frame {
+    use base64::Engine;
+    let refused = |e: String| Frame::Written {
+        path: rel.to_string(),
+        size: 0,
+        hash: String::new(),
+        error: Some(e),
+    };
+    let full = match confine(place, rel) {
+        Ok(p) => p,
+        Err(e) => return refused(e),
+    };
+    let under_attachments = full
+        .strip_prefix(place.arbos())
+        .ok()
+        .and_then(|r| r.components().next())
+        .is_some_and(|c| c.as_os_str() == arbos_core::wire::ATTACHMENTS_DIR);
+    if !under_attachments && !arbos_core::store::is_store_path(place.path(), &full) {
+        return refused(format!(
+            "{rel}: a file goes under {}/ (or docs/, internal/, media/)",
+            arbos_core::wire::ATTACHMENTS_DIR
+        ));
+    }
+    if arbos_core::store::protected_by(place.path(), &full).is_some()
+        || arbos_core::store::is_root_owned(place.path(), &full)
+    {
+        return refused(format!("{rel}: not a file a client may replace"));
+    }
+    if full.is_dir() {
+        return refused(format!("{rel} is a folder"));
+    }
+    // Rough size before decoding: 4 chars per 3 bytes.
+    if b64.len() / 4 * 3 > arbos_core::wire::PUT_MAX_BYTES + 3 {
+        return refused(format!(
+            "{rel}: {} MB is over the {} MB cap for one file",
+            b64.len() / 4 * 3 / (1024 * 1024),
+            arbos_core::wire::PUT_MAX_BYTES / (1024 * 1024)
+        ));
+    }
+    let clean: String = b64.chars().filter(|c| !c.is_whitespace()).collect();
+    let bytes = match base64::engine::general_purpose::STANDARD
+        .decode(&clean)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&clean))
+    {
+        Ok(b) => b,
+        Err(e) => return refused(format!("{rel}: data is not base64: {e}")),
+    };
+    if bytes.len() > arbos_core::wire::PUT_MAX_BYTES {
+        return refused(format!(
+            "{rel}: {} MB is over the {} MB cap for one file",
+            bytes.len() / (1024 * 1024),
+            arbos_core::wire::PUT_MAX_BYTES / (1024 * 1024)
+        ));
+    }
+    if let Some(parent) = full.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return refused(format!("{rel}: {e}"));
+    }
+    let tmp = full.with_file_name(format!(
+        ".{}.{}.tmp",
+        full.file_name().and_then(|n| n.to_str()).unwrap_or("put"),
+        std::process::id()
+    ));
+    if let Err(e) = std::fs::write(&tmp, &bytes).and_then(|()| std::fs::rename(&tmp, &full)) {
+        let _ = std::fs::remove_file(&tmp);
+        return refused(format!("{rel}: {e}"));
+    }
+    Frame::Written {
+        path: rel.to_string(),
+        size: bytes.len() as u64,
+        hash: arbos_core::hub::content_hash(&bytes),
         error: None,
     }
 }
