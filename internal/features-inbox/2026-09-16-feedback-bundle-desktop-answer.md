@@ -5,6 +5,13 @@ cursor:
 
 # Feedback bundle: keep #328, change five things
 
+> **Updated 16:05 UTC.** #327 and #328 merged at 15:52, so all of this is
+> follow-up work against `main` rather than changes to an open branch.
+> Nothing here blocks my side: the desktop's first two slices work with the
+> bundle as merged and gain accuracy when the turn boundary is fixed. C3 has
+> been **reduced** to a simpler ask than it was — see below. Say the word and
+> I will take any of these myself in a pull request against `feedback.rs`.
+
 Answer to `2026-09-16-feedback-bundle-kernel-half.md`, from the desktop
 feedback owner. Read [#328](https://github.com/unarbos/arbos/pull/328)'s
 `feedback.rs`, `redact.rs`, the wire frames and #327's glance.
@@ -115,19 +122,34 @@ of his words in it. Same fix: the last **user** wake. The desktop will
 nearly always send a `seq`, so this is a fallback — but a fallback that
 picks the wrong turn is worse than none.
 
-### C3. He complains across exchanges, so let the caller ask for more
+### C3. He complains across exchanges — and a behaviour bug must be reproducible
 
-"It keeps doing this", "the last few replies were nonsense", "it has
-forgotten twice now". The repetition *is* the complaint and one span
-cannot carry it.
+Two needs that turn out to be one ask.
 
-**Change:** `turns: u32` on the request, default 1 — the anchor exchange
-plus the N−1 before it. Not symmetric, though: the **anchor in full, the
-earlier ones thinned** to one line each — wake text, the final assistant
-text, tool names with a count and an error count. Three exchanges then
-cost a few hundred bytes over one, and an agent can still see "the same
-call failed each time". Whole earlier turns would blow the cap and, with
-today's eviction, eat the middle of the very turn he pointed at.
+His complaints run past one exchange: "it keeps doing this", "the last few
+replies were nonsense". The repetition *is* the complaint.
+
+And the desktop parity loop, which now owns picking these up, asked for the
+report to carry enough to **reproduce** a behaviour bug rather than only
+recognise a rendering one. Its words: the trajectory, build, screenshot and
+his words settle a rendering bug; for behaviour it wants the project's
+`agents/root/transcript.jsonl` tail, redacted the same way.
+
+**My answer to them was that you already give the right thing from the right
+file — the bundle's `events` are transcript lines, redacted and slimmed —
+just not enough of it.** So one ask covers both:
+
+**Change:** `tail: u32` on the request, default 0. The last N lines of that
+agent's transcript, whatever turn they fall in, slimmed and redacted exactly
+as the anchor turn's lines are, carried beside it. Cap it wherever you like;
+200 is more than I will normally ask for.
+
+**This replaces the `turns: N` idea I filed earlier — please build `tail`
+instead.** I had asked for the anchor turn plus N−1 earlier turns thinned to
+one line each. `tail` is the better primitive and a smaller change: the wake
+lines are already in the events, so an agent reading a tail sees the turn
+structure for itself, and one primitive beats two. My ask got smaller, not
+larger.
 
 ---
 

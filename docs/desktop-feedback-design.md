@@ -80,6 +80,8 @@ Asked of the layout worker in
 | His words | The sheet's text field | The only thing he types |
 | The turn's trajectory, with tool calls | Kernel `feedback` frame | Tool arguments and an output glance; bodies and diffs replaced |
 | The kernel log for that turn | Same frame | The log lines inside the turn's span, plus the log's own tail |
+| The transcript tail | Same frame, `tail: N` | More history than the anchor turn, for a behaviour bug |
+| The app's own view of the chat | `.arbos/desktop/sessions/<id>.json` | So a drawing that disagrees with the transcript is visible |
 | App version, build and commit | `build::version_label()`, `ARBOS_COMMIT` | Compiled in, because a shipped bundle has no repository to ask |
 | Kernel version, commit, built-at | The bundle's `kernel` block | The running process's own commit, not the file's |
 | Machine and place | `os`, `arch`, the project's name | The place *path* is left out on purpose: it names his home directory |
@@ -110,6 +112,41 @@ about eight kilobytes of body weighted to the tail, the last call of the
 turn gets the same, everything else keeps the glance, and a call he clicked
 on comes back whole. Reasoning and the sizes are in the same inbox note.
 
+### Enough to reproduce, not only to recognise
+
+A report that shows *that* something looked wrong is enough for a rendering
+bug: the screenshot is the evidence and the fix is in the drawing code. A
+behaviour bug is different. "It said it was working and then answered
+something else" cannot be reproduced from a picture. It needs the sequence
+that led there.
+
+The parts above cover rendering. For behaviour, two additions:
+
+**The transcript tail, from the kernel.** The bundle's `events` already *are*
+lines of `agents/<id>/transcript.jsonl`, redacted and slimmed, so the source
+is right — but only the anchor turn's span of it. Reproducing a behaviour bug
+needs more history than the turn he pointed at. So the request gains
+`tail: N`: the last N lines of that agent's transcript, whatever turn they
+fall in, slimmed and redacted identically, alongside the anchor turn.
+
+`tail` also replaces a weaker idea. An earlier ask was for `turns: N` with
+the older turns thinned to one line each. `tail` is the better primitive: the
+wake lines are in the events, so an agent reading the tail can see the turn
+structure for itself, and one primitive beats two. The ask to the features
+agent was reduced accordingly.
+
+**The app's own view of the chat, from the desktop.** This one is mine, not
+the kernel's, and it matters more than it sounds. The classic desktop bug is
+that the app drew something the transcript does not say — one worker drawn
+three times, a line that says "Starting" forever, a fold split into three.
+You cannot see that from the transcript alone, because the transcript is
+right; the divergence *is* the bug. So the report carries the app's own
+session record (`.arbos/desktop/sessions/<id>.json`) beside the kernel's
+truth, and an agent can compare the two. F14 and F15 on the phone were both
+this shape.
+
+Both are parts in the sheet with their own ✕, like every other part.
+
 ---
 
 ## 4. Nothing leaves without him seeing it
@@ -123,6 +160,8 @@ per part:
 - **Screenshot** — a thumbnail that opens full size, and an ✕.
 - **Trajectory** — "14 lines, 6 tool calls", expandable, and an ✕.
 - **Kernel log** — "83 lines", expandable, and an ✕.
+- **Transcript tail** — "200 earlier lines", expandable, and an ✕.
+- **The app's own view of the chat** — expandable, and an ✕.
 - **Versions and machine** — the short line itself, and an ✕.
 
 A line reads "2 credentials were removed" when the bundle's count is not
@@ -131,6 +170,11 @@ every tool argument and output at once, for the case where he does not want
 his code leaving at all.
 
 Send is the only thing that sends. There is no silent path.
+
+**The report says what he removed.** Every part he cuts is recorded as
+`included: {"log": false, …}`, not simply left out. Otherwise the loop cannot
+tell "he did not want to send the log" from "there was no log", and it would
+chase the second while the first is the truth.
 
 ### The limits of redaction, stated honestly
 
@@ -242,21 +286,79 @@ A recorded report is a folder holding `report.json`, `screenshot.png` and a
 `feedback.md` written for a person: his words, what the trajectory shows,
 which build, and what it turned out to be.
 
-**Two things this loop should do better than the phone's, because it can:**
-
-The poller belongs in a mirrored place, not only on a host. The phone's
-poller lives at `~/asc-feedback.py` on a rented Mac and is in no repository,
-so the machine going away takes it. This one goes in the repository —
-`deploy/feedback/poll.py`, reading its token from the environment — so it
-survives its host and can be reviewed. Nothing secret is in it.
-
-**Which loop takes the fix** is a coordination decision, not Jacob's. The
-honest analog of the phone loop is the desktop cycle that already runs
-endlessly against the app and already absorbs findings: the
+The owner is the
 [Match Cursor chat view exactly](bc-2a1318aa-e675-52f4-b3ab-94cb9415aa39)
-loop. Recommended that the timer fires into it, with kernel-side findings
-filed to the features agent the way the phone loop already files them. To be
-settled with that loop and the coordinator before the timer is registered.
+loop, which has accepted it. It runs endlessly against the app, already
+absorbs findings and fixes them in the cycle they arrive, and will still be
+running after this feature is finished. It is handed the timer rather than
+one being registered here.
+
+The five rules below are the loop's conditions, and they are written as
+design because a convention is only as durable as the agent that remembers
+it. Each is enforced by `deploy/feedback/poll.py` or by the report's own
+shape.
+
+### Rule 1 — the loop that receives a report owns the answer
+
+A report is never handed back to Jacob as the wrong owner's problem. When it
+turns out to be kernel behaviour, the loop files it to the features inbox
+itself, and **still writes the `fixed` marker** once the kernel's pull
+request merges. He talks to one place.
+
+`poll.py filed <report> --to features` records the hand-off in the report's
+own folder and prints the obligation in as many words. The marker is written
+by whoever received the report, whatever repository the fix landed in.
+
+### Rule 2 — a report interrupts the plan, never a run in flight
+
+His report becomes the next thing the moment the timer finds it. The cycle
+already running finishes its gate and its pull request first. Otherwise
+half-gated work ships under his name, which is worse than a fix arriving one
+cycle later.
+
+`poll.py poll` states this in its own output every time it finds something,
+so it is in front of the agent that is about to act, not only in a document.
+
+### Rule 3 — the report carries enough to reproduce, not only to recognise
+
+Covered in section 3. The screenshot, trajectory, build and his words settle
+a rendering bug. A behaviour bug also needs the transcript tail (`tail: N`
+on the kernel's request — the one addition asked of the features agent) and
+the app's own view of the chat, so a drawing that disagrees with the
+transcript is visible rather than argued about.
+
+### Rule 4 — two copies, because the store has lost directories
+
+Every report is copied into the Project store **and** kept on the rig. The
+store dropped directories twice on 2026-09-16. The rig copy is the
+authoritative one and the store copy is what agents read.
+
+The dedupe list lives on the rig for a sharper reason than durability
+alone: losing the ledger costs a rewrite, but losing the list of reports
+already seen would replay every report Jacob has ever sent, at him, as new.
+
+### Rule 5 — the marker is verified, not asserted
+
+`poll.py fixed` refuses to write anything unless the pull request really
+merged, its merge commit is really on the base branch, and the gate on the
+pull request's head really read success. Only then does it write the build
+number, which it computes the same way the packager stamps it — the commit
+count at the merge commit.
+
+The point of telling him a build number is that the build carries the fix.
+An unverified marker is worse than none, because he would install it and
+find the bug still there. `--allow-ungated` exists for a gate that is
+genuinely absent, and it records that it was used.
+
+### One more thing this loop does better than the phone's
+
+The poller lives in the repository at `deploy/feedback/poll.py`, not on a
+host. The phone's lives at `~/asc-feedback.py` on a rented Mac that may move
+to another provider or go away, and it is in no repository, so the machine
+going away takes it. This one is reviewed, versioned, holds no credential of
+its own, and runs wherever the loop happens to be. Its transport is either
+`arbos-kernel store ls|read|put` through the hub or a plain directory, so the
+machine that keeps the reports can read them without a round trip.
 
 ---
 
@@ -273,17 +375,23 @@ for every green commit on `main` and already has an update bar in the app.
 
 1. The fix merges. The dev channel publishes, signed and notarised, with a
    build number that is the commit count.
-2. The ledger records the build against his words, as the phone's does.
-3. **The loop writes `fixed.json` back into the report's own folder** on
-   ArbosLife — the build number, the pull request, one sentence of what it
-   was.
-4. **The app reads it** on its next attach and says so where he will see it:
-   "Your report from 15:12 is fixed in build 884." If he is behind, the
-   update bar is already the thing that offers him the build.
+2. `poll.py fixed` **checks** before it says anything: merged, on the base
+   branch, gate green (Rule 5). It refuses otherwise.
+3. It writes `fixed.json` back into the report's own folder — the build
+   number, the pull request, the gated commit, one sentence of what it was —
+   and fills the same line into the report's `feedback.md`.
+4. The ledger records the build against his words, as the phone's does.
+5. **The app reads the marker** on its next attach and says so where he will
+   see it: "Your report from 15:12 is fixed in build 884." If he is behind,
+   the update bar is already the thing that offers him the build.
 
-Step 4 is what the phone cannot do, because TestFlight has no reply channel
+Step 5 is what the phone cannot do, because TestFlight has no reply channel
 to an internal tester. Here the report has an identity and the app kept it,
-so the answer can come back to the same place the complaint left from.
+so the answer comes back to the place the complaint left from.
+
+Verified against real merged work while building the tool: report `2026-09-16-1`
+resolved to build 1059 through [#328](https://github.com/unarbos/arbos/pull/328),
+and an open pull request was refused.
 
 ---
 
@@ -293,19 +401,31 @@ Each stands alone, compiles, passes, and ships something usable, because an
 hourly steward merges green pull requests and a half-feature must not be
 visible.
 
-| # | Slice | Stands alone because |
-| --- | --- | --- |
-| S1 | Sequence number on the chat item; call `feedback`; write the bundle to the outbox; reachable from the menubar | He can already hand the file to an agent |
-| S2 | The review sheet, and window capture on the normal build | The real control, with review; Send still means "saved to disk" |
-| S3 | Delivery by store address, plus outbox retry and its state line | Reports now arrive; everything before it still worked |
-| S4 | Thumbs-down opens the sheet | The fast path; the menubar path already worked |
-| S5 | The poller, the timer, the record folder and the ledger | Pickup; reports were already arriving and readable by hand |
-| S6 | `fixed.json`, and the app saying which build carries the fix | The close; the ledger already recorded it |
+Each stands alone because an hourly steward merges green pull requests and a
+half-feature must not be visible.
+
+| # | Slice | State | Stands alone because |
+| --- | --- | --- | --- |
+| K | The kernel's bundle | **merged** — [#327](https://github.com/unarbos/arbos/pull/327), [#328](https://github.com/unarbos/arbos/pull/328) | The frame is callable; nothing calls it yet |
+| S5 | The poller, the writeback, the record folder and the ledger | **built** | Pickup works on reports written by hand; nothing writes them yet |
+| S1 | Sequence number on the chat item; call `feedback`; write the report to the outbox; reachable from the menubar | next | He can hand the file to an agent himself |
+| S2 | The review sheet, window capture, and the tool-argument toggle | next | The real control, with review; Send means "saved to disk" |
+| S3 | Delivery by store address, plus outbox retry and its state line | after S2 | Reports now arrive; everything before it still worked |
+| S4 | Thumbs-down opens the sheet | after S2 | The fast path; the menubar path already worked |
+| S6 | The app reads the marker and names the build | last | The close; the ledger already recorded it |
+
+S5 was built before S1–S4 deliberately. It is the half that must exist before
+a report is worth writing, it is testable without any user interface, and it
+is the half the parity loop adopts — so it should be in their hands while the
+app's side is still being built.
+
+The kernel's `tail: N` and the corrections filed against the bundle are now
+follow-up work, since #327 and #328 merged at 15:52 UTC. That does not block
+S1 or S2: both work with the bundle as merged, and gain accuracy when the
+turn boundary is fixed.
 
 S1 and S2 depend on the layout worker's answer about the sequence number and
-the sheet's home. S3 depends on the mesh worker's answers. S5 depends on the
-phone loop's poller pattern, which is now known, and on which loop takes the
-fix.
+the sheet's home. S3 depends on the mesh worker's answers.
 
 ---
 
