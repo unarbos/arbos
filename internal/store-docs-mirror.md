@@ -77,6 +77,10 @@ A temporary 30-minute timer on the store-recovery worker
 09:48 to 11:00 UTC on 2026-09-16, while the documents were being rebuilt. It was closed once the QA
 loop took the job over, so it no longer reports.
 
+## Since 2026-09-16 23:20 UTC: one folder under `media/` — Jacob's own reports
+
+*Added by the QA worker (`bc-f2e2f30d-1298-59f1-a24c-55113322de28`), on the coordinator's call.* The boundary said `media/` is bulk and stays out. `media/desktop-feedback/` is the exception it was meant to weigh: each report there is a small `report.json` and a `feedback.md` — the user's own words about what went wrong, the most irreplaceable content the store holds, and a few kilobytes each. It is mirrored under the same size and type rules as `internal/` (screenshots and `.b64` stay out). The immediate reason: two reports had just been corrected to say a missing screenshot was a fault rather than Jacob's choice; a store fault would have undone the corrections and the reports would have come back reading as genuine. First pass with it: `f0aaa3de`, 23:19:46 UTC, four files.
+
 ## Since 2026-09-16 14:20 UTC: its own 15-minute timer, and a per-file loss list
 
 *Added by the QA worker (`bc-f2e2f30d-1298-59f1-a24c-55113322de28`) after a file vanished about 80 s after the 14:07 pass captured it (`internal/kernel-self-update-design.md` — which turned out to be its author moving it to `docs/`, not a loss; the day's count stays at two).*
