@@ -1097,6 +1097,7 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         "notifications": {
             "notifier": crate::notify_os::NOTIFIER,
             "window_active": this.window_active,
+            "touched": this.touched,
             "posted": this.notifications_posted.iter().map(|n| json!({
                 "at": n.at,
                 "title": n.title,
