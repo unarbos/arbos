@@ -1473,9 +1473,6 @@ impl KernelHooks {
         }
         let title = title.map(str::trim).filter(|t| !t.is_empty());
         let rename = rename.map(str::trim).filter(|t| !t.is_empty());
-        if (title.is_some() || rename.is_some()) && to.trim().eq_ignore_ascii_case("user") {
-            bail!("say: title and rename are for a worker of yours, not the user");
-        }
         let renamed = match rename {
             Some(new_name) => Some(self.rename_worker(from, to, new_name)?),
             None => None,
@@ -1519,12 +1516,18 @@ impl KernelHooks {
         hops_in: u8,
         title: Option<&str>,
     ) -> Result<String> {
+        // The user reads the reply, not a message: a `say to=user` put the
+        // kickoff greeting in the chat twice, once as a notice and once as
+        // the turn's reply (cycle 15, F-66). Refused, with what to do.
         if to.trim().eq_ignore_ascii_case("user") {
-            self.dedupe(from, "user", text)?;
-            self.notify_user(from.as_str(), text)?;
-            return Ok(
-                "Sent to the user as a notice in this chat: now if it is open, otherwise when they next open it."
-                    .into(),
+            let is_root = from.as_str() == arbos_core::ROOT_ID;
+            bail!(
+                "say: `user` is not a target — the user reads your reply. Put these words in your reply and end the turn{}. Nothing was sent.",
+                if is_root {
+                    ""
+                } else {
+                    "; the user hears from your parent, which reads your final words as your report"
+                }
             );
         }
         let target = self.resolve(from, to)?;

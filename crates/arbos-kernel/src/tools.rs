@@ -791,9 +791,13 @@ impl Tool for Say {
     fn schema(&self) -> Value {
         simple_schema(
             "say",
-            "Message another agent (id or name, see <<peers>>) or the user. mode note waits for their next turn; request queues a turn and their reply arrives here; steer lands in a running turn at its next tool step (redirect or stop a worker). Then end your turn.",
+            "Message another agent (id or name, see <<peers>>). Never the user: the user reads your reply, so words for them go in the reply, not here. mode note waits for their next turn; request queues a turn and their reply arrives here; steer lands in a running turn at its next tool step (redirect or stop a worker). Then end your turn.",
             &[
-                ("to", "Agent id or name, user, or <machine>/<agent>.", true),
+                (
+                    "to",
+                    "Agent id or name, or <machine>/<agent>. Not `user` (the reply is for the user).",
+                    true,
+                ),
                 ("text", "The message; the recipient sees only this.", true),
                 (
                     "mode",
