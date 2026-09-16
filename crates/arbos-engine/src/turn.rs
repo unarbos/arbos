@@ -179,7 +179,7 @@ fn image_owed(events: &[Event]) -> bool {
 
 /// What the model reads when its turn is about to end with a file its
 /// brief named as `Output:` still missing. `{paths}` is filled in.
-pub const OUTPUT_NUDGE: &str = "Your brief names Output: {paths} — not written yet. A reply is not the deliverable: write the file now (write path:\"<path>\" contents:…), check it exists, then name its path in your report.";
+pub const OUTPUT_NUDGE: &str = "Your brief names Output: {paths} — not written yet. A reply is not the deliverable: write the file now (write path:\"<path>\" contents:…), check it exists, then name its path in your report. If the file already exists somewhere else because the task put it there (the user's own project file, a repo-root CHANGELOG.md), leave it where it is and name that path in your report — never move or delete a file to match the brief.";
 
 /// The files a brief's `Output:` line names — one line, or the indented
 /// lines under it — as paths: tokens with a `/` or a `.arbos` head and a
@@ -232,13 +232,61 @@ fn output_owed(events: &[Event], place: &std::path::Path) -> Vec<String> {
     let EventKind::Wake { text: Some(t), .. } = &events[start].kind else {
         return Vec::new();
     };
+    // Files this turn wrote, by name: a deliverable that exists where the
+    // task put it (CHANGELOG.md at the repo root when the brief said
+    // .arbos/docs/CHANGELOG.md) is delivered. Nudging for the brief's
+    // path made a worker move the user's file out of their repository
+    // (qal-j04, three journey runs).
+    let written = written_this_turn(&events[start..]);
     brief_output_paths(t)
         .into_iter()
         .filter(|p| {
             let rel = p.trim_start_matches("./");
-            !(place.join(rel).exists() || place.join(".arbos").join(rel).exists())
+            if place.join(rel).exists() || place.join(".arbos").join(rel).exists() {
+                return false;
+            }
+            let want = basename(rel).to_ascii_lowercase();
+            !written
+                .iter()
+                .any(|w| basename(w).eq_ignore_ascii_case(&want) && exists_under(place, w))
         })
         .collect()
+}
+
+fn basename(p: &str) -> &str {
+    p.rsplit(['/', '\\']).next().unwrap_or(p)
+}
+
+fn exists_under(place: &std::path::Path, p: &str) -> bool {
+    let path = std::path::Path::new(p);
+    if path.is_absolute() {
+        path.exists()
+    } else {
+        place.join(p).exists()
+    }
+}
+
+/// Paths the turn's write-class calls named or touched.
+pub fn written_this_turn(turn: &[Event]) -> Vec<String> {
+    let mut out = Vec::new();
+    for e in turn {
+        let EventKind::Tool(rec) = &e.kind else {
+            continue;
+        };
+        if rec.error.is_some() || !matches!(rec.name.as_str(), "write" | "edit" | "apply_patch") {
+            continue;
+        }
+        if let Some(p) = rec
+            .args
+            .as_ref()
+            .and_then(|a| a.get("path"))
+            .and_then(|p| p.as_str())
+        {
+            out.push(p.to_string());
+        }
+        out.extend(rec.paths.iter().cloned());
+    }
+    out
 }
 
 /// What the model reads when its reply links a pull request no tool

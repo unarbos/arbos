@@ -126,6 +126,14 @@ impl Tool for Bash {
                     "bash: {what} is a worker's job, not the coordinator's — spawn a worker with the exact command (wait=true for a one-off) and relay its result. Your bash is for one quick command the user asked to see."
                 );
             }
+            // A file this turn wrote is never moved or deleted to satisfy
+            // the brief's Output line: told its deliverable was "not
+            // written yet" at the brief's path, a worker moved the user's
+            // CHANGELOG.md out of their repository (qal-j04). The reminder
+            // is bookkeeping; the file stays where the task put it.
+            if let Some(why) = moves_a_delivered_file(&cx, cmd) {
+                bail!("{why}");
+            }
             // Before the approval prompt: a refused command is not a
             // question for the user.
             {
@@ -837,6 +845,57 @@ pub fn looks_like_server(cmd: &str) -> bool {
 /// The build and test runners a coordinator hands to a worker: what the
 /// command is, in words for the refusal, when its first program (after
 /// `cd x &&`, env assignments, `time`, `nice`) is one of them.
+/// After an "output owed" reminder this turn, a `mv`, `rm`, `git mv` or
+/// `git rm` whose operand is a file the turn wrote (or shares its name
+/// with an owed path) is refused with the reason. Only then: the
+/// guard is for the one shape that lost a user's file, not for every
+/// move a worker makes.
+fn moves_a_delivered_file(cx: &RunCx, cmd: &str) -> Option<String> {
+    let toks: Vec<&str> = cmd.split_whitespace().collect();
+    let moving = toks.iter().any(|t| matches!(*t, "mv" | "rm" | "unlink"));
+    if !moving {
+        return None;
+    }
+    let transcript = arbos_core::Layout::new(&cx.place, cx.agent.id.as_str()).transcript();
+    let events = arbos_core::load_transcript(&transcript).ok()?;
+    let start = events.iter().rposition(arbos_core::Event::is_wake)?;
+    let turn = &events[start..];
+    let nudged = turn.iter().any(|e| {
+        matches!(&e.kind, arbos_core::EventKind::Nudge { reason, .. } if reason == "output owed")
+    });
+    if !nudged {
+        return None;
+    }
+    let mut protected: Vec<String> = crate::turn::written_this_turn(turn)
+        .iter()
+        .map(|p| {
+            p.rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(p)
+                .to_ascii_lowercase()
+        })
+        .collect();
+    if let arbos_core::EventKind::Wake { text: Some(t), .. } = &events[start].kind {
+        protected.extend(
+            crate::turn::brief_output_paths(t)
+                .iter()
+                .map(|p| p.rsplit('/').next().unwrap_or(p).to_ascii_lowercase()),
+        );
+    }
+    let hit = toks.iter().find(|t| {
+        let base = t
+            .trim_matches(['"', '\''])
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        !base.is_empty() && protected.contains(&base)
+    })?;
+    Some(format!(
+        "bash: refused — this moves or deletes {hit}, a file this turn delivered, after a reminder about the brief's Output path. The reminder is bookkeeping, never a reason to relocate a user's file: leave {hit} where the task put it and name that path in your report (the brief's Output line is satisfied by the file existing)."
+    ))
+}
+
 pub fn build_or_test(cmd: &str) -> Option<&'static str> {
     for segment in cmd
         .split("&&")
