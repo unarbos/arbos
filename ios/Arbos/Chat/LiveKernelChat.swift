@@ -346,7 +346,7 @@ final class LiveKernelChat: ChatSource {
     /// The coordinator's bookkeeping calls: worker lines, the page, the
     /// checklist and the live step stand in for them, never a row.
     private static let hiddenRootTools: Set<String> = [
-        "status", "plan", "todo", "say", "subscribe", "remember", "notes", "page", "title",
+        "status", "plan", "todo", "say", "subscribe", "remember", "notes", "page", "title", "ask",
     ]
 
     /// The tree names a worker the way the desktop's panel does; the
