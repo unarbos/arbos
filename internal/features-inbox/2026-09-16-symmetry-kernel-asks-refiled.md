@@ -57,6 +57,14 @@ The features agent has the numbers F-56 and F-66 without the words; they are the
 
 **Ask.** `strip_tool_markup` should take the `default_api.<tool>(…)` code-block form too (a fenced block whose only statements call `default_api.` or `print(default_api.`). Name the family in the reply and the desktop's `markup::strip_live` will mirror it for the live stream.
 
+## F-91 — the coordinator ran `gh auth login` and hung its turn (journey run 4, 2026-09-16)
+
+**Seen.** A worker reported it could not open a PR without GitHub auth. The coordinator then ran `gh auth login` itself through `bash` — an interactive prompt — and its turn sat on `Running 1 command` for the rest of the run, seven minutes and counting (`media/cursor-reference/cycle-17/journey-r4-j08-gh-auth-login-hang.png`).
+
+**Ask.** A `bash` call must not wait forever on a TTY: give the command no stdin (or `</dev/null`) so an interactive prompt fails at once, and time the call out with a line the model can act on ("`gh auth login` needs a terminal; ask the user to run it"). Cursor's coordinator never runs a command that waits on a keyboard.
+
+**Desktop, done.** The stall clock and hint (F-77, #299) already show a silent turn honestly; the journey harness puts the gate's stand-in `gh` on PATH so the run measures the app, not GitHub.
+
 ## Not re-filed (shipped, or not the kernel's)
 
 F-19/F-20 (#236), F-37/F-43/F-46 (#244, #245), F-10 (#225), the readonly marker (#285/#288), notifications (#293/#297), `step` on deltas (#247/#252), the settled `thinking` record (#221), `put` with bytes (#270/#273). The keyless first line has its own kernel note (#312, `2026-09-16-keyless-first-line-kernel-half.md`); the desktop half is the layout worker's and is in the ledger as F-84.
