@@ -25,6 +25,9 @@ struct ProjectChatView: View {
     @State private var composerHeight: CGFloat = 80
     /// The row SwiftUI keeps in place while content changes (paging back).
     @State private var heldRow: UUID?
+    /// Growth at the bottom pins the view to the tail, until the user pages
+    /// back — then the top is theirs until they send again.
+    @State private var followGrowth = true
     @FocusState private var composing: Bool
 
     private var identity: ProjectIdentity {
@@ -219,13 +222,14 @@ struct ProjectChatView: View {
                 .padding(.horizontal, ArbosTheme.gutter)
                 .padding(.top, 4)
             }
-            .modifier(ChatScrollAnchor())
+            .modifier(ChatScrollAnchor(followGrowth: followGrowth))
             .scrollPosition(id: $heldRow, anchor: .top)
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: chat.items) { _, _ in
                 if let anchor = chat.anchorAfterPrepend {
                     // Older lines came in above: hold the row that was at the top.
                     chat.anchorAfterPrepend = nil
+                    followGrowth = false
                     heldRow = anchor
                     proxy.scrollTo(anchor, anchor: .top)
                     Task { @MainActor in
@@ -309,6 +313,8 @@ struct ProjectChatView: View {
 
     private func send() {
         guard canSend else { return }
+        followGrowth = true
+        heldRow = nil
         chat.send(draft, attachments: attachments)
         draft = ""
         attachments = []
@@ -551,11 +557,14 @@ private struct Caret: View {
 /// scroll on new items), and older lines prepended at the top must not
 /// drag the view to the end. iOS 17 has only the all-roles anchor.
 private struct ChatScrollAnchor: ViewModifier {
+    let followGrowth: Bool
+
     func body(content: Content) -> some View {
         if #available(iOS 18, *) {
             content
                 .defaultScrollAnchor(.bottom, for: .initialOffset)
                 .defaultScrollAnchor(.bottom, for: .alignment)
+                .defaultScrollAnchor(followGrowth ? .bottom : nil, for: .sizeChanges)
         } else {
             content.defaultScrollAnchor(.bottom)
         }
