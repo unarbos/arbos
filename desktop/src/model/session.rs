@@ -564,6 +564,12 @@ pub struct ChatSession {
     /// index: the deltas merge into this, and the item shows it with any
     /// tool-call markup cut (`crate::markup`). Runtime only.
     pub stream_raw: HashMap<usize, String>,
+    /// Prompts this window sent whose `user` record has not come back yet,
+    /// squashed. The kernel may hold a line in its inbox for minutes
+    /// (a turn still ending, workers running) before it runs it and writes
+    /// the record; the echo is then matched by these, not by a clock —
+    /// a two-minute window doubled two prompts after a relaunch (F-94).
+    awaiting_echo: VecDeque<String>,
     /// When this window asked the kernel for the kickoff turn on an empty
     /// root (Cursor's "Setting up environment"). Runtime only.
     pub kickoff_at: Option<SystemTime>,
@@ -698,6 +704,7 @@ impl ChatSession {
             last_frame_at: Instant::now(),
             probe_at: Cell::new(None),
             stream_raw: HashMap::new(),
+            awaiting_echo: VecDeque::new(),
             kickoff_at: None,
             kickoff_secs: None,
             readonly: false,
@@ -786,6 +793,7 @@ impl ChatSession {
             last_frame_at: Instant::now(),
             probe_at: Cell::new(None),
             stream_raw: HashMap::new(),
+            awaiting_echo: VecDeque::new(),
             kickoff_at: None,
             kickoff_secs: None,
             readonly: false,
@@ -874,6 +882,7 @@ impl ChatSession {
             last_frame_at: Instant::now(),
             probe_at: Cell::new(None),
             stream_raw: HashMap::new(),
+            awaiting_echo: VecDeque::new(),
             kickoff_at: None,
             kickoff_secs: None,
             readonly: false,
@@ -1721,6 +1730,24 @@ impl ChatSession {
     fn foreign_prompt(&mut self, text: String, attachments: Vec<String>, ts: i64, channel: String) {
         self.new_turn_steps();
         let squash = |s: &str| s.split_whitespace().collect::<String>();
+        // A line this window sent and is still waiting to see recorded:
+        // its card is the newest with these words. However long the kernel
+        // held it, this is the echo.
+        if let Some(at) = self
+            .awaiting_echo
+            .iter()
+            .position(|sent| *sent == squash(&text))
+        {
+            self.awaiting_echo.remove(at);
+            if let Some(card) = self.items.iter_mut().rev().find_map(|item| match item {
+                ChatItem::User(message) if squash(&message.text) == squash(&text) => Some(message),
+                _ => None,
+            }) && ts > 0
+            {
+                card.sent_at = Some(ts);
+            }
+            return;
+        }
         let echo = self
             .items
             .iter_mut()
@@ -1945,6 +1972,16 @@ impl ChatSession {
     /// answers, and before a reconnect finishes.
     fn land_turn(&mut self, content: &Prompt) {
         self.new_turn_steps();
+        let squashed: String = content.text.split_whitespace().collect();
+        if !squashed.is_empty() {
+            self.awaiting_echo.push_back(squashed);
+            // A record that never comes back (a kernel from before the echo,
+            // a line it dropped) must not match a later prompt with the
+            // same words forever.
+            while self.awaiting_echo.len() > 8 {
+                self.awaiting_echo.pop_front();
+            }
+        }
         self.flight = Some(Flight {
             at: SystemTime::now(),
             used: self.usage.map_or(0, |usage| usage.used),
