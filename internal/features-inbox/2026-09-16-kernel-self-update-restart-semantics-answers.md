@@ -108,6 +108,24 @@ here rather than let the note stand on reading alone:
 Nothing here changes the gate (`update_verdict`): it still waits on a
 running turn, which is what an open approval is, and lets an ask through.
 
+## Item 2 driven: the boot reap was taking the jobs (added 21:20 UTC, [#353](https://github.com/unarbos/arbos/pull/353))
+
+§2 above said the boot reap "takes only jobs whose parent is pid 1".
+That was the comment's intent, not the code: `reap_leftovers` killed every
+running job without a `keep` file, whatever its parent. Across an `execv`
+the new image would have ended every detached job — the very jobs the
+gate stopped waiting for. Fixed in #353: a job whose leash's parent is
+this process itself is inherited, not reaped, and boot logs
+`job_inherited` and `jobs_alive count=N <id>:pid=<pid>`. Driven by a
+helper that starts a job the kernel's way and then execs into
+`arbos-kernel serve`: same pid, job still writing under the new image,
+and ended when that pid dies.
+
+Item 3 is readable the same way: `update_gate verdict=busy
+reason="<child>: a turn runs on <machine>"` in the log whenever the gate is
+asked, and `GET /healthz` carries `update_gate: {verdict, reason}` so you
+can read the refusal from outside before the swap.
+
 ## What a restart preserves (all files) and what it cannot
 
 Preserved, no work needed: asks and their answers; inbox files; subscriptions

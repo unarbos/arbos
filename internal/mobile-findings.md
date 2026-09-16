@@ -31,7 +31,7 @@ Still open at the loss (text as it survived):
 | --- | --- | --- | --- | --- |
 | M-09 | 09-15 | projects list | the hub roster carries no face for a project the phone has never attached to → default folder glyph and a hashed colour | largely closed by #233 + #260; hashed fallback stays for unknown projects |
 | M-19 | 09-15 | Agents pill | counted every child ever in the tree, not this session's | addressed cycle 2 (`touched` set); keep an eye |
-| M-27 | 09-15 | worker chat | a remote worker's chat shows only local placeholder lines ("Nothing on record yet") | **open — kernel**: worker history over the hub (re-seen cycle 13, `media/mobile/cycle-13/06-`) |
+| M-27 | 09-15 | worker chat | a finished worker's chat shows only "Nothing on record yet" — remote or local | **cause found** (cycle 32): the kernel's `history` for an archived agent answers `total: 0` (probe against the pod kernel); ask filed `features-inbox/2026-09-16-mobile-worker-history-archived-agents.md` |
 | M-30 | 09-15 | call | first reply 0.67 s, but the model answered the project question generically | closed by gateway PR #56 (kernel answers) — see M-85 |
 | M-31 | 09-15 | call screen | Jacob's reference set has no call screen | closed by cycle 3's own design |
 | M-36 | 09-15 | barge-in | 2.4 s through the gateway's echo gate | closed — M-85 |
