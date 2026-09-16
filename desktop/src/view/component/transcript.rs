@@ -5273,6 +5273,35 @@ fn heartbeat(
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let since = chat.elapsed().unwrap_or_default();
+    // The kernel owes this chat a reply and has said nothing for twenty
+    // seconds, probe included: the wire is cut and the socket has not
+    // noticed yet. Said calmly, keyed on what the person cares about; the
+    // next frame of any kind clears it (F-81, the phone's rule).
+    if let Some(quiet) = chat.not_answering() {
+        Painter::of(cx).lease(2.0, Duration::from_millis(1100), cx);
+        let who = chat
+            .host
+            .clone()
+            .unwrap_or_else(|| "This computer".to_string());
+        return div()
+            .id("not-answering")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(ROW_GAP))
+            .py(px(2.))
+            .child(
+                div()
+                    .text_style(TextStyle::Body)
+                    .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!(
+                        "{who} is not answering — waiting · {}",
+                        since_short(quiet)
+                    ))),
+            )
+            .into_any_element();
+    }
     // A silent model call: the braille spinner and "Thinking for 42s",
     // ticking, so a minute of thought never looks like a dead turn.
     if let Some(thinking) = chat.thinking_for() {

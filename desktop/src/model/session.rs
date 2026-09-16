@@ -29,6 +29,7 @@ use cacp::schema::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::Cell,
     collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::Arc,
@@ -551,6 +552,14 @@ pub struct ChatSession {
     /// Runtime only; cleared when a turn ends.
     pub step_items: HashMap<u64, usize>,
     pub step_thoughts: HashMap<u64, usize>,
+    /// When the kernel last said anything on this socket. A TCP socket
+    /// does not notice a cut for twenty seconds or more, so "connected"
+    /// keyed on it lies; this is keyed on what the person cares about —
+    /// whether the kernel is answering.
+    pub last_frame_at: Instant,
+    /// When the last liveness probe (`list`) went out, so one goes per
+    /// quiet window rather than every frame.
+    probe_at: Cell<Option<Instant>>,
     /// The streamed text of each live reply item as it arrived, by item
     /// index: the deltas merge into this, and the item shows it with any
     /// tool-call markup cut (`crate::markup`). Runtime only.
@@ -686,6 +695,8 @@ impl ChatSession {
             thought_carry: 0,
             step_items: HashMap::new(),
             step_thoughts: HashMap::new(),
+            last_frame_at: Instant::now(),
+            probe_at: Cell::new(None),
             stream_raw: HashMap::new(),
             kickoff_at: None,
             kickoff_secs: None,
@@ -772,6 +783,8 @@ impl ChatSession {
             thought_carry: 0,
             step_items: HashMap::new(),
             step_thoughts: HashMap::new(),
+            last_frame_at: Instant::now(),
+            probe_at: Cell::new(None),
             stream_raw: HashMap::new(),
             kickoff_at: None,
             kickoff_secs: None,
@@ -858,6 +871,8 @@ impl ChatSession {
             thought_carry: 0,
             step_items: HashMap::new(),
             step_thoughts: HashMap::new(),
+            last_frame_at: Instant::now(),
+            probe_at: Cell::new(None),
             stream_raw: HashMap::new(),
             kickoff_at: None,
             kickoff_secs: None,
@@ -1725,6 +1740,37 @@ impl ChatSession {
         self.flush();
     }
 
+    /// How long the kernel has been silent while it owes this chat
+    /// something — a reply to a prompt just sent, or the rest of a turn in
+    /// flight — past the point where silence means the wire, not the model.
+    /// `None` while nothing is owed or the silence is still ordinary.
+    ///
+    /// A first probe goes out after `QUIET_PROBE`; the kernel answers a
+    /// `list` at once whatever the agent is doing, so silence past
+    /// `QUIET_LOST` is a cut the socket has not noticed yet. Cleared by the
+    /// next frame of any kind.
+    pub fn not_answering(&self) -> Option<Duration> {
+        let owed = self.busy() || self.pending_wire;
+        if !owed {
+            return None;
+        }
+        let Connection::Live(session) = &self.connection else {
+            return None;
+        };
+        let quiet = self.last_frame_at.elapsed();
+        if quiet >= QUIET_PROBE {
+            let probed = self
+                .probe_at
+                .get()
+                .is_some_and(|at| at > self.last_frame_at);
+            if !probed {
+                let _ = session.probe();
+                self.probe_at.set(Some(Instant::now()));
+            }
+        }
+        (quiet >= QUIET_LOST).then_some(quiet)
+    }
+
     /// A turn boundary: the step numbers start again at 1, so the maps of
     /// the last turn's items go. Not at turn end — the settled records of
     /// the final step can arrive after `turn_complete`.
@@ -2290,7 +2336,9 @@ impl ChatSession {
 
     fn apply(&mut self, event: Event) {
         self.updated = SystemTime::now();
+        self.last_frame_at = Instant::now();
         match event {
+            Event::Alive => {}
             Event::History(replay) => {
                 self.adopt_history(replay.items);
                 if let Some(model) = replay.model {
@@ -3517,6 +3565,12 @@ fn content_text(block: &ContentBlock) -> String {
 /// How long a kickoff may stay silent before a typed prompt stops waiting
 /// for it.
 const KICKOFF_QUIET: Duration = Duration::from_secs(90);
+
+/// Silence from the kernel while a turn is owed: when the liveness probe
+/// goes out, and when the silence is called what it is. Ten seconds is the
+/// phone's figure for "the kernel has not echoed the typed line".
+const QUIET_PROBE: Duration = Duration::from_secs(10);
+const QUIET_LOST: Duration = Duration::from_secs(20);
 
 /// The streamed and the settled copy of one thought: the same words, or
 /// one the other with the trailing whitespace the stream had.

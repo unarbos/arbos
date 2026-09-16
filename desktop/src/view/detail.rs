@@ -2383,6 +2383,18 @@ impl Arbos {
         };
         let stalled = waited >= Duration::from_secs(60);
 
+        // The wire, not the model: the kernel has not answered a probe.
+        let not_answering = workspace
+            .active_session()
+            .and_then(|chat| chat.not_answering().map(|q| (chat.host.clone(), q)));
+        let shimmer_text = match &not_answering {
+            Some((host, quiet)) => format!(
+                "{} is not answering — waiting · {}",
+                host.clone().unwrap_or_else(|| "This computer".to_string()),
+                transcript::since_short(*quiet)
+            ),
+            None => shimmer_text,
+        };
         let greeting = format!(
             "{name} is ready. Drag in files, or just tell me what you want to build and I'll get it moving.\n\nAnytime you want me to work differently, say so and I'll remember."
         );
