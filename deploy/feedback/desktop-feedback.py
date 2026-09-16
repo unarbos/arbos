@@ -282,7 +282,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
     print(f"NEW {len(taken)} report(s)")
     for r in taken:
-        mark = "" if r["real"] else "  [FIXTURE — not from the app, events may be invented]"
+        mark = "" if r["real"] else "  [FIXTURE — invented words and events; do not diagnose from it]"
         print(f"  {r['name']}  build {r['build']}  {human_time(r['sent_ms'])}{mark}")
         print(f"    words: {r['note'] or '(none)'}")
         print(f"    kept: {r['kept']}")
@@ -443,12 +443,16 @@ def build_label(report: dict) -> str:
 def is_real(report: dict) -> bool:
     """Whether the Arbos app wrote this report.
 
-    A hand-made fixture is invaluable for exercising the loop and poisonous
-    left lying beside real reports: its events are invented, and the first
-    person to read one cold cannot tell. The app stamps `written_by`, so
-    anything without it is labelled rather than trusted.
+    Two signals, because one is not enough. `written_by` catches a report the
+    app never wrote at all. `fixture` catches the harder case: a report written
+    by the app's own on-demand writer, which carries every mark of being
+    genuine while its words and events are invented and do not correspond.
+    Both smoke reports in the Project store are of that second kind.
+
+    A fixture is invaluable for exercising the loop and poisonous left lying
+    beside real reports, because the first person to read one cold cannot tell.
     """
-    return report.get("written_by") == "arbos-desktop"
+    return report.get("written_by") == "arbos-desktop" and not report.get("fixture")
 
 
 def plural(n: int, one: str, many: str = "") -> str:
@@ -475,10 +479,16 @@ def summarise(report: dict, name: str, report_id: str, shot: bool) -> str:
     ]
     if not is_real(report):
         lines += [
-            "> **Not a real report.** Nothing in this file says the Arbos app wrote"
-            " it (`written_by`), so it is a fixture someone made by hand. Its"
-            " events, its log and its timings may be invented. Do not diagnose"
-            " from it and do not quote it as something Jacob saw.",
+            "> **Not a real report.** "
+            + (
+                "It is marked `fixture`: written by the app's own on-demand writer"
+                " to exercise the loop."
+                if report.get("fixture")
+                else "Nothing in it says the Arbos app wrote it (`written_by`)."
+            )
+            + " Its words and its events are invented and may not even correspond"
+            " to each other. Do not diagnose from it, and do not quote it as"
+            " something Jacob saw.",
             "",
         ]
     lines += [

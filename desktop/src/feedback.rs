@@ -178,6 +178,16 @@ pub struct Draft {
     pub parts: Parts,
     /// What the app is, compiled in.
     pub app: Value,
+    /// This report's contents were made up — by the on-demand writer below, or
+    /// by a rig exercising the loop — and it must never be diagnosed from or
+    /// quoted as something Jacob saw.
+    ///
+    /// It exists because `written_by` is not enough. Both smoke reports in the
+    /// Project store went through this same real writer, so they carry every
+    /// mark of being genuine; one of them pairs a *real* transcript with an
+    /// invented complaint, which is the worst case — a reader diagnoses a
+    /// complaint the events were never about. A fixture has to say so itself.
+    pub fixture: bool,
 }
 
 impl Draft {
@@ -244,6 +254,9 @@ impl Draft {
             // real reports would otherwise be read as one of Jacob's, and
             // invented events are worse than no events.
             "written_by": "arbos-desktop",
+            // Loud, and first: anything reading this file raw sees it before
+            // the words.
+            "fixture": self.fixture,
             "id": id,
             "sent_ms": sent_ms,
             "note": self.note.trim(),
@@ -1524,7 +1537,16 @@ mod tests {
         let at = std::env::var("ARBOS_FEEDBACK_PROBE").expect("ARBOS_FEEDBACK_PROBE");
         let place = Place::new(&at);
         let mut draft = Draft::new(Parts::default());
-        draft.note = format!("the sheet froze when I opened it, and my key {} was on screen", format!("sk-{}v1-3f8a9b2c4d5e6f7a8b9c0d1e2f3a4b5c", "or-"));
+        // Marked at the source. Two reports written by this very function are
+        // sitting in the Project store looking genuine, and one of them cost a
+        // reader a diagnosis of a complaint its events were never about.
+        draft.fixture = true;
+        draft.note = format!(
+            "FIXTURE, not a real report — made by write_one_report_for_the_poller. \
+             Its words and events are invented and do not correspond. \
+             (Pretend complaint: the sheet froze when I opened it, and my key {} was on screen.)",
+            format!("sk-{}v1-3f8a9b2c4d5e6f7a8b9c0d1e2f3a4b5c", "or-")
+        );
         draft.session = Some(json!({"items": [{"User": {}}, {"Assistant": {}}]}));
         draft.shot_error = Some("Screen Recording is not allowed for Arbos".into());
         draft.bundle = Some(Bundle {
