@@ -223,19 +223,21 @@ struct Inner {
     generation: u64,
 }
 
-#[derive(Default)]
 pub struct Hub {
     inner: Mutex<Inner>,
     /// The share mode of a project that sets none: from the token file's
     /// user count at start (`Auth::default_share`).
     default_share: &'static str,
+    /// Device tokens and the APNs sender (`push.rs`).
+    pub push: crate::push::Push,
 }
 
 impl Hub {
-    pub fn new(default_share: &'static str) -> Self {
+    pub fn new(default_share: &'static str, push: crate::push::Push) -> Self {
         Self {
             inner: Mutex::default(),
             default_share,
+            push,
         }
     }
 
@@ -571,6 +573,39 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                             let _ = tx.send(f);
                         }
                     }
+                    // A kernel's notification, with no client attached or
+                    // not: pushed to the phones registered for its project
+                    // (`<machine>/<project>`); the machine token's user
+                    // covers `*` registrations.
+                    HubFrame::Notify { project: p, id, agent, kind, title, body, unseen, .. } => {
+                        if hub.push.enabled() {
+                            let address = format!("{machine}/{p}");
+                            let notice = crate::push::Notice { id, agent, kind, title, body, unseen };
+                            let hub2 = Arc::clone(&hub);
+                            let user = token_user.clone();
+                            tokio::spawn(async move {
+                                for d in hub2.push.notify(&address, &user, &notice).await {
+                                    if d.status != 200 {
+                                        eprintln!("hub: push {address} → {}…: {} {}", &d.token[..d.token.len().min(8)], d.status, d.detail.trim());
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    HubFrame::Seen { project: p, unseen, .. } => {
+                        if hub.push.enabled() {
+                            let address = format!("{machine}/{p}");
+                            let hub2 = Arc::clone(&hub);
+                            let user = token_user.clone();
+                            tokio::spawn(async move {
+                                for d in hub2.push.seen(&address, &user, unseen).await {
+                                    if d.status != 200 {
+                                        eprintln!("hub: badge {address} → {}…: {} {}", &d.token[..d.token.len().min(8)], d.status, d.detail.trim());
+                                    }
+                                }
+                            });
+                        }
+                    }
                     // A registrant sends nothing else; a second register is nothing.
                     HubFrame::Register { .. }
                     | HubFrame::Registered { .. }
@@ -675,13 +710,19 @@ pub async fn attach(
         .await;
         return;
     }
-    proxy(ws, who, kernel, &access).await;
+    proxy(Arc::clone(&hub), ws, who, kernel, &access).await;
 }
 
 /// Join one client socket to one kernel channel until either side ends.
 /// `role` is what the client may do there: its token role capped by the
 /// project's share mode.
-async fn proxy(mut ws: Ws, who: Identity, kernel: Arc<Registrant>, role: &str) {
+async fn proxy(
+    hub_for_push: Arc<Hub>,
+    mut ws: Ws,
+    who: Identity,
+    kernel: Arc<Registrant>,
+    role: &str,
+) {
     let (to_client, mut from_kernel) = mpsc::unbounded_channel::<serde_json::Value>();
     let (name, _) = who.as_client();
     let role = role.to_string();
@@ -711,6 +752,31 @@ async fn proxy(mut ws: Ws, who: Identity, kernel: Arc<Registrant>, role: &str) {
                     // whole. Only the shape is checked here; a line that is
                     // not a frame is refused with the reason, never dropped.
                     match relay_shape(l) {
+                        // A phone's device token: the hub's to keep, never
+                        // the kernel's. `project` defaults to the address
+                        // this socket attached to.
+                        Ok(frame) if frame["type"] == "push" => {
+                            let address = match frame.get("project").and_then(|v| v.as_str()) {
+                                Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+                                _ => format!("{}/{}", kernel.machine, kernel.project.as_deref().unwrap_or("")),
+                            };
+                            let outcome = hub_for_push.push.register(
+                                frame["token"].as_str().unwrap_or(""),
+                                frame["platform"].as_str().unwrap_or("apns"),
+                                frame.get("sandbox").and_then(|v| v.as_bool()),
+                                &address,
+                                who.user(),
+                            );
+                            let reply = match outcome {
+                                Ok(()) => serde_json::json!({
+                                    "type": "pushed",
+                                    "project": address,
+                                    "enabled": hub_for_push.push.enabled(),
+                                }),
+                                Err(e) => serde_json::to_value(Frame::Error { agent: None, detail: format!("hub: {e}") }).unwrap_or_default(),
+                            };
+                            let _ = send_json(&mut ws, &reply).await;
+                        }
                         Ok(frame) => {
                             if !kernel.send(HubFrame::Frame { chan, frame }) {
                                 break;
@@ -896,7 +962,7 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
     } else {
         access
     };
-    proxy(ws, who, kernel, &access).await;
+    proxy(Arc::clone(&hub), ws, who, kernel, &access).await;
 }
 
 #[cfg(test)]

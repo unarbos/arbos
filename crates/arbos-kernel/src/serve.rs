@@ -930,7 +930,15 @@ fn handle_frame(
             // Read on one client is read on all: every window drops its
             // badge together.
             match arbos_core::notify::mark_seen(place, through) {
-                Ok(now) => hooks.broadcast(Frame::Seen { through: now }),
+                Ok(now) => {
+                    hooks.broadcast(Frame::Seen { through: now });
+                    let unseen = arbos_core::notify::unseen(place).len() as u64;
+                    hooks.tell_hub(|project| arbos_core::hub::HubFrame::Seen {
+                        project,
+                        through: now,
+                        unseen,
+                    });
+                }
                 Err(e) => klog::warn("seen_failed", None, format!("{e:#}")),
             }
         }

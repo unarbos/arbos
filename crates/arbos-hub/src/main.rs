@@ -6,6 +6,7 @@
 mod auth;
 mod http;
 mod hub;
+mod push;
 
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
@@ -37,19 +38,32 @@ fn main() -> Result<()> {
     }
     let config = config.unwrap_or_else(|| arbos_core::host_dir().join("hub-server.toml"));
     let auth = Arc::new(auth::Auth::load(&config)?);
+    let config_dir = config
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| arbos_core::host_dir());
     let bind = bind
         .filter(|b| !b.trim().is_empty())
         .or_else(|| Some(auth.bind.clone()).filter(|b| !b.trim().is_empty()))
         .unwrap_or_else(|| "127.0.0.1:7010".to_string());
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(serve(auth, bind))
+    rt.block_on(serve(auth, bind, config_dir))
 }
 
-async fn serve(auth: Arc<auth::Auth>, bind: String) -> Result<()> {
+async fn serve(auth: Arc<auth::Auth>, bind: String, config_dir: PathBuf) -> Result<()> {
     let listener = TcpListener::bind(&bind)
         .await
         .with_context(|| format!("bind {bind}"))?;
-    let hub = Arc::new(hub::Hub::new(auth.default_share()));
+    let push =
+        push::Push::new(auth.push.clone(), &config_dir).context("[push] in the hub config")?;
+    if push.enabled() {
+        println!(
+            "arbos-hub: push to Apple enabled for topic {} ({} device(s) registered)",
+            auth.push.topic,
+            push.device_count()
+        );
+    }
+    let hub = Arc::new(hub::Hub::new(auth.default_share(), push));
     println!(
         "arbos-hub {} listening on {} with {} identities of {} user(s); an unset project's store is {} by default",
         env!("CARGO_PKG_VERSION"),

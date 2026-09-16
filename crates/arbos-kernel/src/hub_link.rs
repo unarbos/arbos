@@ -276,6 +276,9 @@ async fn session(
         ),
     );
     let (to_hub, mut from_clients) = mpsc::unbounded_channel::<HubFrame>();
+    // Notifications and seen marks ride the same socket, so the hub can
+    // push to a phone with no client attached.
+    *hooks.hub_out.lock().unwrap() = Some((project.to_string(), to_hub.clone()));
     let mut chans: HashMap<u64, (mpsc::UnboundedSender<String>, Arc<AtomicBool>)> = HashMap::new();
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.tick().await;
@@ -339,6 +342,8 @@ async fn session(
                     | HubFrame::Registered { .. }
                     | HubFrame::Claim { .. }
                     | HubFrame::Claimed { .. }
+                    | HubFrame::Notify { .. }
+                    | HubFrame::Seen { .. }
                     | HubFrame::Unknown => {}
                 }
             }
@@ -353,6 +358,7 @@ async fn session(
     for (_, (_, open)) in chans.drain() {
         open.store(false, Ordering::Relaxed);
     }
+    *hooks.hub_out.lock().unwrap() = None;
     result
 }
 

@@ -220,6 +220,10 @@ pub struct KernelHooks {
     pub remotes: crate::remote::RemoteHub,
     /// Try Live requests forwarded to a remote kernel and not yet answered.
     pub screen_pending: Arc<Mutex<HashSet<String>>>,
+    /// The hub session, while one is up: `(project name, sender)`. A
+    /// notification and a `seen` go there too, so the hub can push to a
+    /// phone that is asleep with no client attached.
+    pub hub_out: Mutex<Option<(String, mpsc::UnboundedSender<arbos_core::hub::HubFrame>)>>,
 }
 
 impl KernelHooks {
@@ -265,6 +269,7 @@ impl KernelHooks {
             inbox_retry: Mutex::new(HashMap::new()),
             remotes: crate::remote::RemoteHub::default(),
             screen_pending: Arc::new(Mutex::new(HashSet::new())),
+            hub_out: Mutex::new(None),
         })
     }
 
@@ -1732,14 +1737,32 @@ impl KernelHooks {
                 self.broadcast(Frame::Notify {
                     id: n.id,
                     ts: n.ts,
-                    agent: n.agent,
-                    kind: n.kind,
-                    title: n.title,
-                    body: n.body,
+                    agent: n.agent.clone(),
+                    kind: n.kind.clone(),
+                    title: n.title.clone(),
+                    body: n.body.clone(),
                     replayed: false,
+                });
+                self.tell_hub(|project| arbos_core::hub::HubFrame::Notify {
+                    project,
+                    id: n.id,
+                    ts: n.ts,
+                    agent: n.agent.clone(),
+                    kind: n.kind.clone(),
+                    title: n.title.clone(),
+                    body: n.body.clone(),
+                    unseen: arbos_core::notify::unseen(&self.place).len() as u64,
                 });
             }
             Err(e) => crate::klog::warn("notify_failed", Some(agent), format!("{e:#}")),
+        }
+    }
+
+    /// A frame for the hub, when this kernel is registered with one.
+    pub fn tell_hub(&self, make: impl FnOnce(String) -> arbos_core::hub::HubFrame) {
+        let guard = self.hub_out.lock().unwrap();
+        if let Some((project, tx)) = guard.as_ref() {
+            let _ = tx.send(make(project.clone()));
         }
     }
 
@@ -2213,5 +2236,56 @@ mod caps_tests {
         assert_eq!(Caps::from_config(&cfg).children, 24);
         cfg.max_children = 3;
         assert_eq!(Caps::from_config(&cfg).children, 3);
+    }
+}
+
+#[cfg(test)]
+mod hub_notify_tests {
+    use arbos_core::Place;
+
+    /// A notification and a seen mark ride the hub socket too, so the hub
+    /// can push to a phone with no client attached.
+    #[test]
+    fn notify_and_seen_reach_the_hub_link_with_the_project_and_the_unseen_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = Place::new(dir.path());
+        std::fs::create_dir_all(place.arbos().join("runtime")).unwrap();
+        arbos_core::Agent::root("root")
+            .save(&place.agent_dir("root"))
+            .unwrap();
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (kick_tx, _kick_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = super::KernelHooks::new(place.clone(), wake_tx, kick_tx);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        *hooks.hub_out.lock().unwrap() = Some(("demo".to_string(), tx));
+        hooks.notify("root", "reply", "root replied", "Done: three files.");
+        hooks.notify("root", "ask", "root asks", "Which branch?");
+        let first = rx.try_recv().unwrap();
+        let arbos_core::hub::HubFrame::Notify {
+            project,
+            id,
+            kind,
+            body,
+            unseen,
+            ..
+        } = first
+        else {
+            panic!("{first:?}");
+        };
+        assert_eq!((project.as_str(), id, kind.as_str()), ("demo", 1, "reply"));
+        assert_eq!(body, "Done: three files.");
+        assert_eq!(unseen, 1);
+        let second = rx.try_recv().unwrap();
+        let arbos_core::hub::HubFrame::Notify {
+            id, kind, unseen, ..
+        } = second
+        else {
+            panic!("{second:?}");
+        };
+        assert_eq!((id, kind.as_str(), unseen), (2, "ask", 2));
+        // The link went: nothing is sent, nothing panics.
+        *hooks.hub_out.lock().unwrap() = None;
+        hooks.notify("root", "reply", "root replied", "again");
+        assert!(rx.try_recv().is_err());
     }
 }

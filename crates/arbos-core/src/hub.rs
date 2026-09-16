@@ -144,6 +144,29 @@ pub enum HubFrame {
     Error {
         detail: String,
     },
+    /// Kernel → hub: a notification the user should hear about even with
+    /// no client attached (the same as the attach protocol's `notify`),
+    /// so the hub can push it to a phone that is asleep. `unseen` is the
+    /// count after this one, for the badge.
+    Notify {
+        project: String,
+        id: u64,
+        ts: i64,
+        agent: String,
+        kind: String,
+        title: String,
+        body: String,
+        #[serde(default)]
+        unseen: u64,
+    },
+    /// Kernel → hub: the user has seen through `through`; `unseen` is what
+    /// is left, so a phone's badge drops without the app running.
+    Seen {
+        project: String,
+        through: u64,
+        #[serde(default)]
+        unseen: u64,
+    },
     /// A frame this build does not know. Skipped, never fatal.
     #[serde(other)]
     Unknown,
