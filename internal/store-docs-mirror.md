@@ -77,6 +77,14 @@ A temporary 30-minute timer on the store-recovery worker
 09:48 to 11:00 UTC on 2026-09-16, while the documents were being rebuilt. It was closed once the QA
 loop took the job over, so it no longer reports.
 
+## Since 2026-09-16 14:20 UTC: its own 15-minute timer, and a per-file loss list
+
+*Added by the QA worker (`bc-f2e2f30d-1298-59f1-a24c-55113322de28`) after a file vanished about 80 s after the 14:07 pass captured it (`internal/kernel-self-update-design.md` — which turned out to be its author moving it to `docs/`, not a loss; the day's count stays at two).*
+
+Cycle start and end left an exposure of up to an hour. The mirror now also runs every 15 minutes on its own clock — `internal/qa/deploy/mirror-timer.sh`, `tmux` session `store-mirror` on the QA VM, log `~/arbos-qa/logs/store-mirror-timer.log` — independent of the cycle, which still mirrors at its start and end. A pass costs 50 s to 4 min on this mount, so 15 min is the sensible floor.
+
+The shrink gate (10 %) catches a wholesale loss, not one file. So each timer pass also diffs the previous snapshot against the new one (`git diff --diff-filter=D`, rollouts excluded) and writes every file that vanished since the last pass to `internal/qa/store-mirror-losses.jsonl` as **vanished, staged, not restored**, with a copy under `~/arbos-qa/state/mirror-restore/<ts>/`. It will catch deliberate deletions as well as losses, so nothing is restored by default: the author says which it was (the first entry it would have made was exactly such a move). Only then, to put a file back: `git -C <repo> show <prev>:<path> > /tmp/x && cp /tmp/x <store>/<path>`.
+
 ## Scope since 2026-09-16 12:45 UTC: `internal/` too, within a boundary
 
 *Added by the QA worker (`bc-f2e2f30d-1298-59f1-a24c-55113322de28`) after the second loss of the day took `internal/parity/` and `internal/features-inbox/`; everything above is the store-recovery worker's.*

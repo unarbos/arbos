@@ -65,6 +65,12 @@ The features agent has the numbers F-56 and F-66 without the words; they are the
 
 **Desktop, done.** The stall clock and hint (F-77, #299) already show a silent turn honestly; the journey harness puts the gate's stand-in `gh` on PATH so the run measures the app, not GitHub.
 
+## F-96 — Continue after Stop reads the stopped workers as failures (journey, 2026-09-16)
+
+**Seen.** Stop while two workers ran; then "Continue Working". The coordinator woke on the two workers' `ended badly — stopped` reports, said "Both workers ended badly. I will…", ended its turn and spawned nothing; the folder stayed empty until the next follow-up. Twice in a row (`journey.py` J09 named it).
+
+**Ask.** A worker the user stopped should report `stopped by the user`, not `ended badly`; and a `user` line right after a Stop (Continue Working sends "Continue where you stopped.") should reach the coordinator with those reports marked as the user's own stop, so it resumes instead of mourning. Cursor's Continue Working resumes the job.
+
 ## Not re-filed (shipped, or not the kernel's)
 
 F-19/F-20 (#236), F-37/F-43/F-46 (#244, #245), F-10 (#225), the readonly marker (#285/#288), notifications (#293/#297), `step` on deltas (#247/#252), the settled `thinking` record (#221), `put` with bytes (#270/#273). The keyless first line has its own kernel note (#312, `2026-09-16-keyless-first-line-kernel-half.md`); the desktop half is the layout worker's and is in the ledger as F-84.

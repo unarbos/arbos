@@ -3,7 +3,8 @@
 # Each pass: run internal/mirror-docs.sh (a non-zero exit is the alarm → mirror-alarm.py), then diff the
 # branch's previous head against the new one and record every file that vanished from the store since the
 # last pass in <loop>/store-mirror-losses.jsonl, with a staged copy under <root>/state/mirror-restore/<ts>/
-# ready to put back. Nothing is restored automatically: a deletion may be an author's choice.
+# ready to put back. Recorded as "vanished, staged, not restored": the diff catches deliberate deletions and
+# moves as well as losses, so the author says which it was; nothing is restored by default.
 #
 #   ROOT=~/arbos-qa INTERVAL=900 bash mirror-timer.sh
 set -u
@@ -48,8 +49,8 @@ import json, sys
 log, ts, prev, new, stage, files = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6].split("\n")
 files = [f for f in files if f]
 with open(log, "a") as fh:
-    fh.write(json.dumps({"ts": ts, "prev": prev, "new": new, "vanished": files, "staged": stage}) + "\n")
-print(f"[{ts}] {len(files)} file(s) vanished from the store since {prev[:8]}: " + ", ".join(files[:8]) + (" …" if len(files) > 8 else "") + f"; copies staged under {stage}")
+    fh.write(json.dumps({"ts": ts, "prev": prev, "new": new, "vanished": files, "staged": stage, "restored": False, "verdict": "unknown — the author says whether it was a move, a deliberate delete, or a loss"}) + "\n")
+print(f"[{ts}] vanished, staged, not restored — {len(files)} file(s) since {prev[:8]}: " + ", ".join(files[:8]) + (" …" if len(files) > 8 else "") + f"; copies under {stage}")
 PY
 }
 

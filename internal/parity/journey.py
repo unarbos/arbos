@@ -382,10 +382,18 @@ class Journey:
         else:
             self.send("Continue where you stopped and finish the to-do app and its tests.")
         started = self.wait(lambda: busy(self.state()) or None, 15)
-        done = self.wait_root_idle(420)
+        # The coordinator may end its own turn at once and let the workers
+        # run on: "done" is the root idle with no worker left working.
+        def all_done():
+            c = self.root() or {}
+            live = c.get("streaming") or c.get("turn_open")
+            working = (c.get("pills") or {}).get("working", 0)
+            return (not live and working == 0) or None
+        time.sleep(3)
+        done = bool(self.wait(all_done, 420, 2.0))
         c = self.root() or {}
         reply = next((i.get("text", "")[:100] for i in reversed(c.get("items", [])) if i.get("kind") == "agent" and (i.get("text") or "").strip()), "")
-        self.score("J08-continue-to-done", "Continue Working restarts the turn and it ends with a reply within 7 min",
+        self.score("J08-continue-to-done", "Continue Working restarts the turn and the work ends — root idle, no worker left working — within 7 min",
                    bool(started) and done and bool(reply), f"started={bool(started)} done={done} reply={reply!r}", t0)
 
     def j09_on_disk(self) -> None:
