@@ -2,9 +2,10 @@ import Foundation
 
 /// The composer's microphone: words spoken into the field. The speech
 /// server transcribes (`session.start {mode: dictation}`) and answers
-/// nothing; partials replace the open segment, finals settle it, and the
-/// text is left in the field for a look before it is sent — a voice note
-/// the kernel can read.
+/// nothing; `transcript.delta` appends to the open segment, `transcript.final`
+/// settles it. The words show in the field while he speaks, and go as one
+/// line when he taps the microphone again (Jacob, build 956: a voice note
+/// should land in the chat by itself).
 @MainActor
 final class Dictation: ObservableObject {
     @Published private(set) var active = false
@@ -97,10 +98,13 @@ final class Dictation: ObservableObject {
         switch event {
         case .userTranscript(let words, let final):
             if final {
-                committed = join(committed, words)
+                // The final is the whole segment; an empty one means the
+                // server gave up on it, and the deltas already heard stay
+                // rather than vanish (build 956 kept only the last delta).
+                committed = join(committed, words.isEmpty ? partial : words)
                 partial = ""
             } else {
-                partial = words
+                partial = join(partial, words)
             }
             text = join(committed, partial)
         case .error(let message):
