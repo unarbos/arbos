@@ -72,9 +72,10 @@ class ArbosHarnessConfig(HarnessConfig):
     1 = one, 2 = the reporter's example plus a second input the agent derives."""
     mechanism_required: bool = True
     """Refuse the first edit without a `mechanism` line (`ARBOS_MECHANISM_REQUIRED`)."""
-    max_turn_cost_usd: float = Field(4.0, ge=0)
+    max_turn_cost_usd: float = Field(8.0, ge=0)
     """Dollars one rollout's turn may spend on model calls before the kernel ends it
-    (`ARBOS_MAX_TURN_COST`); 0 = no cap. One SWE-bench rollout ran to $14 before this."""
+    (`ARBOS_MAX_TURN_COST`); 0 = no cap. One SWE-bench rollout ran to $14 before this;
+    at $4 the cap cut three hard rollouts that had solved at $6 before (cycle 9), so $8."""
     changes_before_done: bool = False
     """Nudge a final reply after edits to run `changes` first (`ARBOS_CHANGES_BEFORE_DONE`)."""
     artifacts: str = "outputs/arbos"
