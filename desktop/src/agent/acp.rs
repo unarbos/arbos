@@ -107,6 +107,10 @@ pub enum Event {
         step: u64,
         secs: Option<u32>,
     },
+    /// Any frame at all arrived on this socket: the kernel is answering.
+    /// Sent ahead of the frame's own events so a quiet turn's liveness
+    /// clock restarts on frames that draw nothing (a `listing`, a `tree`).
+    Alive,
     /// A recorded `wake`: a turn opens (a prompt, a child's report, a
     /// subscription firing); the model's step numbers start again at 1.
     /// A kind other than `user`/`kickoff` is a segment of its own.
@@ -349,6 +353,9 @@ impl Session {
                             return;
                         }
                     }
+                    if tx.send(Event::Alive).is_err() {
+                        return;
+                    }
                     for ev in frame_events(&agent, frame) {
                         if tx.send(ev).is_err() {
                             return;
@@ -449,6 +456,15 @@ impl Session {
             base_hash: None,
         })?;
         Ok(stored)
+    }
+
+    /// A probe while a turn is quiet: the kernel answers a `list` with a
+    /// `listing` at once, whatever the agent is doing, so silence past it
+    /// is the wire's, not the model's.
+    pub fn probe(&self) -> Result<()> {
+        self.send_frame(&Frame::List {
+            path: String::new(),
+        })
     }
 
     pub fn cancel(&self) -> Result<(), Error> {
