@@ -200,6 +200,21 @@ if [ "${ARBOS_QA_DESKTOP:-0}" = 1 ] && command -v Xvfb >/dev/null 2>&1; then
     ARBOS_DESKTOP_BIN="$app" ARBOS_DESKTOP_DRIVER="${ARBOS_QA_DRIVER_DIR:-$wt/desktop/driver}" \
       nice -n 10 timeout 60m python3 run.py --kernel "$ROOT/target-desktop-$slug/release/arbos-kernel" --kernel-branch "$branch" --integration --fileplan "$fileplan" --tag desktop --with-model --budget-usd "$BUDGET_USD"
     echo "-- desktop $branch: run.py exit $?"
+    # The acceptance journey (docs/acceptance-journeys.md) ran inside the desktop-tagged set; say its score
+    # here so every cycle log carries it, and the pass rate over the last ten runs.
+    if [ -f journey-history.jsonl ]; then
+      python3 - <<'PY'
+import json
+runs = [json.loads(l) for l in open("journey-history.jsonl") if l.strip()]
+if runs:
+    last = runs[-1]
+    marks = " ".join(f"{s}{'✓' if v == 'pass' else ('?' if v == 'unverified' else '✗')}" for s, v in last["steps"].items())
+    print(f"-- journey: {last['score']}/8 pass, {len(last['unverified'])} unverified, {len(last['failed'])} fail — {marks}")
+    tail = runs[-10:]
+    rate = {s: sum(1 for r in tail if r["steps"].get(s) == "pass") for s in last["steps"]}
+    print("-- journey pass rate, last %d runs: %s" % (len(tail), " ".join(f"{s} {n}/{len(tail)}" for s, n in rate.items())))
+PY
+    fi
     set -e
   done
   rm -rf "$ROOT/loop/__pycache__"

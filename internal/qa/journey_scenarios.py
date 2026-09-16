@@ -292,6 +292,12 @@ def register(scenario, registry, transcript, now_ms, branch):
             if rig.busy(folder):
                 rig.send(f"Also add a line to CHANGELOG.md saying who asked for this: QA-{tag}.")
                 midflight["followup_sent_at"] = time.time()
+                end = time.time() + 120
+                while time.time() < end:
+                    if any(e.get("kind") == "user" and f"QA-{tag}" in e.get("text", "") for e in read_transcript(folder)):
+                        midflight["followup_reached_root_s"] = round(time.time() - midflight["followup_sent_at"], 1)
+                        break
+                    time.sleep(0.5)
                 time.sleep(4)
                 if rig.busy(folder):
                     rig.send("Use British spelling in the CHANGELOG.")
@@ -358,7 +364,7 @@ def register(scenario, registry, transcript, now_ms, branch):
                 turn_tools = [e.get("name") for e in evs[(i_follow or 0):follow_tc] if e.get("kind") == "tool"]
                 relayed = "say" in turn_tools and "spawn" not in turn_tools
                 workers_now = agents_of(folder) - {"root"}
-                j4["midflight"] = {"index": i_follow, "task_turn_complete": task_tc, "same_turn": same_turn, "relayed_to_worker": relayed, "turn_tools": turn_tools, "workers": sorted(workers_now), "taken": same_turn or (relayed and len(workers_now) == len(ev.get("J2", {}).get("workers", [])))}
+                j4["midflight"] = {"index": i_follow, "reached_root_s": midflight.get("followup_reached_root_s"), "task_turn_complete": task_tc, "same_turn": same_turn, "relayed_to_worker": relayed, "turn_tools": turn_tools, "workers": sorted(workers_now), "taken": same_turn or (relayed and len(workers_now) == len(ev.get("J2", {}).get("workers", [])))}
             rig.send("Summarise what you changed in two lines.")
             after_busy = rig.wait_busy(folder, 30)
             rig.wait_idle(folder, 180)
@@ -486,21 +492,37 @@ def register(scenario, registry, transcript, now_ms, branch):
             # ── J8: the awkward parts ──────────────────────────────────────
             j8 = {}
             rig.focus(folder)
-            rig.send("Run `sleep 30; echo waited` with bash, then say done.")
+            side = folder / "side-effects.log"
+            # A command with a side effect, then a long wait: killing the kernel during the wait shows whether the
+            # continued turn re-runs the in-flight tool (the features agent's known wrinkle — no record of an
+            # in-flight tool, so the model runs it again; harmless for reads, a real bug for this).
+            rig.send(f"Run exactly this with bash and nothing else first: `echo ran-{tag} >> side-effects.log; sleep 30; echo waited`. Then say done.")
             if rig.wait_busy(folder, 30):
-                time.sleep(4)
+                end = time.time() + 25
+                while time.time() < end and not side.exists():
+                    time.sleep(0.5)
+                time.sleep(3)
                 pid = kernel_pid(folder)
                 if pid:
                     os.kill(pid, signal.SIGKILL)
                 time.sleep(2)
                 rig.send(f"After the restart, reply with the single word BACK-{tag}.")
-                rig.wait_idle(folder, 120)
-                time.sleep(2)
+                # The continued turn may finish (or re-run) its command before this line's turn: poll for the
+                # answer itself, never infer it from an idle moment.
+                end = time.time() + 180
+                while time.time() < end:
+                    evs8 = read_transcript(folder)
+                    if any(e.get("kind") == "assistant" and f"BACK-{tag}" in e.get("text", "") for e in evs8):
+                        break
+                    time.sleep(2)
                 evs8 = read_transcript(folder)
                 backs = [e for e in evs8 if e.get("kind") == "user" and f"BACK-{tag}" in e.get("text", "")]
                 answered = any(e.get("kind") == "assistant" and f"BACK-{tag}" in e.get("text", "") for e in evs8)
                 notices = [str(i.get("text"))[:80] for i in (rig.root_chat(folder) or {}).get("items", []) if i.get("kind") == "notice" and i.get("failed")]
-                j8["restart"] = {"pid_before": pid, "pid_after": kernel_pid(folder), "line_count": len(backs), "answered": answered, "failed_notices": notices[-2:]}
+                # Give the continued turn time to (re)run the command before counting the side effect.
+                rig.wait_idle(folder, 90)
+                runs = side.read_text().count(f"ran-{tag}") if side.exists() else 0
+                j8["restart"] = {"pid_before": pid, "pid_after": kernel_pid(folder), "line_count": len(backs), "answered": answered, "failed_notices": notices[-2:], "side_effect_runs": runs}
             else:
                 j8["restart"] = "the slow turn never started"
             # Second project at the same time.
@@ -537,6 +559,10 @@ def register(scenario, registry, transcript, now_ms, branch):
                     problems.append("the kernel was not respawned")
                 if len(r["failed_notices"]) > 1:
                     problems.append(f"more than one failed notice after the restart: {r['failed_notices']}")
+                if r["side_effect_runs"] > 1:
+                    problems.append(f"the in-flight command ran {r['side_effect_runs']} times across the kernel restart (a non-idempotent side effect doubled)")
+                if r["side_effect_runs"] == 0:
+                    problems.append("the in-flight command's side effect never happened (before or after the restart)")
             if j8["second_project"]["in_second"] != 1 or in_first or in_home:
                 problems.append(f"the second project's line went astray: {j8['second_project']}")
             mark("J8", "fail" if problems else "unverified", "; ".join(problems) or "restart and second project fine; dropped connection not checkable here")
