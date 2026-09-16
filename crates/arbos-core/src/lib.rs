@@ -54,6 +54,7 @@ pub use machines::{Machine, Machines};
 pub type NodeId = u64;
 pub use page::{Page, PageKind};
 pub use place::Place;
+pub use project::{ArchivedChild, archived_children};
 pub use prs::{PrRec, load_prs, record_pr};
 pub use skills::{Skill, load_skills, slash_skill};
 pub use wake::{Wake, WakeKind};

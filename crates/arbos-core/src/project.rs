@@ -497,3 +497,61 @@ mod tests {
         assert!(kinded.role.is_none());
     }
 }
+
+/// One finished worker in the archive, as a parent reads it back.
+#[derive(Debug, Clone)]
+pub struct ArchivedChild {
+    pub id: String,
+    pub name: String,
+    /// The worker's definition (`explore`, …) or empty.
+    pub kind: String,
+    /// When its last turn ended (ms), when the transcript says.
+    pub ended_ms: Option<i64>,
+    /// Its last words: the final non-empty assistant line, whole.
+    pub last_words: String,
+}
+
+/// `parent`'s finished workers under `archive/agents/`, newest last turn
+/// first. A coordinator asked which workers ran answers from this; the
+/// live roster alone read as "none" once they were archived (F-57).
+pub fn archived_children(place: &Place, parent: &str) -> Vec<ArchivedChild> {
+    let Ok(rd) = std::fs::read_dir(archive_agents_dir(place)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<ArchivedChild> = rd
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| {
+            let dir = e.path();
+            let agent = crate::Agent::load(&dir).ok()?;
+            if agent.parent.as_ref().map(|p| p.as_str()) != Some(parent) {
+                return None;
+            }
+            let events = crate::load_transcript(&dir.join("transcript.jsonl")).unwrap_or_default();
+            let ended_ms = events
+                .iter()
+                .rev()
+                .find(|ev| matches!(ev.kind, crate::EventKind::TurnComplete { .. }))
+                .map(|ev| ev.ts);
+            let last_words = events
+                .iter()
+                .rev()
+                .find_map(|ev| match &ev.kind {
+                    crate::EventKind::Assistant { text, .. } if !text.trim().is_empty() => {
+                        Some(text.trim().to_string())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default();
+            Some(ArchivedChild {
+                id: agent.id.to_string(),
+                name: agent.name.clone(),
+                kind: agent.kind.clone(),
+                ended_ms,
+                last_words,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.ended_ms.cmp(&a.ended_ms).then(a.id.cmp(&b.id)));
+    out
+}

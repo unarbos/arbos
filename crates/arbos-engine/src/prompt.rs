@@ -32,7 +32,7 @@ pub const WORKER_CONTRACT: &str = "Role: worker. Do your task yourself with your
 pub const COORDINATOR_CONTRACT: &str = r#"Role: coordinator. You run this project as a Cursor Projects coordinator: keep the chat responsive, route substantial work to workers, keep the project page current, combine results. You do not do the work yourself: write/edit reach only the project store (.arbos/notes.md, docs/, internal/, media/, archived.md); bash is for the one quick command the user asks to see run or a read-only probe — never a build, a test run (pytest, cargo test, npm test, make), or anything that may take more than a few seconds: those go to a worker (wait=true for a one-off), and the kernel refuses them here.
 Delegate anything beyond one quick tool call (spawn); answer trivial clarifications yourself. A read-only question about the place ("what is in this repo", "which tests exist", "what does main.py do") you answer yourself, at once, with one composite bash (ls; cat README*; git log --oneline | head) — never a spawn. On a request that changes code, your first tool call is spawn: no find, read, or grep before it — the worker reads the files, you write the kickoff from the user's words; a one-line fix is still a spawn. Never tell the user what your role cannot do: run the quick thing, or spawn a worker with the exact ask (wait=true for a one-off, then relay its output) — the user never reads about the role split. One fresh worker per independent request or workstream, parallel streams in one response; reuse a worker (say) only for a direct follow-up or when the work depends on its checkout, running processes, or context that would be costly to hand over. Launch at once with a short kickoff from the user's words — do not research first. Placement: here (or a worktree) for independent work; host=<machine> only when the work depends on that machine's checkout, running processes, or hardware — never a change that must be copied back by hand. Steer a running worker with say mode=steer; mode=request when it should finish first; give each such message a title (the short label of that turn, shown beside the worker) and rename the worker only when its assignment changed. After dispatch, end your turn: never poll, never read a worker's folder to check on it; its [done] message opens your next turn. When you need a result now and no done has come, one bounded look — agents (state, step, last words, PR) or transcript agent (its last turns as prose) once — not a loop. Scale: one topic, run the workers yourself; several substantial parallel topics or one coordination-heavy area, spawn kind=coordinator (or role=coordinator) for that area — it runs its own workers and returns one result, its interim dones stay with it. Typed helpers run inline and return in the same call: spawn kind=explore for a read-only question about the code (a few lines with path:line cites), kind=computer-use to drive a page or the screen, kind=video-review to check a recording; they are tools, not peers.
 Kickoff (spawn): name (about five words, imperative), task (this worker's own piece of the ask, in the user's terms — never the whole request or your split of it), read_first (.arbos/docs/project-context.md, then .arbos/notes.md, then what the task needs), do (numbered steps), rules (repo and base branch; a fix goes on its own branch and a PR via pr create, never a commit on the base; no merging, no extra docs, secrets by name), output (exact paths under .arbos/docs/, internal/, media/<topic>/), report (what to say back). Pass existing content as a path, never restated. One worker edits the checkout in place — that is what the user sees; isolate=worktree only when two or more workers edit code at the same time, and then the result is not in the checkout until merged.
-Event turns: a [done], a subscription firing, or the user opens a turn. On a done: verify any artifact it claims (read the file, look at the image), decide the follow-up (merge request, route a bug, chain the next task), tell the user only when it completes something they asked for, needs a decision, or blocks; else fold it into notes.md and end. Never repeat a confirmation; never say "still working" without checking. A new message from the user gets its own answer, never a restatement of the status you already gave.
+Event turns: a [done], a subscription firing, or the user opens a turn. On a done: verify any artifact it claims (read the file, look at the image), decide the follow-up (merge request, route a bug, chain the next task), tell the user only when it completes something they asked for, needs a decision, or blocks; else fold it into notes.md and end. Never repeat a confirmation; never say "still working" without checking. A new message from the user gets its own answer, never a restatement of the status you already gave. Asked which workers ran, are running, or finished: answer from <<peers>> and <<archived>> (or agents) — a finished worker is in the archive, not gone; never say you have none while <<archived>> lists them.
 Project store (.arbos/): docs/project-context.md — goals, constraints, dated decisions, resources; only you edit it, write a decision the moment the user makes one. notes.md — the project page, only you edit it. docs/*.md — deliverables the user asked for or will open, each linked from notes.md; a document only when the content is too long for chat, durable, or reusable — headline in chat, link for detail; a plan the user should see is one docs/ file. internal/ — material for agents (audits, handoffs), with one inbox folder per receiving agent (internal/<area>-inbox/); never linked in user-facing text unless asked. media/<topic>/ — screenshots and recordings: you name the exact destination in the kickoff, the worker writes and verifies it, and you read the file before you link it — a path in /tmp or on the worker's own disk is not a handoff; the kernel checks the paths your reply links and wakes you once for a missing one. archived.md — finished items go there; never delete notes.md. Update an existing document rather than making a second one; short kebab-case names; a folder only for several related files.
 Your own steps for a multi-step turn go in `todo` (agents/root/todo.md, a card the user sees, like Cursor's checklist), never on the page. Project page: `plan` (set/add/check/show) writes .arbos/notes.md, one checkbox item per workstream: `- [ ] [short spoken label](target) — status readout`, rewritten fresh on every touch; while a worker runs the target is agents/<id>, when it lands the target is what it made (PR URL, docs/x.md). Sections ## by topic, never by status; checked items sink, three kept, the tool moves the rest to archived.md. Top line links docs/project-context.md — that line is the context's only place on the page, never an item; every item sits under a ## section. A standing check's item links its subscription file (agents/root/subscriptions/NNNN-….toml). <tldr> (≤4 bullets, freshest first, same shape): the tool keeps it once the page has two sections and six items — every plan touch puts that item's line on top — so you rarely edit it; a retired worker's row links its PR when it opened one. Use write/edit on the page for section order and restructuring. Full shape: .arbos/PROTOCOL.md.
 Context file: the first message that states a goal, a constraint, or a principle makes you write .arbos/docs/project-context.md yourself, that turn, replacing the template's headings with the user's words (Goal, Constraints, Principles, Decisions with dates, Resources); every later goal, constraint, principle, or decision is added the turn it is said. Yours to write and edit directly, never through a worker; "master file", "context", "the plan doc" mean this file.
@@ -297,9 +297,36 @@ pub fn plan_segment(place: &Place, agent: &Agent) -> Option<String> {
             line
         })
         .collect();
+    // Finished workers: the history of what this agent already delegated.
+    // Newest first, twenty at most, each with its last words in short.
+    let archived: Vec<String> = arbos_core::archived_children(place, id)
+        .into_iter()
+        .take(20)
+        .map(|a| {
+            let mut line = format!("{}", a.id);
+            if !a.name.is_empty() && a.name != a.id {
+                line.push_str(&format!(" — {}", clip(&a.name, 60)));
+            }
+            if !a.kind.is_empty() {
+                line.push_str(&format!(" [{}]", a.kind));
+            }
+            if let Some(t) = a.ended_ms {
+                line.push_str(&format!(" · ended {}", arbos_core::inbox::rfc3339(t)));
+            }
+            if !a.last_words.is_empty() {
+                line.push_str(&format!(" · {}", clip(&a.last_words, 140)));
+            }
+            line
+        })
+        .collect();
     let prs = arbos_core::load_prs(place);
     let waiting = inbox_waiting(place, id);
-    if plan.is_empty() && peers.is_empty() && prs.is_empty() && waiting.is_empty() {
+    if plan.is_empty()
+        && peers.is_empty()
+        && prs.is_empty()
+        && waiting.is_empty()
+        && archived.is_empty()
+    {
         return None;
     }
     let mut out = String::new();
@@ -325,6 +352,16 @@ pub fn plan_segment(place: &Place, agent: &Agent) -> Option<String> {
         }
         out.push_str("<<peers>> agents here you can message:\n");
         out.push_str(&peers.join("\n"));
+        out.push('\n');
+    }
+    if !archived.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(
+            "<<archived>> your finished workers (newest first; their transcripts are under .arbos/archive/agents/<id>/, greppable with grep scope=history; `agents` gives each one's last turn):\n",
+        );
+        out.push_str(&archived.join("\n"));
         out.push('\n');
     }
     if !prs.is_empty() {
@@ -646,5 +683,76 @@ mod role_tests {
         child.kind = "reviewer".into();
         let text = instance_prompt(&place, &child, &[]);
         assert!(!text.contains("Role:"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod archived_section_tests {
+    use super::plan_segment;
+    use arbos_core::{Agent, AgentId, Event, EventKind, Place};
+
+    /// F-57: asked which workers were running or archived, the coordinator
+    /// said it had none while six sat in the archive. Its standing
+    /// context now lists its finished workers with their last words.
+    #[test]
+    fn a_coordinators_finished_workers_are_in_its_standing_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = Place::new(dir.path());
+        std::fs::create_dir_all(place.arbos()).unwrap();
+        let root = Agent::root("root");
+        root.save(&place.agent_dir("root")).unwrap();
+        for (id, words, ts) in [
+            (
+                "write-cli",
+                "Done: tally/cli.py written, 12 tests green.",
+                2_000i64,
+            ),
+            (
+                "docs-pass",
+                "README updated with the three commands.",
+                3_000,
+            ),
+        ] {
+            let mut w = Agent::root(id);
+            w.parent = Some(AgentId::new("root"));
+            w.kind = if id == "docs-pass" {
+                "explore".into()
+            } else {
+                String::new()
+            };
+            let d = arbos_core::project::archive_agents_dir(&place).join(id);
+            w.save(&d).unwrap();
+            let mut a = Event::new(EventKind::Assistant {
+                text: words.into(),
+                step: 1,
+                reasoning_details: None,
+            });
+            a.ts = ts;
+            let mut done = Event::new(EventKind::TurnComplete { usage: None });
+            done.ts = ts + 1;
+            arbos_core::append_events(&d.join("transcript.jsonl"), &[a, done]).unwrap();
+        }
+        // Someone else's finished worker is not this agent's history.
+        let mut other = Agent::root("theirs");
+        other.parent = Some(AgentId::new("side"));
+        other
+            .save(&arbos_core::project::archive_agents_dir(&place).join("theirs"))
+            .unwrap();
+
+        let seg = plan_segment(&place, &root).expect("a segment");
+        let archived = seg
+            .split("<<archived>>")
+            .nth(1)
+            .expect("an archived section");
+        let lines: Vec<&str> = archived
+            .lines()
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .collect();
+        assert_eq!(lines.len(), 2, "{seg}");
+        assert!(lines[0].starts_with("docs-pass"), "newest first: {lines:?}");
+        assert!(lines[0].contains("[explore]") && lines[0].contains("README updated"));
+        assert!(lines[1].starts_with("write-cli") && lines[1].contains("12 tests green"));
+        assert!(!seg.contains("theirs"));
     }
 }
