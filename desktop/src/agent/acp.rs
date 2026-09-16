@@ -1359,6 +1359,7 @@ mod tests {
             out,
             session_id: "s1".into(),
             cwd: PathBuf::new(),
+            remote: false,
         };
         (session, rx)
     }
