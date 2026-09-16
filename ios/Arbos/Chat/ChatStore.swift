@@ -345,9 +345,38 @@ final class ChatStore: ObservableObject {
         return agent == "main" ? target : "\(target) · \(agent)"
     }
 
+    /// The open question, if the kernel is waiting on one.
+    var pendingAsk: (id: String?, options: [String])? {
+        for item in items.reversed() {
+            if case .ask(_, let options, let id, answered: false) = item.kind { return (id, options) }
+        }
+        return nil
+    }
+
+    /// Answer the open question — a tapped option or the typed line. The
+    /// answer goes as an `answer` frame with the kernel's id, and the card
+    /// closes; the kernel echoes the answer as a user line.
+    func answer(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let ask = pendingAsk else { return }
+        if let index = items.lastIndex(where: { if case .ask(_, _, _, answered: false) = $0.kind { return true } else { return false } }),
+           case .ask(let q, let o, let id, _) = items[index].kind {
+            items[index].kind = .ask(question: q, options: o, id: id, answered: true)
+        }
+        var card = ChatItem(.user(trimmed, pending: true))
+        card.step = 0
+        items.append(card)
+        pendingSends.append((card.id, trimmed, false, settings.kernelTarget))
+        busy = true
+        sentAt = Date()
+        source?.answer(text: trimmed, id: ask.id)
+    }
+
     func send(_ text: String, attachments: [PendingAttachment] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty else { return }
+        // A typed line while a question is open is the answer to it.
+        if attachments.isEmpty, pendingAsk != nil { answer(trimmed); return }
         // Shown at once, as pending; the kernel's echo of the same words
         // makes it real. A turn already running gets the new words as a
         // steer at its next tool boundary; otherwise this starts one.
@@ -514,6 +543,18 @@ final class ChatStore: ObservableObject {
             onSeen?(through)
         case .pushed(let enabled, let reason):
             onPushed?(enabled, reason)
+        case .ask(let question, let options, let id):
+            // The transcript line that asked may already be on screen (a
+            // replay, or the settled text): it becomes the card, so the
+            // question is not drawn twice.
+            if let last = items.lastIndex(where: \.isAgent), case .agent(let text, _) = items[last].kind,
+               text.trimmingCharacters(in: .whitespacesAndNewlines) == question.trimmingCharacters(in: .whitespacesAndNewlines) {
+                items[last].kind = .ask(question: question, options: options, id: id, answered: false)
+            } else if !items.contains(where: { if case .ask(_, _, let known, false) = $0.kind, known != nil, known == id { return true } else { return false } }) {
+                closeOpenAgentMessage()
+                items.append(ChatItem(.ask(question: question, options: options, id: id, answered: false)))
+            }
+            busy = false
         case .agents(let list):
             agents = list
         case .workers(let list):

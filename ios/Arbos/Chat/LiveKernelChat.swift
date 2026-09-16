@@ -89,6 +89,10 @@ final class LiveKernelChat: ChatSource {
         try? client.seen(through: through)
     }
 
+    func answer(text: String, id: String?) {
+        try? client.answer(text, id: id)
+    }
+
     func registerPush(token: String, sandbox: Bool) {
         try? client.registerPush(token: token, sandbox: sandbox)
     }
@@ -185,10 +189,10 @@ final class LiveKernelChat: ChatSource {
             if path == "project.toml", error == nil, let identity = ProjectIdentity.parse(toml: text) {
                 stream?.yield(.identity(identity))
             }
-        case .ask(let agent, let question, _):
+        case .ask(let agent, let question, let options, let id):
             if agent == focus {
                 stream?.yield(.agentDone)
-                stream?.yield(.item(ChatItem(.agent(question, streaming: false))))
+                stream?.yield(.ask(question: question, options: options, id: id))
             }
         case .notify(let notification):
             stream?.yield(.notify(notification))

@@ -132,7 +132,9 @@ enum KernelFrame {
     case assistantDelta(agent: String, text: String, step: Int)
     /// `running` or `idle`.
     case turn(agent: String, state: String)
-    case ask(agent: String, question: String, options: [String])
+    /// `id` names the pending question (#342 re-offers it on attach); the
+    /// `answer` frame carries it back.
+    case ask(agent: String, question: String, options: [String], id: String?)
     /// What `agent` is doing now, in a few words; empty means idle.
     case status(agent: String, step: String, source: String)
     /// The model call for `agent` is alive but silent for `secs` seconds.
@@ -251,7 +253,8 @@ enum KernelFrame {
             self = .ask(
                 agent: object["agent"] as? String ?? "",
                 question: object["question"] as? String ?? "",
-                options: object["options"] as? [String] ?? []
+                options: object["options"] as? [String] ?? [],
+                id: object["id"] as? String
             )
         default:
             self = .other(type: type)

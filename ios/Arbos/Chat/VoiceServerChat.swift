@@ -28,6 +28,8 @@ final class VoiceServerChat: ChatSource {
         try await link.connect()
     }
 
+    func answer(text: String, id: String?) { Task { try? await send(text: text, steer: false, attachments: []) } }
+
     func send(text: String, steer: Bool, attachments: [PendingAttachment]) async throws {
         try await link.connect()
         stream?.yield(.item(ChatItem(.user(text))))
