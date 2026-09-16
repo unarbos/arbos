@@ -120,7 +120,9 @@ def register(scenario, registry, transcript, now_ms, branch):
             texts = [str(i.get("text", "")) for i in items]
             cx.rec.expect(not any("Internal error" in t for t in texts), "cp-02-cap-called-internal-error", "a configured cap is drawn as 'turn failed: Internal error'", "desktop session.rs failed-notice prefix (qal-j05)")
             cx.rec.expect(not any(i.get("kind") == "agent" for i in items), "cp-02-agent-apologises-for-cap", "an agent bubble apologises for the spend although the model wrote nothing (qal-j05)")
-            cx.rec.expect(sum(1 for i in items if i.get("kind") != "user") <= 1, "cp-02-cap-told-more-than-once", f"{sum(1 for i in items if i.get('kind') != 'user')} chat items for one capped turn (qal-j05)")
+            # The step that crossed the cap already ran its tools, so tool cards are legitimate; the stop itself is one line.
+            said = [i for i in items if i.get("kind") in ("notice", "agent")]
+            cx.rec.expect(len(said) <= 1, "cp-02-cap-told-more-than-once", f"{len(said)} notice/agent items for one capped turn: {[str(i.get('text', ''))[:60] for i in said]} (qal-j05)")
             # The composer takes the next line; that turn ends the same readable way.
             rig.send("Reply with the single word CAPPED.")
             rig.wait_busy(folder, 20)
@@ -337,7 +339,7 @@ def register(scenario, registry, transcript, now_ms, branch):
                         time.sleep(2)
                     parts["a"]["delivered_later"] = (da / "delivered").exists()
                     parts["a"]["in_store_later"] = (beta / ".arbos" / "docs" / "feedback" / da.name / "report.json").exists()
-                    cx.rec.expect(parts["a"]["delivered_later"], "fb-01-a-never-retried", "the report that waited did not go by itself within 75 s of the credentials appearing (backoff starts at 30 s)")
+                    cx.rec.expect(parts["a"]["delivered_later"], "fb-01-a-never-retried", "the report that waited did not go by itself within 75 s of the credentials appearing, although the sheet promised it would (backoff starts at 30 s; delivery only runs when another report is sent)", "desktop root.rs deliver_feedback: one call site, on Send (qal-j06)")
 
             # Phase C — pickup: the poller reads the store through the hub and copies each report to its rig.
             repo = Path(os.environ.get("ARBOS_QA_REPO", str(Path(cx.binary).resolve().parents[2])))
@@ -350,7 +352,7 @@ def register(scenario, registry, transcript, now_ms, branch):
                 env_c = dict(cx.env)
                 env_c["XDG_CONFIG_HOME"] = str(cx.scratch / "xdg-c")
                 env_c["PATH"] = f"{Path(cx.binary).parent}:{env_c.get('PATH', '')}"
-                r = subprocess.run(["python3", str(poller), "poll", "--source", "arbos://qa-b/beta/docs/feedback", "--rig", str(rig_dir)], env=env_c, capture_output=True, text=True, timeout=120)
+                r = subprocess.run(["python3", str(poller), "--source", "arbos://qa-b/beta/docs/feedback", "--rig", str(rig_dir), "poll"], env=env_c, capture_output=True, text=True, timeout=120)
                 picked = sorted(p.name for p in rig_dir.iterdir()) if rig_dir.exists() else []
                 have_json = [n for n in picked if (rig_dir / n / "report.json").exists() or any((rig_dir / n).glob("*.json"))]
                 parts["c"] = {"exit": r.returncode, "out": (r.stdout + r.stderr).strip()[-400:], "picked": picked[:6], "with_report": have_json[:6]}
