@@ -99,6 +99,18 @@ struct ProjectChatView: View {
             }
         }
         .toolbar(.hidden, for: .navigationBar)
+        // The bar is hidden, and UIKit hides its edge swipe with it. The
+        // gesture Jacob expects (build 1021: "swiping to the left should
+        // take me back") is drawn here instead: a drag that starts at the
+        // left edge and travels right goes back to the projects.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 24, coordinateSpace: .global)
+                .onEnded { value in
+                    let fromEdge = value.startLocation.x < 28
+                    let rightward = value.translation.width > 90 && abs(value.translation.height) < 80
+                    if fromEdge, rightward { dismiss() }
+                }
+        )
         .fullScreenCover(isPresented: $showCall) { CallScreen() }
         .sheet(isPresented: $showSettings) { SettingsView().environmentObject(settings) }
         .sheet(isPresented: $showWorkers) {
