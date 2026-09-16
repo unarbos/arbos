@@ -366,6 +366,16 @@ fn list<'a>(it: impl Iterator<Item = &'a String>) -> String {
     }
 }
 
+/// End a refused connection so the peer reads the reason first. A tunnel
+/// in front (cloudflared) drops frames an origin sends and then closes in
+/// the same instant after the upgrade — the client saw a bare close and
+/// never the `error`. A short pause before the close handshake lets the
+/// proxy forward the text; refusals are rare, so the wait costs nothing.
+async fn refuse_close(ws: &mut Ws) {
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let _ = ws.close(None).await;
+}
+
 async fn next_text(ws: &mut Ws) -> Option<String> {
     loop {
         match ws.next().await? {
@@ -399,6 +409,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
             },
         )
         .await;
+        refuse_close(&mut ws).await;
         return;
     };
     let first = tokio::time::timeout(FIRST_FRAME, next_text(&mut ws))
@@ -430,6 +441,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
             },
         )
         .await;
+        refuse_close(&mut ws).await;
         return;
     };
     if !machine.eq_ignore_ascii_case(&token_machine) {
@@ -440,6 +452,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
             },
         )
         .await;
+        refuse_close(&mut ws).await;
         return;
     }
     if protocol > arbos_core::hub::HUB_PROTOCOL {
@@ -457,6 +470,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
             },
         )
         .await;
+        refuse_close(&mut ws).await;
         return;
     }
     let (to_socket, mut from_hub) = mpsc::unbounded_channel::<HubFrame>();
@@ -720,6 +734,7 @@ pub async fn attach(
             },
         )
         .await;
+        refuse_close(&mut ws).await;
         return;
     }
     proxy(Arc::clone(&hub), ws, who, kernel, &access).await;
@@ -832,6 +847,7 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
             },
         )
         .await;
+        refuse_close(&mut ws).await;
         return;
     }
     let first = tokio::time::timeout(FIRST_FRAME, next_text(&mut ws))
@@ -852,6 +868,7 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
             },
         )
         .await;
+        refuse_close(&mut ws).await;
         return;
     };
     let worker = match hub.worker(machine) {
@@ -903,6 +920,7 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
             },
         )
         .await;
+        refuse_close(&mut ws).await;
         return;
     }
     let answer = match tokio::time::timeout(CLAIM_WAIT, rx).await {
@@ -963,6 +981,7 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
             },
         )
         .await;
+        refuse_close(&mut ws).await;
         return;
     };
     if !send_json(&mut ws, &answer).await {
