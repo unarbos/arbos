@@ -129,9 +129,14 @@ final class ChatStore: ObservableObject {
         // Frames start arriving during attach; the pump must be running
         // before the history replay lands.
         adopt(live, mode: .connecting)
-        if (try? await live.start()) != nil {
+        do {
+            try await live.start()
             mode = .live
             return true
+        } catch {
+            #if DEBUG
+            print("attach \(endpoint.url): \(error)")
+            #endif
         }
         live.stop()
         pump?.cancel()
@@ -336,12 +341,17 @@ final class ChatStore: ObservableObject {
             }
         case .agentDone:
             closeOpenAgentMessage()
-        case .agentReplace(let text, let step):
+        case .agentReplace(let raw, let step):
+            let text = ToolMarkup.strip(raw)
             // The step's own item when the kernel numbers steps; the last
-            // agent item when it does not (older kernels).
+            // agent item when it does not (older kernels). Steps restart
+            // every turn, so only this turn's items — after the last prompt
+            // card — are candidates; a settled line must never reach back
+            // into an earlier reply.
+            let turnStart = items.lastIndex(where: { if case .user = $0.kind { return true } else { return false } }).map { $0 + 1 } ?? 0
             let index = step > 0
-                ? items.lastIndex(where: { $0.isAgent && $0.step == step })
-                : items.lastIndex(where: \.isAgent)
+                ? items[turnStart...].lastIndex(where: { $0.isAgent && $0.step == step })
+                : items[turnStart...].lastIndex(where: \.isAgent)
             if let index {
                 let wasOpen = items[index].isStreamingAgent
                 // The kernel's whole text for one step can land after the
@@ -352,8 +362,12 @@ final class ChatStore: ObservableObject {
                    streamedText.trimmingCharacters(in: .whitespacesAndNewlines).count > text.count {
                     break
                 }
+                if text.isEmpty {
+                    items.remove(at: index)
+                    break
+                }
                 items[index].kind = .agent(text, streaming: false)
-                if wasOpen, !text.isEmpty { onAgentMessage?(text) }
+                if wasOpen { onAgentMessage?(text) }
             } else if !text.isEmpty {
                 // Nothing streamed for this step (attached mid-turn): a new message.
                 closeOpenAgentMessage()
@@ -388,8 +402,14 @@ final class ChatStore: ObservableObject {
     private func closeOpenAgentMessage() {
         guard let index = items.indices.last,
               case .agent(let text, streaming: true) = items[index].kind else { return }
-        let final = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Markup a model wrote as a call goes; a reply that was only markup
+        // settles to no line on the kernel (#278), so no bubble stays here.
+        let final = ToolMarkup.strip(text)
+        if final.isEmpty {
+            items.remove(at: index)
+            return
+        }
         items[index].kind = .agent(final, streaming: false)
-        if !final.isEmpty { onAgentMessage?(final) }
+        onAgentMessage?(final)
     }
 }

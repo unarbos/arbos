@@ -39,9 +39,15 @@ final class ProjectStore: ObservableObject {
         if settings.kernelEndpoint != nil {
             list.append(entry(target: .pod, folder: "pod", machine: "pod", place: "", live: true, remote: true))
         }
+        #if DEBUG
+        print("roster: hub \(settings.hubURL) configured=\(settings.hubConfigured) token=\(settings.hubToken.count) chars")
+        #endif
         if settings.hubConfigured {
             do {
                 let machines = try await HubClient.list(hubURL: settings.hubURL, token: settings.hubToken)
+                #if DEBUG
+                print("roster: \(machines.count) machines, \(machines.flatMap(\.projects).count) projects")
+                #endif
                 for machine in machines {
                     // `<project>--<child>` is a worker's worktree place, not a
                     // project of Jacob's: it belongs under its parent's chat.
