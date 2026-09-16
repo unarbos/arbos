@@ -552,7 +552,11 @@ class Pass:
             self.send(P_LONG); self.wait(lambda s: busy(s), 20, what="turn start")
         self.check("composer-field cmd-shift-enter", sc, "type + ⇧⌘↩ while busy", "kernel follow-up row (followups-head), session.held > 0, composer empty",
                    lambda: (self.app.click("composer-field"), self.app.type("Also say thanks."), self.app.key("cmd-shift-enter")),
-                   lambda a, b: (self.app.exists("followups-head") or (active(b) or {}).get("held", 0) > 0) and b["composer"]["text"] == "" and f"held={(active(b) or {}).get('held')} followups-head={self.app.exists('followups-head')}", settle=2)
+                   # Since the coordinator shell (#190) the root's own turn is short and its workers
+                   # carry the long part: `busy` here is F-97's disc over running workers, and a
+                   # prompt to an idle root runs at once — Cursor's shape too (its steer while a
+                   # worker ran became its own Worked turn). Held, or landed as a user card, both pass.
+                   lambda a, b: b["composer"]["text"] == "" and (self.app.exists("followups-head") or (active(b) or {}).get("held", 0) > 0 or any("Also say thanks." in it.get("text", "") for it in (active(b) or {}).get("items", []) if it.get("kind") == "user")) and f"held={(active(b) or {}).get('held')} followups-head={self.app.exists('followups-head')} landed={any('Also say thanks.' in it.get('text', '') for it in (active(b) or {}).get('items', []) if it.get('kind') == 'user')}", settle=2)
         self.inv("follow-up-row")
         if busy(self.state()):
             agent = (active(self.state()) or {}).get("agent_session") or "root"
