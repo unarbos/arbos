@@ -30,7 +30,7 @@ while true; do
   for f in run.py consistency.py desktop_scenarios.py fileplan_scenarios.py multitasking_scenarios.py remote_scenarios.py batch_scenarios.py crossproject_scenarios.py journey_scenarios.py; do cp -f "$STORE/$f" "$ROOT/loop/$f" 2>/dev/null; done
   mkdir -p "$ROOT/loop/scenarios" "$ROOT/loop/bugs" "$ROOT/loop/inbox"
   cp -f "$STORE"/scenarios/*.json "$ROOT/loop/scenarios/" 2>/dev/null
-  cp -f "$STORE"/bugs/qa-*.md "$ROOT/loop/bugs/" 2>/dev/null
+  cp -f "$STORE"/bugs/qa-*.md "$STORE"/bugs/qal-*.md "$ROOT/loop/bugs/" 2>/dev/null
   cp -f "$STORE"/inbox/*.md "$ROOT/loop/inbox/" 2>/dev/null
   cp -f "$STORE"/deploy/cycle.sh "$STORE"/deploy/publish.sh "$STORE"/deploy/kill-shim.sh "$ROOT/deploy/" 2>/dev/null
   chmod +x "$ROOT"/deploy/*.sh
