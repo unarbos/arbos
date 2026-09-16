@@ -1168,13 +1168,8 @@ fn user_attachments(message: &UserMessage, theme: &Theme) -> AnyElement {
                 .into_any_element()
         }))
         .children(message.images.iter().enumerate().map(|(ix, image)| {
-            attachment::chip(
-                ("history-image", ix),
-                image.label().to_string(),
-                image.preview(),
-                theme,
-            )
-            .into_any_element()
+            attachment::thumb(("history-image", ix), image.preview(), 40., 40., theme)
+                .into_any_element()
         }))
         .into_any_element()
 }
@@ -4004,6 +3999,16 @@ fn zone(
             tail = tail.child(notice(chat, ix, &line, *failed, &theme, cx));
             continue;
         }
+        // The model's regret about a stop the kernel imposed: the cap line
+        // that follows says it once (qal-j05).
+        if let ChatItem::Agent(text) = &chat.items[ix]
+            && crate::model::session::is_cap_apology(text)
+            && chat.items[ix + 1..turn.range.end].iter().any(|item| {
+                matches!(item, ChatItem::Notice { text, .. } if crate::model::session::is_cap_notice(text))
+            })
+        {
+            continue;
+        }
         tail = tail.child(match &chat.items[ix] {
             ChatItem::Agent(text) => div()
                 .self_start()
@@ -4167,9 +4172,11 @@ fn turn_footer(
         );
     // Cursor's order: thumbs up, thumbs down, copy, fork, then "Just now".
     let (vote, sent_at, reported) = match chat.items.get(turn) {
-        Some(ChatItem::User(message)) => {
-            (message.feedback, message.sent_at, message.reported.is_some())
-        }
+        Some(ChatItem::User(message)) => (
+            message.feedback,
+            message.sent_at,
+            message.reported.is_some(),
+        ),
         _ => (None, None, false),
     };
     let thumb = |up: bool, cx: &mut Context<Workspace>| {

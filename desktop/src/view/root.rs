@@ -12,7 +12,7 @@ use crate::{
     },
     view::{
         component::{
-            chat_search::{ChatSearch, ChatSearchEvent, Hit},
+            chat_search::{ChatSearch, ChatSearchEvent, Hit, PaletteAction},
             composer::{Composer, ComposerEvent, VoiceState},
             feedback_sheet::{FeedbackSheet, FeedbackSheetEvent},
             menu::Menu,
@@ -827,6 +827,18 @@ impl Arbos {
                     this.show_pane(Pane::Chat, cx);
                     this.focus_composer(window, cx);
                 }
+                // The palette's actions are the menubar's, dispatched so
+                // the one handler each has stays the one handler.
+                ChatSearchEvent::Action(action) => {
+                    let action: Box<dyn gpui::Action> = match action {
+                        PaletteAction::NewTab => Box::new(NewTab),
+                        PaletteAction::OpenFolder => Box::new(OpenProject),
+                        PaletteAction::ProjectPage => Box::new(ShowProject),
+                        PaletteAction::Settings => Box::new(OpenSettings),
+                        PaletteAction::ReportProblem => Box::new(ReportProblem),
+                    };
+                    window.dispatch_action(action, cx);
+                }
                 ChatSearchEvent::Dismiss => this.focus_composer(window, cx),
             },
         )
@@ -1570,16 +1582,19 @@ impl Arbos {
                 let first = crate::model::session::first_user_text(&chat.items)
                     .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
                     .unwrap_or_default();
-                let first: String = first.chars().take(72).collect();
-                let label = if first.is_empty() || first == title {
-                    format!("{tab} › {title}")
+                let snippet: String = if first == title {
+                    String::new()
                 } else {
-                    format!("{tab} › {title} — {first}")
+                    first.chars().take(90).collect()
                 };
                 hits.push(Hit {
                     project: ix,
                     session: chat.id,
-                    label,
+                    title,
+                    snippet,
+                    tab: tab.clone(),
+                    updated: chat.updated,
+                    running: chat.busy(),
                 });
             }
         }

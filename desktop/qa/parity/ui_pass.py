@@ -594,9 +594,20 @@ class Pass:
         # Stop.
         if not busy(self.state()):
             self.send(P_LONG); self.wait(lambda s: busy(s), 20, what="turn start")
+        root_was_busy = bool((active(self.state()) or {}).get("streaming") or (active(self.state()) or {}).get("turn_open"))
         self.check("composer-stop", sc, "click Stop", "turn ends (not busy) within 5 s",
                    lambda: self.app.click("composer-stop"), lambda a, b: not busy(self.wait(lambda s: not busy(s), 8) or b), settle=1)
-        self.notice_check("stop-notice", sc, "notice after Stop", "'Stopped by you' and no failed notice (PR #83)")
+        if root_was_busy:
+            self.notice_check("stop-notice", sc, "notice after Stop", "'Stopped by you' and no failed notice (PR #83)")
+        else:
+            # F-97: the disc was over running workers with the root idle; Stop stops
+            # them and the root's transcript gets no interrupted line — Cursor's
+            # shape too (its Stop over workers left bare Worked headers, no
+            # "Stopped by you"). No failed notice is the check that remains.
+            items = (active(self.state()) or {}).get("items", [])
+            failed = [it.get("text", "")[:60] for it in items[-6:] if it.get("kind") == "notice" and it.get("failed")]
+            self.record("stop-notice", sc, "Stop over running workers (root idle)", "no failed notice; no 'Stopped by you' expected on the idle root",
+                        f"failed notices={failed}", "pass" if not failed else "fail", self.still("stop-notice"))
         # Stop word.
         self.send(P_LONG); self.wait(lambda s: busy(s), 20, what="turn start")
         self.check("stop-word", sc, "type 'stop' + Enter while busy", "turn interrupted, nothing queued",
@@ -1412,12 +1423,20 @@ class Pass:
         self.app = app
         place_window(); time.sleep(1.5)
         self.tabs = self.app.exists("tab-bar"); self.go_project()
-        s2 = self.wait_idle(120)
+        s2 = self.wait(lambda s: not busy(s), 120, what="idle")
+        # Not `wait_idle`: its recover() presses Stop, and the kernel drops a
+        # queued prompt on Stop (F-105, filed) — the row would then measure
+        # the stop, not the relaunch. A turn still running after two minutes
+        # is its own finding here; the held row is what is checked.
+        stopped_by_gate = False
+        if s2 is None and busy(self.state()):
+            stopped_by_gate = True
+            self.recover()
         items = (active(self.state()) or {}).get("items", [])
         ran = any("RESTART-TEST" in it.get("text", "") for it in items if it.get("kind") == "user")
         self.record("queue-survives-relaunch", sc, "⇧⌘↩ a follow-up while busy, quit, relaunch, wait for idle",
                     "the follow-up ran (its user card is on the transcript) or is still held by the kernel",
-                    f"held_before={held_before} ran={ran} held_now={(active(self.state()) or {}).get('held')}",
+                    f"held_before={held_before} ran={ran} held_now={(active(self.state()) or {}).get('held')}{' (turn still running at 120 s; Stop pressed after the read — F-105)' if stopped_by_gate else ''}",
                     "pass" if ran or (active(self.state()) or {}).get("held", 0) > 0 else ("not-reachable" if held_before == 0 else "fail"), self.still("relaunch"))
         # Scenario 21: typed words while a question stands are never a skip.
         self.send(P_ASK)
@@ -1458,6 +1477,15 @@ class Pass:
         sc = "provider-offer"
         cfg = xdg / "arbos" / "config.toml"
         cfg.write_text(cfg.read_text().replace('api_key_env = "OPENROUTER_API_KEY"', 'api_key_env = "QA_NO_SUCH_KEY"'))
+        # The place as the run left it, before this phase wipes it: the
+        # evidence for anything the earlier phases found (F-105's lost
+        # follow-up was undiagnosable twice because this reset ran first).
+        keep = self.outdir / "arbos-before-nokey"
+        shutil.rmtree(keep, ignore_errors=True)
+        try:
+            shutil.copytree(PROJ / ".arbos", keep, ignore=shutil.ignore_patterns("jobs", "pages", "trace", "*.png", "*.jpg"))
+        except OSError as e:
+            log(f"could not keep the place: {e}")
         shutil.rmtree(PROJ / ".arbos", ignore_errors=True)
         subprocess.run(["pkill", "-f", f"arbos-kernel serve {PROJ}$"]); time.sleep(1)
         app = self.drv.Arbos.launch(binary=binary, env={"ARBOS_KERNEL_BIN": kernel, "DISPLAY": DISPLAY, "XDG_CONFIG_HOME": str(xdg), "XDG_DATA_HOME": str(xdg / "data")},

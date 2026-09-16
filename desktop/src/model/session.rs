@@ -4150,6 +4150,61 @@ pub fn interrupt_label(detail: &str) -> String {
 /// The notice text for a turn the user stopped; the fold line keys on it.
 pub const STOPPED_BY_YOU: &str = "Stopped by you";
 
+/// The kernel's line for a turn that ended at the user's own per-turn
+/// spend cap ("Stopped at the per-turn cap: this turn spent $… over the $…
+/// you allow"; older kernels: "…over the $… cap").
+pub fn is_cap_notice(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    lower.starts_with("stopped at the per-turn cap")
+        || (lower.contains("over the $") && lower.contains(" cap"))
+}
+
+/// A model's short apology or refusal for a stop the kernel imposed —
+/// "I'm sorry, I cannot complete your request." after the cap line. The
+/// kernel's own line says what happened; the model's regret about it is
+/// noise (qal-j05), the same family as the empty-reply apology the engine
+/// trims. Short and about not doing the thing; a real answer that happens
+/// to open with "Sorry, the tests fail" is longer or says more.
+pub fn is_cap_apology(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() || t.chars().count() > 240 {
+        return false;
+    }
+    let lower = t.to_ascii_lowercase();
+    let regret = [
+        "sorry",
+        "apolog",
+        "unfortunately",
+        "i cannot",
+        "i can't",
+        "i am unable",
+        "i'm unable",
+    ]
+    .iter()
+    .any(|w| lower.contains(w));
+    let about_stopping = [
+        "cannot complete",
+        "can't complete",
+        "unable to complete",
+        "cannot continue",
+        "can't continue",
+        "unable to continue",
+        "cannot proceed",
+        "can't proceed",
+        "unable to proceed",
+        "cannot fulfill",
+        "cannot fulfil",
+        "can't fulfill",
+        "cap",
+        "budget",
+        "limit",
+        "cost",
+    ]
+    .iter()
+    .any(|w| lower.contains(w));
+    regret && about_stopping
+}
+
 /// Whether a notice marks the end of an interrupted turn.
 pub fn is_interrupt_notice(text: &str) -> bool {
     text == STOPPED_BY_YOU || text.starts_with("Interrupted")
