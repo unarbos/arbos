@@ -1,4 +1,4 @@
-# Arbos Project store — mirror of `docs/` and `notes.md`
+# Arbos Project store — mirror of `docs/`, `notes.md` and `internal/` (within a boundary)
 
 This branch is a backup, not code. It has no shared history with `main` and is never merged.
 
@@ -8,8 +8,17 @@ It mirrors two things from the Arbos Project's Cursor Agent Store
 - `docs/` — the Project's written deliverables, at the same names and paths the store uses,
   so a link of the form `docs/<name>.md` means the same file here and there.
 - `notes.md` — the Project status page, for context on what the documents refer to.
+- `internal/` — working tooling, reports, pending instructions and small state, at the store's
+  own paths. Since 2026-09-16 (the second loss took `internal/parity/` and
+  `internal/features-inbox/`). **Boundary:** every file under `internal/` except run output and
+  caches (any folder named `rollouts`, `staging`, `state`, `node_modules`, `.venv`,
+  `__pycache__`, `target`, `.git`), binaries (images, audio, video, archives, compiled files),
+  and files over 2 MB. So bug files, inbox notes, scripts, the parity rig, history `.jsonl`
+  files and reports are protected; rollout bundles, screenshots and big logs are not — their
+  owners keep their own copy.
 
-Not mirrored: `internal/` (working notes, noisy) and `media/` (large binaries).
+Not mirrored: `media/` (large binaries), `artifacts/` (platform folder), and the excluded
+paths above.
 
 ## The convention
 

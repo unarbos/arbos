@@ -1,0 +1,17 @@
+{"ts": 1789290970759, "rollout": "20260913T091445Z-kickoff-session", "branch": "rust", "passed": 9, "total": 12, "pass_ids": [1, 2, 4, 6, 7, 9, 10, 11, 12]}
+{"ts": 1789300794326, "rollout": "20260913T115808Z-kickoff-session", "branch": "cursor/release-integration-52cd", "passed": 7, "total": 12, "pass_ids": [1, 2, 6, 7, 9, 11, 12]}
+{"ts": 1789320685550, "rollout": "20260913T172954Z-kickoff-session", "branch": "rust", "passed": 8, "total": 12, "pass_ids": [1, 2, 6, 7, 9, 10, 11, 12]}
+{"ts": 1789331511119, "rollout": "20260913T201949Z-kickoff-session", "branch": "cursor/release-integration-52cd", "passed": 1, "total": 12, "pass_ids": [9]}
+{"ts": 1789333215587, "rollout": "20260913T205847Z-kickoff-session", "branch": "rust", "passed": 7, "total": 12, "pass_ids": [1, 2, 6, 7, 10, 11, 12]}
+{"ts": 1789333814566, "rollout": "20260913T210902Z-kickoff-session", "branch": "cursor/release-integration-52cd", "passed": 3, "total": 12, "pass_ids": [1, 9, 12]}
+{"ts": 1789346760385, "rollout": "20260914T003358Z-kickoff-session", "branch": "cursor/ask-parks-b027", "passed": 0, "total": 12, "pass_ids": []}
+{"ts": 1789358016620, "rollout": "20260914T035140Z-kickoff-session", "branch": "rust", "passed": 10, "total": 12, "pass_ids": [1, 2, 4, 5, 6, 7, 9, 10, 11, 12]}
+{"ts": 1789366303911, "rollout": "20260914T060920Z-kickoff-session", "branch": "main", "passed": 9, "total": 12, "pass_ids": [1, 2, 4, 5, 6, 7, 10, 11, 12]}
+{"ts": 1789440303496, "rollout": "20260915T024048Z-kickoff-session", "branch": "rust", "passed": 9, "total": 12, "pass_ids": [1, 2, 3, 5, 6, 8, 10, 11, 12]}
+{"ts": 1789442776994, "rollout": "20260915T032250Z-kickoff-session", "branch": "main", "passed": 8, "total": 12, "pass_ids": [1, 2, 4, 5, 6, 10, 11, 12]}
+{"ts": 1789449504562, "rollout": "20260915T051314Z-kickoff-session", "branch": "rust", "passed": 10, "total": 12, "pass_ids": [1, 2, 3, 4, 5, 6, 7, 8, 10, 11]}
+{"ts": 1789451898366, "rollout": "20260915T055325Z-kickoff-session", "branch": "main", "passed": 10, "total": 12, "pass_ids": [1, 2, 3, 5, 6, 7, 8, 9, 10, 11]}
+{"ts": 1789481023149, "rollout": "20260915T071630Z-kickoff-session", "branch": "rust", "passed": 10, "total": 12, "pass_ids": [2, 3, 5, 6, 7, 8, 9, 10, 11, 12]}
+{"ts": 1789488799537, "rollout": "20260915T160913Z-kickoff-session", "branch": "main", "passed": 12, "total": 12, "pass_ids": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]}
+{"ts": 1789545449438, "rollout": "20260916T075403Z-kickoff-session", "branch": "rust", "passed": 10, "total": 12, "pass_ids": [1, 2, 3, 5, 6, 7, 8, 9, 10, 11]}
+{"ts": 1789550164271, "rollout": "20260916T091252Z-kickoff-session", "branch": "main", "passed": 11, "total": 12, "pass_ids": [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12]}

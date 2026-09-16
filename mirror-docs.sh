@@ -59,6 +59,9 @@ shopt -u nullglob
 n_now=${#docs[@]}
 [ "$n_now" -gt 0 ] || die "docs/ lists no .md files. The store view looks broken. Not touching the mirror."
 
+[ -d "$STORE/internal" ] || die "$STORE/internal is not there. The store may be faulting. Not touching the mirror."
+[ -n "$(ls -A "$STORE/internal" 2>/dev/null)" ] || die "internal/ lists nothing. The store view looks broken. Not touching the mirror."
+
 # Every file must be readable and non-empty. A mount that half-answers shows up here.
 for f in "${docs[@]}" "$STORE/notes.md"; do
     [ -r "$f" ] || die "cannot read $f"
@@ -91,6 +94,51 @@ for f in "$STORE"/docs/*; do
     [ -f "$f" ] || continue
     stage "docs/$(basename "$f")" "$f"
 done
+# ---- internal/: tooling and pending instructions, not bulk ------------------
+# Boundary (2026-09-16, after the second loss took internal/parity/ and
+# internal/features-inbox/): every file under internal/ is mirrored EXCEPT
+#   - anything under a folder named rollouts, staging, state, node_modules,
+#     .venv, __pycache__, target, .git  (run output, caches, checkouts)
+#   - binaries: images, audio, video, archives, compiled files
+#   - files over MIRROR_MAX_BYTES (default 2 MB) — logged, not staged
+# So a document, a script, a bug file, an inbox note, a history .jsonl and the
+# parity rig's driver are protected; a rollout bundle or a screenshot is not,
+# and its owner keeps their own copy.
+MIRROR_MAX_BYTES="${MIRROR_MAX_BYTES:-2097152}"
+n_internal=0
+skipped_big=0
+# Prune the excluded folders in find itself (the store is a slow network mount; descending
+# into rollouts/ costs minutes), then hash every kept file in one git call.
+list="$(mktemp /tmp/mirror-docs-list.XXXXXX)"
+prune='( -type d ( -name rollouts -o -name staging -o -name state -o -name node_modules -o -name .venv -o -name __pycache__ -o -name target -o -name .git ) -prune )'
+# shellcheck disable=SC2086
+find "$STORE/internal" $prune -o -type f -size -"$((MIRROR_MAX_BYTES / 1024 + 1))"k \
+    ! \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.gif' -o -iname '*.webp' -o -iname '*.mp4' -o -iname '*.mov' -o -iname '*.wav' -o -iname '*.mp3' -o -iname '*.zip' -o -iname '*.tar' -o -iname '*.gz' -o -iname '*.tgz' -o -iname '*.pyc' -o -iname '*.so' -o -iname '*.o' -o -iname '*.bin' -o -iname '*.pdf' \) \
+    -print 2>/dev/null | sort > "$list"
+# shellcheck disable=SC2086
+skipped_big="$(find "$STORE/internal" $prune -o -type f -size +"$((MIRROR_MAX_BYTES / 1024))"k -print 2>/dev/null | wc -l)"
+if [ -s "$list" ]; then
+    # One hash-object call for all files; the blob ids come back in the same order.
+    paste -d' ' <(git hash-object -w --stdin-paths < "$list") "$list" | while IFS=' ' read -r blob f; do
+        rel="${f#"$STORE/"}"
+        mode=100644
+        [ -x "$f" ] && mode=100755
+        git update-index --add --cacheinfo "$mode,$blob,$rel"
+    done
+    n_internal="$(wc -l < "$list")"
+fi
+rm -f "$list"
+[ "$n_internal" -gt 0 ] || die "internal/ yielded no mirrorable files. The store view looks broken. Not touching the mirror."
+[ "$skipped_big" -gt 0 ] && log "internal/: $skipped_big file(s) over $MIRROR_MAX_BYTES bytes left out"
+
+# Never let the internal/ mirror shrink by accident either.
+if [ -n "$parent" ]; then
+    n_internal_last="$(git ls-tree -r --name-only "$parent" internal/ 2>/dev/null | wc -l || true)"
+    if [ "$n_internal_last" -gt 0 ] && [ "$n_internal" -lt $(( n_internal_last * 9 / 10 )) ] && [ "${MIRROR_ALLOW_SHRINK:-0}" != "1" ]; then
+        die "internal/ has $n_internal mirrorable files but the mirror holds $n_internal_last. Refusing to shrink the mirror by more than a tenth. If the removal is intended: MIRROR_ALLOW_SHRINK=1 bash mirror-docs.sh"
+    fi
+fi
+
 # The branch carries the tool that reads it.
 stage mirror-docs.sh "$SELF" 100755
 
@@ -98,7 +146,7 @@ stage mirror-docs.sh "$SELF" 100755
 # anything that changed per run (a date, a count) would make every run a new commit.
 readme="$(mktemp /tmp/mirror-docs-readme.XXXXXX)"
 cat > "$readme" <<'README'
-# Arbos Project store — mirror of `docs/` and `notes.md`
+# Arbos Project store — mirror of `docs/`, `notes.md` and `internal/` (within a boundary)
 
 This branch is a backup, not code. It has no shared history with `main` and is never merged.
 
@@ -108,8 +156,17 @@ It mirrors two things from the Arbos Project's Cursor Agent Store
 - `docs/` — the Project's written deliverables, at the same names and paths the store uses,
   so a link of the form `docs/<name>.md` means the same file here and there.
 - `notes.md` — the Project status page, for context on what the documents refer to.
+- `internal/` — working tooling, reports, pending instructions and small state, at the store's
+  own paths. Since 2026-09-16 (the second loss took `internal/parity/` and
+  `internal/features-inbox/`). **Boundary:** every file under `internal/` except run output and
+  caches (any folder named `rollouts`, `staging`, `state`, `node_modules`, `.venv`,
+  `__pycache__`, `target`, `.git`), binaries (images, audio, video, archives, compiled files),
+  and files over 2 MB. So bug files, inbox notes, scripts, the parity rig, history `.jsonl`
+  files and reports are protected; rollout bundles, screenshots and big logs are not — their
+  owners keep their own copy.
 
-Not mirrored: `internal/` (working notes, noisy) and `media/` (large binaries).
+Not mirrored: `media/` (large binaries), `artifacts/` (platform folder), and the excluded
+paths above.
 
 ## The convention
 
@@ -161,7 +218,7 @@ fi
 
 # ---- Commit and push -------------------------------------------------------
 total="$(du -sh --exclude=.git "$STORE/docs" 2>/dev/null | cut -f1 || echo '?')"
-msg="store docs mirror: $n_now documents, $total, notes.md $(stat -c%s "$STORE/notes.md") B
+msg="store docs mirror: $n_now documents, $total, notes.md $(stat -c%s "$STORE/notes.md") B, internal/ $n_internal files
 
 Mirrored from $STORE by ${MIRROR_BY:-$(hostname)} at $(date -u +%FT%TZ)."
 
