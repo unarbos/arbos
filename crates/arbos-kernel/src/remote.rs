@@ -228,6 +228,24 @@ impl RemoteHub {
         self.running.lock().unwrap().contains(agent)
     }
 
+    /// Record that `agent`'s remote kernel has a turn in flight (or not).
+    pub fn set_running(&self, agent: &str, running: bool) {
+        let mut set = self.running.lock().unwrap();
+        if running {
+            set.insert(agent.to_string());
+        } else {
+            set.remove(agent);
+        }
+    }
+
+    /// The remote children with a turn in flight, for the update gate's
+    /// reason line.
+    pub fn running_agents(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.running.lock().unwrap().iter().cloned().collect();
+        v.sort();
+        v
+    }
+
     /// Words for a remote child: mirrored on its local transcript for the
     /// window, sent to the remote root as a user line (a steer when asked).
     pub fn forward(

@@ -37,7 +37,7 @@ pub use control::TurnControl;
 pub use host::{Host, HostConfig, KeySource, ProviderKind};
 pub use jobs::{
     JOB_TTL, JOURNAL_WINDOW, Job, JobsRoot, Meta as JobMeta, PidIdentity, Reaped,
-    Status as JobStatus,
+    Status as JobStatus, parent_pid,
 };
 pub use provider::{
     ChatMessage, Interrupted, Provider, ProviderError, check_key, list_model_ids, warm,

@@ -420,6 +420,16 @@ impl JobsRoot {
                 arbos_core::inbox::rfc3339(job.meta.started_ms),
                 arbos_core::text::clip(job.meta.command.trim(), 80)
             );
+            // A job whose leash is this very process's child was started
+            // by the image that ran before an `execv` (same pid): not a
+            // leftover, ours, still leashed to us. Driving the claim that
+            // jobs survive a self-update found the reap took them (the
+            // pid-1 case in the comment above was the intent, not the
+            // check).
+            if parent_pid(job.meta.pid) == Some(std::process::id()) {
+                out.inherited.push(line);
+                continue;
+            }
             match pid_identity(job.meta.pid, &dir, &job.meta) {
                 PidIdentity::Ours => {
                     let _ = fs::write(
@@ -651,6 +661,9 @@ fn pid_alive(_pid: u32) -> bool {
 pub struct Reaped {
     /// Ended: the job's own process, still running.
     pub reaped: Vec<String>,
+    /// Left running: leashed to this process itself — started by the
+    /// image before an `execv`.
+    pub inherited: Vec<String>,
     /// Left alone: the pid now belongs to another program.
     pub foreign: Vec<String>,
     /// Left alone: no way to tell whose the process is on this machine.
@@ -723,6 +736,21 @@ fn process_start_ms(pid: u32) -> Option<i64> {
 }
 
 /// The command line of `pid`, from /proc or `ps`.
+/// The parent pid of `pid`, when the machine can say.
+pub fn parent_pid(pid: u32) -> Option<u32> {
+    if let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) {
+        return status
+            .lines()
+            .find_map(|l| l.strip_prefix("PPid:"))
+            .and_then(|v| v.trim().parse().ok());
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
 fn process_args(pid: u32) -> Option<String> {
     if let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) {
         return Some(String::from_utf8_lossy(&raw).replace('\0', " "));

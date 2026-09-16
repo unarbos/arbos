@@ -241,6 +241,27 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         }
         let root = arbos_engine::JobsRoot::for_agent(&place, &agent.id);
         let found = root.reap_leftovers();
+        // Detached jobs still running after the reap: the ones this
+        // kernel inherited (a `keep` file, or an execv — same pid, so
+        // their leash never saw a parent die). Logged so a run of the
+        // self-updater is a reading: the same job ids and pids before
+        // and after the swap.
+        let alive: Vec<String> = root
+            .list()
+            .into_iter()
+            .filter(|j| j.running())
+            .map(|j| format!("{}:pid={}", j.id, j.meta.pid))
+            .collect();
+        if !alive.is_empty() {
+            crate::klog::info(
+                "jobs_alive",
+                Some(agent.id.as_str()),
+                format!("count={} {}", alive.len(), alive.join(" ")),
+            );
+        }
+        for line in &found.inherited {
+            crate::klog::info("job_inherited", Some(agent.id.as_str()), line);
+        }
         for line in &found.reaped {
             crate::klog::warn("job_reaped", Some(agent.id.as_str()), line);
         }
@@ -309,7 +330,8 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                     } else {
                         "loopback"
                     };
-                    attach::answer_http(stream, &path, klog::version(), PROTOCOL, auth).await;
+                    let gate = crate::idle::update_gate_json(&accept_hooks, UPDATE_HORIZON_MS);
+                    attach::answer_http(stream, &path, klog::version(), PROTOCOL, auth, gate).await;
                     return;
                 }
                 let (r, w, who) = match admit(conn, peer, &accept_access).await {
@@ -2115,6 +2137,10 @@ pub async fn serve_client(
 /// provider, which asks the network nothing). The text is
 /// `missing_key_hint`: what to run, set, or write, and where keys come
 /// from.
+/// The self-updater's expected downtime: a subscription due within it
+/// holds the gate. What `/healthz` reports the gate against.
+pub const UPDATE_HORIZON_MS: i64 = 10_000;
+
 pub fn keyless(place: &Place) -> Option<String> {
     if arbos_engine::replay::current().ok().flatten().is_some() {
         return None;

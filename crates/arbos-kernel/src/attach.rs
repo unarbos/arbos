@@ -424,16 +424,20 @@ pub async fn answer_http(
     kernel: &str,
     protocol: u32,
     auth: &str,
+    update_gate: serde_json::Value,
 ) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut sink = [0u8; 8192];
     let _ = tokio::time::timeout(PEEK_WAIT, stream.read(&mut sink)).await;
     let path_only = path.split('?').next().unwrap_or("/");
     let (status, body) = if path_only == "/" || path_only == "/healthz" {
+        // `update_gate` is what the self-updater would decide this
+        // second: `{"verdict":"busy","reason":…}` or `{"verdict":"idle"}`
+        // — so a run on a real machine reads the refusal from outside.
         (
             "200 OK",
             format!(
-                "{{\"kernel\":\"{kernel}\",\"git_sha\":\"{}\",\"built_at\":\"{}\",\"protocol\":{protocol},\"attach\":\"websocket\",\"auth\":\"{auth}\"}}\n",
+                "{{\"kernel\":\"{kernel}\",\"git_sha\":\"{}\",\"built_at\":\"{}\",\"protocol\":{protocol},\"attach\":\"websocket\",\"auth\":\"{auth}\",\"update_gate\":{update_gate}}}\n",
                 crate::klog::git_sha(),
                 crate::klog::built_at()
             ),
