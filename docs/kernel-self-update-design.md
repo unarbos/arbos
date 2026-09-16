@@ -55,55 +55,98 @@ rename, so the trap is gone.
 
 ### The moment: `idle::update_verdict`, ~10 s horizon
 
-Corrected by the features agent; my first version guarded the wrong state.
+Corrected twice, and both corrections **widened** what may be updated. Written
+out because the first version of this document said the opposite of each.
 
-- **A pending approval is already `Busy`** — the tool call blocks inside the
-  running turn, so the agent never leaves `hooks.running`.
-- **A parked question to the human is *not* a reason to hold.** It is a file,
-  `clear_approves` does not touch it, and the answer arrives as an inbox file
-  that opens a new turn. `Waiting` maps to `Idle`. This removes a reason to sit
-  stale, which is the point of the feature.
-- **Running jobs and remote children mid-turn are `Busy`** — `verdict` cannot
-  see them, and both die with the kernel whatever a `keep` file says. `keep` is
-  never the updater's to set.
-- **Horizon ~10 s**, the expected downtime, not `--until-idle`'s hour — with an
-  hour, a place holding an hourly timer is never idle and never updates.
+**What holds the gate:**
 
-Two further refusals: another process holds the place lock, and a `kernel.json`
-naming a live pid that is not us. Both mean a second kernel is serving.
+- **A turn in flight.** Including a pending approval — `hooks.approve()` blocks
+  the tool call *inside* the running turn, so the agent never leaves
+  `hooks.running` and `verdict` already says `Busy`.
+- **A remote child mid-turn.** The swap closes its link, and it would report to
+  a kernel that is no longer listening for it.
+- A subscription run in flight.
 
-### Restart: `execv` where nothing supervises
+**What does not:**
 
-**Changed 2026-09-16 after looking at the live machines**, and this is the most
-important correction in the document.
+- **A parked question to the human.** It is a file, `clear_approves` does not
+  touch it, and the answer arrives as an inbox file that opens a new turn.
+  `Waiting` maps to `Idle`.
+- **A detached job** — *changed 2026-09-16 by [#321](https://github.com/unarbos/arbos/pull/321),
+  and a consequence of `execv` rather than a separate decision.* The pid does
+  not change, so a job's leash — which watches the kernel's pid — sees nothing
+  happen, and the boot reap only takes jobs orphaned to pid 1. Jobs survive the
+  swap. The earlier rule would have held an update behind a background server
+  for up to the 24-hour ceiling, for no gain.
 
-`subnet120`'s parent is `init` — the desktop spawns a remote kernel detached —
-so **nothing would bring it back**. A kernel that exits there is gone, and it is
-the machine the whole feature exists for.
+`keep` remains not the updater's to set.
+
+**Horizon ~10 s**, the expected downtime, not `--until-idle`'s hour — with an
+hour, a place holding an hourly timer is never idle and never updates.
+
+Two further refusals: another process holds the place lock, and a
+`kernel.json` naming a live pid that is not us. Both mean a second kernel is
+serving.
+
+### Restart: `execv`, one code path
+
+**Changed twice on 2026-09-16**, each time towards something simpler.
+
+The first version had two modes: exit under a supervisor, spawn-and-exit
+without one. Then the live machines showed that `subnet120`'s parent is
+`init` — the desktop spawns a remote kernel detached — so **nothing would
+bring it back**, and a kernel that exits there is gone. That is the machine
+this feature exists for.
+
+`execv` is better than spawning for the unsupervised case:
 
 | | spawn + exit | `execv` |
 | --- | --- | --- |
-| the new binary will not start | the kernel is **gone** | `execv` returns an error and the old image **keeps serving** |
-| the place lock | two processes briefly want it, so the child must retry ~30 s | same pid throughout; nothing else ever wants it |
+| the new binary will not start | the kernel is **gone** | `execv` returns and the old image **keeps serving** |
+| the place lock | two processes briefly want it → a ~30 s retry | same pid throughout; nothing else ever wants it |
 | pid, and anything watching it | changes | unchanged |
+| detached jobs | the leash kills them | **they survive** — the leash watches a pid that has not changed |
 
-So: `ARBOS_SUPERVISED=1` → exit with a distinct code and let the loop restart
-it. Otherwise → `execv`. The 30-second lock retry the features agent asked for
-was a consequence of spawning, and spawning has been dropped.
+And then it turned out to be better for the supervised case too, so
+**`ARBOS_SUPERVISED` is gone and there is one code path.** A supervisor sees
+its process continue and has nothing to do; an unsupervised kernel keeps
+serving. Two modes existed only because exiting was on the table.
 
 **Exec the path, not `/proc/self/exe`.** After the swap Linux reports the image
 as `<path> (deleted)` — exactly what was seen on `subnet120` on 15 September.
 Capture the path *before* the swap and exec it by name, or the kernel re-execs
-the build it was trying to replace.
-
-**A kernel that cannot re-exec refuses out loud**, where skew is already shown
-— the log, `hello`, the roster. A silent refusal is the same failure as the one
-being fixed.
+the build it was trying to replace, succeeds, and comes back identical with no
+error anywhere.
 
 Still required, unchanged: **same argv and environment** (`--leash`, `--hub`,
 `--project`, `--bind` must survive), and **do not call `remote::stop_all`** on
 the update exit — remote children are leashed and `remote::restore` re-attaches
 them, so stopping them turns a restart into a teardown.
+
+### The probe is load-bearing, because `execv` will not tell you
+
+`execv` reports an error only when **the exec itself** fails — a bad
+architecture, a missing interpreter, a file that is not executable. A binary
+that starts and then dies while booting returns nothing, because by then the
+old image is gone. There is no "it came up, so keep it" moment afterwards.
+
+So all the confidence has to be bought *before* the old binary is moved aside,
+and [#318](https://github.com/unarbos/arbos/pull/318) buys as much as it can:
+
+- **`Probe::Version`** — the staged binary runs and reports the version the
+  feed promised. Proves it links, reaches `main`, and is for this machine.
+- **`Probe::Place`** — and it reads a real place *no worse than the binary it
+  replaces*, via `arbos-kernel check <place>`, which walks the store with the
+  parsers `serve` boots on. Compared with the old binary rather than required
+  to be clean: a place with pre-existing errors is not the new build's fault,
+  and refusing on it would make updates impossible on exactly the machines
+  that need one.
+
+And for the failure no probe can see, the binary that was replaced is kept as
+`<bin>.previous`. Not hidden, unlike the staging and backup names — somebody
+looking at a kernel that will not start should find the one that did sitting
+next to it. It turns "the new kernel dies at boot on a box nobody watches"
+from unrecoverable into one `mv`.
 
 ### Replacing the binary is not updating the kernel
 

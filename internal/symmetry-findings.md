@@ -105,6 +105,7 @@ Every gap between Arbos and Cursor, who found it, the cycle, the PR. Target: zer
 | F-92 | 09-16 | QA (journey J1/J3, `qal-j01`) | root chat, kickoff | the model writes `status "Setting plan"` as a reply line — the prompt's own example form — and the window hid only the `status:` colon form, so a new user saw three code-looking bubbles over the kickoff greeting | #315: `status_line` takes every form a model writes (colon, quoted, parenthesised, `=`, with markdown around the word), live, settled and on replay; kernel half with the features agent |
 | F-93 | 09-16 | QA (journey), Jacob's habit | launch | every launch landed on the Home tab by design, so "close it and come back" dropped him somewhere he was not | #315: a launch lands on the tab that was in front; Home only when that place is gone (journey step J11a scores it) |
 | F-94 | 09-16 | loop (journey runs 2 and 5, J11) | relaunch | after quit and relaunch two prompts showed twice — `Continue where you stopped.` and the follow-up — each once with the kernel's clock (from history) and once without (a local card); the kernel's transcript holds each once. Both were typed while the root was idle and its workers ran; the steer typed while the root streamed was not doubled. The local record after relaunch: `media/cursor-reference/cycle-17/f94-root-record-after-relaunch.json` | open — named BUG by the journey (J11 failed in runs 2, 3, 5); cycle 17 first item: the echo of a prompt typed under running workers is not matched to its card |
+| F-95 | 09-16 | loop (gate on #315's head, `recover` still) | root chat, wake segment | after a worker's report the segment showed `⚙ Mul function worker done — …` with no `Worked` header and no live line, while the session read busy and Stop did not end it (`media/qa-ui/one-worker-turn-2/033-recover-stuck.png`); the gate's `fork-turn` click just before it saw no new session either | open — cycle 17: a wake turn that shows neither a header nor a heartbeat, and a busy state Stop cannot clear; check whether the fork click started it |
 
 ## Per-cycle count
 
@@ -119,7 +120,7 @@ Every gap between Arbos and Cursor, who found it, the cycle, the PR. Target: zer
 | 14 | 10 (F-56 … F-65) + 3 around the Inter change (F-53 … F-55) | 1 (F-52, bionic weight) |
 | 15 | 5 (F-66 … F-70) | 0 |
 | 16 | 9 (F-71 … F-75, F-78 … F-81) | 2 (F-76 raw provider error, F-77 kickoff stall) |
-| 17 (opened) | 12 so far (F-83, F-84, F-92, F-93 from QA; F-85 … F-91, F-94 from the journey's first five runs) | 1 (F-82, the bubble-sort turn) |
+| 17 (opened) | 13 so far (F-83, F-84, F-92, F-93 from QA; F-85 … F-91, F-94 from the journey's first five runs; F-95 from the gate) | 1 (F-82, the bubble-sort turn) |
 
 ## Untested by decision (Linux is the rig — Jacob, 2026-09-16)
 

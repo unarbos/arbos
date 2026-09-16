@@ -34,7 +34,7 @@ while true; do
   cp -f "$STORE"/inbox/*.md "$ROOT/loop/inbox/" 2>/dev/null
   cp -f "$STORE"/deploy/cycle.sh "$STORE"/deploy/publish.sh "$STORE"/deploy/kill-shim.sh "$ROOT/deploy/" 2>/dev/null
   chmod +x "$ROOT"/deploy/*.sh
-  cp -f "$STORE"/deploy/swebench-nightly.sh "$STORE"/deploy/swebench-collect.py "$STORE"/deploy/call-mode-collect.py "$STORE"/deploy/pod-health.py "$STORE"/deploy/mirror-alarm.py "$ROOT/deploy/" 2>/dev/null; chmod +x "$ROOT"/deploy/*.sh
+  cp -f "$STORE"/deploy/mirror-timer.sh "$STORE"/deploy/swebench-nightly.sh "$STORE"/deploy/swebench-collect.py "$STORE"/deploy/call-mode-collect.py "$STORE"/deploy/pod-health.py "$STORE"/deploy/mirror-alarm.py "$ROOT/deploy/" 2>/dev/null; chmod +x "$ROOT"/deploy/*.sh
   "$ROOT/deploy/cycle.sh" || echo "== cycle failed ($?)"
   # Nightly SWE-bench slice after the 02:00 UTC cycle (16 instances, capped).
   if [ "$(date -u +%H)" = "02" ] && [ ! -e "$ROOT/state/swebench-$(date -u +%F)" ]; then
