@@ -1836,7 +1836,14 @@ def register_fileplan():
 
         fileplan_scenarios.register(scenario, SCENARIOS, transcript, kinds, nodes, now_ms, model_turn, fileplan_branch())
     except Exception as e:
+        MODULES_MISSING.append(f"fileplan: {e}")
         print(f"file-plan scenarios unavailable: {e}", file=sys.stderr)
+
+
+# Scenario modules that failed to import this run: every scenario they define is silently absent
+# unless the summary says so (the 14:00 and 15:00 cycles of 2026-09-16 lost the journey this way).
+MODULES_MISSING = []
+HEADLINE = ("kickoff-session", "journey-linux")
 
 
 def register_multitasking():
@@ -1860,6 +1867,7 @@ def register_multitasking():
 
         journey_scenarios.register(scenario, SCENARIOS, transcript, now_ms, "main")
     except Exception as e:
+        MODULES_MISSING.append(f"multitasking/remote/batch/crossproject/journey: {e}")
         print(f"multitasking scenarios unavailable: {e}", file=sys.stderr)
 
 
@@ -1903,7 +1911,26 @@ def main():
     if key:
         print(f"estimated spend today: ${spent_today():.3f}" + (f" of ${args.budget_usd:.2f}" if args.budget_usd is not None else ""))
     broke = [r for r in results if r["status"] == "break"]
-    print(f"\n{len(results)} run, {len(broke)} with breaks, {sum(1 for r in results if r['status']=='skipped')} skipped")
+    skipped = [r for r in results if r["status"] == "skipped"]
+    print(f"\n{len(results)} run, {len(broke)} with breaks, {len(skipped)} skipped")
+    if skipped:
+        by_reason = {}
+        for r in skipped:
+            by_reason.setdefault(r.get("reason", "?"), []).append(r["scenario"])
+        for reason, ns in sorted(by_reason.items()):
+            print(f"!! SKIPPED ({reason}): {len(ns)} — " + ", ".join(sorted(ns)[:12]) + (" …" if len(ns) > 12 else ""))
+        if "budget" in by_reason:
+            print(f"!! BUDGET BOUND: ${spent_today():.2f} of ${args.budget_usd:.2f} — {len(by_reason['budget'])} model scenario(s) not run; say so to Jacob rather than raising the cap")
+    for m in MODULES_MISSING:
+        print(f"!! MODULE MISSING: {m} — every scenario it defines was absent from this run")
+    ran = {r["scenario"] for r in results if r["status"] != "skipped"}
+    for h in HEADLINE:
+        wanted = (args.only and h in args.only.split(",")) or (not args.only and (h in names))
+        if h in names and h not in ran:
+            why = next((r.get("reason", "?") for r in results if r["scenario"] == h), "not registered")
+            print(f"!! HEADLINE NOT RUN: {h} ({why})")
+        elif h not in SCENARIOS and (args.only is None or wanted):
+            print(f"!! HEADLINE NOT RUN: {h} (not registered — a scenario module failed to import)")
     return 1 if broke else 0
 
 

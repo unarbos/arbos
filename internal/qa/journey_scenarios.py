@@ -190,6 +190,45 @@ class Rig:
         self.xvfb.terminate()
 
 
+NOTIFY_KEYS = ("unseen", "unread", "notifications", "badge", "unseen_count", "unread_count", "away")
+STORE = Path(os.environ.get("ARBOS_QA_STORE_ROOT", "/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983"))
+
+
+def notify_surface(project, chat):
+    """The unseen/notification state the driver exposes for a project or its chat, or None when it exposes none yet."""
+    for holder in (chat or {}, project or {}):
+        for k in NOTIFY_KEYS:
+            if k in holder:
+                return {k: holder[k]}
+    return None
+
+
+def phone_j8c(max_age_h=24):
+    """J8c (dropped connection) from the phone loop's history: the newest run within max_age_h that scored it."""
+    hist = STORE / "internal" / "mobile-journey-history.jsonl"
+    if not hist.exists():
+        return None
+    rows = []
+    for l in hist.read_text(errors="replace").splitlines():
+        try:
+            rows.append(json.loads(l))
+        except Exception:  # noqa: BLE001
+            pass
+    now = time.time()
+    for r in reversed(rows):
+        v = (r.get("steps") or {}).get("J8c")
+        if not v:
+            continue
+        try:
+            ts = time.mktime(time.strptime(r["ts"], "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+        except Exception:  # noqa: BLE001
+            ts = now
+        if now - ts > max_age_h * 3600:
+            return {"verdict": "unverified", "why": f"phone loop's last J8c is older than {max_age_h} h ({r.get('ts')})"}
+        return {"verdict": v, "ts": r.get("ts"), "target": r.get("target"), "evidence": r.get("evidence")}
+    return None
+
+
 def register(scenario, registry, transcript, now_ms, branch):
     def reg(name):
         def deco(fn):
@@ -474,7 +513,14 @@ def register(scenario, registry, transcript, now_ms, branch):
             before_sessions = len((rig.project(folder) or {}).get("sessions", []))
             notes_before = (folder / ".arbos" / "notes.md").read_text(errors="replace") if (folder / ".arbos" / "notes.md").exists() else ""
             rig.focus(folder)
+            # Something arrives while the user is away: a reply that lands after the window is closed.
+            rig.send(f"Run `sleep 15` with bash, then reply with the single word LATER-{tag}.")
+            rig.wait_busy(folder, 20)
             rig.close(folders=[], stop_kernels=False)  # quit the app only; the kernel keeps serving
+            end = time.time() + 90
+            while time.time() < end and not any(e.get("kind") == "assistant" and f"LATER-{tag}" in e.get("text", "") for e in read_transcript(folder)):
+                time.sleep(2)
+            late_reply_landed = any(e.get("kind") == "assistant" and f"LATER-{tag}" in e.get("text", "") for e in read_transcript(folder))
             time.sleep(2)
             rig = Rig(cx, [folder], tag="app-relaunch", reseed=False)
             time.sleep(4)
@@ -482,23 +528,47 @@ def register(scenario, registry, transcript, now_ms, branch):
             # The app puts the home tab in front at every launch by design (workspace.rs); the user
             # clicks their project tab. Recorded, not scored — Jacob decides whether that is what "come back" means.
             active = rig.active_path()
+            # Read the notification surface BEFORE clicking the tab (clicking marks things seen).
+            notify_before_click = notify_surface(p, rig.root_chat(folder))
             rig.focus(folder)
             time.sleep(1)
+            notify_after_click = notify_surface(rig.project(folder), rig.root_chat(folder))
             chat = rig.root_chat(folder)
             after_items = len((chat or {}).get("items", []))
             after_sessions = len((p or {}).get("sessions", [])) if p else 0
             leaves = rig.leaves()
             worker_rows = [l for l in leaves if l.startswith(("panel-agent", "panel-archived"))]
             notes_after = (folder / ".arbos" / "notes.md").read_text(errors="replace") if (folder / ".arbos" / "notes.md").exists() else ""
-            ev["J6"] = {"tab_back": p is not None, "landed_on": active, "landed_on_project": active == str(folder).rstrip("/"), "items_before": before_items, "items_after": after_items, "sessions_before": before_sessions, "sessions_after": after_sessions, "worker_rows": len(worker_rows), "notes_unchanged": notes_before == notes_after, "notifications": "unverified: the driver exposes no unseen count"}
+            ev["J6"] = {"tab_back": p is not None, "landed_on": active, "landed_on_project": active == str(folder).rstrip("/"), "late_reply_landed_while_closed": late_reply_landed, "notify_before_click": notify_before_click, "notify_after_click": notify_after_click, "items_before": before_items, "items_after": after_items, "sessions_before": before_sessions, "sessions_after": after_sessions, "worker_rows": len(worker_rows), "notes_unchanged": notes_before == notes_after, "notifications": "unverified: the driver exposes no unseen count"}
             if p is None:
                 mark("J6", "fail", "the project tab did not come back after relaunch")
             elif after_items < before_items:
                 mark("J6", "fail", f"transcript shorter after relaunch: {before_items} -> {after_items} items")
             elif not (worker_rows or agents_of(folder) - {"root"} == set()):
                 mark("J6", "fail", "workers existed but no worker/archived row is shown after relaunch")
+            elif late_reply_landed and not any(f"LATER-{tag}" in str(i.get("text", "")) for i in (chat or {}).get("items", [])):
+                mark("J6", "fail", "a reply that arrived while the window was closed is not in the transcript after reopening")
+            elif notify_before_click is None:
+                mark("J6", "unverified", "tab, transcript and workers back" + ("" if ev["J6"]["landed_on_project"] else " (the app landed on the home tab, not the project)") + "; the driver exposes no notification state yet, so the unseen reply cannot be checked")
             else:
-                mark("J6", "unverified", "tab, transcript and workers back" + ("" if ev["J6"]["landed_on_project"] else " (the app landed on the home tab, not the project)") + "; notifications not checkable on this rig")
+                # The driver exposes notification state: a reply arrived while the user was away, so the project must show it unseen, and clicking the tab must clear it.
+                def seen_count(surface):
+                    if not surface:
+                        return 0
+                    v = next(iter(surface.values()))
+                    if isinstance(v, bool):
+                        return int(v)
+                    if isinstance(v, (int, float)):
+                        return int(v)
+                    if isinstance(v, (list, dict)):
+                        return len(v)
+                    return 1 if v else 0
+                if late_reply_landed and seen_count(notify_before_click) == 0:
+                    mark("J6", "fail", f"a reply arrived while the window was closed but nothing is shown unseen on reopening ({notify_before_click})")
+                elif seen_count(notify_after_click) > 0 and seen_count(notify_before_click) > 0:
+                    mark("J6", "fail", f"the unseen mark did not clear when the user opened the tab ({notify_after_click})")
+                else:
+                    mark("J6", "pass", f"tab, transcript, workers back; unseen reply shown {notify_before_click} and cleared on opening the tab" + ("" if ev["J6"]["landed_on_project"] else " (landed on the home tab)"))
 
             # ── J7: the result on disk ─────────────────────────────────────
             ok, last = tests_pass(folder)
@@ -576,7 +646,8 @@ def register(scenario, registry, transcript, now_ms, branch):
             in_first = [e for e in read_transcript(folder) if e.get("kind") == "user" and f"SECOND-{tag}" in e.get("text", "")]
             in_home = [e for e in read_transcript(cx.scratch / "home" / ".arbos") if f"{tag}" in e.get("text", "")]
             j8["second_project"] = {"in_second": len(in_second), "in_first": len(in_first), "in_home_store": len(in_home)}
-            j8["dropped_connection"] = "unverified: the kernel is local on this rig; the phone loop owns the network drop"
+            phone = phone_j8c()
+            j8["dropped_connection"] = phone or {"verdict": "unverified", "why": "no J8c in the phone loop's history (internal/mobile-journey-history.jsonl)"}
             ev["J8"] = j8
             problems = []
             r = j8.get("restart")
@@ -595,7 +666,15 @@ def register(scenario, registry, transcript, now_ms, branch):
                     problems.append("the in-flight command's side effect never happened (before or after the restart)")
             if j8["second_project"]["in_second"] != 1 or in_first or in_home:
                 problems.append(f"the second project's line went astray: {j8['second_project']}")
-            mark("J8", "fail" if problems else "unverified", "; ".join(problems) or "restart and second project fine; dropped connection not checkable here")
+            c_verdict = j8["dropped_connection"].get("verdict")
+            if c_verdict == "fail":
+                problems.append(f"dropped connection failed on the phone loop's last run ({j8['dropped_connection'].get('ts')}, {j8['dropped_connection'].get('evidence')})")
+            if problems:
+                mark("J8", "fail", "; ".join(problems))
+            elif c_verdict == "pass":
+                mark("J8", "pass", f"restart once (side effect once), second project isolated; dropped connection: pass on the phone loop's run {j8['dropped_connection'].get('ts')}")
+            else:
+                mark("J8", "unverified", "restart and second project fine; dropped connection: " + str(j8["dropped_connection"].get("why", c_verdict)))
         except Exception as e:  # noqa: BLE001
             cx.rec.log(f"journey exception: {type(e).__name__}: {e}")
             for s in STEPS:

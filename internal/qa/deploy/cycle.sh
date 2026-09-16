@@ -276,5 +276,13 @@ EOF
 "$ROOT/deploy/publish.sh" push || echo "-- publish failed (kept locally)"
 
 # 6. Mirror the store again at the end of the cycle.
+# Everything the runners shouted (!! SKIPPED / BUDGET BOUND / MODULE MISSING / HEADLINE NOT RUN) in one
+# block at the end, so a cycle that measured less than it claims cannot look green in the log's tail.
+if grep -q '^!!' "$LOG" 2>/dev/null; then
+  echo "== ALARMS this cycle:"
+  grep -h '^!!' "$LOG" | sort | uniq -c | sed 's/^/   /'
+else
+  echo "== alarms this cycle: none (every registered scenario ran or was skipped for a stated non-budget reason)"
+fi
 mirror_store end
 echo "== cycle end $(date -u +%FT%TZ)"
