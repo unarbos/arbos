@@ -63,11 +63,39 @@ pub const SHOW_NUDGE: &str = "Your brief says the user asked to see the result (
 /// Tools whose failure means the thing was not made.
 const WRITE_CLASS: &[&str] = &["write", "edit", "bash", "apply_patch", "git", "pr"];
 
+/// Words a reply uses to claim a write happened.
+const CLAIMS: &[&str] = &[
+    "seeded",
+    "created",
+    "wrote",
+    "written",
+    "added",
+    "updated",
+    "saved",
+    "fixed",
+    "committed",
+    "pushed",
+    "applied",
+    "installed",
+    "generated",
+    "removed",
+    "deleted",
+    "renamed",
+    "moved",
+    "done",
+    "complete",
+    "finished",
+    "set up",
+    "ready",
+];
+
 /// The last tool step of this turn had a failed write-class call with no
-/// later success of the same tool, and `reply` does not own up to it:
-/// the reply reads as if the file was written. "Said seeded when nothing
-/// was seeded" (JB-4): a `write` returned an error and the turn carried
-/// on as though it might have worked. Returns the failed call.
+/// later success of the same tool, and `reply` reads as if it worked — it
+/// claims a result (`seeded`, `created`, `done`…) or names the failed
+/// call's path — without a word of failure. "Said seeded when nothing was
+/// seeded" (JB-4). A reply about something else (a read-only helper whose
+/// side `write` the kernel refused, answering from its `grep`) is left
+/// alone. Returns the failed call.
 fn unowned_failure<'a>(events: &'a [Event], reply: &str) -> Option<&'a arbos_core::ToolRec> {
     let lower = reply.to_ascii_lowercase();
     if [
@@ -82,6 +110,9 @@ fn unowned_failure<'a>(events: &'a [Event], reply: &str) -> Option<&'a arbos_cor
         "blocked",
         "not written",
         "no such",
+        "cannot",
+        "can't",
+        "denied",
     ]
     .iter()
     .any(|w| lower.contains(w))
@@ -113,7 +144,18 @@ fn unowned_failure<'a>(events: &'a [Event], reply: &str) -> Option<&'a arbos_cor
             _ => {}
         }
     }
-    failed
+    let rec = failed?;
+    let names_path = rec
+        .args
+        .as_ref()
+        .and_then(|a| a.get("path").and_then(|p| p.as_str()))
+        .map(|p| {
+            let base = p.rsplit('/').next().unwrap_or(p);
+            !base.is_empty() && lower.contains(&base.to_ascii_lowercase())
+        })
+        .unwrap_or(false);
+    let claims = CLAIMS.iter().any(|w| lower.contains(w));
+    (names_path || claims).then_some(rec)
 }
 
 /// The turn's wake carried a `Show:` line (the user asked to see the
