@@ -59,3 +59,25 @@ Missing against `8764ff48`, exactly: **155 files** — `docs/` all 21; `internal
 Restored 14:25–14:33Z from `8764ff48` with `git archive` → `/tmp/restore3` → `cp` into the store (a full pass over 156 files took eight minutes on this mount). Every file on the missing list is back; nothing still missing. `internal/kernel-self-update-design.md` came back with them because it was in the snapshot — deleted again, `docs/kernel-self-update-design.md` stays the single copy.
 
 Two facts for the store owner: the loss is **selective, not a directory wipe** — 99 of 184 bug files went and 85 stayed, all in one folder; and the `mirror-docs.sh` the alarm depends on was among the lost, which is why the alarm path that keys off the script's absence matters. Day's count: **three losses** (07:43–09:01, ~12:20, 14:20–14:23), the 14:07 event having been a move.
+
+## Reassessment, 14:45 UTC: one certain loss, two uncertain — probably partial views, not deletions
+
+The update worker hit the mirror's refusal and, before forcing it, read the store three times seconds apart: 1092, 1122, 1092 files in `internal/`; the gate had seen 296 against 379; every file it sampled was present and non-empty; a retry minutes later passed. **A healthy store can answer partially.** Re-reading today's episodes with that in mind:
+
+| Episode | Reads that saw it gone | Verdict |
+|---|---|---|
+| 1. `docs/` + `artifacts/`, 07:43–09:01 | many, over more than an hour; confirmed by Jacob | **loss** |
+| 2. ~12:20 — root read as `internal/ media/ notes.md`, `internal/` 15 entries | single reads, 12:23–12:25; by 12:42 `internal/parity/` (14 files) and `features-inbox/` were back on the branch without anyone reporting a rewrite | **uncertain, leaning partial view** |
+| 3. 14:20–14:23 — root read as `internal/ media/ notes.md`, `internal/` 15 entries, 155 files "missing" | one read per file (timer alarm 14:23:24, this worker's listing 14:23:51 and the 80 s per-file loop); "selective" pattern — 85 of 184 bug files present — is what a partial listing looks like; the update worker's unstable counts fall in the same minutes | **uncertain, leaning partial view** |
+
+Episodes 2 and 3 gave the **same picture** — root `internal/ media/ notes.md`, `internal/` at exactly 15 entries — which reads as one failure mode of the store's view, not two deletions that happened to leave the same subset.
+
+**What my restores may have cost.** If 2 and 3 were partial views, the files were there and my `cp` from the snapshot wrote older content over them. Any edit made to those files inside these windows is gone, and nothing I have can detect it: (a) `docs/*.md` (19 files), edits between **11:00:17Z** (snapshot `bdb3578f`) and **12:26Z**; (b) the 155 files listed above — all of `docs/`, 99 bug files, `internal/parity/`, `internal/features-inbox/`, eight `internal/*.md`, four `internal/qa/` files — edits between **14:20:32Z** (`8764ff48`) and **14:25–14:33Z**. Owners who wrote into those paths in those windows should re-check their text. This is the concrete cost of restoring by default, and the reason the procedure below changes.
+
+**Procedure from now on, for this worker and for the timer (`mirror-timer.sh`):**
+1. Before concluding a file is lost, **re-read it three times, seconds apart**; a file seen in any read is not lost. Unstable counts between reads mean the store is answering partially — and the honest response to a partial answer is to **wait and re-read, and conclude nothing**. Nothing is at risk from waiting: the gate already refuses to push a partial view over the last good snapshot, so the snapshot holds while the store settles.
+2. A file absent across all reads is recorded as *vanished, staged, not restored*; the author says whether it was a move, a delete, or a loss.
+3. Restore only when the owner asks, or when the absence has held across reads spread over many minutes (episode 1's shape). **Always name the snapshot and the window** (`<commit>`, `<from>Z → <to>Z`): that is the only thing that made today's possible cost knowable — the two owners with writes inside the 14:20 window could be told exactly what to re-check.
+4. A gate refusal is the mirror working: it protects the snapshot from a partial view. Never force it.
+
+Day's count as this worker can honestly state it: **one loss, two uncertain**. The two "uncertain" rows stay uncertain unless the store's own logs say otherwise.

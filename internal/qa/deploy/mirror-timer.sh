@@ -37,6 +37,17 @@ pass() {
   [ "$prev" = none ] || [ "$prev" = "$new" ] && return
   deleted="$(git -C "$REPO" diff --diff-filter=D --name-only "$prev" "$new" | grep -v '^internal/qa/rollouts/' || true)"
   [ -n "$deleted" ] || return
+  # Re-read before concluding a file is gone: this mount can answer partially (three reads seconds apart
+  # gave 1092, 1122, 1092 files once, all present). A file seen in any of three reads is not vanished.
+  local confirmed="" unstable=0 f
+  for f in $deleted; do
+    local seen=0 i
+    for i in 1 2 3; do [ -e "$STORE/$f" ] && { seen=1; break; }; sleep 3; done
+    if [ "$seen" = 1 ]; then unstable=1; else confirmed="$confirmed$f"$'\n'; fi
+  done
+  [ "$unstable" = 1 ] && echo "[$ts] partial view: some files the snapshot lacked are present on re-read; the store answered partially"
+  deleted="$confirmed"
+  [ -n "$(echo "$deleted" | tr -d '[:space:]')" ] || return
   local stage="$ROOT/state/mirror-restore/$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$stage"
   while IFS= read -r f; do
@@ -49,7 +60,7 @@ import json, sys
 log, ts, prev, new, stage, files = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6].split("\n")
 files = [f for f in files if f]
 with open(log, "a") as fh:
-    fh.write(json.dumps({"ts": ts, "prev": prev, "new": new, "vanished": files, "staged": stage, "restored": False, "verdict": "unknown — the author says whether it was a move, a deliberate delete, or a loss"}) + "\n")
+    fh.write(json.dumps({"ts": ts, "prev": prev, "new": new, "vanished": files, "staged": stage, "restored": False, "reread": "absent in three reads over ~6 s", "verdict": "unknown — the author says whether it was a move, a deliberate delete, or a loss"}) + "\n")
 print(f"[{ts}] vanished, staged, not restored — {len(files)} file(s) since {prev[:8]}: " + ", ".join(files[:8]) + (" …" if len(files) > 8 else "") + f"; copies under {stage}")
 PY
 }

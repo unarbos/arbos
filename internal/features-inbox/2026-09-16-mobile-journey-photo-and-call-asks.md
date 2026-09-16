@@ -14,3 +14,8 @@ The phone sends `put {path: attachments/<name>.jpg, data: <base64>}` then `user 
 ## 2. Voice gateway — the call must be scoped to the project (JB-3)
 
 "Call demo" from the `demo` chat opens a call whose kernel is whatever the gateway was started with (the phone kernel). A project question asked on the call was answered from, and recorded in, that kernel — `demo`'s transcript never saw it. Ask: let `session.start` carry the target (`{"kernel": "arboslife/demo"}` or the hub attach URL + a client token), attach to that kernel for the call's life, and report it in `session.ready.kernel`. The app will pass `KernelTarget` from the chat it was opened from. Until then the call answers for one project only, whichever chat it is opened from — worth a line in the call screen naming the project actually on the line.
+
+
+## 3. Mesh worker — the ArbosLife kernels are an old build (added 14:45 UTC)
+
+Two more symptoms point the same way as the lost photo: `arboslife/demo` and `arboslife/subnet120` replay **no `notify` frames** on attach (the pod kernel does; the phone's badge and away card work there and not here), and the photo `put` loses its bytes. `notify` is #296-era, `put` #270-era. Please check the kernel binary running under `/home/const/arbos-hub/projects/*` on ArbosLife and update it; the phone journey will re-run against `arboslife/demo` afterwards.
