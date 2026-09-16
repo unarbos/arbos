@@ -251,6 +251,11 @@ final class ChatStore: ObservableObject {
             }
             guard let self, !Task.isCancelled else { return }
             self.reconnectIn = nil
+            // This task is the one about to run reconnect(); disconnect()
+            // inside it cancels `reconnectTask` — which was this task, so
+            // the attach died with CancellationError every time and the
+            // countdown started over for ever (M-109). Hand the slot back first.
+            self.reconnectTask = nil
             await self.reconnect()
         }
     }
