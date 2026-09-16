@@ -14,7 +14,7 @@ use base64::Engine;
 use serde_json::Value;
 use std::{path::PathBuf, sync::Arc};
 
-use crate::hooks::{Isolate, KernelHooks, SayMode};
+use crate::hooks::{Isolate, KernelHooks, SayMode, WaitEnd};
 use crate::pty::PtyHub;
 
 /// The one browser page an agent has. The desktop keys its row on this.
@@ -659,22 +659,17 @@ impl Tool for Spawn {
                 // `wait=true` blocks on the worker's report the way a local
                 // spawn does — not on the sync and start notices (qa-037).
                 if wait {
-                    let rx = hooks.wait_for(cx.agent.id.as_str(), id.as_str());
-                    let report = tokio::select! {
-                        r = rx => r.ok(),
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(wait_secs)) => None,
-                        _ = cx.cancel.cancelled() => {
-                            hooks.stop_waiting(id.as_str());
+                    match hooks
+                        .wait_report(cx.agent.id.as_str(), id.as_str(), wait_secs, &cx.cancel)
+                        .await
+                    {
+                        WaitEnd::Report(text) => body = format!("{id} reports:\n{text}"),
+                        WaitEnd::Timeout => body.push_str(&format!(
+                            "\n{id} is still working after {wait_secs}s; its report will arrive here as a message from it."
+                        )),
+                        WaitEnd::Steered => body.push_str(&format!("\n{}", steered_line(id.as_str()))),
+                        WaitEnd::Stopped => {
                             anyhow::bail!("interrupted while waiting for {id}; it keeps working on {host}")
-                        }
-                    };
-                    match report {
-                        Some(text) => body = format!("{id} reports:\n{text}"),
-                        None => {
-                            hooks.stop_waiting(id.as_str());
-                            body.push_str(&format!(
-                                "\n{id} is still working after {wait_secs}s; its report will arrive here as a message from it."
-                            ));
                         }
                     }
                 }
@@ -753,22 +748,17 @@ impl Tool for Spawn {
                 paths.push(w.path.display().to_string());
             }
             if wait {
-                let rx = hooks.wait_for(cx.agent.id.as_str(), id.as_str());
-                let report = tokio::select! {
-                    r = rx => r.ok(),
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(wait_secs)) => None,
-                    _ = cx.cancel.cancelled() => {
-                        hooks.stop_waiting(id.as_str());
+                match hooks
+                    .wait_report(cx.agent.id.as_str(), id.as_str(), wait_secs, &cx.cancel)
+                    .await
+                {
+                    WaitEnd::Report(text) => body = format!("{id} reports:\n{text}"),
+                    WaitEnd::Timeout => body.push_str(&format!(
+                        "\n{id} is still working after {wait_secs}s; its report will arrive here as a message from it."
+                    )),
+                    WaitEnd::Steered => body.push_str(&format!("\n{}", steered_line(id.as_str()))),
+                    WaitEnd::Stopped => {
                         anyhow::bail!("interrupted while waiting for {id}; it keeps working")
-                    }
-                };
-                match report {
-                    Some(text) => body = format!("{id} reports:\n{text}"),
-                    None => {
-                        hooks.stop_waiting(id.as_str());
-                        body.push_str(&format!(
-                            "\n{id} is still working after {wait_secs}s; its report will arrive here as a message from it."
-                        ));
                     }
                 }
             }
@@ -1355,6 +1345,13 @@ impl Tool for Ask {
             )))
         })
     }
+}
+
+/// The spawn result when the user spoke while the parent waited.
+fn steered_line(child: &str) -> String {
+    format!(
+        "{child} is still working; the user said something meanwhile — it follows this result. Answer it, or pass it on with `say to={child} mode=steer` if it is for {child}. {child}'s report arrives here as a message from it when it finishes."
+    )
 }
 
 impl Tool for Terminal {
