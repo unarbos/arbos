@@ -86,6 +86,12 @@ final class ArbosKernelClient {
         try write(frame)
     }
 
+    /// The user has seen every notification up to `through`; the kernel
+    /// tells every other client, so nothing shouts twice.
+    func seen(through id: Int) throws {
+        try write(["type": "seen", "through": id])
+    }
+
     /// A file from the phone into the kernel's store (`.arbos/<path>`), so a
     /// `user` frame can name it in `attachments`. A kernel without this frame
     /// answers with an error the chat shows.

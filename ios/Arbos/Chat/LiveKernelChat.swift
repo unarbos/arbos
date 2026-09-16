@@ -84,6 +84,10 @@ final class LiveKernelChat: ChatSource {
         await page(agent: agent) { try client.history(agent: agent) }?.items ?? []
     }
 
+    func markSeen(through: Int) {
+        try? client.seen(through: through)
+    }
+
     func earlier(before seq: Int, limit: Int) async -> HistoryPage? {
         guard seq > 1 else { return nil }
         return await page(agent: focus) { try client.history(agent: focus, before: seq, limit: limit) }
@@ -180,8 +184,11 @@ final class LiveKernelChat: ChatSource {
             if agent == focus {
                 stream?.yield(.agentDone)
                 stream?.yield(.item(ChatItem(.agent(question, streaming: false))))
-                stream?.yield(.asked(question))
             }
+        case .notify(let notification):
+            stream?.yield(.notify(notification))
+        case .seen(let through):
+            stream?.yield(.seen(through: through))
         case .thinkingDelta:
             break
         case .error(let detail):
@@ -276,10 +283,7 @@ final class LiveKernelChat: ChatSource {
         case .say(let from, let text):
             // A worker's report is its turn's end; a remote child is not in
             // the tree, so this is the only word of its finish.
-            if !replaying, children.contains(from) {
-                setWorker(from, running: false, step: "")
-                stream?.yield(.workerDone(name: childNames[from] ?? from, words: text))
-            }
+            if !replaying, children.contains(from) { setWorker(from, running: false, step: "") }
             return ChatItem(.subagent(name: childNames[from] ?? from, status: text))
         case .ask(let question):
             return ChatItem(.agent(question, streaming: false))

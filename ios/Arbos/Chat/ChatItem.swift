@@ -77,10 +77,10 @@ enum ChatUpdate {
     case dropped(String)
     /// The hub or kernel refused this target for good; no retry.
     case refused(String)
-    /// The agent asked and waits (the question is also an item).
-    case asked(String)
-    /// A worker finished with these words (the line is also an item).
-    case workerDone(name: String, words: String)
+    /// Something the user should hear about (#293), live or replayed.
+    case notify(KernelNotification)
+    /// Every notification up to `through` was seen, on some client.
+    case seen(through: Int)
 }
 
 /// Where the main chat comes from: the live kernel, or a scripted stand-in
@@ -97,11 +97,14 @@ protocol ChatSource: AnyObject {
     /// The lines before `seq` of the focused transcript, oldest first;
     /// nil where there is no paging.
     func earlier(before seq: Int, limit: Int) async -> HistoryPage?
+    /// The user saw the notifications up to `through`.
+    func markSeen(through: Int)
 }
 
 extension ChatSource {
     func history(agent: String) async -> [ChatItem] { [] }
     func earlier(before seq: Int, limit: Int) async -> HistoryPage? { nil }
+    func markSeen(through: Int) {}
 }
 
 /// One page of a transcript: the lines and the seq range they cover.

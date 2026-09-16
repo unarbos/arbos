@@ -140,6 +140,12 @@ enum KernelFrame {
     case thinkingDelta(agent: String, text: String)
     /// The kernel refused something ("auth required", …).
     case error(detail: String)
+    /// Something the user should hear about even when away (#293):
+    /// `reply`, `ask`, `error`, `notice`. `replayed` marks the unseen ones
+    /// sent again after `hello`.
+    case notify(KernelNotification)
+    /// The user saw everything up to `through` — on any client.
+    case seen(through: Int)
     /// The outcome of a `put`: `error` says why a file did not land.
     case written(path: String, error: String?)
     case other(type: String)
@@ -161,6 +167,18 @@ enum KernelFrame {
                 text: object["text"] as? String ?? "",
                 error: object["error"] as? String
             )
+        case "notify":
+            self = .notify(KernelNotification(
+                id: object["id"] as? Int ?? 0,
+                ts: object["ts"] as? Int ?? 0,
+                agent: object["agent"] as? String ?? "root",
+                kind: object["kind"] as? String ?? "notice",
+                title: object["title"] as? String ?? "",
+                body: object["body"] as? String ?? "",
+                replayed: object["replayed"] as? Bool ?? false
+            ))
+        case "seen":
+            self = .seen(through: object["through"] as? Int ?? 0)
         case "written":
             self = .written(path: object["path"] as? String ?? "", error: object["error"] as? String)
         case "error":
@@ -246,4 +264,19 @@ enum KernelFrame {
             )
         }
     }
+}
+
+
+/// One `notify` frame, as the kernel recorded it.
+struct KernelNotification: Identifiable, Equatable {
+    let id: Int
+    let ts: Int
+    let agent: String
+    let kind: String
+    let title: String
+    let body: String
+    let replayed: Bool
+
+    var isAsk: Bool { kind == "ask" }
+    var failed: Bool { kind == "error" }
 }

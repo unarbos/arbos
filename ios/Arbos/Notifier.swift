@@ -2,44 +2,20 @@ import Foundation
 import UIKit
 import UserNotifications
 
-/// What the chat wants the user to know when they are not looking at it.
-enum Attention {
-    /// The agent's reply for a turn, settled.
-    case reply(project: String, text: String)
-    /// The agent asked something and waits.
-    case ask(project: String, question: String)
-    /// A worker finished; its last words.
-    case workerDone(project: String, worker: String, words: String)
-}
-
-/// Local notifications while the app is not in front: a reply, an ask, a
-/// worker's finish. iOS suspends a backgrounded app within seconds unless
-/// a call keeps it awake, so this covers the switch-away-and-back case and
-/// the call; the phone-asleep-for-hours case needs a push from the hub
-/// (asked for in the project store's features inbox).
+/// The phone's side of the kernel's `notify` frames (#293). While the app
+/// is not in front — the half minute iOS leaves the socket open after a
+/// switch-away, or a call in the background — a live `notify` becomes a
+/// banner; the app badge is the count of unseen; a `seen` from any client
+/// clears both. What the app cannot do alone: reach a phone that iOS has
+/// suspended. That needs a push (APNs) from the hub, keyed on the same
+/// frame — asked for in the project store's features inbox — and on the
+/// way back the replayed `notify`s fill in what the push did not carry.
 @MainActor
 final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
-    /// The project a tapped notification asks the app to open.
+    /// The project a tapped banner asks the app to open.
     @Published var openTarget: String?
     private var asked = false
     private var hold: UIBackgroundTaskIdentifier = .invalid
-
-    /// The user switched away: keep the socket alive for the half minute
-    /// iOS allows, so a reply that is already on its way still rings.
-    /// Beyond that the app is suspended and only a push could reach it.
-    func holdOpen() {
-        release()
-        hold = UIApplication.shared.beginBackgroundTask(withName: "arbos.reply") { [weak self] in
-            Task { @MainActor in self?.release() }
-        }
-    }
-
-    /// Back in front (or out of time): let go.
-    func release() {
-        guard hold != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(hold)
-        hold = .invalid
-    }
 
     override init() {
         super.init()
@@ -56,32 +32,59 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
         }
     }
 
-    /// Post it, unless the app is in front — then the chat itself shows it.
-    func post(_ attention: Attention, target: String) {
+    /// The user switched away: keep the socket alive for the half minute
+    /// iOS allows, so a reply already on its way still rings. Beyond that
+    /// the app is suspended and only a push could reach it.
+    func holdOpen() {
+        release()
+        hold = UIApplication.shared.beginBackgroundTask(withName: "arbos.notify") { [weak self] in
+            Task { @MainActor in self?.release() }
+        }
+    }
+
+    /// Back in front (or out of time): let go.
+    func release() {
+        guard hold != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(hold)
+        hold = .invalid
+    }
+
+    /// A live `notify`: a banner unless the app is in front (then the
+    /// chat itself is the notification), and the badge either way.
+    func post(_ notification: KernelNotification, project: String, target: String, unseenCount: Int) {
+        setBadge(unseenCount)
         guard UIApplication.shared.applicationState != .active else { return }
         let content = UNMutableNotificationContent()
-        switch attention {
-        case .reply(let project, let text):
-            content.title = project
-            content.body = Self.firstLine(text)
-        case .ask(let project, let question):
-            content.title = "\(project) asks"
-            content.body = Self.firstLine(question)
-            content.interruptionLevel = .timeSensitive
-        case .workerDone(let project, let worker, let words):
-            content.title = "\(project) · \(worker) done"
-            content.body = Self.firstLine(words)
-        }
+        content.title = notification.title.isEmpty ? project : "\(project) · \(notification.title)"
+        content.body = Self.firstLines(notification.body)
         content.sound = .default
-        content.userInfo = ["target": target]
+        content.badge = NSNumber(value: unseenCount)
+        content.userInfo = ["target": target, "id": notification.id]
         content.threadIdentifier = target
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        if notification.isAsk { content.interruptionLevel = .timeSensitive }
+        let request = UNNotificationRequest(identifier: "notify-\(target)-\(notification.id)", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
 
-    private static func firstLine(_ text: String) -> String {
-        let line = text.split(separator: "\n").first.map(String.init) ?? text
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
+    /// `seen {through}` from any client: banners up to it go, the badge
+    /// shows what is left.
+    func clear(through id: Int, target: String, remaining: Int) {
+        let center = UNUserNotificationCenter.current()
+        center.getDeliveredNotifications { delivered in
+            let gone = delivered
+                .filter { ($0.request.content.userInfo["target"] as? String) == target && (($0.request.content.userInfo["id"] as? Int) ?? 0) <= id }
+                .map(\.request.identifier)
+            if !gone.isEmpty { center.removeDeliveredNotifications(withIdentifiers: gone) }
+        }
+        setBadge(remaining)
+    }
+
+    private func setBadge(_ count: Int) {
+        UNUserNotificationCenter.current().setBadgeCount(count) { _ in }
+    }
+
+    private static func firstLines(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.count > 160 ? String(trimmed.prefix(157)) + "…" : trimmed
     }
 

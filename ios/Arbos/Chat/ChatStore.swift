@@ -54,9 +54,13 @@ final class ChatStore: ObservableObject {
     /// Fires with each finished agent message. The call speaks it when the
     /// server does not.
     var onAgentMessage: ((String) -> Void)?
-    /// Something the user should hear about if they are not looking:
-    /// the turn's reply, an ask, a worker's finish.
-    var onAttention: ((Attention) -> Void)?
+    /// A live `notify` while the user may not be looking.
+    var onNotify: ((KernelNotification) -> Void)?
+    /// Every client saw up to this id: banners and the badge go.
+    var onSeen: ((Int) -> Void)?
+    /// What the user missed while away (replayed on attach) plus what
+    /// arrived live and is not yet seen; the "while you were away" card.
+    @Published private(set) var unseen: [KernelNotification] = []
 
     let settings: AppSettings
     private let link: VoiceLink
@@ -282,6 +286,15 @@ final class ChatStore: ObservableObject {
         }
     }
 
+    /// The user has seen the card: tell the kernel, which tells every
+    /// other client, so the desktop's badge drops too.
+    func markSeen() {
+        guard let last = unseen.last?.id else { return }
+        source?.markSeen(through: last)
+        unseen.removeAll()
+        onSeen?(last)
+    }
+
     /// A line the app itself has to say (a picker or dictation problem).
     func notice(_ text: String) {
         items.append(ChatItem(.notice(text, failed: true)))
@@ -294,6 +307,7 @@ final class ChatStore: ObservableObject {
             items.removeAll()
             earlierLines = 0
             identity = nil
+            unseen.removeAll()
         }
         settings.kernelTarget = target
         reconnectAttempt = 0
@@ -316,6 +330,7 @@ final class ChatStore: ObservableObject {
         // makes it real. A turn already running gets the new words as a
         // steer at its next tool boundary; otherwise this starts one.
         let steer = busy
+        if !unseen.isEmpty { markSeen() }
         let shown = attachments.isEmpty ? trimmed : (trimmed.isEmpty ? "" : trimmed + "\n") + attachments.map { "📎 \($0.name)" }.joined(separator: "\n")
         let card = ChatItem(.user(shown, pending: true))
         closeOpenAgentMessage()
@@ -429,19 +444,16 @@ final class ChatStore: ObservableObject {
             }
         case .turn(let running):
             busy = running
-            if !running {
-                closeOpenAgentMessage()
-                // The turn's last reply, for a user who switched away.
-                let turnStart = items.lastIndex(where: { if case .user = $0.kind { return true } else { return false } }) ?? -1
-                if turnStart >= 0, let reply = items[(turnStart + 1)...].last(where: \.isAgent),
-                   case .agent(let text, _) = reply.kind, !text.isEmpty {
-                    onAttention?(.reply(project: title, text: text))
-                }
+            if !running { closeOpenAgentMessage() }
+        case .notify(let notification):
+            if !unseen.contains(where: { $0.id == notification.id }) {
+                unseen.append(notification)
+                unseen.sort { $0.id < $1.id }
             }
-        case .asked(let question):
-            onAttention?(.ask(project: title, question: question))
-        case .workerDone(let name, let words):
-            onAttention?(.workerDone(project: title, worker: name, words: words))
+            if !notification.replayed { onNotify?(notification) }
+        case .seen(let through):
+            unseen.removeAll { $0.id <= through }
+            onSeen?(through)
         case .agents(let list):
             agents = list
         case .workers(let list):

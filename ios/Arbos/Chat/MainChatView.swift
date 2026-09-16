@@ -218,6 +218,10 @@ struct ProjectChatView: View {
                     ForEach(chat.items) { item in
                         ChatRow(item: item).id(item.id)
                     }
+                    if !chat.unseen.isEmpty {
+                        AwayCard(notifications: chat.unseen) { chat.markSeen() }
+                            .id("away")
+                    }
                     if chat.busy {
                         WorkingLine(step: chat.step)
                     }
@@ -580,5 +584,55 @@ private struct ChatScrollAnchor: ViewModifier {
         } else {
             content.defaultScrollAnchor(.bottom)
         }
+    }
+}
+
+
+/// What happened while the user was away: the kernel's unseen `notify`s,
+/// oldest first, on one raised card under the transcript. "Got it" tells
+/// the kernel, which tells every other client. An ask leads; a failure is
+/// marked; the rest read as one line each.
+struct AwayCard: View {
+    let notifications: [KernelNotification]
+    let seen: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(notifications.count == 1 ? "While you were away" : "While you were away · \(notifications.count)")
+                    .font(ArbosTheme.caption)
+                    .foregroundStyle(ArbosTheme.textMuted)
+                Spacer()
+                Button("Got it", action: seen)
+                    .font(ArbosTheme.caption)
+                    .foregroundStyle(ArbosTheme.accent)
+                    .buttonStyle(.plain)
+            }
+            ForEach(notifications.suffix(6)) { note in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: note.isAsk ? "questionmark.circle" : (note.failed ? "exclamationmark.circle" : "circle.fill"))
+                        .font(.system(size: note.isAsk || note.failed ? 13 : 6))
+                        .foregroundStyle(note.failed ? ArbosTheme.danger : (note.isAsk ? ArbosTheme.accent : ArbosTheme.textDim))
+                        .frame(width: 14)
+                    VStack(alignment: .leading, spacing: 2) {
+                        if !note.title.isEmpty {
+                            Text(note.title)
+                                .font(ArbosTheme.caption.weight(.semibold))
+                                .foregroundStyle(ArbosTheme.textMuted)
+                        }
+                        Text(note.body)
+                            .font(ArbosTheme.body)
+                            .foregroundStyle(ArbosTheme.text)
+                            .lineLimit(3)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: ArbosTheme.cardRadius, style: .continuous)
+                .fill(ArbosTheme.raised)
+        )
+        .padding(.top, 8)
     }
 }

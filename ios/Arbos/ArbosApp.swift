@@ -65,11 +65,16 @@ struct RootView: View {
             }
         }
         .onAppear {
-            // A reply, an ask or a worker's finish while the app is not in
-            // front becomes a notification for the project it came from.
-            chat.onAttention = { [weak chat, weak notifier] attention in
+            // The kernel's `notify` while the app is not in front becomes a
+            // banner for the project it came from; `seen` from any client
+            // takes it down again.
+            chat.onNotify = { [weak chat, weak notifier] notification in
                 guard let chat, let notifier else { return }
-                notifier.post(attention, target: chat.settings.kernelTarget.stored)
+                notifier.post(notification, project: chat.title, target: chat.settings.kernelTarget.stored, unseenCount: chat.unseen.count)
+            }
+            chat.onSeen = { [weak chat, weak notifier] through in
+                guard let chat, let notifier else { return }
+                notifier.clear(through: through, target: chat.settings.kernelTarget.stored, remaining: chat.unseen.count)
             }
         }
         // A tapped notification lands in that project's chat.
