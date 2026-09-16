@@ -11,7 +11,7 @@ What the loop has exercised and when, so nothing goes long untested. One row per
 
 | aspect | last checked | how | state / open |
 | --- | --- | --- | --- |
-| projects list — faces, rows, sections | 15 (offline cold start, M-88 fixed) | simulator, ArbosLife hub, phone token | four real projects with their faces; a project moves to "Working" while its kernel runs; a dead kernel's row vanishes (M-84, open); with the hub unreachable at launch the cached rows show "Off" (right) |
+| projects list — faces, rows, sections | 16 (offline start → rows come back by themselves, M-92 fixed) | simulator, ArbosLife hub, phone token | four real projects with their faces; a project moves to "Working" while its kernel runs; a dead kernel's row vanishes (M-84, open); with the hub unreachable at launch the cached rows show "Off" (right) |
 | projects list — search, filter, refresh | 7 | simulator, pod hub | search filters as typed; filter menu (All / Live only); pull-to-refresh keeps the rows — **due** |
 | list composer → names its project, rides above the keyboard | 11 | simulator | placeholder "Message demo…" (F1); bottom inset above the keyboard (F2) |
 | project chat — send, prompt card, streaming, Worked line | 13 | simulator, `demo` | a 20-line reply streamed 14 s; the view held where the reader scrolled (F12, recorded); "Sending…" → "demo is not answering — waiting" at 10 s (M-81) |
@@ -29,10 +29,10 @@ What the loop has exercised and when, so nothing goes long untested. One row per
 | notifications (`notify`, push) | 9 | simulator, `simctl push` with the hub's payload | banner, badge, tap-to-project, away card, seen both ways all verified; real pushes start when Jacob's APNs key + capability land (no release needed) |
 | background 8 s → foreground | 13 | simulator | list intact (the SpringBoard kick in the harness drops the status bar; harness, not app) |
 | background minutes/hours → resume; what a returning user sees first | 5 (10 min) | simulator | intact; real suspension covered by scenePhase reconnect — check on Jacob's phone |
-| network drop → reconnect | 12 (443 cut; kernel killed), 13 (M-83) | simulator | one calm line; pending lines never cross projects (M-82, proven both ways); a project opened while down says "Opening…" then "not answering — waiting" (M-83, verified) |
+| network drop → reconnect | journey J8c ×4 (25 s cut mid-turn: calm line, turn resumes), 16 (roster retry) | simulator | one calm line; pending lines never cross projects (M-82, proven both ways); a project opened while down says "Opening…" then "not answering — waiting" (M-83, verified) |
 | cold start | 13 | simulator | lands on the list, four rows, 6 s |
 | TestFlight build on Jacob's phone | 956 (13 reports), 994 (fixes for F1–F6) | TestFlight | F7/F8 open until he confirms; F9–F13 land with #309 |
 | style pair vs Cursor stills | 2 (list, chat), 3 (call vs GPT), 4 (list), 5 (chat, four workers), 6 (composer with a chip), 7 (list search) | pairs in `media/mobile/cycle-N/` | **overdue** — cycles 11–13 went to Jacob's feedback; chat pair next |
-| recording | 1, 3, 6, 10 (call), 13 (stream while scrolled up, 30 s) | mp4 in `media/mobile/cycle-N/` | next due cycle 16 |
+| recording | 1, 3, 6, 10 (call), 13 (stream while scrolled up), 16 (journey run 7: the challenge and a worker appearing, 2 min, `media/mobile/journey/0916-152618/recording-challenge-workers.mp4`) | mp4 | next due cycle 19 |
 
-**Journey runs** (`internal/mobile-journey-runs.md`): 6 so far — 3 on `demo` (old numbering; JB-1…3 named), 3 on `pod` on QA's ids (run 4 a floundering root, runs 5–6 clean apart from the U steps). Next: `arboslife/demo` on QA's ids once its kernel is updated.
+**Journey runs** (`internal/mobile-journey-runs.md`): 7 so far — 3 on `demo` (old numbering; JB-1…3 named), 3 on `pod` on QA's ids (run 4 a floundering root, runs 5–6 clean apart from the U steps). Next: `arboslife/demo` on QA's ids once its kernel is updated.
