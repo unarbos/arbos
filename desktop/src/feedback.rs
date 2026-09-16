@@ -757,7 +757,11 @@ pub fn fit_for_sending(bytes: &[u8], whole_screen: bool) -> Result<Shot> {
     let image = image::load_from_memory(bytes).context("read the capture back")?;
     for width in [SHOT_WIDTH, SHOT_WIDTH / 2, SHOT_WIDTH / 3] {
         let scaled = if image.width() > width {
-            image.resize(width, u32::MAX, image::imageops::FilterType::CatmullRom)
+            image.resize(
+                width,
+                u32::MAX,
+                image::imageops::FilterType::CatmullRom,
+            )
         } else {
             image.clone()
         };
@@ -991,10 +995,7 @@ mod tests {
         let planted = [
             format!("sk-{}v1-{body}", "or-"),
             format!("gh{}16C7e42F292c6912E7710c838347Ae178B4a", "p_"),
-            format!(
-                "xo{}2401234567-2410987654321-AbCdEfGhIjKlMnOpQrStUvWx",
-                "xb-"
-            ),
+            format!("xo{}2401234567-2410987654321-AbCdEfGhIjKlMnOpQrStUvWx", "xb-"),
             format!("AK{}IOSFODNN7EXAMPLE", "IA"),
             format!("AI{}D-1234567890abcdefghijklmnopqrstu", "zaSy"),
             format!("sk{}51H8xkLMnOpQrStUvWxYz0123456789", "_live_"),
@@ -1084,10 +1085,7 @@ mod tests {
     /// the credential is gone too, and with them sent it is still gone.
     #[test]
     fn the_toggle_changes_what_travels_but_never_whether_a_key_does() {
-        let key = format!(
-            "sk-{}v1-3f8a9b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
-            "or-"
-        );
+        let key = format!("sk-{}v1-3f8a9b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a", "or-");
         for tool_io in [true, false] {
             let mut draft = Draft::new(Parts {
                 tool_io,
@@ -1100,10 +1098,7 @@ mod tests {
                 ..Default::default()
             });
             let written = serde_json::to_string(&draft.report("x", 0)).unwrap();
-            assert!(
-                !written.contains(key.as_str()),
-                "tool_io={tool_io}: {written}"
-            );
+            assert!(!written.contains(key.as_str()), "tool_io={tool_io}: {written}");
         }
     }
 
@@ -1111,10 +1106,7 @@ mod tests {
     #[test]
     fn his_words_are_checked_where_he_can_still_see_them() {
         let mut draft = Draft::new(Parts::default());
-        draft.note = format!(
-            "it printed gh{}16C7e42F292c6912E7710c838347Ae178B4a at me",
-            "p_"
-        );
+        draft.note = format!("it printed gh{}16C7e42F292c6912E7710c838347Ae178B4a at me", "p_");
         assert_eq!(draft.note_redaction().tokens, 1);
         draft.note = "the sidebar draws twice".into();
         assert_eq!(draft.note_redaction().total(), 0);
