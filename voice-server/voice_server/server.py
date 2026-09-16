@@ -41,6 +41,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     engine.add_argument("--duplex-url", default=os.environ.get("VOICE_DUPLEX_URL", "ws://127.0.0.1:9000/v1/realtime"),
                         help="NemotronLabs VoiceChat container realtime endpoint")
     engine.add_argument("--instructions", default=None, help="system prompt for the duplex model (text or @file)")
+    engine.add_argument("--answerer", default="auto", choices=["auto", "kernel", "model"],
+                        help="duplex call mode: who answers a spoken turn. kernel: always the Arbos kernel (voiced by the gateway TTS); "
+                             "model: the speech model itself; auto: kernel unless the turn is small talk (default)")
 
     kernel = parser.add_argument_group("Arbos kernel (enables the agent tools and the text channel)")
     kernel.add_argument("--kernel", default=os.environ.get("VOICE_KERNEL_URL"),
@@ -138,7 +141,7 @@ async def serve_forever(args: argparse.Namespace) -> None:
         raise SystemExit(f"unknown voice {args.voice!r}; have: {', '.join(engines.tts.voices)}")
     await engines.warm_up(args.voice)
     defaults = SessionDefaults(language=args.language, voice=args.voice, speed=args.speed, reply=args.reply,
-                               instructions=args.instructions)
+                               instructions=args.instructions, answerer=args.answerer)
     tuning = Tuning(
         start_threshold=args.vad_threshold,
         end_threshold=max(0.1, args.vad_threshold - 0.15),

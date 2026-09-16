@@ -48,6 +48,7 @@ class SessionDefaults:
     speed: float = 1.0
     reply: str = "none"
     instructions: str | None = None
+    answerer: str = "auto"  # duplex call mode: kernel | model | auto (kernel unless small talk)
 
 
 class BaseSession:
@@ -74,6 +75,7 @@ class BaseSession:
         self.tools.on_call = self._on_tool_call
         self.tools.on_result = self._on_tool_result
         self.mirror_agents = engines.kernel is not None
+        self.running_children: set[str] = set()
         self.echo = EchoGate(self.rate, tuning.echo_margin) if tuning.echo_gate else None
         self.normalizers: dict[str, Normalizer] = {}
 
@@ -102,7 +104,7 @@ class BaseSession:
     async def run(self) -> None:
         sender = asyncio.create_task(self._sender(), name=f"send-{self.sid}")
         log.info("[%s] connected (%s)", self.sid, self.engine)
-        if self.mirror_agents and self.engines.kernel:
+        if self.engines.kernel:
             self.engines.kernel.listeners.append(self._mirror)
         try:
             await self.on_open()
@@ -178,6 +180,7 @@ class BaseSession:
             text=reply if reply != "none" else "none",
             tools=[t["name"] for t in self.tools_available()],
             kernel=bool(self.engines.kernel and self.engines.kernel.connected),
+            answerer=getattr(self, "answerer", "n/a"),
             voice=self.voice,
         )
 
@@ -217,6 +220,12 @@ class BaseSession:
         elif kind == P.CLIENT_SPEAKING:
             if self.echo is not None:
                 self.echo.client_speaking = bool(msg.get("speaking", False))
+                route = str(msg.get("route", "") or "").lower()
+                if route:  # headsets cancel their own echo; the gate would only get in the way
+                    bypass = route in ("airpods", "headset", "headphones", "bluetooth", "wired", "earpiece")
+                    if bypass != self.echo.bypass:
+                        self.echo.bypass = bypass
+                        self.echo.confirmations = 0  # a new route is a new echo path
         elif kind == P.SESSION_END:
             return True
         else:
@@ -247,6 +256,9 @@ class BaseSession:
             self.instructions = msg["instructions"].strip()
         if "agents" in msg:
             self.mirror_agents = bool(msg["agents"]) and self.engines.kernel is not None
+        answerer = msg.get("answerer")
+        if answerer in ("kernel", "model", "auto") and hasattr(self, "answerer"):
+            self.answerer = answerer
         reply = msg.get("reply")
         if reply in ("none", "openrouter", "kernel"):
             if reply != "none" and not self.engines.reply:
@@ -335,7 +347,27 @@ class BaseSession:
         except Exception:
             log.exception("[%s] could not voice the agent report", self.sid)
 
+    def _watch_child(self, frame: dict) -> None:
+        """Any sub-agent of root that finishes gets reported, whoever dispatched it (a voice
+        tool, the kernel's own spawn during a kernel-answered turn, or the phone's chat)."""
+        name = frame.get("agent")
+        if not name or name == "root" or self.engines.kernel is None:
+            return
+        state = self.engines.kernel.agents.get(name)
+        if frame.get("state") == "running":
+            self.running_children.add(name)
+        elif name in self.running_children:
+            self.running_children.discard(name)
+            if state is None or (state.parent not in (None, "root")):
+                return
+            report = state.says[-1] if state.says else state.assistant.strip()
+            if report:
+                from .tools import _clip
+                asyncio.create_task(self._on_agent_report(name, _clip(report, 500)))
+
     def _mirror(self, frame: dict) -> None:
+        if frame.get("type") == "turn":
+            self._watch_child(frame)
         if not self.mirror_agents:
             return
         kind = frame.get("type")

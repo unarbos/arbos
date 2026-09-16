@@ -294,21 +294,23 @@ async def main() -> None:
         # 1. the question
         final = run.wait("transcript.final")
         stopped = run.wait("speech.stopped")
+        if args.reply:  # the reply can start in the same instant as transcript.final; arm its waiters now
+            started = run.wait("response.started")
+            first_tr = run.wait("response.transcript")
+            run.first_audio_at = None
+            first_audio = run.wait("audio.first")
+            done = run.wait("response.done")
         run.log(f"-> streaming {args.wav} ({question.size / RATE:.1f}s) as the microphone")
         mic.play(question, "q1")
         t_stop, _ = await asyncio.wait_for(stopped, args.timeout)
         t_final, final_msg = await asyncio.wait_for(final, args.timeout)
-        speech_end = mic.marks["q1.speech_end"]
+        speech_end = mic.marks.get("q1.speech_end", t_final)  # the server may finalise before the clip ends
         run.metrics["asr.speech_stopped_ms"] = (t_stop - speech_end) * 1000
         run.metrics["asr.final_ms"] = (t_final - speech_end) * 1000
         run.metrics["asr.text"] = final_msg.get("text", "")
 
         # 2. the reply: either the server's own, or text we hand it
         if args.reply:
-            started = run.wait("response.started")
-            first_tr = run.wait("response.transcript")
-            first_audio = run.wait("audio.first")
-            done = run.wait("response.done")
             await asyncio.wait_for(started, args.timeout)
             t_tr, _ = await asyncio.wait_for(first_tr, args.timeout)
             run.metrics["reply.first_token_ms"] = (t_tr - t_final) * 1000

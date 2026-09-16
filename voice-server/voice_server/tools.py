@@ -83,13 +83,10 @@ class ToolRunner:
         self.on_report = on_report
         self.on_call: Callable[[str, dict], Awaitable[None]] | None = None
         self.on_result: Callable[[str, str], Awaitable[None]] | None = None
-        self.watching: set[str] = set()
-        if kernel:
-            kernel.listeners.append(self._watch_children)
+        self.watching: set[str] = set()  # kept for introspection; reporting lives in the session now
 
     def close(self) -> None:
-        if self.kernel and self._watch_children in self.kernel.listeners:
-            self.kernel.listeners.remove(self._watch_children)
+        return None
 
     async def run(self, name: str, args: dict) -> str:
         if self.on_call:
@@ -137,10 +134,7 @@ class ToolRunner:
         await asyncio.sleep(0.2)
         new = [a for a in self.kernel.agents.values() if a.name not in before and a.name != "root"]
         for child in new:
-            if child.running:
-                self.watching.add(child.name)
-            else:  # already done before we could watch it
-                asyncio.create_task(self._report(child.name))
+            self.watching.add(child.name)
         first_sentence = re.split(r"(?<=[.!?])\s", reply.strip(), maxsplit=1)[0]
         if new:
             return first_sentence or f"Dispatched agent {new[0].name}."

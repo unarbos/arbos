@@ -56,15 +56,17 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
           "reply": "none" | "openrouter"  who answers the user (default from --reply)
     <binary>                       microphone audio
           "instructions": "..."  system prompt for the speech model (duplex engine)
+          "answerer": "auto"|"kernel"|"model"  duplex call mode: who answers a spoken turn (see Engines)
           "agents": true|false  mirror kernel events (agent.*) to this client (default on when a kernel is attached)
     <binary>                       microphone audio
     {"type":"speak","text":"..."}  voice this text; requests queue in order
     {"type":"interrupt"}           drop the current reply and everything queued
     {"type":"text.input","text":"..."}   TEXT CHANNEL: a typed turn; answered with text.delta* + text.done
     {"type":"text.cancel"}         stop the running text turn
-    {"type":"client.speaking","speaking":true|false}
+    {"type":"client.speaking","speaking":true|false,"route":"speaker"|"airpods"|"headset"|...}
                                    optional: the app is playing reply audio right now. Tightens the
-                                   server's echo gate (see below). Send false when playback drains.
+                                   server's echo gate (see below); a headset route turns the gate off
+                                   (those cancel their own echo). Send false when playback drains.
     {"type":"session.end"}         close
 
   server -> client
@@ -111,6 +113,12 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
         speech-to-speech model. No turn-taking: it listens while it talks, yields when the
         user cuts in, and calls the Arbos tools mid-conversation. Events above are produced by
         the model. "speak" is voiced by the gateway TTS (the model cannot be told what to say).
+        Call mode (--answerer, default auto): when a kernel is attached, every spoken turn that
+        is not small talk goes to the kernel's main agent as a text turn and its reply is voiced
+        by the gateway TTS (response.started / response.transcript / audio / response.done); the
+        model's own reply for that turn is dropped and its tool calls are answered "already
+        handled". Small talk (greetings, thanks, "can you hear me") is left to the model. The
+        model still hears the user, so barge-in over a kernel answer works the same way.
     pipeline (fallback, any GPU or CPU): Silero VAD -> faster-whisper -> optional reply hop
         (OpenRouter with the same tools, or the kernel) -> Kokoro. Explicit turns; barge-in is
         server-side cancellation on speech.started.
@@ -138,12 +146,13 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
     to +24 dB, and holds over silence. --no-normalize sends the engine's raw level.
 
   Echo gate (server side, independent of the phone's echo cancellation)
-    While reply audio is on its way to the speaker (and 0.6 s after), every uplink frame is
-    cross-correlated with the reply audio sent in the last 3 s. A match is our own voice
-    coming back through the mic: the frame is replaced with silence before the speech model
-    or VAD sees it. A frame much louder than the predicted echo is the user talking over us
-    and passes, so barge-in keeps working. "client.speaking":true lowers the thresholds.
-    --no-echo-gate turns it off.
+    While reply audio is on its way to the speaker (and 0.6 s after), the last 160 ms of
+    uplink is cross-correlated with the reply audio sent in the last 3 s. The gate closes
+    only after an echo path is confirmed (three close matches); until then, and with a
+    headset route, everything passes. A confirmed echo is replaced with silence before the
+    speech model or VAD sees it; uplink louder than the predicted echo (--echo-margin) is
+    the user talking over us and passes, so barge-in keeps working. "client.speaking":true
+    lowers the thresholds. --no-echo-gate turns it off.
 
   Health   GET /healthz -> 200 "ok" (no auth)
 """
