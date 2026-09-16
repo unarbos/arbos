@@ -77,3 +77,69 @@ jobs:
       - name: Check desktop
         working-directory: desktop
         run: cargo check --locked --all-targets
+
+  ios-changed:
+    # Decides whether the iPhone job below runs. Only `ios/` counts, so the
+    # Rust PRs never wait on an Xcode runner.
+    name: ios changed?
+    runs-on: ubuntu-latest
+    outputs:
+      ios: ${{ steps.check.outputs.ios }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            range="origin/${{ github.base_ref }}...HEAD"
+          else
+            # A push: compare with the commit before it, or run when there
+            # is nothing to compare with (a new branch).
+            range="${{ github.event.before }}..HEAD"
+            git cat-file -e "${{ github.event.before }}" 2>/dev/null || range=""
+          fi
+          if [ -z "$range" ] || git diff --name-only $range -- ios/ | grep -q .; then
+            echo "ios=true" >> "$GITHUB_OUTPUT"
+            echo "ios/ changed — the iPhone build runs"
+          else
+            echo "ios=false" >> "$GITHUB_OUTPUT"
+            echo "nothing under ios/ changed — the iPhone build is skipped"
+          fi
+
+  iphone:
+    # The iPhone app is Swift, and nothing else in CI compiles it. Before this
+    # job, a Swift error could only surface after a merge, in the TestFlight
+    # workflow, and the phone silently stopped receiving builds (2026-09-16:
+    # every build between 1021 and 1099 failed at archive on one such error).
+    # Required for a PR that touches `ios/`; skipped for everything else.
+    name: iPhone (build, simulator)
+    needs: ios-changed
+    if: needs.ios-changed.outputs.ios == 'true'
+    # The same runner as ios-testflight.yml: the app needs the current iOS
+    # SDK, and macos-14's newest Xcode (16.2) is too old for it.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the newest Xcode on the runner
+        run: |
+          latest=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$latest"
+          xcodebuild -version
+      - name: Build for the simulator
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild build -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee "$RUNNER_TEMP/xcodebuild.log" | grep -E "error:|warning: unre|BUILD (SUCCEEDED|FAILED)|Compiling|Linking" || true
+          grep -q "BUILD SUCCEEDED" "$RUNNER_TEMP/xcodebuild.log"
+      - name: Say plainly what broke
+        if: failure()
+        run: |
+          echo "::error title=The iPhone app does not compile::This is the iOS (Swift) build, not Rust. The kernel and desktop jobs are separate. The Swift errors are below; a PR touching ios/ cannot merge with this red."
+          grep -E "\.swift:[0-9]+:[0-9]+: error:" "$RUNNER_TEMP/xcodebuild.log" | sort -u | head -n 40 \
+            | sed -E 's#^/Users/runner/work/[^/]+/[^/]+/(.*):([0-9]+):([0-9]+): error: (.*)#::error file=\1,line=\2,col=\3,title=iPhone build::\4#'
+          exit 1
