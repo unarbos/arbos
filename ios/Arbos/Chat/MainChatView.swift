@@ -66,7 +66,12 @@ struct ProjectChatView: View {
                 // Scrolled text passes under the inset; the pill and the
                 // composer sit on the background, not on the words.
                 .background(
-                    LinearGradient(colors: [ArbosTheme.bg.opacity(0), ArbosTheme.bg], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.25))
+                    ArbosTheme.bg
+                        .padding(.top, -14)
+                        .mask(
+                            LinearGradient(colors: [.clear, .black, .black], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.12))
+                                .padding(.top, -14)
+                        )
                         .ignoresSafeArea(edges: .bottom)
                 )
             }
