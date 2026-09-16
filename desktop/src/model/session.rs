@@ -4056,18 +4056,67 @@ fn is_waiting_line(text: &str) -> bool {
     text.trim() == "Waiting for your answer"
 }
 
-/// A kernel `status` call as the transcript records it: one line,
-/// "status: <what the agent is doing>". The step, or `None` for prose.
-fn status_line(text: &str) -> Option<String> {
+/// A `status` call written as a line of the reply, in any of the forms a
+/// model produces: the kernel's own record `status: <step>`, the prompt's
+/// example `status "<step>"` (QA qal-j01: three of them over the kickoff
+/// greeting, drawn as bubbles), `status 'step'`, `status(step)`,
+/// `status = step`, with or without markdown around the word. One line
+/// only. The step, or `None` for prose — "Status quo is fine" is prose.
+pub(crate) fn status_line(text: &str) -> Option<String> {
     let line = text.trim();
     if line.contains('\n') {
         return None;
     }
-    let rest = line
-        .strip_prefix("status:")
-        .or_else(|| line.strip_prefix("Status:"))?;
-    let step = rest.trim();
+    let line = line.trim_matches(|c: char| matches!(c, '*' | '_' | '`'));
+    let rest = ["status", "Status", "STATUS"]
+        .iter()
+        .find_map(|word| line.strip_prefix(word))?;
+    let rest = rest.trim_start_matches(|c: char| matches!(c, '*' | '_' | '`'));
+    let rest = rest.trim_start();
+    let step = if let Some(r) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('=')) {
+        r.trim().to_string()
+    } else if let Some(r) = rest.strip_prefix('(') {
+        r.trim_end_matches(|c: char| matches!(c, '*' | '_' | '`'))
+            .strip_suffix(')')
+            .unwrap_or(r)
+            .trim()
+            .to_string()
+    } else if rest.starts_with(['"', '\'', '“', '‘']) {
+        rest.trim_end_matches(|c: char| matches!(c, '*' | '_' | '`' | '.'))
+            .trim_matches(|c: char| matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’'))
+            .trim()
+            .to_string()
+    } else {
+        return None;
+    };
+    let step = step
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '*' | '`' | '_'))
+        .trim();
     (!step.is_empty()).then(|| step.to_string())
+}
+
+#[cfg(test)]
+mod status_line_tests {
+    use super::status_line;
+
+    #[test]
+    fn every_form_a_model_writes_is_the_step() {
+        assert_eq!(status_line("status: Reading the file"), Some("Reading the file".into()));
+        assert_eq!(status_line("Status: Setting plan"), Some("Setting plan".into()));
+        assert_eq!(status_line("status \"Looking around the new place\""), Some("Looking around the new place".into()));
+        assert_eq!(status_line("status 'Writing project context'"), Some("Writing project context".into()));
+        assert_eq!(status_line("status(\"Spawning worker\")"), Some("Spawning worker".into()));
+        assert_eq!(status_line("**status:** Running tests"), Some("Running tests".into()));
+        assert_eq!(status_line("`status \"Setting plan\"`"), Some("Setting plan".into()));
+    }
+
+    #[test]
+    fn prose_is_not_a_step() {
+        assert_eq!(status_line("Status quo is fine."), None);
+        assert_eq!(status_line("status"), None);
+        assert_eq!(status_line("The status of the build is green."), None);
+        assert_eq!(status_line("status: Reading\nthe file"), None);
+    }
 }
 
 /// A worker's folder name as a label: "math-docstrings" → "math docstrings",

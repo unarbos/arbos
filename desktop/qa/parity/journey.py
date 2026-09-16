@@ -296,9 +296,13 @@ class Journey:
         ix = self.project_ix()
         made = self.proj.is_dir()
         kickoff = self.app.exists("kickoff")
-        ok = made and ix is not None and st.get("pane") == "chat" and kickoff
-        self.score("J02-create-project", "⌘T, type a path that does not exist, Enter on Create: the folder is made, a tab opens on it, the kickoff view shows",
-                   ok, f"rows={len(rows)} made={made} tab={ix} pane={st.get('pane')} kickoff={kickoff} changes_pill={self.app.exists('pill-changes')}", t0)
+        # A fast kernel has the kickoff turn running by now and the
+        # transcript has taken the view over: that is the same landing.
+        c = self.root() or {}
+        setting_up = kickoff or bool(c.get("streaming") or c.get("turn_open"))
+        ok = made and ix is not None and st.get("pane") == "chat" and setting_up and not self.app.exists("pill-changes")
+        self.score("J02-create-project", "⌘T, type a path that does not exist, Enter on Create: the folder is made, a tab opens on it on the kickoff view (or its turn already running); no Changes pill on a non-repo",
+                   ok, f"rows={len(rows)} made={made} tab={ix} pane={st.get('pane')} kickoff_view={kickoff} kickoff_running={bool(c.get('streaming') or c.get('turn_open'))} changes_pill={self.app.exists('pill-changes')}", t0)
         return ix is not None
 
     def j03_kickoff(self) -> None:
@@ -420,6 +424,14 @@ class Journey:
         time.sleep(2)
         self.launch(fresh=False)
         ix = self.wait(lambda: self.project_ix(), 20)
+        # The tab that was in front when the window closed is in front
+        # again; Home only when that place is gone. Then click it as a user
+        # would, whatever came up, so the rest of the run does not depend on
+        # the restore.
+        front = next((p.get("active") for p in self.state()["projects"] if p["index"] == ix), None) if ix is not None else None
+        self.score("J11a-front-tab-restored", "the relaunch lands on the tab that was in front, not Home",
+                   bool(front), f"tab={ix} in_front={front} active_tab={[p['index'] for p in self.state()['projects'] if p.get('active')]}", t0)
+        t0 = time.time()
         if ix is not None:
             self.app.click(f"tab-{ix}"); time.sleep(1.5)
         after = self.wait(lambda: (self.root() if len((self.root() or {}).get("items", [])) >= 1 else None), 30) or {}
@@ -427,8 +439,10 @@ class Journey:
         kept = last_agent and any(last_agent.strip() == (i.get("text") or "").strip() for i in after.get("items", []) if i.get("kind") == "agent")
         users_after = [i.get("text", "")[:40] for i in after.get("items", []) if i.get("kind") == "user"]
         doubled = sorted({u for u in users_after if users_after.count(u) > 1})
+        # Workers the last turn started may still be running through the
+        # relaunch — the kernel outlives the window — so busy is allowed.
         self.score("J11-close-reopen", "quit and relaunch: the tab is back, the transcript has every item (no loss, no doubled prompt), the last reply is there",
-                   ix is not None and n_after >= n_before - 2 and bool(kept) and not doubled and not busy(self.state()),
+                   ix is not None and n_after >= n_before - 2 and bool(kept) and not doubled,
                    f"tab={ix} items {n_before}->{n_after} last_reply_kept={bool(kept)} doubled_prompts={doubled} pane={self.state().get('pane')}", t0)
 
     def j12_after_reopen(self) -> None:
@@ -489,6 +503,15 @@ def main() -> int:
     if not os.environ.get("OPENROUTER_API_KEY"):
         raise SystemExit("OPENROUTER_API_KEY is not set")
     drv = load_driver()
+    # The gate's stand-in `gh` first on PATH: a worker's `gh pr create` gets
+    # a PR URL instead of a login prompt — run 4's coordinator ran
+    # `gh auth login` and hung its turn on the interactive prompt (F-91).
+    fake_gh = Path("/tmp/journey-fake-gh")
+    fake_gh.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(HERE / "fake-gh" / "gh.sh", fake_gh / "gh")
+    os.chmod(fake_gh / "gh", 0o755)
+    os.environ["PATH"] = f"{fake_gh}:{os.environ.get('PATH', '')}"
+    os.environ["FAKE_GH_STATE"] = str(fake_gh / "counter")
     record.parent.mkdir(parents=True, exist_ok=True)
     prior = [json.loads(l) for l in record.read_text().splitlines() if l.strip()] if record.exists() else []
     next_run = max([r["run"] for r in prior if r["label"] == args.label], default=0) + 1

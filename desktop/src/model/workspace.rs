@@ -151,23 +151,32 @@ impl Workspace {
             .iter()
             .filter_map(|raw| Place::parse(raw))
             .collect();
+        // The tab that was in front when the window last closed: a launch
+        // lands there again ("close it and come back" is a step of the
+        // journey and what Jacob does all day); the home tab only when that
+        // place is gone.
+        let was_front = state
+            .projects
+            .get(state.active)
+            .and_then(|raw| Place::parse(raw));
         let mut projects: Vec<Project> = state
             .projects
             .into_iter()
             .filter_map(|raw| Place::parse(&raw).map(Project::open))
             .collect();
-        // The home tab: `~/.arbos`, the folder the app lands on. First in
-        // the strip and in front at every launch; the tabs that were open
-        // last time follow it, each with its state where it was left.
+        // The home tab: `~/.arbos`, always open and first in the strip; the
+        // tabs that were open last time follow it, each with its state
+        // where it was left.
         let home = Self::home_place().filter(|home| std::fs::create_dir_all(&home.path).is_ok());
-        let active = match home {
-            Some(home) => {
-                projects.retain(|project| project.place() != home);
-                projects.insert(0, Project::open(home));
-                Some(0)
-            }
-            None => (!projects.is_empty()).then(|| state.active.min(projects.len() - 1)),
-        };
+        if let Some(home) = home {
+            projects.retain(|project| project.place() != home);
+            projects.insert(0, Project::open(home));
+        }
+        let active = (!projects.is_empty()).then(|| {
+            was_front
+                .and_then(|front| projects.iter().position(|project| project.place() == front))
+                .unwrap_or(0)
+        });
         let restore: Vec<usize> = (0..projects.len()).collect();
         let mut this = Self {
             settings,

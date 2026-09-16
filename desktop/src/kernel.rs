@@ -1419,8 +1419,7 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
                 failed: false,
             } if text.trim() == "Waiting for your answer" && ix < n => false,
             crate::model::session::ChatItem::Agent(text) => {
-                let line = text.trim();
-                !(line.starts_with("status:") && !line.contains('\n'))
+                crate::model::session::status_line(text).is_none()
             }
             _ => true,
         }
