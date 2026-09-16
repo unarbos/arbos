@@ -454,6 +454,12 @@ final class ChatStore: ObservableObject {
                     return
                 }
             }
+            // The transcript's own line for a question the card already
+            // shows: the card is the line.
+            if case .agent(let text, _) = item.kind,
+               items.contains(where: { if case .ask(let q, _, _, _) = $0.kind { return q.trimmingCharacters(in: .whitespacesAndNewlines) == text.trimmingCharacters(in: .whitespacesAndNewlines) } else { return false } }) {
+                return
+            }
             closeOpenAgentMessage()
             items.append(item)
         case .agentDelta(let delta, let step):
