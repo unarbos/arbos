@@ -22,6 +22,7 @@ struct ProjectChatView: View {
     @StateObject private var dictation = Dictation()
     @EnvironmentObject private var notifier: Notifier
     /// The row SwiftUI keeps in place while content changes (paging back).
+    @State private var heldRow: UUID?
     /// Growth at the bottom pins the view to the tail, until the user pages
     /// back — then the top is theirs until they send again.
     @State private var followGrowth = true
@@ -282,6 +283,7 @@ struct ProjectChatView: View {
                 .padding(.top, 4)
             }
             .modifier(ChatScrollAnchor(followGrowth: followGrowth))
+            .scrollPosition(id: $heldRow, anchor: .top)
             .scrollDismissesKeyboard(.interactively)
             // A tap on the words puts the keyboard away (Jacob, build 956),
             // and the tail comes back into view as the keyboard moves.
@@ -297,6 +299,7 @@ struct ProjectChatView: View {
                     // Older lines came in above: hold the row that was at the top.
                     chat.anchorAfterPrepend = nil
                     followGrowth = false
+                    heldRow = anchor
                     proxy.scrollTo(anchor, anchor: .top)
                     Task { @MainActor in
                         try? await Task.sleep(for: .milliseconds(120))
@@ -381,6 +384,7 @@ struct ProjectChatView: View {
     private func send() {
         guard canSend else { return }
         followGrowth = true
+        heldRow = nil
         chat.send(draft, attachments: attachments)
         // The first message sent is the moment to ask about being told
         // when the answer comes.
