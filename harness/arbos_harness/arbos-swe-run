@@ -15,6 +15,7 @@
 #   ARBOS_BASE_COMMIT                    diff base (default: HEAD when we start)
 #   ARBOS_TRACE                          1 = record every provider call (default 1)
 #   ARBOS_WINDOW_TOKENS                  context the loop plans against (default 200000)
+#   ARBOS_VISION_MODEL                   model that describes images (default google/gemini-2.5-flash)
 #   ARBOS_ALLOWLIST                      tools the agent may use (default: file + shell tools)
 #   ARBOS_INSTRUCTIONS                   standing instructions shown in every prompt
 #
@@ -22,7 +23,8 @@
 # kernel.log, rollout/<stamp>-root/ (the exported bundle), result.json.
 # Exit 0 whenever the agent ran and left a transcript, whatever it achieved;
 # result.json carries the kernel's own exit code (0 ok, 2 failed turn,
-# 3 waited on a question, 4 timed out). Non-zero only when nothing ran.
+# 3 waited on a question, 4 timed out). Non-zero only when nothing ran:
+# 75 when the provider refused before any tool call (not a graded result).
 set -u
 
 PLACE="${ARBOS_PLACE:-}"
@@ -80,6 +82,9 @@ TRACE=true
   [ -n "${ARBOS_MODEL:-}" ] && echo "model = \"$ARBOS_MODEL\""
   echo "window_tokens = ${ARBOS_WINDOW_TOKENS:-200000}"
   echo "fallback_models = [\"none\"]"
+  # Image description for models without vision: the kernel's OpenRouter
+  # default is an openai/* model, which this account cannot call (403).
+  echo "vision_model = \"${ARBOS_VISION_MODEL:-google/gemini-2.5-flash}\""
   echo "trace = $TRACE"
 } > "$CONFIG"
 chmod 600 "$CONFIG"
@@ -162,8 +167,10 @@ if [ "$IN_GIT" -eq 1 ]; then
 fi
 
 END=$(date +%s)
-TOOL_CALLS=$(grep -c '"kind":"tool"' "$TRANSCRIPT" 2>/dev/null || echo 0)
-TURNS=$(grep -c '"kind":"turn_complete"' "$TRANSCRIPT" 2>/dev/null || echo 0)
+# grep -c prints 0 and exits 1 on no match; take the first line only.
+count() { c=$(grep -c "$1" "$2" 2>/dev/null | head -n1); echo "${c:-0}"; }
+TOOL_CALLS=$(count '"kind":"tool"' "$TRANSCRIPT")
+TURNS=$(count '"kind":"turn_complete"' "$TRANSCRIPT")
 EVENTS=$(wc -l < "$TRANSCRIPT" 2>/dev/null | tr -d ' ' || echo 0)
 q() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 cat > "$OUT/result.json" <<EOF
@@ -185,6 +192,15 @@ cat > "$OUT/result.json" <<EOF
 }
 EOF
 
+# A provider refusal (403 policy block, 401, a model the route does not
+# serve) that stopped the turn before any tool ran is not a result of the
+# agent's; exit 75 so the harness records an error, not a graded zero.
+RUN_TOOLS=$(count '"kind":"tool"' "$OUT/run.jsonl")
+if [ "$KCODE" -eq 2 ] && [ "${RUN_TOOLS:-0}" -eq 0 ] \
+   && grep -E '"kind":"notice".*"failed":true' "$OUT/run.jsonl" 2>/dev/null | grep -qiE '403|401|blocked|policy violation|no endpoints|not a valid model'; then
+  echo "arbos-swe-run: the model provider refused the request before the agent ran a tool; see $OUT/run.jsonl" >&2
+  exit 75
+fi
 if [ -s "$TRANSCRIPT" ]; then
   exit 0
 fi
