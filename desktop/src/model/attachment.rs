@@ -300,6 +300,10 @@ pub struct UserMessage {
     /// the kernel wrote seqs). A report anchors on it (`feedback` frame).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
+    /// The id of a problem report he sent about this exchange, once one has
+    /// gone. The thumbs-down stays lit for it, whatever the vote does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported: Option<String>,
     /// Typed into a running turn (Cursor's steer): the card sits inside
     /// that turn's work, and the turn stays one — no second "Worked".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -377,6 +381,7 @@ impl From<StoredMessage> for UserMessage {
                 feedback: None,
                 described: Vec::new(),
                 seq: None,
+                reported: None,
                 steer: false,
             },
             StoredMessage::Images {
@@ -393,6 +398,7 @@ impl From<StoredMessage> for UserMessage {
                 feedback: None,
                 described: Vec::new(),
                 seq: None,
+                reported: None,
                 steer: false,
             },
         };
@@ -413,6 +419,7 @@ impl From<String> for UserMessage {
             feedback: None,
             described: Vec::new(),
             seq: None,
+            reported: None,
             steer: false,
         };
         message.lift_files();

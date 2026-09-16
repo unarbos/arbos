@@ -682,6 +682,9 @@ pub struct Arbos {
     /// The sheet a tab's name, glyph and colour are set in.
     pub(crate) tab_sheet: Entity<TabSheet>,
     pub(crate) feedback_sheet: Entity<FeedbackSheet>,
+    /// The exchange the open report is about — chat id and the prompt's
+    /// `seq` — so a sent report can leave its mark on that prompt's footer.
+    report_anchor: Option<(u64, u64)>,
     pub(crate) permissions_sheet: Entity<PermissionsSheet>,
     pub(crate) permission_center: Entity<PermissionCenter>,
     /// ⌘K: the palette over every open tab's chats.
@@ -981,6 +984,7 @@ impl Arbos {
             opener,
             tab_sheet,
             feedback_sheet,
+            report_anchor: None,
             permissions_sheet,
             permission_center,
             chat_search,
@@ -2288,6 +2292,7 @@ impl Arbos {
             .as_ref()
             .map(crate::feedback::load_parts)
             .unwrap_or_default();
+        self.report_anchor = id.zip(seq);
         self.feedback_sheet.update(cx, |sheet, cx| {
             sheet.show(agent, seq, parts, window, cx);
             sheet.take_session(
@@ -2382,6 +2387,13 @@ impl Arbos {
             )),
             Err(e) => Err(format!("could not write the report: {e:#}")),
         };
+        if outcome.is_ok() {
+            if let Some((chat_id, seq)) = self.report_anchor.take() {
+                self.workspace.update(cx, |workspace, cx| {
+                    workspace.with_session(chat_id, cx, |chat| chat.mark_reported(seq, &id));
+                });
+            }
+        }
         sheet.update(cx, |sheet, cx| sheet.settled(outcome, cx));
     }
 

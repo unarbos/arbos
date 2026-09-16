@@ -4166,15 +4166,22 @@ fn turn_footer(
                 .text_color(theme.text_faint),
         );
     // Cursor's order: thumbs up, thumbs down, copy, fork, then "Just now".
-    let (vote, sent_at) = match chat.items.get(turn) {
-        Some(ChatItem::User(message)) => (message.feedback, message.sent_at),
-        _ => (None, None),
+    let (vote, sent_at, reported) = match chat.items.get(turn) {
+        Some(ChatItem::User(message)) => {
+            (message.feedback, message.sent_at, message.reported.is_some())
+        }
+        _ => (None, None, false),
     };
     let thumb = |up: bool, cx: &mut Context<Workspace>| {
         let value: i8 = if up { 1 } else { -1 };
-        let lit = vote == Some(value);
+        // A sent report keeps the thumbs-down lit whatever the vote does
+        // since: Cursor's stays marked after Submit, and a feature about
+        // showing him what happened should leave a mark on what he pressed.
+        let lit = vote == Some(value) || (!up && reported);
         let (name, path, tip) = if up {
             ("up", crate::assets::THUMBS_UP_ICON, "Good answer")
+        } else if reported {
+            ("down", crate::assets::THUMBS_DOWN_ICON, "Reported")
         } else {
             ("down", crate::assets::THUMBS_DOWN_ICON, "Bad answer")
         };
@@ -5798,6 +5805,7 @@ mod selection_tests {
                 images: vec![image.clone(), image],
                 described: Vec::new(),
                 seq: None,
+                reported: None,
                 steer: false,
                 files: Vec::new(),
                 worked_secs: None,
