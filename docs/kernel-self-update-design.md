@@ -72,6 +72,20 @@ out because the first version of this document said the opposite of each.
 - **A parked question to the human.** It is a file, `clear_approves` does not
   touch it, and the answer arrives as an inbox file that opens a new turn.
   `Waiting` maps to `Idle`.
+
+  **This is true from [#342](https://github.com/unarbos/arbos/pull/342) onward
+  and was not true before it**, so it is a dependency and not a fact about the
+  design. The file always survived, but a client attaching to the restarted
+  kernel was never re-offered the question: the desktop rebuilt a card from the
+  transcript line, and the phone would have shown a question with nothing to
+  tap. Attach now re-offers pending asks as `ask` frames.
+
+  It matters here more than it looks. `execv` keeps the pid, but it replaces
+  the program image and closes the listening socket, so **every attached client
+  reconnects and attaches fresh** — the re-attach path is squarely inside this
+  feature's blast radius, and that is precisely where the gap was. Slice 4
+  would have shipped a kernel that updated itself between turns and left
+  somebody holding an unanswerable question.
 - **A detached job** — *changed 2026-09-16 by [#321](https://github.com/unarbos/arbos/pull/321),
   and a consequence of `execv` rather than a separate decision.* The pid does
   not change, so a job's leash — which watches the kernel's pid — sees nothing
@@ -172,6 +186,37 @@ platform is an answer, not an error. Only the last is a non-zero exit.
 `dev` when the machine is registered with a hub, `stable` when it is not —
 Jacob's ruling. A machine on the hub is part of the mesh and is meant to track
 `main`. Automatic is on by default, with the refusals above as the safety.
+
+## Slice 4 must be driven, not reasoned
+
+Three claims about what survives a restart were read out of the code this
+morning and written into this document. Two of them were wrong when somebody
+actually ran them ([#342](https://github.com/unarbos/arbos/pull/342)): a parked
+ask survived the file but was never re-offered to a reconnecting client, and a
+cut approval was described to the model as "may have completed in part or in
+full" when the call had never run at all. The third held.
+
+Both were correct readings of the code and both were wrong about the behaviour,
+which is the point. This design's gate — what may be updated and what may not —
+rests entirely on claims of that kind, so slice 4 does not ship on reasoning.
+
+What has to be **watched happening**, on a real kernel, before it runs
+unattended:
+
+1. An agent parked on a question, a desktop and a phone attached, an update in
+   between. The question is re-offered to both and answering it still works.
+2. A detached job running across the swap. It is still running afterwards, and
+   its output did not stop — the claim that the leash sees an unchanged pid is
+   the reason jobs no longer hold the gate, and it is untested from this side.
+3. A remote child mid-turn. The gate refuses, and does not merely appear to.
+4. A new binary that passes the probe and then dies at boot. `<bin>.previous`
+   is there and moving it back recovers the machine.
+5. `execv` on a box with no supervisor — `subnet120` is the case — with the
+   path captured before the swap, confirming it comes back as the *new* build
+   and not the deleted inode.
+
+Any of the five that cannot be driven is a reason to hold the slice, not a
+reason to write a more confident sentence about it.
 
 ## Slices
 
