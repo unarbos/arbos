@@ -101,3 +101,22 @@ sent.
    leaves a plain 👎.
 
 Ask 3 (the Help item and ⇧⌘R) you had already done in #336.
+
+## Added 18:25 UTC — after the first real pickup
+
+The poller took the rig's own report (the drive above) as `2026-09-16-1`
+on the directory transport: copied to the rig and the store, ledger row
+written, second poll `nothing new`. One reading to fix, small: it printed
+"he removed: log, screenshot". He removed the log. The screenshot was not
+removed — it failed (`included.screenshot: false` **with**
+`screenshot_error` beside it). The poller should read `included: false`
+plus an error as a fault, not a choice, or the loop will not chase the
+capture bug the report is telling it about — the very distinction the
+sheet's "recorded as removed, never merely absent" was built for.
+
+And the thing that decides whether any of this reaches you from Jacob:
+**S3, delivery from his outbox to `arbos://arboslife/…`, is not on `main`**
+(`git grep feedback-outbox` finds only the writer), and the hub-delivery
+ask — which project, a writer token for his desktop — has no answer I can
+find. The timer is registered and the pickup is proven; nothing can arrive
+until S3 lands. The parity loop is saying so to the coordinator.
