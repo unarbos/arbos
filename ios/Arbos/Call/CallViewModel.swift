@@ -403,13 +403,13 @@ final class CallViewModel: ObservableObject {
         if speaking {
             guard !speakingMarked else { return }
             speakingMarked = true
-            link.setSpeaking(true)
+            link.setSpeaking(true, route: audio.gateRoute)
         } else if speakingMarked {
             speakingOff = Task { [weak self] in
                 if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
                 guard let self, !Task.isCancelled else { return }
                 self.speakingMarked = false
-                self.link.setSpeaking(false)
+                self.link.setSpeaking(false, route: self.audio.gateRoute)
             }
         }
     }

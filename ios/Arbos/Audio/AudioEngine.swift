@@ -61,6 +61,21 @@ final class AudioEngine {
         }
     }
 
+    /// The route in the gateway's words, for `client.speaking`: `airpods`,
+    /// `headset`, `headphones`, `bluetooth`, `wired`, `earpiece`, `speaker`.
+    var gateRoute: String {
+        guard let port = AVAudioSession.sharedInstance().currentRoute.outputs.first else { return "speaker" }
+        switch port.portType {
+        case .builtInSpeaker: return "speaker"
+        case .builtInReceiver: return "earpiece"
+        case .headphones, .lineOut: return "wired"
+        case .bluetoothHFP, .bluetoothA2DP, .bluetoothLE:
+            return port.portName.localizedCaseInsensitiveContains("airpods") ? "airpods" : "bluetooth"
+        case .usbAudio: return "headset"
+        default: return "speaker"
+        }
+    }
+
     /// `captureMic: false` runs playback only (a test feeds audio itself).
     func start(captureMic: Bool = true) throws {
         try configureSession()

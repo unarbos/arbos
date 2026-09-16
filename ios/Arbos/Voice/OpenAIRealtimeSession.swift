@@ -75,7 +75,7 @@ final class OpenAIRealtimeSession: VoiceSession {
         interrupt()
     }
 
-    func setSpeaking(_ speaking: Bool) {}
+    func setSpeaking(_ speaking: Bool, route: String) {}
 
     func interrupt() {
         // Server VAD already cancelled the reply on `speech_started`; this
