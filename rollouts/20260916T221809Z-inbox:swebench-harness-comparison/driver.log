@@ -1,0 +1,5 @@
+1789597089078 kernel started pid 1100776
+1789598521851 timeout waiting for turn root idle after 300s
+1789598522070 BREAK turn-never-ended: feature swebench-harness-comparison: turn never ended
+1789598522452 kernel stopped with code 0
+1789598522879 bugs: new 05d33e739b.md
