@@ -2,6 +2,7 @@
 
 - Feature: the spawn brief's `output` field and the "Output … not written yet" nudge (coordinator protocol, `.arbos/docs/` as the home of a worker's outputs); `main` @ `efcab58f` and #329's branch alike, model `google/gemini-2.5-flash`
 - Severity: high for the thing Jacob does: he asks for a file in his project, the worker writes it in the right place, and then the kernel talks the worker into moving it into `.arbos/docs/`, where the user never looks and where `git` does not see it. The tests pass, the branch has its commit, and the CHANGELOG the user asked for is gone from the repo.
+- **Closed 2026-09-16 18:15 UTC** by #340 (`71c5a812`): a move or delete of a file the turn wrote is refused after an output reminder, and the reminder accepts the file where the task put it. Re-run of the journey on the #340 kernel (+ `efcab58f` desktop), 2/2: J7 pass, `CHANGELOG.md` at the project root with the QA line, no "not written yet" nudge in the worker's transcript, nothing under `.arbos/docs/` but the project page. Both runs 8/8. J7 keeps the check.
 - Journey step: **J7 (the result on disk)** — `no CHANGELOG.md`, failed in two consecutive runs (`20260916T163147Z-journey-linux`, `20260916T172422Z-journey-linux`), the brief-and-move shape visible in a third (`20260916T162657Z`, where the worker copied instead of moving so J7 passed by luck). Named by the journey's twice rule.
 
 ## Repro

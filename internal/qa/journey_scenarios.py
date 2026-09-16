@@ -159,6 +159,7 @@ class Rig:
                 pass
         ms = round((time.time() - t0) * 1000)
         self.pulses.append((after, ms))
+        getattr(self.cx, "_pulses", self.pulses if False else []).append((after, ms))
         return ms
 
     def active_path(self):
@@ -345,6 +346,7 @@ def register(scenario, registry, transcript, now_ms, branch):
         """The acceptance journey J1..J8 on the Linux rig (docs/acceptance-journeys.md): a fresh project, a real challenge with a failing test, follow-ups, steer/interrupt/read-only ask, leave and come back, the result on disk, kernel restart and a second project. Scored per step."""
         steps = {s: ("unverified", "not reached") for s in STEPS}
         ev = {}
+        cx._pulses = []  # every liveness pulse across every app launch of this run
 
         def mark(step, verdict, why):
             steps[step] = (verdict, why)
@@ -838,7 +840,7 @@ def register(scenario, registry, transcript, now_ms, branch):
                     steps[s] = ("unverified", f"not reached: {type(e).__name__}: {str(e)[:80]}")
         finally:
             try:
-                pulses = getattr(rig, "pulses", [])
+                pulses = getattr(cx, "_pulses", None) or getattr(rig, "pulses", [])
                 if pulses:
                     slowest = max(pulses, key=lambda x: x[1])
                     ev["liveness"] = {"pulses": len(pulses), "slowest_ms": slowest[1], "slowest_after": slowest[0], "limit_ms": int(Rig.PULSE_LIMIT_S * 1000)}

@@ -10,7 +10,7 @@ ROOT="${ARBOS_QA_ROOT:-$HOME/arbos-qa}"
 STORE="${ARBOS_QA_STORE:-/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/qa}"
 export ARBOS_QA_ROOT="$ROOT" ARBOS_QA_SYSTEM_TOOLCHAIN=1 ARBOS_QA_STAGING="$ROOT/staging"
 export ARBOS_QA_TRACK_BRANCHES="${ARBOS_QA_TRACK_BRANCHES:-main}"  # main is canonical since 2026-09-13 23:50 UTC (#58, #104, #106, #105 merged)
-export ARBOS_QA_BUDGET_USD="${ARBOS_QA_BUDGET_USD:-10}"
+export ARBOS_QA_BUDGET_USD="${ARBOS_QA_BUDGET_USD:-20}"  # $20/day approved by Jacob 2026-09-16; report when it binds, do not raise
 export ARBOS_QA_DESKTOP="${ARBOS_QA_DESKTOP:-1}" ARBOS_QA_DRIVER_DIR="${ARBOS_QA_DRIVER_DIR:-$([ -f /cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/parity/arbosdriver.py ] && echo /cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/parity || echo /home/ubuntu/arbos-qa/repo/desktop/driver)}"
 mkdir -p "$ROOT/loop" "$ROOT/logs"
 # Pause switch: a file state/PAUSED-until-<UTC ISO> stops every run until that instant
