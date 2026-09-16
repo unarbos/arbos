@@ -27,6 +27,7 @@ struct ProjectChatView: View {
     /// back — then the top is theirs until they send again.
     @State private var followGrowth = true
     @State private var atTail = true
+    @State private var connectingSince = Date()
     @State private var openFolds: Set<UUID> = []
 
     /// Consecutive tool calls fold into one row: the phone shows what was
@@ -253,7 +254,18 @@ struct ProjectChatView: View {
                         WorkingLine(step: chat.step)
                     }
                     workerLines
-                    if let notice = modeNotice {
+                    if chat.mode == .connecting {
+                        // Opening a project whose link is down was a blank
+                        // page for as long as the socket hung (M-83): say
+                        // what is happening, then who is not answering.
+                        TimelineView(.periodic(from: connectingSince, by: 1)) { context in
+                            let waited = context.date.timeIntervalSince(connectingSince)
+                            Text(waited >= 10 ? "\(title) is not answering — waiting" : "Opening \(title)…")
+                                .font(ArbosTheme.caption)
+                                .foregroundStyle(waited >= 10 ? ArbosTheme.textMuted : ArbosTheme.textDim)
+                                .padding(.top, 4)
+                        }
+                    } else if let notice = modeNotice {
                         Text(notice)
                             .font(ArbosTheme.caption)
                             .foregroundStyle(ArbosTheme.textDim)
@@ -300,7 +312,8 @@ struct ProjectChatView: View {
                     withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
                 }
             }
-            .onChange(of: chat.mode) { _, _ in
+            .onChange(of: chat.mode) { _, mode in
+                if mode == .connecting { connectingSince = Date() }
                 // The one line under the transcript changed; keep it in view.
                 if atTail { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) } }
             }
@@ -358,8 +371,7 @@ struct ProjectChatView: View {
             if let refusal = chat.refusal { return refusal }
             if let seconds = chat.reconnectIn { return "Link lost — reconnecting in \(seconds)s" }
             return "Kernel offline."
-        case .connecting: return "Reconnecting…"
-        case .server, .live: return nil
+        case .connecting, .server, .live: return nil
         }
     }
 
