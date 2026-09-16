@@ -32,7 +32,7 @@ pub mod snapshot;
 pub mod store_cmd;
 pub mod subs;
 pub mod tools;
-pub mod watch;
 pub mod update_cmd;
+pub mod watch;
 pub mod worker;
 pub mod worktree;
