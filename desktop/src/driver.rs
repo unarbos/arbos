@@ -57,7 +57,7 @@ use std::{
 };
 
 /// The window title the screenshot looks for among AppKit's windows.
-const WINDOW_TITLE: &str = "Arbos";
+pub(crate) const WINDOW_TITLE: &str = "Arbos";
 
 /// Where the socket goes, or `None` when the driver is switched off.
 pub fn socket_path() -> Option<PathBuf> {

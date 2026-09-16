@@ -2305,6 +2305,18 @@ impl Arbos {
         let Some(id) = self.workspace.read(cx).active_id() else {
             return;
         };
+        // Look before taking: this runs inside the workspace's observer,
+        // and `with_session` notifies the workspace, so taking from a chat
+        // that holds nothing observed itself forever — the window froze
+        // the moment the sheet opened (found driving it on the rig).
+        if !self
+            .workspace
+            .read(cx)
+            .session(id)
+            .is_some_and(|chat| chat.feedback.is_some())
+        {
+            return;
+        }
         let mut taken = None;
         self.workspace.update(cx, |workspace, cx| {
             workspace.with_session(id, cx, |chat| taken = chat.take_feedback());

@@ -155,17 +155,10 @@ impl FeedbackSheet {
     /// The picture arrived, or did not.
     pub fn take_shot(&mut self, shot: Result<feedback::Shot, String>, cx: &mut Context<Self>) {
         match shot {
-            Ok(shot) => {
-                if feedback::shot_too_big(&shot) {
-                    // Said rather than silently dropped: a report whose picture
-                    // was cut in transit is worse than one that says why there
-                    // is none.
-                    self.draft.shot_error =
-                        Some("the window is too large to send as one picture".into());
-                } else {
-                    self.draft.shot = Some(shot);
-                }
-            }
+            // Scaling happens in the capture, so a picture that arrives here
+            // already fits. It used to be refused for size instead, which meant
+            // no report from a Retina Mac carried one at all (F-101).
+            Ok(shot) => self.draft.shot = Some(shot),
             Err(why) => self.draft.shot_error = Some(why),
         }
         cx.notify();
@@ -342,7 +335,10 @@ impl Render for FeedbackSheet {
                     .border_color(theme.border)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(heading)
-                    .child(self.field.clone())
+                    // Named so the rig can put the caret back after
+                    // clicking a row; typing already works, since the
+                    // field takes the focus when the sheet opens.
+                    .child(div().id("feedback-note").child(self.field.clone()))
                     .child(theme.group_box().children(rows))
                     .child(self.tool_io_control(&theme, cx))
                     .child(self.provenance(&b, &theme))
@@ -475,10 +471,15 @@ impl FeedbackSheet {
                             .text_style(TextStyle::Caption)
                             .text_color(theme.text_muted)
                             .child(SharedString::from(format!(
-                                "{}×{}, {} — this window only, never the whole screen",
+                                "{}×{}, {} — {}",
                                 shot.width,
                                 shot.height,
-                                feedback::bytes_human(shot.bytes.len() as u64)
+                                feedback::bytes_human(shot.bytes.len() as u64),
+                                if shot.whole_screen {
+                                    "the whole display: this desktop gave no way to photograph the window alone, so anything else on screen is in it"
+                                } else {
+                                    "this window only, never the whole screen"
+                                }
                             ))),
                     )
                     .into_any_element(),
@@ -556,6 +557,15 @@ impl FeedbackSheet {
 
     fn shot_detail(&self) -> String {
         match (&self.draft.shot, &self.draft.shot_error) {
+            // A whole-screen capture leads with that, because it is the one
+            // thing about the picture he may want to act on: his other windows
+            // are in it, and the design says they are not the report.
+            (Some(shot), _) if shot.whole_screen => format!(
+                "your whole screen, not only Arbos — {}×{}, {}",
+                shot.width,
+                shot.height,
+                feedback::bytes_human(shot.bytes.len() as u64)
+            ),
             (Some(shot), _) => format!(
                 "{}×{}, {}",
                 shot.width,
@@ -609,14 +619,17 @@ impl FeedbackSheet {
                     .flex_1()
                     .text_style(TextStyle::Caption)
                     .text_color(theme.text_faint)
-                    .child(SharedString::from(if on {
-                        format!(
-                            "{calls} calls carry what they were given and a glance at what came back — including file contents"
-                        )
-                    } else {
-                        format!(
-                            "{calls} calls will say what ran and whether it failed, with no file contents and no paths"
-                        )
+                    .child(SharedString::from({
+                        let s = if calls == 1 { "call" } else { "calls" };
+                        if on {
+                            format!(
+                                "{calls} {s} carry what they were given and a glance at what came back — including file contents"
+                            )
+                        } else {
+                            format!(
+                                "{calls} {s} will say what ran and whether it failed, with no file contents and no paths"
+                            )
+                        }
                     })),
             )
             .into_any_element()

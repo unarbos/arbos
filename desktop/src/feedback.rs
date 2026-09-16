@@ -39,12 +39,20 @@ pub const TOOL_IO_BY_DEFAULT: bool = true;
 /// without making the review sheet unreadable.
 pub const TAIL_LINES: u32 = 200;
 
-/// A screenshot wider than this is scaled down before it is encoded. The
-/// kernel serves one file at most 1 MiB (`files::READ_CAP`), and the
-/// poller reads the picture as base64 through that door, so a Retina window
-/// at full size would arrive cut — and a cut base64 string is a broken
-/// image, which is worse than a small one.
+/// The kernel serves one file at most 1 MiB (`files::READ_CAP`), and the
+/// poller reads the picture as base64 through that door, so a picture past
+/// this arrives cut — and a cut base64 string is a broken image, which is
+/// worse than a small one.
 pub const SHOT_MAX_BASE64: usize = 900 * 1024;
+
+/// A picture is scaled to this width before it is encoded.
+///
+/// A bug report does not need Retina pixels; it needs to show what the window
+/// looked like. `screencapture -l` of a 1440×900 Retina window is 2880×1800,
+/// which as PNG is comfortably past the cap — so before this, every report
+/// from Jacob's Mac would have carried no picture at all (F-101, found by
+/// driving the sheet on the rig).
+pub const SHOT_WIDTH: u32 = 1440;
 
 /// The kernel's answer, as the app holds it.
 #[derive(Clone, Debug, Default)]
@@ -99,6 +107,14 @@ pub struct Shot {
     pub height: u32,
     /// `image/png` or `image/jpeg`.
     pub mime: String,
+    /// The capture is the whole display, not the Arbos window alone. True only
+    /// where the window could not be photographed on its own — a Linux desktop
+    /// with no way to name the window.
+    ///
+    /// It matters because his other windows are then in the picture, and the
+    /// design's own rule is that they are not the report. So it is never sent
+    /// quietly: the sheet says so, and one click drops it.
+    pub whole_screen: bool,
 }
 
 impl Shot {
@@ -673,20 +689,104 @@ pub fn capture_window(width: f32, height: f32) -> Result<Shot> {
             .map(|d| d.as_millis())
             .unwrap_or(0)
     ));
-    let id = crate::driver::ns_window_number(width, height)
-        .context("could not find this window to photograph")?;
-    crate::driver::capture_window(id, &path)?;
+    let whole_screen = grab(width, height, &path)?;
     let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let _ = std::fs::remove_file(&path);
     if bytes.is_empty() {
         anyhow::bail!("the capture wrote nothing");
     }
-    Ok(Shot {
-        bytes,
-        width: width as u32,
-        height: height as u32,
-        mime: "image/png".into(),
-    })
+    fit_for_sending(&bytes, whole_screen)
+}
+
+/// Put a picture of the window at `path`. `Ok(true)` means the whole display
+/// was taken because the window alone could not be.
+#[cfg(target_os = "macos")]
+fn grab(width: f32, height: f32, path: &Path) -> Result<bool> {
+    let id = crate::driver::ns_window_number(width, height)
+        .context("could not find this window to photograph")?;
+    crate::driver::capture_window(id, path)?;
+    Ok(false)
+}
+
+/// X11 and Wayland have no AppKit window number, so the window is named
+/// instead. `import -window <title>` takes ours alone; failing that the id
+/// from `xdotool`; failing both, the whole display, which the caller is told
+/// about rather than left to assume.
+#[cfg(not(target_os = "macos"))]
+fn grab(_width: f32, _height: f32, path: &Path) -> Result<bool> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let wrote = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0) > 0;
+    let by_name = std::process::Command::new("import")
+        .args(["-window", crate::driver::WINDOW_TITLE])
+        .arg(path)
+        .status();
+    if by_name.map(|s| s.success()).unwrap_or(false) && wrote(path) {
+        return Ok(false);
+    }
+    if let Ok(out) = std::process::Command::new("xdotool")
+        .args(["search", "--pid", &std::process::id().to_string()])
+        .output()
+        && let Some(id) = String::from_utf8_lossy(&out.stdout).lines().next()
+        && std::process::Command::new("import")
+            .args(["-window", id.trim()])
+            .arg(path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        && wrote(path)
+    {
+        return Ok(false);
+    }
+    // The rig's own path, and the last resort on a desktop: everything on the
+    // screen. Honest rather than silent — his other windows are in it.
+    crate::driver::capture_window(0, path)?;
+    Ok(true)
+}
+
+/// Scale and encode a capture so it fits through the door it has to go
+/// through, rather than being refused at it.
+///
+/// A window on a Retina Mac is 2880×1800 and its PNG is well past the cap, so
+/// refusing meant no report from Jacob ever carried a picture. Scaled to
+/// [`SHOT_WIDTH`] and JPEG-encoded it is a few hundred kilobytes and still
+/// shows what he was looking at. Quality steps down, and then the width, until
+/// it fits; a report is worth more than a sharp picture.
+pub fn fit_for_sending(bytes: &[u8], whole_screen: bool) -> Result<Shot> {
+    let image = image::load_from_memory(bytes).context("read the capture back")?;
+    for width in [SHOT_WIDTH, SHOT_WIDTH / 2, SHOT_WIDTH / 3] {
+        let scaled = if image.width() > width {
+            image.resize(
+                width,
+                u32::MAX,
+                image::imageops::FilterType::CatmullRom,
+            )
+        } else {
+            image.clone()
+        };
+        for quality in [82u8, 70, 55, 40] {
+            let mut out = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)
+                .encode_image(&scaled)
+                .context("encode the capture")?;
+            let shot = Shot {
+                bytes: out,
+                width: scaled.width(),
+                height: scaled.height(),
+                mime: "image/jpeg".into(),
+                whole_screen,
+            };
+            if !shot_too_big(&shot) {
+                return Ok(shot);
+            }
+        }
+    }
+    anyhow::bail!(
+        "the capture will not fit in {} bytes even at {}px",
+        SHOT_MAX_BASE64,
+        SHOT_WIDTH / 3
+    )
 }
 
 #[cfg(test)]
@@ -780,22 +880,48 @@ mod tests {
         assert_eq!(&format_utc(0), "19700101T000000Z");
     }
 
+    /// The bug the rig found: a Retina window's capture is 2880×1800, its PNG
+    /// is well past the cap, and the sheet used to refuse it — so no report
+    /// from Jacob's Mac would ever have carried a picture (F-101). It has to
+    /// be made to fit, not turned away at the door.
     #[test]
-    fn a_picture_too_big_for_the_door_is_known_before_it_is_sent() {
-        let small = Shot {
-            bytes: vec![0; 1000],
-            width: 1,
-            height: 1,
-            mime: "image/png".into(),
-        };
-        assert!(!shot_too_big(&small));
-        let big = Shot {
-            bytes: vec![0; SHOT_MAX_BASE64],
-            width: 1,
-            height: 1,
-            mime: "image/png".into(),
-        };
-        assert!(shot_too_big(&big));
+    fn a_retina_window_is_scaled_to_fit_rather_than_refused() {
+        // Noise, not flat colour: a flat image compresses to nothing and would
+        // pass this test without proving anything.
+        let (w, h) = (2880u32, 1800u32);
+        let mut raw = image::RgbImage::new(w, h);
+        let mut seed = 0x2545F491u32;
+        for pixel in raw.pixels_mut() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let b = seed.to_le_bytes();
+            *pixel = image::Rgb([b[0], b[1], b[2]]);
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(raw)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        assert!(
+            png.len().saturating_mul(4).div_ceil(3) > SHOT_MAX_BASE64,
+            "the fixture is past the cap to begin with, or it proves nothing: {}",
+            png.len()
+        );
+
+        let shot = fit_for_sending(&png, false).expect("a window capture always fits");
+        assert!(!shot_too_big(&shot), "{} bytes", shot.bytes.len());
+        assert_eq!(shot.mime, "image/jpeg");
+        assert_eq!(shot.width, SHOT_WIDTH, "scaled to a readable width");
+        assert_eq!(shot.height, SHOT_WIDTH * h / w, "aspect kept");
+        assert!(
+            shot.bytes.starts_with(&[0xff, 0xd8, 0xff]),
+            "a real JPEG comes out"
+        );
+        // And it is still an image afterwards, not a truncated buffer.
+        let back = image::load_from_memory(&shot.bytes).expect("decodes again");
+        assert_eq!(back.width(), SHOT_WIDTH);
+
+        // A whole-screen capture keeps saying so through the scaling, since
+        // that is what the sheet warns him about.
+        assert!(fit_for_sending(&png, true).unwrap().whole_screen);
     }
 
     #[test]
