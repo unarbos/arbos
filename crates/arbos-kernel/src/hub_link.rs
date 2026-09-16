@@ -276,7 +276,7 @@ async fn session(
         ),
     );
     let (to_hub, mut from_clients) = mpsc::unbounded_channel::<HubFrame>();
-    let mut chans: HashMap<u64, (mpsc::UnboundedSender<Frame>, Arc<AtomicBool>)> = HashMap::new();
+    let mut chans: HashMap<u64, (mpsc::UnboundedSender<String>, Arc<AtomicBool>)> = HashMap::new();
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.tick().await;
     let result = loop {
@@ -297,7 +297,7 @@ async fn session(
                             "reader" => Role::Reader,
                             _ => Role::Writer,
                         };
-                        let (tx, rx) = mpsc::unbounded_channel::<Frame>();
+                        let (tx, rx) = mpsc::unbounded_channel::<String>();
                         let open = Arc::new(AtomicBool::new(true));
                         chans.insert(chan, (tx, Arc::clone(&open)));
                         let (r, w) = HubChannel { chan, to_hub: to_hub.clone(), open }.split(rx);
@@ -312,8 +312,11 @@ async fn session(
                         ));
                     }
                     HubFrame::Frame { chan, frame } => {
+                        // The client's JSON as it was sent; this kernel's own
+                        // parser reads it in the channel's read loop.
                         if let Some((tx, _)) = chans.get(&chan) {
-                            if tx.send(frame).is_err() {
+                            let line = frame.to_string();
+                            if tx.send(line).is_err() {
                                 chans.remove(&chan);
                             }
                         }

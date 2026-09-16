@@ -15,7 +15,6 @@
 //! `ls`, per the file-system principle.
 
 use crate::Place;
-use crate::wire::Frame;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -45,9 +44,10 @@ impl RegistrantKind {
     }
 }
 
-/// Frames between the hub and anything connected to it. `Frame` (the
-/// attach wire) rides inside `frame` on a numbered channel, so one
-/// registration socket carries any number of attached clients.
+/// Frames between the hub and anything connected to it. The attach wire
+/// (`wire::Frame`) rides inside `frame` on a numbered channel as raw
+/// JSON, so one registration socket carries any number of attached
+/// clients and the hub needs no knowledge of the kernel's frames.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
@@ -100,10 +100,16 @@ pub enum HubFrame {
         who: String,
         role: String,
     },
-    /// Both ways: one attach frame for channel `chan`.
+    /// Both ways: one attach frame for channel `chan`, carried as the
+    /// JSON it was sent as. The hub never parses it into a typed `Frame`:
+    /// a hub older than the kernel would drop the fields it did not know
+    /// (a `put` lost its `data`, a `history` its `before`, silently). Only
+    /// the two ends — the client and the kernel, each on its own version —
+    /// read it; the hub checks it is an object with a `type` and passes
+    /// it through whole.
     Frame {
         chan: u64,
-        frame: Frame,
+        frame: serde_json::Value,
     },
     /// Both ways: channel `chan` is gone.
     Close {
@@ -908,6 +914,22 @@ Report: link [the audit](arbos://cloud/demo/docs/echo.md); read arbos://cloud/de
         // open: never below reader for anyone admitted.
         assert_eq!(store_access("open", "alice", "bogus", "owner"), "reader");
         assert_eq!(store_access("open", "alice", "writer", "owner"), "writer");
+    }
+
+    /// The channel frame carries the attach frame as JSON, so a field a
+    /// build does not know rides through it untouched.
+    #[test]
+    fn a_channel_frame_keeps_fields_this_build_does_not_know() {
+        let line = r#"{"type":"frame","chan":3,"frame":{"type":"put","path":"a","data":"QUJD","later":true}}"#;
+        let f: HubFrame = serde_json::from_str(line).unwrap();
+        let HubFrame::Frame { chan, frame } = &f else {
+            panic!("{f:?}");
+        };
+        assert_eq!(*chan, 3);
+        assert_eq!(frame["data"], "QUJD");
+        assert_eq!(frame["later"], true);
+        let back = serde_json::to_string(&f).unwrap();
+        assert!(back.contains(r#""later":true"#), "{back}");
     }
 
     #[test]

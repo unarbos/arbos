@@ -30,9 +30,11 @@ pub struct HubChannel {
 }
 
 impl HubChannel {
-    /// The reader and writer for one hub channel; frames the hub delivers
-    /// for it go into `from_hub`.
-    pub fn split(self, from_hub: mpsc::UnboundedReceiver<Frame>) -> (Reader, Writer) {
+    /// The reader and writer for one hub channel; the JSON lines the hub
+    /// delivers for it go into `from_hub`, parsed here like any other
+    /// transport's (so an unknown type or a new field is this kernel's
+    /// call, never the hub's).
+    pub fn split(self, from_hub: mpsc::UnboundedReceiver<String>) -> (Reader, Writer) {
         (Reader::Chan(from_hub), Writer::Chan(self))
     }
 }
@@ -251,9 +253,9 @@ pub enum Reader {
         futures_util::stream::SplitStream<WebSocketStream<TcpStream>>,
         Vec<String>,
     ),
-    /// Frames relayed by the hub for one channel; ends when the hub
+    /// JSON lines relayed by the hub for one channel; ends when the hub
     /// closes it or the hub link drops.
-    Chan(mpsc::UnboundedReceiver<Frame>),
+    Chan(mpsc::UnboundedReceiver<String>),
 }
 
 impl Reader {
@@ -262,11 +264,11 @@ impl Reader {
         loop {
             match self {
                 Reader::Chan(rx) => {
-                    let frame = rx.recv().await?;
-                    match serde_json::to_string(&frame) {
-                        Ok(line) => return Some(line),
-                        Err(_) => continue,
+                    let line = rx.recv().await?;
+                    if line.trim().is_empty() {
+                        continue;
                     }
+                    return Some(line);
                 }
                 Reader::Tcp(lines) => match lines.next_line().await {
                     Ok(Some(line)) if line.trim().is_empty() => continue,
@@ -325,7 +327,7 @@ impl Writer {
                 ch.to_hub
                     .send(HubFrame::Frame {
                         chan: ch.chan,
-                        frame: frame.clone(),
+                        frame: serde_json::to_value(frame)?,
                     })
                     .map_err(|_| anyhow::anyhow!("hub link closed"))
             }
