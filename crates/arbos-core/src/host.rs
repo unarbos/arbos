@@ -89,8 +89,8 @@ impl ProviderKind {
             Self::OpenRouter => &[
                 "anthropic/claude-opus-5",
                 "anthropic/claude-fable-5.1",
-                "openai/gpt-5.6-terra",
                 "google/gemini-3.8-flash",
+                "openai/gpt-5.6-terra",
                 "x-ai/grok-4.6",
                 "deepseek/deepseek-v4.1-flash",
                 "z-ai/glm-5.3",
