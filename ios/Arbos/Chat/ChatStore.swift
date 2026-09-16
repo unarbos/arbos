@@ -36,6 +36,11 @@ final class ChatStore: ObservableObject {
     @Published private(set) var identity: ProjectIdentity?
     /// Send → first token of the last typed turn.
     @Published private(set) var lastFirstToken: TimeInterval?
+    /// Transcript lines before the first one shown (the kernel replays its
+    /// last 200 on attach); a long project's earlier history.
+    @Published private(set) var earlierLines = 0
+    /// Seconds until the next reconnect try, while the link is down.
+    @Published private(set) var reconnectIn: Int?
 
     /// Fires with each finished agent message. The call speaks it when the
     /// server does not.
@@ -46,6 +51,8 @@ final class ChatStore: ObservableObject {
     private var source: ChatSource?
     private var pump: Task<Void, Never>?
     private var sentAt: Date?
+    private var reconnectTask: Task<Void, Never>?
+    private var reconnectAttempt = 0
 
     init(settings: AppSettings, link: VoiceLink) {
         self.settings = settings
@@ -85,6 +92,12 @@ final class ChatStore: ObservableObject {
             }
             server.stop()
         }
+        // A configured kernel that is not answering is an outage, not a
+        // reason to show scripted answers: stay offline and retry.
+        if settings.chatEndpoint != nil {
+            mode = .offline
+            return
+        }
         let mock = MockKernelChat()
         try? await mock.start()
         adopt(mock, mode: .mock)
@@ -106,6 +119,9 @@ final class ChatStore: ObservableObject {
     }
 
     func disconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectIn = nil
         pump?.cancel()
         pump = nil
         source?.stop()
@@ -114,16 +130,50 @@ final class ChatStore: ObservableObject {
         busy = false
     }
 
-    /// Drop the current source and try the kernel again.
+    /// The app came back to the front (the phone woke, the user returned):
+    /// a link iOS cut while the app slept is reopened at once.
+    func resumeIfNeeded() {
+        guard mode == .offline || mode == .mock, settings.chatEndpoint != nil else { return }
+        reconnectAttempt = 0
+        Task { await reconnect() }
+    }
+
+    /// The link went: try again after 2 s, then 4, 8, 16, 32, capped at 60,
+    /// until it holds. `reconnectIn` counts down for the chat's notice.
+    private func scheduleReconnect() {
+        reconnectTask?.cancel()
+        let delay = min(60, 2 << min(reconnectAttempt, 5))
+        reconnectAttempt += 1
+        reconnectIn = delay
+        reconnectTask = Task { [weak self] in
+            for remaining in stride(from: delay, to: 0, by: -1) {
+                guard let self, !Task.isCancelled else { return }
+                self.reconnectIn = remaining
+                try? await Task.sleep(for: .seconds(1))
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.reconnectIn = nil
+            await self.reconnect()
+        }
+    }
+
+    /// Drop the current source and try the kernel again. The transcript
+    /// stays on screen until the replay replaces it, so a reconnect never
+    /// shows an empty chat.
     func reconnect() async {
+        let attempt = reconnectAttempt
         disconnect()
-        items.removeAll()
+        reconnectAttempt = attempt
         agents.removeAll()
         workers.removeAll()
         step = ""
-        identity = nil
         lastFirstToken = nil
         await connect()
+        if mode == .live || mode == .server {
+            reconnectAttempt = 0
+        } else if settings.chatEndpoint != nil, mode != .connecting {
+            scheduleReconnect()
+        }
     }
 
     /// A worker's transcript, replayed once from the kernel.
@@ -136,7 +186,13 @@ final class ChatStore: ObservableObject {
     /// Open another kernel: the pod, or a machine/project on the hub.
     func switchTarget(_ target: KernelTarget) async {
         guard target != settings.kernelTarget || mode != .live else { return }
+        if target != settings.kernelTarget {
+            items.removeAll()
+            earlierLines = 0
+            identity = nil
+        }
         settings.kernelTarget = target
+        reconnectAttempt = 0
         await reconnect()
     }
 
@@ -182,8 +238,9 @@ final class ChatStore: ObservableObject {
 
     private func apply(_ update: ChatUpdate) {
         switch update {
-        case .history(let seed):
+        case .history(let seed, let earlier):
             items = seed
+            earlierLines = earlier
         case .item(let item):
             closeOpenAgentMessage()
             items.append(item)
@@ -241,6 +298,7 @@ final class ChatStore: ObservableObject {
             items.append(ChatItem(.notice(reason, failed: true)))
             mode = .offline
             busy = false
+            if settings.chatEndpoint != nil { scheduleReconnect() }
         }
         if items.count > 200 { items.removeFirst(items.count - 200) }
     }

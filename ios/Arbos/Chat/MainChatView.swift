@@ -154,6 +154,13 @@ struct ProjectChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: ArbosTheme.itemGap) {
+                    if chat.earlierLines > 0 {
+                        Text("\(chat.earlierLines) earlier lines not shown")
+                            .font(ArbosTheme.caption)
+                            .foregroundStyle(ArbosTheme.textDim)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
                     if chat.items.isEmpty, chat.mode != .connecting {
                         Text(emptyLine)
                             .font(ArbosTheme.body)
@@ -220,8 +227,10 @@ struct ProjectChatView: View {
     private var modeNotice: String? {
         switch chat.mode {
         case .mock: return "No kernel reachable — a scripted chat is answering."
-        case .offline: return "Kernel offline."
-        case .connecting: return "Connecting…"
+        case .offline:
+            if let seconds = chat.reconnectIn { return "Link lost — reconnecting in \(seconds)s" }
+            return "Kernel offline."
+        case .connecting: return "Reconnecting…"
         case .server, .live: return nil
         }
     }

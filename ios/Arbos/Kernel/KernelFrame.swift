@@ -122,7 +122,8 @@ enum KernelFrame {
     /// One line of the transcript as it was before we attached.
     case replayed(agent: String, event: KernelEvent)
     /// Replay is over; what follows is live.
-    case historyEnd(agent: String)
+    /// Replay is over; `total` is the transcript's length, `shown` how many lines came.
+    case historyEnd(agent: String, total: Int, shown: Int)
     case event(agent: String, event: KernelEvent)
     /// One streamed token of the reply being written.
     case assistantDelta(agent: String, text: String, step: Int)
@@ -180,7 +181,13 @@ enum KernelFrame {
                 event: KernelEvent(json: object["event"] as? [String: Any] ?? [:])
             )
         case "history_end":
-            self = .historyEnd(agent: object["agent"] as? String ?? "")
+            let from = object["from"] as? Int ?? 0
+            let to = object["to"] as? Int ?? 0
+            self = .historyEnd(
+                agent: object["agent"] as? String ?? "",
+                total: object["total"] as? Int ?? 0,
+                shown: from > 0 && to >= from ? to - from + 1 : 0
+            )
         case "assistant_delta":
             self = .assistantDelta(
                 agent: object["agent"] as? String ?? "",

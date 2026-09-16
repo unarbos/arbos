@@ -51,7 +51,8 @@ struct WorkerStatus: Identifiable, Hashable {
 /// What a chat source tells the store, in order.
 enum ChatUpdate {
     /// Replace everything shown (mock seed; later, a transcript replay).
-    case history([ChatItem])
+    /// `earlier` is how many transcript lines lie before the first shown.
+    case history([ChatItem], earlier: Int)
     case item(ChatItem)
     /// Append to the open agent message of this step, opening one if there is none.
     case agentDelta(String, step: Int)
@@ -69,6 +70,7 @@ enum ChatUpdate {
     case step(String)
     /// `.arbos/project.toml` read off the kernel.
     case identity(ProjectIdentity)
+    /// The link to the kernel went; the store reconnects on its own.
     case dropped(String)
 }
 
