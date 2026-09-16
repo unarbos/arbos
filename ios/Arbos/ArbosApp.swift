@@ -6,6 +6,7 @@ struct ArbosApp: App {
     @StateObject private var link: VoiceLink
     @StateObject private var chat: ChatStore
     @StateObject private var projects: ProjectStore
+    @StateObject private var notifier = Notifier()
 
     init() {
         let settings = AppSettings()
@@ -23,6 +24,7 @@ struct ArbosApp: App {
                 .environmentObject(chat)
                 .environmentObject(link)
                 .environmentObject(projects)
+                .environmentObject(notifier)
         }
     }
 }
@@ -32,6 +34,8 @@ struct ArbosApp: App {
 /// still talks to the project last open.
 struct RootView: View {
     @EnvironmentObject private var chat: ChatStore
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var notifier: Notifier
     @Environment(\.scenePhase) private var scenePhase
     @State private var path = NavigationPath()
 
@@ -48,7 +52,38 @@ struct RootView: View {
         // the first thing the returning user sees is the chat as it was,
         // then the replay, not an offline notice.
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { chat.resumeIfNeeded() }
+            switch phase {
+            case .active:
+                notifier.release()
+                chat.resumeIfNeeded()
+            case .background:
+                notifier.holdOpen()
+            case .inactive:
+                break
+            @unknown default:
+                break
+            }
+        }
+        .onAppear {
+            // The kernel's `notify` while the app is not in front becomes a
+            // banner for the project it came from; `seen` from any client
+            // takes it down again.
+            chat.onNotify = { [weak chat, weak notifier] notification in
+                guard let chat, let notifier else { return }
+                notifier.post(notification, project: chat.title, target: chat.settings.kernelTarget.stored, unseenCount: chat.unseen.count)
+            }
+            chat.onSeen = { [weak chat, weak notifier] through in
+                guard let chat, let notifier else { return }
+                notifier.clear(through: through, target: chat.settings.kernelTarget.stored, remaining: chat.unseen.count)
+            }
+        }
+        // A tapped notification lands in that project's chat.
+        .onChange(of: notifier.openTarget) { _, stored in
+            guard let stored else { return }
+            notifier.openTarget = nil
+            let target = KernelTarget(stored: stored)
+            path = NavigationPath()
+            path.append(target)
         }
     }
 }

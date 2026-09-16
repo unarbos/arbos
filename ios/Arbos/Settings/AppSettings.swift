@@ -100,8 +100,9 @@ final class AppSettings: ObservableObject {
         voiceToken = Keychain.read(Self.voiceTokenAccount) ?? ""
         kernelToken = Keychain.read(Self.kernelTokenAccount) ?? ""
         hubToken = Keychain.read(Self.hubTokenAccount) ?? ""
-        // The baked hub address moves with the build too, unless typed over.
-        if !baked.hubURL.isEmpty {
+        // The baked hub address moves with the build too, unless typed over
+        // — or named on the launch line (a scripted run).
+        if !baked.hubURL.isEmpty, !ProcessInfo.processInfo.arguments.contains("-hubURL") {
             let previous = defaults.string(forKey: "baked-hubURL")
             if previous == nil || hubURL == previous {
                 hubURL = baked.hubURL

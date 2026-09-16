@@ -84,6 +84,10 @@ final class LiveKernelChat: ChatSource {
         await page(agent: agent) { try client.history(agent: agent) }?.items ?? []
     }
 
+    func markSeen(through: Int) {
+        try? client.seen(through: through)
+    }
+
     func earlier(before seq: Int, limit: Int) async -> HistoryPage? {
         guard seq > 1 else { return nil }
         return await page(agent: focus) { try client.history(agent: focus, before: seq, limit: limit) }
@@ -181,6 +185,10 @@ final class LiveKernelChat: ChatSource {
                 stream?.yield(.agentDone)
                 stream?.yield(.item(ChatItem(.agent(question, streaming: false))))
             }
+        case .notify(let notification):
+            stream?.yield(.notify(notification))
+        case .seen(let through):
+            stream?.yield(.seen(through: through))
         case .thinkingDelta:
             break
         case .error(let detail):
