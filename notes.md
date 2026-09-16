@@ -1,6 +1,6 @@
 # Arbos
 
-- [ ] [Restore the missing docs directory](bc-0b112226-cf98-5cab-92c3-2671518dd9b9) — the store service itself deleted `docs/` and `artifacts/` in a 77-minute window, no worker involved ([record](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/store-docs-loss-2026-09-16.md)); 17 of 19 documents are back — recovered, rebuilt by their authors from evidence, or re-entered here for the project context — with only the UI QA pass and one parity report outstanding; `docs/` now mirrors to the `store-docs` branch every half hour, and the mirror refuses to push when the store looks damaged, so a repeat becomes an alarm instead of a discovery
+- [x] [Restore the missing docs directory](bc-0b112226-cf98-5cab-92c3-2671518dd9b9) — the store service itself deleted `docs/` and `artifacts/` in a 77-minute window, no worker involved ([record](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/store-docs-loss-2026-09-16.md)); all 19 documents are back with reconstructions marked inline, and `docs/` now mirrors to the `store-docs` branch every half hour with a refusal-as-alarm if the store looks damaged again
 
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
