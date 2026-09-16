@@ -610,12 +610,39 @@ pub struct Call {
     pub connecting: bool,
 }
 
+/// How long after opening a window activation still counts as the launch.
+const LAUNCH_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// One OS notification the window asked the platform to show.
+#[derive(Debug, Clone)]
+pub(crate) struct PostedNotification {
+    pub at: i64,
+    pub title: String,
+    pub body: String,
+    /// The command could not be started; `None` when it was.
+    pub error: Option<String>,
+}
+
 pub struct Arbos {
     pub(crate) workspace: Entity<Workspace>,
     /// Whether this window is the active one on the desktop: a kernel
     /// notification for a chat the person is looking at is seen at once;
     /// one for a chat they are not goes to the OS as a notification.
     pub(crate) window_active: bool,
+    /// The person has done something in this window since it opened — a
+    /// press, a key, or coming back to it after leaving. Until then a chat
+    /// restored in front is on screen but not yet looked at, and its unseen
+    /// replies keep their dot (qal-j03): a reply that landed while the app
+    /// was shut is exactly the one a person needs telling about.
+    pub(crate) touched: bool,
+    /// When the window opened: activations in its first seconds are the
+    /// launch settling (X11 focuses a new window more than once), not a
+    /// return to it.
+    launched_at: std::time::Instant,
+    /// OS notifications this window posted (#293), newest last, capped:
+    /// what the driver shows a test so "an alert was posted" is a fact it
+    /// can read and check against the daemon, not a belief.
+    pub(crate) notifications_posted: Vec<PostedNotification>,
     /// The open session menu was opened from the chat header's `⋯`, so it
     /// anchors there rather than at a panel row.
     pub(crate) menu_at_header: bool,
@@ -915,6 +942,9 @@ impl Arbos {
             terminals: Default::default(),
             active_terminal: None,
             window_active: true,
+            notifications_posted: Vec::new(),
+            touched: false,
+            launched_at: std::time::Instant::now(),
             panel_open: true,
             archived_open: false,
             agents_card_open: None,
@@ -977,7 +1007,11 @@ impl Arbos {
             if this.window_active {
                 this.workspace
                     .update(cx, |workspace, cx| workspace.reload_projects(cx));
-                // Coming back to the window is looking at its chat.
+                // Coming back to the window is looking at its chat; the
+                // launch's own activations are not.
+                if this.launched_at.elapsed() > LAUNCH_SETTLE {
+                    this.touched = true;
+                }
                 this.reap_notifications(cx);
             } else {
                 this.flush_composer_draft(cx);
@@ -1365,14 +1399,17 @@ impl Arbos {
     /// on the tab's badge until that chat is opened.
     pub(crate) fn reap_notifications(&mut self, cx: &mut Context<Self>) {
         let window_active = self.window_active;
+        let touched = self.touched;
         let mut post: Vec<(String, String)> = Vec::new();
         self.workspace.update(cx, |workspace, _| {
             let active = workspace.active_id();
             let active_ix = workspace.active;
             for (ix, project) in workspace.projects.iter_mut().enumerate() {
                 for chat in &mut project.sessions {
-                    let looking =
-                        window_active && Some(ix) == active_ix && Some(chat.id) == active;
+                    let looking = window_active
+                        && touched
+                        && Some(ix) == active_ix
+                        && Some(chat.id) == active;
                     if looking {
                         if !chat.unseen.is_empty() {
                             chat.mark_seen();
@@ -1386,7 +1423,19 @@ impl Arbos {
             }
         });
         for (title, body) in post {
-            crate::notify_os::post(&title, &body);
+            let result = crate::notify_os::post(&title, &body);
+            self.notifications_posted.push(PostedNotification {
+                at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+                title,
+                body,
+                error: result.err(),
+            });
+            if self.notifications_posted.len() > 50 {
+                self.notifications_posted.remove(0);
+            }
         }
     }
 
@@ -2270,6 +2319,20 @@ impl Render for Arbos {
             .font_family(theme.font_sans.clone())
             .text_color(theme.text)
             .text_style(TextStyle::Body)
+            // The first press or key in the window: from here the chat in
+            // front counts as looked at (see `touched`).
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                if !this.touched {
+                    this.touched = true;
+                    this.reap_notifications(cx);
+                }
+            }))
+            .on_key_down(cx.listener(|this, _, _, cx| {
+                if !this.touched {
+                    this.touched = true;
+                    this.reap_notifications(cx);
+                }
+            }))
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::copy_chat))
             .on_action(cx.listener(Self::paste_chat))

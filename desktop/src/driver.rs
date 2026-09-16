@@ -1072,6 +1072,12 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
                 "path": project.path.display().to_string(),
                 "host": project.host,
                 "active": workspace.active == Some(ix),
+                // The tab's badge as tabs.rs draws it: a dot while a chat
+                // asks or holds notifications nobody has looked at (#297).
+                "tab_dot": project.sessions.iter().filter(|chat| !chat.closed).any(|chat| {
+                    !chat.unseen.is_empty() || chat.plan_open().any(|n| n.do_kind == "ask")
+                }),
+                "unseen": project.sessions.iter().filter(|chat| !chat.closed).map(|chat| chat.unseen.len()).sum::<usize>(),
                 "archive_open": project.archive_open,
                 "focus": project.focus.map(|focus| json!({
                     "agent": focus.agent,
@@ -1088,6 +1094,17 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         "panel_open": this.panel_open,
         "text_size": workspace.text_size,
         "bionic_reading": workspace.bionic_reading,
+        "notifications": {
+            "notifier": crate::notify_os::NOTIFIER,
+            "window_active": this.window_active,
+            "touched": this.touched,
+            "posted": this.notifications_posted.iter().map(|n| json!({
+                "at": n.at,
+                "title": n.title,
+                "body": n.body,
+                "error": n.error,
+            })).collect::<Vec<_>>(),
+        },
         "settings_open": cx.windows().iter().any(|w| w.downcast::<SettingsWindow>().is_some()),
         "opener_open": this.opener.read(cx).open,
         "search_open": this.chat_search.read(cx).is_open(),
@@ -1174,6 +1191,7 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         "readonly": chat.readonly,
         "agent_kind": chat.agent_kind,
         "unseen": chat.unseen.len(),
+        "unseen_kinds": chat.unseen.iter().map(|n| n.kind.clone()).collect::<Vec<_>>(),
         "seen_through": chat.seen_through,
         "draft": chat.draft,
         "queued": chat.queue.len(),

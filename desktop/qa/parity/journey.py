@@ -51,6 +51,23 @@ FOLLOW_UP = "Run `python3 -m unittest test_todo.py` once more and tell me the re
 AFTER_REOPEN = "In one sentence: what did you build here, and does it pass its tests?"
 
 
+def dunst_history() -> list[str] | None:
+    """The notification daemon's own record (dunst on the rig), oldest
+    first; None without dunstctl. The proof an alert reached a daemon."""
+    if not shutil.which("dunstctl"):
+        return None
+    try:
+        # History holds notifications once they are closed; a popup still
+        # on screen is not in it yet. Close them first, then read.
+        subprocess.run(["dunstctl", "close-all"], capture_output=True, timeout=5, env=ENV)
+        raw = subprocess.run(["dunstctl", "history"], capture_output=True, text=True, timeout=5, env=ENV).stdout
+        data = json.loads(raw).get("data", [[]])
+        entries = data[0] if data else []
+        return [f"{e.get('summary', {}).get('data', '')} | {e.get('body', {}).get('data', '')}" for e in reversed(entries)]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def log(msg: str) -> None:
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -205,6 +222,7 @@ class Journey:
                 self.j08_continue()
                 self.j09_on_disk()
                 self.j10_follow_up()
+                self.j10b_notification_away()
                 self.j11_close_reopen()
                 self.j12_after_reopen()
         finally:
@@ -422,6 +440,46 @@ class Journey:
         new_agent = [i for i in c.get("items", [])[before:] if i.get("kind") == "agent" and (i.get("text") or "").strip()]
         self.score("J10-follow-up-after", "a follow-up on the finished project gets a reply within 4 min",
                    bool(started) and done and bool(new_agent), f"started={bool(started)} done={done} reply={(new_agent[-1].get('text', '')[:100] if new_agent else '')!r}", t0)
+
+    def j10b_notification_away(self) -> None:
+        """Leave for another tab while the project answers: the reply must
+        reach you — a dot on the tab, an OS notification the daemon really
+        got — and looking at it must clear the dot (#293/#297)."""
+        t0 = time.time()
+        ix = self.project_ix()
+        st = self.state()
+        posted_before = len(st.get("notifications", {}).get("posted", []))
+        seen_before = (self.root() or {}).get("seen_through") or 0
+        nonce = f"jn{int(time.time()) % 100000}"
+        self.send(f"Run the shell command `sleep 6` and then reply with exactly: journey notification check {nonce}.")
+        time.sleep(0.3)
+        self.app.click("tab-0"); time.sleep(0.5)
+        self.wait_root_idle(120); time.sleep(3)
+        st = self.state()
+        pr = next((p for p in st["projects"] if p["index"] == ix), {})
+        c = self.root() or {}
+        posted = st.get("notifications", {}).get("posted", [])[posted_before:]
+        # The post's body is the reply's first line; a model may put words
+        # before the nonce, so any new post from this chat counts and the
+        # daemon is checked for that post's own words.
+        hit = next((n for n in posted if nonce in (n.get("body") or "").lower()), None) or (posted[-1] if posted else None)
+        key = ((hit or {}).get("body") or nonce).strip()[:40].lower()
+        after, daemon = None, False
+        for _ in range(10):
+            after = dunst_history()
+            daemon = after is not None and any(key in e.lower() or nonce in e.lower() for e in after)
+            if daemon or after is None:
+                break
+            time.sleep(0.5)
+        unseen_ok = (c.get("unseen") or 0) >= 1 and bool(pr.get("tab_dot"))
+        os_ok = bool(hit) and not hit.get("error") and (daemon or after is None)
+        self.app.click(f"tab-{ix}"); time.sleep(2.0)
+        pr2 = next((p for p in self.state()["projects"] if p["index"] == ix), {})
+        c2 = self.root() or {}
+        seen_ok = c2.get("unseen") == 0 and not pr2.get("tab_dot") and (c2.get("seen_through") or 0) > seen_before
+        self.score("J10b-notification-away", "a reply that lands while another tab is in front: unseen 1+, the tab's dot, an OS notification the daemon's history confirms; opening the chat clears it and sends seen",
+                   unseen_ok and os_ok and seen_ok,
+                   f"unseen={c.get('unseen')} tab_dot={pr.get('tab_dot')} posted={bool(hit)} body={(hit or {}).get('body', '')[:50]!r} daemon={'n/a' if after is None else daemon} err={hit.get('error') if hit else None} | after open: unseen={c2.get('unseen')} tab_dot={pr2.get('tab_dot')} seen_through {seen_before}->{c2.get('seen_through')}", t0)
 
     def j11_close_reopen(self) -> None:
         t0 = time.time()
