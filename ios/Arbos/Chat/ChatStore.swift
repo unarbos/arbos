@@ -378,7 +378,9 @@ final class ChatStore: ObservableObject {
             busy = false
             if settings.chatEndpoint != nil { scheduleReconnect() }
         }
-        if items.count > 200 { items.removeFirst(items.count - 200) }
+        // A long project pages back 200 at a time; the cap is for a day-long
+        // stream, not for the history the user asked to see.
+        if items.count > 2000 { items.removeFirst(items.count - 2000) }
     }
 
     private func closeOpenAgentMessage() {
