@@ -227,7 +227,7 @@ final class LiveKernelChat: ChatSource {
             }
             return
         }
-        if case .tool(let record) = event, record.name == "spawn", let child = record.child {
+        if case .tool(let record) = event, record.name == "spawn", let child = record.child ?? (record.args?["name"] as? String) {
             children.insert(child)
             childNames[child] = record.args?["brief"] as? String ?? child
             setWorker(child, running: true, step: "Starting")
@@ -259,7 +259,8 @@ final class LiveKernelChat: ChatSource {
             let trimmed = ToolMarkup.strip(text)
             return trimmed.isEmpty ? nil : ChatItem(.agent(trimmed, streaming: false), step: step)
         case .tool(let record):
-            if record.name == "spawn", let child = record.child {
+            // Older kernels name the child only in the call's arguments.
+            if record.name == "spawn", let child = record.child ?? (record.args?["name"] as? String) {
                 let brief = record.args?["brief"] as? String ?? child
                 children.insert(child)
                 childNames[child] = brief
