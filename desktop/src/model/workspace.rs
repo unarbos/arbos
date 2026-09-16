@@ -2305,12 +2305,14 @@ impl Workspace {
     /// conversation back.
     pub fn session_connected(&mut self, id: u64, cx: &mut Context<Self>) {
         self.with_session(id, cx, |chat| {
+            // The kernel's copy first: a "reconnected" line is this
+            // window's to say, not a transcript record to seed.
+            chat.sync_kernel_history();
             if chat.reconnect_attempt > 0 {
                 chat.notice(false, "reconnected");
             }
             chat.reconnect_attempt = 0;
             chat.reconnect_at = None;
-            chat.sync_kernel_history();
             // What the agent is on right now, from its status file, so a
             // fresh attach draws the line without waiting for a frame.
             if chat.host.is_none()

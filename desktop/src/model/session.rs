@@ -30,7 +30,7 @@ use cacp::schema::{
 use serde::{Deserialize, Serialize};
 use std::{
     cell::Cell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -1156,9 +1156,51 @@ impl ChatSession {
     /// Push local bubbles the kernel never stored, then title from them.
     pub(crate) fn sync_kernel_history(&mut self) {
         if let Some(sid) = self.agent_session.clone() {
-            crate::kernel::seed_transcript(&self.place(), &sid, &self.items);
+            // A line typed while the socket was down has its card on the
+            // transcript already and its words still in the queue: they go
+            // as a frame when the queue drains, and the kernel records them
+            // then. Seeded here as well, the kernel held the line twice —
+            // once written by this window, once from the frame (QA,
+            // 2026-09-16, after a kernel respawn on a fresh place).
+            let unsent = self.unsent_cards();
+            if unsent.is_empty() {
+                crate::kernel::seed_transcript(&self.place(), &sid, &self.items);
+            } else {
+                let sent: Vec<ChatItem> = self
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(ix, _)| !unsent.contains(ix))
+                    .map(|(_, item)| item.clone())
+                    .collect();
+                crate::kernel::seed_transcript(&self.place(), &sid, &sent);
+            }
         }
         self.take_title_from_first_prompt();
+    }
+
+    /// The prompt cards whose words are still queued for the wire: the
+    /// newest card for each queued prompt, matched by its words.
+    fn unsent_cards(&self) -> HashSet<usize> {
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        let mut taken = HashSet::new();
+        for prompt in &self.queue {
+            let words = squash(&prompt.text);
+            let found = self
+                .items
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(ix, item)| {
+                    !taken.contains(ix)
+                        && matches!(item, ChatItem::User(message) if squash(&message.text) == words)
+                })
+                .map(|(ix, _)| ix);
+            if let Some(ix) = found {
+                taken.insert(ix);
+            }
+        }
+        taken
     }
 
     /// First user line → a short title. Skipped when they already named it.
