@@ -266,7 +266,10 @@ final class LiveKernelChat: ChatSource {
             // when it ends (`wait: true`). Only the first may say "running":
             // the second arrives after the child's own turn went idle and
             // was flipping a finished worker back to Working (M-100).
-            if workers[child] == nil {
+            // …and the brief may by then live under the kernel's id (adopt).
+            let want = Self.slug(child)
+            let known = workers[child] != nil || workerOrder.contains { Self.slug($0) == want || Self.slug(childNames[$0] ?? "") == want }
+            if !known {
                 setWorker(child, running: true, step: machine.isEmpty ? "Starting" : "Running on \(machine) · reports here when done")
             }
         }
