@@ -1419,12 +1419,20 @@ class Pass:
         self.app = app
         place_window(); time.sleep(1.5)
         self.tabs = self.app.exists("tab-bar"); self.go_project()
-        s2 = self.wait_idle(120)
+        s2 = self.wait(lambda s: not busy(s), 120, what="idle")
+        # Not `wait_idle`: its recover() presses Stop, and the kernel drops a
+        # queued prompt on Stop (F-105, filed) — the row would then measure
+        # the stop, not the relaunch. A turn still running after two minutes
+        # is its own finding here; the held row is what is checked.
+        stopped_by_gate = False
+        if s2 is None and busy(self.state()):
+            stopped_by_gate = True
+            self.recover()
         items = (active(self.state()) or {}).get("items", [])
         ran = any("RESTART-TEST" in it.get("text", "") for it in items if it.get("kind") == "user")
         self.record("queue-survives-relaunch", sc, "⇧⌘↩ a follow-up while busy, quit, relaunch, wait for idle",
                     "the follow-up ran (its user card is on the transcript) or is still held by the kernel",
-                    f"held_before={held_before} ran={ran} held_now={(active(self.state()) or {}).get('held')}",
+                    f"held_before={held_before} ran={ran} held_now={(active(self.state()) or {}).get('held')}{' (turn still running at 120 s; Stop pressed after the read — F-105)' if stopped_by_gate else ''}",
                     "pass" if ran or (active(self.state()) or {}).get("held", 0) > 0 else ("not-reachable" if held_before == 0 else "fail"), self.still("relaunch"))
         # Scenario 21: typed words while a question stands are never a skip.
         self.send(P_ASK)
