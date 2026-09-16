@@ -344,10 +344,14 @@ final class ChatStore: ObservableObject {
         case .agentReplace(let raw, let step):
             let text = ToolMarkup.strip(raw)
             // The step's own item when the kernel numbers steps; the last
-            // agent item when it does not (older kernels).
+            // agent item when it does not (older kernels). Steps restart
+            // every turn, so only this turn's items — after the last prompt
+            // card — are candidates; a settled line must never reach back
+            // into an earlier reply.
+            let turnStart = items.lastIndex(where: { if case .user = $0.kind { return true } else { return false } }).map { $0 + 1 } ?? 0
             let index = step > 0
-                ? items.lastIndex(where: { $0.isAgent && $0.step == step })
-                : items.lastIndex(where: \.isAgent)
+                ? items[turnStart...].lastIndex(where: { $0.isAgent && $0.step == step })
+                : items[turnStart...].lastIndex(where: \.isAgent)
             if let index {
                 let wasOpen = items[index].isStreamingAgent
                 // The kernel's whole text for one step can land after the
