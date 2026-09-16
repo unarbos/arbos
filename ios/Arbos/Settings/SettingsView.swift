@@ -16,6 +16,8 @@ struct SettingsView: View {
         return "\(version) (\(build))"
     }
 
+    @EnvironmentObject private var notifier: Notifier
+
     var body: some View {
         NavigationStack {
             Form {
@@ -74,6 +76,15 @@ struct SettingsView: View {
                     Text("Mesh hub")
                 } footer: {
                     Text("Lists the machines and projects the Projects screen shows.")
+                }
+                Section {
+                    Text(notifier.pushLine)
+                        .font(ArbosTheme.caption)
+                        .foregroundStyle(ArbosTheme.textMuted)
+                } header: {
+                    Text("Notifications")
+                } footer: {
+                    Text("Replies, questions and failures while the app is away. What you missed is shown when you come back either way.")
                 }
                 Section {
                     LabeledContent("Arbos", value: Self.buildLine)

@@ -1,7 +1,21 @@
 import SwiftUI
+import UIKit
+
+/// The two UIKit callbacks SwiftUI has no modifier for: the APNs token
+/// and its refusal. Both go to the Notifier.
+final class PushDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        Task { @MainActor in Notifier.current?.tokenArrived(deviceToken) }
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        Task { @MainActor in Notifier.current?.registrationFailed(error) }
+    }
+}
 
 @main
 struct ArbosApp: App {
+    @UIApplicationDelegateAdaptor(PushDelegate.self) private var pushDelegate
     @StateObject private var settings: AppSettings
     @StateObject private var link: VoiceLink
     @StateObject private var chat: ChatStore
@@ -76,7 +90,12 @@ struct RootView: View {
                 guard let chat, let notifier else { return }
                 notifier.clear(through: through, target: chat.settings.kernelTarget.stored, remaining: chat.unseen.count)
             }
+            chat.onPushed = { [weak notifier] enabled in notifier?.hubAnswered(enabled: enabled) }
+            chat.pushToken = notifier.deviceToken
         }
+        // The token arrives after launch (and rotates): the chat sends it
+        // to the hub on the next attach, or now if attached.
+        .onChange(of: notifier.deviceToken) { _, token in chat.pushToken = token }
         // A tapped notification lands in that project's chat.
         .onChange(of: notifier.openTarget) { _, stored in
             guard let stored else { return }

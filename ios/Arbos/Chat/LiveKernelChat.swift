@@ -88,6 +88,10 @@ final class LiveKernelChat: ChatSource {
         try? client.seen(through: through)
     }
 
+    func registerPush(token: String, sandbox: Bool) {
+        try? client.registerPush(token: token, sandbox: sandbox)
+    }
+
     func earlier(before seq: Int, limit: Int) async -> HistoryPage? {
         guard seq > 1 else { return nil }
         return await page(agent: focus) { try client.history(agent: focus, before: seq, limit: limit) }
@@ -189,9 +193,17 @@ final class LiveKernelChat: ChatSource {
             stream?.yield(.notify(notification))
         case .seen(let through):
             stream?.yield(.seen(through: through))
+        case .pushed(_, let enabled):
+            stream?.yield(.pushed(enabled: enabled))
         case .thinkingDelta:
             break
         case .error(let detail):
+            // A hub from before #301 passes `push` to the kernel, which does
+            // not know it: that is "no push here", not a line for the chat.
+            if detail.contains("unknown frame type \"push\"") {
+                stream?.yield(.pushed(enabled: false))
+                return
+            }
             // The hub saying the kernel went away is the link going, not a
             // line for the transcript: the store's one calm line covers it.
             if detail.contains("went away") || detail.contains("closed") {

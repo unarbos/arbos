@@ -86,6 +86,12 @@ final class ArbosKernelClient {
         try write(frame)
     }
 
+    /// This phone's APNs token, for the hub to push the project's
+    /// notifications to (#301). Sent on every attach; tokens rotate.
+    func registerPush(token: String, sandbox: Bool) throws {
+        try write(["type": "push", "platform": "apns", "token": token, "sandbox": sandbox])
+    }
+
     /// The user has seen every notification up to `through`; the kernel
     /// tells every other client, so nothing shouts twice.
     func seen(through id: Int) throws {
