@@ -1339,6 +1339,8 @@ fn tree_nodes(place: &Place) -> Vec<TreeNode> {
             mode: a.mode.as_str().into(),
             prs: arbos_core::prs::prs_of_tree(&prs, a.id.as_str(), &agents).len() as u32,
             step: arbos_core::status::read(place, a.id.as_str()).map(|s| s.step),
+            agent_kind: a.kind.clone(),
+            readonly: a.readonly,
         })
         .collect()
 }

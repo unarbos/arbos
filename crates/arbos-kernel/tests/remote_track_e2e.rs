@@ -138,8 +138,13 @@ fn a_read_only_spawn_with_an_output_file_is_refused() {
     assert!(
         err.contains("readonly=true")
             && err.contains(".arbos/docs/rivers.md")
-            && err.contains("Drop readonly"),
+            && err.contains("drop readonly and keep the Output line"),
         "{refused:#?}"
+    );
+    // The right fix is named first; dropping the Output is the last resort.
+    assert!(
+        err.find("drop readonly").unwrap() < err.find("leave Output out").unwrap(),
+        "{err}"
     );
     assert!(!k.place.join(".arbos/agents/first-sentence").exists());
     let ok = spawns

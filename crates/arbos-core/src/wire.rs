@@ -505,6 +505,14 @@ pub struct TreeNode {
     /// flight. Absent when idle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
+    /// The definition the agent was spawned from (`spawn kind=explore`),
+    /// when one was; the window shows a worker's kind on its line (F-56).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent_kind: String,
+    /// The agent cannot write (a read-only kind, or `readonly: true`): a
+    /// glyph on the worker line says so while it runs, not after.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub readonly: bool,
 }
 
 fn is_zero(n: &u32) -> bool {
