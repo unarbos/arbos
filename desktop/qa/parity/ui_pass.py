@@ -111,6 +111,9 @@ def dunst_history() -> list[str] | None:
     if not shutil.which("dunstctl"):
         return None
     try:
+        # History holds notifications once they are closed; a popup still
+        # on screen is not in it yet. Close them first, then read.
+        subprocess.run(["dunstctl", "close-all"], capture_output=True, timeout=5, env=ENV)
         raw = subprocess.run(["dunstctl", "history"], capture_output=True, text=True, timeout=5, env=ENV).stdout
         data = json.loads(raw).get("data", [[]])
         entries = data[0] if data else []
@@ -935,8 +938,10 @@ class Pass:
             _, root0 = root_of(self.state())
             seen_at_send = root0.get("seen_through") or 0
             posted_before = len(self.state().get("notifications", {}).get("posted", []))
-            dunst_before = dunst_history()
-            self.send("Run the shell command `sleep 6` and then reply with exactly: notification check done.")
+            # A nonce in the reply: dunst keeps a capped history (20), so a
+            # repeat of the same words could be an old entry.
+            nonce = f"nc{int(time.time()) % 100000}"
+            self.send(f"Run the shell command `sleep 6` and then reply with exactly: notification check {nonce}.")
             time.sleep(0.3); self.app.click("tab-0"); time.sleep(0.5)
             self.wait_idle(120); time.sleep(3)
             pr, away = root_of(self.state())
@@ -947,9 +952,16 @@ class Pass:
                         f"tab_dot={pr.get('tab_dot')} unseen={pr.get('unseen')}", "pass" if pr.get("tab_dot") else ("unverified" if verdict == "unverified" else "fail"), "")
             posted = self.state().get("notifications", {}).get("posted", [])
             new_posts = posted[posted_before:]
-            hit = next((n for n in new_posts if "notification check done" in (n.get("body") or "")), None)
-            dunst_after = dunst_history()
-            seen_by_daemon = dunst_after is not None and any("notification check done" in e for e in dunst_after[len(dunst_before or []):])
+            hit = next((n for n in new_posts if nonce in (n.get("body") or "")), None)
+            # notify-send hands the alert to the daemon a beat after the
+            # window records the post; give the daemon a moment.
+            dunst_after, seen_by_daemon = None, False
+            for _ in range(10):
+                dunst_after = dunst_history()
+                seen_by_daemon = dunst_after is not None and any(nonce in e for e in dunst_after)
+                if seen_by_daemon or dunst_after is None:
+                    break
+                time.sleep(0.5)
             if hit and hit.get("error"):
                 os_verdict, why = "fail", f"the window could not start {self.state()['notifications'].get('notifier')}: {hit['error']}"
             elif hit and dunst_after is None:

@@ -57,6 +57,9 @@ def dunst_history() -> list[str] | None:
     if not shutil.which("dunstctl"):
         return None
     try:
+        # History holds notifications once they are closed; a popup still
+        # on screen is not in it yet. Close them first, then read.
+        subprocess.run(["dunstctl", "close-all"], capture_output=True, timeout=5, env=ENV)
         raw = subprocess.run(["dunstctl", "history"], capture_output=True, text=True, timeout=5, env=ENV).stdout
         data = json.loads(raw).get("data", [[]])
         entries = data[0] if data else []
@@ -446,9 +449,9 @@ class Journey:
         ix = self.project_ix()
         st = self.state()
         posted_before = len(st.get("notifications", {}).get("posted", []))
-        dunst_before = dunst_history()
         seen_before = (self.root() or {}).get("seen_through") or 0
-        self.send("Run the shell command `sleep 6` and then reply with exactly: journey notification check.")
+        nonce = f"jn{int(time.time()) % 100000}"
+        self.send(f"Run the shell command `sleep 6` and then reply with exactly: journey notification check {nonce}.")
         time.sleep(0.3)
         self.app.click("tab-0"); time.sleep(0.5)
         self.wait_root_idle(120); time.sleep(3)
@@ -456,9 +459,14 @@ class Journey:
         pr = next((p for p in st["projects"] if p["index"] == ix), {})
         c = self.root() or {}
         posted = st.get("notifications", {}).get("posted", [])[posted_before:]
-        hit = next((n for n in posted if "journey notification check" in (n.get("body") or "")), None)
-        after = dunst_history()
-        daemon = after is not None and any("journey notification check" in e for e in after[len(dunst_before or []):])
+        hit = next((n for n in posted if nonce in (n.get("body") or "").lower()), None)
+        after, daemon = None, False
+        for _ in range(10):
+            after = dunst_history()
+            daemon = after is not None and any(nonce in e.lower() for e in after)
+            if daemon or after is None:
+                break
+            time.sleep(0.5)
         unseen_ok = (c.get("unseen") or 0) >= 1 and bool(pr.get("tab_dot"))
         os_ok = bool(hit) and not hit.get("error") and (daemon or after is None)
         self.app.click(f"tab-{ix}"); time.sleep(2.0)
