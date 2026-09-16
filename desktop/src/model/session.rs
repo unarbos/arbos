@@ -2137,8 +2137,18 @@ impl ChatSession {
             .take(start + 1)
             .filter(|item| matches!(item, ChatItem::User(_)))
             .count() as u32;
+        // The prompt's own transcript line names the turn exactly; the
+        // count of cards is the fallback for a card from before seqs were
+        // kept. The two differ whenever the transcript holds `user` lines
+        // the window folds — an ask's answer, a skipped question, a fork's
+        // copied history — and the count then rewinds the wrong turn or
+        // none (F-103).
+        let line = match &self.items[start] {
+            ChatItem::User(message) => message.seq,
+            _ => None,
+        };
         self.rewind_to = Some(start);
-        session.rewind(turn, files);
+        session.rewind(turn, line, files);
     }
 
     /// Pause or resume the agent.

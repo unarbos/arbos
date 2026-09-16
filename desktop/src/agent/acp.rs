@@ -603,11 +603,12 @@ impl Session {
 
     /// Put the agent back to the start of its `turn`-th user turn
     /// ("Rewind here"); `files` restores the project too.
-    pub fn rewind(&self, turn: u32, files: bool) {
+    pub fn rewind(&self, turn: u32, line: Option<u64>, files: bool) {
         let _ = self.send_frame(&Frame::Rewind {
             agent: self.session_id.clone(),
             turn,
             files,
+            line,
         });
     }
 
