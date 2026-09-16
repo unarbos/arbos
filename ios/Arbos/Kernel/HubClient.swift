@@ -10,14 +10,19 @@ struct HubMachine: Decodable, Identifiable, Equatable {
         /// The face from the project's `project.toml`, as the hub relays it
         /// (#233); absent when nobody has read the file.
         var identity: ProjectIdentity?
+        /// What the place says it is (#346): empty for a project of Jacob's;
+        /// `worktree` for a worker's checkout, `service` for infrastructure
+        /// (the feedback pipe). Only the empty kind is a row in the list.
+        var kind: String
 
         var id: String { name }
 
-        init(name: String, place: String = "", live: Bool = false, identity: ProjectIdentity? = nil) {
+        init(name: String, place: String = "", live: Bool = false, identity: ProjectIdentity? = nil, kind: String = "") {
             self.name = name
             self.place = place
             self.live = live
             self.identity = identity
+            self.kind = kind
         }
 
         // Fields the hub leaves out when empty must decode as defaults.
@@ -27,9 +32,10 @@ struct HubMachine: Decodable, Identifiable, Equatable {
             place = try c.decodeIfPresent(String.self, forKey: .place) ?? ""
             live = try c.decodeIfPresent(Bool.self, forKey: .live) ?? false
             identity = try c.decodeIfPresent(ProjectIdentity.self, forKey: .identity)
+            kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? ""
         }
 
-        private enum CodingKeys: String, CodingKey { case name, place, live, identity }
+        private enum CodingKeys: String, CodingKey { case name, place, live, identity, kind }
     }
 
     var name: String
