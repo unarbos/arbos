@@ -89,27 +89,44 @@ fn a_goal_wakes_the_agent_while_its_check_fails_and_closes_when_it_passes() {
         .join("marker.txt")
         .exists()));
 
-    // The next check (30 s) passes: the goal closes, the user is told.
+    // The next check passes: the goal closes, the user is told. The kernel
+    // removes the goal's file, says the line, and writes the `Goal met`
+    // transcript line as separate steps; a reader that stops at "the file is
+    // gone" can see the transcript a step early (the CI flake of 2026-09-16:
+    // the `say` was there, the `Goal met` line was not yet). So each thing is
+    // waited for on its own, not inferred from the one before.
+    let has_text = |needle: &str| {
+        transcript(&k.place)
+            .iter()
+            .any(|e| e["text"].as_str().unwrap_or("").contains(needle))
+    };
     assert!(
         wait_for(Duration::from_secs(70), || goal_files(&k.place).is_empty()),
         "the goal closes once its check passes: {:?}",
         goal_files(&k.place)
     );
-    let t = transcript(&k.place);
     assert!(
-        t.iter().any(|e| e["text"]
-            .as_str()
-            .unwrap_or("")
-            .contains("Goal met: the marker file exists")),
-        "{t:?}"
+        wait_for(Duration::from_secs(10), || has_text(
+            "Goal met: the marker file exists"
+        )),
+        "the transcript records the goal as met: {:?}",
+        transcript(&k.place)
     );
     assert!(
-        t.iter()
-            .any(|e| e["kind"] == "say" && e["text"].as_str().unwrap_or("").contains("goal met")),
-        "the user hears it as a line: {t:?}"
+        wait_for(Duration::from_secs(10), || transcript(&k.place).iter().any(
+            |e| e["kind"] == "say" && e["text"].as_str().unwrap_or("").contains("goal met")
+        )),
+        "the user hears it as a line: {:?}",
+        transcript(&k.place)
     );
-    let log =
-        std::fs::read_to_string(k.place.join(".arbos/runtime/kernel.log")).unwrap_or_default();
-    assert!(log.contains("goal_met"), "{log}");
+    assert!(
+        wait_for(Duration::from_secs(10), || std::fs::read_to_string(
+            k.place.join(".arbos/runtime/kernel.log")
+        )
+        .unwrap_or_default()
+        .contains("goal_met")),
+        "kernel.log records goal_met: {}",
+        std::fs::read_to_string(k.place.join(".arbos/runtime/kernel.log")).unwrap_or_default()
+    );
     let _ = k.child.kill();
 }
