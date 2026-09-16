@@ -2315,7 +2315,10 @@ impl Workspace {
     pub fn session_connected(&mut self, id: u64, cx: &mut Context<Self>) {
         self.with_session(id, cx, |chat| {
             // The kernel's copy first: a "reconnected" line is this
-            // window's to say, not a transcript record to seed.
+            // window's to say, not a transcript record to seed. And what it
+            // wrote while no window was attached comes in before anything
+            // live does (F-105).
+            chat.adopt_kernel_tail();
             chat.sync_kernel_history();
             if chat.reconnect_attempt > 0 {
                 chat.notice(false, "reconnected");

@@ -1183,6 +1183,68 @@ impl ChatSession {
     }
 
     /// Push local bubbles the kernel never stored, then title from them.
+    /// Lines the kernel recorded while no window was attached — a held
+    /// follow-up that ran after the app was shut, its answer, a worker's
+    /// report — are on the transcript and not in this window's record; the
+    /// live stream only starts at the attach. The view then showed the
+    /// answer with no prompt over it, or nothing (F-105, cycle 22: the
+    /// follow-up ran between quit and relaunch, and only "restart" came
+    /// through). On attach, every turn the kernel wrote after the newest
+    /// prompt this record knows is taken in whole.
+    pub(crate) fn adopt_kernel_tail(&mut self) {
+        if self.host.is_some() {
+            return;
+        }
+        let Some(sid) = self.agent_session.clone() else {
+            return;
+        };
+        let Some(replay) = crate::kernel::session_history(&self.place(), &sid) else {
+            return;
+        };
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        let is_user = |item: &ChatItem| matches!(item, ChatItem::User(_));
+        // The record's newest prompt, by its transcript line when the card
+        // kept one, else by its words.
+        let Some(ChatItem::User(known)) = self.items.iter().rev().find(|item| is_user(item)) else {
+            return;
+        };
+        let known_words = squash(&known.text);
+        let known_at = match known.seq {
+            Some(seq) => replay.items.iter().rposition(
+                |item| matches!(item, ChatItem::User(m) if m.seq == Some(seq)),
+            ),
+            None => replay.items.iter().rposition(
+                |item| matches!(item, ChatItem::User(m) if squash(&m.text) == known_words),
+            ),
+        };
+        let Some(known_at) = known_at else {
+            return;
+        };
+        let Some(next_turn) = replay.items[known_at + 1..]
+            .iter()
+            .position(is_user)
+            .map(|offset| known_at + 1 + offset)
+        else {
+            return;
+        };
+        // Whole turns only, and none this record already has: a prompt the
+        // live stream delivered in the meantime is matched by its words.
+        let fresh: Vec<ChatItem> = replay.items[next_turn..]
+            .iter()
+            .filter(|item| match item {
+                ChatItem::User(m) => !self.items.iter().any(
+                    |mine| matches!(mine, ChatItem::User(k) if squash(&k.text) == squash(&m.text) && k.sent_at == m.sent_at),
+                ),
+                _ => true,
+            })
+            .cloned()
+            .collect();
+        if fresh.iter().any(is_user) {
+            self.items.extend(fresh);
+            self.flush();
+        }
+    }
+
     pub(crate) fn sync_kernel_history(&mut self) {
         if let Some(sid) = self.agent_session.clone() {
             // A line typed while the socket was down has its card on the
@@ -1776,6 +1838,7 @@ impl ChatSession {
                 if seq > 0 {
                     card.seq = Some(seq);
                 }
+                self.flush();
             }
             return;
         }
@@ -1800,6 +1863,7 @@ impl ChatSession {
             if seq > 0 {
                 last.seq = Some(seq);
             }
+            self.flush();
             return;
         }
         let mut message = crate::model::attachment::UserMessage::from(text);
