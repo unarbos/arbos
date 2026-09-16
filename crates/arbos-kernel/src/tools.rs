@@ -485,7 +485,7 @@ impl Tool for Spawn {
                 ),
                 (
                     "kind",
-                    "Leave out unless a Kind fits. Built in everywhere: explore (read-only codebase question, inline), computer-use (drive a page or the screen, inline), video-review (check a recording, inline), coordinator (an area with several parallel topics: it runs its own workers and returns one result).",
+                    "Leave out unless a Kind fits. Built in everywhere: explore (read-only codebase question, inline), computer-use (drive a page or the screen, inline), video-review (check a recording, inline), coordinator (an area with several parallel topics: it runs its own workers and returns one result). A read-only kind on a task that writes (Output files, steps that create or change files, a PR, a worktree) is started as a plain writing worker instead, and the result says so: pick the kind for the task, never trim the task to fit a kind.",
                     false,
                     "string",
                 ),
@@ -574,34 +574,45 @@ impl Tool for Spawn {
             let brief = rendered.as_str();
             let model = opt_str(&args, "model");
             let readonly = opt_bool(&args, "readonly").unwrap_or(false);
-            // A read-only worker cannot write the deliverable its brief
-            // names: the two workers of remote-track F-36 reported exactly
-            // that. The mismatch is refused here, before the worker exists,
-            // with both ways out.
-            let kind_readonly = opt_str(&args, "kind")
+            // A read-only worker and a brief that writes are the wrong
+            // pairing. The rule judges the brief — Output files, a Show
+            // line, steps that change files, a commit or PR, a worktree —
+            // not the Output field alone: the old guard taught the model
+            // to drop the Output line and keep `kind: explore`, and seven
+            // workers wrote nothing (F-56). A read-only *kind* was the
+            // wrong pick and is set right here, with a note; an explicit
+            // readonly=true is refused with the right fix named first.
+            let mut kind_pick = opt_str(&args, "kind").map(str::to_string);
+            let kind_readonly = kind_pick
+                .as_deref()
                 .and_then(|k| arbos_core::find_def(&hooks.place, k))
                 .is_some_and(|d| d.readonly);
+            let wants_worktree = opt_str(&args, "isolate")
+                .is_some_and(|i| i.trim().eq_ignore_ascii_case("worktree"));
+            let mut readonly_note: Option<String> = None;
             if readonly || kind_readonly {
-                let owed = arbos_engine::brief_output_paths(brief);
-                if !owed.is_empty() {
-                    anyhow::bail!(
-                        "spawn: {} but the brief names Output files it must write ({}). Drop readonly (the worker writes its deliverable), or drop the Output line and have it report in words.",
-                        if readonly {
-                            "readonly=true".to_string()
-                        } else {
-                            format!(
-                                "kind {:?} is read-only",
-                                opt_str(&args, "kind").unwrap_or("")
-                            )
-                        },
-                        owed.join(", ")
-                    );
+                let mut reasons = arbos_engine::intent::write_reasons(brief);
+                if wants_worktree {
+                    reasons.push("isolate=worktree (a worktree exists to be written in)".into());
+                }
+                if !reasons.is_empty() {
+                    let why = reasons.join("; ");
+                    if readonly {
+                        anyhow::bail!(
+                            "spawn: readonly=true, but this task writes — {why}. Change the pairing, not the brief: drop readonly and keep the Output line; the worker writes its deliverable. Only if the ask is truly a question with nothing to produce, say so in the task and leave Output out."
+                        );
+                    }
+                    let k = kind_pick.take().unwrap_or_default();
+                    readonly_note = Some(format!(
+                        "kind {k:?} is read-only and this task writes ({why}), so the worker was started as a writing worker (no kind) with the brief as given. kind={k} is for a question with nothing to produce; keep Output lines on writing tasks."
+                    ));
                 }
             }
             let cwd = opt_str(&args, "cwd").map(PathBuf::from);
             // A typed helper runs inline: its result is this call's result
             // unless the caller says otherwise.
-            let inline_kind = opt_str(&args, "kind")
+            let inline_kind = kind_pick
+                .as_deref()
                 .and_then(|k| arbos_core::find_def(&hooks.place, k))
                 .is_some_and(|d| d.inline);
             let wait = opt_bool(&args, "wait").unwrap_or(inline_kind);
@@ -669,7 +680,7 @@ impl Tool for Spawn {
                 });
             }
             let mut ran_here = String::new();
-            let kind = opt_str(&args, "kind");
+            let kind = kind_pick.as_deref();
             let kind_owned = kind.map(str::to_string);
             let raw = opt_str(&args, "isolate")
                 .map(str::trim)
@@ -718,6 +729,9 @@ impl Tool for Spawn {
             };
             if let Some(note) = &host_note {
                 body.push_str(&format!("\nNote: {note}."));
+            }
+            if let Some(note) = &readonly_note {
+                body.push_str(&format!("\nNote: {note}"));
             }
             let mut paths = vec![format!(".arbos/agents/{id}")];
             if let Some(w) = &worktree {

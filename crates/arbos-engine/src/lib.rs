@@ -9,6 +9,7 @@ pub mod envprobe;
 mod evict;
 mod host;
 pub mod image;
+pub mod intent;
 mod jobs;
 pub mod markup;
 pub mod mechanism;
