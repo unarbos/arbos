@@ -68,9 +68,11 @@ pub enum Frame {
     /// wake (the `done`, `job`, `serve` wakes inside stay inside). The
     /// exchange is the one holding `seq` (a line the user is looking at)
     /// or the tool call `call_id` (a tool line the user clicked, carried
-    /// whole); absent both, the last the user opened. `turns` (default
-    /// 1) adds that many minus one earlier exchanges, thinned to a line
-    /// each, for "it keeps doing this". Answered with `feedback_bundle`:
+    /// whole); absent both, the last the user opened. `tail` (default 0)
+    /// adds the last N lines of the agent's transcript whatever exchange
+    /// they fall in, slimmed and redacted the same — for "it keeps doing
+    /// this" and for reproducing a behaviour bug; the wake lines in them
+    /// show the turn structure. Answered with `feedback_bundle`:
     /// the lines slimmed (tool bodies budgeted by outcome — a glance for
     /// a call that went fine, the error uncut plus a tail-weighted 8 KB
     /// for one that failed or the span's last, whole for the named
@@ -86,17 +88,18 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
         #[serde(default, skip_serializing_if = "is_zero_u32")]
-        turns: u32,
+        tail: u32,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         note: String,
     },
     /// Kernel → client: the answer to `feedback`. `events` are the anchor
-    /// exchange's lines; `earlier` one summary line per earlier exchange;
-    /// `children` the spawned agents' lines since the exchange began,
+    /// exchange's lines; `tail` the last N transcript lines asked for
+    /// (those already in `events` left out); `children` the spawned
+    /// agents' lines since the exchange began,
     /// each `{agent, events}`; `log` kernel.log lines for the span (and
     /// the log's newest few). All JSON as the files hold them, after
     /// redaction and slimming. `redacted` counts what went; `truncated`
-    /// says the cap cut something (earlier exchanges first, then
+    /// says the cap cut something (the tail's oldest lines first, then
     /// children, then log lines to a floor, then the anchor's middle);
     /// `bytes` is this frame's size.
     FeedbackBundle {
@@ -104,7 +107,7 @@ pub enum Frame {
         turn: serde_json::Value,
         events: Vec<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        earlier: Vec<serde_json::Value>,
+        tail: Vec<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         children: Vec<serde_json::Value>,
         log: Vec<serde_json::Value>,

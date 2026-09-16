@@ -205,20 +205,40 @@ fn feedback_hands_over_one_exchange_redacted_budgeted_and_bounded() {
     );
     assert_eq!(by_call["turn"]["call_id"], root_spawn_id);
 
-    // `turns: 2` from exchange 2: exchange 1 thinned to a line.
-    a.send(serde_json::json!({"type":"feedback","agent":"root","turns": 2}));
-    let two = a
+    // `tail: 40` from exchange 2: the last lines of the transcript
+    // whatever exchange they fall in, minus what the anchor already
+    // carries; the wake lines show the turn structure.
+    a.send(serde_json::json!({"type":"feedback","agent":"root","tail": 40}));
+    let with_tail = a
         .wait(Duration::from_secs(10), |f| f["type"] == "feedback_bundle")
-        .expect("two exchanges");
+        .expect("with a tail");
     assert_eq!(
-        two["events"][1]["text"], "and now something else",
+        with_tail["events"][1]["text"], "and now something else",
         "no seq: the last user exchange"
     );
-    let earlier = two["earlier"].as_array().unwrap();
-    assert_eq!(earlier.len(), 1);
-    assert_eq!(earlier[0]["asked"], "check the env");
-    assert_eq!(earlier[0]["answered"], "checker reports the env is set.");
-    assert_eq!(earlier[0]["tools"]["spawn"], 1);
+    let tail = with_tail["tail"].as_array().unwrap();
+    assert!(!tail.is_empty());
+    assert!(
+        tail.iter()
+            .any(|e| e["kind"] == "wake" && e["wake"] == "user" && e["text"] == "check the env"),
+        "{tail:?}"
+    );
+    assert!(
+        tail.iter()
+            .any(|e| e["kind"] == "wake" && e["wake"] == "done"),
+        "{tail:?}"
+    );
+    assert!(
+        tail.iter().all(|e| e["text"] != "and now something else"),
+        "the anchor's lines are not repeated: {tail:?}"
+    );
+    assert!(
+        tail.iter()
+            .filter(|e| e["kind"] == "tool")
+            .all(|e| e.get("body").is_none()),
+        "slimmed the same"
+    );
+    assert_eq!(with_tail["turn"]["tail"], 40);
 
     // The companion: one body whole, redacted.
     a.send(serde_json::json!({"type":"tool_body","agent":"checker","call_id": child_bash_id}));

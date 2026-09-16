@@ -1959,7 +1959,7 @@ pub async fn serve_client(
                             agent,
                             seq,
                             call_id,
-                            turns,
+                            tail,
                             note,
                         } => {
                             if !arbos_core::agent_exists(&place_for_history, &agent) {
@@ -1977,12 +1977,11 @@ pub async fn serve_client(
                                 });
                                 continue;
                             };
-                            let turns = turns.max(1);
                             let req = crate::feedback::Request {
                                 agent: &agent,
                                 seq,
                                 call_id: call_id.as_deref(),
-                                turns,
+                                tail,
                                 note: &note,
                             };
                             let b = crate::feedback::bundle(&place_for_history, &req, &host);
@@ -1990,12 +1989,12 @@ pub async fn serve_client(
                                 "feedback_bundle",
                                 Some(&agent),
                                 format!(
-                                    "seq={} call_id={} turns={turns} lines={} earlier={} children={} log={} bytes={} redacted={} truncated={}",
+                                    "seq={} call_id={} tail={tail} lines={} tail_lines={} children={} log={} bytes={} redacted={} truncated={}",
                                     seq.map(|s| s.to_string())
                                         .unwrap_or_else(|| "latest".into()),
                                     call_id.as_deref().unwrap_or("-"),
                                     b.events.len(),
-                                    b.earlier.len(),
+                                    b.tail.len(),
                                     b.children.len(),
                                     b.log.len(),
                                     b.bytes,
@@ -2007,7 +2006,7 @@ pub async fn serve_client(
                                 agent,
                                 turn: b.turn,
                                 events: b.events,
-                                earlier: b.earlier,
+                                tail: b.tail,
                                 children: b.children,
                                 log: b.log,
                                 kernel: b.kernel,

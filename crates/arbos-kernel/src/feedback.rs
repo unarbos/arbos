@@ -32,6 +32,8 @@ const LOG_FLOOR: usize = 40;
 const DIAGNOSTIC_BYTES: usize = 8 * 1024;
 /// A bash command is what an agent reads first and is almost never long.
 const COMMAND_BYTES: usize = 4 * 1024;
+/// The most transcript lines `tail` will carry.
+pub const TAIL_MAX: u32 = 500;
 
 /// Argument keys that carry a whole file or patch: glanced, with the real
 /// length recorded under `args_clipped`.
@@ -57,16 +59,18 @@ pub struct Request<'a> {
     /// The tool line the user clicked: its exchange is the anchor and its
     /// body is carried whole (up to the cap).
     pub call_id: Option<&'a str>,
-    /// Exchanges to cover: the anchor in full plus this many minus one
-    /// before it, thinned to a line each.
-    pub turns: u32,
+    /// The last N lines of the agent's transcript, whatever exchange they
+    /// fall in, beside the anchor: the wake lines in them show the turn
+    /// structure, so one primitive serves "it keeps doing this" and
+    /// reproduction alike. Capped at `TAIL_MAX`.
+    pub tail: u32,
     pub note: &'a str,
 }
 
 pub struct Bundle {
     pub turn: Value,
     pub events: Vec<Value>,
-    pub earlier: Vec<Value>,
+    pub tail: Vec<Value>,
     pub children: Vec<Value>,
     pub log: Vec<Value>,
     pub kernel: Value,
@@ -128,17 +132,6 @@ fn span_end(events: &[Event], starts: &[usize], start: usize) -> usize {
         .find(|&&w| w > start)
         .copied()
         .unwrap_or(events.len())
-}
-
-/// `n` exchanges before the one starting at `start`, oldest first.
-fn earlier_spans(events: &[Event], start: usize, n: u32) -> Vec<(usize, usize)> {
-    let starts = boundaries(events);
-    let before: Vec<usize> = starts.iter().copied().filter(|&w| w < start).collect();
-    let skip = before.len().saturating_sub(n as usize);
-    before[skip..]
-        .iter()
-        .map(|&s| (s, span_end(events, &starts, s)))
-        .collect()
 }
 
 /// Head and tail of `text` within `budget` bytes, most of it the tail.
@@ -252,41 +245,6 @@ fn slim(ev: &Event, budget: Budget) -> Value {
 
 fn body_glance_len(rec: &ToolRec) -> usize {
     rec.digest().map(|d| d.len()).unwrap_or(0)
-}
-
-/// One earlier exchange, thinned to a line: what was asked, what was
-/// answered, which tools ran and how many failed.
-fn thin(events: &[Event]) -> Value {
-    let wake_text = events.first().and_then(|e| match &e.kind {
-        EventKind::Wake { text, .. } => text.clone(),
-        _ => None,
-    });
-    let final_text = events.iter().rev().find_map(|e| match &e.kind {
-        EventKind::Assistant { text, .. } if !text.trim().is_empty() => Some(text.clone()),
-        _ => None,
-    });
-    let mut tools: Map<String, Value> = Map::new();
-    let mut errors = 0u64;
-    for e in events {
-        if let EventKind::Tool(rec) = &e.kind {
-            let n = tools.get(&rec.name).and_then(Value::as_u64).unwrap_or(0);
-            tools.insert(rec.name.clone(), json!(n + 1));
-            if rec.error.is_some() {
-                errors += 1;
-            }
-        }
-    }
-    json!({
-        "kind": "exchange",
-        "from": events.first().map(|e| e.seq).unwrap_or(0),
-        "to": events.last().map(|e| e.seq).unwrap_or(0),
-        "started_ms": events.first().map(|e| e.ts).unwrap_or(0),
-        "asked": wake_text.map(|t| arbos_core::text::clip(&t, 200)),
-        "answered": final_text.map(|t| arbos_core::text::clip(&t, 300)),
-        "tools": tools,
-        "errors": errors,
-        "complete": events.iter().any(Event::is_turn_complete),
-    })
 }
 
 /// Every string leaf of `v`, redacted in place: the kernel's own key and
@@ -414,13 +372,37 @@ pub fn bundle(place: &Place, req: &Request<'_>, host: &arbos_engine::Host) -> Bu
         })
         .collect();
 
-    // Earlier exchanges, thinned.
-    let mut earlier: Vec<Value> = match anchor {
-        Some((s, _)) if req.turns > 1 => earlier_spans(&events, s, req.turns - 1)
-            .into_iter()
-            .map(|(a, b)| thin(&events[a..b]))
-            .collect(),
-        _ => vec![],
+    // The transcript's tail, beside the anchor: lines the anchor already
+    // carries are left out; budgets as for the anchor (a failed call or
+    // the tail's last call diagnostic, the rest a glance).
+    let mut tail: Vec<Value> = if req.tail > 0 {
+        let n = req.tail.min(TAIL_MAX) as usize;
+        let skip = events.len().saturating_sub(n);
+        let picked: Vec<&Event> = events
+            .iter()
+            .enumerate()
+            .skip(skip)
+            .filter(|(i, _)| !anchor.is_some_and(|(s, en)| (s..en).contains(i)))
+            .map(|(_, e)| e)
+            .collect();
+        let last_tool = picked
+            .iter()
+            .rposition(|x| matches!(x.kind, EventKind::Tool(_)));
+        picked
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let budget = match &e.kind {
+                    EventKind::Tool(r) if r.error.is_some() || Some(i) == last_tool => {
+                        Budget::Diagnostic
+                    }
+                    _ => Budget::Glance,
+                };
+                slim(e, budget)
+            })
+            .collect()
+    } else {
+        vec![]
     };
 
     // Children spawned or reporting in the span: their own lines since the
@@ -468,7 +450,7 @@ pub fn bundle(place: &Place, req: &Request<'_>, host: &arbos_engine::Host) -> Bu
 
     for v in lines
         .iter_mut()
-        .chain(earlier.iter_mut())
+        .chain(tail.iter_mut())
         .chain(children.iter_mut())
         .chain(log.iter_mut())
     {
@@ -479,27 +461,27 @@ pub fn bundle(place: &Place, req: &Request<'_>, host: &arbos_engine::Host) -> Bu
     counts.values += n.values;
     counts.blocks += n.blocks;
 
-    // The cap, in the order that loses the least: thinned earlier
-    // exchanges (oldest first), then child spans (oldest first), then log
-    // lines down to the floor, then the anchor's middle — its wake, the
-    // user's line and its last line always stay.
-    let over = |lines: &[Value], earlier: &[Value], children: &[Value], log: &[Value]| {
-        size_of(&[lines, earlier, children, log]) > MAX_BYTES
+    // The cap, in the order that loses the least: the tail's oldest lines,
+    // then child spans (oldest first), then log lines down to the floor,
+    // then the anchor's middle — its wake, the user's line and its last
+    // line always stay.
+    let over = |lines: &[Value], tail: &[Value], children: &[Value], log: &[Value]| {
+        size_of(&[lines, tail, children, log]) > MAX_BYTES
     };
     let mut truncated = false;
-    while over(&lines, &earlier, &children, &log) && !earlier.is_empty() {
-        earlier.remove(0);
+    while over(&lines, &tail, &children, &log) && !tail.is_empty() {
+        tail.remove(0);
         truncated = true;
     }
-    while over(&lines, &earlier, &children, &log) && !children.is_empty() {
+    while over(&lines, &tail, &children, &log) && !children.is_empty() {
         children.remove(0);
         truncated = true;
     }
-    while over(&lines, &earlier, &children, &log) && log.len() > LOG_FLOOR {
+    while over(&lines, &tail, &children, &log) && log.len() > LOG_FLOOR {
         log.remove(0);
         truncated = true;
     }
-    while over(&lines, &earlier, &children, &log) && lines.len() > 3 {
+    while over(&lines, &tail, &children, &log) && lines.len() > 3 {
         lines.remove(2);
         truncated = true;
     }
@@ -523,7 +505,7 @@ pub fn bundle(place: &Place, req: &Request<'_>, host: &arbos_engine::Host) -> Bu
         "lines": lines.len(),
         "of": span.len(),
         "call_id": req.call_id,
-        "turns": req.turns.max(1),
+        "tail": req.tail.min(TAIL_MAX),
     });
     let redacted = json!({
         "secrets": counts.secrets,
@@ -533,7 +515,7 @@ pub fn bundle(place: &Place, req: &Request<'_>, host: &arbos_engine::Host) -> Bu
     });
     // The whole frame's size, as the client shows it.
     let bytes = json!({
-        "agent": agent, "turn": turn, "events": lines, "earlier": earlier, "children": children,
+        "agent": agent, "turn": turn, "events": lines, "tail": tail, "children": children,
         "log": log, "kernel": kernel, "note": note, "redacted": redacted, "truncated": truncated,
     })
     .to_string()
@@ -541,7 +523,7 @@ pub fn bundle(place: &Place, req: &Request<'_>, host: &arbos_engine::Host) -> Bu
     Bundle {
         turn,
         events: lines,
-        earlier,
+        tail,
         children,
         log,
         kernel,
@@ -662,7 +644,6 @@ mod tests {
         let only_housekeeping = vec![wake(1, 1, "user"), wake(2, 2, "serve"), wake(3, 3, "job")];
         assert_eq!(anchor_span(&only_housekeeping, None, None), Some((0, 3)));
         assert_eq!(anchor_span(&ev, Some(999), None), None);
-        assert_eq!(earlier_spans(&ev, 9, 3), vec![(0, 9)]);
     }
 
     #[test]
@@ -686,11 +667,6 @@ mod tests {
         assert!(glance.get("output_clipped").is_none());
         let whole = slim(&ev[4], Budget::Whole);
         assert_eq!(whole["output"].as_str().unwrap().len(), 15_000);
-        let t = thin(&ev[0..9]);
-        assert_eq!(t["tools"]["bash"], 2);
-        assert_eq!(t["errors"], 1);
-        assert_eq!(t["answered"], "Both done.");
-        assert_eq!(t["asked"], "user 1");
     }
 
     #[test]
