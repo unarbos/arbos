@@ -53,6 +53,9 @@ struct CallView: View {
                     .onTapGesture(perform: tapOrb)
                 // Who is on the line: the gateway's own word once the call
                 // is up (`session.ready.project`), the chat's face before.
+                // With the keyboard up the transcript line rises into this
+                // spot (the orb layer ignores the keyboard on purpose), so the
+                // name steps aside rather than print over the words.
                 HStack(spacing: 8) {
                     ProjectGlyph(identity: onTheLine, size: 22)
                     Text(onTheLine.label ?? projectName)
@@ -61,6 +64,8 @@ struct CallView: View {
                         .lineLimit(1)
                 }
                 .padding(.top, -8)
+                .opacity(typing ? 0 : 1)
+                .animation(.easeOut(duration: 0.15), value: typing)
                 if let hint {
                     Text(hint)
                         .font(ArbosTheme.callout)
