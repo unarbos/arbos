@@ -30,6 +30,18 @@ Register the device with the hub through the attach socket, before or after
 - A `seen` from any client becomes a background push (`content-available:
   1`) with the new badge, so the phone's badge follows the desktop.
 
+## Checking it works (added 16:45 UTC, [#333](https://github.com/unarbos/arbos/pull/333))
+
+- The hub stays up on a bad key; it logs `push disabled — <reason>` at
+  start and serves.
+- `GET /push` with any token: `enabled`, `reason`, your devices as token
+  tails, and the last 50 attempts with Apple's status and detail.
+- `GET /push/test` (or `/push/test/<token-tail>`): a test alert to your
+  phone — 200 when it took it, 503 when push is off, 502 when Apple
+  refused, with why in the body.
+- The `pushed` reply to the app's `push` frame carries `reason` when
+  push is off, for a plain line in the UI.
+
 ## Jacob
 
 Into the hub host's `hub-server.toml`:
