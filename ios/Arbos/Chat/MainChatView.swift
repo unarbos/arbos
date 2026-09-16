@@ -216,7 +216,7 @@ struct ProjectChatView: View {
                             .padding(.top, 8)
                     }
                     ForEach(chat.items) { item in
-                        ChatRow(item: item, waitingOn: chat.title).id(item.id)
+                        ChatRow(item: item, waitingOn: title).id(item.id)
                     }
                     if !chat.unseen.isEmpty {
                         AwayCard(notifications: chat.unseen) { chat.markSeen() }
