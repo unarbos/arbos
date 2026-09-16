@@ -648,7 +648,9 @@ class Pass:
         self.send(P_EDIT); self.wait_idle(120); time.sleep(1)
         sc = "turn-folds"
         self.inv(sc)
-        work = self.first("work-*")
+        # `work-bare-N` is a headline over nothing foldable (F-104): no chevron,
+        # nothing to click. Only a real fold is exercised here.
+        work = next((w for w in self.ids("work-*") if "work-bare-" not in w), None)
         if work:
             def below_y():
                 foot = self.ids("copy-turn-*")
@@ -658,7 +660,8 @@ class Pass:
                        lambda: self.app.click(work), lambda a, b: (below_y() != y0) and f"footer y {y0:.0f} -> {below_y():.0f}; tool={len(self.ids('tool-*'))} thought={len(self.ids('thought-*'))} diff={len(self.ids('diff-card-*'))} term={len(self.ids('term-card-*'))}")
             self.check("work", sc, "click 'Worked' fold again", "fold toggles back", lambda: self.app.click(work), lambda a, b: below_y() == y0)
         else:
-            self.gap("work", sc, "click", "no work-* fold after an edit turn")
+            bare = self.first("work-bare-*")
+            self.gap("work", sc, "click", "no work-* fold after an edit turn" + (" (a bare 'Worked' headline over a delegating turn — nothing to fold, F-104)" if bare else ""))
         for kind in ("tool", "thought", "diff-card", "term-card", "term-body", "diff-body"):
             el = self.first(f"{kind}-*")
             if not el:

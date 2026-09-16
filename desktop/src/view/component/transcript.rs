@@ -3779,18 +3779,6 @@ fn zone(
         .iter()
         .any(|seg| matches!(seg, Seg::Run(_) | Seg::Prose(_)))
         || matches!(chat.items.get(first), Some(ChatItem::Wake { .. }));
-    let mut header_drawn = false;
-    let mut open = open;
-    if !running && foldable {
-        match work_header(chat.id, first, &stats, open, running, chat, cx) {
-            Some(header) => {
-                zone = zone.child(header);
-                header_drawn = true;
-            }
-            // No headline to fold under: the body stands as it is.
-            None => open = true,
-        }
-    }
     // Cursor's Project chat (the root) shows no tool calls at all — the
     // coordinator's quick reads and commands are hidden work; its checklist
     // (`plan`, Cursor's TodoWrite) shows as a card. A worker's chat shows
@@ -3807,6 +3795,18 @@ fn zone(
             ),
         Seg::Prose(_) | Seg::Other(_) => false,
     });
+    let mut header_drawn = false;
+    let mut open = open;
+    if !running && foldable {
+        match work_header(chat.id, first, &stats, open, running, rows_under, chat, cx) {
+            Some(header) => {
+                zone = zone.child(header);
+                header_drawn = true;
+            }
+            // No headline to fold under: the body stands as it is.
+            None => open = true,
+        }
+    }
     // Cursor's live headline over the timeline: "Working <step> ⌄" — the
     // step the agent named, else the kernel's; the rows of work under it,
     // and the chevron folds them. Over nothing (a root waiting on its
@@ -4363,6 +4363,7 @@ fn work_header(
     stats: &WorkStats,
     open: bool,
     running: bool,
+    rows: bool,
     chat: &ChatSession,
     cx: &mut Context<Workspace>,
 ) -> Option<AnyElement> {
@@ -4381,11 +4382,17 @@ fn work_header(
         .elapsed()
         .filter(|_| running)
         .unwrap_or_else(|| Duration::from_secs(stamped.unwrap_or(stats.secs)));
-    let (mut verb, rest) = work_summary(stats, running, elapsed, true);
+    let (mut verb, mut rest) = work_summary(stats, running, elapsed, true);
     // A turn that was cut short says so on its one line, with the time it
-    // had run, instead of a bare "Worked" over nothing.
+    // had run, instead of a bare "Worked" over nothing. Without a time the
+    // summary's words were a verb phrase ("explored the project page") whose
+    // verb the label replaces — "Stopped by you the project page" (cycle
+    // 22); Cursor's line is "Stopped by you" alone.
     if !running && let Some(label) = interrupt_label_of(&chat.items, turn) {
         verb = label;
+        if elapsed.as_secs() == 0 {
+            rest = String::new();
+        }
     }
     // Nothing to say — no time, no tools worth a word: Cursor draws no
     // line at all; the caller shows the body as it is.
@@ -4394,6 +4401,14 @@ fn work_header(
     }
     // Cursor's headline is "Worked 12s ⌄" alone; the +3 −3 sits on the
     // "Edited 2 files" run line inside the fold.
+    // Over nothing foldable — a turn that only delegated, prose alone —
+    // Cursor's line is bare: "Worked 6s" with no chevron and nothing to
+    // click (F-104, `cycle-22/cursor-worked-bare.png`).
+    if !rows {
+        return Some(
+            fold_row(&theme, "work-bare", turn, verb, rest, None, false, open, cx).into_any_element(),
+        );
+    }
     Some(
         fold_row(&theme, "work", turn, verb, rest, None, false, open, cx)
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -4563,8 +4578,9 @@ fn fold_row(
         .gap(px(ROW_GAP))
         .py(px(2.))
         .rounded(px(Theme::control_radius()))
-        .cursor_pointer()
-        .hover(|el| el.bg(theme.element_hover))
+        .when(name != "work-bare", |el| {
+            el.cursor_pointer().hover(|el| el.bg(theme.element_hover))
+        })
         .child(
             div()
                 .text_style(style)
@@ -4592,15 +4608,17 @@ fn fold_row(
             )
         })
         .when_some(diff, |el, (add, del)| el.child(diff_badge(theme, add, del)))
-        .child(
-            // The turn's headline wears its chevron ("Worked 6m 44s ›"); a run
-            // inside the opened timeline shows one on hover.
-            div()
-                .when(name != "work", |el| {
-                    el.invisible().group_hover(group, |el| el.visible())
-                })
-                .child(Layout::disclosure(theme, open)),
-        )
+        .when(name != "work-bare", |el| {
+            el.child(
+                // The turn's headline wears its chevron ("Worked 6m 44s ›"); a
+                // run inside the opened timeline shows one on hover.
+                div()
+                    .when(name != "work", |el| {
+                        el.invisible().group_hover(group, |el| el.visible())
+                    })
+                    .child(Layout::disclosure(theme, open)),
+            )
+        })
 }
 
 /// A clock every live shimmer shares, so rows sweep together.
