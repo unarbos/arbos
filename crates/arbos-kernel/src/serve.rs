@@ -1825,6 +1825,8 @@ pub async fn serve_client(
                 store: crate::hub_link::self_store().map(|a| a.to_string()),
                 protocol: PROTOCOL,
                 kernel: env!("CARGO_PKG_VERSION").to_string(),
+                git_sha: klog::git_sha().to_string(),
+                build: klog::build().to_string(),
                 tail: ATTACH_TAIL,
                 focus: focus_agent.clone(),
             });

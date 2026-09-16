@@ -160,6 +160,8 @@ pub async fn register(
             labels: labels(extra_labels),
             capabilities,
             version: klog::version().to_string(),
+            git_sha: klog::git_sha().to_string(),
+            build: klog::build().to_string(),
             protocol: HUB_PROTOCOL,
         },
     )

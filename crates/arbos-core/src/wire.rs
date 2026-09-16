@@ -34,6 +34,14 @@ pub enum Frame {
         store: Option<String>,
         protocol: u32,
         kernel: String,
+        /// Which build answered: the short git sha and the build time
+        /// (`YYYY-MM-DDTHH:MMZ`). Semver moves rarely; these tell this
+        /// morning's kernel from last week's, which is what a client (or
+        /// the self-updater) needs to see skew at all.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        git_sha: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        build: String,
         tail: u32,
         focus: String,
     },

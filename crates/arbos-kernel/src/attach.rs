@@ -433,7 +433,9 @@ pub async fn answer_http(
         (
             "200 OK",
             format!(
-                "{{\"kernel\":\"{kernel}\",\"protocol\":{protocol},\"attach\":\"websocket\",\"auth\":\"{auth}\"}}\n"
+                "{{\"kernel\":\"{kernel}\",\"git_sha\":\"{}\",\"build\":\"{}\",\"protocol\":{protocol},\"attach\":\"websocket\",\"auth\":\"{auth}\"}}\n",
+                crate::klog::git_sha(),
+                crate::klog::build()
             ),
         )
     } else {
