@@ -1,6 +1,6 @@
 # Arbos
 
-- [ ] The store keeps losing files — twice in five hours it dropped `docs/` and the shallow `internal/` entries while busy deep folders survived ([record](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/store-docs-loss-2026-09-16.md)); the second time the mirror restored all 19 documents in six minutes, and its scope is widening to `internal/` tooling with a push at the start of each cycle too; the rig's own driver was lost and belongs in the repo, and this is worth reporting to Cursor as a durability fault
+- [ ] The store keeps losing files — twice in five hours it dropped `docs/` and the shallow `internal/` entries while busy deep folders survived ([record](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/store-docs-loss-2026-09-16.md)); the second time the mirror restored all 19 documents in six minutes; it now covers `internal/` reports, notes, bug files and scripts too — not rollouts, media or large logs — and runs at the start and end of every cycle; owners are re-placing the lost tooling and pending notes, and this is worth reporting to Cursor as a durability fault
 
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 

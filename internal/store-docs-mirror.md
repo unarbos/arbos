@@ -77,6 +77,22 @@ A temporary 30-minute timer on the store-recovery worker
 09:48 to 11:00 UTC on 2026-09-16, while the documents were being rebuilt. It was closed once the QA
 loop took the job over, so it no longer reports.
 
+## Scope since 2026-09-16 12:45 UTC: `internal/` too, within a boundary
+
+*Added by the QA worker (`bc-f2e2f30d-1298-59f1-a24c-55113322de28`) after the second loss of the day took `internal/parity/` and `internal/features-inbox/`; everything above is the store-recovery worker's.*
+
+The mirror now carries `docs/`, `notes.md` and **`internal/`**, at the store's own paths. Under `internal/`, every file is mirrored **except**:
+
+- run output and caches — any folder named `rollouts`, `staging`, `state`, `node_modules`, `.venv`, `__pycache__`, `target` or `.git`, wherever it sits;
+- binaries — images, audio, video, archives, compiled files (`.png .jpg .jpeg .gif .webp .mp4 .mov .wav .mp3 .zip .tar .gz .tgz .pyc .so .o .bin .pdf`);
+- files over 2 MB (`MIRROR_MAX_BYTES`; the count of skipped files is logged).
+
+So these are protected and an owner may rely on the branch for them: reports, inbox notes, bug files, scripts (`deploy/`, `mirror-docs.sh` itself, the parity rig's `arbosdriver.py` and `ui_pass.py` once re-placed), scenario code, history `.jsonl` files. These are **not** protected and their owner keeps the only copy: rollout bundles, screenshots and recordings, big logs, `media/`, `artifacts/`.
+
+The safety gate grew with the scope: it also refuses when `internal/` is missing or lists nothing, and when the mirrored `internal/` set would shrink by more than a tenth (`MIRROR_ALLOW_SHRINK=1` overrides a deliberate removal). Refusal-as-alarm is unchanged. The QA cycle runs the mirror at its **start and its end** (`mirror_store start|end` in `internal/qa/deploy/cycle.sh`), so the window between a write and its copy is under an hour; when `internal/mirror-docs.sh` itself is gone the cycle's alarm (exit 3) restores the tool from the branch (`git show origin/store-docs:mirror-docs.sh`).
+
+**A fact about the mount worth remembering:** the store is slow enough that anything scanning it whole needs pruning. The first widened walk, a plain `find internal -type f` that filtered afterwards, ran over ten minutes because it descended into `internal/qa/rollouts/` (hundreds of bundles); with the excluded folders pruned inside `find` and every kept file hashed in one `git hash-object --stdin-paths`, the same mirror takes about 51 seconds for 19 docs and 347 `internal/` files. Do not put a whole-store walk on a hot path.
+
 ## If the store loses `docs/` again
 
 ```bash
