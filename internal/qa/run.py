@@ -1856,6 +1856,9 @@ def register_multitasking():
         import crossproject_scenarios
 
         crossproject_scenarios.register(scenario, SCENARIOS, transcript, now_ms, "main")
+        import journey_scenarios
+
+        journey_scenarios.register(scenario, SCENARIOS, transcript, now_ms, "main")
     except Exception as e:
         print(f"multitasking scenarios unavailable: {e}", file=sys.stderr)
 

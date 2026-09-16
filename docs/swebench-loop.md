@@ -22,7 +22,9 @@ One cycle = run Arbos on 50 fresh SWE-bench Verified instances, classify every l
 | Cycle 5 slice (50 fresh: 20 easy / 26 medium / 4 hard) | 50 | 40 (run A) | **42** (run B) | not run |
 | Cycle 6 slice, first 40 (`main` `43d8569`, measurement only) | 40 | **36** | — | not run |
 | Regression 20 at `-r 2`, complete (cycle 6) | 40 rollouts | **28** (17 instances once, 11 both) | — | — |
-| Covered so far | 316 of 500 (slice 6: 40 of 50 run) | | | |
+| Regression 20 at `-r 2`, `N=2` reproductions (cycle 7, 32 of 40 rollouts) | 32 rollouts | **28** (13 of 17 instances both times) | — | — |
+| Cycle 7 slice (30: 12 easy / 16 medium / 2 hard) | 30 / 13 | 26 (run A, `N=1`) | 10 of 13 (run B, `N=2`; A on the same 13: 11) | not run |
+| Covered so far | 346 of 500 (slice 6: 40 of 50 run; slice 7: 30) | | | |
 
 Cost per instance: Arbos $0.42–0.53 before the gates, ~$0.59 with both gates; Codex $1.72 on the same 24. Wall time per instance (median): Arbos 139–157 s; Codex 56 s.
 
@@ -30,17 +32,17 @@ Cost per instance: Arbos $0.42–0.53 before the gates, ~$0.59 with both gates; 
 
 ## Cause histogram (losses on the cycle slices, before the fix)
 
-| Cause | Cycle 1 (run A, 8 losses + 1 error) | Cycle 2 (run A, 13 losses) | Cycle 2 after fix (run B, 9) | Cycle 3 (run A, 11) | Cycle 4 (run A, 11) | Cycle 5 (run A, 10 → run B, 8) | Cycle 6 (`main`, 4 of 40) |
-|---|---|---|---|---|---|---|---|
-| wrong layer — fixed the symptom's caller/outer layer; hidden tests exercise the shared helper | 5 | 4 | 2 | 0 | 0 | 3 → 1 | 0 |
-| partial-complete — an adjacent case the issue implies was not covered | 1 | 4 | 2 | 3 | 3 | 3 → 3 | 1 |
-| wrong mechanism — right file, wrong fix (new in cycle 2) | 0 | 3 | 3 | **6** | **8** | 4 → 2 | **3** |
-| scope drift — generalised past the issue; hidden test pins the narrow behaviour | 1 | 1 | 1 | 2 | 0 | 0 | 0 |
-| test editing | 0 (on this slice; 2 on the original 16) | 1 (fixture files under `tests/`) | 1 | 0 | 0 | 0 | 0 |
-| env discovery | 0 losses (waste only; fixed by #96's login shell) | 0 | 0 | 0 | 0 | 0 | 0 |
-| call granularity | 0 losses (wall time only) | 0 | 0 | 0 | 0 | 0 | 0 |
-| tool gap | 0 on the slice; 1 on the regression set (`rm -rf /tmp/x` asked for approval) | 0 | 0 | 0 | 0 | 0 | 0 |
-| grader / harness artefact | 1 (trace dir over Harbor's 32 MB artifact cap) | 0 | 0 | 0 | 0 (disk full before the runs; restarted) | 0 | 0 |
+| Cause | Cycle 1 (run A, 8 losses + 1 error) | Cycle 2 (run A, 13 losses) | Cycle 2 after fix (run B, 9) | Cycle 3 (run A, 11) | Cycle 4 (run A, 11) | Cycle 5 (run A, 10 → run B, 8) | Cycle 6 (`main`, 4 of 40) | Cycle 7 (run A, 4 of 30) |
+|---|---|---|---|---|---|---|---|---|
+| wrong layer — fixed the symptom's caller/outer layer; hidden tests exercise the shared helper | 5 | 4 | 2 | 0 | 0 | 3 → 1 | 0 | 0 |
+| partial-complete — an adjacent case the issue implies was not covered | 1 | 4 | 2 | 3 | 3 | 3 → 3 | 1 | 1 |
+| wrong mechanism — right file, wrong fix (new in cycle 2) | 0 | 3 | 3 | **6** | **8** | 4 → 2 | **3** | **3** |
+| scope drift — generalised past the issue; hidden test pins the narrow behaviour | 1 | 1 | 1 | 2 | 0 | 0 | 0 | 0 |
+| test editing | 0 (on this slice; 2 on the original 16) | 1 (fixture files under `tests/`) | 1 | 0 | 0 | 0 | 0 | 0 |
+| env discovery | 0 losses (waste only; fixed by #96's login shell) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| call granularity | 0 losses (wall time only) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| tool gap | 0 on the slice; 1 on the regression set (`rm -rf /tmp/x` asked for approval) | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| grader / harness artefact | 1 (trace dir over Harbor's 32 MB artifact cap) | 0 | 0 | 0 | 0 (disk full before the runs; restarted) | 0 | 0 | 0 |
 
 ## Fixes shipped
 
@@ -53,6 +55,7 @@ Cost per instance: Arbos $0.42–0.53 before the gates, ~$0.59 with both gates; 
 | 4 | [#179](https://github.com/unarbos/arbos/pull/179) (stacked on #142) | `mechanism` argument on the first edit: recorded, echoed, shown by `changes`; refusal without it is opt-in (`ARBOS_MECHANISM_REQUIRED=1`, harness default) after the measurement | slice 4: 39→38 with the refusal on (50/50 stated a mechanism, 20 refusals); regression 20 at `-r 2`: 21/29 rollouts, the four flip-prone instances split 1/1 |
 | 5 | [#186](https://github.com/unarbos/arbos/pull/186) (stacked on #179) | `bash repro:true` records a failing reproduction; first edit refused without one (`ARBOS_REPRO_REQUIRED=1`, harness default); `changes` re-runs reproductions and reports pass / STILL FAILS; the last failing bash command counts as the reproduction | slice 5: 40→**42** (+2: two wrong-mechanism and two wrong-layer losses flipped; two variance losses); cost +53% from refusals, refinement unmeasured |
 | 6 | [#295](https://github.com/unarbos/arbos/pull/295) (harness only) | provider refusals exit 75 → verifiers error, not a zero; `vision_model` on a working route (`openai/*` is 403 on this key); `grep -c` doubling | measurement cycle: `main` `43d8569` 36/40 on slice 6; regression `-r 2` complete 28/40; #186's refinement cut reproduction refusals 2.9 → 1.05 per rollout |
+| 7 | [#314](https://github.com/unarbos/arbos/pull/314) | `ARBOS_REPRO_REQUIRED=N`: the first edit needs N distinct failing reproductions (N=2 = the reporter's example plus one the agent derives); harness knobs `repro_required`, `mechanism_required` | regression `-r 2` at N=2: **28/32** vs the 28/40 floor (like-for-like on the same 17 instances 23/34 → 28/32; the four coin-flip instances 2/2 each); slice 7 subset: A 11/13 vs B 10/13 (noise); kernel base also moved, so attribution waits for cycle 8 |
 
 ## Cycle 1 (2026-09-13) — detail
 
@@ -146,9 +149,20 @@ Kernel behaviours merged since cycle 5 (#186 repro gate + last-failing refinemen
 
 **Spend**: $62.50 — **$2.50 over the cap**: the two runs shared the cap and rollouts in flight finished after the batch-level check. From cycle 7 the regression run has its own cap ($30) and the slice runner's cap is set from what remains.
 
-## Next (cycle 7)
+## Cycle 7 (2026-09-16) — one experiment: two reproductions before the first edit
 
-1. Finish slice 6 (10 instances) so the 50-instance number exists, then slice 7 with a run B on the top loss class of the day — wrong mechanism again (3 of 4), now that both gates are in place and cheap.
-2. Wall time: Django `runtests.py` to the 1800 s timeout persists; `bash_wait_ms` 600 s for headless runs.
-3. Cap discipline: regression `-r 2` under its own $30, slice runs under the remainder, checked per batch *and* per rollout in flight.
-4. Partial-complete (3 of 11 in cycle 3, 3 of 11 in cycle 4): the done-criterion pass reads the request, not the *tests the request implies*; a check that lists the hidden-test-shaped cases (each example, each edge in the issue) against new test functions. *(reconstructed: this item stood in the "Next" list from cycle 2 onward.)*
+**Branch** `cursor/swebench-loop-c7` on `main` `c964294` ([#314](https://github.com/unarbos/arbos/pull/314)). **Target**: right file, wrong mechanism (3 of 4 losses in cycle 6). **Lever**: `ARBOS_REPRO_REQUIRED=2` — before the first edit the agent needs two *distinct* failing reproductions: the reporter's example and a second input it derives from the request text; the refusal says which is missing. Same kernel in both arms; only the variable differs. Caps were separate this cycle: $30 regression (watcher at $27), $30 slice (watcher at $28).
+
+**Regression 20 at `-r 2`, N=2: 28 of 32 rollouts** (stopped at its cap; 17 instances reached, 13 passed both rollouts, 15 at least once). Against the cycle-6 floor of 28/40 — and like-for-like on the same 17 instances, **23/34 → 28/32**. The four instances that were coin flips through cycles 1–6 (django-14792, 15022, 15252, pylint-8898) went **2/2 each**; astropy-13398 stayed 1/1; requests-2317 and xarray-6992 stayed 0. This is the largest regression movement of the loop. **Confound**: the kernel base also moved (`43d8569` → `c964294`: first-byte replacement, refused-family memory, markup stripping), and there is no N=1 regression run on `c964294`, so N=2 cannot yet be separated from those. Cost $0.87 per rollout (cycle 6: $0.97).
+
+**Slice 7** (30: 12 easy / 16 medium / 2 hard): run A (N=1) **26/30**, $19.07, median 32 calls. Run B (N=2) reached 13 of 20 before the slice cap: **10/13**, A on the same 13: 11 — one flip against (django-11265), two losses shared (django-11532, django-13195, both wrong mechanism). Inside noise. Compliance: 13/13 run-B rollouts recorded a second reproduction; 24 second-reproduction refusals over 13 rollouts (1.8 each — the agent's first instinct is still to edit after one reproduction).
+
+**Incident**: when the regression watcher fired it removed *all* containers and the slice run-B eval died in the same minute (its two in-flight rollouts ended with kernel exit 2 as the interception server vanished); run B was resumed with `--resume`. The watcher now sends SIGINT and leaves container cleanup to verifiers. Run A's per-batch cap check also let a third batch start at $13.38 against a $14 cap, which is why run B only had budget for 13.
+
+**Spend**: $58.28 — regression $27.82 (under its cap), slice $30.47 ($0.47 over, in flight).
+
+## Next (cycle 8)
+
+1. **Attribute N=2**: regression 20 at `-r 2` with N=1 *and* N=2 on the same kernel, nothing else changed ($30 each, stop at the cap). If N=2 holds 28/32-class numbers and N=1 sits at the floor, the lever is real and ships as the harness default.
+2. Slice runs only if budget remains after that; the regression set at `-r 2` is the instrument now.
+3. Wall time: Django `runtests.py` to the 1800 s timeout persists; `bash_wait_ms` 600 s for headless runs.

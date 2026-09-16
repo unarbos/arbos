@@ -54,7 +54,7 @@ case "${1:-}" in
     # Mirror: a draft removed from loop/bugs (folded into a curated file) must
     # not come back from the branch on the next pull.
     rsync -a --delete "$ROOT/loop/bugs/" "$RESULTS/bugs/"
-    for f in kickoff-history.jsonl spend.jsonl call-mode-history.jsonl pod-health.jsonl store-mirror-history.jsonl; do
+    for f in kickoff-history.jsonl spend.jsonl call-mode-history.jsonl pod-health.jsonl store-mirror-history.jsonl journey-history.jsonl; do
       [ -f "$ROOT/loop/$f" ] && cp "$ROOT/loop/$f" "$RESULTS/$f"
     done
     [ -f "$ROOT/loop/rollouts/index.jsonl" ] && cp "$ROOT/loop/rollouts/index.jsonl" "$RESULTS/rollouts/index.jsonl"

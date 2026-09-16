@@ -1,0 +1,44 @@
+# Acceptance journeys — the whole path a user lives, scored step by step
+
+Owner: the QA loop (`bc-f2e2f30d`). First version 2026-09-16. Jacob's words that set it: *"The upgrade loops need to actually run full cycles of creating a project, running a challenge, doing follow up etc. Right now these things are flaky at best."* We had been testing elements and moments; this is the one path nobody ran start to finish. Three loops measure it against this one definition: the QA loop on Linux (every cycle, `internal/qa/journey_scenarios.py`, scenario `journey-linux`), the desktop loop as the spine of its cycle, the iPhone loop as the phone's version.
+
+## Rules
+
+1. **Every step asserts what the user would see** — the chat items, the tabs, the worker rows, the files on disk, the command's output — never an internal state on its own. Internal files (`transcript.jsonl`, `kernel.log`) may confirm, not replace.
+2. **A step that cannot be checked honestly is `unverified`, not `pass`.** The score line says how many were unverified and why; a loop that cannot reach a surface (no notification badge in the driver, no network to drop) says so.
+3. **Scored per step, run after run.** One line per run in `internal/qa/journey-history.jsonl`: `{ts, branch, sha, steps: {J1: pass|fail|unverified, …}, evidence}`; the loop reports pass rates per step over the last N runs, so flakiness is a rate, not a shrug.
+4. **A step that fails twice in a row is a bug with a name** (`qal-jNN-<step>-<slug>.md` in `internal/qa/bugs/`, with the two rollouts), filed by the loop, fixed as any other.
+5. **The challenge is real.** It needs workers, edits files, runs a command, and can fail on its merits (a test that must pass). No toy prompt.
+6. One journey run uses one fresh folder that is not `~/.arbos`, the app as a new user has it (scratch config, one model key, no prior projects), and the current `main` kernel and app.
+
+## The journey
+
+Each step: what the user does · what the user must see (the assertion) · how the Linux rig checks it · when it is `unverified`.
+
+**J1 — Create a project from nothing.** Open the app on an empty folder (not `~/.arbos`). *Sees:* one tab for the folder, a chat with the kickoff greeting (or a plain one-sentence notice if the key's model is refused — never a raw provider error), no failed notice. *Check:* driver state has a session for the folder; its items contain an assistant line and no `notice{failed}`; `.arbos/` exists under the folder. *Unverified:* never — this always runs.
+
+**J2 — Give it a real challenge.** The seeded folder holds a small Python project with a failing test (`tests/test_math.py`: `area()` wrong) and no CHANGELOG. Prompt: *"Fix the failing test in this project, add a CHANGELOG.md entry describing the fix, run the tests to prove they pass, and commit the work on a branch (not main). Tell me the branch name and the test output's last line."* *Sees:* the chat goes busy; one or more workers appear (worker rows / tabs, or `spawn` cards in the chat). *Check:* state shows `turn_open|streaming` within 20 s; within 120 s a session other than root exists (live or archived) or a `spawn` tool card is in the items. *Unverified:* if the coordinator does the work itself without a worker — then J2's "workers appear" is `unverified`, not `fail`, and the rest of the journey continues.
+
+**J3 — Watch it work honestly.** *Sees:* worker rows go from working to finished; the chat never shows the same assistant text twice in a row; when the chat says idle, the transcript has ended the turn. *Check:* the workers' turns end (transcript `turn_complete`); no two consecutive identical assistant items; `turn_open == false` ⇒ transcript ends with `turn_complete|interrupted` (nudges allowed after). *Unverified:* never.
+
+**J4 — Follow up mid-flight, and after.** While it works: *"Also add a line to the CHANGELOG saying who asked for this: QA."* *Sees:* the line appears in the same conversation and is taken up before the turn ends — not a second, parallel turn. *Check:* the follow-up `user` line is on the transcript **before** the first `turn_complete` that follows it, and root has no second `running` overlapping the first. After it finishes: *"Summarise what you changed in two lines."* *Sees:* a new turn that answers. *Check:* a new `turn_complete` after the second follow-up with an assistant reply. *Unverified:* if the turn had already ended when the mid-flight line was sent (the challenge finished too fast) — the mid-flight half is `unverified`.
+
+**J5 — Steer, interrupt, ask read-only.** Steer: *"Use British spelling in the CHANGELOG."* while it works — *sees* it acknowledged in the same turn (check as J4 mid-flight). Interrupt: press Stop — *sees* the turn end at once with an interrupted marker; the composer is usable; a next prompt runs. *Check:* `interrupted` on the transcript within 5 s of Stop, `turn_open` false, a later prompt gets a `turn_complete`. Read-only ask while working: *"What time is it, roughly? One line."* — *sees* an answer without the work being abandoned (the running task continues or resumes). *Check:* the answer line arrives; the challenge's files still get finished (J7). *Unverified:* Stop when nothing is running; the read-only ask when the turn had ended.
+
+**J6 — Leave and come back.** Quit the app; reopen it on the same folder. *Sees:* the tab is back, the transcript is intact (same items or more), the workers are still listed (finished ones as archived), the unseen notifications are shown. *Check:* driver state after relaunch: the project's session exists with `len(items) >= before`; worker sessions or archived rows present; `notes.md` unchanged by the relaunch. *Unverified:* the notification part — the Linux driver exposes no badge/unseen count today; it is recorded `unverified` until it does.
+
+**J7 — The result happened on disk.** *Sees/checks:* `tests/test_math.py` passes when the rig runs `python3 -m unittest` itself; `CHANGELOG.md` exists and mentions the fix (and "QA" if J4's line was taken); a branch other than `main` exists with at least one commit ahead of `main`; `main` unchanged. *Unverified:* never — but a `fail` here is the challenge failing on its merits, which is a legitimate product finding, not a harness one.
+
+**J8 — The awkward parts.** (a) Kernel restart mid-turn: kill the kernel while a turn runs, type a line — *sees* the line answered once after the app respawns the kernel, no duplicate, no error notice left behind. (b) A second project open at the same time: open another empty folder in a second tab, type a line there — *sees* it answered in that tab and nowhere else; the first project's transcript has no trace of it. (c) A dropped connection mid-turn (network loss, not process death): `unverified` on the Linux rig — the kernel is local, there is no link to drop; the phone loop owns this check. *Check:* transcripts of both projects and the home store for each tagged line; `kernel.json` pid changed for the restarted one.
+
+## Scoring
+
+Per run: `passed / 8` with the count of `unverified` steps stated (`J6 notifications`, `J8c` always; `J2 workers`, `J4 mid-flight`, `J5` parts when the timing did not allow the check). A step with several parts is `pass` only when every checkable part passed; `unverified` when at least one part was unverified and none failed; `fail` otherwise. Reported every cycle as `journey: N/8 pass, U unverified, F fail — J1 ✓ J2 ✓ …` and as pass rates over the last 10 runs.
+
+## The three loops
+
+- **QA loop (Linux, Xvfb, the gpui app + the driver):** `journey-linux`, every cycle after the tracked-branch run; history in `internal/qa/journey-history.jsonl`; rollout under `internal/qa/rollouts/<ts>-journey-linux/` with the app log, the driver frames, both projects' `.arbos` snapshots and the seeded folder's git log.
+- **Desktop loop (macOS):** the same steps against the Mac build; J8c may be checked with a real network toggle there.
+- **iPhone loop:** the phone's version — the project exists on a machine's kernel; J1 becomes "open the project in the list", J6 "background the app and return", J8c "toggle airplane mode mid-turn" (the phone owns the dropped-connection check).
+
+All three record the same step ids so one table compares them.
