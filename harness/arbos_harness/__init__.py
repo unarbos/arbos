@@ -72,6 +72,12 @@ class ArbosHarnessConfig(HarnessConfig):
     1 = one, 2 = the reporter's example plus a second input the agent derives."""
     mechanism_required: bool = True
     """Refuse the first edit without a `mechanism` line (`ARBOS_MECHANISM_REQUIRED`)."""
+    max_turn_cost_usd: float = Field(8.0, ge=0)
+    """Dollars one rollout's turn may spend on model calls before the kernel ends it
+    (`ARBOS_MAX_TURN_COST`); 0 = no cap. One SWE-bench rollout ran to $14 before this;
+    at $4 the cap cut three hard rollouts that had solved at $6 before (cycle 9), so $8."""
+    changes_before_done: bool = False
+    """Nudge a final reply after edits to run `changes` first (`ARBOS_CHANGES_BEFORE_DONE`)."""
     artifacts: str = "outputs/arbos"
     """Host folder that receives each rollout's `/logs/artifacts/arbos` (patch,
     rollout bundle, kernel log, result.json) under `<task>--<trace id>/`. Empty = keep
@@ -132,6 +138,8 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
             "ARBOS_WINDOW_TOKENS": str(self.config.window_tokens),
             "ARBOS_REPRO_REQUIRED": str(self.config.repro_required),
             "ARBOS_MECHANISM_REQUIRED": "1" if self.config.mechanism_required else "0",
+            "ARBOS_MAX_TURN_COST": str(self.config.max_turn_cost_usd),
+            "ARBOS_CHANGES_BEFORE_DONE": "1" if self.config.changes_before_done else "0",
             "ARBOS_OUT": OUT_DIR,
             "ARBOS_KERNEL_BIN": KERNEL_BIN,
             "XDG_CONFIG_HOME": f"/tmp/vf-arbos/{trace.id}/config",
@@ -177,6 +185,7 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
             "arbos_patch_bytes": float(r.get("patch_bytes", 0)),
             "arbos_tool_calls": float(r.get("tool_calls", 0)),
             "arbos_wall_s": float(r.get("wall_s", 0)),
+            "arbos_cost_capped": float(r.get("cost_capped", 0)),
             "arbos_artifact_bytes": float(collected),
         }
 

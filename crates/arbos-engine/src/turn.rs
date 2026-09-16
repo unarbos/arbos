@@ -160,6 +160,35 @@ fn unowned_failure<'a>(events: &'a [Event], reply: &str) -> Option<&'a arbos_cor
 
 /// The turn's wake carried a `Show:` line (the user asked to see the
 /// result) and no tool call since has produced an image.
+/// Set to `1` for headless runs: a final reply after edits with no
+/// `changes` since the last edit is nudged once to run it. `changes` is
+/// where the recorded reproductions are re-run and the coverage line
+/// reappears; in cycle 6 of the SWE-bench loop 23 of 40 rollouts finished
+/// without ever calling it, so that evidence was never seen.
+pub const CHANGES_BEFORE_DONE_ENV: &str = "ARBOS_CHANGES_BEFORE_DONE";
+
+fn changes_before_done() -> bool {
+    std::env::var(CHANGES_BEFORE_DONE_ENV).is_ok_and(|v| v == "1" || v == "true")
+}
+
+/// Whether this task (since the last user message) edited a file and has
+/// not run `changes` since its last edit.
+fn changes_owed(events: &[Event]) -> bool {
+    let mut owed = false;
+    for e in events {
+        match &e.kind {
+            EventKind::User { .. } => owed = false,
+            EventKind::Tool(rec) if rec.error.is_none() => match rec.name.as_str() {
+                "edit" | "write" | "apply_patch" => owed = true,
+                "changes" => owed = false,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    owed
+}
+
 fn image_owed(events: &[Event]) -> bool {
     let Some(start) = events.iter().rposition(Event::is_wake) else {
         return false;
@@ -813,6 +842,8 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     };
 
     let mut nudged = false;
+    // The `changes`-before-done nudge fires once per turn.
+    let mut changes_nudged = false;
     // The reason of the last nudge, for what the next reply may not say.
     let mut nudge_reason: Option<&'static str> = None;
     // Replies with no words and no calls in a row (a done wake's silence
@@ -1082,6 +1113,30 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         if let Some(c) = usage.and_then(|u| u.cost) {
             turn_cost = Some(turn_cost.unwrap_or(0.0) + c);
         }
+        // A money cap, for headless runs: one SWE-bench rollout ran to $14
+        // (16x the median) and ate half a measurement. The turn ends with
+        // the reason on the transcript; the patch so far stays in the tree.
+        let cap = host.config.max_turn_cost();
+        if cap > 0.0 && turn_cost.is_some_and(|c| c > cap) {
+            let spent = turn_cost.unwrap_or(0.0);
+            append_events(
+                &transcript,
+                &[Event::new(EventKind::Notice {
+                    text: format!(
+                        "This turn has spent ${spent:.2} on model calls, over the ${cap:.2} cap (max_turn_cost_usd / ARBOS_MAX_TURN_COST); it ends here. What is in the working tree stays; a new message starts a new budget."
+                    ),
+                    failed: true,
+                })],
+            )?;
+            return end(
+                usage.map(|mut u| {
+                    u.cost = turn_cost;
+                    u.cached = turn_cached;
+                    u
+                }),
+                Some("over the turn's cost cap"),
+            );
+        }
         if let Some(n) = usage.and_then(|u| u.cached) {
             turn_cached = Some(turn_cached.unwrap_or(0) + n);
         }
@@ -1273,6 +1328,13 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 // turn is ending with no image made: once, before the
                 // report goes out with words alone (kickoff item 3).
                 Some((SHOW_NUDGE.to_string(), "image owed"))
+            } else if changes_before_done() && !changes_nudged && changes_owed(&events) {
+                changes_nudged = true;
+                Some((
+                    "You edited files this turn and have not run changes since the last edit. Run changes now: it shows the diff, re-runs the reproductions you recorded and says which still fail, and names the tests that cover the change. Then finish, or fix what it shows."
+                        .to_string(),
+                    "changes owed",
+                ))
             } else {
                 // The brief named a deliverable and the turn is ending
                 // without it: a research worker answered in its last words
