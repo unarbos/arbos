@@ -1,0 +1,9 @@
+Walking /tmp/arbos-qa-bench-fix-commit-branch@bench-see-and-commit-nudges-ssi4ersn/place...
+Found 25 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (5317 trigrams, 25 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-fix-commit-branch@bench-see-and-commit-nudges-ssi4ersn/home/.cache/arbos/tgrep/d320f63e576db13a
+tools root: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+spawn_kind_ignored root: kind "python": no agent definitions exist here; spawning the built-in child
+tools fixbrokenhellopyscriptin: 2 calls, wall 23ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 147996ms, sum 147996ms, speedup 1.0x

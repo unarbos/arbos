@@ -1,0 +1,17 @@
+Walking /tmp/arbos-qa-malformed-frames-92k1p1u1/place...
+Found 27 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (5361 trigrams, 27 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-malformed-frames-92k1p1u1/home/.cache/arbos/tgrep/2e75c4b88ce6e1a1
+frame_rejected: not a frame: expected ident at line 1 column 2 — "this is not json"
+frame_rejected: not a frame: expected value at line 1 column 1 — "\0\u{1}\u{2}"
+frame_rejected: not a frame: key must be a string at line 1 column 2 — "{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{"
+frame_rejected: unknown frame type "no_such_frame"
+frame_rejected does-not-exist: no agent "does-not-exist" in this place
+frame_rejected ../../etc: no agent "../../etc" in this place
+inbox root: empty prompt
+frame_rejected root: plan op run #424242: unknown plan row #424242
+frame_rejected root: plan op explode #1: unknown plan row #1
+frame_rejected does-not-exist: no agent "does-not-exist" in this place
+frame_rejected: focus "../../../../etc/passwd": agent id must be [A-Za-z0-9_-]
+frame_rejected nobody: no agent "nobody" in this place

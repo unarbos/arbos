@@ -1,0 +1,69 @@
+{
+  "scenario": "rapid-create-delete",
+  "doc": "Create and delete chats fast while the kernel runs, delete root and recreate it as the desktop does, then prompt root. Live frames must still flow.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "state:agent-md-missing",
+      "detail": "agent folder without agent.md; list_agents skips it silently",
+      "where": "/tmp/arbos-qa-rapid-create-delete-zhf6ewn1/place/.arbos/agents/chat-rcd-0/agent.md"
+    },
+    {
+      "rule": "state:agent-md-missing",
+      "detail": "agent folder without agent.md; list_agents skips it silently",
+      "where": "/tmp/arbos-qa-rapid-create-delete-zhf6ewn1/place/.arbos/agents/chat-rcd-12/agent.md"
+    },
+    {
+      "rule": "state:agent-md-missing",
+      "detail": "agent folder without agent.md; list_agents skips it silently",
+      "where": "/tmp/arbos-qa-rapid-create-delete-zhf6ewn1/place/.arbos/agents/chat-rcd-15/agent.md"
+    },
+    {
+      "rule": "state:agent-md-missing",
+      "detail": "agent folder without agent.md; list_agents skips it silently",
+      "where": "/tmp/arbos-qa-rapid-create-delete-zhf6ewn1/place/.arbos/agents/chat-rcd-18/agent.md"
+    },
+    {
+      "rule": "state:agent-md-missing",
+      "detail": "agent folder without agent.md; list_agents skips it silently",
+      "where": "/tmp/arbos-qa-rapid-create-delete-zhf6ewn1/place/.arbos/agents/chat-rcd-21/agent.md"
+    },
+    {
+      "rule": "state:agent-md-missing",
+      "detail": "agent folder without agent.md; list_agents skips it silently",
+      "where": "/tmp/arbos-qa-rapid-create-delete-zhf6ewn1/place/.arbos/agents/chat-rcd-24/agent.md"
+    },
+    {
+      "rule": "state:agent-md-missing",
+      "detail": "agent folder without agent.md; list_agents skips it silently",
+      "where": "/tmp/arbos-qa-rapid-create-delete-zhf6ewn1/place/.arbos/agents/chat-rcd-27/agent.md"
+    },
+    {
+      "rule": "state:agent-md-missing",
+      "detail": "agent folder without agent.md; list_agents skips it silently",
+      "where": "/tmp/arbos-qa-rapid-create-delete-zhf6ewn1/place/.arbos/agents/chat-rcd-3/agent.md"
+    },
+    {
+      "rule": "state:agent-md-missing",
+      "detail": "agent folder without agent.md; list_agents skips it silently",
+      "where": "/tmp/arbos-qa-rapid-create-delete-zhf6ewn1/place/.arbos/agents/chat-rcd-6/agent.md"
+    },
+    {
+      "rule": "state:agent-md-missing",
+      "detail": "agent folder without agent.md; list_agents skips it silently",
+      "where": "/tmp/arbos-qa-rapid-create-delete-zhf6ewn1/place/.arbos/agents/chat-rcd-9/agent.md"
+    }
+  ],
+  "notes": {
+    "root_transcript_lines_before_delete": 4,
+    "root_transcript_lines_after_recreate": 8,
+    "live_wake_or_user_frames_after_recreate": 2
+  },
+  "duration_s": 9.6,
+  "place": "/tmp/arbos-qa-rapid-create-delete-zhf6ewn1/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T235322Z-rapid-create-delete",
+  "branch": "rust",
+  "usd": 0.01323
+}

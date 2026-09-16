@@ -1,0 +1,7 @@
+{
+  "name": "fp-migration-legacy-plan",
+  "doc": "An existing place with a legacy plan.jsonl (a standing 30s shell cron, a pending user prompt, an open ask) starts on the new kernel: the cron becomes a subscription and keeps ticking, the prompt runs, the ask becomes a waiting/ file.",
+  "tags": [
+    "file-plan"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "scenario": "xp-01-dead-kernel-line-stays-in-its-project",
+  "doc": "Two places open. Kill A's kernel, type into A, switch to B and type there. A's line must reach only A (after its kernel respawns); B's only B; neither place's files may carry the other's words.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "xp-01-first-line-lost",
+      "detail": "A's first line (sent while A had no kernel yet) is not on A's transcript: A=['A-after-death-XP80262: reply with ALPHA again.'] home=[] B=['B-only-XP80262: reply with the word BETA.']",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "first_line_landed_after_s": null,
+    "a_user_lines": [
+      "A-after-death-XP80262: reply with ALPHA again."
+    ],
+    "b_user_lines": [
+      "B-only-XP80262: reply with the word BETA."
+    ],
+    "home_store_user_lines": [],
+    "a_kernel_before": 843533,
+    "a_kernel_after": 844094
+  },
+  "duration_s": 97.4,
+  "place": "/tmp/arbos-qa-xp-01-dead-kernel-line-stays-in-its-project-ijn8g7v8/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260916T143439Z-xp-01-dead-kernel-line-stays-in-its-project",
+  "branch": "main",
+  "usd": 0.0
+}

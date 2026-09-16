@@ -1,0 +1,8 @@
+{
+  "name": "inbox:attach-bind-token",
+  "doc": "From inbox note 2026-09-13-attach-bind-token.md: exercise feature 'attach-bind-token' and run every detector. Needs a kernel built from branch cursor/attach-bind-token-b027.",
+  "tags": [
+    "inbox",
+    "attach-bind-token"
+  ]
+}

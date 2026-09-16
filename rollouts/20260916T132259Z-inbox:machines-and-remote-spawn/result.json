@@ -1,0 +1,23 @@
+{
+  "scenario": "inbox:machines-and-remote-spawn",
+  "doc": "From inbox note 2026-09-13-machines-and-remote-spawn.md: exercise feature 'machines-and-remote-spawn' and run every detector. Needs a kernel built from branch cursor/remote-spawn-b027.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "feature machines-and-remote-spawn: turn never ended",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "machines-and-remote-spawn",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-13-machines-and-remote-spawn.md"
+  },
+  "duration_s": 112.2,
+  "place": "/tmp/arbos-qa-inbox:machines-and-remote-spawn-l6z6b3g2/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260916T132259Z-inbox:machines-and-remote-spawn",
+  "branch": "main",
+  "usd": 0.04604
+}

@@ -1,0 +1,8 @@
+{
+  "name": "inbox:elapsed-vocabulary",
+  "doc": "From inbox note 2026-09-13-elapsed-vocabulary.md: exercise feature 'elapsed-vocabulary' and run every detector. Needs a kernel built from branch cursor/elapsed-vocabulary-b027.",
+  "tags": [
+    "inbox",
+    "elapsed-vocabulary"
+  ]
+}

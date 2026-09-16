@@ -1,0 +1,13 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-inbox:multitasking-audit-_3qdhrvj/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (7986 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-inbox:multitasking-audit-_3qdhrvj/home/.cache/arbos/tgrep/137334c49b4f96e2
+tools scenario-3-runner: 2 calls, wall 152ms, sum 0ms, speedup 0.0x
+tools scenario-7-step-1-worker-launch: 2 calls, wall 10ms, sum 3ms, speedup 0.3x
+tools scenario-7-step-1: 2 calls, wall 10890ms, sum 10891ms, speedup 1.0x
+tools scenario-7-step-1-wo-2: 2 calls, wall 8ms, sum 0ms, speedup 0.0x
+tools scenario-7-step-1-wo-2: 3 calls, wall 9ms, sum 5ms, speedup 0.6x
+tools scenario-7-step-1-wo-2: 2 calls, wall 8ms, sum 3ms, speedup 0.4x
+tools exercise-scenario-1: 2 calls, wall 85442ms, sum 85443ms, speedup 1.0x

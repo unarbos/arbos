@@ -1,0 +1,15 @@
+Walking /tmp/arbos-qa-rapid-create-delete-56qw6vpq/place...
+Found 27 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (5360 trigrams, 27 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-rapid-create-delete-56qw6vpq/home/.cache/arbos/tgrep/735162e2da11b54a
+turn chat-rcd-6: agent folder was deleted; ending without writing
+turn chat-rcd-0: agent folder was deleted; ending without writing
+turn chat-rcd-9: agent folder was deleted; ending without writing
+turn chat-rcd-12: agent folder was deleted; ending without writing
+turn chat-rcd-15: agent folder was deleted; ending without writing
+turn chat-rcd-3: agent folder was deleted; ending without writing
+turn chat-rcd-21: agent folder was deleted; ending without writing
+turn chat-rcd-18: agent folder was deleted; ending without writing
+turn chat-rcd-24: agent folder was deleted; ending without writing
+turn chat-rcd-27: agent folder was deleted; ending without writing

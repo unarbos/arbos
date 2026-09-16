@@ -1,0 +1,20 @@
+{
+  "scenario": "desktop-kill-kernel-under-ui",
+  "doc": "SIGKILL the kernel while the window is attached, then send a prompt. The app must notice, respawn the kernel, and run the prompt.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "DriverError: move: no element matches `project-0`",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 2.1,
+  "place": "/tmp/arbos-qa-desktop-kill-kernel-under-ui-m_sj8rfz/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260915T040940Z-desktop-kill-kernel-under-ui",
+  "branch": "main",
+  "usd": 0.0
+}

@@ -1,0 +1,8 @@
+{
+  "name": "ask-identity",
+  "doc": "qa-021: an ask frame carries an id; a wrong/late answer is refused with an error frame; the matching answer resolves the question once.",
+  "tags": [
+    "adversarial",
+    "protocol"
+  ]
+}

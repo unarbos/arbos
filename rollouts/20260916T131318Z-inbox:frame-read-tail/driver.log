@@ -1,0 +1,5 @@
+1789564398122 kernel started pid 789536
+1789564439528 BREAK transcript-corrupt: bad lines: [1, 2, 3, 4, 5]
+1789564439531 kernel stopped with code 0
+1789564439532 BREAK state:transcript-bad-lines: 5 unparseable line(s): [1, 2, 3, 4, 5]
+1789564439567 bugs: new 533ac9400e.md, new cdc868e540.md

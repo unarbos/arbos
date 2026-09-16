@@ -1,0 +1,20 @@
+{
+  "scenario": "mt-25-child-can-reach-history",
+  "doc": "Item 25. A brief says 'find what the earlier worker wrote about X': the child searches .arbos/agents and finds it.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "RecursionError: maximum recursion depth exceeded",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 0.0,
+  "place": "/tmp/arbos-qa-mt-25-child-can-reach-history-ewf9zq74/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260914T000008Z-mt-25-child-can-reach-history",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.0
+}

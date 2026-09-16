@@ -1,0 +1,8 @@
+{
+  "name": "bench-standing-job",
+  "doc": "Checklist item 9: a standing task must become a recurring plan node (when.every), not a promise or a shell loop.",
+  "tags": [
+    "benchmark",
+    "item-9"
+  ]
+}

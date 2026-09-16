@@ -1,0 +1,7 @@
+1789545043523 kernel started pid 677300
+1789545134138 BREAK wrong-output: no commit on the fix branch ahead of main: {'fix/hello-py': '', 'initial-state': ''}
+1789545134139 BREAK wrong-output: main was changed
+1789545134140 BREAK wrong-output: hello.py on the branch is still broken: ''
+1789545134140 BREAK wrong-output: the reply does not name the PR base branch
+1789545134143 kernel stopped with code 0
+1789545134177 bugs: seen e17a9ed707.md, seen e17a9ed707.md, seen e17a9ed707.md, seen e17a9ed707.md

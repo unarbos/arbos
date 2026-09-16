@@ -1,0 +1,35 @@
+{
+  "scenario": "ordinary-task",
+  "doc": "A small coding task through the real model: write a script, run it, report. Checks the file, the run, and the transcript shape.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "fizz.py not created",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "final reply did not report FizzBuzz: ' to create and run the fizz.py script, but this environment has no configured execution machine named \"local.\" Could you confirm where to run the worker or if I should run and handle this differently?'",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "tools_called": [
+      "write",
+      "spawn"
+    ],
+    "tool_errors": [
+      "as coordinator you write only the project store (.arbos/notes.md, docs/, internal/, media/, archived.md); code and other files are a worker's job \u2014 spawn one",
+      "no machine named \"local\" in /tmp/arbos-qa-ordinary-task-1b0v4cev/xdg/arbos/machines.toml or .arbos/machines/. Known: (none; add a [[machine]] with name, ssh, dir, or register one on the hub)"
+    ],
+    "trace_files": 3
+  },
+  "duration_s": 8.8,
+  "place": "/tmp/arbos-qa-ordinary-task-1b0v4cev/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T210449Z-ordinary-task",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.00852
+}

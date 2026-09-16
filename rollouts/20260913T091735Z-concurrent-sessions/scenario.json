@@ -1,0 +1,7 @@
+{
+  "name": "concurrent-sessions",
+  "doc": "Eight chats prompted at once. Each transcript must hold exactly its own wake and end; no cross-talk.",
+  "tags": [
+    "adversarial"
+  ]
+}

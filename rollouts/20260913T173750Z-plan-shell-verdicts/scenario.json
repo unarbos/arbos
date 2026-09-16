@@ -1,0 +1,8 @@
+{
+  "name": "plan-shell-verdicts",
+  "doc": "Kernel-run shell nodes: exit 0 with empty output is done, exit 0 with output is done with the output as outcome, exit 1 is failed and wakes the agent. No model needed.",
+  "tags": [
+    "adversarial",
+    "plan"
+  ]
+}

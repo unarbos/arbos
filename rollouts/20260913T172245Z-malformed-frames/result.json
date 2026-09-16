@@ -1,0 +1,45 @@
+{
+  "scenario": "malformed-frames",
+  "doc": "Garbage on the attach socket, unknown frame types, frames for missing agents and nodes, empty prompts. Kernel must survive; a client should learn what was rejected.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "focus-unvalidated",
+      "detail": "focus file now holds '../../../../etc/passwd'; any attach client can write an arbitrary path there",
+      "where": "crates/arbos-kernel/src/serve.rs:349"
+    },
+    {
+      "rule": "state:agent-md-missing",
+      "detail": "agent folder without agent.md; list_agents skips it silently",
+      "where": "/tmp/arbos-qa-malformed-frames-ec423ro1/place/.arbos/agents/nobody/agent.md"
+    },
+    {
+      "rule": "state:transcript-unended-turn",
+      "detail": "wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start",
+      "where": "/tmp/arbos-qa-malformed-frames-ec423ro1/place/.arbos/agents/root/transcript.jsonl"
+    },
+    {
+      "rule": "state:plan-active-after-stop",
+      "detail": "node #1 is active with no kernel; reclaim() should settle it on next start",
+      "where": "/tmp/arbos-qa-malformed-frames-ec423ro1/place/.arbos/agents/root/plan.jsonl"
+    },
+    {
+      "rule": "state:attempt-running-after-stop",
+      "detail": "attempt a1 never ended",
+      "where": "/tmp/arbos-qa-malformed-frames-ec423ro1/place/.arbos/agents/root/attempts.jsonl"
+    }
+  ],
+  "notes": {
+    "error_frames_seen": 0,
+    "stderr_lines": 9,
+    "focus_after_traversal": "../../../../etc/passwd",
+    "empty_goal_nodes": 1
+  },
+  "duration_s": 2.2,
+  "place": "/tmp/arbos-qa-malformed-frames-ec423ro1/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T172245Z-malformed-frames",
+  "branch": "rust",
+  "usd": 0.00124
+}

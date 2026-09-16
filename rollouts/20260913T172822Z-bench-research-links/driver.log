@@ -1,0 +1,4 @@
+1789320502827 kernel started pid 177498
+1789320520113 BREAK wrong-output: research.md has 1 markdown links to sources
+1789320520121 kernel stopped with code 0
+1789320520125 bugs: seen qa-010-search-tool-blocked-without-provider.md

@@ -1,0 +1,4 @@
+1789333446080 kernel started pid 213603
+1789333448733 BREAK driver-exception: FileNotFoundError: [Errno 2] No such file or directory: '/tmp/arbos-qa-malformed-frames-92k1p1u1/place/.arbos/focus'
+1789333448737 kernel SIGKILLed
+1789333448739 bugs: seen 0017aeb03a.md

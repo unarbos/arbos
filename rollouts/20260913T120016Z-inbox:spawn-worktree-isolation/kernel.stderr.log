@@ -1,0 +1,9 @@
+Walking /tmp/arbos-qa-inbox:spawn-worktree-isolation-s7ct8_o8/place...
+Found 8 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (517 trigrams, 8 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-inbox:spawn-worktree-isolation-s7ct8_o8/home/.cache/arbos/tgrep/081bb2e0e84444dc
+tools root: 2 calls, wall 17ms, sum 17ms, speedup 1.0x
+tools createhellotxtcontaining: 2 calls, wall 5ms, sum 5ms, speedup 1.0x
+tools root: 2 calls, wall 10ms, sum 10ms, speedup 1.0x
+turn root: agent folder was deleted; ending without writing

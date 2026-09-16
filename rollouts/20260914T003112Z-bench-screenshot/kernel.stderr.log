@@ -1,0 +1,20 @@
+Walking /tmp/arbos-qa-bench-screenshot-os_5xqdi/place...
+Found 25 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (5228 trigrams, 25 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-screenshot-os_5xqdi/home/.cache/arbos/tgrep/6e871bfa8de0ec12
+tools root: 2 calls, wall 7ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 6ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 13ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 14ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 10ms, sum 1ms, speedup 0.1x
+tools root: 2 calls, wall 8ms, sum 1ms, speedup 0.1x
+tools root: 2 calls, wall 3ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 12ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 7ms, sum 1ms, speedup 0.1x
+tools root: 2 calls, wall 6ms, sum 1ms, speedup 0.2x
+tools root: 2 calls, wall 19ms, sum 0ms, speedup 0.0x
+tools root: 3 calls, wall 28ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 3ms, sum 1ms, speedup 0.3x
+tools root: 2 calls, wall 13ms, sum 0ms, speedup 0.0x
+tools root: 4 calls, wall 9ms, sum 0ms, speedup 0.0x

@@ -4,7 +4,7 @@ status: pr-open
 severity: high (state inconsistency; silent data growth; user is never told the turn failed)
 scenario: prompt-no-key (also echoed by every no-key run of concurrent-sessions, rapid-create-delete, huge-input, malformed-folder, malformed-frames)
 rollout: /cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/qa/rollouts/20260912T223419Z-prompt-no-key
-fingerprints: 3e3f75b8f1 80cbe8aac0 024560c4a1 15be798dbc 5b8d5d8568 dc7c17de8d eeab0db489 2fc27a317a ce456f1477 72a1f6ccd8 2e06b430ad 3a1f63922f 8221f69f07 cc36bc4eff 9a7195c831 62ec4b87fc c98493bdd3 cb102b75a3 70971cf20c 00cca844dc
+fingerprints: 3e3f75b8f1 80cbe8aac0 024560c4a1 15be798dbc 5b8d5d8568 dc7c17de8d eeab0db489 2fc27a317a ce456f1477 72a1f6ccd8 2e06b430ad 3a1f63922f 8221f69f07 cc36bc4eff 9a7195c831 62ec4b87fc c98493bdd3 cb102b75a3 70971cf20c 00cca844dc d8eaf8f08f f1f582de43
 pr: https://github.com/unarbos/arbos/pull/7 (branch `cursor/qa-loop-de28` -> `rust`, ready for review)
 
 ## Repro

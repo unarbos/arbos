@@ -1,0 +1,10 @@
+{
+  "name": "bench-no-screenshot-unasked@bench-see-and-commit-nudges",
+  "doc": "A plain 'run it and tell me the result' must not produce a screenshot or open a browser. (against feature branch cursor/bench-see-and-commit-nudges-b027)",
+  "tags": [
+    "inbox",
+    "bench-see-and-commit-nudges",
+    "benchmark",
+    "item-3"
+  ]
+}

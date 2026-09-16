@@ -1,0 +1,7 @@
+{
+  "name": "malformed-folder",
+  "doc": "Pre-write broken state: garbage agent.md, corrupt transcript, dangling parent, stale lock and kernel.json with dead pids, active node with no attempt. Kernel must boot and settle it.",
+  "tags": [
+    "adversarial"
+  ]
+}

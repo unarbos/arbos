@@ -1,0 +1,4 @@
+1789290124981 kernel started pid 143628
+1789290187043 BREAK steer-lost: 16/25 steer messages reached the transcript
+1789290187047 kernel stopped with code 0
+1789290187059 bugs: seen qa-014-steers-lost-one-per-step.md

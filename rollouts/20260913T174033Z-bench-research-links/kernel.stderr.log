@@ -1,0 +1,10 @@
+Walking /tmp/arbos-qa-bench-research-links-bussf5g_/place...
+Found 25 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (5306 trigrams, 25 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-research-links-bussf5g_/home/.cache/arbos/tgrep/107a353dc65da289
+tools root: 5 calls, wall 112ms, sum 348ms, speedup 3.1x
+tools root: 2 calls, wall 4ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 11ms, sum 10ms, speedup 0.9x
+spawn_kind_ignored root: kind "edit": no agent definitions exist here; spawning the built-in child
+tools writeresearchmdsummarizi: 8 calls, wall 921ms, sum 2332ms, speedup 2.5x

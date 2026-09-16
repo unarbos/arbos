@@ -1,0 +1,4 @@
+1789449120813 kernel started pid 446119
+1789449134334 BREAK wrong-output: no screenshot image produced; browser errors: ['navigate http://127.0.0.1:8765/: net::ERR_CONNECTION_REFUSED']
+1789449134366 kernel stopped with code 0
+1789449134377 bugs: seen 00c922a645.md

@@ -1,3 +1,3 @@
-host: computeinstance-u00sd1yvtcwsc091pb
-last_cycle: 2026-09-13T05:11:36Z
-built_sha: c066c372d74f
+host: cursor
+last_cycle: 2026-09-16T15:22:32Z
+built_sha: 4b387fce1334

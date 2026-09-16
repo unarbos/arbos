@@ -1,0 +1,7 @@
+{
+  "name": "mt-11-child-cannot-write-project-page",
+  "doc": "Item 11 (pin). A worker that writes .arbos/notes.md is refused with PAGE_REFUSAL.",
+  "tags": [
+    "multitasking"
+  ]
+}

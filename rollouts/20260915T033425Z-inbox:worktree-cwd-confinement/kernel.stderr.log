@@ -1,0 +1,23 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-inbox:worktree-cwd-confinement-9stfzwk9/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (7989 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-inbox:worktree-cwd-confinement-9stfzwk9/home/.cache/arbos/tgrep/9080d315397cfacf
+tools worktree-attack-tests: 2 calls, wall 9ms, sum 0ms, speedup 0.0x
+tools worktree-confinement-root-tests: 2 calls, wall 511ms, sum 511ms, speedup 1.0x
+tools worktree-attack-tests: 2 calls, wall 105ms, sum 1ms, speedup 0.0x
+tools worktree-attack-tests: 2 calls, wall 12ms, sum 0ms, speedup 0.0x
+tools worktree-confinement-root-tests: 6 calls, wall 12ms, sum 2ms, speedup 0.2x
+tools worktree-attack-tests: 2 calls, wall 14ms, sum 0ms, speedup 0.0x
+tools worktree-confinement-root-tests: 2 calls, wall 6ms, sum 0ms, speedup 0.0x
+tools worktree-confinement-test: 2 calls, wall 88488ms, sum 94792ms, speedup 1.1x
+tools worktree-attack-tests: 5 calls, wall 12ms, sum 0ms, speedup 0.0x
+tools worktree-attack-tests: 5 calls, wall 14ms, sum 1ms, speedup 0.1x
+tools worktree-attack-tests: 2 calls, wall 3ms, sum 3ms, speedup 1.0x
+tools child-confinement-check: 2 calls, wall 255ms, sum 255ms, speedup 1.0x
+tools child-confinement-check: 3 calls, wall 19ms, sum 1ms, speedup 0.1x
+tools root-access-check: 2 calls, wall 8ms, sum 1ms, speedup 0.1x
+tools child-confinement-check: 2 calls, wall 25ms, sum 1ms, speedup 0.0x
+tools child-confinement-check: 2 calls, wall 260ms, sum 511ms, speedup 2.0x
+tools worktree-attack-tests: 2 calls, wall 111673ms, sum 130594ms, speedup 1.2x

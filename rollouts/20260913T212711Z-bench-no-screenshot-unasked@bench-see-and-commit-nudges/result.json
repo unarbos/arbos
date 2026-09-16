@@ -1,0 +1,23 @@
+{
+  "scenario": "bench-no-screenshot-unasked@bench-see-and-commit-nudges",
+  "doc": "A plain 'run it and tell me the result' must not produce a screenshot or open a browser. (against feature branch cursor/bench-see-and-commit-nudges-b027)",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "over-eager-screenshot",
+      "detail": "1 browser calls / 0 images for a task that asked for text",
+      "where": "crates/arbos-engine/src/prompt.rs CONTRACT"
+    }
+  ],
+  "notes": {
+    "feature": "bench-see-and-commit-nudges",
+    "browser_calls": 1
+  },
+  "duration_s": 36.2,
+  "place": "/tmp/arbos-qa-bench-no-screenshot-unasked@bench-see-and-commit-nudges-qdywt_i3/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T212711Z-bench-no-screenshot-unasked@bench-see-and-commit-nudges",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.05391
+}

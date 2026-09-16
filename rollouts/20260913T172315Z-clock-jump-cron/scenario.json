@@ -1,0 +1,8 @@
+{
+  "name": "clock-jump-cron",
+  "doc": "Recurring nodes across clock jumps: a node ten days overdue must fire once (coalesce), a node whose next due is ten days ahead after a clock rewind must be pulled back within one period, and a deferred node from the far future must not be lost.",
+  "tags": [
+    "adversarial",
+    "environment"
+  ]
+}

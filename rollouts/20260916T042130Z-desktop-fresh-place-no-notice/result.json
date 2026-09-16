@@ -1,0 +1,20 @@
+{
+  "scenario": "desktop-fresh-place-no-notice",
+  "doc": "Open a fresh place (no .arbos yet). The chat, board and terminal all attach at once; exactly one kernel must be spawned and no failed notice (\"arbos-kernel exited\") may appear in the chat or the transcript (qa-030).",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "DriverError: move: no element matches `project-0`",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 1.5,
+  "place": "/tmp/arbos-qa-desktop-fresh-place-no-notice-dbt_a_2h/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260916T042130Z-desktop-fresh-place-no-notice",
+  "branch": "main",
+  "usd": 0.0
+}

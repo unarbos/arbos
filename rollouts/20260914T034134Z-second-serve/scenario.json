@@ -1,0 +1,7 @@
+{
+  "name": "second-serve",
+  "doc": "Two kernels on one place. The second must fail fast; the first must keep serving.",
+  "tags": [
+    "adversarial"
+  ]
+}

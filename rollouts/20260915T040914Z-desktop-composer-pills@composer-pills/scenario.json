@@ -1,0 +1,11 @@
+{
+  "name": "desktop-composer-pills@composer-pills",
+  "doc": "Feature composer-pills: a PR URL printed twice by bash counts once; a URL merely read from a file is recorded; the strip above the composer must not overflow a 900 px window. (against feature branch cursor/composer-pills-b027)",
+  "tags": [
+    "inbox",
+    "composer-pills",
+    "desktop",
+    "inbox",
+    "composer-pills"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "scenario": "second-serve",
+  "doc": "Two kernels on one place. The second must fail fast; the first must keep serving.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "lock-removed-by-loser",
+      "detail": "the failed second serve removed the live kernel's lock file",
+      "where": "crates/arbos-core/src/lock.rs:44"
+    }
+  ],
+  "notes": {},
+  "duration_s": 0.4,
+  "place": "/tmp/arbos-qa-second-serve-gcuktt8i/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T210234Z-second-serve",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.0
+}

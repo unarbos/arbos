@@ -1,0 +1,36 @@
+{
+  "scenario": "bench-fix-commit-branch@bench-see-and-commit-nudges",
+  "doc": "Checklist item 8: fix a planted bug on a new branch with a commit, leave main untouched, and name the PR base. (against feature branch cursor/bench-see-and-commit-nudges-b027)",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "no branch other than main was created",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "no commit on the fix branch ahead of main: {}",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "hello.py on the branch is still broken: ''",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "bench-see-and-commit-nudges",
+    "branches": [
+      "main"
+    ],
+    "ahead_of_main": {}
+  },
+  "duration_s": 166.8,
+  "place": "/tmp/arbos-qa-bench-fix-commit-branch@bench-see-and-commit-nudges-ssi4ersn/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T203817Z-bench-fix-commit-branch@bench-see-and-commit-nudges",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.2236
+}

@@ -1,0 +1,6 @@
+1789335810058 kernel started pid 226131
+1789335810109 kernel stopped with code 0
+1789335810110 kernel-sub started pid 226148
+1789335850461 BREAK bare-subscription-silently-ignored: a hand-written subscription without id/created/next_due ran 0 time(s) and the kernel never named 0002-bare.toml in kernel.log or stderr; the file system is the interface, a file the kernel cannot use must be said
+1789335850465 kernel-sub stopped with code 0
+1789335850472 bugs: new bd30f086b2.md

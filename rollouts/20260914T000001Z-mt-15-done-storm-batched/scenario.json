@@ -1,0 +1,7 @@
+{
+  "name": "mt-15-done-storm-batched",
+  "doc": "Item 15. Five workers ending within 15 s: at most two root turns and one summary message, not one turn per child.",
+  "tags": [
+    "multitasking"
+  ]
+}

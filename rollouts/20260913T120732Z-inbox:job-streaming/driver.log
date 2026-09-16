@@ -1,0 +1,7 @@
+1789301252443 kernel started pid 151730
+1789301313679 BREAK turn-never-ended: feature job-streaming: turn never ended
+1789301313688 BREAK state:lock-leftover: lock file left behind after the kernel stopped (lock.rs Drop did not run)
+1789301313688 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789301313688 BREAK state:plan-active-after-stop: node #1 is active with no kernel; reclaim() should settle it on next start
+1789301313688 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789301325333 bugs: new 271d0c9a32.md, new 886ce71e03.md, new b234886744.md, new 0724b505e4.md, new 2940065caf.md

@@ -1,0 +1,22 @@
+{
+  "scenario": "fp-timer-subscription",
+  "doc": "A timer subscription (kind = timer, every = 30s, prompt) fires one inbox message per period, which becomes one turn; the prompt is what the agent sees.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "reply lacks TIMER-TICK: ''",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "firings_seen": 2
+  },
+  "duration_s": 31.0,
+  "place": "/tmp/arbos-qa-fp-timer-subscription-h1wj54pc/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260916T041735Z-fp-timer-subscription",
+  "branch": "main",
+  "usd": 0.0
+}

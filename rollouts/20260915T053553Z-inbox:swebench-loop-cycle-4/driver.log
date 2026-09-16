@@ -1,0 +1,5 @@
+1789450553333 kernel started pid 450569
+1789450697005 kernel stopped with code 0
+1789450697006 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789450697006 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789450697046 bugs: new ba2262db79.md, seen ba2262db79.md

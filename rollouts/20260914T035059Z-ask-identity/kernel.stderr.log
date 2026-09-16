@@ -1,0 +1,9 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-ask-identity-em5xhhfw/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (7012 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-ask-identity-em5xhhfw/home/.cache/arbos/tgrep/2fb59a4984b308f3
+answer_id_unknown root: answer names ask "call_zAcSTXLyldGOLR8nTID7OxKz-stale" (never issued); taken for the one pending question "call_zAcSTXLyldGOLR8nTID7OxKz"
+frame_rejected root: answer refused: no question is pending for root
+frame_rejected root: answer refused: no question is pending for root

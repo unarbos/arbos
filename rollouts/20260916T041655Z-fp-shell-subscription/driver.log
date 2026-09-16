@@ -1,0 +1,6 @@
+1789532215135 kernel started pid 667357
+1789532215188 kernel stopped with code 0
+1789532215189 kernel-sub started pid 667374
+1789532255541 BREAK shell-sub-spent-a-turn: 1 model turn(s) for a deliver_to = user shell subscription; the reading must reach the user with no model turn
+1789532255544 kernel-sub stopped with code 0
+1789532255554 bugs: seen ab8f18b856.md

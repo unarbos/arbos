@@ -1,0 +1,8 @@
+1789333099112 kernel started pid 211835
+1789333101417 BREAK ask-no-id: the ask frame carries no id: any answer resolves it
+1789333103921 BREAK ask-auto-resolved: a blank answer was recorded for the question: ['', 'teal']
+1789333108928 timeout waiting for error for the late answer after 5s
+1789333108928 BREAK late-answer-accepted: a late answer to a resolved ask produced no error frame
+1789333109429 BREAK late-answer-recorded: a late answer was appended: ['', 'teal', '']
+1789333109436 kernel stopped with code 0
+1789333109441 bugs: seen qa-021-ask-delivered-twice-answer-has-no-identity.md, seen qa-021-ask-delivered-twice-answer-has-no-identity.md, seen qa-021-ask-delivered-twice-answer-has-no-identity.md, seen qa-021-ask-delivered-twice-answer-has-no-identity.md

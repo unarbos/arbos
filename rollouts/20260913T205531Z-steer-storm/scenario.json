@@ -1,0 +1,8 @@
+{
+  "name": "steer-storm",
+  "doc": "Twenty-five steer frames land during one running turn. Kernel alive, transcript parseable, steers recorded in order, turn ends.",
+  "tags": [
+    "adversarial",
+    "multi-agent"
+  ]
+}

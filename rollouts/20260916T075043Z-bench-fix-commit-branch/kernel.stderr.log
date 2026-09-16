@@ -1,0 +1,19 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-fix-commit-branch-w__grth1/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8136 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-fix-commit-branch-w__grth1/home/.cache/arbos/tgrep/356c8abc8a80e83b
+tools fix-hello-py: 2 calls, wall 1ms, sum 0ms, speedup 0.0x
+tools fix-hello-py: 3 calls, wall 27ms, sum 20ms, speedup 0.7x
+tools fix-hello-py: 2 calls, wall 509ms, sum 509ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 510ms, sum 510ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 256ms, sum 256ms, speedup 1.0x
+tools fix-hello-py: 4 calls, wall 1016ms, sum 1015ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 255ms, sum 255ms, speedup 1.0x
+tools fix-hello-py: 4 calls, wall 1016ms, sum 1016ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 509ms, sum 509ms, speedup 1.0x
+tools fix-hello-py: 3 calls, wall 262ms, sum 255ms, speedup 1.0x
+tools fix-hello-py: 3 calls, wall 517ms, sum 510ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 509ms, sum 508ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 512ms, sum 512ms, speedup 1.0x

@@ -1,0 +1,10 @@
+{
+  "name": "secrets-leak-hunt@secrets-door",
+  "doc": "A granted secret and the kernel's own API key must not appear in the transcript, plain or encoded. Records which encodings get through. (against feature branch cursor/secrets-door-b027)",
+  "tags": [
+    "inbox",
+    "secrets-door",
+    "adversarial",
+    "security"
+  ]
+}

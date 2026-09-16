@@ -1,0 +1,23 @@
+{
+  "scenario": "bench-no-screenshot-unasked@bench-see-and-commit-nudges",
+  "doc": "A plain 'run it and tell me the result' must not produce a screenshot or open a browser. (against feature branch cursor/bench-see-and-commit-nudges-b027)",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "reply lacks the result: 'ands. Could you please specify a machine to run the command on, or provide access details if you want me to run it here?'",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "bench-see-and-commit-nudges",
+    "browser_calls": 0
+  },
+  "duration_s": 6.9,
+  "place": "/tmp/arbos-qa-bench-no-screenshot-unasked@bench-see-and-commit-nudges-icj8yrd_/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T204103Z-bench-no-screenshot-unasked@bench-see-and-commit-nudges",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.00357
+}

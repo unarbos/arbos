@@ -1,0 +1,8 @@
+{
+  "name": "desktop-kill-kernel-under-ui",
+  "doc": "SIGKILL the kernel while the window is attached, then send a prompt. The app must notice, respawn the kernel, and run the prompt.",
+  "tags": [
+    "desktop",
+    "adversarial"
+  ]
+}

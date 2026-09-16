@@ -1,0 +1,6 @@
+1789365757493 kernel started pid 284520
+1789365760506 kernel SIGKILLed
+1789365761009 kernel-restart started pid 284547
+1789365788162 BREAK turn-contract: transcript does not end in turn_complete: ['assistant', 'turn_complete', 'nudge']
+1789365788169 kernel-restart stopped with code 0
+1789365788192 bugs: seen 78cee31f6c.md

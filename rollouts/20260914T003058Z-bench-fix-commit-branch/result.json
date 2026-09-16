@@ -1,0 +1,35 @@
+{
+  "scenario": "bench-fix-commit-branch",
+  "doc": "Checklist item 8: fix a planted bug on a new branch with a commit, leave main untouched, and name the PR base.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "no branch other than main was created",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "no commit on the fix branch ahead of main: {}",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "hello.py on the branch is still broken: ''",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "branches": [
+      "main"
+    ],
+    "ahead_of_main": {}
+  },
+  "duration_s": 13.8,
+  "place": "/tmp/arbos-qa-bench-fix-commit-branch-68eq8s2y/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-ask-parks-b027/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260914T003058Z-bench-fix-commit-branch",
+  "branch": "cursor/ask-parks-b027",
+  "usd": 0.01353
+}

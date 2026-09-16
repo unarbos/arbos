@@ -1,0 +1,28 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-inbox:spawn-worktree-isolation-n2yh1x6i/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8116 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-inbox:spawn-worktree-isolation-n2yh1x6i/home/.cache/arbos/tgrep/c0cdae3913f2c352
+tools test-existing-branch: 2 calls, wall 8ms, sum 0ms, speedup 0.0x
+tools test-grep-duplicate-hits: 2 calls, wall 256ms, sum 256ms, speedup 1.0x
+tools test-dirty-parent-checkout: 2 calls, wall 256ms, sum 256ms, speedup 1.0x
+tools test-worktree-deleted: 3 calls, wall 256ms, sum 256ms, speedup 1.0x
+tools child-2: 2 calls, wall 509ms, sum 509ms, speedup 1.0x
+tools child-1: 2 calls, wall 69ms, sum 1ms, speedup 0.0x
+tools test-worktree-basic: 2 calls, wall 2ms, sum 2ms, speedup 1.0x
+tools test-existing-branch: 3 calls, wall 18ms, sum 0ms, speedup 0.0x
+tools test-large-repo-worktree-add: 2 calls, wall 172ms, sum 0ms, speedup 0.0x
+tools test-large-repo-worktree-add: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools test-large-repo-worktree-add: 2 calls, wall 510ms, sum 510ms, speedup 1.0x
+tools child-1: 2 calls, wall 511ms, sum 511ms, speedup 1.0x
+tools child-1: 2 calls, wall 511ms, sum 511ms, speedup 1.0x
+tools test-parallel-worktrees: 2 calls, wall 126285ms, sum 212086ms, speedup 1.7x
+tools test-parallel-worktrees: 2 calls, wall 13ms, sum 1ms, speedup 0.1x
+tools test-parallel-worktrees: 2 calls, wall 9ms, sum 1ms, speedup 0.1x
+tools test-parallel-worktrees: 4 calls, wall 17ms, sum 1ms, speedup 0.1x
+tools test-parallel-worktrees: 2 calls, wall 12ms, sum 2ms, speedup 0.2x
+worktree_remove_failed child-2: git worktree remove /tmp/arbos-qa-inbox:spawn-worktree-isolation-n2yh1x6i/place/.arbos/worktrees/child-2: fatal: validation failed, cannot remove working tree: '/tmp/arbos-qa-inbox:spawn-worktree-isolation-n2yh1x6i/place/.arbos/worktrees/child-2' does not point back to '.git/worktrees/child-2'
+worktree_remove_failed child-1: git worktree remove /tmp/arbos-qa-inbox:spawn-worktree-isolation-n2yh1x6i/place/.arbos/worktrees/child-1: fatal: validation failed, cannot remove working tree: '/tmp/arbos-qa-inbox:spawn-worktree-isolation-n2yh1x6i/place/.arbos/worktrees/child-1' does not point back to '.git/worktrees/child-1'
+tools test-large-repo-worktree-add: 2 calls, wall 512ms, sum 512ms, speedup 1.0x
+tools root: 8 calls, wall 162254ms, sum 597721ms, speedup 3.7x

@@ -1,0 +1,20 @@
+{
+  "scenario": "mt-11-child-cannot-write-project-page",
+  "doc": "Item 11 (pin). A worker that writes .arbos/notes.md is refused with PAGE_REFUSAL.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "RecursionError: maximum recursion depth exceeded",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 0.0,
+  "place": "/tmp/arbos-qa-mt-11-child-cannot-write-project-page-d2efk07x/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260914T000001Z-mt-11-child-cannot-write-project-page",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.0
+}

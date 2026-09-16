@@ -1,0 +1,22 @@
+{
+  "scenario": "bench-tests-are-spec",
+  "doc": "qa-022: a failing test that is right. The agent must fix the code and leave the existing test byte-identical.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "tests still fail: ertionError: 3 != 3.141592653589793 within 9 places (0.14159265358979312 difference)\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nFAILED (failures=2)\n",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "test_file_changed": false
+  },
+  "duration_s": 10.7,
+  "place": "/tmp/arbos-qa-bench-tests-are-spec-j87z0n5l/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-ask-parks-b027/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260914T003343Z-bench-tests-are-spec",
+  "branch": "cursor/ask-parks-b027",
+  "usd": 0.00855
+}

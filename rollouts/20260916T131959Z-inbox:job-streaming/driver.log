@@ -1,0 +1,5 @@
+1789564799397 kernel started pid 793426
+1789564948512 BREAK turn-never-ended: feature job-streaming: turn never ended
+1789564948520 BREAK state:lock-leftover: lock file left behind after the kernel stopped (lock.rs Drop did not run)
+1789564948520 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789564948616 bugs: seen qa-025-runaway-background-job-unbounded-log-outlives-kernel.md, seen qa-025-runaway-background-job-unbounded-log-outlives-kernel.md, seen qa-025-runaway-background-job-unbounded-log-outlives-kernel.md

@@ -1,0 +1,42 @@
+Walking /tmp/arbos-qa-inbox:agent-defs-hfcl8zej/place...
+Found 27 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (5364 trigrams, 27 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-inbox:agent-defs-hfcl8zej/home/.cache/arbos/tgrep/4428ab64b403201f
+tools root: 2 calls, wall 8ms, sum 1ms, speedup 0.1x
+tools root: 8 calls, wall 32ms, sum 0ms, speedup 0.0x
+tools exercise-custom-agent-defs: 2 calls, wall 3ms, sum 0ms, speedup 0.0x
+spawn_kind_ignored exercise-custom-agent-defs: kind "reviewer": no agent definitions exist here; spawning the built-in child
+tools reviewer-child: 2 calls, wall 18ms, sum 0ms, speedup 0.0x
+spawn_kind_ignored reviewer-child: kind "reviewer": no agent definitions exist here; spawning the built-in child
+spawn_kind_ignored child-of-reviewer-child: kind "reviewer": no agent definitions exist here; spawning the built-in child
+tools reviewer-child: 2 calls, wall 5404ms, sum 5404ms, speedup 1.0x
+spawn_kind_ignored reviewer-child: kind "reviewer": no agent definitions exist here; spawning the built-in child
+spawn_kind_ignored grandchild-reviewer-test: kind "reviewer": no agent definitions exist here; spawning the built-in child
+tools exercise-custom-agent-defs: 2 calls, wall 23ms, sum 1ms, speedup 0.0x
+spawn_kind_ignored exercise-custom-agent-defs: kind "readonlyspawn": no agent definitions exist here; spawning the built-in child
+spawn_kind_ignored exercise-custom-agent-defs: kind "notakind": no agent definitions exist here; spawning the built-in child
+tools invalid-kind-child: 2 calls, wall 20ms, sum 0ms, speedup 0.0x
+spawn_kind_ignored readonly-parent: kind "readonlyspawn": no agent definitions exist here; spawning the built-in child
+tools readonly-parent-2: 2 calls, wall 10ms, sum 0ms, speedup 0.0x
+tools readonly-parent-2: 3 calls, wall 8ms, sum 0ms, speedup 0.0x
+tools readonly-parent-2: 2 calls, wall 2ms, sum 0ms, speedup 0.0x
+tools readonly-parent-2: 2 calls, wall 1ms, sum 0ms, speedup 0.0x
+spawn_kind_ignored reviewer-child: kind "reviewer": no agent definitions exist here; spawning the built-in child
+tools readonly-parent-2: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+spawn_kind_ignored child-of-reviewer-ch-2: kind "reviewer": no agent definitions exist here; spawning the built-in child
+tools child-of-reviewer-ch-2: 3 calls, wall 12ms, sum 2ms, speedup 0.2x
+tools readonly-parent: 3 calls, wall 35518ms, sum 35518ms, speedup 1.0x
+tools invalid-kind-child: 2 calls, wall 9ms, sum 1ms, speedup 0.1x
+tools readonly-parent: 2 calls, wall 7ms, sum 0ms, speedup 0.0x
+tools readonly-parent-2: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools readonly-parent: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+spawn_kind_ignored reviewer-child: kind "reviewer": no agent definitions exist here; spawning the built-in child
+spawn_kind_ignored root-level-reviewer-test: kind "reviewer": no agent definitions exist here; spawning the built-in child
+tools root-level-reviewer-test: 3 calls, wall 11ms, sum 1ms, speedup 0.1x
+tools root-level-reviewer-test: 2 calls, wall 16ms, sum 0ms, speedup 0.0x
+spawn_kind_ignored readonly-parent: kind "readonlyspawn": no agent definitions exist here; spawning the built-in child
+tools readonly-parent-3: 3 calls, wall 19ms, sum 0ms, speedup 0.0x
+tools readonly-parent-3: 5 calls, wall 8ms, sum 0ms, speedup 0.0x
+tools readonly-parent-3: 3 calls, wall 16ms, sum 0ms, speedup 0.0x
+tools readonly-parent-3: 2 calls, wall 12ms, sum 1ms, speedup 0.1x

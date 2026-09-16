@@ -1,0 +1,11 @@
+{
+  "name": "desktop-user-message-card@user-message-card",
+  "doc": "Feature user-message-card: a short prompt's card hugs its text and sits right; a 200-word prompt wraps within the cap; nothing overflows the reading column. (against feature branch cursor/user-message-card-b027)",
+  "tags": [
+    "inbox",
+    "user-message-card",
+    "desktop",
+    "inbox",
+    "user-message-card"
+  ]
+}

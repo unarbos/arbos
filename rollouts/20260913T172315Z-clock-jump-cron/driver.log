@@ -1,0 +1,6 @@
+1789320195803 kernel started pid 174916
+1789320195835 kernel stopped with code 0
+1789320195843 kernel-after-jump started pid 174932
+1789320203904 BREAK cron-clock-rewind: node #2 next_due is 10.0 days ahead (clock was rewound); a recurring node should never wait longer than one period
+1789320203909 kernel-after-jump stopped with code 0
+1789320203928 bugs: seen qa-013-clock-rewind-silences-recurring-node.md

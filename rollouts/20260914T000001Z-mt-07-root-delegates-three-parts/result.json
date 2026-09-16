@@ -1,0 +1,20 @@
+{
+  "scenario": "mt-07-root-delegates-three-parts",
+  "doc": "Item 7. Coordinator root: two spawns in one response, the question answered inline, root idle within 10 s of the spawns, six-field briefs with read_first naming project-context.md.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "RecursionError: maximum recursion depth exceeded",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 0.0,
+  "place": "/tmp/arbos-qa-mt-07-root-delegates-three-parts-briczm1l/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260914T000001Z-mt-07-root-delegates-three-parts",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.0
+}

@@ -1,0 +1,6 @@
+1789443265017 kernel started pid 422903
+1789443565378 timeout waiting for turn root idle after 300s
+1789443565379 BREAK turn-never-ended: feature worktree-cwd-confinement: turn never ended
+1789443565394 kernel stopped with code 0
+1789443565396 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789443565497 bugs: new 9185bfcbc0.md, new 75b122651e.md

@@ -1,0 +1,8 @@
+1789332913945 kernel started pid 206868
+1789332913996 kernel stopped with code 0
+1789332913996 kernel-shell started pid 206883
+1789332922050 kernel-shell stopped with code 0
+1789332922051 BREAK state:transcript-unended-turn: wake at line 7 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789332922051 BREAK state:plan-active-after-stop: node #6 is active with no kernel; reclaim() should settle it on next start
+1789332922051 BREAK state:attempt-running-after-stop: attempt a7 never ended
+1789332922055 bugs: seen qa-001-no-key-turn-left-unended.md, seen qa-007-sigint-during-turn-behaves-like-crash.md, seen qa-007-sigint-during-turn-behaves-like-crash.md

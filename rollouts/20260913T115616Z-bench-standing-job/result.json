@@ -1,0 +1,32 @@
+{
+  "scenario": "bench-standing-job",
+  "doc": "Checklist item 9: a standing task must become a recurring plan node (when.every), not a promise or a shell loop.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "turn never reached idle",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "no recurring plan node after a standing request",
+      "where": "crates/arbos-kernel/src/hooks.rs plan tool"
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "the agent scheduled with a shell loop/cron instead of the plan: ['{\"background\": true, \"command\": \"echo \\\\\"*/60 * * * * date -u >> $(pwd)/notes.md\\\\']",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "recurring_nodes": []
+  },
+  "duration_s": 9.2,
+  "place": "/tmp/arbos-qa-bench-standing-job-yh5hfqxy/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T115616Z-bench-standing-job",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.00411
+}

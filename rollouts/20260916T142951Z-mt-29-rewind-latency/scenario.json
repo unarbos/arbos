@@ -1,0 +1,8 @@
+{
+  "name": "mt-29-rewind-latency",
+  "doc": "`rewind`: the first `rewound` frame arrives under 100 ms (the cut), and the file restore reports after (a second `rewound` with `restored`, or an `error`); the transcript is cut.",
+  "tags": [
+    "multitasking",
+    "standing-pass"
+  ]
+}

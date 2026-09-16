@@ -1,0 +1,5 @@
+1789300576443 kernel started pid 149556
+1789300585159 BREAK turn-never-ended: turn never reached idle
+1789300585659 BREAK wrong-output: no recurring plan node after a standing request
+1789300585660 BREAK wrong-output: the agent scheduled with a shell loop/cron instead of the plan: ['{"background": true, "command": "echo \\"*/60 * * * * date -u >> $(pwd)/notes.md\\']
+1789300585664 bugs: new 3d07a0e323.md, seen qa-009-plan-accepts-one-shot-for-recurring-goal.md, seen qa-009-plan-accepts-one-shot-for-recurring-goal.md

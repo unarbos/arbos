@@ -1,0 +1,4 @@
+1789333540639 kernel started pid 214266
+1789333555914 BREAK spawn-error-text: refusals without a clear cap message: ['no machine named "local" in /tmp/arbos-qa-spawn-storm-las761tp/xdg/arbos/machines.toml or .arbos/machines/. Known: (none; add a [[machine]] with name, ssh, dir, or register one on the hub)', 'no machine named "local" in /tmp/arbos-qa-spawn-storm-las761tp/xdg/arbos/machines.toml or .arbos/machines/. Known: (none; add a [[machine]] with name, ssh, dir, or register one on the hub)', 'no machine named "local" in /tmp/arbos-qa-spawn-storm-las761tp/xdg/arbos/machines.toml or .arbos/machines/. Known: (none; add a [[machine]] with name, ssh, dir, or register one on the hub)']
+1789333555917 kernel stopped with code 0
+1789333555924 bugs: new 6cb7af22d1.md

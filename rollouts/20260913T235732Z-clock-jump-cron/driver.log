@@ -1,0 +1,6 @@
+1789343852455 kernel started pid 239809
+1789343852506 kernel stopped with code 0
+1789343852507 kernel-after-jump started pid 239826
+1789343860557 BREAK cron-coalesce: after firing, node #1 next_due is -1789343853s from now; expected within one period
+1789343860561 kernel-after-jump stopped with code 0
+1789343860569 bugs: seen e241411996.md

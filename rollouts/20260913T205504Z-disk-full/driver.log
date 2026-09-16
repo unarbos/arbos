@@ -1,0 +1,6 @@
+1789332904675 kernel started pid 206777
+1789332905827 BREAK kernel-died: kernel exited with -25 when a write hit the size limit (SIGXFSZ is 25; -25 = killed by it)
+1789332905828 BREAK state:lock-leftover: lock file left behind after the kernel stopped (lock.rs Drop did not run)
+1789332905828 BREAK state:plan-bad-lines: 1 unparseable line(s): [2]
+1789332905828 BREAK state:attempt-running-after-stop: attempt a1 never ended
+1789332905830 bugs: seen qa-012-file-size-limit-kills-kernel.md, seen qa-012-file-size-limit-kills-kernel.md, seen qa-012-file-size-limit-kills-kernel.md, seen qa-012-file-size-limit-kills-kernel.md

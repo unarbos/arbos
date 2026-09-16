@@ -1,0 +1,8 @@
+{
+  "name": "mt-14-child-done-does-not-interrupt",
+  "doc": "Item 14. Root idle, composer holds unsent text, a child finishes: the composer text is untouched, no raw 'Turn ended. Last words' card.",
+  "tags": [
+    "multitasking",
+    "desktop"
+  ]
+}

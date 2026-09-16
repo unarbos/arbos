@@ -1,0 +1,8 @@
+1789290870183 kernel started pid 144428
+1789290873993 BREAK ask-no-id: the ask frame carries no id: any answer resolves it
+1789290876199 BREAK ask-auto-resolved: a blank answer was recorded for the question: ['', 'teal']
+1789290881212 timeout waiting for error for the late answer after 5s
+1789290881212 BREAK late-answer-accepted: a late answer to a resolved ask produced no error frame
+1789290881712 BREAK late-answer-recorded: a late answer was appended: ['', 'teal', '']
+1789290881716 kernel stopped with code 0
+1789290881720 bugs: new 2111b8f0be.md, new 559b02d119.md, new fccce121b0.md, new aff06d8428.md

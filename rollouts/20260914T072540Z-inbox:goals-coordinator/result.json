@@ -1,0 +1,23 @@
+{
+  "scenario": "inbox:goals-coordinator",
+  "doc": "From inbox note 2026-09-13-goals-coordinator.md: exercise feature 'goals-coordinator' and run every detector. Needs a kernel built from branch cursor/goals-coordinator-b027.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "feature goals-coordinator: turn never ended",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "goals-coordinator",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-13-goals-coordinator.md"
+  },
+  "duration_s": 1296.7,
+  "place": "/tmp/arbos-qa-inbox:goals-coordinator-egvtrbv4/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260914T072540Z-inbox:goals-coordinator",
+  "branch": "main",
+  "usd": 0.0161
+}

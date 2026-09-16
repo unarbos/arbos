@@ -1,0 +1,28 @@
+{
+  "scenario": "inbox:frame-read-tail",
+  "doc": "From inbox note 2026-09-13-frame-read-tail.md: exercise feature 'frame-read-tail' and run every detector. Needs a kernel built from branch cursor/frame-read-tail-b027.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "transcript-corrupt",
+      "detail": "bad lines: [1, 2, 3, 4, 5]",
+      "where": ""
+    },
+    {
+      "rule": "state:transcript-bad-lines",
+      "detail": "5 unparseable line(s): [1, 2, 3, 4, 5]",
+      "where": "/tmp/arbos-qa-inbox:frame-read-tail-qsaxg1bm/place/.arbos/agents/root/transcript.jsonl"
+    }
+  ],
+  "notes": {
+    "feature": "frame-read-tail",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-13-frame-read-tail.md"
+  },
+  "duration_s": 41.4,
+  "place": "/tmp/arbos-qa-inbox:frame-read-tail-qsaxg1bm/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260916T131318Z-inbox:frame-read-tail",
+  "branch": "main",
+  "usd": 0.0853
+}

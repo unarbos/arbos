@@ -1,0 +1,14 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-fix-commit-branch-xxrpmhh7/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8138 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-fix-commit-branch-xxrpmhh7/home/.cache/arbos/tgrep/de29673351753906
+tools fix-hello-py: 2 calls, wall 3ms, sum 0ms, speedup 0.0x
+tools fix-hello-py: 2 calls, wall 21ms, sum 0ms, speedup 0.0x
+tools fix-hello-py: 2 calls, wall 9ms, sum 1ms, speedup 0.1x
+tools fix-hello-py: 2 calls, wall 1ms, sum 0ms, speedup 0.0x
+tools fix-hello-py: 2 calls, wall 7ms, sum 0ms, speedup 0.0x
+tools fix-hello-py: 2 calls, wall 4ms, sum 1ms, speedup 0.2x
+snapshot_failed: git add: fatal: unable to stat 'agents/fix-hello-py/turns/t0001/meta.toml': No such file or directory
+tools root: 2 calls, wall 5ms, sum 1ms, speedup 0.2x

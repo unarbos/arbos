@@ -1,0 +1,22 @@
+{
+  "scenario": "desktop-composer-pills",
+  "doc": "Feature composer-pills: a PR URL printed twice by bash counts once; a URL merely read from a file is recorded; the strip above the composer must not overflow a 900 px window.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "DriverError: move: no element matches `project-0`",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "composer-pills"
+  },
+  "duration_s": 3.4,
+  "place": "/tmp/arbos-qa-desktop-composer-pills-2dbux5hk/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260915T063917Z-desktop-composer-pills",
+  "branch": "main",
+  "usd": 0.0
+}

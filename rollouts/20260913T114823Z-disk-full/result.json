@@ -1,0 +1,22 @@
+{
+  "scenario": "disk-full",
+  "doc": "Writes start failing mid-run (simulated with a 256 KB file-size limit on the kernel process). The kernel must report the failure and stay up, not die on SIGXFSZ or corrupt a line.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "no idle after the oversized write",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "exit_code": null
+  },
+  "duration_s": 61.4,
+  "place": "/tmp/arbos-qa-disk-full-zqvlvz3m/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T114823Z-disk-full",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.0
+}

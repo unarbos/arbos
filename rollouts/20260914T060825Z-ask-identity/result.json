@@ -1,0 +1,25 @@
+{
+  "scenario": "ask-identity",
+  "doc": "qa-021: an ask frame carries an id; a wrong/late answer is refused with an error frame; the matching answer resolves the question once.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "ask-auto-resolved",
+      "detail": "a blank answer was recorded for the question: ['']",
+      "where": "crates/arbos-kernel/src/serve.rs Frame::Answer"
+    }
+  ],
+  "notes": {
+    "ask_id": "call_OYrzwKDHTM6jfDj614dMPv8d",
+    "answers_recorded": [
+      ""
+    ]
+  },
+  "duration_s": 7.4,
+  "place": "/tmp/arbos-qa-ask-identity-4fbrddy4/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260914T060825Z-ask-identity",
+  "branch": "main",
+  "usd": 0.0036
+}

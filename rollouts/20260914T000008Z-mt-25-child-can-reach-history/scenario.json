@@ -1,0 +1,7 @@
+{
+  "name": "mt-25-child-can-reach-history",
+  "doc": "Item 25. A brief says 'find what the earlier worker wrote about X': the child searches .arbos/agents and finds it.",
+  "tags": [
+    "multitasking"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "inbox:job-streaming",
+  "doc": "From inbox note 2026-09-13-job-streaming.md: exercise feature 'job-streaming' and run every detector. Needs a kernel built from branch cursor/job-streaming-b027.",
+  "tags": [
+    "inbox",
+    "job-streaming"
+  ]
+}

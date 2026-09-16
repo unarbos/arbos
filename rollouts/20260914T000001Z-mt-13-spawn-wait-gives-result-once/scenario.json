@@ -1,0 +1,7 @@
+{
+  "name": "mt-13-spawn-wait-gives-result-once",
+  "doc": "Item 13. spawn wait=true: the tool result carries the child's words; no done file wakes root afterwards.",
+  "tags": [
+    "multitasking"
+  ]
+}

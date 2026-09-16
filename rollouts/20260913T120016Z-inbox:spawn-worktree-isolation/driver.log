@@ -1,0 +1,5 @@
+1789300816941 kernel started pid 150309
+1789300841485 kernel stopped with code 0
+1789300841485 BREAK state:focus-missing: no focus file
+1789300841485 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789300841487 bugs: new b573ac64b3.md, seen qa-017-turn-resurrects-deleted-agent-folder.md

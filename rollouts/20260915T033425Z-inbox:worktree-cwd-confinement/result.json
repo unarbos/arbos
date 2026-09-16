@@ -1,0 +1,28 @@
+{
+  "scenario": "inbox:worktree-cwd-confinement",
+  "doc": "From inbox note 2026-09-12-worktree-cwd-confinement.md: exercise feature 'worktree-cwd-confinement' and run every detector. Needs a kernel built from branch cursor/worktree-cwd-confinement-b027.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "feature worktree-cwd-confinement: turn never ended",
+      "where": ""
+    },
+    {
+      "rule": "state:agent-md-missing",
+      "detail": "agent folder without agent.md; list_agents skips it silently",
+      "where": "/tmp/arbos-qa-inbox:worktree-cwd-confinement-9stfzwk9/place/.arbos/agents/child-test-cwd/agent.md"
+    }
+  ],
+  "notes": {
+    "feature": "worktree-cwd-confinement",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-12-worktree-cwd-confinement.md"
+  },
+  "duration_s": 300.4,
+  "place": "/tmp/arbos-qa-inbox:worktree-cwd-confinement-9stfzwk9/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260915T033425Z-inbox:worktree-cwd-confinement",
+  "branch": "main",
+  "usd": 0.44285
+}

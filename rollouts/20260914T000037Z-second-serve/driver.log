@@ -1,0 +1,5 @@
+1789344037731 kernel started pid 240583
+1789344037782 kernel-second started pid 240600
+1789344038087 BREAK lock-removed-by-loser: the failed second serve removed the live kernel's lock file
+1789344038090 kernel stopped with code 0
+1789344038095 bugs: seen f52e7c83db.md

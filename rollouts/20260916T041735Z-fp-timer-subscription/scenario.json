@@ -1,0 +1,7 @@
+{
+  "name": "fp-timer-subscription",
+  "doc": "A timer subscription (kind = timer, every = 30s, prompt) fires one inbox message per period, which becomes one turn; the prompt is what the agent sees.",
+  "tags": [
+    "file-plan"
+  ]
+}

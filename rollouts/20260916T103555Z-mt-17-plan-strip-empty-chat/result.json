@@ -1,0 +1,20 @@
+{
+  "scenario": "mt-17-plan-strip-empty-chat",
+  "doc": "Item 17. A new chat in a new place shows nothing above the composer: no plan strip, no kernel chore.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "DriverError: move: no element matches `project-0`",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 1.5,
+  "place": "/tmp/arbos-qa-mt-17-plan-strip-empty-chat-0lm19ijv/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260916T103555Z-mt-17-plan-strip-empty-chat",
+  "branch": "main",
+  "usd": 0.0
+}

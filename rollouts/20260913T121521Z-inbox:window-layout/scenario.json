@@ -1,0 +1,8 @@
+{
+  "name": "inbox:window-layout",
+  "doc": "From inbox note 2026-09-13-window-layout.md: exercise feature 'window-layout' and run every detector. Needs a kernel built from branch cursor/window-layout-tabs-right-panel.",
+  "tags": [
+    "inbox",
+    "window-layout"
+  ]
+}

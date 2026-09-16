@@ -1,0 +1,60 @@
+{
+  "scenario": "plan-shell-verdicts",
+  "doc": "Kernel-run shell nodes: exit 0 with empty output is done, exit 0 with output is done with the output as outcome, exit 1 is failed and wakes the agent. No model needed.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "shell-verdict",
+      "detail": "exit 0 with no output closed as (None, ''); expected done",
+      "where": "crates/arbos-kernel/src/plan.rs run_mechanical"
+    },
+    {
+      "rule": "shell-verdict",
+      "detail": "exit 0 with output closed as (None, ''); expected done with the output in the outcome",
+      "where": ""
+    },
+    {
+      "rule": "shell-verdict",
+      "detail": "exit 1 closed as (None, ''); expected failed",
+      "where": ""
+    },
+    {
+      "rule": "shell-verdict",
+      "detail": "a missing command closed as (None, ''); expected failed",
+      "where": ""
+    },
+    {
+      "rule": "shell-failure-silent",
+      "detail": "no kernel wake node after failed shell nodes; the agent is never told",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "verdicts": {
+      "1": [
+        null,
+        ""
+      ],
+      "2": [
+        null,
+        ""
+      ],
+      "3": [
+        null,
+        ""
+      ],
+      "4": [
+        null,
+        ""
+      ]
+    },
+    "kernel_wake_nodes": 0
+  },
+  "duration_s": 8.1,
+  "place": "/tmp/arbos-qa-plan-shell-verdicts-wzb46cse/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-ask-parks-b027/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260914T002524Z-plan-shell-verdicts",
+  "branch": "cursor/ask-parks-b027",
+  "usd": 0.0
+}

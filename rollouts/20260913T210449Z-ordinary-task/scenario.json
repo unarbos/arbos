@@ -1,0 +1,5 @@
+{
+  "name": "ordinary-task",
+  "doc": "A small coding task through the real model: write a script, run it, report. Checks the file, the run, and the transcript shape.",
+  "tags": []
+}

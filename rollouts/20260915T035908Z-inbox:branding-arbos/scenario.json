@@ -1,0 +1,8 @@
+{
+  "name": "inbox:branding-arbos",
+  "doc": "From inbox note 2026-09-13-branding-arbos.md: exercise feature 'branding-arbos' and run every detector. Needs a kernel built from branch cursor/branding-arbos-b027.",
+  "tags": [
+    "inbox",
+    "branding-arbos"
+  ]
+}

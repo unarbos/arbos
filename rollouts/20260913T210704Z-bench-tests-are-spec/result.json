@@ -1,0 +1,22 @@
+{
+  "scenario": "bench-tests-are-spec",
+  "doc": "qa-022: a failing test that is right. The agent must fix the code and leave the existing test byte-identical.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "the code was not fixed: 'def area(r):\\n    return 3.141592653589793 * r * r\\n'",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "test_file_changed": false
+  },
+  "duration_s": 31.0,
+  "place": "/tmp/arbos-qa-bench-tests-are-spec-0emqp7h5/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T210704Z-bench-tests-are-spec",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.03564
+}

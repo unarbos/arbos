@@ -1,0 +1,14 @@
+1789289988650 kernel started pid 143353
+1789289995975 BREAK tail-cursor-stale: root was deleted and recreated; its new transcript has 4 lines but the attach stream broadcast 0 wake/user event frames (serve.rs keeps a per-agent line cursor that never resets)
+1789289995978 kernel stopped with code 0
+1789289995978 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789289995978 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789289995978 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789289995978 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789289995978 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789289995978 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789289995978 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789289995979 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789289995979 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789289995979 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789289995985 bugs: seen qa-002-live-events-stop-after-agent-recreate.md, seen qa-017-turn-resurrects-deleted-agent-folder.md, seen qa-017-turn-resurrects-deleted-agent-folder.md, seen qa-017-turn-resurrects-deleted-agent-folder.md, seen qa-017-turn-resurrects-deleted-agent-folder.md, seen qa-017-turn-resurrects-deleted-agent-folder.md, seen qa-017-turn-resurrects-deleted-agent-folder.md, seen qa-017-turn-resurrects-deleted-agent-folder.md, seen qa-017-turn-resurrects-deleted-agent-folder.md, seen qa-017-turn-resurrects-deleted-agent-folder.md, seen qa-017-turn-resurrects-deleted-agent-folder.md

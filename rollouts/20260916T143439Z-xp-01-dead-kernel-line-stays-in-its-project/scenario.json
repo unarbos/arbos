@@ -1,0 +1,8 @@
+{
+  "name": "xp-01-dead-kernel-line-stays-in-its-project",
+  "doc": "Two places open. Kill A's kernel, type into A, switch to B and type there. A's line must reach only A (after its kernel respawns); B's only B; neither place's files may carry the other's words.",
+  "tags": [
+    "cross-project",
+    "desktop"
+  ]
+}

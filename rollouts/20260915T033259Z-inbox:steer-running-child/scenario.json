@@ -1,0 +1,8 @@
+{
+  "name": "inbox:steer-running-child",
+  "doc": "From inbox note 2026-09-12-steer-running-child.md: exercise feature 'steer-running-child' and run every detector. Needs a kernel built from branch cursor/steer-running-child-b027.",
+  "tags": [
+    "inbox",
+    "steer-running-child"
+  ]
+}

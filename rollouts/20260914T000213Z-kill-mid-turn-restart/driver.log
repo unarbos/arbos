@@ -1,0 +1,9 @@
+1789344133976 kernel started pid 240914
+1789344135883 kernel SIGKILLed
+1789344136384 kernel-restart started pid 240934
+1789344256759 timeout waiting for turn root idle after 120s
+1789344256760 BREAK continued-turn-never-ended: continued turn never reached idle
+1789344257761 BREAK turn-contract: transcript does not end in turn_complete: ['tool', 'assistant', 'tool']
+1789344257761 BREAK wrong-output: count.txt was never written after the continuation
+1789344257768 kernel-restart stopped with code 0
+1789344257797 bugs: seen 8a212695c0.md, seen 78cee31f6c.md, seen 49ede41274.md

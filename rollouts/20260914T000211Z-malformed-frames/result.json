@@ -1,0 +1,23 @@
+{
+  "scenario": "malformed-frames",
+  "doc": "Garbage on the attach socket, unknown frame types, frames for missing agents and nodes, empty prompts. Kernel must survive; a client should learn what was rejected.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "FileNotFoundError: [Errno 2] No such file or directory: '/tmp/arbos-qa-malformed-frames-15got_yo/place/.arbos/focus'",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "error_frames_seen": 11,
+    "stderr_lines": 17
+  },
+  "duration_s": 2.7,
+  "place": "/tmp/arbos-qa-malformed-frames-15got_yo/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-ask-parks-b027/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260914T000211Z-malformed-frames",
+  "branch": "cursor/ask-parks-b027",
+  "usd": 0.0
+}

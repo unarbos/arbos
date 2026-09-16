@@ -1,0 +1,20 @@
+{
+  "scenario": "mt-10-notes-stay-current",
+  "doc": "Item 10. After a delegated three-part request, .arbos/notes.md has one item per workstream with a readout, not the template.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "RecursionError: maximum recursion depth exceeded",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 0.0,
+  "place": "/tmp/arbos-qa-mt-10-notes-stay-current-jfpipji4/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260914T000001Z-mt-10-notes-stay-current",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.0
+}

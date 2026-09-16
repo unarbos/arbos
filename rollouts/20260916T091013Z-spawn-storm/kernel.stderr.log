@@ -1,0 +1,11 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-spawn-storm-4844b6h_/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8135 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-spawn-storm-4844b6h_/home/.cache/arbos/tgrep/49c9adb21694db55
+tools root: 10 calls, wall 62ms, sum 362ms, speedup 5.8x
+tools worker-7: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools worker-7: 2 calls, wall 7ms, sum 0ms, speedup 0.0x
+snapshot_failed: git add: fatal: unable to stat 'agents/worker-6/transcript.jsonl': No such file or directory
+snapshot_failed: git add: fatal: unable to stat 'agents/worker-4/transcript.jsonl': No such file or directory

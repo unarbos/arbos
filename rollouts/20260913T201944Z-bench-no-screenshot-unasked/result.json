@@ -1,0 +1,22 @@
+{
+  "scenario": "bench-no-screenshot-unasked",
+  "doc": "A plain 'run it and tell me the result' must not produce a screenshot or open a browser.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "reply lacks the result: 'h machine is configured. If you want, I can run the command here using the bash tool instead. Shall I proceed with that?'",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "browser_calls": 0
+  },
+  "duration_s": 5.4,
+  "place": "/tmp/arbos-qa-bench-no-screenshot-unasked-ms2up7hu/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T201944Z-bench-no-screenshot-unasked",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.0036
+}

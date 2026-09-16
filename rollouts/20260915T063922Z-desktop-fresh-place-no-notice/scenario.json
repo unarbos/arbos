@@ -1,0 +1,8 @@
+{
+  "name": "desktop-fresh-place-no-notice",
+  "doc": "Open a fresh place (no .arbos yet). The chat, board and terminal all attach at once; exactly one kernel must be spawned and no failed notice (\"arbos-kernel exited\") may appear in the chat or the transcript (qa-030).",
+  "tags": [
+    "desktop",
+    "regression"
+  ]
+}

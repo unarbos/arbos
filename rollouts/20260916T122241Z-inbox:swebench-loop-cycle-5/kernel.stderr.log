@@ -1,0 +1,15 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-inbox:swebench-loop-cycle-5-ps4gsb6x/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8144 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-inbox:swebench-loop-cycle-5-ps4gsb6x/home/.cache/arbos/tgrep/ee0924b43b2f7ebd
+tools create-dummy-module: 2 calls, wall 1ms, sum 0ms, speedup 0.0x
+tools create-dummy-module: 2 calls, wall 26ms, sum 20ms, speedup 0.8x
+tools create-dummy-module: 3 calls, wall 257ms, sum 254ms, speedup 1.0x
+tools create-dummy-module: 2 calls, wall 263ms, sum 254ms, speedup 1.0x
+tools create-dummy-module: 2 calls, wall 259ms, sum 254ms, speedup 1.0x
+tools create-dummy-module: 2 calls, wall 261ms, sum 255ms, speedup 1.0x
+tools create-dummy-module: 2 calls, wall 259ms, sum 256ms, speedup 1.0x
+tools create-dummy-module: 2 calls, wall 12ms, sum 3ms, speedup 0.2x
+tools create-hang-script: 2 calls, wall 4ms, sum 0ms, speedup 0.0x

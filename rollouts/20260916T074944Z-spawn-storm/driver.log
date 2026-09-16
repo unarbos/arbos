@@ -1,0 +1,4 @@
+1789544984546 kernel started pid 676865
+1789544993460 BREAK spawn-cap: 9 children exist; the cap is 8
+1789545027676 kernel stopped with code 0
+1789545027767 bugs: new 0f247a6512.md

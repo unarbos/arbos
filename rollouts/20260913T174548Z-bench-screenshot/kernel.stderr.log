@@ -1,0 +1,32 @@
+Walking /tmp/arbos-qa-bench-screenshot-mps8515n/place...
+Found 25 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (5301 trigrams, 25 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-screenshot-mps8515n/home/.cache/arbos/tgrep/619441143c604e3d
+tools root: 2 calls, wall 537ms, sum 388ms, speedup 0.7x
+tools root: 2 calls, wall 74ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 7ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 15ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 9ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 11ms, sum 1ms, speedup 0.1x
+tools root: 2 calls, wall 10ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 45ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 8ms, sum 0ms, speedup 0.0x
+tools root: 3 calls, wall 10ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 6ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 6ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 7ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 16ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 15ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 7ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 39ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 11ms, sum 0ms, speedup 0.0x
+tools root: 3 calls, wall 17ms, sum 1ms, speedup 0.1x
+tools root: 2 calls, wall 18ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 5ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 35ms, sum 0ms, speedup 0.0x
+tools root: 2 calls, wall 8ms, sum 1ms, speedup 0.1x
+tools root: 4 calls, wall 63ms, sum 2ms, speedup 0.0x
+tools root: 2 calls, wall 7ms, sum 1ms, speedup 0.1x
+tools root: 2 calls, wall 19ms, sum 1ms, speedup 0.1x
+tools writeindexhtmlwithqaokan: 2 calls, wall 238ms, sum 1ms, speedup 0.0x

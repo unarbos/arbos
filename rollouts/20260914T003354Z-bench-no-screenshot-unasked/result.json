@@ -1,0 +1,22 @@
+{
+  "scenario": "bench-no-screenshot-unasked",
+  "doc": "A plain 'run it and tell me the result' must not produce a screenshot or open a browser.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "reply lacks the result: 'd for execution. If you want, I can help you set it up or try another way to get the result. Let me know how to proceed.'",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "browser_calls": 0
+  },
+  "duration_s": 4.7,
+  "place": "/tmp/arbos-qa-bench-no-screenshot-unasked-9f4_xkl0/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-ask-parks-b027/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260914T003354Z-bench-no-screenshot-unasked",
+  "branch": "cursor/ask-parks-b027",
+  "usd": 0.00323
+}

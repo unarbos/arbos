@@ -4,7 +4,7 @@ status: pr-open — https://github.com/unarbos/arbos/pull/12 (branch `cursor/fix
 severity: low-medium (recovery exists via `reclaim`, but a "stopped" agent silently resumes on next start, and the transcript has no record of the stop)
 scenario: kickoff-session (kernel stopped while goal 10 was still running); reproducible with any model turn + SIGINT
 rollout: /cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/qa/rollouts/ (first kickoff attempt, superseded; see kickoff-history.jsonl for the current run)
-fingerprints: bcb2294131 d4f73e35a3 fb5b128a4e 4b597d58b0 f2866e6a9f 0f2035577c 3c916ea97a ef97cb7674 834b31b60c 2708d7fae3 c175fa2e98 9395dbcd55 ad14d20818 bb66c7fc5a
+fingerprints: bcb2294131 d4f73e35a3 fb5b128a4e 4b597d58b0 f2866e6a9f 0f2035577c 3c916ea97a ef97cb7674 834b31b60c 2708d7fae3 c175fa2e98 9395dbcd55 ad14d20818 bb66c7fc5a 56f3eefb64 e0845cace9
 
 ## Repro
 

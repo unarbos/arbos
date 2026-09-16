@@ -1,0 +1,46 @@
+{
+  "scenario": "ordinary-task",
+  "doc": "A small coding task through the real model: write a script, run it, report. Checks the file, the run, and the transcript shape.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "fizz.py not created",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "final reply did not report FizzBuzz: '          I cannot spawn a worker on the local machine because no machine named \"local\" is registered here. Please advise how you want me to proceed or provide a registered machine name.'",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "tools_called": [
+      "ls",
+      "read",
+      "ls",
+      "read",
+      "ls",
+      "read",
+      "find",
+      "read",
+      "read",
+      "spawn"
+    ],
+    "tool_errors": [
+      "/tmp/arbos-qa-ordinary-task-jp5xne21/place/fizz.py does not exist (ls /tmp/arbos-qa-ordinary-task-jp5xne21/place to see what is there)",
+      "/tmp/arbos-qa-ordinary-task-jp5xne21/place/README.md does not exist (ls /tmp/arbos-qa-ordinary-task-jp5xne21/place to see what is there)",
+      "/tmp/arbos-qa-ordinary-task-jp5xne21/place/scripts/fizz.py does not exist (ls /tmp/arbos-qa-ordinary-task-jp5xne21/place to see what is there)",
+      "/tmp/arbos-qa-ordinary-task-jp5xne21/place/README does not exist (ls /tmp/arbos-qa-ordinary-task-jp5xne21/place to see what is there)",
+      "no machine named \"local\" in /tmp/arbos-qa-ordinary-task-jp5xne21/xdg/arbos/machines.toml or .arbos/machines/. Known: (none; add a [[machine]] with name, ssh, dir, or register one on the hub)"
+    ],
+    "trace_files": 11
+  },
+  "duration_s": 23.5,
+  "place": "/tmp/arbos-qa-ordinary-task-jp5xne21/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T173714Z-ordinary-task",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.02121
+}

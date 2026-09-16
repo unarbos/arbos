@@ -1,0 +1,19 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-inbox:agent-defs-3c300d76/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (7013 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-inbox:agent-defs-3c300d76/home/.cache/arbos/tgrep/0f0b20e5d92a813f
+tools root: 2 calls, wall 20ms, sum 0ms, speedup 0.0x
+spawn_kind_ignored root: kind "agent-defs": no agent definitions exist here; spawning the built-in child
+tools test-agent-defs-feature: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools test-reviewer: 2 calls, wall 6ms, sum 0ms, speedup 0.0x
+tools test-reviewer: 3 calls, wall 5ms, sum 0ms, speedup 0.0x
+tools child-bashwrite-test: 3 calls, wall 10ms, sum 0ms, speedup 0.0x
+tools test-bashwrite: 3 calls, wall 5569ms, sum 5570ms, speedup 1.0x
+tools test-reviewer-childtest: 3 calls, wall 1ms, sum 2ms, speedup 2.0x
+tools test-reviewer-childtest: 2 calls, wall 13ms, sum 1ms, speedup 0.1x
+tools test-reviewer-childtest: 4 calls, wall 25ms, sum 1ms, speedup 0.0x
+tools test-agent-defs-feature: 3 calls, wall 0ms, sum 0ms, speedup 1.0x
+tools spawn-unknownkind-test: 3 calls, wall 17ms, sum 2ms, speedup 0.1x
+tools test-malformed: 2 calls, wall 11ms, sum 0ms, speedup 0.0x

@@ -1,0 +1,8 @@
+1789291618200 kernel started pid 147881
+1789300072575 timeout waiting for turn garbage idle after 60s
+1789300074625 kernel stopped with code 0
+1789300074898 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789300074898 BREAK state:agent-parent-dangling: parent 'ghost-parent' has no folder
+1789300074898 BREAK state:transcript-bad-lines: 2 unparseable line(s): [2, 4]
+1789300074898 BREAK state:plan-done-unattempted: user node #1 is done but no ended attempt records the turn
+1789300075316 bugs: seen qa-006-prompt-to-unlisted-folder-parks-forever.md, seen qa-006-prompt-to-unlisted-folder-parks-forever.md, seen qa-006-prompt-to-unlisted-folder-parks-forever.md, seen qa-001-no-key-turn-left-unended.md

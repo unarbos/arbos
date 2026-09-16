@@ -1,0 +1,8 @@
+{
+  "name": "inbox:agent-defs",
+  "doc": "From inbox note 2026-09-13-agent-defs.md: exercise feature 'agent-defs' and run every detector. Needs a kernel built from branch cursor/agent-defs-b027.",
+  "tags": [
+    "inbox",
+    "agent-defs"
+  ]
+}

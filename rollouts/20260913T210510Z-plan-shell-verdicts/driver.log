@@ -1,0 +1,10 @@
+1789333510261 kernel started pid 213897
+1789333510312 kernel stopped with code 0
+1789333510313 kernel-shell started pid 213914
+1789333518363 BREAK shell-verdict: exit 0 with no output closed as (None, ''); expected done
+1789333518363 BREAK shell-verdict: exit 0 with output closed as (None, ''); expected done with the output in the outcome
+1789333518363 BREAK shell-verdict: exit 1 closed as (None, ''); expected failed
+1789333518363 BREAK shell-verdict: a missing command closed as (None, ''); expected failed
+1789333518363 BREAK shell-failure-silent: no kernel wake node after failed shell nodes; the agent is never told
+1789333518367 kernel-shell stopped with code 0
+1789333518370 bugs: seen 5767dabcfd.md, seen 5767dabcfd.md, seen 5767dabcfd.md, seen 5767dabcfd.md, seen 479b242ba3.md

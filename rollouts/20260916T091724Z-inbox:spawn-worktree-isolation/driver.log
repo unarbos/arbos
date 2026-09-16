@@ -1,0 +1,5 @@
+1789550244607 kernel started pid 688243
+1789550544974 timeout waiting for turn root idle after 300s
+1789550544974 BREAK turn-never-ended: feature spawn-worktree-isolation: turn never ended
+1789550545038 kernel stopped with code 0
+1789550545113 bugs: seen 7fd73d1978.md

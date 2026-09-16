@@ -4,7 +4,7 @@ status: pr-open — https://github.com/unarbos/arbos/pull/20 (branch `cursor/fix
 severity: medium (a standing job the user was told exists fires once and dies; eight tool calls to schedule anything)
 scenario: bench-standing-job (benchmark item 9)
 rollout: /cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/qa/rollouts/20260913T000829Z-bench-standing-job
-fingerprints: 6561543051
+fingerprints: 6561543051 3d07a0e323
 
 ## Repro
 

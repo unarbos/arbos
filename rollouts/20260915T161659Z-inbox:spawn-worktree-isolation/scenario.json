@@ -1,0 +1,8 @@
+{
+  "name": "inbox:spawn-worktree-isolation",
+  "doc": "From inbox note 2026-09-12-spawn-worktree-isolation.md: exercise feature 'spawn-worktree-isolation' and run every detector. Needs a kernel built from branch cursor/spawn-worktree-isolation-b027.",
+  "tags": [
+    "inbox",
+    "spawn-worktree-isolation"
+  ]
+}

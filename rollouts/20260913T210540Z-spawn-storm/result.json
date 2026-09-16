@@ -1,0 +1,25 @@
+{
+  "scenario": "spawn-storm",
+  "doc": "Ten workers spawned at once against a cap of eight. The cap must hold with clear errors, every child folder must be consistent, and the kernel must stay up.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "spawn-error-text",
+      "detail": "refusals without a clear cap message: ['no machine named \"local\" in /tmp/arbos-qa-spawn-storm-las761tp/xdg/arbos/machines.toml or .arbos/machines/. Known: (none; add a [[machine]] with name, ssh, dir, or register one on the hub)', 'no machine named \"local\" in /tmp/arbos-qa-spawn-storm-las761tp/xdg/arbos/machines.toml or .arbos/machines/. Known: (none; add a [[machine]] with name, ssh, dir, or register one on the hub)', 'no machine named \"local\" in /tmp/arbos-qa-spawn-storm-las761tp/xdg/arbos/machines.toml or .arbos/machines/. Known: (none; add a [[machine]] with name, ssh, dir, or register one on the hub)']",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "children": 0,
+    "spawn_calls": 10,
+    "refused": 10,
+    "files": []
+  },
+  "duration_s": 15.3,
+  "place": "/tmp/arbos-qa-spawn-storm-las761tp/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T210540Z-spawn-storm",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.00858
+}

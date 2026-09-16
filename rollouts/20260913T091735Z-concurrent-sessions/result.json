@@ -1,0 +1,20 @@
+{
+  "scenario": "concurrent-sessions",
+  "doc": "Eight chats prompted at once. Each transcript must hold exactly its own wake and end; no cross-talk.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "turns-not-all-ended",
+      "detail": "2/8 turns reached idle",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 543.7,
+  "place": "/tmp/arbos-qa-concurrent-sessions-zm0d8yge/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-cursor-release-integration-52cd/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260913T091735Z-concurrent-sessions",
+  "branch": "cursor/release-integration-52cd",
+  "usd": 0.01507
+}
