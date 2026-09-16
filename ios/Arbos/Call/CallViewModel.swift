@@ -260,13 +260,14 @@ final class CallViewModel: ObservableObject {
 
     /// Words typed in the pulled-down composer: to the project's chat, as
     /// a typed turn would be. In the pipeline shape the reply is spoken.
-    func sendTyped(_ text: String) {
+    func sendTyped(_ text: String, attachments: [PendingAttachment] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        lines.append(TranscriptLine(speaker: .user, text: trimmed))
+        guard !trimmed.isEmpty || !attachments.isEmpty else { return }
+        let shown = attachments.isEmpty ? trimmed : (trimmed.isEmpty ? "" : trimmed + " ") + "📎 " + attachments.map(\.name).joined(separator: ", ")
+        lines.append(TranscriptLine(speaker: .user, text: shown))
         trimLines()
         if !server.answersItself { kernelBusy = true; phase = .thinking }
-        chat.send(trimmed)
+        chat.send(trimmed, attachments: attachments)
     }
 
     /// Phone speaker instead of a connected headset, and back.
