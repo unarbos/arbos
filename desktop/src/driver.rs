@@ -1108,6 +1108,27 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         "settings_open": cx.windows().iter().any(|w| w.downcast::<SettingsWindow>().is_some()),
         "opener_open": this.opener.read(cx).open,
         "search_open": this.chat_search.read(cx).is_open(),
+        "feedback": {
+            "sheet_open": this.feedback_sheet.read(cx).is_open,
+            // The sentence he reads after Send. The one thing this feature
+            // cannot get wrong is promising something it does not do, so the
+            // promise itself is assertable rather than only photographable.
+            "message": this.feedback_sheet.read(cx).message().map(|(ok, text)| json!({
+                "ok": ok,
+                "text": text,
+            })),
+            "screenshot": {
+                "attached": this.feedback_sheet.read(cx).shot_state().0,
+                "whole_screen": this.feedback_sheet.read(cx).shot_state().1,
+                "error": this.feedback_sheet.read(cx).shot_state().2,
+            },
+            "outbox": {
+                "waiting": this.feedback_outbox.waiting,
+                "sent_this_run": this.feedback_outbox.sent_this_run,
+                "last_error": this.feedback_outbox.last_error,
+                "drained": this.feedback_outbox.at.is_some(),
+            },
+        },
         "permissions": {
             "open": this.permissions_sheet.read(cx).is_open(),
             "seen": workspace.permissions_seen,

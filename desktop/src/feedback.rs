@@ -1445,6 +1445,45 @@ mod tests {
         assert_eq!(pending(&place).len(), 1);
     }
 
+    /// Every project's outbox is drained, not only the one on screen. A report
+    /// he filed in one project while another was in front is still his report,
+    /// and the drain that runs without a new Send has to find it.
+    #[test]
+    fn a_report_waiting_in_another_project_is_still_attempted() {
+        let a = Scratch::new("place-a");
+        let b = Scratch::new("place-b");
+        let (pa, pb) = (Place::new(a.path()), Place::new(b.path()));
+        for (n, place) in [(1, &pa), (2, &pb)] {
+            let mut draft = Draft::new(Parts::default());
+            draft.note = format!("report {n}");
+            write(place, &draft, &format!("20260916T15421{n}Z-aa11"), 1_789_573_330_000).unwrap();
+        }
+        // As the drain does it: every open place, one pass.
+        let now = 1_789_573_400_000;
+        let tried: Vec<_> = [&pa, &pb]
+            .iter()
+            .flat_map(|place| {
+                deliver_pending(
+                    place,
+                    "arbos://nowhere/nothing/internal/feedback",
+                    Path::new("/nonexistent"),
+                    now,
+                )
+            })
+            .collect();
+        assert_eq!(tried.len(), 2, "both were tried: {tried:?}");
+        for (_, state) in &tried {
+            assert!(
+                matches!(state, Delivery::Waiting { attempts: 1, last_error: Some(_) }),
+                "each kept its reason: {state:?}"
+            );
+        }
+        // And both are still there to try again — nothing was dropped for
+        // being in the wrong project.
+        assert_eq!(pending(&pa).len(), 1);
+        assert_eq!(pending(&pb).len(), 1);
+    }
+
     /// A delivered report keeps its folder: the loop writes `fixed.json` back
     /// into it, and the app reads that to tell him which build carries the fix.
     #[test]

@@ -212,6 +212,30 @@ impl FeedbackSheet {
     pub fn parts(&self) -> Parts {
         self.draft.parts
     }
+
+    /// The words under the buttons — what he actually reads after pressing
+    /// Send — and whether they are good news.
+    ///
+    /// On the driver's surface because these are the sentences that make or
+    /// break the feature's honesty, and QA had to photograph the window to
+    /// check them. A promise should be assertable.
+    pub fn message(&self) -> Option<(bool, String)> {
+        match &self.outcome {
+            Some(Ok(text)) => Some((true, text.clone())),
+            Some(Err(text)) => Some((false, text.clone())),
+            None => None,
+        }
+    }
+
+    /// Whether a picture came, and whether it is of the window alone. The
+    /// rig cannot tell a scaled window capture from a screen grab by looking.
+    pub fn shot_state(&self) -> (bool, bool, Option<String>) {
+        (
+            self.draft.shot.is_some(),
+            self.draft.shot.as_ref().is_some_and(|s| s.whole_screen),
+            self.draft.shot_error.clone(),
+        )
+    }
 }
 
 impl Focusable for FeedbackSheet {
