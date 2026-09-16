@@ -41,7 +41,7 @@ pub mod wire;
 pub use agent::validate_id;
 pub use agent::{ALL_TOOLS, Agent, AgentId, Mode};
 pub use agent_def::{AgentDef, find_def, load_defs};
-pub use event::{Event, EventKind, ToolRec, Usage};
+pub use event::{DIGEST_CHARS, Event, EventKind, ToolRec, Usage, tool_digest};
 pub use files::{
     Layout, ROOT_ID, TranscriptTail, agent_exists, append_event, append_events, bootstrap,
     create_chat, lineage, list_agents, load_agent, load_transcript, needs_serve, read_focus,
