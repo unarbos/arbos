@@ -2194,7 +2194,12 @@ impl ChatSession {
             self.notice(true, "rewind needs a live kernel connection");
             return;
         };
-        if self.busy() {
+        // The chat's own turn, not its workers: a spawned worker's tool row
+        // reads as running until the worker reports, and `busy()` counts it
+        // — so an idle chat over a long-running worker refused every rewind
+        // ("stop the turn before rewinding", gate cycle-22b). The kernel
+        // checks the agent itself and refuses if it is running.
+        if self.streaming || self.turn_open {
             self.notice(true, "stop the turn before rewinding");
             return;
         }
