@@ -167,7 +167,7 @@ final class LiveKernelChat: ChatSource {
                     stream?.yield(.step(""))
                 }
                 stream?.yield(.turn(running: running))
-            } else if children.contains(agent) {
+            } else if { adopt(agent); return children.contains(agent) }() {
                 setWorker(agent, running: running, step: running ? nil : "")
                 if !running {
                     stream?.yield(.item(ChatItem(.subagent(name: childNames[agent] ?? agent, status: "done"))))
@@ -176,7 +176,7 @@ final class LiveKernelChat: ChatSource {
         case .status(let agent, let step, _):
             if agent == focus {
                 stream?.yield(.step(step))
-            } else if children.contains(agent) {
+            } else if { adopt(agent); return children.contains(agent) }() {
                 setWorker(agent, running: !step.isEmpty ? true : nil, step: step)
             }
         case .working(let agent, let secs):
@@ -320,6 +320,7 @@ final class LiveKernelChat: ChatSource {
         case .say(let from, let text):
             // A worker's report is its turn's end; a remote child is not in
             // the tree, so this is the only word of its finish.
+            adopt(from)
             if !replaying, children.contains(from) { setWorker(from, running: false, step: "") }
             return ChatItem(.subagent(name: childNames[from] ?? from, status: text))
         case .ask(let question):
@@ -343,6 +344,7 @@ final class LiveKernelChat: ChatSource {
     /// spawn record's brief only stands in until the tree arrives.
     private func remember(_ agents: [KernelAgent]) {
         for agent in agents where agent.parent == focus {
+            adopt(agent.id)
             children.insert(agent.id)
             childNames[agent.id] = agent.name
             inTree.insert(agent.id)
@@ -367,7 +369,36 @@ final class LiveKernelChat: ChatSource {
         publishWorkers()
     }
 
+    /// An older kernel's spawn record names the child by its brief ("Write
+    /// hello file") while every later frame carries the id the kernel made
+    /// from it ("write-hello-file"). Until the two are one entry, the brief's
+    /// line stays "Starting" for ever and the id's line says Done (M-100).
+    private func adopt(_ id: String) {
+        guard workers[id] == nil else { return }
+        let want = Self.slug(id)
+        guard let old = workerOrder.first(where: { $0 != id && (Self.slug(childNames[$0] ?? $0) == want || Self.slug($0) == want) }) else { return }
+        let old_ = workers.removeValue(forKey: old)
+        workers[id] = WorkerStatus(id: id, name: old_?.name ?? childNames[old] ?? old, step: old_?.step ?? "", running: old_?.running ?? false)
+        if let at = workerOrder.firstIndex(of: old) { workerOrder[at] = id } else { workerOrder.append(id) }
+        if touched.remove(old) != nil { touched.insert(id) }
+        children.remove(old); children.insert(id)
+        if childNames[id] == nil { childNames[id] = childNames[old] ?? old }
+        childNames[old] = nil
+    }
+
+    private static func slug(_ text: String) -> String {
+        let lowered = text.lowercased()
+        var out = ""; var dash = false
+        for ch in lowered {
+            if ch.isLetter || ch.isNumber { out.append(ch); dash = false }
+            else if !dash, !out.isEmpty { out.append("-"); dash = true }
+        }
+        while out.hasSuffix("-") { out.removeLast() }
+        return out
+    }
+
     private func setWorker(_ id: String, running: Bool?, step: String?) {
+        adopt(id)
         var worker = workers[id] ?? WorkerStatus(id: id, name: childNames[id] ?? id, step: "", running: false)
         if workers[id] == nil { workerOrder.append(id) }
         touched.insert(id)
