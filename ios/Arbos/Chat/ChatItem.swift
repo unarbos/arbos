@@ -43,6 +43,13 @@ struct ChatItem: Identifiable, Equatable {
         lhs.id == rhs.id && lhs.kind == rhs.kind && lhs.step == rhs.step && lhs.spoken == rhs.spoken && lhs.images == rhs.images
     }
 
+    /// Typed here, not yet echoed: a steer that rides at the tail while
+    /// the reply it interrupts keeps streaming above it.
+    var isPendingUser: Bool {
+        if case .user(_, pending: true) = kind { return true }
+        return false
+    }
+
     var isStreamingAgent: Bool {
         if case .agent(_, streaming: true) = kind { return true }
         return false
