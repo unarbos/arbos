@@ -28,7 +28,7 @@ final class VoiceServerChat: ChatSource {
         try await link.connect()
     }
 
-    func send(text: String, steer: Bool) async throws {
+    func send(text: String, steer: Bool, attachments: [PendingAttachment]) async throws {
         try await link.connect()
         stream?.yield(.item(ChatItem(.user(text))))
         textBusy = true

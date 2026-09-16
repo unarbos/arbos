@@ -37,7 +37,7 @@ final class LiveKernelChat: ChatSource {
     private var turnStarted: Date?
     /// A `history <agent>` request in flight: its replayed lines and the
     /// continuation waiting for `history_end`.
-    private var pendingHistory: (agent: String, items: [ChatItem], done: CheckedContinuation<[ChatItem], Never>)?
+    private var pendingHistory: (agent: String, items: [ChatItem], done: CheckedContinuation<HistoryPage, Never>)?
 
     let updates: AsyncStream<ChatUpdate>
 
@@ -60,8 +60,14 @@ final class LiveKernelChat: ChatSource {
         try? client.read(path: "project.toml")
     }
 
-    func send(text: String, steer: Bool) async throws {
-        try client.send(text: text, steer: steer)
+    func send(text: String, steer: Bool, attachments: [PendingAttachment]) async throws {
+        var paths: [String] = []
+        for file in attachments {
+            let path = "attachments/\(file.storedName)"
+            try client.put(path: path, data: file.data)
+            paths.append(path)
+        }
+        try client.send(text: text, steer: steer, attachments: paths)
     }
 
     func stop() {
@@ -70,19 +76,29 @@ final class LiveKernelChat: ChatSource {
         stream?.finish()
         if let pending = pendingHistory {
             pendingHistory = nil
-            pending.done.resume(returning: pending.items)
+            pending.done.resume(returning: HistoryPage(items: pending.items, from: 0, to: 0, total: 0))
         }
     }
 
     func history(agent: String) async -> [ChatItem] {
-        guard pendingHistory == nil else { return [] }
+        await page(agent: agent) { try client.history(agent: agent) }?.items ?? []
+    }
+
+    func earlier(before seq: Int, limit: Int) async -> HistoryPage? {
+        guard seq > 1 else { return nil }
+        return await page(agent: focus) { try client.history(agent: focus, before: seq, limit: limit) }
+    }
+
+    /// One `history` request: its replayed lines gathered until `history_end`.
+    private func page(agent: String, request: () throws -> Void) async -> HistoryPage? {
+        guard pendingHistory == nil else { return nil }
         return await withCheckedContinuation { continuation in
             pendingHistory = (agent, [], continuation)
             do {
-                try client.history(agent: agent)
+                try request()
             } catch {
                 pendingHistory = nil
-                continuation.resume(returning: [])
+                continuation.resume(returning: HistoryPage(items: [], from: 0, to: 0, total: 0))
             }
         }
     }
@@ -103,22 +119,23 @@ final class LiveKernelChat: ChatSource {
             stream?.yield(.agents(agents))
         case .replayed(let agent, let event):
             if let pending = pendingHistory, pending.agent == agent {
-                if let item = item(for: event, worker: true) { pendingHistory?.items.append(item) }
+                if let item = item(for: event, worker: agent != focus) { pendingHistory?.items.append(item) }
                 return
             }
             guard agent == focus else { return }
             if let item = item(for: event, worker: false) { history.append(item) }
-        case .historyEnd(let agent, let total, let shown):
+        case .historyEnd(let agent, let total, let from, let to):
             if let pending = pendingHistory, pending.agent == agent {
                 pendingHistory = nil
-                pending.done.resume(returning: pending.items)
+                pending.done.resume(returning: HistoryPage(items: pending.items, from: from, to: to, total: total))
                 return
             }
             guard agent == focus else { return }
             replaying = false
             // The kernel replays its last 200 lines; the rest of a long
-            // project's history is before them.
-            stream?.yield(.history(history, earlier: max(0, total - max(shown, history.count))))
+            // project's history is before them (seqs start at 1).
+            let earlier = from > 0 ? from - 1 : max(0, total - history.count)
+            stream?.yield(.history(history, earlier: earlier, firstSeq: from))
             history.removeAll()
         case .assistantDelta(let agent, let text, let step):
             guard agent == focus, !text.isEmpty else { return }
@@ -166,6 +183,14 @@ final class LiveKernelChat: ChatSource {
             }
         case .thinkingDelta:
             break
+        case .error(let detail):
+            stream?.yield(.item(ChatItem(.notice(detail, failed: true))))
+        case .written(let path, let error):
+            // A file that landed says nothing; one that did not says why.
+            if let error {
+                let name = path.split(separator: "/").last.map(String.init) ?? path
+                stream?.yield(.item(ChatItem(.notice("\(name) did not send: \(error)", failed: true))))
+            }
         case .other(let type):
             if type == "closed" { stream?.yield(.dropped("kernel closed")) }
         }

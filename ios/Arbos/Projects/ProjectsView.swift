@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 
 /// The first screen, in the shape of Cursor's agents list on the phone
@@ -299,9 +300,11 @@ struct RoundButton: View {
     }
 }
 
-/// The reference's composer: a floating pill with a `+` disc at the left,
-/// the field, and the mic at the right. `+` is for attachments (a later
-/// cycle) and sits dim until then; the mic opens the call.
+/// The reference's composer: a floating pill with a `+` at the left (a
+/// menu: photo library, files), the field, and the mic at the right — the
+/// mic dictates into the field through the speech server; `onMic` is the
+/// call, used where the bar has no dictation (the list). Picked files sit
+/// above the field as chips until the send.
 struct ComposerBar: View {
     @Binding var text: String
     let placeholder: String
@@ -310,63 +313,136 @@ struct ComposerBar: View {
     let onMic: () -> Void
     var micEnabled = true
     var focus: FocusState<Bool>.Binding?
+    var attachments: Binding<[PendingAttachment]>?
+    var dictation: Dictation?
+    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var showFiles = false
+    @State private var showPhotos = false
+    @EnvironmentObject private var settings: AppSettings
+
+    private var dictating: Bool { dictation?.active ?? false }
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            Image(systemName: "plus")
-                .font(.system(size: 17, weight: .regular))
-                .foregroundStyle(ArbosTheme.textMuted)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(ArbosTheme.raisedHover))
-                .padding(.bottom, 1)
-            Group {
-                if let focus {
-                    TextField(placeholder, text: $text, axis: .vertical).focused(focus)
+        VStack(spacing: 0) {
+            if let attachments, !attachments.wrappedValue.isEmpty {
+                AttachmentChips(attachments: attachments)
+            }
+            HStack(alignment: .bottom, spacing: 10) {
+                plusButton
+                Group {
+                    if let focus {
+                        TextField(placeholder, text: $text, axis: .vertical).focused(focus)
+                    } else {
+                        TextField(placeholder, text: $text, axis: .vertical)
+                    }
+                }
+                .font(ArbosTheme.body)
+                .lineLimit(1...6)
+                .foregroundStyle(ArbosTheme.text)
+                .tint(ArbosTheme.accent)
+                .padding(.vertical, 4)
+                .submitLabel(.send)
+                .onSubmit { if canSend { onSend() } }
+                if dictating {
+                    Button {
+                        dictation?.stop()
+                    } label: {
+                        ZStack {
+                            Circle().fill(ArbosTheme.accent.opacity(0.25 + 0.6 * Double(dictation?.level ?? 0)))
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(ArbosTheme.text)
+                        }
+                        .frame(width: 28, height: 28)
+                        .padding(.bottom, 1)
+                    }
+                    .buttonStyle(.plain)
+                } else if canSend {
+                    Button(action: onSend) {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(Color.black)
+                            .frame(width: 28, height: 28)
+                            .background(Circle().fill(ArbosTheme.text))
+                            .padding(.bottom, 1)
+                    }
+                    .buttonStyle(.plain)
                 } else {
-                    TextField(placeholder, text: $text, axis: .vertical)
+                    Button {
+                        if let dictation { dictation.start(settings: settings) } else { onMic() }
+                    } label: {
+                        Image(systemName: "mic.fill")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(micEnabled ? ArbosTheme.text : ArbosTheme.textDim)
+                            .frame(width: 28, height: 28)
+                            .padding(.bottom, 1)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!micEnabled)
                 }
             }
-            .font(ArbosTheme.body)
-            .lineLimit(1...6)
-            .foregroundStyle(ArbosTheme.text)
-            .tint(ArbosTheme.accent)
-            .padding(.vertical, 4)
-            .submitLabel(.send)
-            .onSubmit { if canSend { onSend() } }
-            if canSend {
-                Button(action: onSend) {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(Color.black)
-                        .frame(width: 28, height: 28)
-                        .background(Circle().fill(ArbosTheme.text))
-                        .padding(.bottom, 1)
-                }
-                .buttonStyle(.plain)
-            } else {
-                Button(action: onMic) {
-                    Image(systemName: "mic.fill")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(micEnabled ? ArbosTheme.text : ArbosTheme.textDim)
-                        .frame(width: 28, height: 28)
-                        .padding(.bottom, 1)
-                }
-                .buttonStyle(.plain)
-                .disabled(!micEnabled)
-            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 9)
         .background(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .fill(ArbosTheme.inputBg)
                 .overlay(
                     RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .strokeBorder(ArbosTheme.border, lineWidth: 1)
+                        .strokeBorder(dictating ? ArbosTheme.accent.opacity(0.6) : ArbosTheme.border, lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
         )
         .padding(.horizontal, ArbosTheme.barMargin)
         .padding(.bottom, 10)
+        .photosPicker(isPresented: $showPhotos, selection: $photoItems, maxSelectionCount: 4, matching: .images)
+        .onChange(of: photoItems) { _, items in
+            guard !items.isEmpty, let attachments else { return }
+            Task {
+                for item in items {
+                    if let file = await PendingAttachment.photo(item) { attachments.wrappedValue.append(file) }
+                }
+                photoItems = []
+            }
+        }
+        .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            guard let attachments, case .success(let urls) = result else { return }
+            for url in urls {
+                if let file = PendingAttachment.file(url) { attachments.wrappedValue.append(file) }
+            }
+        }
+    }
+
+    /// `+`: the picker menu where the bar takes attachments; dim where not.
+    @ViewBuilder
+    private var plusButton: some View {
+        if attachments != nil {
+            Menu {
+                Button {
+                    showPhotos = true
+                } label: {
+                    Label("Photo Library", systemImage: "photo.on.rectangle")
+                }
+                Button {
+                    showFiles = true
+                } label: {
+                    Label("Files", systemImage: "folder")
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 17, weight: .regular))
+                    .foregroundStyle(ArbosTheme.textMuted)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(ArbosTheme.raisedHover))
+                    .padding(.bottom, 1)
+            }
+        } else {
+            Image(systemName: "plus")
+                .font(.system(size: 17, weight: .regular))
+                .foregroundStyle(ArbosTheme.textDim)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(ArbosTheme.raisedHover))
+                .padding(.bottom, 1)
+        }
     }
 }

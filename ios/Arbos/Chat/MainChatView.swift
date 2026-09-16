@@ -18,6 +18,11 @@ struct ProjectChatView: View {
     @State private var showSettings = false
     @State private var showWorkers = false
     @State private var worker: WorkerStatus?
+    @State private var attachments: [PendingAttachment] = []
+    @StateObject private var dictation = Dictation()
+    /// The composer stack's height, so the transcript's tail clears it
+    /// however many lines and chips it holds.
+    @State private var composerHeight: CGFloat = 80
     @FocusState private var composing: Bool
 
     private var identity: ProjectIdentity {
@@ -43,14 +48,21 @@ struct ProjectChatView: View {
                 pills
                 ComposerBar(
                     text: $draft,
-                    placeholder: chat.items.isEmpty ? "Plan, ask, build…" : "Follow up…",
+                    placeholder: dictation.active ? "Listening…" : (chat.items.isEmpty ? "Plan, ask, build…" : "Follow up…"),
                     canSend: canSend,
                     onSend: send,
                     onMic: { showCall = true },
                     micEnabled: settings.isConfigured,
-                    focus: $composing
+                    focus: $composing,
+                    attachments: $attachments,
+                    dictation: dictation
                 )
             }
+            .background(
+                GeometryReader { geo in
+                    Color.clear.onChange(of: geo.size.height, initial: true) { _, height in composerHeight = height }
+                }
+            )
         }
         .toolbar(.hidden, for: .navigationBar)
         .fullScreenCover(isPresented: $showCall) { CallScreen() }
@@ -67,6 +79,15 @@ struct ProjectChatView: View {
             WorkerChatView(worker: worker, project: identity)
         }
         .task(id: target) { await chat.switchTarget(target) }
+        .onChange(of: dictation.text) { _, words in
+            if dictation.active || !words.isEmpty { draft = words }
+        }
+        .onChange(of: dictation.active) { _, active in
+            if !active, !dictation.text.isEmpty { draft = dictation.consume() }
+        }
+        .onChange(of: dictation.problem) { _, problem in
+            if let problem { chat.notice(problem) }
+        }
         .onChange(of: chat.identity) { _, face in
             if let face { projects.remember(face, for: target) }
         }
@@ -155,11 +176,22 @@ struct ProjectChatView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: ArbosTheme.itemGap) {
                     if chat.earlierLines > 0 {
-                        Text("\(chat.earlierLines) earlier lines not shown")
+                        Button {
+                            Task { await chat.loadEarlier() }
+                        } label: {
+                            HStack(spacing: 6) {
+                                if chat.loadingEarlier {
+                                    ProgressView().controlSize(.mini).tint(ArbosTheme.textDim)
+                                }
+                                Text(chat.loadingEarlier ? "Loading earlier lines…" : "Show \(min(chat.earlierLines, 200)) earlier lines")
+                            }
                             .font(ArbosTheme.caption)
-                            .foregroundStyle(ArbosTheme.textDim)
+                            .foregroundStyle(ArbosTheme.textMuted)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(chat.loadingEarlier)
                     }
                     if chat.items.isEmpty, chat.mode != .connecting {
                         Text(emptyLine)
@@ -180,7 +212,7 @@ struct ProjectChatView: View {
                             .foregroundStyle(ArbosTheme.textDim)
                             .padding(.top, 4)
                     }
-                    Color.clear.frame(height: chat.workers.isEmpty ? 80 : 132).id("tail")
+                    Color.clear.frame(height: composerHeight + 8).id("tail")
                 }
                 .padding(.horizontal, ArbosTheme.gutter)
                 .padding(.top, 4)
@@ -188,7 +220,16 @@ struct ProjectChatView: View {
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: chat.items) { _, _ in
-                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
+                if let anchor = chat.anchorAfterPrepend {
+                    // Older lines came in above: hold the row that was at the top.
+                    chat.anchorAfterPrepend = nil
+                    proxy.scrollTo(anchor, anchor: .top)
+                } else {
+                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
+                }
+            }
+            .onChange(of: composerHeight) { _, _ in
+                proxy.scrollTo("tail", anchor: .bottom)
             }
             .onChange(of: chat.earlierLines) { _, _ in
                 // A long replay lands in one go; the layout settles a beat later.
@@ -245,13 +286,14 @@ struct ProjectChatView: View {
     // MARK: - Composer
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && chat.mode != .offline && chat.mode != .connecting
+        (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) && !dictation.active
     }
 
     private func send() {
         guard canSend else { return }
-        chat.send(draft)
+        chat.send(draft, attachments: attachments)
         draft = ""
+        attachments = []
     }
 }
 

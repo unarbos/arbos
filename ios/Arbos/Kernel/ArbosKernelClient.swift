@@ -77,11 +77,20 @@ final class ArbosKernelClient {
 
     /// Send one text turn. `steer: true` slips it into a running turn at
     /// its next tool boundary instead of queueing a new one.
-    func send(text: String, agent: String? = nil, steer: Bool = false) throws {
-        try write([
+    func send(text: String, agent: String? = nil, steer: Bool = false, attachments: [String] = []) throws {
+        var frame: [String: Any] = [
             "type": "user", "agent": agent ?? focus, "text": text, "steer": steer,
             "channel": "text", "device": "phone",
-        ])
+        ]
+        if !attachments.isEmpty { frame["attachments"] = attachments }
+        try write(frame)
+    }
+
+    /// A file from the phone into the kernel's store (`.arbos/<path>`), so a
+    /// `user` frame can name it in `attachments`. A kernel without this frame
+    /// answers with an error the chat shows.
+    func put(path: String, data: Data) throws {
+        try write(["type": "put", "path": path, "data": data.base64EncodedString()])
     }
 
     func stop(agent: String? = nil) throws {
@@ -105,6 +114,11 @@ final class ArbosKernelClient {
     /// How a worker's chat is opened without refocusing the kernel.
     func history(agent: String, limit: Int = 200) throws {
         try write(["type": "history", "agent": agent, "since": 0, "limit": limit])
+    }
+
+    /// The `limit` lines before `seq`, oldest first (kernel #272).
+    func history(agent: String, before seq: Int, limit: Int = 200) throws {
+        try write(["type": "history", "agent": agent, "before": seq, "limit": limit])
     }
 
     // MARK: - Private
