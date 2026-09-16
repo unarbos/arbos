@@ -3847,7 +3847,9 @@ fn zone(
         .flex_col()
         .gap(px(ITEM_GAP));
     let mut has_tail = false;
-    for ix in turn.answer_from..turn.range.end {
+    // The tail starts where the body ended: the report line under a wake
+    // segment's header is drawn above, not again here.
+    for ix in turn.answer_from.max(body_start)..turn.range.end {
         // The interruption is on the fold line already; once is enough.
         if header_drawn
             && let ChatItem::Notice { text, .. } = &chat.items[ix]
