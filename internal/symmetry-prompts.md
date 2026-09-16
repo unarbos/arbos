@@ -53,7 +53,7 @@ One row per app area. "Last" is the last cycle that looked at it side by side (o
 
 | area | last | how | due? |
 | --- | --- | --- | --- |
-| chat: Project style (root) | 13 | p24, p13 steer; every gate | — |
+| chat: Project style (root) | 23 (F-115 … F-117 fixed; F-113 kept, F-114 open) | journey stages side by side with Cursor's Journey project, `cycle-23/` | — |
 | chat: classic style (worker) | 22 (F-110 fixed; F-111 open: Files Changed card, "Worked for") | pp2/pp4 worker reopen, `cycle-22/` | — |
 | long-form project (many turns, notes restructure, workers come and go, archived, context re-found, scroll) | 14 (l1–l13), **16 running** (d1–d10, research/docs) | l1–l13, d1–d10 | — |
 | kickoff / new-project landing — the first thirty seconds, refused and silent providers | **16** (f1, f2) | f1/f2 cold, `new-project-kickoff` gate row | every cycle from now |
@@ -127,6 +127,8 @@ Cursor has two chat styles — the Project chat (root) and the agent chat (a del
 | p4 | fan-out with edits | 3 (classic) | — | |
 
 ## Cycle log
+
+- **Cycle 23** (branch `cursor/cycle-23-aa39`, [#359](https://github.com/unarbos/arbos/pull/359)): the Cursor leg of the journey, stage by stage, at last — Cursor's *Journey* project given a worker-sized challenge, watched live (its provider was down that hour: `cursor-04` retry line, `cursor-06` "Taking longer than expected…"), Stop mid-flight (`cursor-08`: nothing drawn), a follow-up after the stop, Quit and relaunch (`cursor-12/13`: the project tab back, the worker's tab gone, the prompt oddly back in an edit card — Cursor's own reopen is not clean either). Arbos ran `journey.py` on the same build: 14/14, then 13/14 (J09 `NO TESTS RAN`, the model's file). Findings F-113 … F-117; F-115/F-116/F-117 fixed. Pairs in `media/cursor-reference/cycle-23/`. Rig: display `:1` hung ten minutes mid-run and freed when Arbos and Cursor were killed; `cursor-launch.sh` now returns to its folder before AppRun; `journey.py` stamps its stills folder so a rerun keeps the last set. The composer-with-attachment set the phone loop asked for is in `media/cursor-reference/composer-attachments/` (cycle 22).
 
 - **Cycle 12** (branch `cursor/symmetry-cycle-12-aa39`, on `main` `848e003`): live Cursor (Project *Kickoff*, sidebar open) vs Arbos root on p22a, p23, p13, p21, p10 — the read-only / wrong-shape / steer class. Findings F-40 … F-44: a steer stays inside its turn, a typed option name is the pick once, the `ask` row hidden; F-37 seen again (bash returns after the first line); the Cursor side of the harness now wheels to the bottom before each shot. Mac leg: `qa-results` `inbox/cycle-12/capture-script.md` (ten captures incl. the cycle-11 fixes live). Pairs: `media/cursor-reference/cycle-12/c12b-*-end-pair.png`, before/after `c12-p13-before-cols.png` → `c12after-arbos-p13-end.png`.
 

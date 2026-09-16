@@ -7,6 +7,13 @@
   re-01  a parked question is offered again to a client that attaches later (#342): the `ask` frame, with its id.
   re-02  an approval-blocked call is written up as never run after a kernel death (#342), not as one that may have run.
   sv-01  a place declaring `kind = "service"` is carried in the hub roster as such so clients can hide it (#346).
+  wt-01  a worktree base holding almost none of the checkout's tree is refused and the branch is cut from HEAD, and the
+         spawn result says so (#357, the empty-project shape behind four identical journey failures elsewhere); a base
+         that merely lags is used as asked.
+  sq-01  Stop holds the user's queued follow-up instead of deleting it: held rows, files kept with wake = false,
+         nothing runs on its own, `plan_op run` sends it as its own turn (#358, kernel half).
+  sq-02  the same in the desktop, where the two halves can disagree: what the window shows as held must exist in
+         the kernel's inbox, or Send now sends nothing (#354 in, #358 in flight).
   fb-01  the desktop feedback chain (#336, #345, #331): the sheet opens from a thumbs-down and the window keeps
          answering; the report is on disk before anything is sent; with no credentials it waits ("saved, and
          waiting"); with credentials it is delivered through `store put` into a store a kernel serves; the poller
@@ -22,6 +29,7 @@ import urllib.request
 from pathlib import Path
 
 from desktop_scenarios import available as desktop_available
+from journey_scenarios import read_transcript
 
 
 def free_port():
@@ -208,6 +216,177 @@ def register(scenario, registry, transcript, now_ms, branch):
         cx.rec.expect(any("never ran" in t or "waiting for the user" in t for t in texts), "re-02-not-written-as-never-run", f"the blocked call is not written up as waiting/never run: {texts[:1]}", "arbos-engine inflight.rs (#342)")
         cx.rec.expect(not (cx.place / "approved.txt").exists(), "re-02-file-written-anyway", "approved.txt exists although the write was never allowed")
 
+
+
+    # ── #357: a worktree base missing most of the tree ────────────────────
+    def seed_repo(folder, files, branch):
+        folder.mkdir(parents=True, exist_ok=True)
+        for name, text in files.items():
+            (folder / name).parent.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_text(text)
+        for args in (["init", "-q", "-b", branch], ["config", "user.name", "qa"], ["config", "user.email", "qa@qa"], ["add", "-A"], ["commit", "-q", "-m", "seed"]):
+            subprocess.run(["git", *args], cwd=folder, capture_output=True)
+
+    def run_git(folder, *args):
+        return subprocess.run(["git", *args], cwd=folder, capture_output=True, text=True).stdout.strip()
+
+    @reg("wt-01-worktree-base-missing-tree-cut-from-head", tags=("worktree",))
+    def wt01(cx):
+        """`spawn isolate=worktree base=main` where `main` holds almost none of the checkout: the worker's branch is cut from HEAD, its folder has the project, and the spawn result says why; a `base` that merely lags HEAD is honoured as asked."""
+        # HEAD (`work`) has the project; `main` is a near-empty branch (a README alone) — the JB-5 / M-111 shape.
+        place = cx.place
+        seed_repo(place, {"README.md": "# shapes\n"}, "main")
+        subprocess.run(["git", "checkout", "-q", "-b", "work"], cwd=place, capture_output=True)
+        for i in range(8):
+            (place / "src").mkdir(exist_ok=True)
+            (place / "src" / f"mod{i}.py").write_text(f"def f{i}():\n    return {i}\n")
+        (place / "tests").mkdir(exist_ok=True)
+        (place / "tests" / "test_all.py").write_text("import unittest\n")
+        subprocess.run(["git", "add", "-A"], cwd=place, capture_output=True)
+        subprocess.run(["git", "-c", "user.name=qa", "-c", "user.email=qa@qa", "commit", "-q", "-m", "the project"], cwd=place, capture_output=True)
+        # A branch that merely lags: `lagging` = work minus the last commit's one extra file.
+        subprocess.run(["git", "branch", "lagging", "work"], cwd=place, capture_output=True)
+        (place / "src" / "extra.py").write_text("x = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=place, capture_output=True)
+        subprocess.run(["git", "-c", "user.name=qa", "-c", "user.email=qa@qa", "commit", "-q", "-m", "one more"], cwd=place, capture_output=True)
+        (place / ".arbos").mkdir(exist_ok=True)
+        (place / ".arbos" / "project.toml").write_text('schema = 2\n\n[git]\nprotected = []\n')
+        lines = [
+            {"agent": "root", "content": "", "calls": [
+                {"name": "spawn", "arguments": {"name": "from-main", "task": "List the files you can see and report their count.", "isolate": "worktree", "base": "main"}},
+                {"name": "spawn", "arguments": {"name": "from-lagging", "task": "List the files you can see and report their count.", "isolate": "worktree", "base": "lagging"}},
+            ]},
+            {"agent": "root", "content": "Two workers started."},
+            # The workers linger on a slow step so their worktrees can be inspected before a clean one is removed.
+            {"agent": "from-main", "content": "", "calls": [{"name": "bash", "arguments": {"command": "sleep 25; ls", "description": "look"}}]},
+            {"agent": "from-main", "content": "I see the project."},
+            {"agent": "from-lagging", "content": "", "calls": [{"name": "bash", "arguments": {"command": "sleep 25; ls", "description": "look"}}]},
+            {"agent": "from-lagging", "content": "I see the project."},
+        ]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        c.user("root", "Start two workers in worktrees, one from main and one from lagging.")
+        cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "wt-01-turn-never-ended", "root's turn never ended")
+        wt_root = place / ".arbos" / "worktrees"
+        end = time.time() + 15
+        while time.time() < end and len([p for p in wt_root.iterdir()] if wt_root.exists() else []) < 2:
+            time.sleep(0.5)
+        evs, _ = transcript(place, "root")
+        spawns = [e for e in evs if e.get("kind") == "tool" and e.get("name") == "spawn"]
+        results = [str(e.get("body") or e.get("result") or json.dumps(e)) for e in spawns]
+        cx.rec.notes["spawn_results"] = [r[:500] for r in results]
+        trees = {p.name: p for p in wt_root.iterdir()} if wt_root.exists() else {}
+        cx.rec.notes["worktrees"] = sorted(trees)
+        def files_in(d):
+            return sorted(str(p.relative_to(d)) for p in d.rglob("*") if p.is_file() and ".git" not in p.relative_to(d).parts and ".arbos" not in p.relative_to(d).parts)
+        main_tree = next((d for n, d in trees.items() if "from-main" in n), None)
+        lag_tree = next((d for n, d in trees.items() if "from-lagging" in n), None)
+        cx.rec.expect(len(spawns) == 2 and not any(e.get("error") for e in spawns), "wt-01-spawn-refused", f"a spawn did not succeed: {[e.get('error') for e in spawns]}", "arbos-kernel worktree.rs create_from (#357)")
+        if main_tree:
+            fm = files_in(main_tree)
+            cx.rec.notes["from_main_files"] = fm
+            cx.rec.expect(len(fm) >= 9, "wt-01-empty-project", f"the worker cut from a near-empty base sees {len(fm)} file(s): {fm[:5]} — the empty-project shape (#357)", "arbos-kernel worktree.rs create_from")
+            said = next((r for r in results if "from-main" in r), "")
+            cx.rec.expect("cut from HEAD" in said or ("empty project" in said and "HEAD" in said), "wt-01-result-silent", f"the spawn result does not say the base was replaced by HEAD: {said[:200]!r}", "arbos-kernel worktree.rs note")
+        else:
+            cx.rec.broke("wt-01-no-worktree", f"no worktree folder for from-main under {wt_root}: {sorted(trees)}")
+        if lag_tree:
+            fl = files_in(lag_tree)
+            cx.rec.notes["from_lagging_files"] = fl
+            branch_base = run_git(lag_tree, "merge-base", "HEAD", "lagging")
+            lag_sha = run_git(place, "rev-parse", "lagging")
+            cx.rec.expect("extra.py" not in " ".join(fl) and branch_base == lag_sha, "wt-01-lagging-base-overridden", f"a base that merely lags HEAD was not used as asked (extra.py present: {'src/extra.py' in fl}, merge-base {branch_base[:8]} vs lagging {lag_sha[:8]})")
+
+    # ── #358 / #354: Stop holds the queued follow-up ──────────────────────
+    @reg("sq-01-stop-holds-the-queued-follow-up", tags=("stop", "queue"))
+    def sq01(cx):
+        """A user line sent while a turn runs is queued (an inbox row, ready). Stop ends the turn and HOLDS the row: `when = waits`, its file kept with `wake = false`, nothing runs on its own; `plan_op run` sends it as its own turn with the words as the prompt (#358). On a kernel without #358 the row is deleted — the user's words accepted and lost."""
+        lines = [
+            {"agent": "root", "content": "working", "calls": [{"name": "bash", "arguments": {"command": "sleep 30; echo slow", "description": "slow step"}}]},
+            {"agent": "root", "content": "Here is the follow-up, answered."},
+        ]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        c.user("root", "do the slow thing")
+        cx.rec.expect(c.wait_turn("root", "running", 10) is not None, "sq-01-turn-never-started", "no running turn")
+        time.sleep(1)
+        c.user("root", "then do this next")
+        plan = c.wait(lambda f: f.get("type") == "plan" and any(n.get("inbox") for n in f.get("nodes", [])), 10, "the queued row")
+        rows = [n for n in (plan or {}).get("nodes", []) if n.get("inbox")]
+        cx.rec.notes["queued_rows"] = [{k_: r.get(k_) for k_ in ("id", "goal", "when")} for r in rows]
+        cx.rec.expect(bool(rows), "sq-01-not-queued", "a user line during a running turn was not queued as an inbox row")
+        inbox = cx.place / ".arbos" / "agents" / "root" / "inbox"
+        before = sorted(p.name for p in inbox.iterdir()) if inbox.exists() else []
+        c.send({"type": "stop", "agent": "root"})
+        cx.rec.expect(c.wait_turn("root", "idle", 15) is not None, "sq-01-stop-did-not-end", "Stop did not end the turn")
+        time.sleep(1.5)
+        after = sorted(p.name for p in inbox.iterdir()) if inbox.exists() else []
+        texts = {n: (inbox / n).read_text(errors="replace") for n in after}
+        c2 = k.attach()
+        held_plan = c2.wait(lambda f: f.get("type") == "plan" and f.get("agent") == "root", 10, "the plan after Stop")
+        held = [n for n in (held_plan or {}).get("nodes", []) if n.get("inbox")]
+        cx.rec.notes.update({"inbox_before_stop": before, "inbox_after_stop": after, "held_rows": [{k_: r.get(k_) for k_ in ("id", "goal", "when")} for r in held]})
+        evs, _ = transcript(cx.place, "root")
+        cx.rec.expect(bool(after), "sq-01-follow-up-deleted", "Stop deleted the queued follow-up: the inbox is empty and the user's words are gone (no file, no line)", "arbos-kernel hooks.rs stop → inbox rows held (#358)")
+        if after:
+            cx.rec.expect(all("wake = false" in t for t in texts.values()), "sq-01-not-held", f"the kept row is not held (wake = false missing): {list(texts.values())[0][:160]!r}")
+            cx.rec.expect(held and all(r.get("when") == "waits" for r in held), "sq-01-row-not-waits", f"the row after Stop should read `waits`, not run on its own: {cx.rec.notes['held_rows']}")
+            cx.rec.expect(not any(e.get("kind") == "user" and e.get("text") == "then do this next" for e in evs), "sq-01-ran-on-its-own", "the held follow-up ran without Send now")
+            node = (held or rows)[0].get("id")
+            c2.send({"type": "plan_op", "agent": "root", "node": node, "op": "run", "text": ""})
+            got = c2.wait(lambda f: f.get("type") == "event" and f.get("event", {}).get("kind") == "assistant" and "follow-up, answered" in f.get("event", {}).get("text", ""), 30, "Send now runs it")
+            evs, _ = transcript(cx.place, "root")
+            at = next((i for i, e in enumerate(evs) if e.get("kind") == "user" and e.get("text") == "then do this next"), None)
+            cx.rec.expect(got is not None and at is not None and at > 0 and evs[at - 1].get("kind") == "wake", "sq-01-send-now-not-own-turn", f"Send now did not run the follow-up as its own turn with the words as the prompt (answered={got is not None}, user_at={at})")
+
+    @reg("sq-02-desktop-stop-holds-follow-up", needs_model=True, tags=("stop", "queue", "desktop"))
+    def sq02(cx):
+        """In the desktop: a follow-up typed while a turn runs, then Stop. What the window shows as held must exist in the kernel's inbox too; while the desktop half (#354) is in and the kernel half (#358) is not, the row is drawn but its file is gone, and Send now sends nothing."""
+        if not desktop_available():
+            cx.rec.notes["skipped"] = "desktop binary/driver/Xvfb missing"
+            return
+        from journey_scenarios import Rig
+
+        folder = cx.scratch / "stop-project"
+        folder.mkdir(parents=True, exist_ok=True)
+        rig = Rig(cx, [folder], tag="app-stop")
+        try:
+            time.sleep(3)
+            rig.focus(folder)
+            rig.wait_idle(folder, 60)
+            rig.send("Run `sleep 40; echo slow` with bash, then say done.")
+            cx.rec.expect(rig.wait_busy(folder, 20), "sq-02-turn-never-started", "the slow turn never started")
+            time.sleep(3)
+            rig.send("Then reply with the single word FOLLOWUP.")  # a user line while the turn runs: queued
+            time.sleep(3)
+            inbox = folder / ".arbos" / "agents" / "root" / "inbox"
+            queued_files = sorted(p.name for p in inbox.iterdir()) if inbox.exists() else []
+            queued_shown = [i for i in (rig.root_chat(folder) or {}).get("items", []) if i.get("kind") == "user" and "FOLLOWUP" in str(i.get("text", ""))]
+            rig.app.click("composer-stop")
+            rig.pulse("Stop with a follow-up queued")
+            cx.rec.expect(rig.wait_idle(folder, 20), "sq-02-stop-did-not-end", "Stop did not end the turn")
+            time.sleep(2)
+            files_after = sorted(p.name for p in inbox.iterdir()) if inbox.exists() else []
+            chat = rig.root_chat(folder) or {}
+            shown_after = [i for i in chat.get("items", []) if i.get("kind") == "user" and "FOLLOWUP" in str(i.get("text", ""))]
+            leaves = rig.leaves()
+            queue_rows = [l for l in leaves if l.startswith("composer-queue") or l.startswith("queue-")]
+            cx.rec.notes.update({"queued_files_before_stop": queued_files, "files_after_stop": files_after, "shown_before": len(queued_shown), "shown_after": len(shown_after), "queue_rows_after": queue_rows[:5]})
+            window_holds = bool(shown_after or queue_rows)
+            kernel_holds = bool(files_after)
+            cx.rec.expect(kernel_holds, "sq-02-kernel-deleted-follow-up", "the kernel deleted the queued follow-up on Stop (its inbox is empty)", "arbos-kernel hooks.rs (#358)")
+            cx.rec.expect(window_holds == kernel_holds, "sq-02-halves-disagree", f"the window and the kernel disagree after Stop: window shows the follow-up={window_holds}, kernel holds it={kernel_holds} — a Send now would send nothing", "desktop #354 vs kernel #358")
+            # Nothing runs on its own after Stop.
+            time.sleep(5)
+            evs = read_transcript(folder)
+            cx.rec.expect(not any(e.get("kind") == "user" and "FOLLOWUP" in e.get("text", "") for e in evs), "sq-02-ran-on-its-own", "the held follow-up ran by itself after Stop")
+        finally:
+            rig.close(folders=[folder])
+            cx.rec.snapshot(folder, "stop-after")
 
     # ── the feedback chain: sheet → disk → delivery → pickup ────────────────
     @reg("fb-01-feedback-report-written-delivered-picked-up", needs_model=True, tags=("feedback", "desktop"))
