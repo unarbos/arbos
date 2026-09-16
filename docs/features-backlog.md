@@ -267,6 +267,8 @@ What Hermes, Codex, Cursor (editor agent), and Claude Code have that a coordinat
 | 2026-09-16 | F-66 | [#289](https://github.com/unarbos/arbos/pull/289) | `say to=user` refused — the user reads the reply; a worker is pointed at its parent. `say_user_refused_e2e`. |
 | 2026-09-16 | notifications | [#293](https://github.com/unarbos/arbos/pull/293) | `notify` frames (reply / ask / error / notice) recorded in `.arbos/notifications.jsonl`, unseen replayed on attach, `seen` broadcast; client notes in `internal/features-inbox/2026-09-16-notify-frame-for-clients.md`. `notifications_e2e`. |
 | 2026-09-16 | Code2 first turn | [#298](https://github.com/unarbos/arbos/pull/298) | A refused provider family is remembered per host and skipped (`blocked-models.json`); the kickoff probes the key before the first word; fallback and failure notices are one plain sentence, provider words go to the log; `first_byte_ms` (30 s) bounds the wait for a first byte. `fallback_403_e2e` (four cases). |
+| 2026-09-16 | first install / remote | [#300](https://github.com/unarbos/arbos/pull/300) | An attachment path that names no file on the kernel's machine is dropped with an `error` frame and a failed notice naming `put`; `seen` past the newest id clamps. `put_attachment_e2e`. |
+| 2026-09-16 | mobile push | [#301](https://github.com/unarbos/arbos/pull/301) | APNs through the hub: `HubFrame::Notify`/`Seen` from kernels, a `push` registration frame from phones (`hub-push.json`), `[push]` key config, ES256 JWT, alert + badge pushes, 410 drops the token. Client/Jacob notes `internal/features-inbox/2026-09-16-apns-push-kernel-hub-answer.md`. `push::tests`. |
 
 ## Next up (in order)
 

@@ -184,7 +184,12 @@ Every merge to `main` publishes a build signed with Jacob's Developer ID, notari
 
 ### Secrets are never printed (2026-09-16)
 
-After three leaks in one day, all from workers masking their own output: no agent prints an env file, a vault item or a credential-bearing config, masked or not. Key names only; values piped straight into the consuming command; a credential is proved by the result of using it, never by showing it.
+After four leaks in one day, every one from a worker masking output it had already decided to print: masking is banned as a technique, because it fails on the one variable nobody anticipated and on values that sit a line below their label.
+
+- Never fetch a whole vault item (`op item get` in any format). Read the one field by reference — `op read "op://Arbos/<item>/<field>"` piped into the consuming command, or `op document get` to a 0600 temp path that is deleted after use.
+- Never print an env file, a vault field of free text, or a credential-bearing config, masked or not. Learn what exists from field labels and file names.
+- Never display the output of a command that could contain a secret; redirect it to a file and search it for what you expect.
+- A credential is proved by the result of using it, never by showing it.
 
 ### The store is never the only copy (2026-09-16)
 
