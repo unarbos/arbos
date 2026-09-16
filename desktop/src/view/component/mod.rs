@@ -4,6 +4,7 @@
 pub mod attachment;
 pub mod chat_search;
 pub mod composer;
+pub mod feedback_sheet;
 pub mod menu;
 pub mod meter;
 pub mod opener;

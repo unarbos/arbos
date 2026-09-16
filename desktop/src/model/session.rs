@@ -457,6 +457,10 @@ pub struct ChatSession {
     /// The last question answered or skipped from this window, and when:
     /// the transcript tail repeats it, and that repeat is not a new card.
     answered_ask: Option<(String, Instant)>,
+    /// The kernel's answer to a `feedback` ask: the material behind an
+    /// in-app report, waiting for the review sheet to take it. Drained
+    /// rather than kept — it is one sheet's worth, not session state.
+    pub feedback: Option<Box<crate::feedback::Bundle>>,
     /// Try Live (A-02): the latest screen frame from the agent's machine,
     /// and whether the live view is open (the poll runs while it is).
     pub live_screen: Option<LiveScreen>,
@@ -667,6 +671,7 @@ impl ChatSession {
             thought_at: None,
             streaming_agent: None,
             answered_ask: None,
+            feedback: None,
             live_screen: None,
             live_open: false,
             stop_requested: false,
@@ -756,6 +761,7 @@ impl ChatSession {
             thought_at: None,
             streaming_agent: None,
             answered_ask: None,
+            feedback: None,
             live_screen: None,
             live_open: false,
             stop_requested: false,
@@ -845,6 +851,7 @@ impl ChatSession {
             thought_at: None,
             streaming_agent: None,
             answered_ask: None,
+            feedback: None,
             live_screen: None,
             live_open: false,
             stop_requested: false,
@@ -3095,6 +3102,9 @@ impl ChatSession {
                     error,
                 });
             }
+            // Held for the review sheet to collect. Nothing is drawn in the
+            // chat: a report is not part of the conversation.
+            Event::Feedback(bundle) => self.feedback = Some(bundle),
         }
     }
 
@@ -3103,6 +3113,33 @@ impl ChatSession {
         if let Connection::Live(session) = &self.connection {
             session.request_screen();
         }
+    }
+
+    /// Ask the kernel for the material behind a report: the exchange holding
+    /// `seq`, or the last one the user opened. Answered as `Event::Feedback`
+    /// and held in [`Self::feedback`] for the review sheet.
+    pub fn request_feedback(&self, seq: Option<u64>, tail: u32) {
+        if let Connection::Live(session) = &self.connection {
+            session.request_feedback(seq, None, tail, "");
+        }
+    }
+
+    pub fn take_feedback(&mut self) -> Option<Box<crate::feedback::Bundle>> {
+        self.feedback.take()
+    }
+
+    /// What this window believes the chat holds, for a report to carry beside
+    /// the kernel's transcript. When the two disagree the drawing is usually
+    /// the wrong one, and that disagreement is the bug.
+    pub fn drawn_view(&self) -> serde_json::Value {
+        serde_json::json!({
+            "items": serde_json::to_value(&self.items).unwrap_or(serde_json::Value::Null),
+            "agent": self.agent_session,
+            // What the window thinks is running now. A count, not the work
+            // itself: "it says one worker is going and the transcript says
+            // none" is the whole question.
+            "live_work": self.live.len(),
+        })
     }
 
     /// The kernel sent the whole plan. Work the kernel is doing for this
@@ -4138,13 +4175,34 @@ mod status_line_tests {
 
     #[test]
     fn every_form_a_model_writes_is_the_step() {
-        assert_eq!(status_line("status: Reading the file"), Some("Reading the file".into()));
-        assert_eq!(status_line("Status: Setting plan"), Some("Setting plan".into()));
-        assert_eq!(status_line("status \"Looking around the new place\""), Some("Looking around the new place".into()));
-        assert_eq!(status_line("status 'Writing project context'"), Some("Writing project context".into()));
-        assert_eq!(status_line("status(\"Spawning worker\")"), Some("Spawning worker".into()));
-        assert_eq!(status_line("**status:** Running tests"), Some("Running tests".into()));
-        assert_eq!(status_line("`status \"Setting plan\"`"), Some("Setting plan".into()));
+        assert_eq!(
+            status_line("status: Reading the file"),
+            Some("Reading the file".into())
+        );
+        assert_eq!(
+            status_line("Status: Setting plan"),
+            Some("Setting plan".into())
+        );
+        assert_eq!(
+            status_line("status \"Looking around the new place\""),
+            Some("Looking around the new place".into())
+        );
+        assert_eq!(
+            status_line("status 'Writing project context'"),
+            Some("Writing project context".into())
+        );
+        assert_eq!(
+            status_line("status(\"Spawning worker\")"),
+            Some("Spawning worker".into())
+        );
+        assert_eq!(
+            status_line("**status:** Running tests"),
+            Some("Running tests".into())
+        );
+        assert_eq!(
+            status_line("`status \"Setting plan\"`"),
+            Some("Setting plan".into())
+        );
     }
 
     #[test]

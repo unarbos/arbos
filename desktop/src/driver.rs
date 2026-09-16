@@ -341,7 +341,7 @@ fn finish_screenshot(reply: Value, request: &Value) -> Value {
 /// shadow (`-o`) and without the camera sound (`-x`). It needs the Screen
 /// Recording permission; macOS asks once, for whichever app launched us.
 #[cfg(target_os = "macos")]
-fn capture_window(window_id: i64, path: &std::path::Path) -> Result<()> {
+pub(crate) fn capture_window(window_id: i64, path: &std::path::Path) -> Result<()> {
     if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("create screenshot folder {}", dir.display()))?;
@@ -367,7 +367,7 @@ fn capture_window(window_id: i64, path: &std::path::Path) -> Result<()> {
 /// window is the only thing on an Xvfb screen, so the root is the window;
 /// on a real desktop the caller crops if it must. `window_id` is unused.
 #[cfg(not(target_os = "macos"))]
-fn capture_window(_window_id: i64, path: &std::path::Path) -> Result<()> {
+pub(crate) fn capture_window(_window_id: i64, path: &std::path::Path) -> Result<()> {
     if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("create screenshot folder {}", dir.display()))?;
@@ -1348,7 +1348,7 @@ fn surface_json(surface: &Surface) -> Value {
 /// `height` points, for `screencapture -l`. Two windows of one size fall
 /// back to the one titled "Arbos", then to the first visible window.
 #[cfg(target_os = "macos")]
-fn ns_window_number(width: f32, height: f32) -> Option<i64> {
+pub(crate) fn ns_window_number(width: f32, height: f32) -> Option<i64> {
     use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 
     #[repr(C)]
@@ -1420,6 +1420,6 @@ fn order_front_regardless(_window_id: i64) {}
 
 /// No AppKit here: the capture path grabs the X display, so any id will do.
 #[cfg(not(target_os = "macos"))]
-fn ns_window_number(_width: f32, _height: f32) -> Option<i64> {
+pub(crate) fn ns_window_number(_width: f32, _height: f32) -> Option<i64> {
     Some(0)
 }

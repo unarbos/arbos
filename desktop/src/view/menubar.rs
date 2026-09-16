@@ -20,8 +20,8 @@
 
 use crate::view::root::{
     Arbos, CloseProject, EndCall, NewSession, NewTab, NextEntry, NextTab, OpenProject,
-    OpenSettings, PrevEntry, PrevTab, SearchChats, ShowPermissions, ShowProject, StartCall,
-    ToggleMute, TogglePanel, ZoomIn, ZoomOut, ZoomReset,
+    OpenSettings, PrevEntry, PrevTab, ReportProblem, SearchChats, ShowPermissions, ShowProject,
+    StartCall, ToggleMute, TogglePanel, ZoomIn, ZoomOut, ZoomReset,
 };
 use bezel::{
     gpui::{
@@ -206,6 +206,11 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
         ]),
+        // Where macOS keeps it and where Cursor keeps its own: the last menu.
+        // The turn footer's thumbs-down is the fast way to complain about an
+        // answer; this is the way to complain about the window, which is half
+        // of what actually gets reported.
+        Menu::new("Help").items([MenuItem::action("Report a Problem…", ReportProblem)]),
     ]
 }
 
@@ -269,6 +274,9 @@ impl Arbos {
             .on_action(cx.listener(Self::new_tab_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::show_permissions_action))
+            // Always answerable, project or not: half of what he reports
+            // is the window itself rather than an answer in it.
+            .on_action(cx.listener(Self::report_problem))
             .on_action(cx.listener(Self::attach_paths_action))
             .on_action(cx.listener(Self::show_chat))
             .on_action(cx.listener(Self::show_project))
