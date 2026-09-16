@@ -133,15 +133,36 @@ fn notes_items_are_rows_the_window_can_check_and_drop() {
     assert_eq!(notes::load(&h.place, "root").open().len(), 0);
 }
 
+/// Stop pauses standing work and keeps what the user queued: their
+/// follow-up is held (wake off — the Send now / Remove row), never
+/// dropped (F-105); a worker's queued brief, the machine's words, goes
+/// with the stop as before.
 #[test]
-fn stop_pauses_subscriptions_and_drops_queued_prompts() {
+fn stop_pauses_subscriptions_holds_the_users_follow_up_and_drops_machine_wakes() {
     let h = hooks("stop");
     h.subscribe("root", timer("tick", Some("1h")), None)
         .unwrap();
     h.inbox("root", "later", "user", Vec::new()).unwrap();
-    assert_eq!(arbos_core::inbox::list(&h.place, "root").len(), 1);
+    h.inbox("root", "a brief for you", "spawn:parent", Vec::new())
+        .unwrap();
+    let before = arbos_core::inbox::list(&h.place, "root");
+    assert_eq!(before.len(), 2);
+    assert!(before.iter().all(|f| f.msg.wake));
     h.stop_work("root");
-    assert!(arbos_core::inbox::list(&h.place, "root").is_empty());
+    let after = arbos_core::inbox::list(&h.place, "root");
+    assert_eq!(
+        after.len(),
+        1,
+        "the user's words stay; the brief goes: {after:?}"
+    );
+    let held = &after[0];
+    assert_eq!(held.msg.body.trim(), "later");
+    assert_eq!(held.msg.from, "user");
+    assert!(!held.msg.wake, "held, not queued to run: {held:?}");
+    // Send now: it runs as its own turn again.
+    h.plan_op("root", arbos_kernel::hooks::inbox_id(&held.name), "run", "")
+        .unwrap();
+    assert!(arbos_core::inbox::list(&h.place, "root")[0].msg.wake);
     let s = arbos_core::subscription::get(&h.place, "root", 1).unwrap();
     assert!(s.paused && s.last.contains("stopped by the user"));
 }
