@@ -390,8 +390,20 @@ def register(scenario, registry, transcript, now_ms, branch):
                 mark("J2", "unverified", "the coordinator worked without a visible worker; the journey continues")
 
             # ── J4a + J5 steer/read-only mid-flight ────────────────────────
+            # "Mid-flight" means the work is running — root's turn open, or a live worker still on its turn
+            # (a coordinator root delegates and ends its own turn within seconds; the worker is the work).
+            def work_in_flight():
+                if rig.busy(folder):
+                    return True
+                for w in agents_of(folder) - {"root"}:
+                    if (Path(folder) / ".arbos" / "agents" / w).exists():
+                        tr = read_transcript(folder, w)
+                        if tr and tr[-1].get("kind") not in ("turn_complete", "interrupted"):
+                            return True
+                return False
+
             midflight = {}
-            if rig.busy(folder):
+            if work_in_flight():
                 rig.send(f"Also add a line to CHANGELOG.md saying who asked for this: QA-{tag}.")
                 midflight["followup_sent_at"] = time.time()
                 end = time.time() + 120
@@ -401,11 +413,11 @@ def register(scenario, registry, transcript, now_ms, branch):
                         break
                     time.sleep(0.5)
                 time.sleep(4)
-                if rig.busy(folder):
+                if work_in_flight():
                     rig.send("Use British spelling in the CHANGELOG.")
                     midflight["steer_sent"] = True
                     time.sleep(4)
-                if rig.busy(folder):
+                if work_in_flight():
                     rig.send("Quick read-only question while you work: roughly what time is it now, in one line?")
                     midflight["readonly_sent"] = True
             else:

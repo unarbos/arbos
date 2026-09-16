@@ -3811,3 +3811,425 @@
 {"ts": 1789575592680, "scenario": "mt-24-relaunch-restores-active-tab", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
 {"ts": 1789575689993, "scenario": "xp-01-dead-kernel-line-stays-in-its-project", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
 {"ts": 1789575730106, "scenario": "xp-02-queued-line-survives-close-and-reopen-in-place", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578106134, "scenario": "boot-idle", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578142668, "scenario": "prompt-no-key", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578143040, "scenario": "second-serve", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578148149, "scenario": "concurrent-sessions", "model": "google/gemini-2.5-flash", "prompt_tokens": 134296, "completion_tokens": 16, "usd": 0.04033}
+{"ts": 1789578159845, "scenario": "rapid-create-delete", "model": "google/gemini-2.5-flash", "prompt_tokens": 24535, "completion_tokens": 54, "usd": 0.0075}
+{"ts": 1789578166981, "scenario": "huge-input", "model": "google/gemini-2.5-flash", "prompt_tokens": 31912, "completion_tokens": 282, "usd": 0.01028}
+{"ts": 1789578231738, "scenario": "malformed-folder", "model": "google/gemini-2.5-flash", "prompt_tokens": 38653, "completion_tokens": 49, "usd": 0.01172}
+{"ts": 1789578234417, "scenario": "malformed-frames", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578234430, "scenario": "kill-mid-turn-restart", "skipped": "budget", "spent_today": 11.3054, "budget": 10.0}
+{"ts": 1789578234438, "scenario": "ordinary-task", "skipped": "budget", "spent_today": 11.3054, "budget": 10.0}
+{"ts": 1789578239617, "scenario": "readonly-arbos", "model": "google/gemini-2.5-flash", "prompt_tokens": 33894, "completion_tokens": 60, "usd": 0.01032}
+{"ts": 1789578241052, "scenario": "disk-full", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578241121, "scenario": "clock-jump-cron", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578241183, "scenario": "plan-shell-verdicts", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578241198, "scenario": "restart-during-compaction", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241206, "scenario": "steer-storm", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241220, "scenario": "spawn-storm", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241232, "scenario": "bench-standing-job", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241245, "scenario": "bench-ask-before-risky", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241258, "scenario": "bench-research-links", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241271, "scenario": "bench-fix-commit-branch", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241284, "scenario": "bench-screenshot", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241297, "scenario": "secrets-leak-hunt", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241310, "scenario": "ask-identity", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241323, "scenario": "bench-tests-are-spec", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241336, "scenario": "bench-no-screenshot-unasked", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241337, "scenario": "desktop-rapid-session-switch", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578241339, "scenario": "desktop-kill-kernel-under-ui", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578241353, "scenario": "desktop-composer-pills", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241354, "scenario": "desktop-user-message-card", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578241355, "scenario": "desktop-fresh-place-no-notice", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578241357, "scenario": "desktop-huge-transcript-scroll", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578241369, "scenario": "kickoff-session", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241382, "scenario": "inbox:headless-kernel-run", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241393, "scenario": "inbox:openrouter-default-provider", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241402, "scenario": "inbox:screenshot-tool", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241414, "scenario": "inbox:spawn-worktree-isolation", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241423, "scenario": "inbox:steer-running-child", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241431, "scenario": "steer-storm@steer-running-child", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241439, "scenario": "inbox:worktree-cwd-confinement", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241450, "scenario": "inbox:acp-workers", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241458, "scenario": "inbox:agent-defs", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241466, "scenario": "inbox:arbos-mesh", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241474, "scenario": "inbox:artifact-cards", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241481, "scenario": "inbox:ask-parks", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241489, "scenario": "inbox:attach-bind-token", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241497, "scenario": "inbox:attach-replay-deltas", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241505, "scenario": "inbox:bench-see-and-commit-nudges", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241513, "scenario": "bench-screenshot@bench-see-and-commit-nudges", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241520, "scenario": "bench-fix-commit-branch@bench-see-and-commit-nudges", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241528, "scenario": "bench-no-screenshot-unasked@bench-see-and-commit-nudges", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241536, "scenario": "inbox:branding-arbos", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241543, "scenario": "inbox:call-mode", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241551, "scenario": "inbox:changed-frames", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241559, "scenario": "inbox:composer-pills", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241567, "scenario": "desktop-composer-pills@composer-pills", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241575, "scenario": "inbox:composer-plan-alignment", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241582, "scenario": "inbox:cost-per-turn", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241590, "scenario": "inbox:elapsed-vocabulary", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241598, "scenario": "inbox:fallback-on-provider-errors", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241606, "scenario": "inbox:frame-read-tail", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241614, "scenario": "inbox:frame-unknown", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241622, "scenario": "inbox:git-guard", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241630, "scenario": "inbox:github-door", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241638, "scenario": "inbox:goals-coordinator", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241646, "scenario": "inbox:hooks-policy", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241654, "scenario": "inbox:image-describe", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241662, "scenario": "inbox:inbox-files", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241670, "scenario": "inbox:inbox-layout-live", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241678, "scenario": "inbox:job-streaming", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241686, "scenario": "inbox:jobs-leash", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241694, "scenario": "inbox:kernel-check-fixtures", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241702, "scenario": "inbox:machines-and-remote-spawn", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241710, "scenario": "inbox:mcp-servers", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241718, "scenario": "inbox:memory", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241726, "scenario": "inbox:multitask-kernel", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241734, "scenario": "inbox:multitasking-audit", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241742, "scenario": "inbox:nested-git-phase1", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241751, "scenario": "inbox:notes-root-gc", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241758, "scenario": "inbox:pdf-input", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241766, "scenario": "inbox:permission-modes", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241774, "scenario": "inbox:pipefail-chat-model", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241782, "scenario": "inbox:plan-approve", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241790, "scenario": "inbox:plan-engine", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241798, "scenario": "inbox:plan-tool-shapes", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241806, "scenario": "inbox:pr-tracking", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241814, "scenario": "inbox:project-page-coordinator-protocol", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241821, "scenario": "inbox:prompt-size", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241829, "scenario": "inbox:recording-tool", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241838, "scenario": "inbox:remote-kernel", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241846, "scenario": "inbox:remote-per-child-places", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241854, "scenario": "inbox:remote-provider-key", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241862, "scenario": "inbox:rewind-here", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241870, "scenario": "inbox:rewind", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241878, "scenario": "inbox:rollout-tracing", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241886, "scenario": "inbox:sandbox", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241894, "scenario": "inbox:search-citations", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241902, "scenario": "inbox:secrets-door", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241910, "scenario": "secrets-leak-hunt@secrets-door", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241919, "scenario": "inbox:settings-model-fields", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241927, "scenario": "inbox:sidebar-search-dots", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241935, "scenario": "inbox:skills-slash", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241943, "scenario": "inbox:spawn-caps", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241951, "scenario": "inbox:spawn-wait", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241960, "scenario": "inbox:stop-word-queue-row", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241973, "scenario": "inbox:subagent-task-panel", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241981, "scenario": "inbox:subs-authored-migrate-ask", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241989, "scenario": "inbox:swebench-gaps", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578241997, "scenario": "inbox:swebench-harness-comparison", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242005, "scenario": "inbox:swebench-harness", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242013, "scenario": "inbox:swebench-loop-cycle-1", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242021, "scenario": "inbox:thinking-heartbeat", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242029, "scenario": "inbox:transcript-bloat", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242037, "scenario": "inbox:turn-feedback", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242045, "scenario": "inbox:ui-qa-fixes", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242053, "scenario": "inbox:under-composer-row", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242061, "scenario": "inbox:until-idle-now", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242069, "scenario": "inbox:user-message-card", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242077, "scenario": "inbox:voice-linux", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242085, "scenario": "inbox:voice-mirror", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242093, "scenario": "inbox:voice-server", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242101, "scenario": "inbox:webhook-door", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242109, "scenario": "inbox:window-layout", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242118, "scenario": "inbox:answer-shape", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242126, "scenario": "inbox:archive-children-default", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242134, "scenario": "inbox:ask-nowait", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242142, "scenario": "inbox:cache-control-vendors", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242150, "scenario": "inbox:chat-doors", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242158, "scenario": "inbox:child-model", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242166, "scenario": "inbox:ci-by-branch", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242174, "scenario": "inbox:containment", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242182, "scenario": "inbox:continuity", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242190, "scenario": "inbox:coordinator-shell", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242198, "scenario": "inbox:custom-modes", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242206, "scenario": "inbox:data-policy", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242214, "scenario": "inbox:follow-own-prs", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242222, "scenario": "inbox:goals", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242230, "scenario": "inbox:polish-kernel-asks", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242238, "scenario": "inbox:protected-files", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242245, "scenario": "inbox:result-spill", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242253, "scenario": "inbox:run-no-prompts", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242261, "scenario": "inbox:say-stop", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242269, "scenario": "inbox:secrets-scope", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242277, "scenario": "inbox:show-me-brief", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242285, "scenario": "inbox:standing-pass-kernel", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242293, "scenario": "inbox:status-line", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242301, "scenario": "inbox:swebench-loop-cycle-2", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242310, "scenario": "inbox:swebench-loop-cycle-3", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242319, "scenario": "inbox:swebench-loop-cycle-4", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242327, "scenario": "inbox:swebench-loop-cycle-5", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242335, "scenario": "inbox:worktree-cleanup", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242343, "scenario": "inbox:done-wakes-remote-lifecycle", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242351, "scenario": "inbox:kickoff-scorer-reads-archive", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242359, "scenario": "inbox:swebench-loop-cycle-6", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242366, "scenario": "inbox:swebench-loop-cycle-7", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242374, "scenario": "inbox:swebench-loop-cycle-8", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242382, "scenario": "fp-timer-subscription", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242390, "scenario": "fp-waiting-ask", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242398, "scenario": "fp-done-to-parent", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242406, "scenario": "fp-plan-md-checklist", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242414, "scenario": "mt-01-typed-while-running-steers", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242422, "scenario": "mt-02-kernel-steer-lands-at-boundary", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242430, "scenario": "mt-03-steer-does-not-cancel-spawn", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242438, "scenario": "mt-04-queue-survives-window-restart", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242446, "scenario": "mt-05-voice-utterance-steers", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242454, "scenario": "mt-07-root-delegates-three-parts", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242462, "scenario": "mt-08-existing-place-keeps-tools", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242470, "scenario": "mt-09-cap-counts-live-children", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242478, "scenario": "mt-10-notes-stay-current", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242486, "scenario": "mt-11-child-cannot-write-project-page", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242493, "scenario": "mt-12-one-report-per-child", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242501, "scenario": "mt-13-spawn-wait-gives-result-once", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242509, "scenario": "mt-14-child-done-does-not-interrupt", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242517, "scenario": "mt-15-done-storm-batched", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242525, "scenario": "mt-16-root-does-not-repeat-result", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242533, "scenario": "mt-18-project-page-not-in-chat-column", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242541, "scenario": "mt-19-standing-work-appears-once", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242549, "scenario": "mt-20-ask-is-a-card-in-place", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242557, "scenario": "mt-21-typed-thought-during-ask-not-lost", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242564, "scenario": "mt-23-deleted-child-under-live-window", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242572, "scenario": "mt-25-child-can-reach-history", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242580, "scenario": "mt-26-project-context-arrives-once", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242588, "scenario": "mt-27-three-part-no-grandchildren", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242596, "scenario": "rm-01-remote-install-and-spawn", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242604, "scenario": "rm-02-remote-update-replaces-older-build", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242612, "scenario": "rm-03-kickoff-turn-fresh-place", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242620, "scenario": "journey-j8a-headless", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578242628, "scenario": "journey-linux", "skipped": "budget", "spent_today": 11.3157, "budget": 10.0}
+{"ts": 1789578298239, "scenario": "boot-idle", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578334781, "scenario": "prompt-no-key", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578335152, "scenario": "second-serve", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578340301, "scenario": "concurrent-sessions", "model": "google/gemini-2.5-flash", "prompt_tokens": 67144, "completion_tokens": 16, "usd": 0.02018}
+{"ts": 1789578760613, "scenario": "rapid-create-delete", "model": "google/gemini-2.5-flash", "prompt_tokens": 302451, "completion_tokens": 323, "usd": 0.09154}
+{"ts": 1789578772404, "scenario": "huge-input", "model": "google/gemini-2.5-flash", "prompt_tokens": 32074, "completion_tokens": 365, "usd": 0.01053}
+{"ts": 1789578836948, "scenario": "malformed-folder", "model": "google/gemini-2.5-flash", "prompt_tokens": 38689, "completion_tokens": 60, "usd": 0.01176}
+{"ts": 1789578839642, "scenario": "malformed-frames", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578839678, "scenario": "kill-mid-turn-restart", "skipped": "budget", "spent_today": 11.4497, "budget": 10.0}
+{"ts": 1789578839691, "scenario": "ordinary-task", "skipped": "budget", "spent_today": 11.4497, "budget": 10.0}
+{"ts": 1789578844078, "scenario": "readonly-arbos", "model": "google/gemini-2.5-flash", "prompt_tokens": 33768, "completion_tokens": 37, "usd": 0.01022}
+{"ts": 1789578845528, "scenario": "disk-full", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578845619, "scenario": "clock-jump-cron", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578845686, "scenario": "plan-shell-verdicts", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578845709, "scenario": "restart-during-compaction", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845717, "scenario": "steer-storm", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845725, "scenario": "spawn-storm", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845733, "scenario": "bench-standing-job", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845743, "scenario": "bench-ask-before-risky", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845751, "scenario": "bench-research-links", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845760, "scenario": "bench-fix-commit-branch", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845768, "scenario": "bench-screenshot", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845776, "scenario": "secrets-leak-hunt", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845784, "scenario": "ask-identity", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845792, "scenario": "bench-tests-are-spec", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845800, "scenario": "bench-no-screenshot-unasked", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845801, "scenario": "desktop-rapid-session-switch", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578845803, "scenario": "desktop-kill-kernel-under-ui", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578845817, "scenario": "desktop-composer-pills", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845817, "scenario": "desktop-user-message-card", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578845819, "scenario": "desktop-fresh-place-no-notice", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578845821, "scenario": "desktop-huge-transcript-scroll", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578845830, "scenario": "kickoff-session", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845838, "scenario": "inbox:headless-kernel-run", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845846, "scenario": "inbox:openrouter-default-provider", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845854, "scenario": "inbox:screenshot-tool", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845862, "scenario": "inbox:spawn-worktree-isolation", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845870, "scenario": "inbox:steer-running-child", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845883, "scenario": "steer-storm@steer-running-child", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845891, "scenario": "inbox:worktree-cwd-confinement", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845899, "scenario": "inbox:acp-workers", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845908, "scenario": "inbox:agent-defs", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845916, "scenario": "inbox:arbos-mesh", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845924, "scenario": "inbox:artifact-cards", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845932, "scenario": "inbox:ask-parks", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845940, "scenario": "inbox:attach-bind-token", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845949, "scenario": "inbox:attach-replay-deltas", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845959, "scenario": "inbox:bench-see-and-commit-nudges", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845967, "scenario": "bench-screenshot@bench-see-and-commit-nudges", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845975, "scenario": "bench-fix-commit-branch@bench-see-and-commit-nudges", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845984, "scenario": "bench-no-screenshot-unasked@bench-see-and-commit-nudges", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578845992, "scenario": "inbox:branding-arbos", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846000, "scenario": "inbox:call-mode", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846008, "scenario": "inbox:changed-frames", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846017, "scenario": "inbox:composer-pills", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846025, "scenario": "desktop-composer-pills@composer-pills", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846035, "scenario": "inbox:composer-plan-alignment", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846045, "scenario": "inbox:cost-per-turn", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846053, "scenario": "inbox:elapsed-vocabulary", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846061, "scenario": "inbox:fallback-on-provider-errors", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846069, "scenario": "inbox:frame-read-tail", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846078, "scenario": "inbox:frame-unknown", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846086, "scenario": "inbox:git-guard", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846094, "scenario": "inbox:github-door", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846102, "scenario": "inbox:goals-coordinator", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846111, "scenario": "inbox:hooks-policy", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846119, "scenario": "inbox:image-describe", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846127, "scenario": "inbox:inbox-files", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846136, "scenario": "inbox:inbox-layout-live", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846144, "scenario": "inbox:job-streaming", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846152, "scenario": "inbox:jobs-leash", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846160, "scenario": "inbox:kernel-check-fixtures", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846169, "scenario": "inbox:machines-and-remote-spawn", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846177, "scenario": "inbox:mcp-servers", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846186, "scenario": "inbox:memory", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846196, "scenario": "inbox:multitask-kernel", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846204, "scenario": "inbox:multitasking-audit", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846213, "scenario": "inbox:nested-git-phase1", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846221, "scenario": "inbox:notes-root-gc", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846230, "scenario": "inbox:pdf-input", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846239, "scenario": "inbox:permission-modes", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846247, "scenario": "inbox:pipefail-chat-model", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846255, "scenario": "inbox:plan-approve", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846263, "scenario": "inbox:plan-engine", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846272, "scenario": "inbox:plan-tool-shapes", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846280, "scenario": "inbox:pr-tracking", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846306, "scenario": "inbox:project-page-coordinator-protocol", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846316, "scenario": "inbox:prompt-size", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846325, "scenario": "inbox:recording-tool", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846333, "scenario": "inbox:remote-kernel", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846342, "scenario": "inbox:remote-per-child-places", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846350, "scenario": "inbox:remote-provider-key", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846358, "scenario": "inbox:rewind-here", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846367, "scenario": "inbox:rewind", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846375, "scenario": "inbox:rollout-tracing", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846383, "scenario": "inbox:sandbox", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846392, "scenario": "inbox:search-citations", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846401, "scenario": "inbox:secrets-door", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846409, "scenario": "secrets-leak-hunt@secrets-door", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846417, "scenario": "inbox:settings-model-fields", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846426, "scenario": "inbox:sidebar-search-dots", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846434, "scenario": "inbox:skills-slash", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846442, "scenario": "inbox:spawn-caps", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846452, "scenario": "inbox:spawn-wait", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846461, "scenario": "inbox:stop-word-queue-row", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846469, "scenario": "inbox:subagent-task-panel", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846480, "scenario": "inbox:subs-authored-migrate-ask", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846488, "scenario": "inbox:swebench-gaps", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846497, "scenario": "inbox:swebench-harness-comparison", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846505, "scenario": "inbox:swebench-harness", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846514, "scenario": "inbox:swebench-loop-cycle-1", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846522, "scenario": "inbox:thinking-heartbeat", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846530, "scenario": "inbox:transcript-bloat", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846538, "scenario": "inbox:turn-feedback", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846546, "scenario": "inbox:ui-qa-fixes", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846555, "scenario": "inbox:under-composer-row", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846563, "scenario": "inbox:until-idle-now", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846583, "scenario": "inbox:user-message-card", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846585, "scenario": "desktop-user-message-card@user-message-card", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578846598, "scenario": "inbox:voice-linux", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846608, "scenario": "inbox:voice-mirror", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846618, "scenario": "inbox:voice-server", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846628, "scenario": "inbox:webhook-door", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846637, "scenario": "inbox:window-layout", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846662, "scenario": "inbox:answer-shape", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846671, "scenario": "inbox:archive-children-default", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846681, "scenario": "inbox:ask-nowait", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846690, "scenario": "inbox:cache-control-vendors", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846698, "scenario": "inbox:chat-doors", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846707, "scenario": "inbox:child-model", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846715, "scenario": "inbox:ci-by-branch", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846723, "scenario": "inbox:containment", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846731, "scenario": "inbox:continuity", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846740, "scenario": "inbox:coordinator-shell", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846748, "scenario": "inbox:custom-modes", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846757, "scenario": "inbox:data-policy", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846766, "scenario": "inbox:follow-own-prs", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846774, "scenario": "inbox:goals", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846782, "scenario": "inbox:polish-kernel-asks", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846794, "scenario": "inbox:protected-files", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846803, "scenario": "inbox:result-spill", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846814, "scenario": "inbox:run-no-prompts", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846822, "scenario": "inbox:say-stop", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846831, "scenario": "inbox:secrets-scope", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846840, "scenario": "inbox:show-me-brief", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846848, "scenario": "inbox:standing-pass-kernel", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846858, "scenario": "inbox:status-line", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846867, "scenario": "inbox:swebench-loop-cycle-2", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846877, "scenario": "inbox:swebench-loop-cycle-3", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846893, "scenario": "inbox:swebench-loop-cycle-4", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846909, "scenario": "inbox:swebench-loop-cycle-5", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846918, "scenario": "inbox:worktree-cleanup", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846927, "scenario": "inbox:done-wakes-remote-lifecycle", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846935, "scenario": "inbox:kickoff-scorer-reads-archive", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846944, "scenario": "inbox:swebench-loop-cycle-6", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846953, "scenario": "inbox:swebench-loop-cycle-7", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578846968, "scenario": "inbox:swebench-loop-cycle-8", "skipped": "budget", "spent_today": 11.4599, "budget": 10.0}
+{"ts": 1789578855018, "scenario": "fp-authored-inbox", "model": "google/gemini-2.5-flash", "prompt_tokens": 16931, "completion_tokens": 2, "usd": 0.00508}
+{"ts": 1789578895494, "scenario": "fp-shell-subscription", "model": "google/gemini-2.5-flash", "prompt_tokens": 68634, "completion_tokens": 44, "usd": 0.0207}
+{"ts": 1789578895529, "scenario": "fp-timer-subscription", "skipped": "budget", "spent_today": 11.4857, "budget": 10.0}
+{"ts": 1789578895537, "scenario": "fp-waiting-ask", "skipped": "budget", "spent_today": 11.4857, "budget": 10.0}
+{"ts": 1789578895546, "scenario": "fp-done-to-parent", "skipped": "budget", "spent_today": 11.4857, "budget": 10.0}
+{"ts": 1789578895554, "scenario": "fp-plan-md-checklist", "skipped": "budget", "spent_today": 11.4857, "budget": 10.0}
+{"ts": 1789578948026, "scenario": "fp-migration-legacy-plan", "model": "google/gemini-2.5-flash", "prompt_tokens": 156879, "completion_tokens": 144, "usd": 0.04742}
+{"ts": 1789578948063, "scenario": "mt-01-typed-while-running-steers", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578948072, "scenario": "mt-02-kernel-steer-lands-at-boundary", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578948081, "scenario": "mt-03-steer-does-not-cancel-spawn", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578948090, "scenario": "mt-04-queue-survives-window-restart", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578948099, "scenario": "mt-05-voice-utterance-steers", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973045, "scenario": "mt-06-heartbeat-working-frames", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578973067, "scenario": "mt-07-root-delegates-three-parts", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973076, "scenario": "mt-08-existing-place-keeps-tools", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973085, "scenario": "mt-09-cap-counts-live-children", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973096, "scenario": "mt-10-notes-stay-current", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973105, "scenario": "mt-11-child-cannot-write-project-page", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973113, "scenario": "mt-12-one-report-per-child", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973122, "scenario": "mt-13-spawn-wait-gives-result-once", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973130, "scenario": "mt-14-child-done-does-not-interrupt", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973138, "scenario": "mt-15-done-storm-batched", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973147, "scenario": "mt-16-root-does-not-repeat-result", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973148, "scenario": "mt-17-plan-strip-empty-chat", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578973157, "scenario": "mt-18-project-page-not-in-chat-column", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973166, "scenario": "mt-19-standing-work-appears-once", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973174, "scenario": "mt-20-ask-is-a-card-in-place", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973183, "scenario": "mt-21-typed-thought-during-ask-not-lost", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973183, "scenario": "mt-22-kernel-restart-with-parked-ask", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578973194, "scenario": "mt-23-deleted-child-under-live-window", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973195, "scenario": "mt-24-relaunch-restores-active-tab", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789578973205, "scenario": "mt-25-child-can-reach-history", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973214, "scenario": "mt-26-project-context-arrives-once", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578973223, "scenario": "mt-27-three-part-no-grandchildren", "skipped": "budget", "spent_today": 11.5331, "budget": 10.0}
+{"ts": 1789578977240, "scenario": "mt-28-fork-claims-no-worker", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579012014, "scenario": "mt-29-rewind-latency", "model": "google/gemini-2.5-flash", "prompt_tokens": 159757, "completion_tokens": 532, "usd": 0.04926}
+{"ts": 1789579012059, "scenario": "rm-01-remote-install-and-spawn", "skipped": "budget", "spent_today": 11.5824, "budget": 10.0}
+{"ts": 1789579012074, "scenario": "rm-02-remote-update-replaces-older-build", "skipped": "budget", "spent_today": 11.5824, "budget": 10.0}
+{"ts": 1789579012089, "scenario": "rm-03-kickoff-turn-fresh-place", "skipped": "budget", "spent_today": 11.5824, "budget": 10.0}
+{"ts": 1789579042811, "scenario": "rm-04-project-face-in-hello-and-roster", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579044032, "scenario": "bt-01-say-to-user-refused", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579045259, "scenario": "bt-02-spawn-guard-reads-the-brief", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579046694, "scenario": "bt-03-worktree-respawn-next-free-branch", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579047937, "scenario": "bt-04-tool-markup-as-prose-stripped", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579048762, "scenario": "bt-05-history-pages-backwards", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579050146, "scenario": "bt-06-fallback-403-falls-through", "model": "google/gemini-2.5-flash", "prompt_tokens": 1, "completion_tokens": 1, "usd": 0.0}
+{"ts": 1789579051934, "scenario": "bt-07-coordinator-sees-archived-workers", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579053733, "scenario": "bt-08-files-arrive-as-bytes", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579053748, "scenario": "fs-01-federated-store-read-write-cas", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579055677, "scenario": "fr-01-first-turn-on-a-blocked-primary", "model": "google/gemini-2.5-flash", "prompt_tokens": 2, "completion_tokens": 2, "usd": 1e-05}
+{"ts": 1789579062070, "scenario": "fr-02-silent-primary-gives-way-fast", "model": "google/gemini-2.5-flash", "prompt_tokens": 1, "completion_tokens": 1, "usd": 0.0}
+{"ts": 1789579063510, "scenario": "fr-03-first-turn-produces-nothing", "model": "google/gemini-2.5-flash", "prompt_tokens": 4, "completion_tokens": 4, "usd": 1e-05}
+{"ts": 1789579063525, "scenario": "xp-01-dead-kernel-line-stays-in-its-project", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579063527, "scenario": "xp-02-queued-line-survives-close-and-reopen-in-place", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579063528, "scenario": "xp-03-hub-attach-does-not-follow-to-another-project", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579063539, "scenario": "journey-j8a-headless", "skipped": "budget", "spent_today": 11.5824, "budget": 10.0}
+{"ts": 1789579063547, "scenario": "journey-linux", "skipped": "budget", "spent_today": 11.5824, "budget": 10.0}
+{"ts": 1789579164616, "scenario": "desktop-composer-pills", "skipped": "budget", "spent_today": 11.5824, "budget": 10.0}
+{"ts": 1789579164624, "scenario": "desktop-composer-pills@composer-pills", "skipped": "budget", "spent_today": 11.5824, "budget": 10.0}
+{"ts": 1789579176409, "scenario": "desktop-fresh-place-no-notice", "model": "google/gemini-2.5-flash", "prompt_tokens": 35356, "completion_tokens": 118, "usd": 0.0109}
+{"ts": 1789579191068, "scenario": "desktop-huge-transcript-scroll", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579204474, "scenario": "desktop-kill-kernel-under-ui", "model": "google/gemini-2.5-flash", "prompt_tokens": 17677, "completion_tokens": 113, "usd": 0.00559}
+{"ts": 1789579214656, "scenario": "desktop-rapid-session-switch", "model": "google/gemini-2.5-flash", "prompt_tokens": 35048, "completion_tokens": 149, "usd": 0.01089}
+{"ts": 1789579229744, "scenario": "desktop-user-message-card", "model": "google/gemini-2.5-flash", "prompt_tokens": 53745, "completion_tokens": 206, "usd": 0.01664}
+{"ts": 1789579245912, "scenario": "desktop-user-message-card@user-message-card", "model": "google/gemini-2.5-flash", "prompt_tokens": 17697, "completion_tokens": 76, "usd": 0.0055}
+{"ts": 1789579245939, "scenario": "journey-linux", "skipped": "budget", "spent_today": 11.6319, "budget": 10.0}
+{"ts": 1789579245948, "scenario": "mt-01-typed-while-running-steers", "skipped": "budget", "spent_today": 11.6319, "budget": 10.0}
+{"ts": 1789579245957, "scenario": "mt-04-queue-survives-window-restart", "skipped": "budget", "spent_today": 11.6319, "budget": 10.0}
+{"ts": 1789579245965, "scenario": "mt-14-child-done-does-not-interrupt", "skipped": "budget", "spent_today": 11.6319, "budget": 10.0}
+{"ts": 1789579252871, "scenario": "mt-17-plan-strip-empty-chat", "model": "google/gemini-2.5-flash", "prompt_tokens": 8783, "completion_tokens": 42, "usd": 0.00274}
+{"ts": 1789579252891, "scenario": "mt-18-project-page-not-in-chat-column", "skipped": "budget", "spent_today": 11.6347, "budget": 10.0}
+{"ts": 1789579252899, "scenario": "mt-19-standing-work-appears-once", "skipped": "budget", "spent_today": 11.6347, "budget": 10.0}
+{"ts": 1789579252908, "scenario": "mt-20-ask-is-a-card-in-place", "skipped": "budget", "spent_today": 11.6347, "budget": 10.0}
+{"ts": 1789579252917, "scenario": "mt-23-deleted-child-under-live-window", "skipped": "budget", "spent_today": 11.6347, "budget": 10.0}
+{"ts": 1789579263204, "scenario": "mt-24-relaunch-restores-active-tab", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579360843, "scenario": "xp-01-dead-kernel-line-stays-in-its-project", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789579400958, "scenario": "xp-02-queued-line-survives-close-and-reopen-in-place", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
