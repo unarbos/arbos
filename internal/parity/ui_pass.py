@@ -932,9 +932,14 @@ class Pass:
         # it posted — a notification check that cannot fail is no check.
         try:
             self.app.click(f"tab-{ix}"); time.sleep(0.6)
+            # The chat the line goes to is the one in front now (after the
+            # fork check it may be the copy, also a root); find it by id.
+            sent_in = self.state().get("active_session")
             def root_of(st):
                 pr = next((p for p in st["projects"] if p["index"] == ix), {})
-                return pr, next((c for c in pr.get("sessions", []) if c.get("parent") is None), {})
+                chats = pr.get("sessions", [])
+                mine = next((c for c in chats if c.get("id") == sent_in), None)
+                return pr, mine or next((c for c in chats if c.get("parent") is None), {})
             _, root0 = root_of(self.state())
             seen_at_send = root0.get("seen_through") or 0
             posted_before = len(self.state().get("notifications", {}).get("posted", []))
@@ -952,13 +957,17 @@ class Pass:
                         f"tab_dot={pr.get('tab_dot')} unseen={pr.get('unseen')}", "pass" if pr.get("tab_dot") else ("unverified" if verdict == "unverified" else "fail"), "")
             posted = self.state().get("notifications", {}).get("posted", [])
             new_posts = posted[posted_before:]
-            hit = next((n for n in new_posts if nonce in (n.get("body") or "")), None)
+            # The post's body is the reply's first line; a model may put
+            # words before the nonce, so any new post counts and the daemon
+            # is checked for that post's own words.
+            hit = next((n for n in new_posts if nonce in (n.get("body") or "").lower()), None) or (new_posts[-1] if new_posts else None)
+            key = ((hit or {}).get("body") or nonce).strip()[:40].lower()
             # notify-send hands the alert to the daemon a beat after the
             # window records the post; give the daemon a moment.
             dunst_after, seen_by_daemon = None, False
             for _ in range(10):
                 dunst_after = dunst_history()
-                seen_by_daemon = dunst_after is not None and any(nonce in e for e in dunst_after)
+                seen_by_daemon = dunst_after is not None and any(key in e.lower() or nonce in e.lower() for e in dunst_after)
                 if seen_by_daemon or dunst_after is None:
                     break
                 time.sleep(0.5)

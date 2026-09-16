@@ -109,6 +109,7 @@ Every gap between Arbos and Cursor, who found it, the cycle, the PR. Target: zer
 | F-96 | 09-16 | loop (journey f94 runs 1–2, J08/J09, behaviour) | coordinator, behaviour | after Stop, "Continue Working" woke the coordinator with the stopped workers' `ended badly — stopped` reports; it read them as failures ("Both workers ended badly. I will…"), ended its turn and spawned nothing, so the disk stayed empty until the next follow-up. Cursor's Continue resumes the job | kernel #324 (merged): a stopped worker reports a pause, and Continue carries the reports in |
 | F-97 | 09-16 | loop (F-95 probe, root idle with a worker running) | composer | while only a worker runs the root's composer shows the mic, not the stop disc; Cursor keeps ■ while any of the project's work runs (`cycle-17/f82-cursor-one-worker-live.png`), and Stop there stops the workers | open — cycle 17 |
 | F-98 | 09-16 | loop (notification driver work) | gate | the gate's `notify-unseen` read `unseen=None` since #297 (F-78's flake): the check looked the chat up by the session id active at send time, which the tab switch changed; and a notification check with no daemon record behind it could not fail | #329: the driver exposes `tab_dot`, `unseen_kinds` and every posted OS notification with its result; the gate's four `notify-*` rows find the root by tab index and check dunst's own history (popups closed first, a nonce in the reply); journey J10b does the same. F-78 closed by this |
+| F-99 | 09-16 | QA (`qal-j03`, built on the F-98 surface) | notifications, relaunch | a reply that landed while the app was shut showed no badge on relaunch when the project came back in front (F-93): the restore counted the front chat as looked at and sent `seen` at once — kernel replay proven right by its e2e, the clearing was the desktop's | #329: "looked at" needs the window touched (a press, a key, or a return to it after its first five seconds); the driver says `touched`. Reproduced three times: badge on relaunch, the first click clears it and sends `seen` |
 
 ## Per-cycle count
 
@@ -123,7 +124,7 @@ Every gap between Arbos and Cursor, who found it, the cycle, the PR. Target: zer
 | 14 | 10 (F-56 … F-65) + 3 around the Inter change (F-53 … F-55) | 1 (F-52, bionic weight) |
 | 15 | 5 (F-66 … F-70) | 0 |
 | 16 | 9 (F-71 … F-75, F-78 … F-81) | 2 (F-76 raw provider error, F-77 kickoff stall) |
-| 17 (opened) | 16 so far (F-83, F-84, F-92, F-93 from QA; F-85 … F-91, F-94, F-96 from seven journey runs; F-95 from the gate; F-97, F-98 from the probes) | 1 (F-82, the bubble-sort turn) |
+| 17 (opened) | 17 so far (F-83, F-84, F-92, F-93, F-99 from QA; F-85 … F-91, F-94, F-96 from seven journey runs; F-95 from the gate; F-97, F-98 from the probes) | 1 (F-82, the bubble-sort turn) |
 
 ## Untested by decision (Linux is the rig — Jacob, 2026-09-16)
 
