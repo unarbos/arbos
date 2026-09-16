@@ -88,6 +88,9 @@ enum ChatUpdate {
     case notify(KernelNotification)
     /// Every notification up to `through` was seen, on some client.
     case seen(through: Int)
+    /// The hub took this phone's push token; `enabled` says whether it
+    /// can actually push yet.
+    case pushed(enabled: Bool)
 }
 
 /// Where the main chat comes from: the live kernel, or a scripted stand-in
@@ -106,12 +109,15 @@ protocol ChatSource: AnyObject {
     func earlier(before seq: Int, limit: Int) async -> HistoryPage?
     /// The user saw the notifications up to `through`.
     func markSeen(through: Int)
+    /// This phone's APNs token, for the hub.
+    func registerPush(token: String, sandbox: Bool)
 }
 
 extension ChatSource {
     func history(agent: String) async -> [ChatItem] { [] }
     func earlier(before seq: Int, limit: Int) async -> HistoryPage? { nil }
     func markSeen(through: Int) {}
+    func registerPush(token: String, sandbox: Bool) {}
 }
 
 /// One page of a transcript: the lines and the seq range they cover.

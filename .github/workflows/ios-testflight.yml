@@ -68,6 +68,39 @@ jobs:
           printf '%s' "$IOS_SECRETS_PLIST" | base64 --decode > Arbos/Secrets.plist
           scripts/check-secrets.sh Arbos/Secrets.plist
 
+      - name: Push capability on the App ID?
+        if: env.SKIP != '1'
+        env:
+          IOS_ASC_KEY_ID: ${{ secrets.IOS_ASC_KEY_ID }}
+          IOS_ASC_ISSUER_ID: ${{ secrets.IOS_ASC_ISSUER_ID }}
+        run: |
+          # The day Jacob ticks Push Notifications on com.unarbos.arbos.ios,
+          # the next build signs with aps-environment and pushes start —
+          # no release change. Until then the entitlement stays out, or the
+          # export would fail on a profile without it.
+          # This lookup must never stop an upload: a failed install or call
+          # leaves ENT empty and the build ships without the entitlement,
+          # as every build before it did.
+          pip3 install --quiet --disable-pip-version-check --user --break-system-packages pyjwt cryptography requests \
+            || echo "::warning::push: could not install pyjwt/requests; skipping the capability check"
+          ENT=$(python3 - <<'PY' || true
+          import jwt, time, requests, os, sys
+          kid = os.environ["IOS_ASC_KEY_ID"]; iss = os.environ["IOS_ASC_ISSUER_ID"]
+          key = open(os.path.expanduser(f"~/.appstoreconnect/private_keys/AuthKey_{kid}.p8")).read()
+          tok = jwt.encode({"iss": iss, "iat": int(time.time()), "exp": int(time.time()) + 600, "aud": "appstoreconnect-v1"}, key, algorithm="ES256", headers={"kid": kid})
+          h = {"Authorization": f"Bearer {tok}"}
+          try:
+              r = requests.get("https://api.appstoreconnect.apple.com/v1/bundleIds", params={"filter[identifier]": "com.unarbos.arbos.ios", "include": "bundleIdCapabilities"}, headers=h, timeout=20)
+              caps = [c["attributes"]["capabilityType"] for c in r.json().get("included", []) if c["type"] == "bundleIdCapabilities"]
+              print("Arbos/Arbos.entitlements" if "PUSH_NOTIFICATIONS" in caps else "", end="")
+              print(f"\ncapabilities: {caps}", file=sys.stderr)
+          except Exception as e:
+              print("", end=""); print(f"capability check failed: {e}", file=sys.stderr)
+          PY
+          )
+          echo "ENTITLEMENTS=$ENT" >> "$GITHUB_ENV"
+          if [ -n "$ENT" ]; then echo "push: the App ID has Push Notifications — signing with aps-environment"; else echo "::notice::push: the App ID has no Push Notifications capability yet — this build gets banners only while open"; fi
+
       - name: Archive (unsigned)
         if: env.SKIP != '1'
         working-directory: ios
@@ -77,6 +110,7 @@ jobs:
           xcodebuild archive -project Arbos.xcodeproj -scheme Arbos -configuration Release \
             -destination "generic/platform=iOS" -archivePath "$RUNNER_TEMP/Arbos.xcarchive" \
             CURRENT_PROJECT_VERSION="$BUILD" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_ENTITLEMENTS="${ENTITLEMENTS}" \
             | tail -30
 
       - name: Sign for App Store Connect and upload to TestFlight
