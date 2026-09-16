@@ -239,6 +239,11 @@ impl Draft {
         }
 
         let mut report = json!({
+            // What made this report. Anything without it did not come from the
+            // app, and the poller says so — a hand-made fixture sitting beside
+            // real reports would otherwise be read as one of Jacob's, and
+            // invented events are worse than no events.
+            "written_by": "arbos-desktop",
             "id": id,
             "sent_ms": sent_ms,
             "note": self.note.trim(),

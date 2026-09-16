@@ -3244,9 +3244,59 @@ impl ChatSession {
     /// What this window believes the chat holds, for a report to carry beside
     /// the kernel's transcript. When the two disagree the drawing is usually
     /// the wrong one, and that disagreement is the bug.
+    ///
+    /// `index` is the part a reader actually works with: one row per drawn
+    /// item, in order, with whatever anchor the app holds for it — the
+    /// transcript `seq` of a prompt card, the kernel's clock on a wake, a
+    /// tool's `call_id`. Those are the three kinds that exist in both views,
+    /// so they are enough to line the drawing up against the events.
+    ///
+    /// The other kinds carry no clock at all, and `anchor: null` says so
+    /// rather than leaving a reader to wonder whether something was lost. The
+    /// features agent asked for a `seq` and `ts` on every item; the honest
+    /// answer is that the app does not have them, and this says which it does.
     pub fn drawn_view(&self) -> serde_json::Value {
+        let index: Vec<serde_json::Value> = self
+            .items
+            .iter()
+            .enumerate()
+            .map(|(n, item)| {
+                let (kind, anchor) = match item {
+                    ChatItem::User(m) => (
+                        "user",
+                        serde_json::json!({"seq": m.seq, "sent_at": m.sent_at, "steer": m.steer}),
+                    ),
+                    ChatItem::Wake { kind, at, .. } => {
+                        ("wake", serde_json::json!({"wake": kind, "at": at}))
+                    }
+                    ChatItem::Tool { id, status, .. } => (
+                        "tool",
+                        // Named here rather than derived, and with no wildcard,
+                        // so a fourth status cannot slip into a report as a
+                        // word nobody chose.
+                        serde_json::json!({"call_id": id, "status": match status {
+                            ToolStatus::Running => "running",
+                            ToolStatus::Success => "success",
+                            ToolStatus::Failure => "failure",
+                        }}),
+                    ),
+                    ChatItem::Agent(_) => ("agent", serde_json::Value::Null),
+                    ChatItem::From { who, .. } => ("from", serde_json::json!({"who": who})),
+                    ChatItem::Thinking { done, .. } => {
+                        ("thinking", serde_json::json!({"done": done}))
+                    }
+                    ChatItem::Notice { failed, .. } => {
+                        ("notice", serde_json::json!({"failed": failed}))
+                    }
+                    ChatItem::Nudge(_) => ("nudge", serde_json::Value::Null),
+                    _ => ("other", serde_json::Value::Null),
+                };
+                serde_json::json!({"n": n, "kind": kind, "anchor": anchor})
+            })
+            .collect();
         serde_json::json!({
             "items": serde_json::to_value(&self.items).unwrap_or(serde_json::Value::Null),
+            "index": index,
             "agent": self.agent_session,
             // What the window thinks is running now. A count, not the work
             // itself: "it says one worker is going and the transcript says
