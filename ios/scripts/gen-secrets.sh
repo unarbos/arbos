@@ -13,15 +13,47 @@ VOICE_TOKEN="$(read_field jmldktl7rrc4rw4sm2akej4qne credential)"
 KERNEL_TOKEN="$(read_field 4vgzvrtucv6dm7eyaw42ckqsv4 credential)"
 # The phone's own row on the hub (role owner); `credential` is the desktop's.
 HUB_TOKEN="$(read_field 6uihrhmgfwncp3jz3vxtfxklhi client-phone)"
-# Hub address: the vault's stable name, unless ARBOS_HUB_URL names the
-# interim quick tunnel, unless the published directory has a `hub:` line.
-HUB_URL="${ARBOS_HUB_URL:-$(read_field 6uihrhmgfwncp3jz3vxtfxklhi url)}"
 
+# Where the hub and the phone kernel live (2026-09-16 cutover): ArbosLife,
+# Jacob's own box. The stable names (`hub-api` / `kernel-api.arbos.life`)
+# survive a tunnel restart, so they win as soon as Jacob's CNAMEs point at
+# the ArbosLife tunnel; until then the vault's interim quick-tunnel fields.
+# ARBOS_HUB_URL / ARBOS_KERNEL_URL override both (a test, never a phone build
+# — the guard refuses a local hub).
+STABLE_HUB="$(read_field 6uihrhmgfwncp3jz3vxtfxklhi url)"
+INTERIM_HUB="$(read_field 6uihrhmgfwncp3jz3vxtfxklhi arboslife-hub-url)"
+INTERIM_KERNEL="$(read_field 6uihrhmgfwncp3jz3vxtfxklhi arboslife-kernel-url)"
+STABLE_KERNEL="wss://kernel-api.arbos.life"
+
+# A hub candidate is good when it lists machines for the phone token.
+hub_ok() {
+  [ -n "$1" ] || return 1
+  code="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $HUB_TOKEN" \
+    "$(printf '%s' "$1" | sed -e 's#^wss://#https://#' -e 's#/*$##')/list" 2>/dev/null || echo 000)"
+  [ "$code" = "200" ]
+}
+# A kernel name is good when its DNS is the ArbosLife tunnel (a CNAME to
+# cfargotunnel.com), not a wildcard somewhere else.
+kernel_ok() {
+  [ -n "$1" ] || return 1
+  host="$(printf '%s' "$1" | sed -e 's#^wss://##' -e 's#[/:].*$##')"
+  dig +short CNAME "$host" 2>/dev/null | grep -q 'cfargotunnel.com' || host "$host" 2>/dev/null | grep -q 'cfargotunnel.com'
+}
+
+if [ -n "${ARBOS_HUB_URL:-}" ]; then HUB_URL="$ARBOS_HUB_URL"
+elif hub_ok "$STABLE_HUB"; then HUB_URL="$STABLE_HUB"; echo "hub: the stable name answers"
+elif hub_ok "$INTERIM_HUB"; then HUB_URL="$INTERIM_HUB"; echo "hub: the stable name is not the hub yet; the interim tunnel is"
+else HUB_URL="${INTERIM_HUB:-$STABLE_HUB}"; echo "hub: neither name answers now — the guard decides" >&2
+fi
+if [ -n "${ARBOS_KERNEL_URL:-}" ]; then KERNEL_URL="$ARBOS_KERNEL_URL"
+elif kernel_ok "$STABLE_KERNEL"; then KERNEL_URL="$STABLE_KERNEL"; echo "kernel: the stable name points at the tunnel"
+else KERNEL_URL="$INTERIM_KERNEL"; echo "kernel: interim tunnel"
+fi
+
+# The voice server still comes from the published directory (it stays on
+# the pod with the voice model).
 DIRECTORY="$(curl -fsS --max-time 8 https://raw.githubusercontent.com/unarbos/arbos/qa-results/voice-endpoint.txt || true)"
 VOICE_URL="$(printf '%s\n' "$DIRECTORY" | grep -v '^#' | grep -m1 '^http' | sed -e 's#^https://#wss://#' -e 's#^http://#ws://#' -e 's#/*$#/ws#')"
-KERNEL_URL="$(printf '%s\n' "$DIRECTORY" | grep -m1 '^kernel:' | sed -e 's/^kernel:[[:space:]]*//' -e 's/?.*$//' -e 's/[[:space:]].*$//')"
-DIR_HUB_URL="$(printf '%s\n' "$DIRECTORY" | grep -m1 '^hub:' | sed -e 's/^hub:[[:space:]]*//' -e 's/?.*$//' -e 's/[[:space:]].*$//')"
-[ -n "$DIR_HUB_URL" ] && HUB_URL="$DIR_HUB_URL"
 
 esc() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g'; }
 
