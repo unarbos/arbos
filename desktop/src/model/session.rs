@@ -111,6 +111,19 @@ pub enum ChatItem {
     /// A kernel reminder addressed to the model, shown dim so the user
     /// knows why the next reply starts with a page update.
     Nudge(String),
+    /// A wake that opened a turn with no prompt of the user's — a worker's
+    /// report (`done`, `say`), a subscription (`serve`), a job. Cursor's
+    /// Project chat draws each as its own "Worked Ns" segment with the
+    /// coordinator's words under it; this item is the segment's boundary
+    /// and carries its clock. Draws nothing itself.
+    Wake {
+        kind: String,
+        text: Option<String>,
+        /// Unix millis the kernel wrote the wake, when known.
+        at: Option<i64>,
+        /// Wall seconds from the wake to the turn's end, once stamped.
+        secs: Option<u32>,
+    },
     /// Files a tool produced for the user to look at: screenshots and
     /// screen recordings. One row per tool call; click opens the file.
     Artifacts(Vec<Artifact>),
@@ -945,6 +958,18 @@ impl ChatSession {
                 .any(|item| matches!(item, ChatItem::User(_)))
         {
             self.kickoff_secs = Some(at.elapsed().map(|d| d.as_secs() as u32).unwrap_or(0));
+            return;
+        }
+        // A segment a wake opened (a worker's report) takes the stamp: it
+        // is the turn that just ended, not the prompt before it.
+        if let Some(ChatItem::Wake { secs, .. }) = self
+            .items
+            .iter_mut()
+            .rev()
+            .find(|item| matches!(item, ChatItem::User(_) | ChatItem::Wake { .. }))
+            && secs.is_none()
+        {
+            *secs = Some(elapsed.as_secs().min(u32::MAX as u64) as u32);
             return;
         }
         let Some(ChatItem::User(message)) = self
@@ -2380,7 +2405,38 @@ impl ChatSession {
                     self.flush();
                 }
             }
-            Event::Woke => self.new_turn_steps(),
+            Event::Woke { kind, text, at } => {
+                self.new_turn_steps();
+                // The kernel writes `wake` then `user` for a prompt: the
+                // user line is that turn's boundary. Every other kind opens
+                // a segment of its own (F-62).
+                if kind != "user" && kind != "kickoff" && kind != "compact" {
+                    let dup = matches!(self.items.last(), Some(ChatItem::Wake { at: Some(prev), .. }) if Some(*prev) == at);
+                    if !dup {
+                        self.items.push(ChatItem::Wake {
+                            kind,
+                            text,
+                            at,
+                            secs: None,
+                        });
+                        // The kernel writes the worker's report (`say`) and
+                        // then the wake it caused. Cursor's segment opens
+                        // with its "Worked" header and the report under it:
+                        // the wake goes first, the report inside.
+                        let n = self.items.len();
+                        if n >= 2 && matches!(self.items[n - 2], ChatItem::From { .. }) {
+                            self.items.swap(n - 2, n - 1);
+                        }
+                        // The segment's clock: "Working" counts from here
+                        // and "Worked Ns" is stamped from it at the end.
+                        self.flight = Some(Flight {
+                            at: SystemTime::now(),
+                            used: self.usage.map_or(0, |usage| usage.used),
+                        });
+                        self.flush();
+                    }
+                }
+            }
             Event::TextDelta { text, step } => {
                 self.turn_alive();
                 self.finish_thinking();
@@ -2839,7 +2895,7 @@ impl ChatSession {
     pub fn plan_queued(&self) -> usize {
         self.plan
             .iter()
-            .filter(|n| n.inbox && n.status == "pending" && n.do_kind != "steer")
+            .filter(|n| n.inbox && n.status == "pending" && is_user_followup(n))
             .count()
     }
 
@@ -3638,6 +3694,17 @@ fn pump(
 /// after a worker started or reported.
 pub fn is_page_nudge(text: &str) -> bool {
     text.trim_start().starts_with("project page not updated")
+}
+
+/// An inbox node the user put there — a follow-up typed while the turn
+/// ran. A worker's report (`say`, `done`), an answer, a subscription
+/// firing wait in the same inbox and are the kernel's to deliver: they are
+/// not the user's queue, and "Send now / Edit / Remove" would be wrong on
+/// them (F-68).
+pub fn is_user_followup(node: &PlanNode) -> bool {
+    // The kernel files every non-steer inbox message as `agent`; who put
+    // it there is in `origin`.
+    node.do_kind != "steer" && (node.origin.is_empty() || node.origin == "user")
 }
 
 /// A standing node the kernel keeps for itself: it marks the prompt so and

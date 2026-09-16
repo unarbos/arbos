@@ -1262,6 +1262,7 @@ fn item_json(item: &ChatItem) -> Value {
             "text": cut(text),
             "failed": failed,
         }),
+        ChatItem::Wake { kind, secs, .. } => json!({ "kind": "wake", "wake": kind, "secs": secs }),
         ChatItem::Nudge(text) => json!({
             "kind": "nudge",
             "text": cut(text),

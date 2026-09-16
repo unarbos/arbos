@@ -2607,7 +2607,9 @@ impl Arbos {
         let queued: Vec<PlanNode> = chat
             .plan
             .iter()
-            .filter(|n| n.inbox && n.status == "pending" && n.do_kind != "steer")
+            .filter(|n| {
+                n.inbox && n.status == "pending" && crate::model::session::is_user_followup(n)
+            })
             .cloned()
             .collect();
         self.followups(id, &queued, &theme, cx)
