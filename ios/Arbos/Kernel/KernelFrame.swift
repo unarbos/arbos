@@ -150,7 +150,8 @@ enum KernelFrame {
     case seen(through: Int)
     /// The hub's answer to `push`: it holds this phone's token for
     /// `project`; `enabled` is false while the hub has no Apple key.
-    case pushed(project: String, enabled: Bool)
+    /// `reason` says why pushes are off (#333): no key on the hub, a bad key.
+    case pushed(project: String, enabled: Bool, reason: String?)
     /// The outcome of a `put`: `error` says why a file did not land.
     case written(path: String, error: String?)
     case other(type: String)
@@ -185,7 +186,7 @@ enum KernelFrame {
         case "seen":
             self = .seen(through: object["through"] as? Int ?? 0)
         case "pushed":
-            self = .pushed(project: object["project"] as? String ?? "", enabled: object["enabled"] as? Bool ?? false)
+            self = .pushed(project: object["project"] as? String ?? "", enabled: object["enabled"] as? Bool ?? false, reason: object["reason"] as? String)
         case "written":
             self = .written(path: object["path"] as? String ?? "", error: object["error"] as? String)
         case "error":

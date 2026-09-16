@@ -90,7 +90,7 @@ struct RootView: View {
                 guard let chat, let notifier else { return }
                 notifier.clear(through: through, target: chat.settings.kernelTarget.stored, remaining: chat.unseen.count)
             }
-            chat.onPushed = { [weak notifier] enabled in notifier?.hubAnswered(enabled: enabled) }
+            chat.onPushed = { [weak notifier] enabled, reason in notifier?.hubAnswered(enabled: enabled, reason: reason) }
             chat.pushToken = notifier.deviceToken
         }
         // The token arrives after launch (and rotates): the chat sends it

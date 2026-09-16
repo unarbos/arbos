@@ -194,15 +194,15 @@ final class LiveKernelChat: ChatSource {
             stream?.yield(.notify(notification))
         case .seen(let through):
             stream?.yield(.seen(through: through))
-        case .pushed(_, let enabled):
-            stream?.yield(.pushed(enabled: enabled))
+        case .pushed(_, let enabled, let reason):
+            stream?.yield(.pushed(enabled: enabled, reason: reason))
         case .thinkingDelta:
             break
         case .error(let detail):
             // A hub from before #301 passes `push` to the kernel, which does
             // not know it: that is "no push here", not a line for the chat.
             if detail.contains("unknown frame type \"push\"") {
-                stream?.yield(.pushed(enabled: false))
+                stream?.yield(.pushed(enabled: false, reason: "the hub is an older build that does not relay push"))
                 return
             }
             // A kernel from before #270 parses `put` as nothing it knows.

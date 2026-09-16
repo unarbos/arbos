@@ -60,7 +60,7 @@ final class ChatStore: ObservableObject {
     /// Every client saw up to this id: banners and the badge go.
     var onSeen: ((Int) -> Void)?
     /// The hub answered `push`: can it push to this phone?
-    var onPushed: ((Bool) -> Void)?
+    var onPushed: ((Bool, String?) -> Void)?
     /// This phone's APNs token, once iOS gave one; sent on every attach.
     var pushToken: String? {
         didSet { if pushToken != oldValue { registerPushIfLive() } }
@@ -512,8 +512,8 @@ final class ChatStore: ObservableObject {
         case .seen(let through):
             unseen.removeAll { $0.id <= through }
             onSeen?(through)
-        case .pushed(let enabled):
-            onPushed?(enabled)
+        case .pushed(let enabled, let reason):
+            onPushed?(enabled, reason)
         case .agents(let list):
             agents = list
         case .workers(let list):
