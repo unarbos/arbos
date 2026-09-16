@@ -95,6 +95,8 @@ struct MachineEntry {
     labels: Vec<String>,
     capabilities: Vec<String>,
     version: String,
+    git_sha: String,
+    built_at: String,
     since: i64,
     worker: Option<Arc<Registrant>>,
     /// Checkouts the worker offered.
@@ -206,6 +208,8 @@ impl MachineEntry {
             labels: self.labels.clone(),
             capabilities: self.capabilities.clone(),
             version: self.version.clone(),
+            git_sha: self.git_sha.clone(),
+            built_at: self.built_at.clone(),
             worker: self.worker.is_some(),
             projects,
             since: self.since,
@@ -414,6 +418,8 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         labels,
         capabilities,
         version,
+        git_sha,
+        built_at,
         protocol,
     }) = first.and_then(|l| serde_json::from_str::<HubFrame>(&l).ok())
     else {
@@ -494,6 +500,12 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         }
         if !version.is_empty() {
             entry.version = version;
+        }
+        if !git_sha.is_empty() {
+            entry.git_sha = git_sha;
+        }
+        if !built_at.is_empty() {
+            entry.built_at = built_at;
         }
         // The latest word on a project's face wins (a kernel's over an
         // older worker's, a re-registration over the last).

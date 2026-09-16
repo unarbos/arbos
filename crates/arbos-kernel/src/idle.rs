@@ -141,6 +141,47 @@ pub fn verdict(hooks: &Arc<KernelHooks>, horizon_ms: i64) -> Verdict {
     Verdict::Idle
 }
 
+/// The gate for a restart the kernel does to itself (a binary update):
+/// `verdict()` with three corrections for that caller.
+///
+/// - A parked **ask** is not a reason to wait: the question is a file
+///   (`waiting/ask-*.toml`), the answer arrives as an inbox file, and the
+///   new kernel opens the turn. `Waiting` reads as `Idle` here.
+/// - A pending **approval** already reads as `Busy` (its turn is blocked
+///   inside the tool), so `clear_approves` at the next boot never sees one
+///   that mattered.
+/// - A running **detached job** is `Busy`: the job's leash kills it the
+///   moment its kernel dies, and a `keep` file only spares the boot reap.
+///   A remote child mid-turn is `Busy` too: its report would land on a
+///   kernel that is gone.
+///
+/// `horizon_ms` is the expected downtime, not `--until-idle`'s hour: a
+/// place with an hourly timer would never update otherwise.
+pub fn update_verdict(hooks: &Arc<KernelHooks>, horizon_ms: i64) -> Verdict {
+    match verdict(hooks, horizon_ms) {
+        Verdict::Busy(why) => return Verdict::Busy(why),
+        Verdict::Idle | Verdict::Waiting(_) => {}
+    }
+    for agent in list_agents(&hooks.place).unwrap_or_default() {
+        let id = agent.id.as_str();
+        if hooks.remotes.is_running(id) {
+            return Verdict::Busy(format!(
+                "{id}: a turn runs on {}",
+                agent.remote.as_deref().unwrap_or("another machine")
+            ));
+        }
+        let root = arbos_engine::JobsRoot::for_agent(&hooks.place, &agent.id);
+        if let Some(job) = root.list().into_iter().find(|j| j.running()) {
+            return Verdict::Busy(format!(
+                "{id}: job {} is running ({}); a restart would kill it",
+                job.id,
+                arbos_core::text::clip(&job.meta.command, 60)
+            ));
+        }
+    }
+    Verdict::Idle
+}
+
 /// `--leash`: exit when unattended. See `LEASH_ENV`.
 pub struct Leash {
     after: std::time::Duration,
@@ -194,5 +235,71 @@ mod leash_tests {
         assert!(!l.poll(0, false), "the clock restarted at the turn");
         std::thread::sleep(Duration::from_millis(60));
         assert!(l.poll(0, false));
+    }
+}
+
+#[cfg(test)]
+mod update_verdict_tests {
+    use super::*;
+    use arbos_core::Place;
+
+    /// The self-updater's gate: an ask does not hold it (the question
+    /// survives a restart); a running job does (the leash kills it).
+    #[test]
+    fn a_parked_ask_lets_an_update_through_and_a_running_job_holds_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = Place::new(dir.path());
+        std::fs::create_dir_all(place.arbos().join("runtime")).unwrap();
+        arbos_core::Agent::root("root")
+            .save(&place.agent_dir("root"))
+            .unwrap();
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (kick_tx, _kick_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = crate::hooks::KernelHooks::new(place.clone(), wake_tx, kick_tx);
+        assert!(matches!(update_verdict(&hooks, 10_000), Verdict::Idle));
+        // A question parked on the user: `verdict` says Waiting, the
+        // update gate says go.
+        arbos_core::waiting::write(
+            &place,
+            "root",
+            &arbos_core::waiting::Waiting {
+                kind: "ask".into(),
+                id: "call_1".into(),
+                question: "Which branch?".into(),
+                options: vec![],
+                tool: String::new(),
+                asked: String::new(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(verdict(&hooks, 10_000), Verdict::Waiting(_)));
+        assert!(matches!(update_verdict(&hooks, 10_000), Verdict::Idle));
+        // A turn in flight holds both.
+        hooks.running.lock().unwrap().insert("root".into());
+        assert!(matches!(update_verdict(&hooks, 10_000), Verdict::Busy(_)));
+        hooks.running.lock().unwrap().clear();
+        // A running detached job holds the update gate alone.
+        let jobs = place.agent_dir("root").join("jobs").join("j1");
+        std::fs::create_dir_all(&jobs).unwrap();
+        std::fs::write(
+            jobs.join("meta.json"),
+            format!(
+                "{{\"command\":\"sleep 600\",\"cwd\":\"{}\",\"pid\":{},\"started_ms\":1}}",
+                dir.path().display(),
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        std::fs::write(jobs.join("out.log"), "").unwrap();
+        match update_verdict(&hooks, 10_000) {
+            Verdict::Busy(why) => {
+                assert!(why.contains("job j1") && why.contains("sleep 600"), "{why}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            matches!(verdict(&hooks, 10_000), Verdict::Waiting(_)),
+            "--until-idle is unchanged"
+        );
     }
 }
