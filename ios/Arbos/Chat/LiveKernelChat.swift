@@ -262,7 +262,13 @@ final class LiveKernelChat: ChatSource {
             // report, when it is done. "Starting" forever read as stuck
             // (Jacob, build 1021); say where it runs instead.
             let machine = (record.args?["machine"] as? String) ?? ""
-            setWorker(child, running: true, step: machine.isEmpty ? "Starting" : "Running on \(machine) · reports here when done")
+            // The spawn record comes twice — when the call starts and again
+            // when it ends (`wait: true`). Only the first may say "running":
+            // the second arrives after the child's own turn went idle and
+            // was flipping a finished worker back to Working (M-100).
+            if workers[child] == nil {
+                setWorker(child, running: true, step: machine.isEmpty ? "Starting" : "Running on \(machine) · reports here when done")
+            }
         }
         guard let item = item(for: event, worker: false) else { return }
         if case .say = event, streamed {
