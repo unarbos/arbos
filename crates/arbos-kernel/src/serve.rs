@@ -926,6 +926,14 @@ fn handle_frame(
                 sched.stop(&id);
             }
         }
+        Frame::Seen { through } => {
+            // Read on one client is read on all: every window drops its
+            // badge together.
+            match arbos_core::notify::mark_seen(place, through) {
+                Ok(now) => hooks.broadcast(Frame::Seen { through: now }),
+                Err(e) => klog::warn("seen_failed", None, format!("{e:#}")),
+            }
+        }
         Frame::Compact { agent } => {
             if !sched.request_compact(&agent) {
                 let _ = wakes.send(Wake::compact(&agent));
@@ -1788,6 +1796,19 @@ pub async fn serve_client(
                 ATTACH_TAIL,
                 &out_tx,
             );
+            // What the user missed while no client was attached: the
+            // unseen notifications, oldest first, marked as replayed.
+            for n in arbos_core::notify::unseen(&accept_place) {
+                let _ = out_tx.send(Frame::Notify {
+                    id: n.id,
+                    ts: n.ts,
+                    agent: n.agent,
+                    kind: n.kind,
+                    title: n.title,
+                    body: n.body,
+                    replayed: true,
+                });
+            }
             tokio::spawn(attach::write_loop(w, out_rx));
             // History requests are answered on this connection alone;
             // everything else goes to the kernel like before.

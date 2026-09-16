@@ -11,7 +11,7 @@ use crate::{
         session::{Artifact, ArtifactKind},
     },
 };
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use arbos_core::wire::Frame;
 use cacp::{
     Error,
@@ -109,7 +109,12 @@ pub enum Event {
     },
     /// A recorded `wake`: a turn opens (a prompt, a child's report, a
     /// subscription firing); the model's step numbers start again at 1.
-    Woke,
+    /// A kind other than `user`/`kickoff` is a segment of its own.
+    Woke {
+        kind: String,
+        text: Option<String>,
+        at: Option<i64>,
+    },
     /// The model call is alive and has been silent for this many seconds
     /// (`working` frame). Live only.
     Working(u64),
@@ -423,15 +428,11 @@ impl Session {
     /// relative path the kernel will know it by.
     fn put_attachment(&self, path: &Path) -> Result<String> {
         use base64::Engine;
+        // No size check here: the kernel holds the file to `PUT_MAX_BYTES`
+        // and its refusal comes back as a `written` frame the chat shows,
+        // where a silent fallback to a path the kernel cannot read would
+        // not. The tray caps the total before this point anyway.
         let bytes = std::fs::read(path)?;
-        if bytes.len() > arbos_core::wire::PUT_MAX_BYTES {
-            bail!(
-                "{} is {} MB; the kernel takes at most {} MB",
-                path.display(),
-                bytes.len() / (1024 * 1024),
-                arbos_core::wire::PUT_MAX_BYTES / (1024 * 1024)
-            );
-        }
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -876,7 +877,11 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
         EventKind::Wake { wake, .. } if wake == "kickoff" && !recorded => {
             vec![Event::Status("Setting up environment".into())]
         }
-        EventKind::Wake { .. } if recorded => vec![Event::Woke],
+        EventKind::Wake { wake, text, .. } if recorded => vec![Event::Woke {
+            kind: wake,
+            text,
+            at: (ts > 0).then_some(ts),
+        }],
         // A transcript line (tailed or replayed) is the step's final text;
         // a live emit without a seq is a delta (older kernels send those
         // as events too).

@@ -1325,17 +1325,32 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
             }
             match &ev.kind {
                 arbos_core::EventKind::User { .. } if !steer => turn_began = Some(ev.ts),
+                // A wake of the kernel's own (a worker's report, a
+                // subscription) opens a segment whose clock starts here.
+                arbos_core::EventKind::Wake { wake, .. }
+                    if !matches!(wake.as_str(), "user" | "kickoff" | "compact" | "plan") =>
+                {
+                    turn_began = Some(ev.ts)
+                }
                 arbos_core::EventKind::Thinking { .. } => {
                     thinking_since.get_or_insert(ev.ts);
                 }
                 arbos_core::EventKind::TurnComplete { .. } => {
                     if let Some(began) = turn_began.take() {
-                        if let Some(crate::model::session::ChatItem::User(message)) = items
-                            .iter_mut()
-                            .rev()
-                            .find(|item| matches!(item, crate::model::session::ChatItem::User(_)))
-                        {
-                            message.worked_secs = secs_between(began, ev.ts);
+                        match items.iter_mut().rev().find(|item| {
+                            matches!(
+                                item,
+                                crate::model::session::ChatItem::User(_)
+                                    | crate::model::session::ChatItem::Wake { .. }
+                            )
+                        }) {
+                            Some(crate::model::session::ChatItem::User(message)) => {
+                                message.worked_secs = secs_between(began, ev.ts);
+                            }
+                            Some(crate::model::session::ChatItem::Wake { secs, .. }) => {
+                                *secs = secs_between(began, ev.ts);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1344,6 +1359,21 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
             if let Some(mut item) = event_to_item(&ev) {
                 if steer && let crate::model::session::ChatItem::User(message) = &mut item {
                     message.steer = true;
+                }
+                // A wake written after the worker's `say` that caused it
+                // opens the segment; the report reads under its header.
+                if matches!(item, crate::model::session::ChatItem::Wake { .. })
+                    && matches!(
+                        items.last(),
+                        Some(crate::model::session::ChatItem::From { .. })
+                    )
+                {
+                    let report = items.pop();
+                    items.push(item);
+                    if let Some(report) = report {
+                        items.push(report);
+                    }
+                    continue;
                 }
                 // A `status` call between two reasoning steps draws no row;
                 // the thoughts on either side of it are one thought.
@@ -1503,6 +1533,18 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
                 crate::model::attachment::UserMessage::from(wake_brief(text, brief.as_deref()));
             message.sent_at = (ev.ts > 0).then_some(ev.ts);
             Some(ChatItem::User(message))
+        }
+        // A worker's report or a subscription firing: a segment of its own
+        // in the Project chat, as Cursor draws it (F-62).
+        arbos_core::EventKind::Wake { wake, text, .. }
+            if !matches!(wake.as_str(), "user" | "kickoff" | "compact" | "plan") =>
+        {
+            Some(ChatItem::Wake {
+                kind: wake.clone(),
+                text: text.clone(),
+                at: (ev.ts > 0).then_some(ev.ts),
+                secs: None,
+            })
         }
         arbos_core::EventKind::Assistant { text, .. } if text.trim().is_empty() => None,
         arbos_core::EventKind::Assistant { text, .. } => Some(ChatItem::Agent(text.clone())),
