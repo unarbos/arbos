@@ -198,6 +198,12 @@ final class LiveKernelChat: ChatSource {
         case .thinkingDelta:
             break
         case .error(let detail):
+            // A hub from before #301 passes `push` to the kernel, which does
+            // not know it: that is "no push here", not a line for the chat.
+            if detail.contains("unknown frame type \"push\"") {
+                stream?.yield(.pushed(enabled: false))
+                return
+            }
             // The hub saying the kernel went away is the link going, not a
             // line for the transcript: the store's one calm line covers it.
             if detail.contains("went away") || detail.contains("closed") {
