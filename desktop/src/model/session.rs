@@ -2835,6 +2835,35 @@ impl ChatSession {
             }
             Event::Refused(detail) => {
                 self.rewind_to = None;
+                // A keyless kernel (#312) answers `kickoff` with this and no
+                // turn: the setup bar under the composer is the cue, and
+                // the kickoff is over — nothing waits behind it.
+                if detail.starts_with(KICKOFF_NOT_STARTED) {
+                    if self.kickoff_at.is_some() && self.kickoff_secs.is_none() {
+                        self.kickoff_secs = Some(0);
+                    }
+                    self.flight = None;
+                    self.streaming = false;
+                    self.turn_open = false;
+                    self.flush();
+                    self.drain();
+                    return;
+                }
+                // A keyless kernel kept the typed line in its inbox instead
+                // of spending a turn on it (#312): no turn is coming, so the
+                // card must not sit under a shimmer. The line says what is
+                // missing and what became of the words (the kernel writes
+                // the same words on the transcript; identical notices read
+                // once); the pending row under the composer shows them
+                // waiting, and the setup bar says where a key goes.
+                if detail.contains(LINE_KEPT_FOR_KEY) {
+                    self.flight = None;
+                    self.streaming = false;
+                    self.turn_open = false;
+                    self.notice(true, &detail);
+                    self.flush();
+                    return;
+                }
                 self.notice(true, &detail);
                 self.flush();
                 // The kernel no longer has this agent: the row keeps its
@@ -4012,6 +4041,15 @@ pub const STOPPED_BY_YOU: &str = "Stopped by you";
 pub fn is_interrupt_notice(text: &str) -> bool {
     text == STOPPED_BY_YOU || text.starts_with("Interrupted")
 }
+
+/// The kernel's answer to `kickoff` on a place with no model key (#312):
+/// no turn follows.
+const KICKOFF_NOT_STARTED: &str = "kickoff not started:";
+
+/// In the kernel's line when it kept a typed prompt in its inbox for want
+/// of a key (#312): "… Your message is kept and runs once a key is in
+/// place: <the words>".
+pub(crate) const LINE_KEPT_FOR_KEY: &str = "Your message is kept and runs once a key is in place";
 
 /// The kernel's notice while an `ask` is parked with the user.
 fn is_waiting_line(text: &str) -> bool {

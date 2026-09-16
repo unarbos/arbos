@@ -2646,6 +2646,13 @@ impl Arbos {
         let theme = Theme::of(cx).clone();
         let chat = self.workspace.read(cx).active_session()?;
         let id = chat.id;
+        // A keyless kernel keeps the words instead of running them (#312):
+        // the row says what they wait for.
+        let waits_for = if chat.provider_missing.is_some() && !chat.busy() {
+            "runs once a model key is in place"
+        } else {
+            "runs when this turn ends"
+        };
         let queued: Vec<PlanNode> = chat
             .plan
             .iter()
@@ -2654,7 +2661,7 @@ impl Arbos {
             })
             .cloned()
             .collect();
-        self.followups(id, &queued, &theme, cx)
+        self.followups(id, &queued, waits_for, &theme, cx)
     }
 
     /// Messages the kernel holds for this chat that have not run yet
@@ -2665,6 +2672,7 @@ impl Arbos {
         &self,
         id: u64,
         queued: &[PlanNode],
+        waits_for: &'static str,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -2697,7 +2705,7 @@ impl Arbos {
                     .flex_1()
                     .text_style(TextStyle::Caption)
                     .text_color(theme.text_faint)
-                    .child("runs when this turn ends"),
+                    .child(waits_for),
             );
         let rows = queued.iter().map(|n| {
             let node = n.id;

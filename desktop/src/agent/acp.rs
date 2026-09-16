@@ -966,6 +966,14 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
             )))]
         }
         EventKind::Say { from, text } => vec![Event::Incoming { who: from, text }],
+        // A keyless kernel kept the typed line for a key (#312): no turn
+        // was spent, so this is not a turn failure — the same words as its
+        // `error` frame, which the session reads once.
+        EventKind::Notice { text, failed: true }
+            if text.contains(crate::model::session::LINE_KEPT_FOR_KEY) =>
+        {
+            vec![Event::Refused(text)]
+        }
         EventKind::Notice { text, failed: true } => {
             vec![Event::TurnDone(Err(Error::internal_error().data(text)))]
         }
