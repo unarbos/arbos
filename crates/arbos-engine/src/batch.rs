@@ -103,22 +103,26 @@ impl Outcome {
             (body, error)
         };
         let result_size = body.len() as u64;
-        Event::new(EventKind::Tool(ToolRec {
-            name: call.name.clone(),
-            call_id: call.id.clone(),
-            step,
-            paths,
-            started,
-            ended,
-            result_size: Some(result_size),
-            error,
-            body: Some(body),
-            args: Some(call.arguments.clone()),
-            child,
-            images,
-            diff,
-            label: call_label(&call.arguments),
-        }))
+        Event::new(EventKind::Tool(
+            ToolRec {
+                name: call.name.clone(),
+                call_id: call.id.clone(),
+                step,
+                paths,
+                started,
+                ended,
+                result_size: Some(result_size),
+                error,
+                body: Some(body),
+                args: Some(call.arguments.clone()),
+                child,
+                images,
+                diff,
+                label: call_label(&call.arguments),
+                output: None,
+            }
+            .with_output(),
+        ))
     }
 }
 
@@ -350,6 +354,7 @@ pub async fn run(
                     images: vec![],
                     diff: None,
                     label: call_label(&call.arguments),
+                    output: None,
                 };
                 // On disk before it runs: a kernel that dies mid-call
                 // leaves this for the next one to write up (qal-j02).
