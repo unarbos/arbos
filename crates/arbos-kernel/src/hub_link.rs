@@ -497,10 +497,14 @@ where
                 | Frame::Listing { path, .. }
                 | Frame::Written { path, .. }
                 | Frame::Chunk { path, .. } => *path == want,
+                // The hub's own refusal, or the kernel refusing this
+                // client's role ("a reader client may not send put"): that
+                // is the answer, in the words the user should read. Other
+                // errors are broadcast to every client and are not ours.
                 Frame::Error {
                     agent: None,
                     detail,
-                } if detail.starts_with("hub:") => {
+                } if detail.starts_with("hub:") || detail.contains("may not send") => {
                     bail!("{addr}: {detail}")
                 }
                 _ => false,
