@@ -88,6 +88,10 @@ final class LiveKernelChat: ChatSource {
         try? client.seen(through: through)
     }
 
+    func registerPush(token: String, sandbox: Bool) {
+        try? client.registerPush(token: token, sandbox: sandbox)
+    }
+
     func earlier(before seq: Int, limit: Int) async -> HistoryPage? {
         guard seq > 1 else { return nil }
         return await page(agent: focus) { try client.history(agent: focus, before: seq, limit: limit) }
@@ -189,6 +193,8 @@ final class LiveKernelChat: ChatSource {
             stream?.yield(.notify(notification))
         case .seen(let through):
             stream?.yield(.seen(through: through))
+        case .pushed(_, let enabled):
+            stream?.yield(.pushed(enabled: enabled))
         case .thinkingDelta:
             break
         case .error(let detail):

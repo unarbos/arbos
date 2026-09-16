@@ -91,10 +91,7 @@ struct ProjectChatView: View {
         .navigationDestination(item: $worker) { worker in
             WorkerChatView(worker: worker, project: identity)
         }
-        .task(id: target) {
-            await chat.switchTarget(target)
-            notifier.requestIfNeeded()
-        }
+        .task(id: target) { await chat.switchTarget(target) }
         .onChange(of: dictation.text) { _, words in
             if dictation.active || !words.isEmpty { draft = words }
         }
@@ -329,6 +326,9 @@ struct ProjectChatView: View {
         followGrowth = true
         heldRow = nil
         chat.send(draft, attachments: attachments)
+        // The first message sent is the moment to ask about being told
+        // when the answer comes.
+        notifier.requestIfNeeded()
         draft = ""
         attachments = []
     }

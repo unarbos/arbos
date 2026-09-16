@@ -58,6 +58,18 @@ final class ChatStore: ObservableObject {
     var onNotify: ((KernelNotification) -> Void)?
     /// Every client saw up to this id: banners and the badge go.
     var onSeen: ((Int) -> Void)?
+    /// The hub answered `push`: can it push to this phone?
+    var onPushed: ((Bool) -> Void)?
+    /// This phone's APNs token, once iOS gave one; sent on every attach.
+    var pushToken: String? {
+        didSet { if pushToken != oldValue { registerPushIfLive() } }
+    }
+    /// Debug builds get sandbox tokens; the hub posts to the sandbox host for them.
+    #if DEBUG
+    private let pushSandbox = true
+    #else
+    private let pushSandbox = false
+    #endif
     /// What the user missed while away (replayed on attach) plus what
     /// arrived live and is not yet seen; the "while you were away" card.
     @Published private(set) var unseen: [KernelNotification] = []
@@ -187,6 +199,7 @@ final class ChatStore: ObservableObject {
         do {
             try await live.start()
             mode = .live
+            registerPushIfLive()
             return true
         } catch {
             #if DEBUG
@@ -284,6 +297,11 @@ final class ChatStore: ObservableObject {
         } else {
             earlierLines = 0
         }
+    }
+
+    private func registerPushIfLive() {
+        guard mode == .live, let token = pushToken, let source else { return }
+        source.registerPush(token: token, sandbox: pushSandbox)
     }
 
     /// The user has seen the card: tell the kernel, which tells every
@@ -454,6 +472,8 @@ final class ChatStore: ObservableObject {
         case .seen(let through):
             unseen.removeAll { $0.id <= through }
             onSeen?(through)
+        case .pushed(let enabled):
+            onPushed?(enabled)
         case .agents(let list):
             agents = list
         case .workers(let list):
