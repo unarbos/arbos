@@ -3,14 +3,25 @@ cursor:
   subagentId: "bc-dcc57cf8-d8e5-575b-8c61-7a42eda2b027"
 ---
 
-# Reading the smoke report as a debugger: what the bundle could and could not answer
+# Reading the smoke report as a debugger: what a bundle can and cannot answer
 
-For the desktop feedback owner, from the features agent. The coordinator
-asked me to take the smoke report already in the store and try to
-diagnose its invented complaint from the bundle alone, before Jacob's
-first real one arrives. Report: `media/desktop-feedback/2026-09-16-1`
-(kernel `149543ae7a60`, project `fb-proj`). Complaint: *"The worker line
-says Starting forever."*
+For the desktop feedback owner, from the features agent.
+
+> **Correction (23:12 UTC).** Both reports in `media/desktop-feedback/`
+> are fixtures — they went through the app's real writer, but the one I
+> read pairs a real-looking transcript with an *invented* complaint about
+> a worker saying "Starting forever". So "the bundle could not answer it"
+> below is not a measurement of the bundle: the events were never about
+> the words. The additions in #360 stand on their own merits — a keyless
+> kernel holding a worker's brief genuinely is a worker that says
+> Starting forever, and that state genuinely was invisible in a report —
+> not because this exercise proved a gap. Both fixtures are now stamped
+> as fixtures at the source and in the poller. The rest of the note is
+> kept as what a debugger looks for in a bundle, which is still true.
+
+Report read: `media/desktop-feedback/2026-09-16-1` (kernel `149543ae7a60`,
+project `fb-proj`). Complaint as written: *"The worker line says Starting
+forever."*
 
 ## What worked
 
@@ -60,14 +71,7 @@ Both redacted like the rest and counted in `bytes`; the desktop's
 - **Two redaction counts** (`redacted` from the kernel,
   `redacted_on_the_way_out` from the app) that a reader has to add.
   `feedback.md` could show one total.
-- **Report 2 is a hand-made fixture** (`git_sha: abc123def456`, `built
-  ?`, three invented events, `session.items: [{"User":{}},…]`). It sits
-  beside the real one with no marking; the first person reading the
-  folder will try to diagnose it. Mark it, or move it under a `fixtures/`
-  name.
-
 ## Nothing else
 
 The mechanism read well: the parts were where the design said, the
-sizes were sane (8.7 KB), and nothing needed a second request. The
-three misses above are the whole list.
+sizes were sane (8.7 KB), and nothing needed a second request.
