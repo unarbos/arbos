@@ -62,6 +62,38 @@ pub enum Frame {
         #[serde(default)]
         limit: u32,
     },
+    /// Client → kernel: the material for a feedback report about one
+    /// turn of `agent` — the turn holding `seq` (a line the user is
+    /// looking at), or the latest turn when absent. Answered with
+    /// `feedback_bundle`: the turn's transcript lines slimmed (tool bodies
+    /// replaced by their `output` glance, no diffs, no bytes), the
+    /// kernel log for the turn's span, and which build answered — all
+    /// redacted of credentials and bounded in size, so a client can send
+    /// it as it is. `note` is the user's own words, redacted the same way
+    /// and carried back so one object holds the report.
+    Feedback {
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        note: String,
+    },
+    /// Kernel → client: the answer to `feedback`. `events` and `log` are
+    /// JSON as the transcript and kernel.log hold them, after redaction;
+    /// `redacted` counts what went; `truncated` says the size cap cut
+    /// older lines; `bytes` is the size of this frame's payload.
+    FeedbackBundle {
+        agent: String,
+        turn: serde_json::Value,
+        events: Vec<serde_json::Value>,
+        log: Vec<serde_json::Value>,
+        kernel: serde_json::Value,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        note: String,
+        redacted: serde_json::Value,
+        truncated: bool,
+        bytes: u64,
+    },
     /// Kernel → client: one transcript line replayed on attach or for a
     /// `history` request. Its own frame so a client that already holds the
     /// transcript (the desktop reads the files) can ignore replays while

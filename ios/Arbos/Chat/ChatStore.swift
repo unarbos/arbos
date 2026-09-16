@@ -353,9 +353,15 @@ final class ChatStore: ObservableObject {
         // steer at its next tool boundary; otherwise this starts one.
         let steer = busy
         if !unseen.isEmpty { markSeen() }
-        let shown = attachments.isEmpty ? trimmed : (trimmed.isEmpty ? "" : trimmed + "\n") + attachments.map { "📎 \($0.name)" }.joined(separator: "\n")
-        let card = ChatItem(.user(shown, pending: true))
-        closeOpenAgentMessage()
+        // Files are named on the card; photos are drawn on it.
+        let files = attachments.filter { !$0.isImage }
+        let shown = files.isEmpty ? trimmed : (trimmed.isEmpty ? "" : trimmed + "\n") + files.map { "📎 \($0.name)" }.joined(separator: "\n")
+        var card = ChatItem(.user(shown, pending: true))
+        card.images = attachments.filter(\.isImage).map(\.storedName)
+        for file in attachments where file.isImage { AttachmentCache.store(file.data, as: file.storedName) }
+        // A steer does not close the reply it interrupts: the words keep
+        // streaming above the card, which waits at the tail for its echo.
+        if !steer { closeOpenAgentMessage() }
         items.append(card)
         pendingSends.append((card.id, trimmed, steer, settings.kernelTarget))
         guard let source, mode == .live || mode == .server || mode == .mock else { return }
@@ -426,13 +432,17 @@ final class ChatStore: ObservableObject {
                 lastFirstToken = Date().timeIntervalSince(sentAt)
                 self.sentAt = nil
             }
-            if let index = items.indices.last, case .agent(let text, streaming: true) = items[index].kind,
+            // The open bubble is the last item, or the last one above the
+            // steer cards typed while it streamed: those ride at the tail
+            // so the reply keeps its place (journey run 5).
+            if let index = openAgentIndex, case .agent(let text, streaming: true) = items[index].kind,
                step == 0 || items[index].step == 0 || items[index].step == step {
                 items[index].kind = .agent(text + delta, streaming: true)
                 if items[index].step == 0 { items[index].step = step }
             } else {
                 closeOpenAgentMessage()
-                items.append(ChatItem(.agent(delta, streaming: true), step: step))
+                let at = items.lastIndex(where: { !$0.isPendingUser }).map { $0 + 1 } ?? items.count
+                items.insert(ChatItem(.agent(delta, streaming: true), step: step), at: at)
             }
         case .agentDone:
             closeOpenAgentMessage()
@@ -443,10 +453,24 @@ final class ChatStore: ObservableObject {
             // every turn, so only this turn's items — after the last prompt
             // card — are candidates; a settled line must never reach back
             // into an earlier reply.
-            let turnStart = items.lastIndex(where: { if case .user = $0.kind { return true } else { return false } }).map { $0 + 1 } ?? 0
-            let index = step > 0
+            let userCards = items.indices.filter { if case .user(_, pending: false) = items[$0].kind { return true } else { return false } }
+            let turnStart = userCards.last.map { $0 + 1 } ?? 0
+            var index = step > 0
                 ? items[turnStart...].lastIndex(where: { $0.isAgent && $0.step == step })
                 : items[turnStart...].lastIndex(where: \.isAgent)
+            // A steer typed while the reply streamed closed its bubble and
+            // now sits between the streamed words and the settled text
+            // ("That" … steer … "That line is already…", journey run 5).
+            // Reach back one card, but only for the bubble whose words the
+            // settled text begins with — never into an earlier reply.
+            if index == nil, userCards.count >= 2, !text.isEmpty {
+                let before = (userCards[userCards.count - 2] + 1)..<userCards[userCards.count - 1]
+                index = items[before].lastIndex(where: { item in
+                    guard item.isAgent, step == 0 || item.step == step, case .agent(let streamed, _) = item.kind else { return false }
+                    let head = streamed.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return !head.isEmpty && text.hasPrefix(head)
+                })
+            }
             if let index {
                 let wasOpen = items[index].isStreamingAgent
                 // The kernel's whole text for one step can land after the
@@ -519,8 +543,15 @@ final class ChatStore: ObservableObject {
         if items.count > 2000 { items.removeFirst(items.count - 2000) }
     }
 
+    /// The streaming bubble: the last item, or the last one above the
+    /// pending steer cards at the tail.
+    private var openAgentIndex: Int? {
+        guard let index = items.lastIndex(where: { !$0.isPendingUser }), items[index].isStreamingAgent else { return nil }
+        return index
+    }
+
     private func closeOpenAgentMessage() {
-        guard let index = items.indices.last,
+        guard let index = openAgentIndex,
               case .agent(let text, streaming: true) = items[index].kind else { return }
         // Markup a model wrote as a call goes; a reply that was only markup
         // settles to no line on the kernel (#278), so no bubble stays here.

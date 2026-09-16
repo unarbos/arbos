@@ -667,6 +667,8 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     };
 
     let mut nudged = false;
+    // The reason of the last nudge, for what the next reply may not say.
+    let mut nudge_reason: Option<&'static str> = None;
     // Replies with no words and no calls in a row (a done wake's silence
     // does not count): the second one is the model failing, not
     // answering — another model takes the turn, or the user is told.
@@ -917,7 +919,16 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         // looks broken on every client. The markup never reaches the
         // transcript; the words around it do, and the nudge below says
         // what happened (subnet120 from the phone, 2026-09-16).
-        let (content, had_markup) = crate::markup::strip_tool_markup(&content);
+        let (mut content, had_markup) = crate::markup::strip_tool_markup(&content);
+        // After "your reply was empty", an opening apology about the
+        // empty reply is the kernel's correction leaking into the chat
+        // ("Sorry — empty reply on my side, nothing blocking." was the
+        // first thing Jacob read). The answer follows it; the apology
+        // does not.
+        if nudge_reason == Some("empty reply") {
+            content = crate::apology::strip_empty_reply_apology(&content);
+            nudge_reason = None;
+        }
         // The provider's own count beats our chars/4 guess. Remember the
         // ratio against the *raw* estimate so it does not feed on itself.
         // The provider counts the tool schemas too; they go on our side as
@@ -934,8 +945,16 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 calib = (u.used as f64 / ours as f64).clamp(CALIB_MIN, CALIB_MAX);
             }
         }
+        // A `status` written as a line of text: the live line takes the
+        // words and the line is not a reply — written as one it was a
+        // code-looking bubble before the greeting, three to eleven of
+        // them with Gemini (qal J1). With no tool call beside it the turn
+        // is nudged on, not ended.
+        let mut spoke_only = false;
         if let Some(step) = arbos_core::status::spoken(&content) {
             hooks.spoke_status(&step);
+            content = String::new();
+            spoke_only = calls.is_empty();
         }
         // A final reply that says again what this turn, or the reply
         // before this wake, already said: not written twice. The turn
@@ -991,6 +1010,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         let empty_reply = calls.is_empty()
             && content.trim().is_empty()
             && !had_markup
+            && !spoke_only
             && wake.kind != WakeKind::Done
             && wake.kind != WakeKind::Serve;
         if empty_reply {
@@ -1058,13 +1078,18 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     "That was a tool call written as text, so nothing ran (the markup was not kept). Call the tool itself: the tools are functions, not text.".to_string(),
                     "tool call written as text",
                 ))
+            } else if spoke_only {
+                Some((
+                    "That line was a status, not a reply: the live line beside your name took it and the chat does not show it. Go on with the step it named — a tool call — or answer the user.".to_string(),
+                    "status written as text",
+                ))
             } else if content.trim().is_empty() {
                 // A done wake that has nothing to add ends in silence:
                 // Cursor's coordinator says nothing between worker reports
                 // when the user is owed nothing yet (cold-p5).
                 (wake.kind != WakeKind::Done).then(|| {
                     (
-                        "Your reply was empty. Continue the task, or say what is blocking you."
+                        "Your reply was empty. Continue the task, or say what is blocking you — and do not mention the empty reply or this note: the user saw neither, and an apology about it would be the first thing they read."
                             .to_string(),
                         "empty reply",
                     )
@@ -1107,6 +1132,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             };
             if let Some((text, reason)) = nudge {
                 nudged = true;
+                nudge_reason = Some(reason);
                 // The reply itself is already on the transcript (the
                 // Assistant line above); only the nudge follows it, or the
                 // window shows the same words twice.

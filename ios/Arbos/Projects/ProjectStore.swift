@@ -42,9 +42,11 @@ final class ProjectStore: ObservableObject {
         #if DEBUG
         print("roster: hub \(settings.hubURL) configured=\(settings.hubConfigured) token=\(settings.hubToken.count) chars")
         #endif
+        var hubAnswered = !settings.hubConfigured
         if settings.hubConfigured {
             do {
                 let machines = try await HubClient.list(hubURL: settings.hubURL, token: settings.hubToken)
+                hubAnswered = true
                 #if DEBUG
                 print("roster: \(machines.count) machines, \(machines.flatMap(\.projects).count) projects")
                 #endif
@@ -76,11 +78,20 @@ final class ProjectStore: ObservableObject {
                 #endif
             }
         }
+        if !hubAnswered {
+            // The hub did not answer: its rows from last time stay, marked
+            // off, instead of the list shrinking to the pod row and that
+            // shrunken list being cached (M-88, seen after an offline cold start).
+            for var row in entries where row.target != .pod && !list.contains(where: { $0.target == row.target }) {
+                row.live = false
+                list.append(row)
+            }
+        }
         if list.isEmpty, entries.isEmpty {
             problem = problem ?? "No kernel or hub is set. Open Settings."
         }
         if !list.isEmpty { entries = list }
-        saveCache()
+        if hubAnswered { saveCache() }
         loading = false
     }
 

@@ -14,12 +14,14 @@
 //! - [`kernel`] — the same, for an `arbos-kernel` binary that keeps itself
 //!   current between turns.
 //!
-//! Nothing here opens a socket. The desktop fetches with the HTTP client it
-//! already has; this crate only says what the bytes mean and where they go.
+//! The desktop fetches with the HTTP client it already has; [`net`] is for
+//! the two programs that update a *kernel*, so they reach the network the
+//! same way rather than each rolling their own.
 
 pub mod feed;
 pub mod install;
 pub mod kernel;
+pub mod net;
 pub mod sign;
 pub mod version;
 

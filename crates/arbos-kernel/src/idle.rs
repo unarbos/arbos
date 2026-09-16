@@ -141,19 +141,22 @@ pub fn verdict(hooks: &Arc<KernelHooks>, horizon_ms: i64) -> Verdict {
     Verdict::Idle
 }
 
-/// The gate for a restart the kernel does to itself (a binary update):
-/// `verdict()` with three corrections for that caller.
+/// The gate for a restart the kernel does to itself (a binary update,
+/// by `execv`: same pid, same children): `verdict()` with two
+/// corrections for that caller.
 ///
 /// - A parked **ask** is not a reason to wait: the question is a file
 ///   (`waiting/ask-*.toml`), the answer arrives as an inbox file, and the
-///   new kernel opens the turn. `Waiting` reads as `Idle` here.
+///   new image opens the turn. `Waiting` reads as `Idle` here.
 /// - A pending **approval** already reads as `Busy` (its turn is blocked
 ///   inside the tool), so `clear_approves` at the next boot never sees one
 ///   that mattered.
-/// - A running **detached job** is `Busy`: the job's leash kills it the
-///   moment its kernel dies, and a `keep` file only spares the boot reap.
-///   A remote child mid-turn is `Busy` too: its report would land on a
-///   kernel that is gone.
+/// - A remote child mid-turn is `Busy`: its report would land on a link
+///   the swap closes.
+///
+/// Detached jobs are not a reason to wait: their leash watches the
+/// kernel's pid, which `execv` keeps, and the boot reap takes only jobs
+/// whose parent is pid 1 — so they run on across the swap.
 ///
 /// `horizon_ms` is the expected downtime, not `--until-idle`'s hour: a
 /// place with an hourly timer would never update otherwise.
@@ -168,14 +171,6 @@ pub fn update_verdict(hooks: &Arc<KernelHooks>, horizon_ms: i64) -> Verdict {
             return Verdict::Busy(format!(
                 "{id}: a turn runs on {}",
                 agent.remote.as_deref().unwrap_or("another machine")
-            ));
-        }
-        let root = arbos_engine::JobsRoot::for_agent(&hooks.place, &agent.id);
-        if let Some(job) = root.list().into_iter().find(|j| j.running()) {
-            return Verdict::Busy(format!(
-                "{id}: job {} is running ({}); a restart would kill it",
-                job.id,
-                arbos_core::text::clip(&job.meta.command, 60)
             ));
         }
     }
@@ -244,9 +239,10 @@ mod update_verdict_tests {
     use arbos_core::Place;
 
     /// The self-updater's gate: an ask does not hold it (the question
-    /// survives a restart); a running job does (the leash kills it).
+    /// survives a restart), nor does a running job (execv keeps the pid
+    /// its leash watches); a turn in flight does.
     #[test]
-    fn a_parked_ask_lets_an_update_through_and_a_running_job_holds_it() {
+    fn a_parked_ask_and_a_running_job_let_an_update_through_and_a_turn_holds_it() {
         let dir = tempfile::tempdir().unwrap();
         let place = Place::new(dir.path());
         std::fs::create_dir_all(place.arbos().join("runtime")).unwrap();
@@ -278,7 +274,8 @@ mod update_verdict_tests {
         hooks.running.lock().unwrap().insert("root".into());
         assert!(matches!(update_verdict(&hooks, 10_000), Verdict::Busy(_)));
         hooks.running.lock().unwrap().clear();
-        // A running detached job holds the update gate alone.
+        // A running detached job does not hold it: execv keeps the pid
+        // its leash watches, so the job runs on across the swap.
         let jobs = place.agent_dir("root").join("jobs").join("j1");
         std::fs::create_dir_all(&jobs).unwrap();
         std::fs::write(
@@ -291,12 +288,7 @@ mod update_verdict_tests {
         )
         .unwrap();
         std::fs::write(jobs.join("out.log"), "").unwrap();
-        match update_verdict(&hooks, 10_000) {
-            Verdict::Busy(why) => {
-                assert!(why.contains("job j1") && why.contains("sleep 600"), "{why}")
-            }
-            other => panic!("{other:?}"),
-        }
+        assert!(matches!(update_verdict(&hooks, 10_000), Verdict::Idle));
         assert!(
             matches!(verdict(&hooks, 10_000), Verdict::Waiting(_)),
             "--until-idle is unchanged"

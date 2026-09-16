@@ -149,6 +149,19 @@ pub const NOTES_NUDGE_REASON: &str = "project page not updated";
 pub const CORRECTION_NUDGE: &str = "correction not kept: last turn the user corrected you or stated a way of working (\"{line}\") and nothing was saved — keep it now, in one call, before your reply: remember (scope:user when it is how they want to work everywhere; the place's memory when it is about this project), or an edit to docs/project-context.md when it is a goal, constraint, or decision.";
 pub const CORRECTION_NUDGE_REASON: &str = "correction not kept";
 
+/// How a `spawn wait=true` ended (`KernelHooks::wait_report`).
+pub enum WaitEnd {
+    /// The child's first report.
+    Report(String),
+    /// `wait_secs` passed; the report will come as a message.
+    Timeout,
+    /// The user spoke to the parent meanwhile; the words are read at this
+    /// tool boundary.
+    Steered,
+    /// The parent's turn was stopped.
+    Stopped,
+}
+
 pub struct KernelHooks {
     pub place: Place,
     /// Housekeeping wakes only (`Serve`, `Compact`). Work goes through the plan.
@@ -517,6 +530,55 @@ impl KernelHooks {
             .unwrap()
             .insert(child.to_string(), (parent.to_string(), tx));
         rx
+    }
+
+    /// `spawn wait=true`: block on `child`'s first report — or stop
+    /// waiting when the user speaks to `parent` meanwhile (a steer file in
+    /// its inbox), when `wait_secs` pass, or when the turn is stopped.
+    /// The steer is why: a coordinator parked in one tool call for the
+    /// minutes a worker takes would otherwise take a mid-flight follow-up
+    /// ("also add…", "what time is it?") only after the worker finished
+    /// (acceptance journey J4/J5). Returning lets the turn read the words
+    /// at this boundary; the child keeps working and its report arrives
+    /// as a message from it.
+    pub async fn wait_report(
+        &self,
+        parent: &str,
+        child: &str,
+        wait_secs: u64,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> WaitEnd {
+        let mut rx = self.wait_for(parent, child);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(400));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                r = &mut rx => {
+                    return match r {
+                        Ok(text) => WaitEnd::Report(text),
+                        Err(_) => { self.stop_waiting(child); WaitEnd::Timeout }
+                    };
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    self.stop_waiting(child);
+                    return WaitEnd::Timeout;
+                }
+                _ = cancel.cancelled() => {
+                    self.stop_waiting(child);
+                    return WaitEnd::Stopped;
+                }
+                _ = tick.tick() => {
+                    let steered = inbox::list(&self.place, parent)
+                        .iter()
+                        .any(|f| f.msg.kind == "steer" && f.msg.from == "user");
+                    if steered {
+                        self.stop_waiting(child);
+                        return WaitEnd::Steered;
+                    }
+                }
+            }
+        }
     }
 
     pub fn stop_waiting(&self, child: &str) {

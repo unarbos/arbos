@@ -781,6 +781,8 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
         | Frame::Configure { .. }
         | Frame::Replayed { .. }
         | Frame::HistoryEnd { .. }
+        | Frame::Feedback { .. }
+        | Frame::FeedbackBundle { .. }
         // A newer kernel's frame: nothing to show, nothing to lose.
         | Frame::Unknown => Vec::new(),
         Frame::Rewound {

@@ -82,6 +82,10 @@ final class SelfHostedVoiceSession: VoiceSession {
             "agents": mode == "voice",
         ]
         if mode != "voice" { start["mode"] = mode }
+        // Dictation is words for the field, nobody's turn: the gateway's
+        // kernel routing (PR #56) must not run on them. Observed 2026-09-16:
+        // a dictated line landed in the gateway's own project, unsent.
+        if mode == "dictation" { start["answerer"] = "model" }
         socket.send(json: start)
     }
 

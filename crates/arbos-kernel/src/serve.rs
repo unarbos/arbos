@@ -1308,6 +1308,12 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
     for ev in picked {
         let mut event = ev.clone();
         arbos_core::files::scrub_child_claims(place, agent, &mut event);
+        // A record from before `output` existed gets its glance here.
+        if let EventKind::Tool(rec) = &mut event.kind
+            && rec.output.is_none()
+        {
+            rec.output = rec.digest();
+        }
         let _ = out.send(Frame::Replayed {
             agent: agent.to_string(),
             event,
@@ -1925,6 +1931,57 @@ pub async fn serve_client(
                                 None => Page::After(since),
                             };
                             replay(&place_for_history, &agent, page, limit, &out_for_history);
+                        }
+                        // A feedback report's material: this client's
+                        // own, built here so a slow disk stalls it alone.
+                        Frame::Feedback { agent, seq, note } => {
+                            if !arbos_core::agent_exists(&place_for_history, &agent) {
+                                let _ = out_for_history.send(Frame::Error {
+                                    agent: Some(agent.clone()),
+                                    detail: format!("feedback: no agent is named {agent}"),
+                                });
+                                continue;
+                            }
+                            let host = Host::load().or_else(|_| Host::peek());
+                            let Ok(host) = host else {
+                                let _ = out_for_history.send(Frame::Error {
+                                    agent: Some(agent.clone()),
+                                    detail: "feedback: the host config could not be read".into(),
+                                });
+                                continue;
+                            };
+                            let b = crate::feedback::bundle(
+                                &place_for_history,
+                                &agent,
+                                seq,
+                                &note,
+                                &host,
+                            );
+                            klog::info(
+                                "feedback_bundle",
+                                Some(&agent),
+                                format!(
+                                    "seq={} lines={} log={} bytes={} redacted={} truncated={}",
+                                    seq.map(|s| s.to_string())
+                                        .unwrap_or_else(|| "latest".into()),
+                                    b.events.len(),
+                                    b.log.len(),
+                                    b.bytes,
+                                    b.redacted,
+                                    b.truncated
+                                ),
+                            );
+                            let _ = out_for_history.send(Frame::FeedbackBundle {
+                                agent,
+                                turn: b.turn,
+                                events: b.events,
+                                log: b.log,
+                                kernel: b.kernel,
+                                note: b.note,
+                                redacted: b.redacted,
+                                truncated: b.truncated,
+                                bytes: b.bytes,
+                            });
                         }
                         // Files under .arbos/, answered here too; a slow
                         // disk stalls this client alone. `put` is a peer's

@@ -1,6 +1,7 @@
 //! One function: [`turn`]. Working set, fold, compact, tool dispatch.
 
 mod access;
+pub mod apology;
 mod batch;
 pub mod blocked;
 pub mod compact;
@@ -10,6 +11,7 @@ pub mod envprobe;
 mod evict;
 mod host;
 pub mod image;
+pub mod inflight;
 pub mod intent;
 mod jobs;
 pub mod markup;

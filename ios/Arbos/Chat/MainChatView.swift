@@ -35,6 +35,8 @@ struct ProjectChatView: View {
     private var rows: [TranscriptRow] {
         var out: [TranscriptRow] = []
         for item in chat.items {
+            if case .agent(let text, streaming: false) = item.kind, text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+            if case .subagent(_, "spawned") = item.kind { continue }
             if case .tool = item.kind, case .tools(let run)? = out.last {
                 out[out.count - 1] = .tools(run + [item])
             } else if case .tool = item.kind {
@@ -115,11 +117,11 @@ struct ProjectChatView: View {
             if dictation.active || !words.isEmpty { draft = words }
         }
         .onChange(of: dictation.active) { _, active in
-            // The take ends on the second tap and goes as one line; the
-            // words were on screen the whole time (Jacob, build 956).
+            // The take ends on the second tap (or when the server closes
+            // it); the words stay in the field for his own send. Build
+            // 1021 sent them by itself and he did not want that.
             guard !active, !dictation.text.isEmpty else { return }
             draft = dictation.consume()
-            if dictation.problem == nil { send() }
         }
         .onChange(of: dictation.problem) { _, problem in
             if let problem { chat.notice(problem) }
@@ -519,6 +521,19 @@ struct ChatRow: View {
         switch item.kind {
         case .user(let text, let pending):
             VStack(alignment: .trailing, spacing: 4) {
+                if !item.images.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(item.images.prefix(3), id: \.self) { name in
+                            if let image = AttachmentCache.image(name) {
+                                Image(uiImage: image)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: item.images.count == 1 ? 220 : 110, height: item.images.count == 1 ? 165 : 110)
+                                    .clipShape(RoundedRectangle(cornerRadius: ArbosTheme.promptRadius, style: .continuous))
+                            }
+                        }
+                    }
+                }
                 Text(text)
                     .font(ArbosTheme.body)
                     .lineSpacing(ArbosTheme.lineSpacing)
