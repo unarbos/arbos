@@ -49,7 +49,7 @@ enum VoiceProvider: String, CaseIterable, Identifiable {
     func makeSession(_ settings: AppSettings) -> VoiceSession {
         switch self {
         case .selfHosted:
-            return SelfHostedVoiceSession(serverURL: settings.selfHostedURL, token: settings.voiceToken)
+            return SelfHostedVoiceSession(serverURL: settings.selfHostedURL, token: settings.voiceToken, project: settings.kernelTarget)
         case .openAIRealtime:
             return OpenAIRealtimeSession(
                 apiKey: settings.openAIKey,

@@ -54,6 +54,9 @@ struct VoiceServerInfo: Equatable {
     /// The server is attached to an Arbos kernel and mirrors its chat.
     var kernel = false
     var text = ""
+    /// The project the call runs against (`session.ready.project`, gateway
+    /// PR #56): the roster's name and icon, for the line under the orb.
+    var project: CallProject?
 
     /// True when the server produces the spoken reply itself, so the app
     /// must not forward transcripts to the kernel (that would answer twice).
@@ -198,4 +201,12 @@ func decodeTypedJSON(_ message: URLSessionWebSocketTask.Message) -> (type: Strin
     guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           let type = object["type"] as? String else { return nil }
     return (type, object)
+}
+
+/// The kernel a scoped call was dialled into, as the gateway names it.
+struct CallProject: Equatable {
+    var machine: String
+    var project: String
+    var name: String
+    var icon: String
 }
