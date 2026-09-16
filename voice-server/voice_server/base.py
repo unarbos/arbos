@@ -8,12 +8,14 @@ import logging
 import time
 from dataclasses import dataclass
 
+import httpx
 import numpy as np
 
 from . import protocol as P
 from .audio import Normalizer, float_to_pcm16, pcm16_to_float, resample_whole
 from .echo import EchoGate
 from .engines import Engines
+from .kernel import KernelClient
 from .tools import ToolRunner
 
 log = logging.getLogger("voice.session")
@@ -71,10 +73,12 @@ class BaseSession:
         self.ready_sent = False
         self.history: list[dict] = []  # text-channel conversation (OpenAI message shape)
         self.text_task: asyncio.Task | None = None
-        self.tools = ToolRunner(engines.kernel, on_report=self._on_agent_report)
+        self.kernel = engines.kernel  # replaced per call when session.start names a project
+        self.project: dict | None = None
+        self.tools = ToolRunner(self.kernel, on_report=self._on_agent_report)
         self.tools.on_call = self._on_tool_call
         self.tools.on_result = self._on_tool_result
-        self.mirror_agents = engines.kernel is not None
+        self.mirror_agents = self.kernel is not None
         self.running_children: set[str] = set()
         self.echo = EchoGate(self.rate, tuning.echo_margin) if tuning.echo_gate else None
         self.normalizers: dict[str, Normalizer] = {}
@@ -104,8 +108,8 @@ class BaseSession:
     async def run(self) -> None:
         sender = asyncio.create_task(self._sender(), name=f"send-{self.sid}")
         log.info("[%s] connected (%s)", self.sid, self.engine)
-        if self.engines.kernel:
-            self.engines.kernel.listeners.append(self._mirror)
+        if self.kernel:
+            self.kernel.listeners.append(self._mirror)
         try:
             await self.on_open()
             async for message in self.ws:
@@ -116,8 +120,10 @@ class BaseSession:
                 elif await self._on_control(message):
                     break
         finally:
-            if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
-                self.engines.kernel.listeners.remove(self._mirror)
+            if self.kernel and self._mirror in self.kernel.listeners:
+                self.kernel.listeners.remove(self._mirror)
+            if self.kernel is not None and self.kernel is not self.engines.kernel:
+                await self.kernel.close()  # the per-call attach
             self.tools.close()
             if self.text_task:
                 self.text_task.cancel()
@@ -179,7 +185,8 @@ class BaseSession:
             reply=reply,
             text=reply if reply != "none" else "none",
             tools=[t["name"] for t in self.tools_available()],
-            kernel=bool(self.engines.kernel and self.engines.kernel.connected),
+            kernel=bool(self.kernel and self.kernel.connected),
+            project=self.project,
             answerer=getattr(self, "answerer", "n/a"),
             voice=self.voice,
         )
@@ -187,7 +194,7 @@ class BaseSession:
     def tools_available(self) -> list[dict]:
         from .tools import TOOLS
 
-        return TOOLS if self.engines.kernel else []
+        return TOOLS if self.kernel else []
 
     # ------------------------------------------------------------------ control
 
@@ -202,6 +209,10 @@ class BaseSession:
 
         if kind == P.SESSION_START:
             self._apply_start(msg)
+            target = _parse_target(msg)
+            if target is not None:
+                if not await self._attach_project(*target):
+                    return True  # refused: the caller asked for a project we cannot reach
             await self.on_start()
             self._send_ready()
         elif kind == P.SPEAK:
@@ -255,7 +266,7 @@ class BaseSession:
         if isinstance(msg.get("instructions"), str) and msg["instructions"].strip():
             self.instructions = msg["instructions"].strip()
         if "agents" in msg:
-            self.mirror_agents = bool(msg["agents"]) and self.engines.kernel is not None
+            self.mirror_agents = bool(msg["agents"]) and self.kernel is not None
         answerer = msg.get("answerer")
         if answerer in ("kernel", "model", "auto") and hasattr(self, "answerer"):
             self.answerer = answerer
@@ -265,6 +276,75 @@ class BaseSession:
                 self._emit(P.ERROR, message="server started without a reply backend; staying speech-only")
             else:
                 self.reply_kind = reply
+
+    # ------------------------------------------------------------------ project scoping (hub)
+
+    async def _attach_project(self, machine: str, project: str) -> bool:
+        """Attach this call to `<machine>/<project>` through the hub. Refuses (error frame, then
+        close 4404) when there is no hub or the project is not on the roster, not live, or
+        does not answer; never falls back to another kernel."""
+        hub, token = self.engines.hub_url, self.engines.hub_token
+        label = f"{machine}/{project}"
+        if not hub:
+            return await self._refuse("no_hub", label, "this voice server has no hub configured, so it cannot scope a call to a project")
+        info = await self._roster_lookup(hub, token, machine, project)
+        if info is None:
+            return await self._refuse("project_unknown", label, f"{label} is not on the hub roster")
+        if not info.get("live", True):
+            return await self._refuse("project_offline", label, f"{label} is on the roster but its kernel is not running")
+        url = f"{hub.rstrip('/')}/attach/{machine}/{project}"
+        kernel = KernelClient(url=url, token=token, auto_approve=self.engines.kernel.auto_approve if self.engines.kernel else True)
+        try:
+            await asyncio.wait_for(kernel.connect(redial=True), 15)
+        except Exception as exc:
+            await kernel.close()
+            return await self._refuse("project_unreachable", label, f"could not attach to {label}: {type(exc).__name__}: {exc}")
+        # swap the call over: tools, mirror, and the kernel every engine hook reads
+        if self.kernel is not None and self._mirror in self.kernel.listeners:
+            self.kernel.listeners.remove(self._mirror)
+        self.tools.close()
+        self.kernel = kernel
+        self.tools = ToolRunner(kernel, on_report=self._on_agent_report)
+        self.tools.on_call = self._on_tool_call
+        self.tools.on_result = self._on_tool_result
+        kernel.listeners.append(self._mirror)
+        self.mirror_agents = True
+        identity = info.get("identity") or {}
+        self.project = {
+            "machine": machine, "project": project,
+            "name": identity.get("name") or project, "icon": identity.get("icon"),
+            "store": info.get("store") or f"arbos://{machine}/{project}/",
+            "kind": info.get("kind", "project"),
+        }
+        log.info("[%s] call scoped to %s (%s)", self.sid, label, self.project["name"])
+        return True
+
+    async def _roster_lookup(self, hub: str, token: str | None, machine: str, project: str) -> dict | None:
+        base = hub.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                roster = (await client.get(f"{base}/list", headers=headers)).json()
+        except Exception as exc:
+            log.warning("[%s] hub roster unavailable: %s", self.sid, type(exc).__name__)
+            return {"live": True}  # cannot check; let the attach itself decide
+        for m in roster.get("machines", []):
+            if m.get("name") != machine:
+                continue
+            for pr in m.get("projects", []):
+                if pr.get("name") == project:
+                    return pr
+        return None
+
+    async def _refuse(self, code: str, label: str, message: str) -> bool:
+        log.warning("[%s] refused call for %s: %s", self.sid, label, code)
+        self._emit(P.ERROR, code=code, project=label, message=message)
+        await asyncio.sleep(0.2)  # let the error frame leave before the close
+        try:
+            await self.ws.close(4404, f"project unreachable: {code}")
+        except Exception:
+            pass
+        return False
 
     # ------------------------------------------------------------------ gateway TTS (Kokoro)
 
@@ -307,6 +387,10 @@ class BaseSession:
 
     async def _text_turn(self, text: str) -> None:
         backend = self.engines.reply if self.reply_kind != "none" else None
+        if self.reply_kind == "kernel" and self.kernel is not None:
+            from .reply import KernelReply
+
+            backend = KernelReply(self.kernel)  # the call's own kernel, not the server default
         if backend is None:
             self._emit(P.ERROR, message="no text backend: start the server with --reply openrouter or --reply kernel")
             self._emit(P.TEXT_DONE, text="", cancelled=False)
@@ -351,9 +435,9 @@ class BaseSession:
         """Any sub-agent of root that finishes gets reported, whoever dispatched it (a voice
         tool, the kernel's own spawn during a kernel-answered turn, or the phone's chat)."""
         name = frame.get("agent")
-        if not name or name == "root" or self.engines.kernel is None:
+        if not name or name == "root" or self.kernel is None:
             return
-        state = self.engines.kernel.agents.get(name)
+        state = self.kernel.agents.get(name)
         if frame.get("state") == "running":
             self.running_children.add(name)
         elif name in self.running_children:
@@ -397,3 +481,23 @@ class BaseSession:
 def _speak_name(agent: str) -> str:
     """Kernel agent ids are squashed words ('writeahaikuaboutriversto'); say something shorter."""
     return agent[:24]
+
+
+def _parse_target(msg: dict) -> tuple[str, str] | None:
+    """session.start may name the project as {"project": {"machine","project"|"place"}},
+    {"kernel": "machine/project"}, or an "arbos://machine/project/" store address."""
+    raw = msg.get("project") or msg.get("kernel")
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        machine = str(raw.get("machine", "")).strip()
+        project = str(raw.get("project") or raw.get("place") or "").strip()
+    else:
+        text = str(raw).strip()
+        if text.startswith("arbos://"):
+            text = text[len("arbos://"):]
+        parts = [p for p in text.strip("/").split("/") if p]
+        machine, project = (parts + ["", ""])[:2]
+    if not machine or not project:
+        return None
+    return machine, project

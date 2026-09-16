@@ -292,7 +292,7 @@ class DuplexSession(BaseSession):
 
     def _kernel_answers(self, text: str) -> bool:
         """Call mode: the project (kernel) answers everything but small talk."""
-        kernel = self.engines.kernel
+        kernel = self.kernel
         if self.answerer == "model" or kernel is None or not kernel.connected:
             return False
         if self.answerer == "kernel":
@@ -356,7 +356,7 @@ class DuplexSession(BaseSession):
                 first_audio = at
 
         try:
-            async for delta in self.engines.kernel.turn(text, timeout=120):
+            async for delta in self.kernel.turn(text, timeout=120):
                 buffer += delta
                 ready, buffer = _split_ready(buffer)
                 for segment in ready:

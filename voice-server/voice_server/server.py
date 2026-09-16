@@ -53,6 +53,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="access.toml client token for a remote kernel (env VOICE_KERNEL_TOKEN); never logged")
     kernel.add_argument("--kernel-place", default=os.environ.get("VOICE_KERNEL_PLACE"), help="place dir; reads .arbos/kernel.json")
     kernel.add_argument("--no-auto-approve", action="store_true", help="do not auto-approve the kernel's 'allow ...' asks")
+    kernel.add_argument("--hub", default=os.environ.get("VOICE_HUB_URL"),
+                        help="arbos-hub base URL (ws://host:port or wss://host). Lets session.start scope a call to a "
+                             "project: the gateway attaches to <hub>/attach/<machine>/<project> for that call")
+    kernel.add_argument("--hub-token", default=os.environ.get("VOICE_HUB_CLIENT_TOKEN") or os.environ.get("VOICE_HUB_TOKEN"),
+                        help="hub [[client]] token used for scoped calls (env VOICE_HUB_CLIENT_TOKEN, else VOICE_HUB_TOKEN); never logged")
 
     models = parser.add_argument_group("models")
     models.add_argument("--model-dir", default=os.environ.get("VOICE_MODEL_DIR", "models"),

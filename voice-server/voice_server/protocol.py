@@ -57,6 +57,13 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
     <binary>                       microphone audio
           "instructions": "..."  system prompt for the speech model (duplex engine)
           "answerer": "auto"|"kernel"|"model"  duplex call mode: who answers a spoken turn (see Engines)
+          "project": {"machine":"arboslife","project":"demo"}   SCOPE THE CALL: attach to that
+                kernel through the hub (--hub) for the life of this call instead of the server's
+                default kernel. Also accepted: "kernel":"arboslife/demo" or an "arbos://…/" store
+                address. If the project is not on the roster, not live, or does not answer, the
+                server sends {"type":"error","code":"project_unknown"|"project_offline"|
+                "project_unreachable"|"no_hub","project":"machine/project","message":…} and
+                closes the socket with code 4404. It never answers from another project.
           "agents": true|false  mirror kernel events (agent.*) to this client (default on when a kernel is attached)
     <binary>                       microphone audio
     {"type":"speak","text":"..."}  voice this text; requests queue in order
@@ -71,7 +78,11 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
 
   server -> client
     {"type":"session.ready","rate":24000,"engine":"duplex"|"pipeline","asr":"...","tts":"...",
-     "reply":"...","text":"...","tools":["send_agent","agent_status","ask_arbos"],"kernel":true}
+     "reply":"...","text":"...","tools":["send_agent","agent_status","ask_arbos"],"kernel":true,
+     "answerer":"auto","project":{"machine":"arboslife","project":"demo","name":"demo",
+     "icon":"folder","store":"arbos://arboslife/demo/","kind":"project"} | null}
+                                   project is null when the call uses the server's default kernel;
+                                   name/icon come from the hub roster (the project's identity)
     {"type":"speech.started"}      server VAD heard the user start talking. If a
                                    reply was playing it is cancelled at the same
                                    moment (barge-in) and response.done follows.

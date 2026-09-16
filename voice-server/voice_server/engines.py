@@ -29,6 +29,8 @@ class Engines:
     engine: str  # "duplex" or "pipeline"
     duplex_url: str
     duplex_name: str
+    hub_url: str | None = None
+    hub_token: str | None = None
 
     @classmethod
     async def load(cls, args) -> "Engines":
@@ -71,7 +73,8 @@ class Engines:
             ("attached" if kernel.connected else "dialing") if kernel else "none",
         )
         return cls(vad=vad, asr=asr, tts=tts, reply=reply, kernel=kernel, engine=engine,
-                   duplex_url=args.duplex_url, duplex_name=duplex_name)
+                   duplex_url=args.duplex_url, duplex_name=duplex_name,
+                   hub_url=args.hub, hub_token=args.hub_token)
 
     async def warm_up(self, voice: str) -> None:
         """First calls are slow (kernel selection, lazy loads). Pay that before the first caller."""
