@@ -81,12 +81,27 @@ final class AppSettings: ObservableObject {
             }
         }
         #endif
+        // A baked token lands in the Keychain when there is none — and
+        // again when the build bakes a different one than the last build
+        // did (a rotation), so a phone never keeps a dead token. What the
+        // user typed by hand is kept: it differs from the previous bake.
         for (account, bakedValue) in [
             (Self.voiceTokenAccount, baked.voiceToken),
             (Self.kernelTokenAccount, baked.kernelToken),
             (Self.hubTokenAccount, baked.hubToken),
-        ] where !bakedValue.isEmpty && (Keychain.read(account) ?? "").isEmpty {
-            Keychain.write(bakedValue, account: account)
+        ] where !bakedValue.isEmpty {
+            let stored = Keychain.read(account) ?? ""
+            let previousBake = Keychain.read("\(account)-baked")
+            if stored.isEmpty || previousBake == nil || stored == previousBake {
+                Keychain.write(bakedValue, account: account)
+            }
+            Keychain.write(bakedValue, account: "\(account)-baked")
+        }
+        // The baked hub address moves with the build too, unless typed over.
+        if !baked.hubURL.isEmpty {
+            let previous = defaults.string(forKey: "baked-hubURL")
+            if previous == nil || hubURL == previous { hubURL = baked.hubURL }
+            defaults.set(baked.hubURL, forKey: "baked-hubURL")
         }
         voiceToken = Keychain.read(Self.voiceTokenAccount) ?? ""
         kernelToken = Keychain.read(Self.kernelTokenAccount) ?? ""

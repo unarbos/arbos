@@ -11,7 +11,8 @@ read_field() { op item get "$1" --vault Arbos --fields "label=$2" --reveal 2>/de
 
 VOICE_TOKEN="$(read_field jmldktl7rrc4rw4sm2akej4qne credential)"
 KERNEL_TOKEN="$(read_field 4vgzvrtucv6dm7eyaw42ckqsv4 credential)"
-HUB_TOKEN="$(read_field 6uihrhmgfwncp3jz3vxtfxklhi credential)"
+# The phone's own row on the hub (role owner); `credential` is the desktop's.
+HUB_TOKEN="$(read_field 6uihrhmgfwncp3jz3vxtfxklhi client-phone)"
 # Hub address: the vault's stable name, unless ARBOS_HUB_URL names the
 # interim quick tunnel, unless the published directory has a `hub:` line.
 HUB_URL="${ARBOS_HUB_URL:-$(read_field 6uihrhmgfwncp3jz3vxtfxklhi url)}"
@@ -39,4 +40,6 @@ cat > "$OUT" <<EOF
 </plist>
 EOF
 plutil -lint "$OUT" >/dev/null
+# A phone build never carries a local hub: the guard runs on every write.
+"$(dirname "$0")/check-secrets.sh" "$OUT"
 echo "wrote $OUT (voice=${VOICE_URL:-?} kernel=${KERNEL_URL:-?} hub=${HUB_URL:-?}; tokens: voice ${#VOICE_TOKEN} kernel ${#KERNEL_TOKEN} hub ${#HUB_TOKEN} chars)"
