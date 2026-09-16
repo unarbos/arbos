@@ -46,7 +46,7 @@ mirror_store() {
 
 # 0. Mirror the store first: the tightest window for whatever was written since the last cycle.
 mirror_store start
-BUDGET_USD="${ARBOS_QA_BUDGET_USD:-10}"
+BUDGET_USD="${ARBOS_QA_BUDGET_USD:-20}"  # raised from 10 on 2026-09-16: the journey + call mode + desktop set hit $10 by 14:30 UTC
 JOBS="${ARBOS_QA_BUILD_JOBS:-8}"
 LOG="$ROOT/logs/cycle-$(date -u +%Y%m%dT%H%M%SZ).log"
 mkdir -p "$ROOT/logs" "$ROOT/state"
