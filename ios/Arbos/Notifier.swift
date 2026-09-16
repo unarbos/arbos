@@ -76,6 +76,9 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
     /// prompt (tokens rotate; the hub wants the newest).
     private func refreshAuthorization() {
         UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+            #if DEBUG
+            print("notifications authorization: \(settings.authorizationStatus.rawValue) (0 undetermined, 1 denied, 2 authorized)")
+            #endif
             Task { @MainActor in
                 switch settings.authorizationStatus {
                 case .authorized, .provisional, .ephemeral:

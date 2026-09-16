@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import UIKit
 
 /// The project's main agent chat, shared by the call screen (voice) and
 /// the chat sheet (text). One agent, two ways in.
@@ -464,6 +465,13 @@ final class ChatStore: ObservableObject {
             busy = running
             if !running { closeOpenAgentMessage() }
         case .notify(let notification):
+            // Live, with the chat in front: the user is reading it — seen,
+            // and every other client hears so. Otherwise it waits on the
+            // card (and, away, becomes a banner).
+            if !notification.replayed, UIApplication.shared.applicationState == .active {
+                source?.markSeen(through: notification.id)
+                return
+            }
             if !unseen.contains(where: { $0.id == notification.id }) {
                 unseen.append(notification)
                 unseen.sort { $0.id < $1.id }
