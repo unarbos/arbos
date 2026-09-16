@@ -11,6 +11,13 @@
 #   IOS_ASC_KEY_P8, IOS_ASC_KEY_ID, IOS_ASC_ISSUER_ID
 # Written by .github/setup-publishing.sh (update-channel worker); the
 # notarisation key's NOTARY_* secrets stay as they are for the desktop.
+#
+# IOS_SECRETS_PLIST: ios/Arbos/Secrets.plist, base64 — the endpoints and
+# tokens the phone needs on first launch (the pod hub and the phone's own
+# hub token). Written from the loop's Mac with `gh secret set` after
+# ios/scripts/gen-secrets.sh. ios/scripts/check-secrets.sh runs before the
+# archive: a plist that points at a local hub, or whose token the hub
+# refuses, fails the job — nothing wrong ever reaches Jacob's phone.
 name: iOS to TestFlight
 
 on:
@@ -50,6 +57,16 @@ jobs:
           mkdir -p ~/.appstoreconnect/private_keys
           printf '%s' "$IOS_ASC_KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_$IOS_ASC_KEY_ID.p8
           chmod 600 ~/.appstoreconnect/private_keys/AuthKey_$IOS_ASC_KEY_ID.p8
+
+      - name: Baked endpoints and tokens (guarded)
+        if: env.SKIP != '1'
+        working-directory: ios
+        env:
+          IOS_SECRETS_PLIST: ${{ secrets.IOS_SECRETS_PLIST }}
+        run: |
+          test -n "$IOS_SECRETS_PLIST" || { echo "::error::IOS_SECRETS_PLIST is not set — the phone would start with no hub. Run ios/scripts/gen-secrets.sh on a Mac with the vault and set the secret."; exit 1; }
+          printf '%s' "$IOS_SECRETS_PLIST" | base64 --decode > Arbos/Secrets.plist
+          scripts/check-secrets.sh Arbos/Secrets.plist
 
       - name: Archive (unsigned)
         if: env.SKIP != '1'
