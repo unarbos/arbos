@@ -45,7 +45,12 @@ pass() {
     for i in 1 2 3; do [ -e "$STORE/$f" ] && { seen=1; break; }; sleep 3; done
     if [ "$seen" = 1 ]; then unstable=1; else confirmed="$confirmed$f"$'\n'; fi
   done
-  [ "$unstable" = 1 ] && echo "[$ts] partial view: some files the snapshot lacked are present on re-read; the store answered partially"
+  if [ "$unstable" = 1 ]; then
+    # A partial answer means: conclude nothing. The snapshot is safe (the gate would refuse a partial push);
+    # wait and run the whole pass again rather than record anything from this view.
+    echo "[$ts] partial view: files the snapshot lacked are present on re-read; concluding nothing, re-reading in 3 min"
+    return 2
+  fi
   deleted="$confirmed"
   [ -n "$(echo "$deleted" | tr -d '[:space:]')" ] || return
   local stage="$ROOT/state/mirror-restore/$(date -u +%Y%m%dT%H%M%SZ)"
@@ -68,5 +73,9 @@ PY
 echo "[$(date -u +%FT%TZ)] store mirror timer: every ${INTERVAL}s, repo $REPO"
 while :; do
   pass
+  if [ "$?" = 2 ]; then
+    sleep 180
+    pass
+  fi
   sleep "$INTERVAL"
 done
