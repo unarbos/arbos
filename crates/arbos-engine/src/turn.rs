@@ -917,7 +917,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         // looks broken on every client. The markup never reaches the
         // transcript; the words around it do, and the nudge below says
         // what happened (subnet120 from the phone, 2026-09-16).
-        let (content, had_markup) = crate::markup::strip_tool_markup(&content);
+        let (mut content, had_markup) = crate::markup::strip_tool_markup(&content);
         // The provider's own count beats our chars/4 guess. Remember the
         // ratio against the *raw* estimate so it does not feed on itself.
         // The provider counts the tool schemas too; they go on our side as
@@ -934,8 +934,16 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 calib = (u.used as f64 / ours as f64).clamp(CALIB_MIN, CALIB_MAX);
             }
         }
+        // A `status` written as a line of text: the live line takes the
+        // words and the line is not a reply — written as one it was a
+        // code-looking bubble before the greeting, three to eleven of
+        // them with Gemini (qal J1). With no tool call beside it the turn
+        // is nudged on, not ended.
+        let mut spoke_only = false;
         if let Some(step) = arbos_core::status::spoken(&content) {
             hooks.spoke_status(&step);
+            content = String::new();
+            spoke_only = calls.is_empty();
         }
         // A final reply that says again what this turn, or the reply
         // before this wake, already said: not written twice. The turn
@@ -991,6 +999,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         let empty_reply = calls.is_empty()
             && content.trim().is_empty()
             && !had_markup
+            && !spoke_only
             && wake.kind != WakeKind::Done
             && wake.kind != WakeKind::Serve;
         if empty_reply {
@@ -1057,6 +1066,11 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 Some((
                     "That was a tool call written as text, so nothing ran (the markup was not kept). Call the tool itself: the tools are functions, not text.".to_string(),
                     "tool call written as text",
+                ))
+            } else if spoke_only {
+                Some((
+                    "That line was a status, not a reply: the live line beside your name took it and the chat does not show it. Go on with the step it named — a tool call — or answer the user.".to_string(),
+                    "status written as text",
                 ))
             } else if content.trim().is_empty() {
                 // A done wake that has nothing to add ends in silence:
