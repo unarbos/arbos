@@ -76,9 +76,21 @@ pub fn verdict(
         };
     }
     if !transient {
-        // The key, the account, or the permission: the same everywhere.
-        if matches!(e.status, Some(401) | Some(402) | Some(403)) {
+        // A bad key or an empty account: the same everywhere.
+        if matches!(e.status, Some(401) | Some(402)) {
             return Verdict::Fail;
+        }
+        // 403 is a refusal of this request, and on a router that is
+        // usually one provider family ("this user has been blocked" for
+        // every `openai/*` while `anthropic/*` answers): another model
+        // may well be allowed. A key refused everywhere fails at the end
+        // of the list, a few fast calls later.
+        if e.status == Some(403) {
+            return if more_models {
+                Verdict::Fallback
+            } else {
+                Verdict::Fail
+            };
         }
         // A provider's own failure — an error frame mid-stream, a 400 the
         // model's backend produced ("Corrupted thought signature") — is
@@ -138,12 +150,42 @@ pub struct Models {
 }
 
 /// Fallbacks a turn gets on OpenRouter when config.toml names none: one
-/// key, every model, so a second opinion costs nothing to set up.
+/// key, every model, so a second opinion costs nothing to set up. One
+/// per provider family; `openrouter_fallbacks` orders them so the
+/// primary's own family comes first and a family the key cannot call
+/// (an account blocked for `openai/*` returns 403 on every one of them,
+/// 2026-09-16) is only ever one of several.
 pub const OPENROUTER_FALLBACKS: &[&str] = &[
-    "openai/gpt-5.6-terra",
     "anthropic/claude-opus-5",
     "google/gemini-3.8-flash",
+    "openai/gpt-5.6-terra",
 ];
+
+/// The provider family of an OpenRouter model id: `anthropic` of
+/// `anthropic/claude-opus-5`. Empty for an id with no slash.
+pub fn family(model: &str) -> &str {
+    model.split_once('/').map(|(f, _)| f).unwrap_or("")
+}
+
+/// The default fallbacks for `primary`, in the order to try them: the
+/// primary's own family first (the same account access, the same
+/// tokenizer habits), then the rest in the constant's order, the primary
+/// itself left out.
+pub fn openrouter_fallbacks(primary: &str) -> Vec<String> {
+    let fam = family(primary);
+    let mut out: Vec<String> = Vec::new();
+    for m in OPENROUTER_FALLBACKS {
+        if *m != primary && !fam.is_empty() && family(m) == fam {
+            out.push(m.to_string());
+        }
+    }
+    for m in OPENROUTER_FALLBACKS {
+        if *m != primary && !out.iter().any(|x| x == m) {
+            out.push(m.to_string());
+        }
+    }
+    out
+}
 
 impl Models {
     pub fn new(primary: String, fallbacks: &[String]) -> Self {
@@ -161,8 +203,7 @@ impl Models {
     /// `base` is openrouter.ai. `fallback_models = ["none"]` forbids them.
     pub fn with_defaults(primary: String, fallbacks: &[String], base: &str) -> Self {
         if fallbacks.is_empty() && base.contains("openrouter.ai") {
-            let defaults: Vec<String> =
-                OPENROUTER_FALLBACKS.iter().map(|s| s.to_string()).collect();
+            let defaults = openrouter_fallbacks(&primary);
             return Self::new(primary, &defaults);
         }
         Self::new(primary, fallbacks)
@@ -197,5 +238,75 @@ pub fn human(d: Duration) -> String {
         format!("{s:.1}s")
     } else {
         format!("{}s", s.round() as u64)
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    fn err(status: u16) -> ProviderError {
+        ProviderError {
+            kind: FailKind::Status,
+            status: Some(status),
+            message: String::new(),
+            retry_after: None,
+            should_retry: None,
+            visible: false,
+            partial: String::new(),
+        }
+    }
+
+    /// 2026-09-16: an OpenRouter key blocked for `openai/*` (403 on every
+    /// one, `anthropic/*` and `google/*` fine) turned a transient failure
+    /// of the primary into a hard stop, because the first default fallback
+    /// was `openai/gpt-5.6-terra` and 403 ended the turn.
+    #[test]
+    fn a_403_falls_through_to_the_next_model_and_a_bad_key_does_not() {
+        let policy = RetryPolicy::default();
+        assert_eq!(verdict(&err(403), 1, &policy, true), Verdict::Fallback);
+        assert_eq!(verdict(&err(403), 1, &policy, false), Verdict::Fail);
+        assert_eq!(verdict(&err(401), 1, &policy, true), Verdict::Fail);
+        assert_eq!(verdict(&err(402), 1, &policy, true), Verdict::Fail);
+    }
+
+    #[test]
+    fn default_fallbacks_start_with_the_primarys_own_family() {
+        assert_eq!(
+            openrouter_fallbacks("anthropic/claude-fable-5.1"),
+            vec![
+                "anthropic/claude-opus-5",
+                "google/gemini-3.8-flash",
+                "openai/gpt-5.6-terra"
+            ]
+        );
+        // The primary is never its own fallback; the rest keep their order.
+        assert_eq!(
+            openrouter_fallbacks("openai/gpt-5.6-terra"),
+            vec!["anthropic/claude-opus-5", "google/gemini-3.8-flash"]
+        );
+        assert_eq!(
+            openrouter_fallbacks("google/gemini-2.5-flash"),
+            vec![
+                "google/gemini-3.8-flash",
+                "anthropic/claude-opus-5",
+                "openai/gpt-5.6-terra"
+            ]
+        );
+        // No family: the constant's order, OpenAI last.
+        assert_eq!(
+            openrouter_fallbacks("mercury"),
+            OPENROUTER_FALLBACKS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+        let m = Models::with_defaults(
+            "inception/mercury-2.5".into(),
+            &[],
+            "https://openrouter.ai/api/v1",
+        );
+        assert_eq!(m.all()[1], "anthropic/claude-opus-5");
+        assert_eq!(m.all().last().unwrap(), "openai/gpt-5.6-terra");
     }
 }

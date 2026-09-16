@@ -404,7 +404,10 @@ fn failure_text(model: &str, e: &ProviderError, attempts: u32) -> String {
             Some(401) => {
                 "Check the API key (api_key or api_key_env in ~/.config/arbos/config.toml)."
             }
-            Some(402) | Some(403) => "Check billing or access for this key.",
+            Some(402) => "Check billing for this key.",
+            Some(403) => {
+                "This key may not call this model (the provider refused it); pick another model in config.toml, or set fallback_models to ones the key can use."
+            }
             Some(404) => "Check the model name in config.toml or agent.md.",
             Some(400) | Some(413) | Some(422) => {
                 "The request was rejected. If the provider says the context is too long, the kernel compacts before the next call; set window_tokens = 0 in config.toml so it plans against the model's own context length."

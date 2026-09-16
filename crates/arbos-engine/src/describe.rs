@@ -15,7 +15,7 @@ use crate::retry::Models;
 
 /// What to fall back to when the config names no `vision_model` and no
 /// fallback looks vision-capable. Cheap, fast, and on every OpenRouter key.
-pub const OPENROUTER_VISION_DEFAULT: &str = "openai/gpt-4.1-mini";
+pub const OPENROUTER_VISION_DEFAULT: &str = "google/gemini-2.5-flash";
 pub const OPENAI_VISION_DEFAULT: &str = "gpt-4.1-mini";
 
 /// Models a provider refused images for, this process. The next turn skips
