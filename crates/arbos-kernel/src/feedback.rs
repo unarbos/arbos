@@ -74,6 +74,13 @@ pub struct Bundle {
     pub children: Vec<Value>,
     pub log: Vec<Value>,
     pub kernel: Value,
+    /// The place's settings that decide behaviour: permission, caps,
+    /// the window pin, spend.
+    pub place: Value,
+    /// Every agent of the place at the moment of the report, with what a
+    /// roster shows and what it does not: running, the live line, parked
+    /// questions, what waits in its inbox and whether it may run.
+    pub agents: Vec<Value>,
     pub note: String,
     pub redacted: Value,
     pub truncated: bool,
@@ -331,8 +338,104 @@ fn size_of(parts: &[&[Value]]) -> usize {
         .sum()
 }
 
+/// Every agent of the place, live and archived children of `anchor`, as
+/// the debugger needs them: reading a report about "the worker line says
+/// Starting forever" (the smoke report, 2026-09-16) from the transcript
+/// alone could not say whether the worker existed, was running, or had a
+/// brief waiting for a key. `running` and `pending_asks` come from the
+/// kernel's own state; `inbox` from the files.
+pub fn roster(
+    place: &Place,
+    hooks: Option<&crate::hooks::KernelHooks>,
+    anchor: &str,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    let live = arbos_core::list_agents(place).unwrap_or_default();
+    for a in &live {
+        let inbox: Vec<Value> = arbos_core::inbox::list(place, a.id.as_str())
+            .iter()
+            .map(|f| {
+                json!({
+                    "name": f.name,
+                    "kind": f.msg.kind,
+                    "from": f.msg.from,
+                    "wake": f.msg.wake,
+                    "sent": f.msg.sent,
+                })
+            })
+            .collect();
+        let status = arbos_core::status::read(place, a.id.as_str());
+        out.push(json!({
+            "id": a.id.as_str(),
+            "name": a.name,
+            "parent": a.parent.as_ref().map(|p| p.to_string()),
+            "kind": a.kind,
+            "readonly": a.readonly,
+            "paused": a.paused,
+            "model": a.model,
+            "remote": a.remote,
+            "running": hooks.is_some_and(|h| h.is_running(a.id.as_str())),
+            "step": status.as_ref().map(|s| s.step.clone()),
+            "step_since": status.as_ref().map(|s| s.since.clone()),
+            "pending_asks": hooks.map(|h| h.pending_asks(a.id.as_str()).len()).unwrap_or(0),
+            "inbox": inbox,
+            "transcript_lines": load_transcript(&arbos_core::Layout::new(place, a.id.as_str()).transcript()).map(|e| e.len()).unwrap_or(0),
+            "archived": false,
+        }));
+    }
+    for c in arbos_core::project::archived_children(place, anchor) {
+        out.push(json!({
+            "id": c.id,
+            "name": c.name,
+            "parent": anchor,
+            "archived": true,
+            "ended_ms": c.ended_ms,
+            "last_words": arbos_core::text::clip(&c.last_words, 200),
+            "transcript_lines": load_transcript(&child_transcript(place, &c.id)).map(|e| e.len()).unwrap_or(0),
+        }));
+    }
+    out
+}
+
+/// The place's settings a debugger asks about first: the mode, the caps,
+/// the window pin that made every turn over budget (JB-4), the spend so
+/// far, the key (a keyless kernel holds every waking line — a worker's
+/// brief included — which reads as "Starting forever").
+pub fn place_facts(place: &Place, host: &arbos_engine::Host) -> Value {
+    let cfg = arbos_core::project::load(place);
+    let spend = arbos_core::spend::load(place);
+    let keyless = crate::serve::keyless(place);
+    json!({
+        "permission": cfg.root.permission.clone(),
+        "archive_children": cfg.root.archives_children(),
+        "spend": {
+            "cap_usd": cfg.spend.cap_usd,
+            "turn_cap_usd": cfg.spend.turn_cap_usd,
+            "spent_usd": spend.spent_usd,
+            "turns": spend.turns,
+        },
+        "window_tokens": host.config.window_tokens,
+        "max_turn_cost_usd": host.config.max_turn_cost(),
+        "max_children": host.config.max_children,
+        "fallback_models": host.config.fallback_models,
+        "key": keyless.is_none(),
+        "keyless_reason": keyless,
+    })
+}
+
 /// Build the report material.
 pub fn bundle(place: &Place, req: &Request<'_>, host: &arbos_engine::Host) -> Bundle {
+    bundle_with(place, req, host, None)
+}
+
+/// `bundle`, with the kernel's live state for the roster (running turns,
+/// parked questions).
+pub fn bundle_with(
+    place: &Place,
+    req: &Request<'_>,
+    host: &arbos_engine::Host,
+    hooks: Option<&crate::hooks::KernelHooks>,
+) -> Bundle {
     let agent = req.agent;
     let events =
         load_transcript(&arbos_core::Layout::new(place, agent).transcript()).unwrap_or_default();
@@ -447,6 +550,8 @@ pub fn bundle(place: &Place, req: &Request<'_>, host: &arbos_engine::Host) -> Bu
     }
 
     let mut log = log_lines(place, started_ms, ended_ms, &agents);
+    let mut roster = roster(place, hooks, agent);
+    let mut facts = place_facts(place, host);
 
     for v in lines
         .iter_mut()
@@ -456,6 +561,10 @@ pub fn bundle(place: &Place, req: &Request<'_>, host: &arbos_engine::Host) -> Bu
     {
         redact_leaves(v, &mut counts);
     }
+    for v in roster.iter_mut() {
+        redact_leaves(v, &mut counts);
+    }
+    redact_leaves(&mut facts, &mut counts);
     let (note, n) = arbos_core::redact::redact(req.note);
     counts.tokens += n.tokens;
     counts.values += n.values;
@@ -516,7 +625,8 @@ pub fn bundle(place: &Place, req: &Request<'_>, host: &arbos_engine::Host) -> Bu
     // The whole frame's size, as the client shows it.
     let bytes = json!({
         "agent": agent, "turn": turn, "events": lines, "tail": tail, "children": children,
-        "log": log, "kernel": kernel, "note": note, "redacted": redacted, "truncated": truncated,
+        "log": log, "kernel": kernel, "place": facts, "agents": roster, "note": note,
+        "redacted": redacted, "truncated": truncated,
     })
     .to_string()
     .len() as u64;
@@ -527,6 +637,8 @@ pub fn bundle(place: &Place, req: &Request<'_>, host: &arbos_engine::Host) -> Bu
         children,
         log,
         kernel,
+        place: facts,
+        agents: roster,
         note,
         redacted,
         truncated,

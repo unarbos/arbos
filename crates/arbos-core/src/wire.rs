@@ -112,6 +112,19 @@ pub enum Frame {
         children: Vec<serde_json::Value>,
         log: Vec<serde_json::Value>,
         kernel: serde_json::Value,
+        /// The place's settings that decide behaviour: permission mode,
+        /// spend caps and spend so far, the window pin, `max_children`,
+        /// fallback models, whether a key is in reach (a keyless kernel
+        /// holds every waking line — a worker's brief reads as "Starting
+        /// forever").
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        place: serde_json::Value,
+        /// Every agent of the place at the moment of the report — live
+        /// ones with `running`, the live `step`, `pending_asks`, and the
+        /// `inbox` (kind, from, wake) — and the anchor's archived children.
+        /// What a roster shows, and what it does not.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        agents: Vec<serde_json::Value>,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         note: String,
         redacted: serde_json::Value,

@@ -70,6 +70,13 @@ pub struct Bundle {
     pub children: Vec<Value>,
     pub log: Vec<Value>,
     pub kernel: Value,
+    /// The place's settings that decide behaviour (permission, caps, the
+    /// window pin, spend, whether a key is in reach) — the kernel's.
+    pub place: Value,
+    /// Every agent of the place at the moment of the report, with its
+    /// live state and inbox — the roster the reader needs for "the worker
+    /// line says Starting forever".
+    pub agents: Vec<Value>,
     /// His words as the kernel redacted them. The app shows its own copy and
     /// sends this one, so what he reads is what leaves.
     pub note: String,
@@ -244,11 +251,13 @@ impl Draft {
             "note": self.note.trim(),
             "app": self.app,
             "kernel": b.kernel,
+            "place": b.place,
             "agent": b.agent,
             "turn": b.turn,
             "events": events,
             "tail": tail,
             "children": children,
+            "agents": if self.parts.trajectory { b.agents } else { vec![] },
             "log": if self.parts.log { b.log } else { vec![] },
             "session": if self.parts.session {
                 self.session.clone().unwrap_or(Value::Null)

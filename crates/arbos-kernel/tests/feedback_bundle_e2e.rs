@@ -268,3 +268,65 @@ fn feedback_hands_over_one_exchange_redacted_budgeted_and_bounded() {
     );
     let _ = k.child.kill();
 }
+
+/// The smoke report's complaint, "the worker line says Starting forever",
+/// could not be diagnosed from the first bundle: no roster, no key state,
+/// no inbox. Built here for real — a worker spawned, then the key gone,
+/// so its brief waits — the bundle must let a reader see the cause: the
+/// worker exists, is not running, has a waking brief in its inbox, and
+/// the place has no key.
+#[test]
+fn a_bundle_lets_a_reader_diagnose_a_worker_that_never_starts() {
+    let replies = concat!(
+        "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"slow starter\",\"task\":\"Do: bash `sleep 20`. Report done.\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"started slow starter\"}\n",
+        "{\"agent\":\"slow-starter\",\"content\":\"working\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"sleep 20\",\"description\":\"Long step\"}}]}\n",
+    );
+    let mut k = start_kernel_replay("feedback-roster", &replies);
+    let mut a = Attach::connect(&k.url);
+    let _ = a.wait(Duration::from_secs(5), |f| f["type"] == "hello");
+    a.send(serde_json::json!({"type":"user","agent":"root","text":"start a slow worker","attachments":[]}));
+    assert!(a.wait_turn("slow-starter", "running", Duration::from_secs(20)));
+    // Root's own turn ends (it spawned and said so); the worker runs on.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while transcript(&k.place, "root")
+        .iter()
+        .all(|e| e["kind"] != "turn_complete")
+    {
+        assert!(std::time::Instant::now() < deadline, "root's turn ends");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The worker is mid-turn: the bundle's roster says so, from the
+    // kernel's own state.
+    a.send(serde_json::json!({"type":"feedback","agent":"root","note":"the worker line says Starting forever"}));
+    let b = a
+        .wait(Duration::from_secs(10), |f| f["type"] == "feedback_bundle")
+        .expect("the bundle");
+    let agents = b["agents"].as_array().unwrap();
+    let worker = agents
+        .iter()
+        .find(|x| x["id"] == "slow-starter")
+        .expect("the worker is on the roster: {agents:?}");
+    assert_eq!(worker["parent"], "root");
+    assert_eq!(worker["running"], true, "{worker}");
+    assert_eq!(worker["archived"], false);
+    assert!(
+        worker["transcript_lines"].as_u64().unwrap() >= 1,
+        "{worker}"
+    );
+    let root = agents.iter().find(|x| x["id"] == "root").unwrap();
+    assert_eq!(root["running"], false);
+    assert_eq!(root["pending_asks"], 0);
+    let place = &b["place"];
+    assert_eq!(place["key"], true, "{place}");
+    assert!(place["keyless_reason"].is_null());
+    assert!(
+        place.get("permission").is_some()
+            && place["spend"].is_object()
+            && place.get("window_tokens").is_some(),
+        "{place}"
+    );
+    assert_eq!(place["archive_children"], true);
+    assert!(place["max_children"].as_u64().unwrap() >= 1);
+    let _ = k.child.kill();
+}
