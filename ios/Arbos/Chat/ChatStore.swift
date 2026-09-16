@@ -129,9 +129,14 @@ final class ChatStore: ObservableObject {
         // Frames start arriving during attach; the pump must be running
         // before the history replay lands.
         adopt(live, mode: .connecting)
-        if (try? await live.start()) != nil {
+        do {
+            try await live.start()
             mode = .live
             return true
+        } catch {
+            #if DEBUG
+            print("attach \(endpoint.url): \(error)")
+            #endif
         }
         live.stop()
         pump?.cancel()
