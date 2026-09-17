@@ -129,8 +129,11 @@ class Gateway:
         self.proc: subprocess.Popen | None = None
 
     async def start(self, timeout: float = 30.0) -> None:
-        env = dict(os.environ, PYTHONPATH=str(ROOT))
-        self.proc = subprocess.Popen(self.cmd, cwd=ROOT, env=env, stdout=self.log.open("wb"), stderr=subprocess.STDOUT)
+        # ARBOS_VOICE_SERVER_SRC: run another checkout's gateway (a branch under review) against
+        # this tree's desktop and mocks.
+        src = Path(os.environ.get("ARBOS_VOICE_SERVER_SRC") or ROOT)
+        env = dict(os.environ, PYTHONPATH=str(src))
+        self.proc = subprocess.Popen(self.cmd, cwd=src, env=env, stdout=self.log.open("wb"), stderr=subprocess.STDOUT)
         deadline = time.monotonic() + timeout
         async with httpx.AsyncClient(timeout=2.0) as client:
             while time.monotonic() < deadline:
