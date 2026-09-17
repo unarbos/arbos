@@ -522,6 +522,13 @@ final class CallViewModel: ObservableObject {
         let silence = Data(count: frameBytes)
         micClipTask = Task.detached { [weak self] in
             var offset = 0
+            // Paced against a fixed start, not by sleeping a frame's worth
+            // each time round: sleeping accumulates the loop's own cost, the
+            // stream falls behind real time, and the server's voice
+            // detection reads the shortfall as pauses and cuts the sentence
+            // up. A rig that mis-paces invents the faults it reports.
+            let started = ContinuousClock.now
+            var sent = 0
             // The clip, then silence for as long as the call lasts: a real
             // microphone does not stop producing frames when someone stops
             // talking, and a duplex model only advances while audio arrives.
@@ -536,7 +543,9 @@ final class CallViewModel: ObservableObject {
                 }
                 guard let self else { return }
                 await MainActor.run { self.audio.onCapture?(frame) }
-                try? await Task.sleep(for: .milliseconds(DebugInjector.frameMilliseconds))
+                sent += 1
+                let due = started.advanced(by: .milliseconds(DebugInjector.frameMilliseconds * sent))
+                try? await Task.sleep(until: due, clock: .continuous)
             }
         }
     }
