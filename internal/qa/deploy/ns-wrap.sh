@@ -24,19 +24,37 @@ set -u
 HIDE="${ARBOS_QA_HIDE_PATH:-/cursor/stores}"
 REAL_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
 RO="${ARBOS_QA_PROTECT_RO:-$REAL_HOME /workspace}"
+# World-writable, sticky directories where this user owns files a wipe can remove. 09:36 on 2026-09-17:
+# a control run of the wipe guard, inside this namespace, deleted /run/agent-store-fuse/pod-grant — the
+# store client's own credential, owned by this user — and this client's store went empty (401 on every
+# token mint, listings returned empty with no error). Hidden behind empty directories, like the store.
+HIDE_ALSO="${ARBOS_QA_HIDE_ALSO:-/run/agent-store-fuse /run/user/$(id -u) /var/tmp /dev/shm}"
 EMPTY="/tmp/arbos-qa-empty-store"
 mkdir -p "$EMPTY" 2>/dev/null
 uid=$(id -u); gid=$(id -g)
 if unshare -Urm --propagation private true 2>/dev/null; then
     exec unshare -Urm --propagation private -- sh -c '
-        empty="$1"; hide="$2"; ro="$3"; shift 3
+        empty="$1"; hide="$2"; ro="$3"; hide_also="$4"; shift 4
         [ -d "$hide" ] && { mount --bind "$empty" "$hide" || { echo "ns-wrap: could not hide $hide" >&2; exit 97; }; }
+        for h in $hide_also; do
+            [ -d "$h" ] || continue
+            mount --bind "$empty" "$h" || { echo "ns-wrap: could not hide $h" >&2; exit 97; }
+        done
         for d in $ro; do
             [ -d "$d" ] || continue
             mount --bind "$d" "$d" && mount -o remount,bind,ro "$d" || { echo "ns-wrap: could not make $d read-only" >&2; exit 97; }
         done
+        # ARBOS_QA_PRIVATE_TMP=<dir>: /tmp holds only that directory (a scenario whose
+        # commands may wipe / must not reach other scenarios or the FUSE log).
+        if [ -n "${ARBOS_QA_PRIVATE_TMP:-}" ] && [ -d "$ARBOS_QA_PRIVATE_TMP" ]; then
+            keep="$ARBOS_QA_PRIVATE_TMP"
+            mount --bind "$keep" /mnt \
+              && mount -t tmpfs -o mode=1777 tmpfs /tmp \
+              && mkdir -p "$keep" && mount --bind /mnt "$keep" && umount /mnt \
+              || { echo "ns-wrap: could not give /tmp privately with $keep kept" >&2; exit 97; }
+        fi
         exec unshare -U --map-user='"$uid"' --map-group='"$gid"' -- "$@"
-    ' sh "$EMPTY" "$HIDE" "$RO" "$@"
+    ' sh "$EMPTY" "$HIDE" "$RO" "$HIDE_ALSO" "$@"
 fi
 if [ "${ARBOS_QA_STORE_VISIBLE:-}" = 1 ]; then
     echo "ns-wrap: user namespaces unavailable; ARBOS_QA_STORE_VISIBLE=1 so running $1 unprotected" >&2

@@ -203,6 +203,30 @@ bash /cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/mirror-docs
 
 Do not start another mirror branch. The script refuses to push when the store looks damaged — a refusal means the store faulted again or someone deleted a document, and it can restore from the branch. Details in `internal/store-docs-mirror.md`.
 
+### A bug report carries the whole state (2026-09-17)
+
+Jacob's ruling, after a report showed a worker row the kernel had no record of and diagnosing it required fetching files from his machine by hand: a feedback report includes everything needed to debug it, including the app's own internal state — the desktop's session for that place, the rows and roster the window held, and the kernel's roster at the same moment, so the two sides can be compared. Privacy is not a constraint on data that stays between him, the agents and his MacBook; his source code and tool arguments were already allowed by his earlier decision and this extends it to the app's state. The review sheet keeps its controls so he can strip something before sending.
+
+Credentials are not content: nothing carrying a key, token or password goes into a report, masked or otherwise. That is the leak rule, not a privacy rule, and it is unchanged.
+
+### Prefer what fails by itself over what needs noticing (2026-09-17)
+
+The night's bugs had one shape: something silently produced nothing, and everything downstream treated that as a fact. A checkpoint that could not be written looked empty. A read that failed became a default. A test that skipped itself printed `pass`. A merged pull request and a lost one looked identical afterwards. A scripted `str.replace` whose anchor had been reworded exited 0, so a control the user clicks was built and never wired — and it compiled, because the value was still read for something else.
+
+So, in order of preference: a construct that cannot compile when it is wrong, then a check a machine runs on a timer, then a habit. Concretely, and each of these is paid for by a real incident:
+
+- Exhaustive matches with no wildcard arm, so the next case added must be handled.
+- Call the function rather than copying its two lines; duplication is a thing that works but that nothing forces to stay correct.
+- Assert an anchor exists before a scripted substitution, and read the diff afterwards — the compiler's verdict is not evidence that the edit landed.
+- A read answers present, absent, or unknown, and nothing destructive acts on unknown; a write is confirmed before anything is built on it.
+- Destroy nothing before the thing that replaces it is in hand; on any failure, put back what was there and judge that by the state, not by the last command's exit code.
+- Never test a destructive path against the live artifact — use a scratch copy, and remember that an instruction to "check whether the guard fires" is an instruction to run the command.
+- Record the commit and the build a measurement was taken on; a number without one is not a measurement.
+- Ask what a passing check actually proved, and what else could have made it fail. Three tests in one night passed for reasons unrelated to their claims.
+- A probe must fail the way the world fails, not a way of its own. A test that stood a FIFO where git's index belongs hung every kernel for 200 seconds — nothing in a real repository does that, while a directory gives the same answer and blocks nothing. When a probe's failure looks nothing like the bug, suspect the probe.
+
+Grep is not a guard: an audit that flags five false positives and one real one only works because a person read the output.
+
 ## Codebase facts
 
 - Repo: `unarbos/arbos`. Work merges to `main`, with `rust` kept fast-forwarded to match. An hourly merge steward merges green PRs.

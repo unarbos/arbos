@@ -77,15 +77,21 @@ shout at `internal/qa/inbox/2026-09-17-store-second-reader-fault-0707.md`.
 Cause: the QA loop's own `rm -rf` (above). By 07:37 the store read `BEHIND`
 again after their restore. The record line is on `store-watch`.
 
-## What remains the service's
+## What remains the service's — now small and sharp (09:48 UTC)
 
-Two things from the fault report survive as genuinely the store's, and go to
-its engineers as a small note in place of the large wrong one: the 502s from
-the S3-backed service, and the one client that saw an empty store for about
-twenty minutes with no deletion from anyone. This reader will show the second
-kind as a `FAULT` on one machine while the mirror's client and the record from
-any third reader stay whole at the same minute — which is exactly how to tell
-it from our own deletions.
+The "client that saw an empty store" is explained too, and it is the one
+finding worth sending to the store's engineers: **a client whose grant is
+missing must fail the read, not report an empty directory.** On 2026-09-17
+the QA loop's own test wiped `/run/agent-store-fuse/pod-grant` on its VM;
+from 09:42 that FUSE client got 401 on every token mint and listed the store
+as *empty with no error at all*, while this reader on another machine saw it
+whole at 09:37. That single behaviour made a deleted credential look like a
+deleted store, twice tonight. The 502s from the S3-backed service are the
+other, smaller item. Everything else in the large report was our own tools.
+
+This reader shows the credential case as a `FAULT` on one machine while the
+mirror's client and any third reader stay whole at the same minute — and,
+until the service fails such reads properly, it is the only thing that does.
 
 ## How to read the record
 
@@ -115,6 +121,34 @@ independent views per half hour. The QA loop is welcome to run it as a cycle
 step under its own `CLIENT`; the mesh worker's timer keeps the second view
 going meanwhile and stops when that worker is archived, so QA should adopt it
 before then.
+
+## Applying another worker's staged files into the store (learned 09:50–09:56 UTC)
+
+When a client has lost its store and stages its edits on a branch for someone
+else to apply: check **content, not clocks** — a mount can lie about
+modification times but not about bytes. A destination may be overwritten only
+if the copy already in the store is a subset of the branch copy (additions
+only), or is byte-identical to a version the author is known to have written.
+If a check fails, **stop and name the file**; do not reason about intent. The
+answer to a failed check comes from knowing *who authored the store copy*, and
+when that cannot be established, stopping is always right. Both times it was
+tried tonight the check caught a real replacement, stopping cost one message,
+and the author's confirmation was the thing that unblocked it.
+
+## A single reader's `AGREE` is not proof (10:20 UTC)
+
+A partial listing can look like a healthy one. At 10:02–10:03 two clients
+listed `media/call-mode/` in the same minute: one saw 13 files, the other 3,
+with the writes independently confirmed (`PUT` 200) and no error on either
+side; the ten unseen files included some from 13 September. So a directory
+can look complete and be neither. This reader compares against the mirror
+tip, so ten files missing *from its view* read as `FAULT` — but if the
+reader's own listing is the partial one, its `AGREE` is only as good as that
+listing, and it cannot tell from inside. Two consequences: a third reader on
+another machine is not a nicety, it is what makes agreement mean anything;
+and when a verdict is surprising in either direction, read the client's own
+log (`/tmp/agent-store-fuse.log` on this VM) before trusting the listing.
+No client's store listing is authoritative on its own.
 
 ## Limits, stated
 

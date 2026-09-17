@@ -124,6 +124,10 @@ agents/root/inbox/2026-09-13T15-04-03Z-agent-fix-ci-000.md  kind = "done"  (kern
 - Q5 measured: policy stays the default; `--highlights model` with a gpt-4.1-mini-class model is available behind guardrails; nano-class models invent outcomes.
 - Narrator: a turn's final words are not lost when the next turn starts before they arrive.
 
+## Slice 6 (2026-09-17, the sound of work)
+
+While the agent runs a turn or a tool, the call plays a quiet bed (or ticks), driven only by `agent.activity` frames the gateway derives from the kernel's own frames, with a 5 s heartbeat; it ducks under any voice and stops when the frames stop. Design note and Jacob's one question (bed or ticks): `docs/call-mode-work-sound.md`. PR on `main`.
+
 ## Slice 5 (2026-09-13, desktop call = phone call, on #100 and #101)
 
 - What was missing on Jacob's Mac: reply audio went to a player program the Mac lacks (dropped silently); the call was narrator-only (no reply to small talk); Fn dictation ran as a `voice` session on the duplex model.

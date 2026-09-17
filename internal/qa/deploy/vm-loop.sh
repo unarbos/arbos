@@ -38,16 +38,44 @@ store_put() {  # store_put <local file> <store-relative path>
   mkdir -p "$PENDING/$(dirname "$rel")" && cp -f "$src" "$PENDING/$rel" && echo "== store write failed or store not sound; staged $rel under $PENDING" >&2
   return 1
 }
+# May the staged copy go over what the store holds now? Content, not time (2026-09-17, the mesh
+# worker's check when it applied our staged files): the store copy must be contained in ours —
+# ours is theirs plus additions, nothing of theirs removed beyond a couple of changed lines. A
+# mount can lie about times; content cannot. Anything else is kept staged and said out loud.
+may_overwrite() {  # may_overwrite <mine> <theirs>  (theirs absent → yes)
+  [ -e "$2" ] || return 0
+  cmp -s "$1" "$2" && return 0
+  python3 - "$1" "$2" <<'PY'
+import sys, difflib
+mine = open(sys.argv[1], errors="replace").read().splitlines()
+theirs = open(sys.argv[2], errors="replace").read().splitlines()
+removed = 0
+for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, theirs, mine, autojunk=False).get_opcodes():
+    if tag in ("delete", "replace"):
+        removed += i2 - i1
+sys.exit(0 if removed <= 2 else 1)
+PY
+}
 apply_pending() {
   [ -d "$PENDING" ] || return 0
   store_sound || { echo "== store not sound from here; $(find "$PENDING" -type f | wc -l) staged file(s) kept"; return 0; }
-  local n=0 f rel
+  local n=0 held=0 f rel dst tmp
   while IFS= read -r f; do
-    rel="${f#"$PENDING/"}"
-    if mkdir -p "$STORE_ROOT/$(dirname "$rel")" 2>/dev/null && cp -f "$f" "$STORE_ROOT/$rel" 2>/dev/null; then rm -f "$f"; n=$((n+1)); fi
+    rel="${f#"$PENDING/"}"; dst="$STORE_ROOT/$rel"
+    if ! may_overwrite "$f" "$dst"; then
+      echo "== HELD $rel: the store's copy has lines ours does not (someone wrote there since); kept under $PENDING, merge by hand"
+      held=$((held+1)); continue
+    fi
+    tmp="$dst.pending.$$"
+    if mkdir -p "$(dirname "$dst")" 2>/dev/null && cp -f "$f" "$tmp" 2>/dev/null && mv -f "$tmp" "$dst" 2>/dev/null && cmp -s "$f" "$dst"; then
+      rm -f "$f"; n=$((n+1))
+    else
+      rm -f "$tmp" 2>/dev/null
+    fi
   done < <(find "$PENDING" -type f)
   find "$PENDING" -type d -empty -delete 2>/dev/null
-  [ "$n" -gt 0 ] && echo "== applied $n staged file(s) to the store"
+  [ "$n" -gt 0 ] && echo "== applied $n staged file(s) to the store (content checked, written via rename, read back)"
+  [ "$held" -gt 0 ] && echo "== $held staged file(s) HELD: the store has newer content"
   return 0
 }
 STORE_ROOT="${STORE%/internal/qa}"

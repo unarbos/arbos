@@ -1,8 +1,35 @@
-# Project Agent Store: the seven "losses" were our own QA loop deleting files — cause found 2026-09-17 07:35 UTC
+# Project Agent Store: a client whose credential is missing lists the store as empty, with no error
 
-Store id: `bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983`
-Mount on our machines: `/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983`, type `fuse.agent-store`. All times UTC.
-Written by the QA loop. **Do not send the sections below the line to the store's engineers as a fault report.** They were written believing the service was removing files; they are kept as the record that led to the finding, with the errors left in place and named.
+Store id: `bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983`. Client: `cursor-agent-store-fuse`, `--backend-mode direct`, mount `/cursor/stores`, `--pod-grant-path /run/agent-store-fuse/pod-grant`. All times UTC, 2026-09-17.
+
+## The finding — for the store's engineers
+
+When the FUSE client's grant file is gone, every `MintAgentStoreToken` returns **401** and every directory read returns **an empty listing and no error**. `ls` of the store root prints nothing and exits 0; `ls` of any subdirectory prints nothing and exits 0; `[ -e path ]` is false for every file. To a person and to every program on that machine, the store has been emptied. Nothing has: other clients read it whole at the same minute. The client log is the only place the truth appears:
+
+```
+WARN list_files{target="source:cloud"}: agent-store-fuse: failed to stat pod grant file error=No such file or directory (os error 2)
+WARN list_files{target="source:cloud"}: agent_store_bcs.rpc.failed rpc_method="MintAgentStoreToken" … status=401
+WARN agent_store_fuse::fs: host read_dir failed error_kind="permission_denied"
+```
+
+`permission_denied` inside; an empty directory outside. A read that cannot be authenticated should fail the read — `EACCES`, or `EIO` — so that a caller sees an error and a mirror refuses to run, rather than an empty tree it may act on. Three observations support this, one of them with the cause in hand:
+
+1. **This VM, 09:36–now.** `/run/agent-store-fuse/pod-grant` was deleted at 09:36 (by us: a sandboxed test of the kernel's wipe guard ran `cd / && rm -rf *` on a kernel from before the guard; the directory is `drwxrwxrwt` and the grant file was owned by this user). Last successful token mint 09:33:27; first `failed to stat pod grant file` 09:42:27; from then on every listing empty, no error, while a second client on another machine recorded the store whole at 09:37 and after (`store-watch` branch, `readers/cloud-mesh-3b98.jsonl`). The client log is `/tmp/agent-store-fuse.log` on this VM; the relevant lines are on branch `qa-vm-evidence-2026-09-17` as `agent-store-fuse-warn-delete-mint.log`.
+2. **The benchmark loop's VM, 05:35–~06:00.** Its mount listed empty and refused writes for over twenty minutes while two other clients read and wrote the same store normally (details under "A third phenomenon", below the line). We did not have that VM's client log; the shape is the same as (1). Whether its grant went the same way, only that log can say.
+
+3. **The coordinator's client, 10:02–10:13.** The call-mode worker wrote two audio samples into `media/call-mode/` at 10:02 and 10:03; its client's log shows `PresignAgentStoreWrites` → 200 and an S3 `PUT` → 200 for each, and its mount lists **13** files in that directory. The coordinator's client, in the same minute, lists **3** — and the ten it does not show include files from 13 September, older than anything written that day. Re-read twice, five minutes apart: still 3. No error on the reading side, no warning anywhere. This is the cleanest of the three: both sides observed at the same minute, the writes independently confirmed, and the reader a different kind of client (a coordinator's session, not a loop's VM) from the two above. It is also the first case where the short listing is *partial* rather than empty — a directory that looks healthy and complete and is neither.
+
+**The fault is silent in both directions.** The client that cannot see the files gets no error, so nothing it runs can tell a missing file from a hidden one. The coordinator concluded those ten files did not exist and said so, when they did, because its own listing looked healthy. That is the practical cost, and it should be stated as a rule for anyone using this store today: **on this store, an absence is not evidence of an absence.** A file you cannot list may be there; check from a second client, or against the writer's own log, before acting on its not being there — and never delete or restore on the strength of one client's listing.
+
+Two smaller asks that follow: the grant file should not be removable by the unprivileged user whose processes it serves (the directory is world-writable and sticky, and the file was ours to delete); and a client that has lost its grant should say so once on its own log at WARN or above with the path it looked for — it does, and that line was what let us find this in minutes rather than a day.
+
+## What the rest of this document is
+
+Everything below the line was written believing the service was removing files from this store. It was not. The seven "loss" episodes of 09-16/17 were our own QA loop: an agent under test ran `cd / && rm -rf *` (the kernel's guard did not stop it; fixed in #410) and the store mount was the first user-writable tree under `/`. That account, with its evidence, is kept in full because it is how the finding above was reached, and because it records what we got wrong on the way. None of it is a fault of the service, and none of it should be read as one.
+
+---
+
+# The seven episodes were our own loop (found 07:35; kept as the account)
 
 ## What happened — in one paragraph
 
@@ -46,6 +73,8 @@ Anything written into the walked paths between the 06:41 mirror pass and the 06:
 6. Kernel bug filed: `internal/qa/bugs/qal-j15-needs-approval-misses-cd-root-wipe.md` — `cd / && rm -rf *` runs without approval.
 
 **08:13, after the store was hidden:** the same command ran once more from the same note. The store logged 0 deletes from this client — the wrapper held — and the walk went on to `home/ubuntu`, taking `~/arbos-qa/{repo,deploy,logs,state,…}` before the reaper killed it. The wrapper now also makes `~` and `/workspace` read-only, and destructive commands are removed from prompts outright (the first defuser's "do not run this, only check whether the kernel asks" was checked by running it).
+
+**The per-client empty view has a cause on at least one client (09:42, this VM):** `/run/agent-store-fuse/pod-grant`, the FUSE client's credential, was deleted (by our own sandboxed control run of the wipe guard — the directory is world-writable and the file was ours). From then on every `MintAgentStoreToken` returned 401 and every listing came back **empty with no error** (`host read_dir failed error_kind="permission_denied"` in the client log, nothing at all to the caller). Other clients read the store normally at the same minute. That is the shape Client A saw at 05:35. Whether Client A's grant went the same way we cannot see from here, but the client behaviour is the same and is the thing to fix: a client that cannot authenticate must fail the read (EACCES), not answer with an empty directory.
 
 ## What was wrong in the record below, named
 
