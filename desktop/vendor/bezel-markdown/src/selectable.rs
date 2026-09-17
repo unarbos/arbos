@@ -29,6 +29,9 @@ pub enum Pointer {
     Move(Cursor),
     /// Let go. Whatever the selection had become is what it is.
     Up,
+    /// Moved here with no button down — `None` when the pointer left the
+    /// text. For the hand and the underline over a link.
+    Hover(Option<Cursor>),
 }
 
 /// Render `doc` with `selection` painted in it, reporting what the pointer does.
@@ -53,6 +56,7 @@ pub fn render<V: 'static>(
     layouts: &BlockLayouts,
     selection: Option<Selection>,
     dragging: bool,
+    hover_link: Option<Selection>,
     reveal: Option<&Reveal>,
     bionic: bool,
     window: &mut Window,
@@ -60,16 +64,32 @@ pub fn render<V: 'static>(
     on_pointer: impl Fn(&mut V, Pointer, &mut Context<V>) + 'static,
 ) -> AnyElement {
     let on_pointer = Rc::new(on_pointer);
-    let (down, moved, up, off) = (
+    let (down, moved, up, off, left) = (
+        on_pointer.clone(),
         on_pointer.clone(),
         on_pointer.clone(),
         on_pointer.clone(),
         on_pointer,
     );
     let (at_down, at_move) = (layouts.clone(), layouts.clone());
+    let hover_marks: Vec<(Selection, crate::render::Annotation)> = hover_link
+        .into_iter()
+        .map(|sel| (sel, crate::render::Annotation::LinkHover))
+        .collect();
     div()
         .id(id)
-        .cursor(CursorStyle::IBeam)
+        // The hand over a link, the I-beam over words: a URL in an answer
+        // read as plain text until it was clicked (Jacob, report -31).
+        .cursor(if hover_link.is_some() {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::IBeam
+        })
+        .on_hover(cx.listener(move |view, hovering: &bool, _, cx| {
+            if !*hovering {
+                left(view, Pointer::Hover(None), cx);
+            }
+        }))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |view, event: &MouseDownEvent, _, cx| {
@@ -82,8 +102,12 @@ pub fn render<V: 'static>(
             }),
         )
         .on_mouse_move(cx.listener(move |view, event: &MouseMoveEvent, _, cx| {
-            if dragging && let Some(cursor) = at_move.hit(event.position) {
-                moved(view, Pointer::Move(cursor), cx);
+            if dragging {
+                if let Some(cursor) = at_move.hit(event.position) {
+                    moved(view, Pointer::Move(cursor), cx);
+                }
+            } else {
+                moved(view, Pointer::Hover(at_move.hit(event.position)), cx);
             }
         }))
         .on_mouse_up(
@@ -102,6 +126,7 @@ pub fn render<V: 'static>(
                 // insertion point in text nobody can type into.
                 caret_on: false,
                 layouts: Some(layouts),
+                annotations: &hover_marks,
                 // `None` when off, so the installed set is read at paint the
                 // way it is everywhere else.
                 typography: bionic.then(|| Typography::of(cx).bionic(true)),
