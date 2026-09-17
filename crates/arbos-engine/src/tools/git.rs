@@ -473,30 +473,105 @@ pub fn restore(cwd: &Path, cp: &Checkpoint) -> Result<String> {
                 .unwrap_or("recorded before the kernel kept the tree, or whether it was clean")
         );
     }
-    // Order matters: HEAD back first, then everything untracked that the
-    // later turns added goes (never `.arbos/`), then the checkpoint's tree
-    // — tracked changes and the untracked files of that moment — comes
-    // back, and the index returns to HEAD so it all shows as it did.
+    // Nothing destructive until everything the restore needs is known to
+    // be there (qal-j16: a `reset --hard` ran, then `read-tree` failed on
+    // a missing object, and the person's own later commit was gone from
+    // the tree while the message said "files not restored"). The
+    // checkpoint's commit and its tree are checked first; then the tree
+    // as it stands now is committed the same way a checkpoint's is, so
+    // a failure after this point can put everything back.
+    for (what, obj) in [("HEAD", format!("{}^{{commit}}", cp.head))]
+        .into_iter()
+        .chain(
+            cp.work
+                .iter()
+                .map(|w| ("working tree", format!("{w}^{{tree}}"))),
+        )
+    {
+        let ok = Command::new("git")
+            .args(["cat-file", "-e", &obj])
+            .current_dir(cwd)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            anyhow::bail!(
+                "the checkpoint's {what} ({}) is not in the repository (a missing or corrupt object); files left as they are",
+                &obj[..obj.len().min(12)]
+            );
+        }
+    }
+    let before_head = git_out(cwd, &["rev-parse", "HEAD"])
+        .context("git rev-parse HEAD failed; files left as they are")?;
+    let before_work = work_commit(cwd, &before_head).map_err(|e| {
+        anyhow::anyhow!(
+            "could not keep a copy of the tree as it stands ({e}); files left as they are"
+        )
+    })?;
+    let put_back = |why: String| -> anyhow::Error {
+        let mut steps = vec![
+            Command::new("git")
+                .args(["reset", "--hard", &before_head])
+                .current_dir(cwd)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false),
+        ];
+        if let Some(w) = &before_work {
+            steps.push(
+                Command::new("git")
+                    .args(["read-tree", "-u", "--reset", w])
+                    .current_dir(cwd)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false),
+            );
+            let _ = Command::new("git")
+                .args(["reset", "-q"])
+                .current_dir(cwd)
+                .status();
+        }
+        if steps.iter().all(|ok| *ok) {
+            anyhow::anyhow!(
+                "{why}; the tree was put back as it was (HEAD {}{})",
+                &before_head[..before_head.len().min(12)],
+                before_work
+                    .as_deref()
+                    .map(|w| format!(", your files from {}", &w[..w.len().min(12)]))
+                    .unwrap_or_default()
+            )
+        } else {
+            anyhow::anyhow!(
+                "{why}; and the tree could not be put back — recover by hand: git reset --hard {}{}",
+                before_head,
+                before_work
+                    .as_deref()
+                    .map(|w| format!(" && git read-tree -u --reset {w} && git reset -q"))
+                    .unwrap_or_default()
+            )
+        }
+    };
+    // Order: HEAD back, then the checkpoint's tree — tracked changes and
+    // the untracked files of that moment — into the index and working
+    // tree, then everything the checkpoint did not have goes (never
+    // `.arbos/`), and the index returns to HEAD so it all shows as it
+    // did. The tree comes back *before* anything untracked is removed:
+    // with the old order (clean, then read-tree) a read-tree that failed
+    // left the person with neither the later files nor the checkpoint's.
     let st = Command::new("git")
         .args(["reset", "--hard", &cp.head])
         .current_dir(cwd)
         .status()?;
     if !st.success() {
-        anyhow::bail!("git reset --hard {} failed", cp.head);
+        return Err(put_back(format!("git reset --hard {} failed", cp.head)));
     }
-    // The checkpoint's tree comes back *before* anything untracked is
-    // removed: with the old order (clean, then read-tree) a read-tree
-    // that failed left the person with neither the later files nor the
-    // checkpoint's — the untracked ones were already gone. Now the tree
-    // is in the index when `clean` runs, so `clean` removes only what
-    // the checkpoint did not have.
     if let Some(work) = &cp.work {
         let st = Command::new("git")
             .args(["read-tree", "-u", "--reset", work])
             .current_dir(cwd)
             .status()?;
         if !st.success() {
-            anyhow::bail!("git read-tree {work} failed");
+            return Err(put_back(format!("git read-tree {work} failed")));
         }
     }
     // What `clean` did is part of what was restored: a failure here is
@@ -1221,6 +1296,171 @@ mod tests {
         assert!(
             !dir.join("f2.txt").exists(),
             "the later turn's file is gone"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The loose object of `sha` removed from an uncompressed repository:
+    /// what a corrupt store looks like to git.
+    fn drop_object(dir: &Path, sha: &str) {
+        let p = dir.join(".git/objects").join(&sha[..2]).join(&sha[2..]);
+        std::fs::remove_file(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let st = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    }
+
+    /// The person's tree after the checkpoint: their own commit of `f2`,
+    /// `f1` edited by hand, a note of their own. Returns HEAD.
+    fn later_work(dir: &Path) -> String {
+        git_ok(dir, &["add", "f2.txt"]);
+        git_ok(
+            dir,
+            &[
+                "-c",
+                "user.name=me",
+                "-c",
+                "user.email=me@x",
+                "commit",
+                "-q",
+                "-m",
+                "mine",
+            ],
+        );
+        std::fs::write(dir.join("f1.txt"), "edited by hand\n").unwrap();
+        std::fs::write(dir.join("my-notes.txt"), "keep\n").unwrap();
+        git_out(dir, &["rev-parse", "HEAD"]).unwrap()
+    }
+
+    /// QA's general property for every rewind that reports an error:
+    /// HEAD, the index and the working tree (every file and its bytes,
+    /// `.git` and `.arbos` aside) are what they were before.
+    fn state(dir: &Path) -> (String, String, Vec<(String, Vec<u8>)>) {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                if p.is_dir() {
+                    if name != ".git" && name != ".arbos" {
+                        walk(root, &p, out);
+                    }
+                } else {
+                    out.push((
+                        p.strip_prefix(root).unwrap().display().to_string(),
+                        std::fs::read(&p).unwrap(),
+                    ));
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(dir, dir, &mut files);
+        files.sort();
+        (
+            git_out(dir, &["rev-parse", "HEAD"]).unwrap(),
+            git_out(dir, &["ls-files", "-s"]).unwrap(),
+            files,
+        )
+    }
+
+    fn tree_as_it_was(dir: &Path, head: &str) {
+        assert_eq!(
+            git_out(dir, &["rev-parse", "HEAD"]).unwrap(),
+            head,
+            "HEAD moved"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f1.txt")).unwrap(),
+            "edited by hand\n"
+        );
+        assert!(
+            dir.join("f2.txt").exists(),
+            "the person's committed file is gone"
+        );
+        assert!(dir.join("f3.txt").exists());
+        assert!(dir.join("my-notes.txt").exists());
+    }
+
+    /// qal-j16: `reset --hard` ran before `read-tree`, so a restore that
+    /// then failed on a missing object had already moved HEAD and taken
+    /// the person's own later commit out of the tree — while the message
+    /// said "files not restored". A checkpoint whose objects are missing
+    /// is refused before anything moves.
+    #[test]
+    fn a_restore_whose_checkpoint_is_corrupt_is_refused_with_the_tree_untouched() {
+        let dir = identityless_repo("corrupt-cp");
+        for f in ["f1", "f2", "f3"] {
+            std::fs::write(dir.join(format!("{f}.txt")), format!("{f}\n")).unwrap();
+        }
+        let head = git_out(&dir, &["rev-parse", "HEAD"]).unwrap();
+        let work = work_commit(&dir, &head).unwrap().unwrap();
+        let cp = Checkpoint {
+            line: 9,
+            ts: 0,
+            head: head.clone(),
+            work: Some(work.clone()),
+            clean: false,
+            work_error: None,
+        };
+        let mine = later_work(&dir);
+        drop_object(&dir, &work);
+        let before = state(&dir);
+        let err = restore(&dir, &cp).unwrap_err().to_string();
+        assert!(err.contains("not in the repository"), "{err}");
+        assert!(err.contains("files left as they are"), "{err}");
+        tree_as_it_was(&dir, &mine);
+        assert_eq!(
+            state(&dir),
+            before,
+            "a restore that reports an error changed the tree"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The checks pass (the tree object is there) and `read-tree` still
+    /// fails, on a blob the tree names that is gone: the tree is put back
+    /// as it was, and the message says so.
+    #[test]
+    fn a_restore_that_fails_after_the_checks_puts_the_tree_back() {
+        let dir = identityless_repo("putback");
+        for f in ["f1", "f2", "f3"] {
+            std::fs::write(dir.join(format!("{f}.txt")), format!("{f}\n")).unwrap();
+        }
+        let head = git_out(&dir, &["rev-parse", "HEAD"]).unwrap();
+        let work = work_commit(&dir, &head).unwrap().unwrap();
+        let cp = Checkpoint {
+            line: 9,
+            ts: 0,
+            head: head.clone(),
+            work: Some(work.clone()),
+            clean: false,
+            work_error: None,
+        };
+        let mine = later_work(&dir);
+        // f3's blob, as the checkpoint's tree names it — and f3 changed
+        // since, so the copy of the current tree does not write that
+        // blob back (the same content would; git stores by content).
+        std::fs::write(dir.join("f3.txt"), "f3 changed\n").unwrap();
+        let blob = git_out(&dir, &["rev-parse", &format!("{work}:f3.txt")]).unwrap();
+        drop_object(&dir, &blob);
+        let before = state(&dir);
+        let err = restore(&dir, &cp).unwrap_err().to_string();
+        assert!(err.contains("read-tree") && err.contains("failed"), "{err}");
+        assert!(err.contains("the tree was put back as it was"), "{err}");
+        tree_as_it_was(&dir, &mine);
+        assert_eq!(
+            state(&dir),
+            before,
+            "a restore that reports an error changed the tree"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f3.txt")).unwrap(),
+            "f3 changed\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
