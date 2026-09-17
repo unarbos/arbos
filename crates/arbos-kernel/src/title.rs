@@ -16,6 +16,18 @@ use crate::klog;
 /// a kernel.
 const ASKED: &str = "title-asked";
 
+/// `ARBOS_CHAT_TITLES=off` turns the call off for a process: the e2e
+/// harness sets it, since a fake provider that counts its calls would see
+/// one more after every first turn; `chat_title_e2e` turns it back on.
+pub const ENV: &str = "ARBOS_CHAT_TITLES";
+
+fn enabled() -> bool {
+    !std::env::var(ENV).is_ok_and(|v| {
+        let v = v.trim();
+        v.eq_ignore_ascii_case("off") || v == "0" || v.eq_ignore_ascii_case("false")
+    })
+}
+
 /// The label is nobody's choice: empty, or the opening words of the first
 /// prompt as a client's fallback cut them (`chattitle::from_prompt`, or
 /// the desktop's first-clause cut). Compared on words, case-blind.
@@ -69,6 +81,9 @@ fn first_exchange(place: &Place, id: &str) -> Option<(String, String)> {
 /// Called when `id`'s turn ends. Decides on disk facts, then makes the
 /// one call off the serve loop.
 pub fn after_turn(hooks: &Arc<KernelHooks>, id: &str) {
+    if !enabled() {
+        return;
+    }
     let place = hooks.place.clone();
     let dir = place.agent_dir(id);
     let Ok(agent) = Agent::load(&dir) else {

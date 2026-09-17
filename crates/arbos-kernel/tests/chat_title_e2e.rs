@@ -8,6 +8,14 @@ mod common;
 use common::{Attach, start_kernel_replay};
 use std::time::Duration;
 
+/// The harness turns titles off for every kernel it starts; this file is
+/// where they are on. Set before any kernel is spawned in this process.
+fn titles_on() {
+    // SAFETY: tests in this binary run kernels as child processes and read
+    // this variable only when spawning them.
+    unsafe { std::env::set_var("ARBOS_CHAT_TITLES", "on") };
+}
+
 const PROMPT: &str = "This project is a research notebook about container image formats (OCI, Docker v2, singularity). Keep notes in notes.md.";
 
 #[test]
@@ -18,6 +26,7 @@ fn a_chat_nobody_named_is_titled_by_the_model_once_and_the_tree_carries_it() {
         "{\"agent\":\"root:title\",\"content\":\"Title: \\\"Container image formats notebook.\\\"\"}\n",
         "{\"agent\":\"root\",\"content\":\"Second turn, nothing new.\"}\n",
     );
+    titles_on();
     let mut k = start_kernel_replay("chat-title", replies);
     let mut a = Attach::connect(&k.url);
     assert!(
@@ -87,6 +96,7 @@ fn a_named_chat_is_left_alone_and_an_unscripted_title_is_not_made() {
         "{\"agent\":\"root\",\"content\":\"hello\"}\n",
         "{\"agent\":\"root\",\"content\":\"again\"}\n",
     );
+    titles_on();
     let mut k = start_kernel_replay("chat-title-named", replies);
     let mut a = Attach::connect(&k.url);
     assert!(
