@@ -25,6 +25,8 @@ MIRROR_BRANCH="${MIRROR_BRANCH:-store-docs}"
 WATCH_BRANCH="${WATCH_BRANCH:-store-watch}"
 CLIENT="${CLIENT:-$(hostname -s 2>/dev/null || hostname)}"
 MODE="${1:-run}"
+# Resolve before the cd into the repo, or a relative invocation resolves against the repo.
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # The paths the episodes took, plus the two that were never taken as controls.
@@ -42,6 +44,56 @@ if [ "$MODE" = show ]; then
     [ -n "$watch_tip" ] || { say "no $WATCH_BRANCH branch yet"; exit 0; }
     git show "$watch_tip:readers/$CLIENT.jsonl" 2>/dev/null | tail -20
     exit 0
+fi
+
+# ---- Restore marker ------------------------------------------------------------
+# A restore copies hundreds of files back through a slow mount, and another
+# client reading half-way through sees exactly the shape of a loss (07:07:26Z
+# on 2026-09-17 was this). The restorer marks start and end on the watch
+# branch so readers report RESTORING, not FAULT, while it runs.
+#   store-second-reader.sh restore-begin <staged-dir>
+#   store-second-reader.sh restore-end
+RESTORE_MARK="restore-in-progress.json"
+watch_commit() {   # watch_commit <message> [<mode>,<blob>,<path>]... ; a path with blob "-" is removed
+    local msg="$1"; shift
+    local idx parent tree commit spec mode blob path
+    idx="$(mktemp)"; rm -f "$idx"
+    parent="$(git rev-parse --verify -q "refs/remotes/origin/$WATCH_BRANCH" || true)"
+    if [ -n "$parent" ]; then GIT_INDEX_FILE="$idx" git read-tree "$parent"; fi
+    for spec in "$@"; do
+        IFS=, read -r mode blob path <<< "$spec"
+        if [ "$blob" = "-" ]; then GIT_INDEX_FILE="$idx" git update-index --force-remove "$path" 2>/dev/null || true
+        else GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "$mode,$blob,$path"; fi
+    done
+    # The script rides along so every client runs the same version.
+    GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100755,$(git hash-object -w "$SELF"),store-second-reader.sh"
+    tree=$(GIT_INDEX_FILE="$idx" git write-tree)
+    if [ -n "$parent" ]; then commit=$(git commit-tree "$tree" -p "$parent" -m "$msg")
+    else commit=$(git commit-tree "$tree" -m "$msg"); fi
+    git push -q origin "$commit:refs/heads/$WATCH_BRANCH"
+    local rc=$?
+    rm -f "$idx"
+    return $rc
+}
+if [ "$MODE" = restore-begin ]; then
+    staged="${2:-unknown}"
+    mark_blob=$(printf '{"client":"%s","since":"%s","staged":"%s"}\n' "$CLIENT" "$NOW" "$staged" | git hash-object -w --stdin)
+    watch_commit "$CLIENT $NOW restore begins ($staged)" "100644,$mark_blob,$RESTORE_MARK" \
+        && say "marked restore in progress on $WATCH_BRANCH" || say "could not mark restore on $WATCH_BRANCH"
+    exit 0
+fi
+if [ "$MODE" = restore-end ]; then
+    watch_commit "$CLIENT $NOW restore ends" "100644,-,$RESTORE_MARK" \
+        && say "cleared restore marker on $WATCH_BRANCH" || say "could not clear restore marker on $WATCH_BRANCH"
+    exit 0
+fi
+restore_mark="$( [ -n "$watch_tip" ] && git show "$watch_tip:$RESTORE_MARK" 2>/dev/null || true)"
+restore_since=""
+restore_age_min=0
+if [ -n "$restore_mark" ]; then
+    restore_since=$(printf '%s' "$restore_mark" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("client","?")+" since "+d.get("since","?"))' 2>/dev/null || echo "?")
+    restore_ts=$(printf '%s' "$restore_mark" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("since",""))' 2>/dev/null || true)
+    [ -n "$restore_ts" ] && restore_age_min=$(( ( $(date -u +%s) - $(date -u -d "$restore_ts" +%s 2>/dev/null || date -u +%s) ) / 60 ))
 fi
 
 # ---- What the mirror's client last accepted -------------------------------
@@ -96,6 +148,8 @@ elif [ "$docs_dir" = MISSING ]; then verdict=FAULT; reason="docs/ is gone (root 
 elif [ "$notes" = MISSING ]; then verdict=FAULT; reason="notes.md is gone or empty"
 elif [ "$here_files" = 0 ]; then verdict=FAULT; reason="nothing readable in scope"
 elif [ "$unreadable_n" -gt 0 ] || [ "$zero_bytes" -gt 0 ]; then verdict=FAULT; reason="$unreadable_n unreadable, $zero_bytes zero-byte file(s)"
+elif [ "$missing_n" -gt 0 ] && [ -n "$restore_mark" ] && [ "$restore_age_min" -le 120 ]; then
+    verdict=RESTORING; reason="$missing_n file(s) the mirror accepted are not here yet; a restore is running ($restore_since, ${restore_age_min} min ago)"
 elif [ "$missing_n" -gt 0 ]; then verdict=FAULT; reason="$missing_n file(s) the mirror accepted are not here"
 elif [ "$extra_n" -gt 0 ]; then verdict=BEHIND; reason="$extra_n file(s) here that the mirror has not taken yet (mirror tip is ${mirror_age_min} min old)"
 fi
@@ -128,7 +182,7 @@ record() {
     old=""
     [ -n "$parent" ] && old="$(git show "$parent:readers/$CLIENT.jsonl" 2>/dev/null || true)"
     blob=$( { [ -n "$old" ] && printf '%s\n' "$old"; printf '%s\n' "$line"; } | git hash-object -w --stdin)
-    self_blob=$(git hash-object -w "$(readlink -f "${BASH_SOURCE[0]}")")
+    self_blob=$(git hash-object -w "$SELF")
     if [ -n "$parent" ]; then GIT_INDEX_FILE="$idx" git read-tree "$parent"; fi
     GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "100644,$blob,readers/$CLIENT.jsonl" \
                                                  --cacheinfo "100755,$self_blob,store-second-reader.sh"
