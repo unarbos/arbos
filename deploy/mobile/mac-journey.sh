@@ -182,9 +182,23 @@ shot J7-verified
 score J6 EYE "chat intact and an away card on return = pass (J6-back.png); no card = unverified"
 score J8 U "a: kernel restart mid-turn — not possible on a hosted kernel from the phone; b: second project — see P-runs; c: link cut 25 s mid-turn — turn finished after the link returned (J8c-link-down.png, J3)"
 
-# P1 — dictate a follow-up; his tap sends
-idb ui tap 355 788 --udid $U; sleep 3; shot P1-listening; sleep 8; idb ui tap 355 788 --udid $U; sleep 3; shot P1-dictated
-idb ui tap 200 788 --udid $U; sleep 0.5; idb ui key 40 --udid $U
+# P1 — dictate a follow-up; his tap sends.
+# By label, for the reason type_send is: the composer row is not at y=788,
+# and the button on its right changes from Microphone to Up the moment there
+# are words to send, so a fixed point hits whichever happens to be there.
+# The one button on the right of the composer is three buttons in turn:
+# Microphone, then Stop while it listens, then Up once there are words to
+# send. A second tap on "Microphone" does not stop it, because by then there
+# is no Microphone there — which is why this step sent nothing for months.
+ui tap "Microphone" || score P1 FAIL "no microphone button on the composer"
+sleep 3; shot P1-listening; sleep 8
+ui tap "Stop" >/dev/null 2>&1 || echo "P1: no Stop button; dictation may not have started" | tee -a $O/run.txt
+sleep 3; shot P1-dictated
+heard=$(ui field plain 2>/dev/null)
+if [ -z "$heard" ]; then score P1 FAIL "dictation put nothing in the composer"; else
+  echo "P1 heard: $heard" | tee -a $O/run.txt
+  ui tap "Up" || score P1 FAIL "dictated words in the box but no send button: $(ui dump | awk '$2 > 740 && $2 < 830')"
+fi
 wait_hist P1 "user +please summarize what the workers did" 30
 # P2/P3 recorded when RECORD_P=1 (the every-third-cycle recording)
 if [ "${RECORD_P:-0}" = "1" ]; then xcrun simctl io "$U" recordVideo --codec h264 --force "$O/p-raw.mp4" >/dev/null 2>&1 & PREC=$!; fi
