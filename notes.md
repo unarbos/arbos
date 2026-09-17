@@ -19,10 +19,10 @@
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
 <tldr>
+- [Integrate GPT Live backend](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — replacing the hosted voice model behind a flag; next proof is Jacob's "hey / status" conversation
 - [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — the call was dropping the first third of a second of every caller's words; fixed and measured at the socket ([#402](https://github.com/unarbos/arbos/pull/402))
 - [Run QA break-and-fix loop](bc-b4f4cdba-0146-5dea-9731-24ea2538adcd) — taking the loop over on a fresh machine; the old one lost its store credential to its own wipe test and went blind
 - [Match Cursor chat view exactly](bc-2a1318aa-e675-52f4-b3ab-94cb9415aa39) — cycle 32 running on its own timer; every run now records the kernel build it measured
-- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — `main` `7017eb7`, eight more merged; the file-deletion fix has been on his Update since build 1270, and the plate that did nothing when he clicked it is fixed on `main` now
 </tldr>
 
 - [ ] [Design side panels for desktop](bc-32dc7892-de92-5f0e-801c-05628fa6bde4) — [the design](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/side-panels-design.md) is written against the code and settles Jacob's model: default closed, anything being worked with listed there, the list as the switcher rather than a menu, no free grid. Reading the code found most of the machinery already exists — real terminals, a browser per project, panel messaging — while "default closed" and surviving a relaunch are genuine changes. The drawer is built and driven in [#445](https://github.com/unarbos/arbos/pull/445): one per project, default closed, its own tab row, `⌘T` and `⌘⇧{}` following focus with the focused row lit — which Cursor does not do, and which is the one thing that makes a shared chord predictable — `⌘\` to zoom, and three ways back. 22 driven checks, and the empty four-tile state turned out not to exist in our app at all; his screenshot was Cursor's. Still waiting on his answer to the one fork, what happens when he and the agent edit the same file, and on two small kernel additions so a spoken "open the terminal" opens it rather than offering a card to click
@@ -31,6 +31,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 ## Voice and phone (end goal)
 
+- [ ] [Integrate GPT Live backend](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — OpenAI Live behind a flag on his key; app face unchanged; acceptance is "hey" local, then status delegated with "one sec" and the kernel answer spoken when it lands
 - [ ] A call goes silent while the agent works, and Jacob could not tell that from a crash — he asked "what are you working on", heard "let me get that information", and nothing came back, with the strip returning to Listening as though the exchange were over; the cause is being found on the desktop path, with the filler settling the turn as the first suspicion. His ask beside it is the real fix: a sound while commands are running, driven by the actual running state rather than a timer, tolerable for minutes rather than seconds, and ducking out of the way the moment either of them speaks
 
 - [ ] [iOS app scaffold PR](https://github.com/unarbos/arbos/pull/5) — voice call, text mode, and Main chat all live against the real kernel and speech server ([screenshot](/opt/cursor/artifacts/screenshots/ios/live-kernel-chat.png)); installed on Jacob's iPhone
