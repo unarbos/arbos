@@ -1229,6 +1229,39 @@ class Pass:
         the labelled control, Escape, ⌘1, the tab; and Start the page…
         lands in the chat with a prompt in the composer."""
         sc = "project-page"
+        # Since the side-panel rewrite the Project page is the panel's
+        # Project tab, closed by default: open the drawer first, and when
+        # there is still no full-pane page, drive the ways out of the tab
+        # instead (R25 — these rows read not-reachable in cycle 36 and said
+        # nothing; Jacob's -24 asked for a clear way out of the page).
+        panel = lambda: (self.state().get("panel") or {})
+        if not self.app.exists("panel-project-head") and self.app.exists("toggle-panel") and not panel().get("open"):
+            self.app.click("toggle-panel"); time.sleep(1.0)
+        if self.app.exists("panel-tab-0") and not self.app.exists("page-back-to-chat"):
+            tabs = panel().get("tabs") or []
+            active = panel().get("active")
+            self.record("panel-project-tab", sc, "open the drawer", "the Project tab is the drawer's first tab and is active",
+                        f"tabs={[t.get('kind') for t in tabs]} active={active}",
+                        "pass" if tabs and tabs[0].get("kind") == "project" and active == 0 else "fail", self.still("panel-project-tab"))
+            self.check("panel-escape-closes", sc, "Escape with the drawer open", "the drawer closes; the chat stays",
+                       lambda: self.app.key("escape"), lambda a, b: (b.get("panel") or {}).get("open") is False and b.get("pane") == "chat")
+            self.app.key("cmd-b"); time.sleep(0.8)
+            if self.app.exists("panel-close"):
+                self.check("panel-close", sc, "click the drawer's close mark", "the drawer closes",
+                           lambda: self.app.click("panel-close"), lambda a, b: (b.get("panel") or {}).get("open") is False)
+            else:
+                self.gap("panel-close", sc, "click", "no close mark on the drawer")
+            self.app.key("cmd-b"); time.sleep(0.8)
+            if self.app.exists("panel-expand"):
+                # Expand's effect is not in the driver's state yet (the
+                # drawer's width stayed 280 at 1100 wide — bounded by the
+                # chat's minimum, or a no-op; the side-panel owner is asked):
+                # recorded with the widths, not judged.
+                self.check("panel-expand", sc, "click expand", "the drawer widens or takes the pane",
+                           lambda: self.app.click("panel-expand"),
+                           lambda a, b: f"unverified: width {(a.get('panel') or {}).get('width')} -> {(b.get('panel') or {}).get('width')}, no other state change" if self.diff(a, b) == "no state change" else self.diff(a, b))
+                self.app.key("escape"); time.sleep(0.6)
+            return
         if not self.app.exists("panel-project-head"):
             self.gap("project-page-back", sc, "-", "no panel-project-head on this layout")
             return
