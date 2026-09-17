@@ -481,8 +481,11 @@ fn spawn_kernel(place: &Place) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let log = std::fs::File::create(dir.join("kernel.out.log"))?;
     let err = log.try_clone()?;
-    let me = std::env::current_exe().context("locate arbos-kernel")?;
-    let mut cmd = Command::new(me);
+    let chosen = crate::binary::kernel_binary().context("locate arbos-kernel")?;
+    if let Some(note) = &chosen.note {
+        eprintln!("arbos-kernel: {note}");
+    }
+    let mut cmd = Command::new(&chosen.path);
     cmd.arg("serve")
         .arg(&place.path)
         .current_dir(&place.path)

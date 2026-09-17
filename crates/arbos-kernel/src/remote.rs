@@ -1564,7 +1564,9 @@ fn prepare_remote(machine: &Machine, local_place: &Path, remote_path: &str) -> R
             std::env::consts::ARCH
         );
         if local_arch == arch {
-            let me = std::env::current_exe().context("locate this kernel binary")?;
+            let me = crate::binary::kernel_binary()
+                .context("locate this kernel binary")?
+                .path;
             let staged = format!("{kernel}.new");
             scp(machine, &me, &staged)?;
             ssh_run(
