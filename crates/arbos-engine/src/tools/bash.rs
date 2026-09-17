@@ -104,9 +104,20 @@ impl Tool for Bash {
         };
         let plan = Plan::access(access);
         // Interactive only when it will wait on a card (ask mode); in
-        // auto the same command is refused in `run`, no card.
+        // auto the same command is refused in `run`, no card. A root or
+        // home wipe is refused in `run` in every mode: never a card.
+        let home = home_dir();
+        let verdict = super::wipe::judge(cmd, &where_it_runs(&dir, cx.root, &home));
+        // Refused here, before any mode's approval card: in ask mode the
+        // card would otherwise come first, and a person could be asked to
+        // allow a wipe of their home (qal-j15, ra-01).
+        if let super::wipe::Verdict::Refuse(why) = &verdict {
+            bail!("bash: refused — {why}");
+        }
         Ok(
-            if needs_approval(cmd) && cx.agent.mode == arbos_core::Mode::Ask {
+            if matches!(verdict, super::wipe::Verdict::Ask(_))
+                && cx.agent.mode == arbos_core::Mode::Ask
+            {
                 plan.interactive()
             } else {
                 plan
@@ -161,19 +172,32 @@ impl Tool for Bash {
                 .await
                 .map_err(|e| anyhow::anyhow!("git guard task: {e}"))??;
             }
-            // A wipe of the filesystem root, sudo, mkfs, a fork bomb: in
-            // auto mode nothing waits on a card (decision 2026-09-15), so
-            // these are refused outright with the reason — the model can
-            // ask the user in words if it truly needs one. In ask mode
-            // the call was already allowed before it ran.
-            if needs_approval(cmd) && cx.agent.mode != arbos_core::Mode::Ask {
-                bail!(
-                    "bash: refused — this command wipes a system path, escalates with sudo, or formats a disk, and the default mode runs without approval cards. Do it another way, or ask the user in words and have them run it; ask mode (the mode chip) asks per command instead."
-                );
-            }
             let dir = opt_str(&args, "cwd")
                 .map(|c| cx.cwd.join(c))
                 .unwrap_or_else(|| cx.cwd.clone());
+            // The wipe guard reads the command from this directory, `cd`
+            // by `cd` (qal-j15: `cd / && rm -rf *` ran, seven times,
+            // because the pieces were read apart). A removal of the
+            // filesystem root, a home, or a top-level system tree is
+            // refused in every mode, ask included: there is no agent's
+            // reason for it. Sudo, mkfs, a fork bomb, a removal the
+            // kernel cannot place: in auto mode nothing waits on a card
+            // (decision 2026-09-15), so these are refused with the reason
+            // — the model can ask the user in words if it truly needs
+            // one. In ask mode the call was already allowed before it ran.
+            {
+                let home = home_dir();
+                match super::wipe::judge(cmd, &where_it_runs(&dir, cx.place.path(), &home)) {
+                    super::wipe::Verdict::Run => {}
+                    super::wipe::Verdict::Refuse(why) => bail!("bash: refused — {why}"),
+                    super::wipe::Verdict::Ask(why) if cx.agent.mode != arbos_core::Mode::Ask => {
+                        bail!(
+                            "bash: refused — this command {why}, and the default mode runs without approval cards. Do it another way, or ask the user in words and have them run it; ask mode (the mode chip) asks per command instead."
+                        )
+                    }
+                    super::wipe::Verdict::Ask(_) => {}
+                }
+            }
             if !dir.is_dir() {
                 bail!(
                     "cwd {} does not exist; the working directory is {}. Use a path relative to it, or omit cwd.",
@@ -683,50 +707,43 @@ mod kill_tests {
     }
 }
 
-/// Commands that ask the user first even in auto mode: wiping the root of
-/// the filesystem (or a top-level directory of it), sudo, mkfs, a fork
-/// bomb. `rm -rf /tmp/scratch` is an ordinary cleanup, not one of these;
-/// the old substring test on `rm -rf /` stopped headless runs on exactly
-/// that.
-pub fn needs_approval(cmd: &str) -> bool {
-    let c = cmd.to_ascii_lowercase();
-    c.contains("sudo ") || c.contains("mkfs") || c.contains(":(){") || rm_wipes_root(&c)
+/// Where a command runs, for the wipe guard: the call's directory, the
+/// user's home, the place.
+fn where_it_runs<'a>(
+    cwd: &'a std::path::Path,
+    place: &'a std::path::Path,
+    home: &'a std::path::Path,
+) -> super::wipe::Where<'a> {
+    super::wipe::Where {
+        cwd,
+        home,
+        place: Some(place),
+    }
 }
 
-/// An `rm` with a recursive flag whose target is `/`, `/*`, `~`, or a
-/// top-level directory such as `/usr` or `/etc`.
-fn rm_wipes_root(lower: &str) -> bool {
-    for segment in lower.split(['|', ';', '&', '\n']) {
-        let mut words = segment.split_whitespace();
-        if words.next() != Some("rm") {
-            continue;
-        }
-        let mut recursive = false;
-        for w in words {
-            if let Some(flags) = w.strip_prefix('-').filter(|f| !f.starts_with('-')) {
-                recursive |= flags.contains('r');
-                continue;
-            }
-            if w == "--recursive" || w == "-r" {
-                recursive = true;
-                continue;
-            }
-            if w.starts_with("--") {
-                continue;
-            }
-            let target = w.trim_matches(['"', '\'']);
-            let t = target.trim_end_matches('/');
-            let top_level = t.starts_with('/')
-                && !t[1..].is_empty()
-                && !t[1..].contains('/')
-                && !matches!(t, "/tmp" | "/var");
-            let wipe = target == "/" || target == "/*" || t == "~" || t == "$home" || top_level;
-            if recursive && wipe {
-                return true;
-            }
-        }
-    }
-    false
+fn home_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/nonexistent-home"))
+}
+
+/// Commands that ask the user first even in auto mode, or are refused in
+/// every mode: wiping the root of the filesystem, a home, or a top-level
+/// system tree (refused); sudo, mkfs, a fork bomb, a removal the kernel
+/// cannot place (asked). Read from a directory that is no tree, with
+/// `$HOME` as the home, for callers without a directory — the bash tool itself
+/// judges from the call's own directory (`wipe::judge`). `rm -rf
+/// /tmp/scratch` is an ordinary cleanup, not one of these.
+pub fn needs_approval(cmd: &str) -> bool {
+    let home = home_dir();
+    super::wipe::judge(
+        cmd,
+        &where_it_runs(
+            std::path::Path::new("/nonexistent-cwd/here"),
+            std::path::Path::new("/nonexistent-place"),
+            &home,
+        ),
+    ) != super::wipe::Verdict::Run
 }
 
 #[cfg(test)]
