@@ -57,6 +57,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                 tree: vec![TreeNode {
                     id: "root".into(),
                     name: "root".into(),
+                    title: String::new(),
                     parent: None,
                     paused: false,
                     model: "inherit".into(),

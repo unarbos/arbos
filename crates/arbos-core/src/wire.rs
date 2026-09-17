@@ -724,6 +724,12 @@ pub struct PlanNode {
 pub struct TreeNode {
     pub id: String,
     pub name: String,
+    /// The chat's label when nobody named it: the model's summary after
+    /// the first turn (F-156), or a client's own cut of the first prompt
+    /// until that lands. Empty when the agent has a real `name`, or before
+    /// any label exists. A window prefers `name`, then this.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
     pub parent: Option<String>,
     pub paused: bool,
     pub model: String,
