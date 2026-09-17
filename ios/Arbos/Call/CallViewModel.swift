@@ -86,6 +86,17 @@ final class CallViewModel: ObservableObject {
     private var responseHadAudio = false
     /// The kernel is mid-turn on our behalf (pipeline shape only).
     private var kernelBusy = false
+    /// The working sound and what drives it: the gateway's `agent.activity`
+    /// per agent (state), the tool named on the note, and a watch that
+    /// stops the sound when no frame has come for a while — a dropped
+    /// link must not tick forever.
+    private let work = WorkSound()
+    private var activity: [String: String] = [:]
+    private var workDetail: String?
+    private var activityWatch: Task<Void, Never>?
+    private static let activityStale: TimeInterval = 12
+    /// The caller is talking: the working sound waits for them too.
+    private var userTalking = false
     private var openUtterance = false
     private var speechEndedAt: Date?
     private var replyLatency: TimeInterval?
@@ -329,6 +340,7 @@ final class CallViewModel: ObservableObject {
             }
         }
         if let replyLatency { parts.append(String(format: "reply %.1fs", replyLatency)) }
+        if let workDetail { parts.append(workDetail) }
         note = parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
@@ -361,9 +373,13 @@ final class CallViewModel: ObservableObject {
             }
             speechEndedAt = nil
             phase = .listening
+            userTalking = true
+            updateDuck()
         case .userSpeechEnded:
             speechEndedAt = Date()
             if server.answersItself { phase = .thinking }
+            userTalking = false
+            updateDuck()
         case .userTranscript(let text, let final):
             appendUserTranscript(text, final: final)
             if final {
@@ -397,6 +413,7 @@ final class CallViewModel: ObservableObject {
             phase = .speaking
             markSpeaking(true)
             audio.play(pcm16: pcm)
+            updateDuck()
         case .assistantTranscript(let delta):
             trace("reply: \(delta)")
             append(delta, to: .arbos)
@@ -419,6 +436,8 @@ final class CallViewModel: ObservableObject {
             appendSystem("\(name)\(summary.isEmpty ? "" : " · \(summary)")")
         case .agentDone(_, let text):
             appendSystem(text)
+        case .agentActivity(let agent, let state, let tool, let detail):
+            noteActivity(agent: agent, state: state, tool: tool, detail: detail)
         case .error(let message):
             fail(message)
         case .closed:
@@ -430,7 +449,57 @@ final class CallViewModel: ObservableObject {
 
     private func playbackDrained() {
         markSpeaking(false, after: 0.3)
+        updateDuck()
         settle()
+    }
+
+    // MARK: - Working sound
+
+    /// The gateway says what the call's agent is doing. The sound is on while
+    /// any agent is not idle; a command starting on the main agent is one
+    /// tick; the tool's name goes on the note so the silence has a reason.
+    private func noteActivity(agent: String, state: String, tool: String?, detail: String?) {
+        let wasTool = activity[agent] == "tool"
+        activity[agent] = state
+        let active = activity.values.contains { $0 != "idle" }
+        if state == "tool", let tool {
+            workDetail = detail.map { "\(tool) · \($0)" } ?? tool
+        } else if active, agent == "root" {
+            workDetail = "working"
+        } else if !active {
+            workDetail = nil
+        }
+        trace("event agent.activity agent=\(agent) state=\(state) tool=\(tool ?? "-") on=\(active)")
+        work.set(on: active)
+        if state == "tool", !wasTool, agent == "root" { work.tick() }
+        updateNote()
+
+        activityWatch?.cancel()
+        activityWatch = nil
+        guard active else { return }
+        activityWatch = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.activityStale))
+            guard let self, !Task.isCancelled else { return }
+            self.trace("agent.activity stale — sound off")
+            self.activity.removeAll()
+            self.workDetail = nil
+            self.work.set(on: false)
+            self.updateNote()
+        }
+    }
+
+    /// The sound waits while a voice has the floor: the reply, or the caller.
+    private func updateDuck() {
+        work.duck(audio.isPlaying || userTalking)
+    }
+
+    private func stopWork() {
+        activityWatch?.cancel()
+        activityWatch = nil
+        activity.removeAll()
+        workDetail = nil
+        userTalking = false
+        work.set(on: false)
     }
 
     private var speakingMarked = false
@@ -627,6 +696,7 @@ final class CallViewModel: ObservableObject {
         link.disconnect()
         startedAt = nil
         kernelBusy = false
+        stopWork()
         speechEndedAt = nil
         level = 0
     }

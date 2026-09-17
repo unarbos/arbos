@@ -111,6 +111,11 @@ final class ProjectStore: ObservableObject {
                 row.waitingOn = machines.contains(machine)
                     ? "\(project) isn't running on \(machine)"
                     : "\(machine) is off"
+                #if DEBUG
+                // Which path kept the row, and why it says what it says.
+                // Cycle 51 could not tell this from the screen and guessed.
+                print("roster: keeping \(target.stored) — \(row.waitingOn)")
+                #endif
                 list.append(row)
             }
         }
@@ -184,7 +189,7 @@ final class ProjectStore: ObservableObject {
         var seen = defaults.array(forKey: "projects.opened") as? [String] ?? []
         guard !seen.contains(target.stored) else { return }
         seen.append(target.stored)
-        defaults.set(seen.suffix(40).map { $0 }, forKey: "projects.opened")
+        defaults.set(Array(seen.suffix(40)), forKey: "projects.opened")
     }
 
     /// One project, one row: the pod row goes when its twin is in the list.
