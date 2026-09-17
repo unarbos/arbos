@@ -74,6 +74,28 @@ is there.
 | button ("Open ↗") | **62 × 22**, same border and fill as the dropdown | centred on the row | text `#F0F0F0` |
 | the two questions asked | **A value control is a boxed control, right-aligned, vertically centred between the label and the description — never baseline-aligned to either.** I did not find a bare right-aligned text value (no box) in General; every "value" Cursor shows there is a dropdown or a button. If you draw a bare value, centre it on the row like the others rather than inventing a baseline rule Cursor does not have. **The column recentres** (see above) — theirs and ours agree; keep ours centred |
 
+## Appendix (19:45): the Appearance section, where the value controls live
+
+`media/cursor-reference/cycle-35/cursor-settings/appearance-1440x900.png`. Read
+at the 1024-wide scale of the still (multiply by 1.4 for pixels); the rows
+keep the 60 px pitch and the same card.
+
+| row | control | how the value is shown |
+| --- | --- | --- |
+| Theme | dropdown *Cursor Dark ⌄* | boxed, right-aligned, centred on the row; the menu lists System / Cursor Light / Cursor Light Colorblind (Beta) / Cursor Dark ✓ / Cursor Dark High Contrast, each with a glyph, the current one ticked |
+| Tool Call Density | slider, two end labels *Compact* … *Detailed* under it | the slider track is ~100 px, right-aligned; the labels sit **under** the track in caption grey, not beside it |
+| Code Block Word Wrap, Themed Diff Backgrounds, Reduce Transparency | toggles | as in General |
+| Hue | slider + a colour swatch disc (20 px) to its right | no numeric value |
+| Intensity | slider + **the value as text, `0%`, right of the track**, caption grey, vertically centred on the row | this is the one bare right-aligned value in Settings: it sits on the row's centre line, not on the label's baseline |
+| UI Font Size, Code Font Size | stepper `− 13 +`: two square buttons (22 px) with the number between them, one boxed control | the value lives inside the box |
+| UI Font Family | dropdown *System font ⌄* | as Theme |
+
+So the answer to "a value rather than a toggle" holds across the whole
+Settings: every value is either inside a boxed control or, for the one
+bare case (Intensity's `0%`), right-aligned caption text on the row's
+vertical centre. Nothing is baseline-aligned to the label or the
+description.
+
 ## The rail
 
 | what | value |

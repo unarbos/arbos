@@ -193,3 +193,16 @@ M-151: the project that vanishes when its machine goes off.
 - PR: **#480** (draft). #433 and #472 still open; #465 merged. Feedback poll hourly, nothing new.
 - Media: `media/mobile/cycle-51/01-project-open.png`, `02-row-kept-kernel-stopped.png`, `03-row-kept-hub-gone.png`, `04-chat-reachable-again.png`, `evidence.txt`.
 - Next: instrument `waitingOn` and finish #480; then the journey with `type_send` fixed (M-162), and the recording.
+
+## Cycle 52 report (19:40 UTC, 09-17)
+
+Finishing #480, which cycle 51 left as a draft with half of it working.
+
+- **The branch was right all along; the test was not** (M-176). One debug line in the kept-row pass settled in a single run what three cycles of screenshots had not: `kept-row pass — listed 1, opened before 1, machines []`, then `keeping hub:awsmac/fieldwork — awsmac is off`. Cycle 51's runs had nothing remembered — `opened before 0` — because the project had not been opened in that install before its kernel was stopped, so the branch had nothing to keep.
+- **The row now reads as intended**: `c52-place / awsmac is off · fieldwork`, with the kernel stopped and the machine gone from the roster, where cycle 45 saw it vanish entirely. Verified again end to end on the final commit `06e9f646`.
+- One debug line stays — the one naming which path kept a row and why. Reading that off the screen is what sent the previous cycle guessing.
+- **#480 is out of draft and ready.** This was the seventh time this week a run reported about something other than what it measured, and the cheapest of the seven to correct: a print answered it outright instead of another round of stills. Worth generalising — when a fix cannot be seen, instrument the decision rather than photograph the result.
+- Purpose check: the list reads in the app's own voice; a project that has gone quiet says which thing is off rather than disappearing.
+- PR: **#480** (ready). #433 still open; #472 and #485 merged, #484 closed in #485's favour.
+- Media: `media/mobile/cycle-52/01-row-named-awsmac-is-off.png`, `02-final-commit-verified.png`, `evidence.txt`.
+- Next: the journey with `type_send` fixed (M-162) — it invalidates most of a run and is the oldest open rig problem — then a recording, which is due.
