@@ -18,6 +18,7 @@ import uuid
 
 import numpy as np
 import websockets
+from collections import deque
 
 from . import protocol as P
 from .audio import Resampler, float_to_pcm16, pcm16_to_float
@@ -72,10 +73,18 @@ class DuplexSession(BaseSession):
         self.to_vad = Resampler(self.rate, P.ASR_RATE)
         self.vad_run_ms = 0
         self.vad_quiet_ms = 0
+        self.cap_active = False
+        self.cap_buf: list[np.ndarray] = []
+        self.cap_preroll: deque = deque(maxlen=max(1, self.tuning.preroll_ms // WINDOW_MS))
+        self.cap_silence_ms = 0
+        self.cap_ms = 0
         self.gateway_speaking = False
         self.pending_text = ""  # kernel-bound words waiting for the user to finish
-        self.model_turn = 0  # user_turns value of the last turn the model may answer itself
+        self.decision = "model"  # who answers the current turn: pending (user speaking / transcribing) | model | kernel
+        self.model_hold: list[bytes] = []  # model audio held while the decision is pending
         self.kernel_launched_at = 0.0
+        self.kernel_question = ""
+        self.kernel_first_audio: float | None = None
         self.pending_task: asyncio.Task | None = None
         self.our_speech_started_at = 0.0
         self.transcript_stash: list[tuple[float, str]] = []
@@ -144,34 +153,16 @@ class DuplexSession(BaseSession):
     def _translate(self, msg: dict) -> None:
         kind = msg.get("type", "")
         if kind == "input_audio_buffer.speech_started":
-            # The model's speech_started often lags the user by 1-2 s, so right after a kernel
-            # answer starts it usually refers to the tail of the question just asked; the client
-            # would take it as a barge-in and stop playback. Real talk-over is caught by the VAD
-            # path in _fast_barge_in within ~0.3 s, which also announces speech.started.
-            answering = self.kernel_task is not None and not self.kernel_task.done()
-            if not answering and time.monotonic() - self.our_speech_started_at > 2.0:
-                self._emit(P.SPEECH_STARTED)  # our VAD did not already announce this one
-            # While the kernel answers, only the VAD path may cut it (the model's event is too late
-            # and too often about the question's own tail).
+            pass  # our VAD announces speech.started ~1 s sooner (see _uplink)
         elif kind == "input_audio_buffer.speech_stopped":
-            self.user_stopped_at = time.monotonic()
-            self._emit(P.SPEECH_STOPPED)
+            pass  # our VAD ends the utterance; the model's endpointing splits sentences at pauses
         elif kind == "conversation.item.input_audio_transcription.delta":
-            self._emit(P.TRANSCRIPT_DELTA, text=msg.get("delta", ""))
+            self._emit(P.TRANSCRIPT_DELTA, text=msg.get("delta", ""))  # live words; the final replaces them
         elif kind == "conversation.item.input_audio_transcription.completed":
-            text = msg.get("transcript", "").strip()
-            if text:
-                self.user_turns += 1
-            self._emit(P.TRANSCRIPT_FINAL, text=msg.get("transcript", ""))
-            route = "kernel" if (text and self._kernel_answers(text)) else "model"
-            if (route == "kernel" and len(text.split()) <= 3 and self.kernel_task is not None
-                    and time.monotonic() - self.kernel_launched_at < 4.0):
-                route = "fragment"  # the model finalised late; a tail of the question we already asked
-            log.info("[%s] user (%s): %r", self.sid, route, text)
-            if route == "kernel":
-                self._start_kernel_answer(text)
-            elif route == "model":
-                self.model_turn = self.user_turns
+            # The model's own transcript drops the first syllable of an utterance ("Hello" -> "o")
+            # and cuts at pauses, measured with the model alone. It is logged for comparison only;
+            # the transcript the client and the kernel get comes from Whisper on our VAD segment.
+            log.info("[%s] model heard: %r", self.sid, msg.get("transcript", ""))
         elif kind == "response.created":
             pass  # the model's "response" spans long stretches of silence; we derive turns from the audio
         elif kind == "response.output_audio.delta":
@@ -179,7 +170,7 @@ class DuplexSession(BaseSession):
         elif kind == "response.output_audio_transcript.delta":
             # Text can run a little ahead of the audio, and keeps flowing for words the model
             # decided not to voice (after a barge-in). Only words that get spoken reach the client.
-            if self.muted or self.kernel_turn or self.user_turns != self.model_turn:
+            if self.muted or self.kernel_turn or self.decision != "model":
                 pass
             elif self.response_open:
                 self._emit_for_gen(self.gen, P.RESPONSE_TRANSCRIPT, text=msg.get("delta", ""))
@@ -208,10 +199,19 @@ class DuplexSession(BaseSession):
         samples = pcm16_to_float(pcm)
         loud = float(np.sqrt(np.mean(samples * samples))) > LOUD_RMS
         now = time.monotonic()
-        if self.kernel_turn or self.user_turns != self.model_turn:
+        if self.kernel_turn or self.decision == "kernel":
             if loud:
                 self.last_loud_at = now
             return  # this turn belongs to the kernel; the model's own reply stays unheard
+        if self.decision == "pending":
+            # The user just spoke and Whisper is still deciding who answers. Hold the model's
+            # reply (it starts ~0.5 s after the endpoint) so small talk stays whole and a
+            # project question never leaks the model's own first words.
+            if loud or self.model_hold:
+                self.model_hold.append(pcm)
+                if len(self.model_hold) > 40:  # ~3 s: something is stuck, stop holding
+                    self.model_hold = self.model_hold[-40:]
+            return
         if self.muted:
             if loud:
                 self.last_loud_at = now
@@ -265,28 +265,100 @@ class DuplexSession(BaseSession):
             if self.response_open and time.monotonic() - self.last_loud_at > TAIL_S * 2:
                 self._close_response()
 
-    def _fast_barge_in(self, data: bytes) -> None:
-        """While the gateway's own TTS is playing, cut it as soon as the VAD hears the user."""
+    def _uplink(self, data: bytes) -> None:
+        """Silero VAD on the uplink does two jobs the model does badly: it cuts a gateway-voiced
+        reply ~0.3 s after the user starts talking, and it segments the user's utterance
+        (with 320 ms of pre-roll) so Whisper can transcribe the whole thing, first word included."""
         talking = self.gateway_speaking or (self.kernel_task is not None and not self.kernel_task.done())
-        for _window, prob in self.vad.push(self.to_vad.process(pcm16_to_float(data))):
+        t = self.tuning
+        for window, prob in self.vad.push(self.to_vad.process(pcm16_to_float(data))):
             if prob >= 0.5:
                 self.vad_run_ms += WINDOW_MS
                 self.vad_quiet_ms = 0
             else:
                 self.vad_run_ms = 0
                 self.vad_quiet_ms += WINDOW_MS
-            if talking and self.vad_run_ms >= max(320, self.tuning.barge_in_min_ms):
+            # barge-in over our own voice
+            if talking and self.vad_run_ms >= max(320, t.barge_in_min_ms):
                 self.vad_run_ms = 0
-                self.our_speech_started_at = time.monotonic()
-                self._emit(P.SPEECH_STARTED)
                 if self.kernel_task is not None and not self.kernel_task.done():
-                    self._cancel_kernel_answer("barge-in (vad)")
+                    if self.kernel_first_audio is not None:
+                        self._cancel_kernel_answer("barge-in (vad)")
                 else:
                     self.gen += 1
                     self.gateway_speaking = False
                     self._emit(P.RESPONSE_DONE, interrupted=True)
                     log.info("[%s] speak cut (barge-in, vad)", self.sid)
                 talking = False
+            # utterance capture
+            if not self.cap_active:
+                self.cap_preroll.append(window)
+                if prob >= t.start_threshold and self.vad_run_ms >= t.min_speech_ms:
+                    self.cap_active = True
+                    self.cap_buf = list(self.cap_preroll)
+                    self.cap_ms = len(self.cap_buf) * WINDOW_MS
+                    self.cap_silence_ms = 0
+                    self.our_speech_started_at = time.monotonic()
+                    self.decision = "pending"
+                    self.model_hold = []
+                    self._emit(P.SPEECH_STARTED)
+            else:
+                self.cap_buf.append(window)
+                self.cap_ms += WINDOW_MS
+                self.cap_silence_ms = self.cap_silence_ms + WINDOW_MS if prob < t.end_threshold else 0
+                if self.cap_silence_ms >= t.end_silence_ms or self.cap_ms >= t.max_utterance_s * 1000:
+                    self.cap_active = False
+                    keep = max(1, 240 // WINDOW_MS)
+                    trim = max(0, self.cap_silence_ms // WINDOW_MS - keep)
+                    windows = self.cap_buf[: len(self.cap_buf) - trim] if trim else self.cap_buf
+                    audio = np.concatenate(windows) if windows else np.zeros(0, dtype=np.float32)
+                    self.cap_buf = []
+                    self.cap_preroll.clear()
+                    self.user_stopped_at = time.monotonic()
+                    self._emit(P.SPEECH_STOPPED)
+                    asyncio.create_task(self._utterance_done(audio))
+
+    async def _utterance_done(self, audio: np.ndarray) -> None:
+        started = time.monotonic()
+        try:
+            text = await asyncio.to_thread(self.engines.asr.transcribe, audio, partial=False, language=self.language)
+        except Exception as exc:
+            log.exception("[%s] transcription failed", self.sid)
+            self._emit(P.ERROR, message=f"transcription failed: {exc}")
+            text = ""
+        text = text.strip()
+        self._emit(P.TRANSCRIPT_FINAL, text=text)
+        if not text:
+            self._release_model()
+            return
+        self.user_turns += 1
+        route = "kernel" if self._kernel_answers(text) else "model"
+        answering = self.kernel_task is not None and not self.kernel_task.done()
+        if route == "kernel" and answering and self.kernel_first_audio is None \
+                and time.monotonic() - self.kernel_launched_at < 3.0:
+            # The user paused and went on before the kernel said anything: one question, not two.
+            text = f"{self.kernel_question} {text}".strip()
+            route = "continuation"
+        elif (route == "kernel" and len(text.split()) <= 3 and self.kernel_task is not None
+                and time.monotonic() - self.kernel_launched_at < 4.0):
+            route = "fragment"  # a tail of the question we already asked
+        log.info("[%s] user (%s, %.0fms audio, asr %.0fms): %r", self.sid, route,
+                 audio.size / P.ASR_RATE * 1000, (time.monotonic() - started) * 1000, text)
+        if route in ("kernel", "continuation"):
+            self.decision = "kernel"
+            self.model_hold = []
+            self._start_kernel_answer(text)
+        elif route == "model":
+            self._release_model()
+        else:
+            self.decision = "kernel"
+
+    def _release_model(self) -> None:
+        """The model answers this turn: let its held reply out, then stream live."""
+        self.decision = "model"
+        held, self.model_hold = self.model_hold, []
+        for pcm in held:
+            self._on_model_audio(pcm)
 
     # ------------------------------------------------------------------ the kernel answers
 
@@ -322,6 +394,9 @@ class DuplexSession(BaseSession):
 
     def _launch_kernel_answer(self, text: str) -> None:
         self.kernel_launched_at = time.monotonic()
+        self.kernel_question = text
+        self.kernel_first_audio = None
+        log.info("[%s] asking the kernel: %r", self.sid, text)
         self.kernel_turn = True
         self.transcript_stash.clear()
         self._close_response()
@@ -342,18 +417,22 @@ class DuplexSession(BaseSession):
         spoken: list[str] = []
         buffer = ""
         first_audio: float | None = None
-        self._emit_for_gen(gen, P.RESPONSE_STARTED)
 
         async def flush(segment: str) -> None:
             nonlocal first_audio
             segment = segment.strip()
             if not segment:
                 return
+            if not spoken:
+                # Only now is there something a client could interrupt; announcing earlier made
+                # clients cut a still-silent answer when the user merely paused and went on.
+                self._emit_for_gen(gen, P.RESPONSE_STARTED)
             spoken.append(segment)
             self._emit_for_gen(gen, P.RESPONSE_TRANSCRIPT, text=(" " if len(spoken) > 1 else "") + segment)
             at = await self._speak(segment, gen)
             if first_audio is None and at is not None:
                 first_audio = at
+                self.kernel_first_audio = at
 
         try:
             async for delta in self.kernel.turn(text, timeout=120):
@@ -362,6 +441,8 @@ class DuplexSession(BaseSession):
                 for segment in ready:
                     await flush(segment)
             await flush(buffer)
+            if not spoken:
+                self._emit_for_gen(gen, P.RESPONSE_STARTED)
             self._emit_for_gen(gen, P.RESPONSE_DONE)
             log.info("[%s] kernel answer: first audio %s, %d chars",
                      self.sid, f"{(first_audio - started) * 1000:.0f}ms" if first_audio else "none", sum(map(len, spoken)))
@@ -382,7 +463,7 @@ class DuplexSession(BaseSession):
             args = json.loads(msg.get("arguments") or "{}")
         except json.JSONDecodeError:
             args = {}
-        if self.kernel_turn or self.user_turns != self.model_turn or (self.kernel_task is not None and not self.kernel_task.done()):
+        if self.kernel_turn or self.decision == "kernel" or (self.kernel_task is not None and not self.kernel_task.done()):
             # The kernel took this turn (it dispatches agents itself); do not act twice.
             await self.up.send(json.dumps({
                 "type": "conversation.item.create", "event_id": str(uuid.uuid4()),
@@ -412,7 +493,7 @@ class DuplexSession(BaseSession):
 
     async def on_audio(self, data: bytes) -> None:
         await self._ensure_upstream()
-        self._fast_barge_in(data)
+        self._uplink(data)
         if not self.to_up.identity:
             data = float_to_pcm16(self.to_up.process(pcm16_to_float(data)))
         self.pending += data
@@ -436,8 +517,9 @@ class DuplexSession(BaseSession):
 
     async def on_interrupt(self, cause: str) -> None:
         if self.kernel_task is not None and not self.kernel_task.done():
-            self._cancel_kernel_answer(cause)
-            return
+            if self.kernel_first_audio is not None:
+                self._cancel_kernel_answer(cause)
+            return  # nothing is playing yet; the user is still finishing the question
         if time.monotonic() - self.kernel_cut_at < 1.0:
             return  # the client echoes our barge-in with its own interrupt; already handled
         self.gen += 1
