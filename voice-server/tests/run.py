@@ -183,6 +183,7 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
     own: MockKernel | None = None
     extra = [*opts.gateway_args, *sc.get("gateway_args", [])]
     project = ""
+    refused = False
     try:
         duplex_url = await duplex.start()
         kernel_url = opts.kernel or await kernel.start()
@@ -194,6 +195,7 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
             hub = MockHub(token="harness-hub")
             project = f"{hub_cfg['machine']}/{hub_cfg['project']}"
             hub.kernels[project] = kernel_url
+            hub.places[project] = str(place)
             hub_url = await hub.start()
             extra += ["--hub", hub_url, "--hub-token", "harness-hub", "--hub-machine", "gateway-box"]
             kernel_url = own_url
@@ -203,18 +205,21 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
             gateway = Gateway(duplex_url=duplex_url, kernel_url=kernel_url, log=out / "gateway.log", extra=extra)
             await gateway.start()
             url, token = gateway.url, TOKEN
+        # `project = "name"`: a bare folder name, as a desktop off the hub sends it; `refused = "code"`:
+        # the gateway must answer with that error code and close, and no kernel may hear a word.
+        if sc.get("project"):
+            project = sc["project"]
         caller = Caller(url, token=token, screen=sc.get("screen", "on your screen"), project=project)
         ready = await caller.connect()
-        res.checks.append((ready.get("mode") == "call" and ready.get("narrator") is True, f"session.ready says call mode with a narrator ({ready.get('mode')}, narrator={ready.get('narrator')})"))
-        if hub_cfg:
-            res.checks.append((ready.get("via") == "hub" and ready.get("project") == project, f"session.ready says the call is attached through the hub to {project} (via={ready.get('via')}, project={ready.get('project')})"))
-        await asyncio.sleep(0.4)  # the speech model's session.update lands
-        await run_steps(steps, caller, duplex, kernel, opts)
-        await caller.wait_quiet(1.0, timeout=10)
-        check(sc.get("expect") or {}, res, caller, duplex, kernel)
-        if hub_cfg and own is not None and hub is not None:
-            res.checks.append((len(own.users) == 0, f"the gateway's own kernel received no user frames ({len(own.users)})"))
-            res.checks.append((project in hub.attaches, f"the hub saw an attach for {project} ({hub.attaches})"))
+        if sc.get("refused"):
+            code = ready.get("code") if ready.get("type") == "error" else None
+            res.checks.append((code == sc["refused"], f"the gateway refused the call with {sc['refused']} (got {ready.get('type')} {code}: {str(ready.get('message'))[:90]})"))
+            await asyncio.sleep(0.6)
+            res.checks.append((caller.ready == {}, "no session.ready followed the refusal"))
+            res.checks.append((len(kernel.users) == 0, f"the gateway's own kernel received no user frames ({len(kernel.users)})"))
+            refused = True
+        if not refused:
+            await run_call(sc, steps, res, ready, caller, duplex, kernel, opts, hub_cfg, project, place, own, hub)
     except Exception as exc:
         res.error = f"{type(exc).__name__}: {exc}"
         traceback.print_exc()
@@ -237,6 +242,23 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
     res.seconds = time.monotonic() - started
     res.ok = not res.error and all(ok for ok, _ in res.checks)
     return res
+
+
+async def run_call(sc, steps, res, ready, caller, duplex, kernel, opts, hub_cfg, project, place, own, hub) -> None:
+    """The call proper, once session.ready came: the checks on ready, the steps, the expectations."""
+    res.checks.append((ready.get("mode") == "call" and ready.get("narrator") is True, f"session.ready says call mode with a narrator ({ready.get('mode')}, narrator={ready.get('narrator')})"))
+    if hub_cfg:
+        res.checks.append((ready.get("via") == "hub" and ready.get("project") == project, f"session.ready says the call is attached through the hub to {project} (via={ready.get('via')}, project={ready.get('project')})"))
+        info = ready.get("project_info") or {}
+        res.checks.append((info.get("place") == str(place) and info.get("via") == "hub",
+                           f"session.ready.project_info names the project's own folder {place} (got {info.get('place')}, via={info.get('via')}), not the gateway kernel's"))
+    await asyncio.sleep(0.4)  # the speech model's session.update lands
+    await run_steps(steps, caller, duplex, kernel, opts)
+    await caller.wait_quiet(1.0, timeout=10)
+    check(sc.get("expect") or {}, res, caller, duplex, kernel)
+    if hub_cfg and own is not None and hub is not None:
+        res.checks.append((len(own.users) == 0, f"the gateway's own kernel received no user frames ({len(own.users)})"))
+        res.checks.append((project in hub.attaches, f"the hub saw an attach for {project} ({hub.attaches})"))
 
 
 async def run_steps(steps: list[dict], caller: Caller, duplex: MockDuplex, kernel: MockKernel, opts: argparse.Namespace) -> None:

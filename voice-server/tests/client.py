@@ -81,6 +81,7 @@ class Caller:
         self.project = project
         self.rec = Record()
         self.ready: dict = {}
+        self.refused: dict | None = None  # the error frame when the gateway refused the call
         self.speaking = False
         self._ws = None
         self._queue: asyncio.Queue[tuple[bytes, asyncio.Future]] = asyncio.Queue()
@@ -101,8 +102,10 @@ class Caller:
         self._tasks.append(asyncio.create_task(self._receiver()))
         self._tasks.append(asyncio.create_task(self._mic()))
         deadline = time.monotonic() + timeout
-        while not self.ready and time.monotonic() < deadline:
+        while not self.ready and self.refused is None and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
+        if self.refused is not None:
+            return self.refused  # the gateway refused the call: an error frame with a code, then close 4404
         if not self.ready:
             raise TimeoutError("no session.ready from the gateway")
         return self.ready
@@ -185,6 +188,8 @@ class Caller:
             kind = msg.get("type")
             if kind == "session.ready":
                 self.ready = msg
+            elif kind == "error" and msg.get("code") and not self.ready:
+                self.refused = msg
             elif kind == "narrator.say":
                 self.rec.narrations.append(f)
             elif kind == "response.started":
