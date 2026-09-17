@@ -388,15 +388,35 @@ impl JobsRoot {
     }
 
     /// SIGKILL the job's process group. A finished job is a no-op.
-    pub fn kill(&self, job: &Job) -> bool {
+    /// `Ok(false)`: not running; `Ok(true)`: the signal was delivered;
+    /// `Err`: the system refused it, and the job runs on — the folder does
+    /// not say "killed", and the caller says so to whoever asked.
+    pub fn kill(&self, job: &Job) -> Result<bool> {
         if !job.running() {
-            return false;
+            return Ok(false);
         }
         // Said before the signal, so a reader that comes between never
         // sees "no exit recorded" (qa-024).
-        let _ = fs::write(job.dir.join("killed"), "killed by the kernel\n");
-        crate::tools::kill_job(job.meta.pid);
-        true
+        let marker = job.dir.join("killed");
+        let _ = fs::write(&marker, "killed by the kernel\n");
+        if let Err(e) = crate::tools::kill_job(job.meta.pid) {
+            // The claim is withdrawn: a job the kernel could not signal is
+            // still running, and must read as such.
+            let _ = fs::remove_file(&marker);
+            let why = match e.raw_os_error() {
+                Some(libc::EPERM) => format!(
+                    "{e} — the job runs as another user (sudo in its command?); stop it yourself with `sudo kill -9 -- -{}`",
+                    job.meta.pid
+                ),
+                _ => e.to_string(),
+            };
+            return Err(anyhow::anyhow!(
+                "could not stop job {} (pid {}): {why}",
+                job.id,
+                job.meta.pid
+            ));
+        }
+        Ok(true)
     }
 
     /// Jobs of this agent still alive from an earlier kernel run, ended.
@@ -440,7 +460,16 @@ impl JobsRoot {
                                 orphans.len()
                             ),
                         );
-                        crate::tools::kill_job(job.meta.pid);
+                        if let Err(e) = crate::tools::kill_job(job.meta.pid) {
+                            let _ = fs::remove_file(dir.join("killed"));
+                            out.unverified.push(format!(
+                                "{} (pid {}): {} orphan(s) of its group could not be signalled: {e}",
+                                job.id,
+                                job.meta.pid,
+                                orphans.len()
+                            ));
+                            continue;
+                        }
                         out.reaped.push(format!(
                             "{} (pid {}): {} [{} orphan(s) of its group]",
                             job.id,
@@ -475,7 +504,14 @@ impl JobsRoot {
                         dir.join("killed"),
                         "killed: left over from an earlier kernel run (reaped at start)\n",
                     );
-                    crate::tools::kill_job(job.meta.pid);
+                    if let Err(e) = crate::tools::kill_job(job.meta.pid) {
+                        // The claim is withdrawn: it runs on, and the log
+                        // says why rather than "reaped".
+                        let _ = fs::remove_file(dir.join("killed"));
+                        out.unverified
+                            .push(format!("{line} — could not be signalled: {e}"));
+                        continue;
+                    }
                     out.reaped.push(line);
                 }
                 PidIdentity::Foreign => {
@@ -967,6 +1003,40 @@ mod tests {
     }
 
     /// qa-024: a job the kernel killed says so, with the time it ran.
+    /// A job the kernel cannot signal is not reported killed: the marker
+    /// written ahead of the signal (qa-024) is withdrawn, the error names
+    /// the job and the reason, and the folder still reads as running.
+    /// Here the un-signallable pid is 1 (`kill_job` refuses it outright);
+    /// in life it is EPERM, a job that became another user's.
+    #[test]
+    fn a_kill_the_system_refuses_is_not_reported_as_done() {
+        let root = JobsRoot::new(scratch("refused"));
+        let dir = root.dir().join("j9");
+        fs::create_dir_all(&dir).unwrap();
+        let meta = Meta {
+            command: "sudo sleep 300".into(),
+            cwd: root.dir().to_path_buf(),
+            pid: 1,
+            started_ms: arbos_core::now_ms(),
+            timeout_ms: None,
+        };
+        fs::write(dir.join("meta.json"), serde_json::to_vec(&meta).unwrap()).unwrap();
+        fs::write(dir.join("out.log"), "").unwrap();
+        let job = root.load("j9").unwrap();
+        assert!(job.running(), "pid 1 is alive; the job reads as running");
+        let err = root.kill(&job).unwrap_err().to_string();
+        assert!(err.contains("could not stop job j9"), "{err}");
+        assert!(!dir.join("killed").exists(), "the claim was withdrawn");
+        let again = root.load("j9").unwrap();
+        assert!(again.running(), "and the folder still says running");
+        assert!(
+            !again.status_line().contains("killed"),
+            "{}",
+            again.status_line()
+        );
+        let _ = fs::remove_dir_all(root.dir());
+    }
+
     #[tokio::test]
     async fn a_killed_job_says_who_and_after_how_long() {
         let root = JobsRoot::new(scratch("killed"));
@@ -980,7 +1050,7 @@ mod tests {
             )
             .unwrap();
         assert!(job.running());
-        assert!(root.kill(&job));
+        assert!(root.kill(&job).unwrap());
         let _ = child.wait().await;
         let again = root.load(&job.id).unwrap();
         assert_eq!(again.status, Status::Killed);

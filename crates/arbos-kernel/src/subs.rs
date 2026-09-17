@@ -978,8 +978,15 @@ async fn run_job(
             }
         }
     };
-    if timed_out && let Ok(j) = root.load(&id) {
-        root.kill(&j);
+    if timed_out
+        && let Ok(j) = root.load(&id)
+        && let Err(e) = root.kill(&j)
+    {
+        crate::klog::warn(
+            "subscription_kill_refused",
+            Some(agent.id.as_str()),
+            format!("{e:#}"),
+        );
     }
     let code = match root.load(&id) {
         Ok(j) => match j.status {
