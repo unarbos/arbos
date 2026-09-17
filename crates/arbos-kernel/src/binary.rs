@@ -24,6 +24,7 @@ static STARTED_AS: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// resolved against the working directory (when it names a path) or
 /// PATH (when it is a bare name).
 pub fn remember_start() {
+    arbos_core::binary_identity::remember_start();
     let _ = STARTED_AS.get_or_init(|| {
         let argv0 = std::env::args_os().next().map(PathBuf::from)?;
         resolve_argv0(
@@ -82,6 +83,37 @@ fn choose(
     on_path: Option<PathBuf>,
 ) -> Result<Chosen> {
     let usable = |p: &PathBuf| p.is_file() && !p.to_string_lossy().ends_with(" (deleted)");
+    // The path this process was started from, first: the question a
+    // start (or a re-exec) asks is what is at that path *now*, not where
+    // this process's own inode has been moved to. For a binary replaced
+    // by unlink-and-write the two agree. For the app's update, which
+    // renames the whole `Arbos.app` directory to a backup, they do not:
+    // the running inode travels with the directory, `current_exe()` names
+    // the backup — a real file, not marked deleted — and preferring it
+    // would start (or exec onto) the old build, silently, and win only by
+    // the swap unlinking the backup a few milliseconds later.
+    let same_file = |a: &PathBuf, b: &PathBuf| {
+        arbos_core::binary_identity::of(a).is_some()
+            && arbos_core::binary_identity::of(a) == arbos_core::binary_identity::of(b)
+    };
+    if let Some(p) = started_as.as_ref().filter(|p| usable(p)) {
+        let note = match &current_exe {
+            Some(me) if usable(me) && same_file(me, p) => None,
+            Some(me) => Some(format!(
+                "this process's own file was replaced or moved under it ({}); kernels start from the path it was started with, {} — restart the daemon to run that build yourself",
+                me.display(),
+                p.display()
+            )),
+            None => Some(format!(
+                "this process's own file could not be found; kernels start from the path it was started with, {}",
+                p.display()
+            )),
+        };
+        return Ok(Chosen {
+            path: p.clone(),
+            note,
+        });
+    }
     if let Some(me) = &current_exe
         && usable(me)
     {
@@ -94,15 +126,6 @@ fn choose(
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "(unknown)".into());
-    if let Some(p) = started_as.filter(usable) {
-        return Ok(Chosen {
-            path: p.clone(),
-            note: Some(format!(
-                "this daemon's own binary was replaced or moved under it ({gone}); kernels start from the path it was started with, {} — restart the daemon to run that build yourself",
-                p.display()
-            )),
-        });
-    }
     if let Some(p) = on_path.filter(usable) {
         return Ok(Chosen {
             path: p.clone(),
@@ -121,47 +144,69 @@ fn choose(
 mod tests {
     use super::*;
 
+    /// The start path first, because it is the question; the process's
+    /// own current path only when it has no start path; PATH last.
     #[test]
-    fn own_binary_first_then_start_path_then_path_with_a_note() {
+    fn the_start_path_first_then_own_file_then_path_with_a_note() {
         let dir = std::env::temp_dir().join(format!("arbos-binary-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         let me = dir.join("me");
-        let started = dir.join("started");
         let on_path = dir.join("bin/arbos-kernel");
-        for p in [&me, &started, &on_path] {
+        for p in [&me, &on_path] {
             std::fs::write(p, b"#!/bin/sh\n").unwrap();
         }
-        let c = choose(
-            Some(me.clone()),
-            Some(started.clone()),
-            Some(on_path.clone()),
-        )
-        .unwrap();
+        // Started by its own path and unchanged: that file, no note.
+        let c = choose(Some(me.clone()), Some(me.clone()), Some(on_path.clone())).unwrap();
         assert_eq!(c.path, me);
-        assert!(c.note.is_none());
+        assert!(c.note.is_none(), "{c:?}");
 
-        // Replaced by unlink-and-write: /proc/self/exe reads "(deleted)".
+        // Replaced by unlink-and-write: /proc/self/exe reads "(deleted)";
+        // the start path holds the new file.
+        std::fs::remove_file(&me).unwrap();
+        std::fs::write(&me, b"#!/bin/sh\n# new\n").unwrap();
         let deleted = PathBuf::from(format!("{} (deleted)", me.display()));
-        let c = choose(
-            Some(deleted.clone()),
-            Some(started.clone()),
-            Some(on_path.clone()),
-        )
-        .unwrap();
-        assert_eq!(c.path, started);
+        let c = choose(Some(deleted), Some(me.clone()), Some(on_path.clone())).unwrap();
+        assert_eq!(c.path, me);
         assert!(c.note.as_deref().unwrap().contains("started with"), "{c:?}");
         assert!(
             c.note.as_deref().unwrap().contains("restart the daemon"),
             "{c:?}"
         );
 
-        // Moved: the file is simply gone; the start path too; PATH has one.
-        std::fs::remove_file(&me).unwrap();
-        std::fs::remove_file(&started).unwrap();
+        // The app's update: the directory renamed to a backup, the inode
+        // travelling with it, a new build at the start path. current_exe
+        // names a real, undeleted file — the *old* build. The start path
+        // wins, with a note.
+        let app = dir.join("Arbos.app");
+        std::fs::create_dir_all(&app).unwrap();
+        let start_path = app.join("arbos-kernel");
+        std::fs::write(&start_path, b"old").unwrap();
+        std::fs::rename(&app, dir.join("Arbos.app.backup")).unwrap();
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(&start_path, b"new build").unwrap();
+        let moved = dir.join("Arbos.app.backup").join("arbos-kernel");
+        let c = choose(Some(moved.clone()), Some(start_path.clone()), None).unwrap();
+        assert_eq!(c.path, start_path, "not the backup: {c:?}");
+        assert!(
+            c.note.as_deref().unwrap().contains("replaced or moved"),
+            "{c:?}"
+        );
+
+        // Moved, with nothing at the start path: the own file is still a
+        // file, so it is used (nothing better exists); then PATH.
+        std::fs::remove_file(&start_path).unwrap();
         let c = choose(
-            Some(me.clone()),
-            Some(started.clone()),
+            Some(moved.clone()),
+            Some(start_path.clone()),
+            Some(on_path.clone()),
+        )
+        .unwrap();
+        assert_eq!(c.path, moved);
+        std::fs::remove_file(&moved).unwrap();
+        let c = choose(
+            Some(moved.clone()),
+            Some(start_path.clone()),
             Some(on_path.clone()),
         )
         .unwrap();
@@ -169,7 +214,7 @@ mod tests {
         assert!(c.note.as_deref().unwrap().contains("on PATH"), "{c:?}");
 
         // Nothing anywhere: a refusal that says what to do.
-        let err = choose(Some(me), Some(started), None)
+        let err = choose(Some(moved), Some(start_path), None)
             .unwrap_err()
             .to_string();
         assert!(

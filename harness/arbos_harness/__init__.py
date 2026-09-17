@@ -53,17 +53,22 @@ PROGRAM_BIN = f"{BIN_DIR}/arbos-swe-run"
 # errored in finalize). The harness collects this dir itself.
 OUT_DIR = "/tmp/vf-arbos/out"
 
-# Kills every process in the container except PID 1 (the runtime's own `sleep
-# infinity`) and this shell, then counts what is still alive and not a zombie.
-# Prints "<killed> <left>". Runs in the container's PID namespace, so /proc is
-# every process the agent could have left behind.
+# Kills every live process in the container except PID 1 (the runtime's own
+# `sleep infinity`, which reaps nothing, so exited children linger as zombies)
+# and this shell, then counts what is still alive and not a zombie. Prints
+# "<killed> <left> <zombies>" and the killed command lines. Runs in the
+# container's PID namespace, so /proc is every process the agent could have
+# left behind.
 SWEEP = r"""
-me=$$; killed=0
+me=$$; killed=0; zombies=0; names=""
 for p in /proc/[0-9]*; do
   pid=${p#/proc/}
   [ "$pid" = 1 ] && continue
   [ "$pid" = "$me" ] && continue
-  kill -9 "$pid" 2>/dev/null && killed=$((killed+1))
+  state=$(awk '{print $3}' "$p/stat" 2>/dev/null || echo gone)
+  if [ "$state" = Z ]; then zombies=$((zombies+1)); continue; fi
+  name=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null | cut -c1-80)
+  kill -9 "$pid" 2>/dev/null && killed=$((killed+1)) && names="$names|$name"
 done
 sleep 1
 left=0
@@ -74,7 +79,8 @@ for p in /proc/[0-9]*; do
   state=$(awk '{print $3}' "$p/stat" 2>/dev/null || echo gone)
   [ "$state" = Z ] || [ "$state" = gone ] || left=$((left+1))
 done
-echo "$killed $left"
+echo "$killed $left $zombies"
+echo "$names"
 """
 DEFAULT_IMAGE = "arbos-harness"
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "arbos-harness"
@@ -106,8 +112,11 @@ class ArbosHarnessConfig(HarnessConfig):
     repro_required: int = Field(1, ge=0)
     """Failing reproductions the first edit needs (`ARBOS_REPRO_REQUIRED`): 0 = no gate,
     1 = one, 2 = the reporter's example plus a second input the agent derives."""
-    mechanism_required: bool = True
-    """Refuse the first edit without a `mechanism` line (`ARBOS_MECHANISM_REQUIRED`)."""
+    mechanism_required: bool = False
+    """Kept for old configs; changes nothing. The kernel no longer refuses an edit without a
+    `mechanism` line (SWE-bench loop, cycle 13: the gate accepted `placeholder`, and the
+    "wrong mechanism" class it targeted was an artefact of contaminated rollouts). The line
+    is still recorded and shown by `changes` when the agent gives one."""
     max_turn_cost_usd: float = Field(8.0, ge=0)
     """Dollars one rollout's turn may spend on model calls before the kernel ends it
     (`ARBOS_MAX_TURN_COST`); 0 = no cap. One SWE-bench rollout ran to $14 before this;
@@ -182,7 +191,6 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
             "ARBOS_TRACE": "1" if self.config.trace else "0",
             "ARBOS_WINDOW_TOKENS": str(self.config.window_tokens),
             "ARBOS_REPRO_REQUIRED": str(self.config.repro_required),
-            "ARBOS_MECHANISM_REQUIRED": "1" if self.config.mechanism_required else "0",
             "ARBOS_MAX_TURN_COST": str(self.config.max_turn_cost_usd),
             "ARBOS_CHANGES_BEFORE_DONE": "1" if self.config.changes_before_done else "0",
             "ARBOS_OUT": OUT_DIR,
@@ -221,15 +229,20 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
 
     async def sweep(self, runtime: Runtime) -> None:
         swept = await runtime.run(["sh", "-c", SWEEP], {})
-        parts = swept.stdout.strip().split()
+        lines = swept.stdout.strip().splitlines() or [""]
+        parts = lines[0].split()
         try:
-            killed, left = int(parts[0]), int(parts[1])
+            killed, left, zombies = int(parts[0]), int(parts[1]), int(parts[2])
         except (IndexError, ValueError):
             raise RuntimeError(
                 f"arbos: process sweep before grading failed: {swept.stderr.strip()[-300:]}"
             ) from None
+        names = [n for n in (lines[1] if len(lines) > 1 else "").split("|") if n.strip()]
         await runtime.write(
-            f"{OUT_DIR}/sweep.json", json.dumps({"killed": killed, "left": left}).encode()
+            f"{OUT_DIR}/sweep.json",
+            json.dumps(
+                {"killed": killed, "left": left, "zombies": zombies, "killed_cmdlines": names}
+            ).encode(),
         )
         if left:
             raise RuntimeError(

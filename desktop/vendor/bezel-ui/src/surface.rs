@@ -242,6 +242,12 @@ impl Element for Surface {
         // is painted here — the look's own tint, so the card degrades to a
         // surface with the page showing through rather than to an opaque slab.
         if !lensed(theme) {
+            // Without the blur, the tint alone left the page's text legible
+            // *through* the card — a folder picker's rows drawn over the
+            // project header behind it (Arbos on Linux, 2026-09-17). An
+            // opaque base under the tint keeps the look's colour and gives
+            // the card a floor to read on.
+            window.paint_quad(fill(bounds, theme.surface_raised).corner_radii(corners));
             let tint = self.tint.unwrap_or(glass.spec.tint);
             window.paint_quad(fill(bounds, tint).corner_radii(corners));
         }

@@ -173,10 +173,32 @@ final class CallViewModel: ObservableObject {
         }
         if defaults.object(forKey: "normalise") != nil { audio.normalise = defaults.bool(forKey: "normalise") }
         #endif
+        // The microphone opens before the socket does, and connecting takes
+        // about two thirds of a second. Until this cycle the captured frames
+        // went nowhere for that whole window, because `onCapture` was only
+        // wired to the sink after `connect()` returned — so a person who
+        // taps call and starts talking loses their first word. Hold the
+        // frames instead and send them the moment there is somewhere to send
+        // them; the newest two seconds are worth keeping, and anyone silent
+        // for longer than that has said nothing to lose.
+        var held: [Data] = []
+        var heldBytes = 0
+        audio.onCapture = { frame in
+            held.append(frame)
+            heldBytes += frame.count
+            while heldBytes > Self.heldCaptureLimit, let oldest = held.first {
+                held.removeFirst()
+                heldBytes -= oldest.count
+            }
+        }
         do {
             try audio.start(captureMic: captureMic)
+            #if DEBUG
+            startMicClipIfAsked()
+            #endif
             try await link.connect()
         } catch {
+            audio.onCapture = nil
             fail(error.localizedDescription)
             return
         }
@@ -185,9 +207,15 @@ final class CallViewModel: ObservableObject {
         let sink = link.audioSink()
         // Muted: the same frames go out as silence, so the duplex model
         // keeps its clock and nothing of the room is heard.
-        audio.onCapture = { [weak self] frame in
+        let send: (Data) -> Void = { [weak self] frame in
+            #if DEBUG
+            self?.framesSent += 1
+            #endif
             sink(self?.mutedNow == true ? Data(count: frame.count) : frame)
         }
+        for frame in held { send(frame) }
+        held.removeAll()
+        audio.onCapture = send
         route = audio.outputRoute
         startedAt = Date()
         phase = .listening
@@ -477,6 +505,71 @@ final class CallViewModel: ObservableObject {
         if lines.count > 12 { lines.removeFirst(lines.count - 12) }
     }
 
+    /// Two seconds of captured audio, at the wire format (24 kHz, mono,
+    /// 16-bit): what is held while the socket is still connecting.
+    private static let heldCaptureLimit = Int(AudioEngine.sampleRate) * 2 * MemoryLayout<Int16>.size
+
+    #if DEBUG
+    /// `-micWav <file>`: play a clip down the **capture** path, starting the
+    /// moment the engine is up and so before the socket is.
+    ///
+    /// `-injectWav` cannot test this. It writes straight into the socket's
+    /// sink, bypassing the microphone altogether, which is right for
+    /// measuring round trips and useless for asking what happens to audio
+    /// captured before there is a socket to send it to. That question is
+    /// what dropped a caller's first word, and nothing in the rig could see
+    /// it.
+    private func startMicClipIfAsked() {
+        guard let clip = DebugInjector.clip(named: "micWav") else { return }
+        let frameBytes = Int(AudioEngine.sampleRate) * 2 * DebugInjector.frameMilliseconds / 1000
+        let silence = Data(count: frameBytes)
+        micClipTask = Task.detached { [weak self] in
+            var offset = 0
+            // Paced against a fixed start, not by sleeping a frame's worth
+            // each time round: sleeping accumulates the loop's own cost, the
+            // stream falls behind real time, and the server's voice
+            // detection reads the shortfall as pauses and cuts the sentence
+            // up. A rig that mis-paces invents the faults it reports.
+            let started = ContinuousClock.now
+            var sent = 0
+            // The clip, then silence for as long as the call lasts: a real
+            // microphone does not stop producing frames when someone stops
+            // talking, and a duplex model only advances while audio arrives.
+            while !Task.isCancelled {
+                let frame: Data
+                if offset < clip.count {
+                    let end = min(offset + frameBytes, clip.count)
+                    frame = clip.subdata(in: offset..<end)
+                    offset = end
+                } else {
+                    frame = silence
+                }
+                guard let self else { return }
+                await MainActor.run {
+                    self.framesFromClip += 1
+                    self.audio.onCapture?(frame)
+                    // Periodically, because a scripted run ends by killing
+                    // the process and teardown never gets to say anything.
+                    if self.framesFromClip % 50 == 0 {
+                        print("metric mic_frames clip=\(self.framesFromClip) sent=\(self.framesSent)")
+                    }
+                }
+                sent += 1
+                let due = started.advanced(by: .milliseconds(DebugInjector.frameMilliseconds * sent))
+                try? await Task.sleep(until: due, clock: .continuous)
+            }
+        }
+    }
+    private var micClipTask: Task<Void, Never>?
+    /// Frames the rig produced, and frames that reached the socket. They
+    /// should match while `-micWav` runs; a gap means the engine is feeding
+    /// the same sink and the stream has two producers.
+    private var framesFromClip = 0
+    var framesSent = 0
+
+    private func stopMicClip() { micClipTask?.cancel(); micClipTask = nil }
+    #endif
+
     // MARK: - Teardown
 
     private func fail(_ message: String) {
@@ -505,6 +598,8 @@ final class CallViewModel: ObservableObject {
         #if DEBUG
         injector?.stop()
         injector = nil
+        if framesFromClip > 0 { print("metric mic_frames clip=\(framesFromClip) sent=\(framesSent)") }
+        stopMicClip()
         #endif
         link.unsubscribe(subscription)
         subscription = nil
@@ -579,7 +674,7 @@ final class CallViewModel: ObservableObject {
     /// `DebugInjector`); `-bargeWav` fires a second clip 1.5 s into the
     /// reply to exercise barge-in.
     private func startInjectionIfAsked() {
-        guard DebugInjector.isRequested() else { return }
+        guard DebugInjector.socketInjectionRequested() else { return }
         let sink = link.audioSink()
         let injector = DebugInjector(sink: { [weak self] data in
             sink(data)

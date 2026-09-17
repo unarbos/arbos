@@ -13,7 +13,7 @@
 //! at once, and every registrant gets the new roster.
 
 use anyhow::{Result, bail};
-use arbos_core::hub::{HubFrame, MachineInfo, ProjectInfo, RegistrantKind};
+use arbos_core::hub::{HubFrame, MachineInfo, ProjectInfo, RegistrantBuild, RegistrantKind};
 use arbos_core::wire::Frame;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -95,8 +95,11 @@ struct MachineEntry {
     labels: Vec<String>,
     capabilities: Vec<String>,
     version: String,
-    git_sha: String,
-    built_at: String,
+    /// Each registrant's build, by its key: `worker`, or `kernel:<project>`.
+    /// Never one row for the machine: the arboslife daemon and the `demo`
+    /// kernel shared a `git_sha` for two and a half days, and `/list` named
+    /// the daemon on a build it was not running.
+    builds: HashMap<String, RegistrantBuild>,
     since: i64,
     worker: Option<Arc<Registrant>>,
     /// Checkouts the worker offered.
@@ -203,6 +206,21 @@ impl MachineEntry {
             }
         }
         projects.sort_by(|a, b| a.name.cmp(&b.name));
+        // The machine's build only when every registrant agrees; else the
+        // row says nothing at the top and `builds` says each.
+        let mut builds: Vec<RegistrantBuild> = self.builds.values().cloned().collect();
+        builds.sort_by(|a, b| (&a.role, &a.project).cmp(&(&b.role, &b.project)));
+        let agreed = |pick: fn(&RegistrantBuild) -> &String| -> String {
+            let mut it = builds.iter().map(pick).filter(|s| !s.is_empty());
+            let Some(first) = it.next() else {
+                return String::new();
+            };
+            if it.all(|s| s == first) {
+                first.clone()
+            } else {
+                String::new()
+            }
+        };
         MachineInfo {
             name: name.to_string(),
             user: self.user.clone(),
@@ -210,12 +228,25 @@ impl MachineEntry {
             labels: self.labels.clone(),
             capabilities: self.capabilities.clone(),
             version: self.version.clone(),
-            git_sha: self.git_sha.clone(),
-            built_at: self.built_at.clone(),
+            git_sha: agreed(|b| &b.git_sha),
+            built_at: agreed(|b| &b.built_at),
+            binary_gone: builds.iter().any(|b| b.binary_gone),
+            builds,
             worker: self.worker.is_some(),
             projects,
             since: self.since,
         }
+    }
+}
+
+/// The place already registered as `machine/key` by a *different* place
+/// than `place`, when there is one. Same place, or a side that did not
+/// say its place: no collision.
+fn collision(g: &Inner, machine: &str, key: &str, place: Option<&str>) -> Option<String> {
+    let standing = g.machines.get(machine)?.kernels.get(key)?;
+    match (standing.place.as_deref(), place) {
+        (Some(old), Some(new)) if old != new => Some(old.to_string()),
+        _ => None,
     }
 }
 
@@ -434,6 +465,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         version,
         git_sha,
         built_at,
+        binary_gone,
         protocol,
     }) = first.and_then(|l| serde_json::from_str::<HubFrame>(&l).ok())
     else {
@@ -459,8 +491,8 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         return;
     }
     if protocol > arbos_core::hub::HUB_PROTOCOL {
-        eprintln!(
-            "hub: {machine} speaks hub protocol {protocol}, this hub {}; carrying on",
+        log!(
+            "{machine} speaks hub protocol {protocol}, this hub {}; carrying on",
             arbos_core::hub::HUB_PROTOCOL
         );
     }
@@ -475,6 +507,31 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         .await;
         refuse_close(&mut ws).await;
         return;
+    }
+    // One name, one place. A second kernel registering the same
+    // `machine/project` from a *different* place is refused: silently
+    // preferring the newest sent every attach to whichever registered
+    // last, and the roster showed one healthy entry throughout
+    // (arboslife/demo, served from two folders at once, 2026-09-17). A
+    // kernel from the *same* place is a reconnect and replaces its old
+    // link below. A kernel that did not say its place (an older build)
+    // cannot be told apart and replaces, as before.
+    if kind == RegistrantKind::Kernel {
+        let key = project.clone().unwrap_or_default();
+        let collision = {
+            let g = hub.inner.lock().unwrap();
+            collision(&g, &machine, &key, place.as_deref())
+        };
+        if let Some(old_place) = collision {
+            let new_place = place.clone().unwrap_or_default();
+            let detail = format!(
+                "{machine}/{key} is already registered by the kernel serving {old_place}; this one serves {new_place}. One name, one place: register this place under another project name (`--project`), or stop the other kernel. If that kernel is gone, its registration clears when its link drops."
+            );
+            eprintln!("hub: register refused — {detail}");
+            let _ = send_json(&mut ws, &HubFrame::Error { detail }).await;
+            refuse_close(&mut ws).await;
+            return;
+        }
     }
     let (to_socket, mut from_hub) = mpsc::unbounded_channel::<HubFrame>();
     let reg = {
@@ -516,14 +573,30 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
             }
         }
         if !version.is_empty() {
-            entry.version = version;
+            entry.version = version.clone();
         }
-        if !git_sha.is_empty() {
-            entry.git_sha = git_sha;
-        }
-        if !built_at.is_empty() {
-            entry.built_at = built_at;
-        }
+        // This registrant's build, under its own key.
+        let build_key = match kind {
+            RegistrantKind::Worker => "worker".to_string(),
+            RegistrantKind::Kernel => format!("kernel:{}", project.clone().unwrap_or_default()),
+        };
+        entry.builds.insert(
+            build_key,
+            RegistrantBuild {
+                role: match kind {
+                    RegistrantKind::Worker => "worker".into(),
+                    RegistrantKind::Kernel => "kernel".into(),
+                },
+                project: match kind {
+                    RegistrantKind::Worker => String::new(),
+                    RegistrantKind::Kernel => project.clone().unwrap_or_default(),
+                },
+                version,
+                git_sha,
+                built_at,
+                binary_gone,
+            },
+        );
         // The latest word on a project's face wins (a kernel's over an
         // older worker's, a re-registration over the last).
         for (name, face) in identities {
@@ -541,16 +614,24 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                 entry.worker_projects = projects;
             }
             RegistrantKind::Kernel => {
-                entry
-                    .kernels
-                    .insert(project.clone().unwrap_or_default(), Arc::clone(&reg));
+                let key = project.clone().unwrap_or_default();
+                // One name, one place. A second kernel registering the same
+                // `machine/project` from a *different* place is refused:
+                // silently preferring the newest sent every attach to
+                // whichever registered last, and the roster showed one
+                // healthy entry throughout (arboslife/demo, served from
+                // two folders at once, 2026-09-17). A kernel from the
+                // *same* place is a reconnect and replaces its old link.
+                // A kernel that did not say its place (an older build)
+                // cannot be told apart and replaces, as before.
+                entry.kernels.insert(key, Arc::clone(&reg));
             }
         }
         g.generation += 1;
         reg
     };
-    eprintln!(
-        "hub: registered {} {} project={} from {peer}",
+    log!(
+        "registered {} {} project={} from {peer}",
         kind.as_str(),
         machine,
         project.as_deref().unwrap_or("-")
@@ -618,7 +699,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                             tokio::spawn(async move {
                                 for d in hub2.push.notify(&address, &user, &notice).await {
                                     if d.status != 200 {
-                                        eprintln!("hub: push {address} → {}…: {} {}", &d.token[..d.token.len().min(8)], d.status, d.detail.trim());
+                                        log!("push {address} → {}…: {} {}", &d.token[..d.token.len().min(8)], d.status, d.detail.trim());
                                     }
                                 }
                             });
@@ -632,7 +713,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                             tokio::spawn(async move {
                                 for d in hub2.push.seen(&address, &user, unseen).await {
                                     if d.status != 200 {
-                                        eprintln!("hub: badge {address} → {}…: {} {}", &d.token[..d.token.len().min(8)], d.status, d.detail.trim());
+                                        log!("badge {address} → {}…: {} {}", &d.token[..d.token.len().min(8)], d.status, d.detail.trim());
                                     }
                                 }
                             });
@@ -665,6 +746,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                     if entry.worker.as_ref().is_some_and(|w| w.id == reg.id) {
                         entry.worker = None;
                         entry.worker_projects.clear();
+                        entry.builds.remove("worker");
                     }
                 }
                 RegistrantKind::Kernel => {
@@ -672,6 +754,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                     if entry.kernels.get(&key).is_some_and(|k| k.id == reg.id) {
                         entry.kernels.remove(&key);
                         entry.worktrees.remove(&key);
+                        entry.builds.remove(&format!("kernel:{key}"));
                     }
                 }
             }
@@ -681,8 +764,8 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         }
         g.generation += 1;
     }
-    eprintln!(
-        "hub: unregistered {} {} project={}",
+    log!(
+        "unregistered {} {} project={}",
         kind.as_str(),
         machine,
         project.as_deref().unwrap_or("-")
@@ -723,8 +806,8 @@ pub async fn attach(
     );
     if access == "none" {
         let (name, _) = who.as_client();
-        eprintln!(
-            "hub: {name} refused on {}/{}: the project is not shared with them",
+        log!(
+            "{name} refused on {}/{}: the project is not shared with them",
             kernel.machine,
             kernel.project.as_deref().unwrap_or("-")
         );
@@ -733,7 +816,7 @@ pub async fn attach(
             &Frame::Error {
                 agent: None,
                 detail: format!(
-                    "hub: no access to {}/{}: the project is not shared with you",
+                    "no access to {}/{}: the project is not shared with you",
                     kernel.machine,
                     kernel.project.as_deref().unwrap_or("-")
                 ),
@@ -760,8 +843,8 @@ async fn proxy(
     let (name, _) = who.as_client();
     let role = role.to_string();
     let chan = kernel.open(to_client, &name, &role);
-    eprintln!(
-        "hub: {name} ({role}) attached to {}/{} chan {chan}",
+    log!(
+        "{name} ({role}) attached to {}/{} chan {chan}",
         kernel.machine,
         kernel.project.as_deref().unwrap_or("-")
     );
@@ -825,7 +908,7 @@ async fn proxy(
         }
     }
     kernel.close(chan, "client left");
-    eprintln!("hub: {name} left {} chan {chan}", kernel.machine);
+    log!("{name} left {} chan {chan}", kernel.machine);
 }
 
 /// A client's line as the JSON the kernel will read: an object with a
@@ -903,8 +986,8 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
     let (tx, rx) = oneshot::channel();
     hub.inner.lock().unwrap().claims.insert(id.clone(), tx);
     let from = if from.is_empty() { name.clone() } else { from };
-    eprintln!(
-        "hub: {name} claims {} for {project} (isolate={isolate}) id {id}",
+    log!(
+        "{name} claims {} for {project} (isolate={isolate}) id {id}",
         worker.machine
     );
     if !worker.send(HubFrame::Claim {
@@ -1008,6 +1091,135 @@ mod roster_face_tests {
     use super::*;
 
     /// A phone's list draws each project's face from the roster: a live
+    /// arboslife/demo, served from two folders at once: an attach reached
+    /// whichever registered last, and the roster showed one entry. One
+    /// name, one place — a second place is refused; the same place (a
+    /// reconnect) and a kernel that named no place are not.
+    #[test]
+    fn a_second_place_under_the_same_name_is_a_collision_a_reconnect_is_not() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let reg = |place: Option<&str>| {
+            Arc::new(Registrant {
+                id: 1,
+                machine: "arboslife".into(),
+                user: "owner".into(),
+                project: Some("demo".into()),
+                place: place.map(str::to_string),
+                to_socket: tx.clone(),
+                chans: Mutex::new(HashMap::new()),
+                next_chan: AtomicU64::new(1),
+            })
+        };
+        let mut g = Inner::default();
+        let entry = g.machines.entry("arboslife".into()).or_default();
+        entry
+            .kernels
+            .insert("demo".into(), reg(Some("/home/c/arbos-hub/projects/demo")));
+        assert_eq!(
+            collision(
+                &g,
+                "arboslife",
+                "demo",
+                Some("/home/c/arbos-qa/cycle-11/demo")
+            ),
+            Some("/home/c/arbos-hub/projects/demo".to_string()),
+            "a different place under the same name"
+        );
+        assert_eq!(
+            collision(
+                &g,
+                "arboslife",
+                "demo",
+                Some("/home/c/arbos-hub/projects/demo")
+            ),
+            None,
+            "the same place is a reconnect"
+        );
+        assert_eq!(
+            collision(&g, "arboslife", "demo", None),
+            None,
+            "no place given: as before"
+        );
+        assert_eq!(collision(&g, "arboslife", "other", Some("/x")), None);
+        assert_eq!(collision(&g, "elsewhere", "demo", Some("/x")), None);
+        let entry = g.machines.get_mut("arboslife").unwrap();
+        entry.kernels.insert("demo".into(), reg(None));
+        assert_eq!(
+            collision(&g, "arboslife", "demo", Some("/x")),
+            None,
+            "the standing kernel named no place: cannot be told apart"
+        );
+    }
+
+    /// The arboslife row said the worker daemon was on `b6e7098` because
+    /// the `demo` kernel spoke last; the daemon was on `bfb36e98` with its
+    /// image deleted. One build per registrant; the machine's own only
+    /// when they agree; `binary_gone` when any says so.
+    #[test]
+    fn a_machine_is_not_one_process_builds_are_per_registrant() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let reg = Arc::new(Registrant {
+            id: 1,
+            machine: "arboslife".into(),
+            user: "owner".into(),
+            project: Some("demo".into()),
+            place: None,
+            to_socket: tx,
+            chans: Mutex::new(HashMap::new()),
+            next_chan: AtomicU64::new(1),
+        });
+        let mut entry = MachineEntry::default();
+        entry.kernels.insert("demo".into(), Arc::clone(&reg));
+        entry.worker = Some(reg);
+        let build = |role: &str, project: &str, sha: &str, gone: bool| RegistrantBuild {
+            role: role.into(),
+            project: project.into(),
+            version: "0.2.0".into(),
+            git_sha: sha.into(),
+            built_at: "2026-09-16T22:31Z".into(),
+            binary_gone: gone,
+        };
+        entry.builds.insert(
+            "kernel:demo".into(),
+            build("kernel", "demo", "b6e7098", false),
+        );
+        entry
+            .builds
+            .insert("worker".into(), build("worker", "", "bfb36e98", true));
+        let info = entry.info("arboslife", Some(("owner", "owner")), "mesh");
+        assert_eq!(
+            info.git_sha, "",
+            "no machine-wide sha when they differ: {info:?}"
+        );
+        assert_eq!(
+            info.built_at, "2026-09-16T22:31Z",
+            "agreed fields still stand"
+        );
+        assert!(info.binary_gone);
+        assert_eq!(info.builds.len(), 2);
+        let worker = info.builds.iter().find(|b| b.role == "worker").unwrap();
+        assert_eq!(worker.git_sha, "bfb36e98");
+        assert!(worker.binary_gone);
+        let kernel = info.builds.iter().find(|b| b.role == "kernel").unwrap();
+        assert_eq!(
+            (kernel.project.as_str(), kernel.git_sha.as_str()),
+            ("demo", "b6e7098")
+        );
+        assert!(!kernel.binary_gone);
+        // Agreeing registrants: the machine's build is theirs.
+        entry
+            .builds
+            .insert("worker".into(), build("worker", "", "b6e7098", false));
+        let info = entry.info("arboslife", Some(("owner", "owner")), "mesh");
+        assert_eq!(info.git_sha, "b6e7098");
+        assert!(!info.binary_gone);
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(
+            json.get("binary_gone").is_none(),
+            "absent when false: {json}"
+        );
+    }
+
     /// kernel's project and a worker's checkout alike, as their
     /// registrants read `project.toml`; a project no one read has none.
     #[test]

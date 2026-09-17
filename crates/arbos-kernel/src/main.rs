@@ -28,8 +28,9 @@ fn main() -> Result<()> {
             );
         }
     }
-    // The path this process was started with, kept before anything can
-    // replace the binary under it (see `binary`).
+    // The path this process was started with, and its file's identity
+    // (device, inode, size, mtime), kept before anything can replace the
+    // binary under it (see `binary`; `binary_gone` compares against it).
     arbos_kernel::binary::remember_start();
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_else(|| "serve".into());
