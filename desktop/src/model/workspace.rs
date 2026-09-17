@@ -21,14 +21,14 @@ use crate::{
         place::Place,
         project::Project,
         record,
-        session::{self, ChatItem, ChatSession, Command},
+        session::{self, ChatItem, ChatSession, Command, Connection},
         settings::{self, Feature, Settings},
         state::{self, State},
         surface::{self, Bind, Surface, SurfaceId, SurfaceKind},
         watch::{self, Watch},
     },
     reading,
-    view::component::transcript,
+    view::component::{surface::Link, transcript},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bezel::{
@@ -2604,6 +2604,20 @@ impl Workspace {
     /// The drawer of the project in front, for the chrome to read.
     pub fn panel(&self) -> Option<&Panel> {
         self.active_project().map(|project| &project.panel)
+    }
+
+    /// Whether the kernel of the project in front is answering — what every
+    /// row in its drawer is labelled against. One live chat is enough: they
+    /// share the place's kernel, and a chat read back from disk has no socket
+    /// of its own to prove anything with.
+    pub fn panel_link(&self) -> Link {
+        let live = self.active_project().is_some_and(|project| {
+            project
+                .sessions
+                .iter()
+                .any(|chat| matches!(chat.connection, Connection::Live(_)))
+        });
+        if live { Link::Live } else { Link::Lost }
     }
 
     /// Change the drawer of the project in front. Every change is filed at

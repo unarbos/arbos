@@ -782,18 +782,36 @@ impl Arbos {
                     .any(|surface| surface.terminal_id() == Some(id.as_str()))
             })
         });
-        let active = workspace.active_surface().and_then(|surface| {
-            Some((
-                surface.terminal_id()?.to_owned(),
-                workspace.active_project()?.place(),
-            ))
-        });
+        // Which terminal wants a live pane: the one the side panel is showing,
+        // or the one in the column when a tab has been zoomed there. Before
+        // the drawer existed only the column could hold one, and a terminal
+        // opened into the panel drew "This terminal has no session" for ever.
+        let in_panel = match workspace.panel().map(Panel::active_tab) {
+            Some(PanelTab::Surface(id)) => workspace
+                .active_project()
+                .and_then(|project| project.surface(id))
+                .and_then(|surface| surface.terminal_id())
+                .map(str::to_owned),
+            Some(PanelTab::Project | PanelTab::New(_)) | None => None,
+        };
+        let active = in_panel
+            .or_else(|| {
+                workspace
+                    .active_surface()
+                    .and_then(|surface| surface.terminal_id())
+                    .map(str::to_owned)
+            })
+            .zip(workspace.active_project().map(|project| project.place()));
         let active_id = active.as_ref().map(|(id, _)| id.clone());
+        let zoomed = self.pane == Pane::Surface;
         if let Some((id, place)) = active {
             let terminal = self.terminals.entry(id.clone()).or_insert_with(|| {
                 cx.new(|cx| crate::view::terminal::TerminalPane::new(place, id, cx))
             });
-            if self.active_terminal != active_id {
+            // The column takes the caret with it, since zooming a terminal is
+            // an act of sitting down at it. In the drawer nothing takes the
+            // focus but a click, as everywhere else here.
+            if zoomed && self.active_terminal != active_id {
                 window.focus(&terminal.focus_handle(cx), cx);
             }
         }

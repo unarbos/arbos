@@ -1762,6 +1762,7 @@ impl Arbos {
             return div().flex_1().into_any_element();
         };
         let place = workspace.active_project().map(|project| project.place());
+        let link = workspace.panel_link();
         let glyph = board::glyph(&shown.board_kind);
         let heading = board::title(&shown);
         let id = shown.id;
@@ -1775,7 +1776,7 @@ impl Arbos {
                     .child(terminal.clone())
                     .into_any_element()
             } else {
-                board::render(&shown, place.as_ref(), window, cx)
+                board::render(&shown, place.as_ref(), link, window, cx)
             };
         div()
             .flex_1()

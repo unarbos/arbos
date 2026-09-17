@@ -1113,7 +1113,7 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
                         "id": id.0,
                         "title": surface.map(board::title),
                         "board_kind": surface.map(|s| s.board_kind.clone()),
-                        "state": surface.and_then(board::state_word),
+                        "state": surface.and_then(|s| board::state_word(s, workspace.panel_link())),
                     })
                 }
             }).collect::<Vec<_>>(),

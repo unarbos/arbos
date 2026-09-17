@@ -18,7 +18,7 @@ use crate::{
         surface::{Surface, SurfaceId},
     },
     view::{
-        component::surface as board,
+        component::surface::{self as board, Link},
         panel::{PANEL_MIN_WINDOW, PANEL_WIDTH},
         root::{self, Arbos, Pane, TogglePanel, ZoomPanel},
     },
@@ -168,8 +168,13 @@ impl Arbos {
             .flex_row()
             .items_center()
             .gap(px(4.))
+            // The row that the tab chords will move carries the accent under
+            // it. The brighter label on its front tab says the same thing, but
+            // measured off a still that difference is 30 levels of grey on one
+            // word — not something anyone reads at a glance, which is what
+            // this has to be.
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(if focused { theme.accent } else { theme.border })
             .child(
                 theme
                     .ghost("panel-new-tab")
@@ -261,6 +266,7 @@ impl Arbos {
     ) -> AnyElement {
         let group = SharedString::from(format!("panel-tab-{at}"));
         let workspace = self.workspace.read(cx);
+        let link = workspace.panel_link();
         let (label, glyph, state) = match tab {
             PanelTab::Project => ("Project".to_string(), Some(icons::files::FOLDER), None),
             // No glyph: the `+` that made it is two pills to the left, and a
@@ -273,7 +279,7 @@ impl Arbos {
                 Some(surface) => (
                     board::title(surface),
                     Some(board::glyph(&surface.board_kind)),
-                    board::state_word(surface),
+                    board::state_word(surface, link),
                 ),
                 // A tab is dropped the moment its surface goes, so this is
                 // unreachable; drawn as gone rather than as nothing, because
@@ -367,6 +373,7 @@ impl Arbos {
         let project = workspace.active_project()?;
         let shown: Surface = project.surface(id)?.clone();
         let place = project.place();
+        let link = workspace.panel_link();
         self.tail_again(&shown, cx);
         let body = match shown.terminal_id().and_then(|id| self.terminals.get(id)) {
             Some(terminal) => div()
@@ -375,7 +382,7 @@ impl Arbos {
                 .min_w_0()
                 .child(terminal.clone())
                 .into_any_element(),
-            None => board::render(&shown, Some(&place), window, cx),
+            None => board::render(&shown, Some(&place), link, window, cx),
         };
         Some(
             div()
