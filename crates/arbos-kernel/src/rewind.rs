@@ -468,3 +468,101 @@ fn stamp(ms: i64) -> String {
         secs % 60
     )
 }
+
+#[cfg(test)]
+mod roll_tests {
+    use super::*;
+    use arbos_core::{Event, append_event};
+
+    /// The third instance of "cut too much": after the transcript rolled
+    /// into the archive, the checkpoints still indexed the *old* file.
+    /// `rewind turn 1` on the fresh file found a user line at seq 3 and
+    /// the checkpoint "on or before" it — the project's first, at line 1
+    /// — and with `--files` would have put the working tree back to the
+    /// project's first turn. The checkpoints roll with the lines they
+    /// describe, and a rewind into rolled history is refused.
+    #[test]
+    fn a_rewind_after_a_roll_does_not_reach_the_rolled_checkpoints() {
+        let dir = std::env::temp_dir().join(format!("arbos-roll-rewind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let place = Place::new(dir.clone());
+        let layout = Layout::new(&place, "root");
+        std::fs::create_dir_all(&layout.dir).unwrap();
+        std::fs::write(layout.agent_md(), "# root\n").unwrap();
+        let path = layout.transcript();
+        // Six turns, a checkpoint at each wake line (as the turn writes it).
+        let mut cps = String::new();
+        for i in 0..6u64 {
+            let at = load_transcript(&path).unwrap().len() as u64;
+            cps.push_str(&format!(
+                "{{\"line\":{at},\"ts\":0,\"head\":\"head{i}\",\"work\":null,\"clean\":true}}\n"
+            ));
+            append_event(
+                &path,
+                &Event::new(EventKind::Wake {
+                    wake: "user".into(),
+                    text: Some(format!("ask {i}")),
+                    brief: None,
+                }),
+            )
+            .unwrap();
+            append_event(
+                &path,
+                &Event::new(EventKind::User {
+                    text: format!("ask {i}"),
+                    attachments: vec![],
+                    channel: String::new(),
+                    device: String::new(),
+                }),
+            )
+            .unwrap();
+            append_event(&path, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+        }
+        std::fs::write(layout.dir.join("checkpoints.jsonl"), &cps).unwrap();
+        assert_eq!(checkpoints(&layout.dir).len(), 6);
+        let rolled = arbos_core::files::roll_transcript(&place, "root", 10)
+            .unwrap()
+            .expect("18 lines roll past a cap of 10");
+        assert_eq!(rolled.lines, 18);
+        // One turn after the roll: its checkpoint is the only one.
+        let at = load_transcript(&path).unwrap().len() as u64;
+        std::fs::write(
+            layout.dir.join("checkpoints.jsonl"),
+            format!(
+                "{{\"line\":{at},\"ts\":0,\"head\":\"head-after\",\"work\":null,\"clean\":true}}\n"
+            ),
+        )
+        .unwrap();
+        append_event(
+            &path,
+            &Event::new(EventKind::Wake {
+                wake: "user".into(),
+                text: Some("after".into()),
+                brief: None,
+            }),
+        )
+        .unwrap();
+        append_event(
+            &path,
+            &Event::new(EventKind::User {
+                text: "after".into(),
+                attachments: vec![],
+                channel: String::new(),
+                device: String::new(),
+            }),
+        )
+        .unwrap();
+        append_event(&path, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+        let events = load_transcript(&path).unwrap();
+        let cps = checkpoints(&layout.dir);
+        assert_eq!(cps.len(), 1, "only the post-roll checkpoint: {cps:?}");
+        // `turn 1` of the fresh file is the post-roll turn, and resolves
+        // to its own checkpoint — not head0, the project's first.
+        let cp = resolve(&events, &cps, Target::Turn(1)).unwrap();
+        assert_eq!(cp.head, "head-after");
+        // A line of the old file no longer names anything here.
+        assert!(resolve(&events, &cps, Target::Line(0)).is_err());
+        assert!(resolve(&events, &cps, Target::Back(2)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
