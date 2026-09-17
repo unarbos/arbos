@@ -402,8 +402,20 @@ class Pass:
             if self.wait(lambda s: not busy(s), 15, what="stop all"):
                 self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", "Stop All ended the workers", "pass", self.still("recover-stop-all"))
                 return
-        self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", "turn still busy after Stop; opening a new chat", "fail", self.still("recover-stuck"))
+        # Which agents are still busy, in the kernel's own words, so the
+        # row says who held the turn — a root waiting on a spawn (the
+        # kernel holds Stop until the child returns; filed 2026-09-17) reads
+        # differently from a worker that ignored Stop.
+        who = [(c.get("title") or c.get("name") or c.get("id"), c.get("live_status") or c.get("status")) for c in sessions(self.state()) if c.get("streaming") or c.get("turn_open")]
+        self.stop_failures = getattr(self, "stop_failures", 0) + 1
+        self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", f"turn still busy after Stop ({self.stop_failures}x this run); busy={who!r}; opening a new chat", "fail", self.still("recover-stuck"))
         self.context_lost = getattr(self, "current_screen", None)
+        # Twice in one run is the kernel holding Stop, not a row's fault:
+        # every phase after this would fail the same way and bury the
+        # run's real rows (cycle 37: 17 fails from one event). Say so once
+        # and let the main loop mark what follows not-reachable (R27).
+        if self.stop_failures >= 2:
+            self.kernel_holds_stop = True
         self.app.key("cmd-n"); time.sleep(1.5)
         try:
             self.app.wait_element("composer-field", timeout=8, reachable=True)
@@ -1992,6 +2004,9 @@ def main() -> int:
             if not fn:
                 continue
             log(f"== phase {letter} {fn.__name__}")
+            if getattr(p, "kernel_holds_stop", False) and busy(p.state()):
+                p.stop_phase(fn.__name__, "the kernel held Stop over a waiting spawn twice this run (filed 2026-09-17-stop-waits-for-a-blocking-spawn); the phase would only repeat the cascade", [letter], fault=False)
+                continue
             # The rig's own pulse before every phase: a display that has
             # stopped answering fails the run loudly (the ten-minute hang
             # of 2026-09-16 would otherwise have passed as quiet).
