@@ -905,13 +905,19 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         // a job finished). One file per message, so none is lost when they
         // come faster than the model steps (qa-014), and one a kernel
         // crash leaves behind starts the next turn instead.
-        let steers = arbos_core::inbox::take_steers(&place, agent.id.as_str());
+        //
+        // The files stay until the transcript holds their words: an
+        // append that fails (the disk full, the store gone) leaves the
+        // person's mid-turn message in the inbox for the next turn rather
+        // than deleted with nothing written in its place.
+        let steers = arbos_core::inbox::steers(&place, agent.id.as_str());
         if !steers.is_empty() {
             // An answer's words are already on the transcript (the kernel
             // appended the `answer` line when the user replied); taking the
             // file is what makes this step read them.
             let batch: Vec<Event> = steers
-                .into_iter()
+                .iter()
+                .map(|f| f.msg.clone())
                 .filter(|msg| msg.kind != "answer")
                 .map(|msg| match msg.from.as_str() {
                     "kernel" => Event::new(EventKind::Notice {
@@ -932,6 +938,14 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 .collect();
             if !batch.is_empty() {
                 append_events(&transcript, &batch)?;
+            }
+            for f in &steers {
+                if let Err(e) = arbos_core::inbox::release(f) {
+                    eprintln!(
+                        "{}: steer {} written but not released: {e:#}",
+                        agent.id, f.name
+                    );
+                }
             }
             events = load_transcript(&transcript)?;
         }
