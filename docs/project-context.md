@@ -223,6 +223,7 @@ So, in order of preference: a construct that cannot compile when it is wrong, th
 - Never test a destructive path against the live artifact — use a scratch copy, and remember that an instruction to "check whether the guard fires" is an instruction to run the command.
 - Record the commit and the build a measurement was taken on; a number without one is not a measurement.
 - Ask what a passing check actually proved, and what else could have made it fail. Three tests in one night passed for reasons unrelated to their claims.
+- Prefer a checked outcome to a classification. Deciding whether a process is supervised by looking at its parent misclassified two of the six shapes actually running on our machines; stopping it and watching for a replacement answers the same question by observation. An attribute says what something probably is.
 - A probe must fail the way the world fails, not a way of its own. A test that stood a FIFO where git's index belongs hung every kernel for 200 seconds — nothing in a real repository does that, while a directory gives the same answer and blocks nothing. When a probe's failure looks nothing like the bug, suspect the probe.
 
 Grep is not a guard: an audit that flags five false positives and one real one only works because a person read the output.

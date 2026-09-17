@@ -90,6 +90,7 @@ Rules from it, now enforced:
 - **A process the harness started is the harness's to kill, wherever its cwd is.** `reap_scratch` reaps by scratch path; the 06:52 `rm` had cwd `/` and outlived its kernel by 40 minutes. Teardown now also kills anything whose environment names the scenario's scratch `HOME`.
 - **Read the client log before blaming the service.** The FUSE mount logs every RPC this client makes; a burst of `delete_files` from us is the first thing to look for when files vanish.
 - **A restore or a staged write goes over a file only when content says it may — time is not enough.** The mesh worker's check when it applied our six staged files (2026-09-17 09:50), now `may_overwrite` in `vm-loop.sh`: the store's copy must be contained in ours (ours is theirs plus additions; at most two of their lines changed), written through a temp name and a rename, read back and compared. Anything else is HELD in `store-pending/` and said out loud. A mount can lie about mtimes; content cannot, and "the copy I hold is a subset of what is there" would have stopped every bad restore of the night.
+- **On this store, an absence is not evidence of an absence** (the coordinator's finding, 10:13: 13 files on the writer's mount, 3 on his, same minute, no error). A file you cannot list may be there; a second client or the writer's own log decides, never one client's listing — and nothing is deleted or restored on the strength of one.
 - **A restore is safe only when you can name why no newer version can exist** — your own unedited copy, of a file nothing else writes. A mirror copied over a live tree is not that: our 07:01 restore wrote 06:41 versions over the phone loop's newer files (M-141) and could not bring back a file newer than the mirror (M-142). Restores stay staged-only; a restore of a *missing* file from the mirror is allowed and announced; an *existing* file is never overwritten.
 - **The mirror never accepts a smaller tree without a reason.** A directory on the tip that does not list here refuses the pass; any fall in file count refuses it unless `MIRROR_ALLOW_SHRINK='<reason>'`. The old one-tenth allowance accepted a 454-for-492 view.
 
@@ -113,6 +114,10 @@ Three passes tonight proved something other than what they claimed: 29 scenarios
 5. **A pass in under a second is a question, not a relief.** `ra-01` passes in 1.0 s; the answer was fifteen recorded refusals, each naming its tree.
 
 `ra-01` (the wipe guard, #410) and `rw-08`/`rw-08b`/`rw-08c` (the rewind property, #419) went through this before their results were recorded in `qal-j15` and `qal-j16`.
+
+## Rewind, closed out (10:25) — evidenced (`rw-08`…`rw-10c`)
+
+`qal-j16` fixed at `0bceb0df`, its misreport at `5340c0d2`; `qal-j17` (the tree taken after the turn wrote) fixed at the source at `2daa555d` — `rw-10b` five runs, 0 lost, 0 wrong, where `5340c0d2` was 4 of 5 wrong. The fix's new face is `qal-j18`: the wait for the tree shows as the command running and is recorded as the command's time (`rw-10c`, six seconds of `echo`). Nine scenarios now stand on rewind: `rw-01`–`rw-04` (history), `rw-08`/`08b`/`08c` (the property under three failures), `rw-09` (a failed clean is said), `rw-10`/`10b`/`10c` (another git in the repository; the instant; the wait's face). Every one was run against a control that fails, and the failing run's reason read.
 
 ## The sandbox's own blind spot (2026-09-17 09:36) — evidenced (`/tmp/agent-store-fuse.log`)
 

@@ -1,4 +1,4 @@
-# qal-j17: when the checkpoint's index copy is delayed, the "before the turn" tree already holds what the turn wrote — a rewind to that turn keeps the turn's own file
+# qal-j17 (fixed at #419 `2daa555d`, verified 10:21): when the checkpoint's index copy is delayed, the "before the turn" tree already holds what the turn wrote — a rewind to that turn keeps the turn's own file
 
 - Measured at: #419 @ `5340c0d2` (`arbos-kernel 0.2.0 5340c0d27b29`), 4 of 5 runs of `rw-10b-index-is-not-a-regular-file-for-an-instant-when-the-checkpoint-copies-it`; controls `0bceb0df` and `main` `7e19f9e9` (5 runs each) lose the tree instead (below); with no delay (`ARBOS_QA_RW10B_NO_SWAP=1`, 5 runs each on `5340c0d2` and `main`) the tree is right every time. Rollouts `internal/qa/rollouts/20260917T10*-rw-10b-…`; every checkpoint's tree listed in `result.json` → `notes.checkpoint_after_turn_wrote`.
 - Class: wrong record that a destructive step later trusts (the qal-j08 family). Not a loss by itself: a `rewind --files` to that turn leaves the turn's first file in place and says "restored".
@@ -24,6 +24,11 @@ The window is not the retry's; the retry only widens it. The tree is taken besid
 ## What we expect
 
 Either the turn's first mutating tool call waits for the tree snapshot to finish (the record is cheap and lands first; the tree is the slow part, and the tools are the only thing that can move the tree under it), or the snapshot is taken from a state the turn cannot have touched (the index copy plus a `git stash create`-style tree of the moment the record was written). The retry itself is right; what it waits for must not be able to change meanwhile.
+
+
+## Verified fixed — #419 at `2daa555d` (2026-09-17 10:21)
+
+`rw-10b`, five runs, the 120 ms index hold in place: **0 lost, 0 wrong** (checkpoint N never holds `fN.txt`). Same probe: `5340c0d2` 4 of 5 wrong, `0bceb0df` 5 of 5 lost, `main` 3 of 5 lost. The fix is at the source: a tool whose plan writes waits for the turn's checkpoint tree (`root: bash waited 6.0s for the turn's checkpoint tree` on the kernel's stderr when the tree is delayed with `ARBOS_TEST_TREE_DELAY_MS`). `rw-08`, `rw-08b`, `rw-08c`, `rw-09`, `rw-10` unchanged, all pass. Closed. What the wait looks like to a person is `qal-j18`.
 
 ## Regression check
 

@@ -1404,6 +1404,68 @@ def register(scenario, registry, transcript, now_ms, branch):
         k.stop()
         cx.check()
 
+    @reg("rw-10c-a-long-wait-for-the-checkpoint-tree-is-shown-as-the-command-running", tags=("rewind", "misreport"))
+    def rw10c(cx):
+        """#419 at 2daa555d: a tool that writes waits for the turn's checkpoint tree. On a large repository that wait is
+        seconds (here: ARBOS_TEST_TREE_DELAY_MS=6000, the kernel's own knob for a slow `add -A`). New behaviour, so the
+        question is what a person sees during it. Measured: not the silent stall (a status and a running tool card
+        appear at once) but the wrong story — status `Running echo first > f1.txt` and a running card for six seconds,
+        and a tool record that says the command ran 6.3 s. The wait must be named as its own step and not charged to
+        the tool."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        g = lambda *a: subprocess.run(["git", "-c", "user.name=qa", "-c", "user.email=qa@qa", *a], cwd=place, capture_output=True, text=True)
+        for args in (["init", "-q"], ["config", "user.name", "qa"], ["config", "user.email", "qa@qa"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+            g(*args)
+        (place / ".gitignore").write_text(".arbos/\n")
+        g("add", ".gitignore")
+        g("commit", "-q", "-m", "ignore .arbos")
+        replies = [
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "echo first > f1.txt", "description": "write f1"}}]},
+            {"agent": "root", "content": "first"},
+        ]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, replies))])
+        k.env["ARBOS_TEST_TREE_DELAY_MS"] = "6000"
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        t0_ms = now_ms()
+        c.user("root", "one")
+        cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "turn-never-ended", "the turn never ended")
+        time.sleep(0.3)
+        # What reached the window after the person's message, in order, with the delay from it.
+        timeline = []
+        for at, f in list(c.frames):
+            if at < t0_ms:
+                continue
+            kind = f.get("type") + ("/" + str((f.get("event") or {}).get("kind")) if f.get("type") == "event" else "")
+            timeline.append((round((at - t0_ms) / 1000, 2), kind, json.dumps(f)[:160]))
+        first_visible = next((t for t, kind, _ in timeline if kind not in ("tree", "plan")), None)
+        named = [blob for _, _, blob in timeline if any(w in blob.lower() for w in ("checkpoint", "waiting", "snapshot"))]
+        evs, bad = transcript(cx.place, "root")
+        tool = next((e for e in evs if e.get("kind") == "tool"), {})
+        user_ts = next((e.get("ts") for e in evs if e.get("kind") == "user"), None)
+        tool_span_s = round(((tool.get("ended") or 0) - (tool.get("started") or 0)) / 1000, 1) if tool else None
+        wait_s = round(((tool.get("started") or 0) - (user_ts or 0)) / 1000, 1) if tool and user_ts else None
+        notices = [e.get("text", "")[:160] for e in evs if e.get("kind") == "notice"]
+        stderr_line = ""
+        try:
+            for l in (cx.rec.dir / "kernel.stderr.log").read_text(errors="replace").splitlines():
+                if "waited" in l and "checkpoint" in l:
+                    stderr_line = l[:160]
+        except OSError:
+            pass
+        cx.rec.notes.update({"timeline_after_message": timeline[:12], "seconds_to_first_visible_frame": first_visible, "frames_naming_the_wait": named[:5], "notices": notices, "tool_record": {"started_after_message_s": wait_s, "started_to_ended_s": tool_span_s, "label": tool.get("label")}, "kernel_stderr_waited": stderr_line})
+        cx.rec.expect(bool(stderr_line), "probe-did-not-wait", "the kernel's stderr does not say it waited; the delay knob did not hold the tool, this run proves nothing")
+        cx.rec.expect(first_visible is not None and first_visible < 2.0, "silent-wait", f"{first_visible}s after the person's message before anything but a tree/plan frame reached the window; the kernel waited for the checkpoint tree ({stderr_line.split(': ', 1)[-1] if stderr_line else '?'}) and nothing the window draws said so — the silent stall shape (st-01) with correct data underneath", "arbos-engine turn.rs — the checkpoint wait (#419 at 2daa555d) is logged to stderr only")
+        status_steps = [json.loads(b).get("step") for _, k_, b in timeline if k_ == "status" and json.loads(b).get("step")]
+        cx.rec.notes["status_steps_shown"] = status_steps
+        cx.rec.expect(tool_span_s is None or tool_span_s < 2.0, "wait-charged-to-the-tool", f"the window showed {status_steps[:1]} and a running tool card for the whole wait, and the transcript's tool record says `{tool.get('label')}` ran for {tool_span_s}s (started {wait_s}s after the message): the checkpoint wait is shown and recorded as the command's own running time — a person sees `echo` hang for six seconds, and history and any duration view blame it", "arbos-engine turn.rs — the checkpoint wait (#419 at 2daa555d) happens inside the tool's started..ended and under the tool's status; name it as its own step")
+        cx.rec.expect((place / "f1.txt").exists(), "tool-did-not-run", "f1.txt was never written")
+        cx.rec.expect(not bad, "transcript-corrupt", f"bad lines: {bad}")
+        k.stop()
+        cx.check()
+
     @reg("rw-09-clean-that-fails-is-in-what-restored-says", tags=("rewind", "misreport"))
     def rw09(cx):
         """#419's second claim: a later turn left an untracked folder git cannot remove (a directory with no write
