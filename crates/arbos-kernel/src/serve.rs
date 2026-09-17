@@ -395,6 +395,15 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         .store_id()
         .context("the place's .arbos folder could not be identified")?;
     arbos_core::remember_opened(store_id);
+    // A second proof beside the inode, for filesystems that re-number
+    // theirs; a store that cannot take it is judged by inode alone.
+    if let Err(e) = arbos_core::stamp_store(&place) {
+        klog::warn(
+            "store_token_unwritten",
+            None,
+            format!("{e} — the store is told apart from a moved one by inode alone"),
+        );
+    }
     let host = Host::load()?;
     host.remember_place(place.path());
     let git_present = say_if_git_missing(&place);
