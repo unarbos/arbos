@@ -267,8 +267,18 @@ pub fn note_turn_error(hooks: &KernelHooks, agent: &str, why: &str) {
     let line: String = why.lines().next().unwrap_or("").chars().take(300).collect();
     text.push_str(&format!("error = {}\n", toml_string(&line)));
     let tmp = dir.join(format!(".meta.toml.tmp-{}", std::process::id()));
-    if std::fs::write(&tmp, text).is_ok() {
-        let _ = std::fs::rename(&tmp, meta);
+    // Said, not swallowed: a turn whose error could not be noted closes
+    // as if it had none, and the feedback bundle reads it so.
+    if let Err(e) = std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, meta)) {
+        let _ = std::fs::remove_file(&tmp);
+        crate::klog::warn(
+            "turn_error_unnoted",
+            Some(agent),
+            format!(
+                "{}: {e} — the turn's folder will close without its error",
+                dir.display()
+            ),
+        );
     }
 }
 
@@ -355,8 +365,21 @@ fn close_turn_folder(hooks: &KernelHooks, agent: &str, forced: Option<&str>) -> 
         events.len()
     ));
     let tmp = dir.join(format!(".meta.toml.tmp-{}", std::process::id()));
-    if std::fs::write(&tmp, text).is_ok() {
-        let _ = std::fs::rename(&tmp, dir.join("meta.toml"));
+    // A folder that could not be closed reads as an open turn to the
+    // feedback bundle and to the next boot's cut-turn sweep. Said here,
+    // and answered false: the boot sweep loops while this returns true,
+    // and a folder that cannot take its `ended` would have held the
+    // kernel at start for ever.
+    if let Err(e) =
+        std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, dir.join("meta.toml")))
+    {
+        let _ = std::fs::remove_file(&tmp);
+        crate::klog::warn(
+            "turn_folder_unclosed",
+            Some(agent),
+            format!("{}: {e} — the folder stays open on disk", dir.display()),
+        );
+        return false;
     }
     true
 }
@@ -1230,4 +1253,78 @@ pub fn wire_rows(place: &arbos_core::Place, agent: &str) -> Vec<PlanNode> {
         });
     }
     rows
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+    use arbos_core::Place;
+
+    /// A turn folder that cannot take its `ended` (the turns folder went
+    /// read-only) must not hold the kernel at start: the boot sweep loops
+    /// `while close_turn_folder(..)`, and a close that reported success
+    /// without closing would have run for ever. It says so and answers
+    /// false.
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_folder_that_cannot_close_says_so_and_does_not_claim_it_did() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let place = Place::new(dir.path());
+        std::fs::create_dir_all(place.arbos().join("runtime")).unwrap();
+        arbos_core::Agent::root("root")
+            .save(&place.agent_dir("root"))
+            .unwrap();
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (kick_tx, _kick_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = KernelHooks::new(place.clone(), wake_tx, kick_tx);
+        let turn = inbox::turns_dir(&place, "root").join("t0001");
+        std::fs::create_dir_all(&turn).unwrap();
+        std::fs::write(turn.join("cause.md"), "user: hello\n").unwrap();
+        std::fs::write(
+            turn.join("meta.toml"),
+            "started = \"2026-09-17T21:00:00Z\"\ntranscript_lo = 1\n",
+        )
+        .unwrap();
+        assert!(
+            open_turn_folder(&hooks, "root").is_some(),
+            "the fault is staged: an open turn"
+        );
+        std::fs::set_permissions(&turn, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // The boot sweep's shape, bounded: a true here would loop.
+        let mut rounds = 0;
+        while close_turn_folder(
+            &hooks,
+            "root",
+            Some("kernel restarted before this turn ended"),
+        ) {
+            rounds += 1;
+            assert!(
+                rounds < 3,
+                "a close that cannot land must not report success"
+            );
+        }
+        assert_eq!(rounds, 0, "the first close already said it could not");
+        assert!(
+            !std::fs::read_to_string(turn.join("meta.toml"))
+                .unwrap()
+                .contains("ended = "),
+            "not closed, and not claimed closed"
+        );
+        std::fs::set_permissions(&turn, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Writable again: it closes, once.
+        assert!(close_turn_folder(
+            &hooks,
+            "root",
+            Some("kernel restarted before this turn ended")
+        ));
+        assert!(
+            !close_turn_folder(&hooks, "root", None),
+            "nothing left open"
+        );
+    }
 }
