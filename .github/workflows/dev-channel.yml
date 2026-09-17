@@ -166,6 +166,11 @@ jobs:
       # commits; this is room for a bad afternoon without ever becoming an
       # unbounded walk through history.
       SCAN: "40"
+      # What started this run, taken from the event rather than asked of
+      # the API again. See `ci_state`: re-asking about the triggering
+      # commit is how a run ends up waiting on itself.
+      EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+      EVENT_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
     outputs:
       publish: ${{ steps.plan.outputs.publish }}
       sha: ${{ steps.plan.outputs.sha }}
@@ -224,16 +229,47 @@ jobs:
           tip="$(git rev-parse FETCH_HEAD)"
           here="$(git rev-parse HEAD)"
 
-          # What CI concluded for one commit: success, pending, failed, or
-          # none at all. A commit nobody ran is not pending — treating it so
-          # would wait for a run that is never coming.
-          ci_state() {
+          # What CI concluded for one commit, as the API has it: success,
+          # pending, failed, or none at all. A commit nobody ran is not
+          # pending — treating it so would wait for a run that is never
+          # coming.
+          api_state() {
             gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
               -f head_sha="$1" -f per_page=20 --jq '
                 if   ([.workflow_runs[] | select(.conclusion == "success")] | length) > 0 then "success"
                 elif ([.workflow_runs[] | select(.status != "completed")]  | length) > 0 then "pending"
                 elif (.workflow_runs | length) > 0 then "failed"
                 else "none" end' 2>/dev/null || echo "none"
+          }
+
+          # The same question, except that the commit this run was started
+          # by can never be answered "pending".
+          #
+          # A commit gets more than one CI run — two, about forty seconds
+          # apart. The first to finish fires the event that starts this
+          # workflow; asking the API a moment later sees its sibling still
+          # going and says "pending", and the plan then waits for an event
+          # that has already happened. On 2026-09-17 four runs in a row
+          # each waited on their own triggering commit, and the channel sat
+          # from 21:37 to 22:19.
+          #
+          # The event already carries that run's conclusion, so use it. A
+          # sibling that went green still counts — a failed trigger asks
+          # the API in case one did — but the answer for this commit is
+          # never "wait", because there is nothing left to wait for.
+          ci_state() {
+            if [ -n "${EVENT_SHA:-}" ] && [ "$1" = "$EVENT_SHA" ]; then
+              if [ "${EVENT_CONCLUSION:-}" = "success" ]; then
+                echo success
+                return
+              fi
+              case "$(api_state "$1")" in
+                success) echo success ;;
+                *) echo failed ;;
+              esac
+              return
+            fi
+            api_state "$1"
           }
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
