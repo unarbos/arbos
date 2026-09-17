@@ -1863,7 +1863,13 @@ impl ChatSession {
                 .iter()
                 .find(|c| c.kernel_id.as_deref() == Some(head))
                 .map(|c| c.title.clone())
-                .unwrap_or_else(|| head.to_string())
+                .filter(|title| !title.trim().is_empty())
+                // A worker the window has not stamped yet (its report can
+                // land before the roster does) is named from its id as a
+                // person would read it: `add-sources-to-project-context`
+                // → "Add sources to project context" (F-170), never the
+                // raw id Cursor never shows.
+                .unwrap_or_else(|| humanize_id(head))
         };
         match tail {
             Some(t) => format!("{name} → {t}"),
@@ -4731,6 +4737,22 @@ fn shorten_words(text: &str, max: usize) -> String {
     let mut cut: String = text.chars().take(max.saturating_sub(1)).collect();
     cut.push('…');
     cut
+}
+
+/// An agent id as a person reads it: dashes and underscores to spaces, the
+/// first letter up. `add-sources-to-project-context` → "Add sources to
+/// project context". An id that is already words (a name) comes back as is.
+pub(crate) fn humanize_id(id: &str) -> String {
+    let id = id.trim();
+    if id.contains(' ') || id.is_empty() {
+        return id.to_string();
+    }
+    let spaced = id.replace(['-', '_'], " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => spaced,
+    }
 }
 
 /// A child's row name from the brief the kernel named it after: the lead
