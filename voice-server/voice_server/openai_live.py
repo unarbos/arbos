@@ -31,6 +31,7 @@ import re
 import websockets
 
 from . import protocol as P
+from .activity import ActivityReporter, _detail
 from .narrator import Narrator
 from .routing import is_small_talk
 from .audio import float_to_pcm16, pcm16_to_float
@@ -61,6 +62,14 @@ LIVE_INSTRUCTIONS = (
     "and general knowledge that has nothing to do with the user's work."
 )
 
+# Recent project-chat lines seeded into the session at start (session.input): how many, and how
+# much of each. The API takes 128 messages / 8,192 tokens; this stays far under.
+HISTORY_LINES = int(os.environ.get("VOICE_LIVE_HISTORY", "12"))
+HISTORY_LINE_CHARS = 600
+HISTORY_TOTAL_CHARS = 6000
+# Live context appends (typed lines, chat replies, what workers do) are coalesced to this rate.
+CONTEXT_MIN_GAP_S = 3.0
+
 
 class OpenAILiveSession(DuplexSession):
     engine = "openai"
@@ -83,6 +92,11 @@ class OpenAILiveSession(DuplexSession):
         self.delegations_seen = 0  # session.delegation.created events so far
         self.live_output_since_final = ""  # the model's words since the caller last finished
         self.ack_watch: asyncio.Task | None = None
+        self.brief_sent = ""  # the project brief GPT-Live has (instructions or a later append)
+        self.context_queue: list[str] = []  # thinking appends waiting for the rate limit
+        self.context_task: asyncio.Task | None = None
+        self.context_kernel = None  # the kernel whose frames feed GPT-Live's context
+        self.workers_known: set[str] = set()
 
     # ------------------------------------------------------------------ upstream
 
@@ -93,20 +107,25 @@ class OpenAILiveSession(DuplexSession):
             self._emit(P.ERROR, code="no_openai_key", message="OPENAI_API_KEY is not set on the voice server")
             raise RuntimeError("no OPENAI_API_KEY")
         t0 = time.monotonic()
+        # What the model knows from the first word: who and where (the brief) and what was said
+        # in the project's chat lately (the seed). Both come from the call's kernel, never from
+        # the gateway's own.
+        brief = self._project_brief()
+        seed = await self._history_seed()
         self.up = await websockets.connect(
             LIVE_URL, additional_headers={"Authorization": f"Bearer {self.api_key}"},
             max_size=16 * 1024 * 1024, compression=None, open_timeout=20,
         )
-        await self.up.send(json.dumps({
-            "type": "session.start",
-            "event_id": "start",
-            "session": {
-                "model": self.live_model,
-                "instructions": _ascii(self.instructions or LIVE_INSTRUCTIONS),
-                "audio": {"format": {"type": "audio/pcm", "rate": 24000}, "output": {"voice": self.live_voice}},
-                "delegation": {"type": "client"},
-            },
-        }))
+        session: dict = {
+            "model": self.live_model,
+            "instructions": _ascii((self.instructions or LIVE_INSTRUCTIONS) + "\n\n" + brief),
+            "audio": {"format": {"type": "audio/pcm", "rate": 24000}, "output": {"voice": self.live_voice}},
+            "delegation": {"type": "client"},
+        }
+        if seed:
+            session["input"] = seed
+        self.brief_sent = brief
+        await self.up.send(json.dumps({"type": "session.start", "event_id": "start", "session": session}))
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             msg = json.loads(await asyncio.wait_for(self.up.recv(), 20))
@@ -122,8 +141,133 @@ class OpenAILiveSession(DuplexSession):
                 raise RuntimeError(f"GPT-Live: {text}")
         self.started_at = time.monotonic()
         self.pump_task = asyncio.create_task(self._pump(), name=f"live-pump-{self.sid}")
-        log.info("[%s] GPT-Live session %s ready in %.0fms (%s, voice %s, client delegation)",
-                 self.sid, self.session_id, (time.monotonic() - t0) * 1000, self.live_model, self.live_voice)
+        self._feed_context_from(self.kernel)
+        log.info("[%s] GPT-Live session %s ready in %.0fms (%s, voice %s, client delegation; brief for %s, %d history lines)",
+                 self.sid, self.session_id, (time.monotonic() - t0) * 1000, self.live_model, self.live_voice,
+                 (self.project_info or {}).get("place") or (self.project_info or {}).get("name") or "no kernel", len(seed))
+
+    # ------------------------------------------------------------------ what the model knows
+
+    def _project_brief(self) -> str:
+        """The call's place, said plainly, so the model never invents a folder or a machine. From
+        the hub roster when the call named a project; the gateway's own kernel is named as
+        such, never presented as the caller's project."""
+        info = self.project_info or {}
+        if info.get("via") == "hub":
+            name = info.get("name") or info.get("project")
+            label = f"{info.get('machine')}/{info.get('project')}"
+            lines = [
+                "PROJECT CONTEXT (authoritative; never invent or guess any of it):",
+                f"This call is about the project '{name}' ({label}) on the machine '{info.get('machine')}'.",
+            ]
+            if info.get("place"):
+                lines.append(f"Its folder, the working directory of everything the backend runs for this call, is {info['place']}.")
+            else:
+                lines.append("Its folder is not known to you; the backend knows it. If asked, delegate.")
+            if info.get("store"):
+                lines.append(f"Its Arbos address is {info['store']}.")
+            lines.append("If asked where you are, which folder, which machine or which project: answer from this, and only this.")
+            return " ".join(lines)
+        if info:
+            where = f"serving the folder {info['place']}" if info.get("place") else f"at {info.get('url') or 'its address'}"
+            return (
+                "PROJECT CONTEXT: no project was named for this call, so the backend is the voice server's "
+                f"default kernel, {where}. Do not present it as the caller's project or machine. If the caller "
+                "asks about their project, say this call is not attached to a project and where the backend really is."
+            )
+        return (
+            "PROJECT CONTEXT: no Arbos kernel is attached to this call. If asked to check, run or change "
+            "anything, say so plainly; never invent files, folders, machines or status."
+        )
+
+    async def _history_seed(self) -> list[dict]:
+        """The last lines of the call kernel's main chat as session.input, so the model knows what
+        was said in the project before the call. User lines and Arbos replies only; nothing from
+        a different kernel."""
+        kernel = self.kernel
+        if kernel is None or HISTORY_LINES <= 0:
+            return []
+        try:
+            events = await asyncio.wait_for(kernel.transcript_tail("root", bytes_=80_000), 4.0)
+        except Exception as exc:
+            log.warning("[%s] no chat history for the seed: %s", self.sid, type(exc).__name__)
+            return []
+        lines = [e for e in events if e.get("kind") in ("user", "assistant") and str(e.get("text") or "").strip()]
+        lines = lines[-HISTORY_LINES:]
+        seed: list[dict] = []
+        total = 0
+        for e in lines:
+            text = " ".join(str(e["text"]).split())[:HISTORY_LINE_CHARS]
+            total += len(text)
+            if total > HISTORY_TOTAL_CHARS:
+                break
+            if e["kind"] == "user":
+                seed.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": _ascii(text)}]})
+            else:
+                seed.append({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": _ascii(text)}]})
+        if seed:
+            seed.insert(0, {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": _ascii(
+                "The following messages are the most recent lines of this project's chat with Arbos, oldest first, "
+                "before this call started. They are context; the caller may refer to them.")}]})
+        return seed
+
+    def _feed_context_from(self, kernel) -> None:
+        """Follow the call kernel's frames so GPT-Live hears what happens in the project while it
+        talks: lines typed in the chat, Arbos's text replies it did not relay itself, workers
+        starting and finishing. Quiet context (session.thinking.append), never spoken on its own."""
+        if kernel is None or kernel is self.context_kernel:
+            return
+        if self.context_kernel is not None and self._context_frame in self.context_kernel.listeners:
+            self.context_kernel.listeners.remove(self._context_frame)
+        self.context_kernel = kernel
+        kernel.listeners.append(self._context_frame)
+        self.workers_known = {name for name in kernel.agents if name != "root"}
+
+    def _context_frame(self, frame: dict) -> None:
+        kind = frame.get("type")
+        agent = str(frame.get("agent") or "")
+        if kind == "event":
+            ev = frame.get("event") or {}
+            ek, text = ev.get("kind"), " ".join(str(ev.get("text") or "").split())
+            if ek == "user" and text and agent == "root":
+                if ev.get("channel") == "voice":
+                    return  # the caller's own words, already in the conversation
+                who = f"on the {ev['device']}" if ev.get("device") else "in the project chat"
+                self._context(f"The user typed {who}: {text[:500]}")
+            elif ek == "assistant" and text and agent == "root" and not self.delegations_in_flight():
+                self._context(f"Arbos replied in the project chat (text, not spoken): {text[:700]}")
+            elif ek == "tool" and agent != "root" and ev.get("name") and not ev.get("seq") and ev.get("ended") is None:
+                self._context(f"Worker {agent} is running {ev['name']}" + (f": {_ascii(_detail(ev))}" if _detail(ev) else ""))
+        elif kind in ("tree", "snapshot"):
+            names = {str(n.get("id")) for n in frame.get("tree", []) if n.get("id") and n.get("id") != "root"}
+            new, gone = names - self.workers_known, self.workers_known - names
+            self.workers_known = names
+            if new:
+                self._context("Workers (sub-agents) now running for this project: " + ", ".join(sorted(new)))
+            if gone:
+                self._context("Workers finished: " + ", ".join(sorted(gone)))
+        elif kind == "turn" and agent != "root" and frame.get("state") == "idle":
+            self._context(f"Worker {agent} finished its turn.")
+
+    def delegations_in_flight(self) -> bool:
+        return any(not t.done() for t in self.delegations.values())
+
+    def _context(self, line: str) -> None:
+        """Queue one quiet line for the model; lines within CONTEXT_MIN_GAP_S go as one append."""
+        if self.up is None:
+            return
+        self.context_queue.append(line)
+        if self.context_task is None or self.context_task.done():
+            self.context_task = asyncio.create_task(self._flush_context(), name=f"live-context-{self.sid}")
+
+    async def _flush_context(self) -> None:
+        await asyncio.sleep(CONTEXT_MIN_GAP_S)
+        lines, self.context_queue = self.context_queue, []
+        if not lines or self.up is None:
+            return
+        body = "Project update: " + " | ".join(lines)
+        await self._append("session.thinking.append", None, body)
+        log.info("[%s] context -> GPT-Live: %d line(s), %d chars", self.sid, len(lines), len(body))
 
     async def on_audio(self, data: bytes) -> None:
         await self._ensure_upstream()
@@ -146,6 +290,10 @@ class OpenAILiveSession(DuplexSession):
                 pass
         for task in self.delegations.values():
             task.cancel()
+        if self.context_task is not None:
+            self.context_task.cancel()
+        if self.context_kernel is not None and self._context_frame in self.context_kernel.listeners:
+            self.context_kernel.listeners.remove(self._context_frame)
         if self.started_at:
             seconds = time.monotonic() - self.started_at
             log.info("[%s] GPT-Live usage: %s (wall %.0fs, ~$%.4f voice at $0.05/min)", self.sid,
@@ -253,12 +401,15 @@ class OpenAILiveSession(DuplexSession):
         tag = (did or "forced")[-8:]
         log.info("[%s] delegation %s -> kernel: %r", self.sid, tag, question)
         self._emit(P.TOOL_CALL, name="delegate", arguments={"question": question, "delegation": did})
-        self._activity("working")  # the working sound starts now, before the kernel's own turn frame
+        if self.activity is not None:
+            self.activity.mark_working()  # the working sound starts now, before the kernel's own turn frame
         self.kernel_launched_at = t0
         await self._append("session.thinking.append", did, "Arbos is working on it.")
         answer = ""
         try:
-            async for delta in kernel.turn(question, timeout=120):
+            # Filed as spoken (`channel: voice`, the caller's device): the chat shows how the line
+            # arrived, and a client that already drew it from transcript.final can tell it apart.
+            async for delta in kernel.turn(question, timeout=120, channel="voice", device=self.device):
                 answer += delta
         except Exception as exc:
             log.exception("[%s] delegation failed", self.sid)
@@ -307,7 +458,37 @@ class OpenAILiveSession(DuplexSession):
                 ack=False, speak_details=False, only_asks=True, approval_timeout=self.defaults.approval_timeout,
             )
             self.narrator.start()
-        log.info("[%s] call mode (GPT-Live, client delegation) on %s", self.sid, self.project or "the gateway's kernel")
+            if self.activity is None:
+                # agent.activity for the client's working sound: the kernel's own turn and tool
+                # frames (ActivityReporter, the shape agreed with the desktop), plus `working` the
+                # moment a delegation leaves for the kernel (mark_working in _delegate).
+                self.activity = ActivityReporter(self.kernel, self._emit)
+                self.activity.start()
+        if self.up is not None:
+            # The model is already up (audio came before session.start): give it the brief now.
+            brief = self._project_brief()
+            if brief != self.brief_sent:
+                self.brief_sent = brief
+                await self._append("session.instructions.append", None, brief)
+            self._feed_context_from(self.kernel)
+        info = self.project_info or {}
+        log.info("[%s] call mode (GPT-Live, client delegation) on %s (%s, folder %s)", self.sid,
+                 self.project or "the gateway's kernel", info.get("via", "none"), info.get("place") or "unknown")
+
+    async def on_call_text(self, text: str) -> None:
+        """Typed during the call: to the project's kernel, as a steer when a turn is running (the
+        narrator here only takes asks, so it must not be the one to file it). GPT-Live learns of
+        the line from the kernel's own `user` event, through the context feed."""
+        narrator = self.narrator
+        if narrator is not None and narrator.pending_ask is not None:
+            narrator.user_said(text, channel="text")  # the typed line answers the open ask
+        elif self.kernel is not None and self.kernel.connected:
+            self.kernel.send_user(text, channel="text", device=self.device)  # steer = the agent is running
+            log.info("[%s] typed -> kernel: %r", self.sid, text[:120])
+        else:
+            self._emit(P.ERROR, message="typed line not delivered: the kernel is not reachable")
+            return
+        self._emit(P.TEXT_DONE, text="", cancelled=False, forwarded=True)
 
     async def on_report_speech(self, text: str) -> None:
         """An agent finished: let GPT-Live say it in its own voice."""

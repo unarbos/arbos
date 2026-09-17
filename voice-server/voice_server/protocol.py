@@ -28,7 +28,6 @@ AGENT_TREE = "agent.tree"
 AGENT_DONE = "agent.done"
 AGENT_ACTIVITY = "agent.activity"
 NARRATOR_SAY = "narrator.say"
-AGENT_ACTIVITY = "agent.activity"
 
 # server -> client
 SESSION_READY = "session.ready"
@@ -71,7 +70,11 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
           "mode": "call"  CALL MODE (see below): talk to a project's main agent; the narrator speaks highlights
           "project": "<machine>/<project>"  which project the call is for. A hub name, when the gateway has --hub:
                                             the call attaches to that kernel through the hub (session.ready says
-                                            "via":"hub"). Empty, or the gateway's own project: its kernel ("via":"gateway")
+                                            "via":"hub"). Empty, or the gateway's own project: its kernel ("via":"gateway").
+                                            A bare folder name the gateway does not serve ("discord_backups" from a
+                                            machine that is not on the hub) is REFUSED: error {"code":"project_not_on_hub",
+                                            "project":"discord_backups","message":...} then close 4404. The call never
+                                            lands on another kernel; register the machine on the hub and call again.
           "channel": "voice"  what the caller's utterances are filed as in the agent's inbox (voice | text)
           "device": "desktop"  which client this is (phone | desktop); written beside channel on every message
           "screen": "on your screen"  how the narrator refers to the client's display ("in the chat" on a phone)
@@ -89,10 +92,15 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
   server -> client
     {"type":"session.ready","rate":24000,"engine":"duplex"|"pipeline","asr":"...","tts":"...",
      "reply":"...","text":"...","tools":["send_agent","agent_status","ask_arbos"],"kernel":true,
-     "answerer":"auto","project":{"machine":"arboslife","project":"demo","name":"demo",
-     "icon":"folder","store":"arbos://arboslife/demo/","kind":"project"} | null}
-                                   project is null when the call uses the server's default kernel;
-                                   name/icon come from the hub roster (the project's identity)
+     "answerer":"auto","project":"arboslife/demo"|"","via":"hub"|"gateway",
+     "project_info":{"machine":"arboslife","project":"demo","name":"demo","icon":"folder",
+     "store":"arbos://arboslife/demo/","kind":"project","place":"/home/const/arbos-hub/projects/demo",
+     "via":"hub"} | {...,"kind":"gateway","via":"gateway","place":"/srv/x"|null,"url":"tcp://..."|null} | null}
+                                   project_info describes the kernel on the line: from the hub roster when the
+                                   call named a project ("place" = the folder it serves = the call's working
+                                   directory); the gateway's own kernel, named as such, when none was named;
+                                   null when the gateway has no kernel. With --engine openai the same brief goes
+                                   to GPT-Live as instructions (see CALL MODE below).
     {"type":"speech.started"}      server VAD heard the user start talking. If a
                                    reply was playing it is cancelled at the same
                                    moment (barge-in) and response.done follows.
@@ -131,10 +139,6 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
                                    "assistant" = streamed increment, "assistant_final" = the whole reply
                                    once the turn ends (replace the streamed line with it)
     {"type":"agent.turn","agent":"root","state":"running"|"idle"}
-    {"type":"agent.activity","agent":"root","state":"working"|"tool"|"idle","tool":"bash"|null,"detail":"pytest -q"|null}
-                                   what the call's agent is doing, sent on every change: working =
-                                   thinking or generating, tool = inside a tool call (which one, and one
-                                   line of what), idle = done. Play a working sound while state != idle.
     {"type":"agent.tree","agents":[{"id","name","parent"}]}
 
     call mode (session.start {"mode":"call"}; session.ready then has "mode":"call","narrator":true)
@@ -181,6 +185,20 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
         are still ours: spoken in the model's voice, answered by the caller's yes or no. Our VAD +
         Whisper still produce transcript.final. Billing: $0.05 per minute of session, per second,
         plus the kernel's own model calls.
+        What GPT-Live is told about the project (all from the call's kernel, never the gateway's):
+        at session start, a PROJECT CONTEXT brief in its instructions (name, machine/project, the
+        folder the kernel serves = the working directory, the arbos:// address; or, when the call
+        named no project, that the backend is the gateway's default kernel and where that is) and
+        the last VOICE_LIVE_HISTORY (12) user/assistant lines of the project's main chat as startup
+        history (session.input). During the call, quiet context (session.thinking.append, coalesced
+        every 3 s): lines typed in the project chat, Arbos's text replies it did not relay, workers
+        starting/finishing and the tools they run. Delegated utterances reach the kernel as `user`
+        lines with channel "voice" and the caller's device. Typed text.input during a GPT-Live call
+        goes to the kernel (steer while a turn runs) unless an ask is open, which it answers.
+        Voice rows in a client's chat are DISPLAY ONLY: draw transcript.final as the caller's line
+        and response.transcript (accumulated to response.done) as Arbos's spoken line; the kernel's
+        own `user` event with channel "voice" for the same words is that same line, not a new one.
+        Never send those words to the kernel again.
     pipeline (fallback, any GPU or CPU): Silero VAD -> faster-whisper -> optional reply hop
         (OpenRouter with the same tools, or the kernel) -> Kokoro. Explicit turns; barge-in is
         server-side cancellation on speech.started.

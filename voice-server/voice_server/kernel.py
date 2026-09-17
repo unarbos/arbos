@@ -395,7 +395,7 @@ class KernelClient:
         self.send(frame)
 
     async def turn(self, text: str, agent: str = "root", *, steer: bool = False, timeout: float = 120.0,
-                   channel: str = "") -> AsyncIterator[str]:
+                   channel: str = "", device: str = "") -> AsyncIterator[str]:
         """Send one user turn and yield the agent's assistant text deltas until it goes idle."""
         queue: asyncio.Queue[str | None] = asyncio.Queue()
         started = False
@@ -427,7 +427,7 @@ class KernelClient:
         emitted = ""
         idle = False
         try:
-            self.send_user(text, agent, channel=channel, steer=steer)
+            self.send_user(text, agent, channel=channel, device=device, steer=steer)
             deadline = time.monotonic() + timeout
             while True:
                 # After `turn idle` the kernel may still send the whole assistant text once more

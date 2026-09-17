@@ -51,6 +51,28 @@ class Engines:
             names.add(self.hub_machine)
         return names
 
+    def own_project_info(self) -> dict | None:
+        """What the gateway's own kernel is, said plainly, for a call that named no project (or
+        named this one): the folder when the kernel is local, else only the address it answers at.
+        A model given this cannot mistake it for the caller's project."""
+        kernel = self.kernel
+        if kernel is None:
+            return None
+        place = str(getattr(kernel, "place", "") or "")
+        leaf = place.rstrip("/").rsplit("/", 1)[-1] if place else ""
+        url = str(getattr(kernel, "url", "") or "").split("?")[0]
+        return {
+            "machine": self.hub_machine or "",
+            "project": leaf or "the gateway's default kernel",
+            "name": leaf or "the gateway's default kernel",
+            "icon": None,
+            "store": f"arbos://{self.hub_machine}/{leaf}/" if (self.hub_machine and leaf) else None,
+            "kind": "gateway",
+            "place": place or None,
+            "url": url or None,
+            "via": "gateway",
+        }
+
     @classmethod
     async def load(cls, args) -> "Engines":
         t0 = time.monotonic()

@@ -172,6 +172,12 @@ class BaseSession:
         elif self.narrator.pending_ask is not None:
             self.narrator.user_said(text, channel=self.channel)
 
+    async def on_call_text(self, text: str) -> None:
+        """Typed during a call (text.input): the same inbox as the spoken words, filed as `text`.
+        The kernel takes it as a steer when a turn is running."""
+        self.narrator.user_said(text, channel="text")
+        self._emit(P.TEXT_DONE, text="", cancelled=False, forwarded=True)
+
     def note_interrupt(self) -> None:
         """The caller cut in (barge-in or an `interrupt` frame): the narrator drops what it was saying."""
         if self.narrator is not None:
@@ -236,25 +242,24 @@ class BaseSession:
     async def _kernel_for(self, project: str) -> KernelClient | None:
         """The kernel a call is for. Empty, or a name for this gateway's own kernel: that one. A hub
         name (`<machine>/<project>`) with a hub configured: a fresh attach through the hub, owned
-        by this call. A hub name with no hub: the own kernel, and the caller is told."""
+        by this call. Any other name: none — a call named for a project never talks to a different
+        kernel (session.start already refused it; this is the safety net behind that)."""
         own = self.engines.kernel
         if self.call_kernel is not None:
             return self.call_kernel  # session.start named the project and _attach_project already attached
         if not project or project in self.engines.own_project_names():
             return own
-        if "/" not in project and own is not None:
-            return own
-        if not self.engines.hub_url:
-            self._emit(P.ERROR, message=f"project {project!r} names another kernel but the gateway has no --hub; using its own kernel")
-            return own
+        if "/" not in project or not self.engines.hub_url:
+            log.warning("[%s] no kernel for %r (bare name or no --hub); not using another", self.sid, project)
+            return None
         url = hub_attach_url(self.engines.hub_url, project, self.engines.hub_token)
         client = KernelClient(url=url, auto_approve=self.engines.auto_approve, token=self.engines.hub_token, name=project)
         try:
             await client.connect()
         except Exception as exc:
             log.warning("[%s] hub attach to %s failed: %s", self.sid, project, exc)
-            self._emit(P.ERROR, message=f"could not reach {project} through the hub ({_ascii_short(exc)}); using the gateway's own kernel")
-            return own
+            self._emit(P.ERROR, message=f"could not reach {project} through the hub ({_ascii_short(exc)}); no other kernel takes the call")
+            return None
         log.info("[%s] call attached to %s through the hub", self.sid, project)
         return client
 
@@ -293,6 +298,9 @@ class BaseSession:
             "name": identity.get("name") or project, "icon": identity.get("icon"),
             "store": info.get("store") or f"arbos://{machine}/{project}/",
             "kind": info.get("kind", "project"),
+            # the folder the project's kernel serves, from the roster: the call's working directory
+            "place": info.get("place") or None,
+            "via": "hub",
         }
         log.info("[%s] call scoped to %s (%s)", self.sid, label, self.project_info["name"])
         return True
@@ -459,6 +467,20 @@ class BaseSession:
             if target is not None and self.call_kernel is None and "/".join(target) not in self.engines.own_project_names():
                 if not await self._attach_project(*target):
                     return True  # refused: the caller asked for a project we cannot reach; never another one
+            elif target is None and self.project and self.project not in self.engines.own_project_names():
+                # A bare folder name ("discord_backups") from a machine that is not on the hub. The
+                # gateway cannot reach that kernel, and it used to answer from its own instead — a
+                # call about Jacob's Mac project talking to the phone kernel on ArbosLife. Refuse.
+                if not await self._refuse(
+                    "project_not_on_hub", self.project,
+                    f"{self.project!r} names a project without a machine, and this voice server does not serve it. "
+                    f"A call can only reach a project through the hub as <machine>/<project>: on the machine that "
+                    f"has the folder, put the hub url, machine name and token in ~/.config/arbos/hub.toml, restart "
+                    f"its kernel so it registers, then call again. Not attaching to any other kernel.",
+                ):
+                    return True
+            if self.call_kernel is None and self.engines.kernel is not None:
+                self.project_info = self.engines.own_project_info()
             if self.call_mode and (self.narrator is None or self.narrator.only_asks):
                 await self._start_call()
             await self.on_start()
@@ -473,9 +495,7 @@ class BaseSession:
         elif kind == P.TEXT_INPUT:
             text = str(msg.get("text", "")).strip()
             if text and self.call_mode and self.narrator is not None:
-                # Typed during a call: the same inbox as the spoken words, filed as `text`.
-                self.narrator.user_said(text, channel="text")
-                self._emit(P.TEXT_DONE, text="", cancelled=False, forwarded=True)
+                await self.on_call_text(text)
             elif text:
                 self._start_text_turn(text)
         elif kind == P.TEXT_CANCEL:
@@ -633,34 +653,7 @@ class BaseSession:
         except Exception:
             log.exception("[%s] could not voice the agent report", self.sid)
 
-    def _activity(self, state: str, tool: str = "", detail: str = "", agent: str = "root") -> None:
-        """agent.activity: what the call's agent is doing right now, on every change. The desktop
-        plays its working sound while state != idle. states: working (thinking/generating),
-        tool (inside a tool call; tool + detail say which), idle."""
-        key = (state, tool, detail)
-        if getattr(self, "_activity_key", None) == key:
-            return
-        self._activity_key = key
-        self._emit(P.AGENT_ACTIVITY, agent=agent, state=state, tool=tool or None, detail=detail or None)
-
-    def _track_activity(self, frame: dict) -> None:
-        if frame.get("agent") != "root":
-            return
-        kind = frame.get("type")
-        if kind == "turn":
-            self._activity("working" if frame.get("state") == "running" else "idle")
-        elif kind == "assistant_delta":
-            self._activity("working")
-        elif kind == "event":
-            event = frame.get("event") or {}
-            if event.get("kind") == "tool" and event.get("name"):
-                if event.get("ended"):
-                    self._activity("working")
-                else:
-                    self._activity("tool", event["name"], _tool_detail(event))
-
     def _mirror(self, frame: dict) -> None:
-        self._track_activity(frame)  # activity goes out even when the transcript mirror is off
         if not self.mirror_agents:
             return
         kind = frame.get("type")
@@ -716,14 +709,3 @@ def _parse_target(msg: dict) -> tuple[str, str] | None:
     if not machine or not project:
         return None
     return machine, project
-
-
-def _tool_detail(event: dict) -> str:
-    """One short line about a tool call: the command, the path, or the brief."""
-    args = event.get("args") or {}
-    for key in ("command", "cmd", "path", "file", "brief", "query", "pattern", "url", "id"):
-        value = args.get(key)
-        if isinstance(value, str) and value.strip():
-            value = value.strip().splitlines()[0]
-            return value if len(value) <= 80 else value[:77] + "..."
-    return ""
