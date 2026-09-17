@@ -33,19 +33,21 @@ xcrun simctl launch --console-pty "$UDID" $BUNDLE \
 sleep 8;  shot 01-call-small-talk
 sleep 30; shot 02-call-delegated-answer
 
-# Out of the call and into the chat it belongs to. The leave control is
-# behind the overflow menu, so both taps go by label rather than by pixel.
-ui tap "More" || ui tap "…" || echo "no overflow control"
-sleep 1; shot 03-call-menu
-ui tap "Leave" || ui tap "End" || echo "no leave control"
-sleep 2; shot 04-chat
+# Out of the call and into the chat it belongs to. Closing the call lands on
+# the project list, not on the chat, so the project is opened by name — the
+# list is alphabetical and its rows move as machines come and go.
+ui tap "Close" || { echo "no close control"; exit 1; }
+sleep 2.5; shot 03-project-list
+ui tap "${PROJECT:-phone}, Idle" || { echo "project row not on screen"; exit 1; }
+sleep 3; shot 04-chat-tail
 
-# The answer sits at the tail; the questions are above it.
-idb ui swipe 196 300 196 700 --duration 0.4 --udid "$UDID"; sleep 1
-shot 05-chat-scrolled-back
+# One screen back reaches the same question as it was answered before the
+# rule landed: the kernel's wording, kept whole.
+idb ui swipe 196 300 196 720 --duration 0.4 --udid "$UDID"; sleep 1.2
+shot 05-chat-before-the-rule
 
-echo "--- agent rows on screen ---"
-ui dump | grep -i "spoken\|worked" | head -20
 echo "--- what the call did ---"
 grep -E "^metric|^event response.done|^phase" "$OUT/console.log" | tail -12
+echo "--- what the kernel wrote for the same turns ---"
+python3 "$HERE/../kernel.py" pod history 8 2>&1 | tail -8
 echo "stills in $OUT"
