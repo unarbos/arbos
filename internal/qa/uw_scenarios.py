@@ -598,4 +598,88 @@ def register(scenario, registry, transcript, now_ms, branch):
             subprocess.run(["pkill", "-f", "uw04-ran-to-the-end"], capture_output=True)
         cx.check()
 
+    # ── the symmetry loop's inbox note of 20:30: a moved place comes back ──
+    @reg("af-04-a-moved-places-old-path-is-not-recreated-by-the-kernels-late-writes", needs_model=True, tags=("after-failure", "destructive-order"))
+    def af04(cx):
+        """From `internal/features-inbox/2026-09-17-kernel-writes-recreate-a-moved-place.md`: the gate renamed
+        a place under an idle kernel and found the old path **back**, holding the whole tree but no
+        `agents/<id>`, still growing — the kickoff's tail (`notes.md`, `spend.toml`,
+        `notifications.jsonl`, `kernel.log`) landing seconds late through `create_dir_all` on the absolute
+        path. The process's cwd followed the inode; its writes did not. af-03's rule checks at turn start,
+        so an idle kernel finishing a tail is outside it, and the next person to open that path reads a
+        ghost project.
+
+        The rename is timed off the turn's `turn_complete` **event**, not `idle`: `idle` arrives after the
+        notes nudge, which is itself part of the tail this is trying to race. The note saw it in 1 run of
+        3; this waits on the earlier frame to make the window as wide as the kernel allows, and reports
+        what it caught either way."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        moved = place.parent / (place.name + "-moved")
+        # A real model: the tail this races is the kickoff's, and the kickoff does not run under the
+        # replay provider — the probe's second version waited 90 s for a `turn_complete` that never came
+        # and then renamed the folder long after anything was being written (`turn_complete_seen: false`).
+        k = cx.kernel()
+        try:
+            started = k.start()
+            cx.rec.expect(started, "af-04-kernel-did-not-start", "the kernel did not come up")
+            if not started:
+                return
+            c = k.attach()
+            c.wait(lambda f: f.get("type") == "snapshot", 5)
+            # The kickoff is client-initiated: the desktop sends a `kickoff` frame, and a kernel merely
+            # served never runs one (measured: the kernel log of the second version held `kernel_start`,
+            # `attach_open`, `notify_replayed`, `kernel_stop` and no turn at all). The tail this races is
+            # the kickoff's own — the plan write to notes.md, the spend line, the greeting's notification
+            # — so the frame is sent here rather than a user line, whose tail is a different, smaller one.
+            c.send({"type": "kickoff", "agent": "root"})
+            ended = wait_turn_complete(c, "root", 120)
+            # The rename goes in the moment the turn's end is recorded, while its tail is still landing.
+            renamed_at = time.time()
+            place.rename(moved)
+            tail = sorted(p.name for p in moved.rglob("*") if p.is_file())[:0]  # touch nothing, just prove the move
+            cx.rec.notes["turn_complete_seen"] = ended is not None
+            cx.rec.notes["moved_to"] = str(moved)
+            if ended is None:
+                # No kickoff turn ended, so there is no tail to race and this run establishes nothing
+                # about the property. Said, not scored: a probe that stages nothing must not read as a
+                # pass (the audit of 2026-09-17, twenty-nine scenarios).
+                cx.rec.notes["skipped"] = "self: probe-no-kickoff-turn — no turn_complete in 90 s, so the rename did not land inside the kickoff's tail and nothing was staged"
+                return
+            # Poll the old path: the fact asserted is "nothing is recreated here", so it is watched for a
+            # bounded time rather than sampled once (the note's writes arrived up to 70 s after the move).
+            recreated, grew = None, []
+            deadline = time.time() + 75
+            while time.time() < deadline:
+                if place.exists():
+                    files = sorted(str(p.relative_to(place)) for p in place.rglob("*") if p.is_file())
+                    if files or any(place.iterdir()):
+                        recreated = {"after_s": round(time.time() - renamed_at, 1), "files": files[:12], "entries": sorted(p.name for p in place.iterdir())[:12]}
+                        grew = files
+                        break
+                time.sleep(0.5)
+            if recreated:
+                time.sleep(8)
+                after = sorted(str(p.relative_to(place)) for p in place.rglob("*") if p.is_file()) if place.exists() else []
+                recreated["still_growing"] = len(after) > len(grew)
+                recreated["files_after_8s"] = len(after)
+                recreated["has_agents_dir"] = (place / ".arbos" / "agents").exists()
+                recreated["has_root_agent"] = (place / ".arbos" / "agents" / "root").exists()
+            cx.rec.notes["old_path_recreated"] = recreated
+            cx.rec.notes["kernel_alive_after"] = k.alive()
+            cx.rec.expect(
+                recreated is None,
+                "af-04-old-path-recreated-as-a-ghost-project",
+                f"the place was renamed to {moved.name} and its old path came back {recreated['after_s'] if recreated else '?'}s later with {recreated['entries'] if recreated else ''} — agents/ {'present' if recreated and recreated['has_agents_dir'] else 'absent'}, root agent {'present' if recreated and recreated['has_root_agent'] else 'absent'}, still growing: {recreated.get('still_growing') if recreated else '?'}. The next open of that path reads a project that is a shell",
+                "arbos-kernel/core: check the place is the folder opened at start before any write under it, or write through a handle opened then (the symmetry loop's ask, 2026-09-17 20:30)",
+            )
+        finally:
+            if moved.exists() and not place.exists():
+                try:
+                    moved.rename(place)
+                except OSError:
+                    pass
+            k.stop()
+        cx.check(place=place if place.exists() else moved)
+
     return reg
