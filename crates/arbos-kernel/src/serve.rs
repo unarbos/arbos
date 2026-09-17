@@ -937,6 +937,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                             Some(&id),
                             format!("{} lines → {}", rolled.lines, rolled.archive.display()),
                         );
+                        // The rolled checkpoints are out of a rewind's
+                        // reach: their tree commits need no refs now.
+                        drop_rolled_checkpoint_refs(&place, &id, &rolled.archive);
                         hooks.broadcast(Frame::Rewound {
                             agent: id.clone(),
                             line: 1,
@@ -2067,6 +2070,33 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
         id: if id == agent { String::new() } else { id },
         unknown,
     });
+}
+
+/// After a roll, the archived checkpoints' refs go: `NNNN.checkpoints.jsonl`
+/// beside the rolled transcript names the lines, and no rewind reaches
+/// them (a rewind into rolled history is refused). Best effort.
+fn drop_rolled_checkpoint_refs(place: &Place, agent: &str, archive: &std::path::Path) {
+    let cps_path = archive.with_extension("checkpoints.jsonl");
+    let lines: Vec<u64> = std::fs::read_to_string(&cps_path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<arbos_engine::git::Checkpoint>(l).ok())
+        .filter(|cp| cp.work.is_some())
+        .map(|cp| cp.line)
+        .collect();
+    if lines.is_empty() {
+        return;
+    }
+    let cwd = arbos_core::load_agent(place, &arbos_core::AgentId::new(agent))
+        .map(|a| a.work_dir(&place.path))
+        .unwrap_or_else(|_| place.path.clone());
+    let n = lines.len();
+    arbos_engine::git::drop_checkpoint_refs(&cwd, agent, lines);
+    klog::info(
+        "checkpoint_refs_dropped",
+        Some(agent),
+        format!("{n} rolled checkpoint ref(s) released for git to reclaim"),
+    );
 }
 
 /// The marker that the missing-git notice was said for this place; in
