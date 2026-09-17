@@ -177,6 +177,7 @@ What is already right and stays: append-only `transcript.jsonl` with one `O_APPE
 9. **Remote-safe.** Clients are views. They act through the kernel, which does the writes. See "Remote attach and sharing".
 10. **Grows without limit.** Logs are append-only and indexed. No step reads a whole log. Context moves by pointer, not by paste: a sub-agent gets a brief and pulls the rest.
 11. **One goals file.** Every agent reads `.arbos/GOALS.md` first. Only the main chat writes it.
+12. **Absent is not unknown, and nothing destructive acts on unknown.** A file that is not there is a fact (start empty). A file that could not be read — EIO, EACCES, a lock, a partial view on a mount, an unparseable body — is a question, and a question is not a value. No `git reset`, no `clean`, no file rewritten over its old bytes, on a record the kernel has not confirmed. Reads that feed a write go through `arbos_core::record::read_text(..).confirmed()`, which turns *unknown* into an error the caller surfaces instead of a default it trusts; records that later readers act on are written with `write_atomic`, whole or not at all, and a failed write is said rather than swallowed. Behind the rule: one bad read of `notes.md` rewrote the project page as one line (qal-j09); a checkpoint whose tree-save failed silently let `rewind --files` delete kept turns' files (qal-j08); a turn-start mark whose write failed sent `undo` to an older HEAD, deleting a kept commit (qal-j10). `grep unwrap_or_default` near a `write` is the smell.
 
 ## On-disk layout
 

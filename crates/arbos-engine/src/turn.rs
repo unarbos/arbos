@@ -553,12 +553,12 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let mut events = load_transcript(&transcript)?;
 
     let cwd = agent.work_dir(&place.path);
+    let turn_line = events.len() as u64;
     let mut tree_ready: Option<tokio::sync::watch::Receiver<bool>> = None;
     {
         let snap = cwd.clone();
         let agent_dir = layout.dir.clone();
         let agent_id = agent.id.to_string();
-        let turn_line = events.len() as u64;
         // The checkpoint's record — HEAD and this turn's line — lands
         // before the turn goes on, so a rewind arriving at any point
         // after resolves to this turn and not the one before it. The
@@ -850,6 +850,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         hooks: Arc::clone(&hooks),
         bash_wait_ms: host.config.bash_wait_ms,
         hops: wake.hops,
+        turn_line,
         tree_ready,
         web: Arc::new(crate::tool::WebCfg {
             search_url: host.config.search_url.clone(),

@@ -377,8 +377,20 @@ pub async fn run(
                     output: None,
                 };
                 // On disk before it runs: a kernel that dies mid-call
-                // leaves this for the next one to write up (qal-j02).
-                crate::inflight::start(&cx.place, &cx.agent.id, &rec);
+                // leaves this for the next one to write up (qal-j02). A
+                // record that cannot be written refuses the call: a crash
+                // now would run it twice with nothing to say so.
+                if let Err(e) = crate::inflight::start(&cx.place, &cx.agent.id, &rec) {
+                    running -= 1;
+                    slots[i].state = State::Done(Outcome::Ran {
+                        out: Err(anyhow::anyhow!(
+                            "not run: its in-flight record could not be written ({e:#}) — a kernel death during the call would run it again unrecorded. Fix what blocks writes under .arbos/ (a full disk?) and call again."
+                        )),
+                        started,
+                        ended: arbos_core::now_ms(),
+                    });
+                    continue;
+                }
                 cx.hooks.emit(&Event::new(EventKind::Tool(rec)));
                 for note in &prepared.notices {
                     hook_notice(&cx, note);

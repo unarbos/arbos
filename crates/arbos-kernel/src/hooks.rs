@@ -1985,13 +1985,17 @@ impl KernelHooks {
     /// reads the parent's chat, not a child's — and on the sender's own
     /// when that is a different agent.
     pub fn notify_user(&self, from: &str, text: &str) -> Result<()> {
-        let mut inbox = std::fs::read_to_string(self.place.user_md()).unwrap_or_default();
+        // A confirmed read: an unreadable user.md is not rewritten as one
+        // line (the qal-j08 family; see arbos_core::record).
+        let mut inbox = arbos_core::record::read_text(&self.place.user_md())
+            .confirmed()?
+            .unwrap_or_default();
         inbox.push_str(&format!(
             "- {} [{from}] {}\n",
             subscription::clock(arbos_core::now_ms()),
             text.replace('\n', " ")
         ));
-        std::fs::write(self.place.user_md(), inbox)?;
+        arbos_core::record::write_atomic(&self.place.user_md(), inbox.as_bytes())?;
         let event = Event::new(EventKind::Say {
             from: format!("{from} → user"),
             text: text.to_string(),
