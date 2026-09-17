@@ -3262,7 +3262,7 @@ fn ssh_put_kernel_from_feed(
     dest: &str,
     step: &dyn Fn(arbos_core::remote_kernel::Progress),
 ) -> Result<bool> {
-    use arbos_update::{Component, feed, kernel as update_kernel, net, sign};
+    use arbos_update::{Channel, Component, feed, kernel as update_kernel, net, sign};
     let Some((platform, arch)) = feed::platform_of(remote_arch) else {
         return Ok(false);
     };
@@ -3271,32 +3271,71 @@ fn ssh_put_kernel_from_feed(
         // check a payload, so it must not install one.
         return Ok(false);
     };
-    let channel = crate::update::channel_now();
     let mine = crate::build::version();
-    let feed = net::feed(channel)
-        .with_context(|| format!("asking the {} channel", channel.as_str()))?;
-    let Some(offered) = feed.for_build(&mine, platform, arch, Component::Kernel) else {
+
+    // The channel this app follows first, then the other one.
+    //
+    // A build is published to whichever channel published it, and this
+    // only ever installs the kernel whose version *and* build equal the
+    // app's — so asking the other channel cannot bring back a different
+    // build, only the same one from where it was actually published. That
+    // matters because the setting and the question are not the same
+    // question: an app with updates switched off still resolves to
+    // `stable` here, and a dev build would find nothing there.
+    let configured = crate::update::channel_now();
+    let mut channels = vec![configured];
+    channels.extend([Channel::Dev, Channel::Stable].into_iter().filter(|c| *c != configured));
+
+    let mut asked: Vec<(Channel, arbos_update::Feed)> = Vec::new();
+    let mut unreachable: Option<anyhow::Error> = None;
+    let mut chosen = None;
+    for channel in channels {
+        match net::feed(channel) {
+            Ok(feed) => {
+                if let Some(offered) = feed.for_build(&mine, platform, arch, Component::Kernel) {
+                    chosen = Some((channel, offered));
+                    break;
+                }
+                asked.push((channel, feed));
+            }
+            Err(e) => {
+                unreachable = Some(e.context(format!("asking the {} channel", channel.as_str())));
+            }
+        }
+    }
+
+    let Some((channel, offered)) = chosen else {
+        // No channel could be read at all: that is a failure worth
+        // reporting rather than a quiet fall-through to a route that
+        // needs the same network.
+        if asked.is_empty()
+            && let Some(e) = unreachable
+        {
+            return Err(e);
+        }
         // Say which of the two reasons it is, because they need different
-        // things done. A channel that carries kernels but not *this*
-        // build means the app has fallen off the end of the channel's
-        // retention and needs to update itself; a channel that carries no
-        // kernel for this machine at all is the stable feed's normal
-        // answer and the release below is the right route.
-        let carried: Vec<String> = feed
-            .releases
-            .iter()
-            .filter(|r| r.download(platform, arch, Component::Kernel).is_some())
-            .map(|r| format!("{}+{}", r.version, r.build))
-            .collect();
-        if !carried.is_empty() {
-            eprintln!(
-                "remote {}: install: this app is {} and the {} channel now carries kernels for {} \
-                 — it cannot place a matching one until it updates itself",
-                target.name,
-                mine.human(),
-                channel.as_str(),
-                carried.join(", ")
-            );
+        // things done. A channel that carries kernels but not *this* build
+        // means the app has fallen off the end of that channel's retention
+        // and needs to update itself; a channel with no kernel for this
+        // machine at all is the stable feed's ordinary answer, and the
+        // release route below is the right one.
+        for (channel, feed) in &asked {
+            let carried: Vec<String> = feed
+                .releases
+                .iter()
+                .filter(|r| r.download(platform, arch, Component::Kernel).is_some())
+                .map(|r| format!("{}+{}", r.version, r.build))
+                .collect();
+            if !carried.is_empty() {
+                eprintln!(
+                    "remote {}: install: this app is {} and the {} channel carries kernels for {} \
+                     — it cannot place a matching one until it updates itself",
+                    target.name,
+                    mine.human(),
+                    channel.as_str(),
+                    carried.join(", ")
+                );
+            }
         }
         return Ok(false);
     };
