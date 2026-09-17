@@ -21,7 +21,17 @@ points. Nothing here measures an image.
   find   print "x y" — the centre, in points — of the first match
   tap    tap that centre
   value  print the element's AXValue (the composer's placeholder or text)
+  field  print what the text field holds, found by being a text field
   dump   print every label and frame, for writing a new scenario
+
+`field` takes no label because the composer has none once there is text in
+it: the placeholder is the label and it goes the moment a character lands,
+so anything that names it cannot read it back. `idb ui text` returns before
+its characters arrive, so a scenario that types and presses return without
+reading the field back sends whatever had landed by then (M-162).
+
+The keyboard must be down for `field`: while it is up, `describe-all`
+returns the keyboard's own tree and the composer is not in it.
 
 A label that matches nothing exits 1 and prints nothing, so a scenario
 fails where it went wrong rather than touching something else.
@@ -69,6 +79,17 @@ def main():
         sys.exit(__doc__)
     udid, verb = sys.argv[1], sys.argv[2]
     els = elements(udid)
+
+    if verb == "field":
+        fields = [e for e in els if (e.get("type") or "") == "TextField"]
+        if not fields:
+            print("ui: no text field on screen — is the keyboard up?", file=sys.stderr)
+            sys.exit(1)
+        if len(fields) > 1:
+            print(f"ui: {len(fields)} text fields on screen, want one", file=sys.stderr)
+            sys.exit(1)
+        print(fields[0].get("AXValue") or "", end="")
+        return
 
     if verb == "dump":
         for e in els:
