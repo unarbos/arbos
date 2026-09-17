@@ -105,7 +105,9 @@ fn history_for_a_live_agent_is_not_marked_archived() {
 fn history_by_the_workers_name_finds_its_archived_record_and_an_unknown_name_says_so() {
     let replies = concat!(
         "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"Run J152618 verification command\",\"task\":\"say the codeword\"}}]}\n",
-        "{\"content\":\"the codeword is marimba\"}\n",
+        // Pinned to the worker's id (the name's slug): unpinned, root's
+        // step after the spawn took this line first on a loaded runner.
+        "{\"agent\":\"run-j152618-verification-command\",\"content\":\"the codeword is marimba\"}\n",
         "{\"agent\":\"root\",\"content\":\"the worker says marimba\"}\n",
     );
     let mut k = start_kernel_replay("history-by-name", replies);
