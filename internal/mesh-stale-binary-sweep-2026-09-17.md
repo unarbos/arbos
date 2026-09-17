@@ -131,6 +131,17 @@ before touching ArbosLife again, because its kernels run under `start.sh`
 > sits open after the work finished — 36 minutes on the pod for a 3-second
 > script. Finished, correct, and indistinguishable from hung.
 
+**Never match a process by name; match by path or inode.** The person who
+wrote that rule broke it twice in one afternoon, in miniature, on his own
+machine: `pkill -f loop-q3` and `pkill -f "sleep 60"` each matched the shell
+that was running the command — its own command line contained the pattern —
+and killed the session that issued it. The same mistake at scale is
+`pkill -x arbos-kernel` in a harness reaching another user's test kernels
+(12:29 UTC, the pod), or a stop script taking every kernel on a box when it
+meant one installation. Stop by pid read from the place's `kernel.json`, or
+by `-f "^<exact path> serve "`, or by the inode of `/proc/<pid>/exe`; a name
+is the one thing every process on the box shares.
+
 **The rule that would have prevented tonight's outage, on its own line:**
 
 > **One file can back several processes. After any install over a binary,
