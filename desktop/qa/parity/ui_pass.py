@@ -1603,6 +1603,20 @@ def place_window() -> None:
             subprocess.run(["xdotool", "windowactivate", "--sync", wid], env=ENV)
             subprocess.run(["xdotool", "windowsize", wid, "1600", "1000"], env=ENV)
             subprocess.run(["xdotool", "windowmove", wid, "100", "60"], env=ENV)
+            # Read the geometry back: the window manager once left the
+            # window a third off the left edge, and every still and every
+            # `visible` of that run was about a clipped window (rig audit
+            # R13, cycle 31). Fail loudly rather than measure a fragment.
+            time.sleep(0.4)
+            geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid], capture_output=True, text=True, env=ENV).stdout
+            pos = {k: int(v) for k, v in (line.split("=") for line in geo.split() if "=" in line)}
+            if pos.get("X", 0) < 0 or pos.get("Y", 0) < 0 or pos.get("X", 0) + pos.get("WIDTH", 0) > 1920:
+                subprocess.run(["xdotool", "windowmove", wid, "100", "60"], env=ENV); time.sleep(0.4)
+                geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid], capture_output=True, text=True, env=ENV).stdout
+                pos = {k: int(v) for k, v in (line.split("=") for line in geo.split() if "=" in line)}
+                if pos.get("X", 0) < 0 or pos.get("Y", 0) < 0:
+                    raise DisplayHung(f"window sits off-screen after placement: {pos}")
+            log(f"window at {pos.get('X')},{pos.get('Y')} {pos.get('WIDTH')}x{pos.get('HEIGHT')}")
             return
         time.sleep(0.5)
 
