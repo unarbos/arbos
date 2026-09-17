@@ -4514,12 +4514,16 @@ fn pump(
                 }
                 for event in surfaces {
                     match event {
+                        // `by` (user | agent) is on the event for the drawer's
+                        // rule — open when the person asked, stay quiet when
+                        // the agent did; the drawer reads it when it lands.
                         Event::Open {
                             path,
                             title,
                             kind,
                             cwd,
                             url,
+                            by: _,
                         } => workspace.open_shown(id, path, title, kind, cwd, url, cx),
                         Event::Hide { path, kind } => {
                             if kind == "process" {

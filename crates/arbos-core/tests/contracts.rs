@@ -198,6 +198,13 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
         (Frame::VoiceStop, "voice_stop"),
         (Frame::Refresh, "refresh"),
         (
+            Frame::Shell {
+                owner: None,
+                cwd: Some("/tmp".into()),
+            },
+            "shell",
+        ),
+        (
             Frame::Board {
                 owner: "root".into(),
                 action: "open".into(),
@@ -206,6 +213,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                 cwd: Some("/tmp".into()),
                 title: None,
                 url: None,
+                by: "user".into(),
             },
             "board",
         ),
