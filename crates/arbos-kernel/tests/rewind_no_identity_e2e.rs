@@ -195,3 +195,103 @@ fn a_rewind_on_a_checkpoint_without_a_tree_leaves_the_files_and_says_so() {
     );
     let _ = k.child.kill();
 }
+
+/// qal-j17: the checkpoint's tree is taken beside the turn, and on a large
+/// repository `add -A` takes seconds while a model's first tool call can
+/// come sooner. A tree taken after that call held the turn's own file, so
+/// `rewind --files` to the turn put the file back and said restored — a
+/// correct-looking restore of the wrong state. Staged with a slow tree
+/// (`ARBOS_TEST_TREE_DELAY_MS`): the turn's first write waits for the
+/// tree, and the rewind to that turn leaves no trace of it.
+#[test]
+fn the_turns_first_write_waits_for_the_checkpoint_tree_so_a_rewind_never_restores_the_turns_own_file()
+ {
+    let replies = concat!(
+        "{\"agent\":\"root\",\"content\":\"\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"echo first > f1.txt\",\"description\":\"Write f1\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"wrote f1\"}\n",
+        "{\"agent\":\"root\",\"content\":\"\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"echo second > f2.txt\",\"description\":\"Write f2\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"wrote f2\"}\n",
+    );
+    let scratch = common::scratch_dir("rewind-slow-tree");
+    let place = scratch.join("place");
+    std::fs::create_dir_all(place.join(".arbos")).unwrap();
+    std::fs::write(
+        place.join(".arbos/project.toml"),
+        "schema = 2\n[root]\nrole = \"worker\"\n",
+    )
+    .unwrap();
+    std::fs::write(place.join(".gitignore"), ".arbos/\n").unwrap();
+    git(&place, &["init", "-q"]);
+    git(&place, &["add", ".gitignore"]);
+    git(
+        &place,
+        &[
+            "-c",
+            "user.name=setup",
+            "-c",
+            "user.email=setup@t",
+            "commit",
+            "-q",
+            "-m",
+            "start",
+        ],
+    );
+    let file = scratch.join("replies.jsonl");
+    std::fs::write(&file, replies).unwrap();
+    std::fs::write(scratch.join("xdg/arbos/config.toml"), "trace = false\n").unwrap();
+    // The tree takes two seconds, as it does on a large repository.
+    let mut k = common::spawn_with_env(
+        scratch,
+        &[
+            "--provider",
+            "replay",
+            "--replies",
+            &file.display().to_string(),
+        ],
+        &[("ARBOS_TEST_TREE_DELAY_MS", "2000")],
+    );
+    let mut a = Attach::connect(&k.url);
+    let _ = a.wait(Duration::from_secs(5), |f| f["type"] == "hello");
+    for text in ["write f1", "write f2"] {
+        a.send(serde_json::json!({"type":"user","agent":"root","text":text,"attachments":[]}));
+        assert!(
+            a.wait_turn("root", "idle", Duration::from_secs(40)),
+            "{text}"
+        );
+    }
+    assert!(k.place.join("f1.txt").exists() && k.place.join("f2.txt").exists());
+    let cps = checkpoints(&k.place);
+    assert_eq!(cps.len(), 2, "{cps:#?}");
+    // Turn 2's tree is the tree *before* turn 2: f1 only.
+    let work = cps[1]["work"].as_str().expect("turn 2 has a tree");
+    let listed = std::process::Command::new("git")
+        .args(["ls-tree", "--name-only", work])
+        .current_dir(&k.place)
+        .output()
+        .unwrap();
+    let names = String::from_utf8_lossy(&listed.stdout);
+    assert!(names.contains("f1.txt"), "{names}");
+    assert!(
+        !names.contains("f2.txt"),
+        "the checkpoint's tree holds the turn's own file — taken after the turn wrote it: {names}"
+    );
+    // Rewind to turn 2 with files: f2 must be gone, and it must say restored.
+    a.send(serde_json::json!({"type":"rewind","agent":"root","turn":2,"files":true}));
+    let restored = a
+        .wait(Duration::from_secs(30), |f| {
+            (f["type"] == "rewound" && !f["restored"].is_null()) || f["type"] == "error"
+        })
+        .expect("the restore reports");
+    assert_eq!(restored["type"], "rewound", "{restored}");
+    assert_eq!(
+        std::fs::read_to_string(k.place.join("f1.txt"))
+            .ok()
+            .as_deref(),
+        Some("first\n")
+    );
+    assert!(
+        !k.place.join("f2.txt").exists(),
+        "rewound to before the turn, and the file it created is still here"
+    );
+    let _ = k.child.kill();
+}

@@ -468,6 +468,33 @@ fn log_speedup(agent: &arbos_core::AgentId, outcomes: &[(ToolCall, Outcome)]) {
 /// the result and may add context for the model.
 async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Result<ToolOut> {
     let name = call.name.clone();
+    // A tool that writes waits for the turn's checkpoint to have its
+    // tree: taken beside the turn, on a large repository `add -A` takes
+    // seconds while a model's first call can come sooner, and a tree
+    // taken after the call held the turn's own file — a rewind then put
+    // that file back and said restored (qal-j17). Reads go on; the wait
+    // is bounded only by the stop button.
+    if !prepared.plan.access.is_readonly()
+        && let Some(rx) = cx.tree_ready.clone()
+        && !*rx.borrow()
+    {
+        let mut rx = rx;
+        let waited = std::time::Instant::now();
+        tokio::select! {
+            r = rx.wait_for(|ready| *ready) => {
+                if r.is_ok() && waited.elapsed() > std::time::Duration::from_millis(500) {
+                    eprintln!(
+                        "{}: {name} waited {:.1}s for the turn's checkpoint tree",
+                        cx.agent.id,
+                        waited.elapsed().as_secs_f64()
+                    );
+                }
+            }
+            _ = cx.cancel.cancelled() => {
+                anyhow::bail!("{name}: stopped while waiting for the turn's checkpoint tree");
+            }
+        }
+    }
     if let Some(question) = &prepared.ask {
         // On disk as "waiting for the user" while the card is up: a
         // kernel that dies here must not write the call up as one that
