@@ -372,8 +372,11 @@ impl Opener {
         else {
             return;
         };
+        // Every machine opens at its home: nobody's project is in `/bin`
+        // (Jacob's still of ArbosLife at `/` — `bin/`, `boot/` as the
+        // first rows).
         let path = if path.is_empty() {
-            "/".into()
+            HOME_START.into()
         } else {
             path.to_string()
         };
@@ -393,7 +396,7 @@ impl Opener {
         let name = host.as_deref().unwrap_or(LOCAL_MACHINE);
         self.field.update(cx, |field, cx| {
             field.set_placeholder(name, cx);
-            field.set_content("/", cx);
+            field.set_content(HOME_START, cx);
         });
         self.prefetch(cx);
         self.ensure_listing(cx);
@@ -456,7 +459,7 @@ impl Opener {
                     Some(Offer::Machine { .. } | Offer::Browse) | None => {
                         let typed = self.query(cx);
                         let path = if typed.is_empty() {
-                            "/".into()
+                            "~".into()
                         } else {
                             typed.trim_end_matches('/').to_string()
                         };
@@ -720,7 +723,7 @@ impl Opener {
 
     fn start(&mut self, host: Option<String>, path: String, cx: &mut Context<Self>) {
         self.open = false;
-        let path = if path.is_empty() { "/".into() } else { path };
+        let path = if path.is_empty() { "~".into() } else { path };
         let place = match host {
             Some(host) => Place::remote(host, path),
             // `~/Code` typed is the user's home, not a folder called `~`.
@@ -751,6 +754,9 @@ impl Opener {
     }
 }
 
+/// Where the folder step opens on any machine: the home folder, listed.
+const HOME_START: &str = "~/";
+
 /// The last name in a path, for "Open <name>": `/` for the root, the home
 /// folder's own name for `~`.
 fn folder_name(path: &str) -> String {
@@ -758,10 +764,10 @@ fn folder_name(path: &str) -> String {
     if trimmed.is_empty() {
         return "/".to_string();
     }
+    // "Open home" on every machine: the local user's folder name was
+    // wrong for a remote host, whose home is someone else's.
     if trimmed == "~" {
-        return dirs::home_dir()
-            .and_then(|home| home.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| "~".to_string());
+        return "home".to_string();
     }
     trimmed.rsplit('/').next().unwrap_or(trimmed).to_string()
 }

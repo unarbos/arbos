@@ -545,13 +545,27 @@ impl Host {
     pub fn remember_place(&self, path: &std::path::Path) {
         let file = self.dir.join("places");
         let line = format!("{}\n", path.display());
-        let body = std::fs::read_to_string(&file).unwrap_or_default();
-        if body.lines().any(|l| l == path.display().to_string()) {
+        // Confirmed, then appended: a failed read must not shrink the
+        // list of places to one line (`crate::record`).
+        let Ok(body) = crate::record::read_text(&file).confirmed() else {
+            return;
+        };
+        if body
+            .as_deref()
+            .unwrap_or("")
+            .lines()
+            .any(|l| l == path.display().to_string())
+        {
             return;
         }
-        let mut out = body;
-        out.push_str(&line);
-        let _ = std::fs::write(file, out);
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
     }
 
     pub fn places(&self) -> Vec<PathBuf> {
