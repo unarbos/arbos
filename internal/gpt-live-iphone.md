@@ -45,7 +45,7 @@ This worker has no Xcode, so the PR's first compile was CI's "iPhone (build, sim
 Appended by the mobile loop; the sections above are the voice worker's and are untouched.
 
 **Answer: no, #485 does not do this. A change was needed and is on
-[#498](https://github.com/unarbos/arbos/pull/498), branch
+[#502](https://github.com/unarbos/arbos/pull/502), branch
 `cursor/mobile-call-text-in-chat-a4fa` off latest `main`.**
 
 ### What was there before, measured

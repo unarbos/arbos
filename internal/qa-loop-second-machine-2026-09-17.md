@@ -361,6 +361,60 @@ against a 0-minute-old tip), mirror pushed `e37f30f4`.
 The cycle timer is the piece still outstanding: cycles are being run by hand while the tree settles, and
 `vm-loop.sh` takes over as the standing hourly loop once one completes clean.
 
+## Cycle 3, 18:18 → 20:36: every step, both mirrors, and what its breaks are
+
+The first cycle on this machine to run from its first mirror to its closing one.
+
+| step | result |
+|---|---|
+| opening mirror | `f7c4756d` at 18:18 — 27 documents, 584 `internal/`, media 156 → 168 |
+| kernel | `42cb9751ace8` primary; `b1c8e82a62b1` / `1577f4de3035` tracked; each rollout names its own build |
+| kickoff replay | **11/12** on the primary run (missing item 4), **8/12** on tracked `main` (missing 1, 3, 4, 12) |
+| tracked `main` + 3 inbox branches | ran |
+| desktop driver | `copied 4 file(s) … to local disk` — off the mount, `qal-j23`'s fix working |
+| **acceptance journey** | **6/8** in 177 s, 0 unverified, J4 and J6 failing (ten-run rate: J4 6/10, J6 8/10) |
+| call mode | **23/23 green** on `main@7ea0a3ecd72e` |
+| publish | **refused, correctly** — then resolved and pushed `a4807ce8`, 323 bug files, none removed |
+| closing mirror | `2a70919f` at 20:36 — 28 documents |
+| totals | 67 pass, 41 break, 181 skip; every skip named with its reason in the ALARMS block |
+
+**The publish refusal is the guard earning its place on its first real cycle.** Three bug files were on
+`qa-results` and not in this machine's tree — `2d013b03b5`, `9e094b99a6`, `c011fbfcf4`, all drafts the
+**outgoing machine** published while this cycle ran. Unguarded, the push would have deleted them and said
+`-- publish: pushed`. Resolved the way the refusal's own message says: seed them from the branch, re-check
+the floor (231 on the branch, 323 here, zero missing), push.
+
+**The desktop breaks are a standing fault, not a new one.** With the driver local, the 18 remaining
+`driver-exception`s carry no store path at all: 16 are `DriverError: move: no element matches 'project-0'`,
+one an `IndexError` in the driver, one a missing `xwd` (a host gap, now installed). The fingerprint of the
+first, `1f6f6064cd`, was **first seen on 2026-09-15** and its draft still reads `Suspected location: (fill
+in)` — so the driver's project selector has not matched the app for two days, across machines, and nobody
+triaged it because a `driver-exception` reads as a harness error rather than a finding. That is the same
+corrosion as a skip printing `pass`, and it is the next thing to take apart: either the app renamed the
+element (a product change the parity driver never followed) or the selector was always wrong, and the
+app's own element tree decides which.
+
+## The store is the loop's source, so a fix that lives only on the machine is reverted
+
+Ten minutes after filing `qal-j23` I met its shape from the inside. `vm-loop.sh` copies the runner and the
+deploy scripts **from the store** at the start of every cycle. I had written `cycle.sh` to the store at
+14:40 — before adding the driver-copy block at 18:15 — so the standing loop's first act was to copy the
+older store copy over the fixed one, and cycle 4 began with the driver back on the mount.
+
+Caught by checking rather than assuming: `grep -c 'desktop driver: copied' deploy/cycle.sh` returned 0 on
+the file the loop was running. Fixed by putting the current script in the store (content-checked first:
+zero of their lines changed) and restarting the loop, which then copied it forward — verified as 1 in the
+cycle it actually runs.
+
+**So the rule for this machine: a change to the runner or to `deploy/` is not made until it is in the
+store.** The machine's copy is a working tree, not a home.
+
+One more thing that came out of the restart: killing `cycle.sh` left its `run.py` **orphaned** (reparented
+to pid 1) and still running scenarios into the log, which is how a "stopped" cycle went on writing for
+three minutes. The loop already knows this shape — "a process the harness started is the harness's to
+kill, wherever its cwd is" — and it applies to the harness's own parent, too. Stopping a cycle means
+stopping `run.py` and its kernels by pid, then the shell, not the shell alone.
+
 ## Cross-references
 
 - `internal/qa/bugs/qal-j21-publish-mirrors-a-smaller-bug-set-and-deletes-the-branchs-drafts.md`
