@@ -1934,6 +1934,11 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
             let mut message =
                 crate::model::attachment::UserMessage::from(wake_brief(text, brief.as_deref()));
             message.sent_at = (ev.ts > 0).then_some(ev.ts);
+            // The parent's words, not the person's: the card is drawn as a
+            // brief (column-wide, folded) only for these. A New Chat's own
+            // first line is filed under the root too, and was drawn as a
+            // brief — "hi" took the column (QA `desktop-user-message-card`).
+            message.channel = crate::model::attachment::BRIEF_CHANNEL.to_string();
             Some(ChatItem::User(message))
         }
         // A worker's report or a subscription firing: a segment of its own
