@@ -7,8 +7,14 @@ harness copies to the host. Model calls go to the interception endpoint as a
 custom OpenAI-compatible provider, so the trace verifiers records is the sample.
 
     uv run eval swebench-verified --env.agent.harness.id arbos-harness \
-        --env.agent.runtime.type docker -m <model> \
+        --env.agent.runtime.type docker --env.agent.runtime.block '["*"]' -m <model> \
         --client.base-url https://openrouter.ai/api/v1 --client.api-key-var OPENROUTER_API_KEY
+
+`--env.agent.runtime.block '["*"]'` leaves the container only the interception
+route. Without it the docker runtime uses the host network, and the agent can
+`pip download` the release that already carries the fix: in the SWE-bench loop's
+cycle-10 baseline run 6 of 35 rollouts did, all six graded solved; in cycle 11,
+8 of 29. The `arbos_egress_open` metric records which rollouts ran open.
 """
 
 from __future__ import annotations
@@ -185,6 +191,11 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
         Also brings the rollout's artifacts to the host when `artifacts` is set."""
         r = await self.result(runtime)
         code = int(r.get("kernel_exit", -1))
+        if not runtime.network_restricted:
+            logger.warning(
+                "arbos: runtime egress is open; the agent could fetch upstream releases. "
+                "Pass --env.agent.runtime.block '[\"*\"]' for a clean measurement."
+            )
         collected = 0
         if self.config.artifacts:
             collected = await self.collect(task, trace, runtime)
@@ -197,6 +208,7 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
             "arbos_wall_s": float(r.get("wall_s", 0)),
             "arbos_cost_capped": float(r.get("cost_capped", 0)),
             "arbos_artifact_bytes": float(collected),
+            "arbos_egress_open": 0.0 if runtime.network_restricted else 1.0,
         }
 
     async def collect(self, task: TaskData, trace: Trace, runtime: Runtime) -> int:
