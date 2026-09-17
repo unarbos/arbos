@@ -2341,14 +2341,23 @@ impl Arbos {
         self.report_anchor = id.zip(seq);
         self.feedback_sheet.update(cx, |sheet, cx| {
             sheet.show(agent, seq, parts, window, cx);
-            sheet.take_session(
-                self.workspace
-                    .read(cx)
-                    .active_session()
-                    .map(|chat| chat.drawn_view())
-                    .unwrap_or(serde_json::Value::Null),
-                cx,
-            );
+            // Everything the window knows about this place, not only the chat
+            // in front: the rows and the facts behind them, the records on
+            // disk, the tabs and the focus. A report that carries one side of a
+            // disagreement cannot show it.
+            let workspace = self.workspace.read(cx);
+            let mut view = workspace
+                .active_project()
+                .map(|project| {
+                    workspace.desktop_state(&project.path, crate::feedback::DESKTOP_STATE_BUDGET)
+                })
+                .unwrap_or(serde_json::Value::Null);
+            if let Some(obj) = view.as_object_mut()
+                && let Some(chat) = workspace.active_session()
+            {
+                obj.insert("drawn".into(), chat.drawn_view());
+            }
+            sheet.take_session(view, cx);
         });
         if let Some(id) = id {
             self.workspace.update(cx, |workspace, cx| {

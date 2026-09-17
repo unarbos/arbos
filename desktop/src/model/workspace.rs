@@ -2205,6 +2205,89 @@ impl Workspace {
 
     /// Any session, in whichever project holds it — the pump that feeds a
     /// session knows only its id, and must not care which tab it sits behind.
+    /// Everything this window knows about `place`, for a report to carry.
+    ///
+    /// Jacob's ruling: package the state needed to debug into the bug itself.
+    /// The test is whether a reader could reconstruct what he was looking at and
+    /// what each side believed — so this holds the rows as the window has them,
+    /// the session records on disk behind them, and where the focus was. The
+    /// kernel's own roster and agent list ride in the same bundle, so the two
+    /// can be set against each other; a report carrying one side cannot show a
+    /// disagreement, and a disagreement is what F-137 was.
+    ///
+    /// `budget` bounds the on-disk records. They hold whole chats, so their
+    /// messages are counted rather than copied and the result says so.
+    pub fn desktop_state(&self, place: &std::path::Path, budget: usize) -> serde_json::Value {
+        let project = self
+            .projects
+            .iter()
+            .find(|project| project.path == place);
+        let rows: Vec<serde_json::Value> = project
+            .map(|project| project.sessions.iter().map(ChatSession::row_facts).collect())
+            .unwrap_or_default();
+
+        // The records are what the window will draw again after a relaunch, so
+        // a row that disagrees with the kernel disagrees here too. Their
+        // `items` are whole chats; the metadata is the part that explains a
+        // wrong row, so the messages are counted and left out.
+        let mut records = Vec::new();
+        let mut records_clipped = 0usize;
+        let mut bytes = 0usize;
+        for (path, record) in crate::model::record::list(place) {
+            let row = serde_json::json!({
+                "file": path.file_name().and_then(|n| n.to_str()),
+                "agent": record.agent,
+                "session": record.session,
+                "parent": record.parent,
+                "delegate_number": record.delegate_number,
+                "title": record.title,
+                "name": record.name,
+                "closed": record.closed,
+                "rank": record.rank,
+                "updated": record.updated,
+                "items": record.items.len(),
+                "draft_chars": record.draft.chars().count(),
+            });
+            let size = row.to_string().len();
+            if bytes + size > budget {
+                records_clipped += 1;
+                continue;
+            }
+            bytes += size;
+            records.push(row);
+        }
+
+        serde_json::json!({
+            "place": place.to_string_lossy(),
+            // The rows on screen, and the facts each label and status came from.
+            "rows": rows,
+            "records": records,
+            // Never a silent drop: what went, and why.
+            "records_clipped": records_clipped,
+            "records_note": if records_clipped > 0 {
+                serde_json::Value::String(format!(
+                    "{records_clipped} session record(s) left out for size; every record's messages are counted rather than copied"
+                ))
+            } else {
+                serde_json::Value::String(
+                    "every session record is here; their messages are counted rather than copied".into(),
+                )
+            },
+            "focus": project.and_then(|p| p.focus.as_ref()).map(|f| serde_json::json!({
+                "agent": f.agent,
+                "surface": f.surface.map(|s| format!("{s:?}")),
+            })),
+            "archived_shown": project.map(|p| p.archive_open),
+            // The tabs, so "which project was in front" is answerable.
+            "tabs": self.projects.iter().map(|p| serde_json::json!({
+                "path": p.path.to_string_lossy(),
+                "host": p.host,
+                "sessions": p.sessions.len(),
+            })).collect::<Vec<_>>(),
+            "active_tab": self.active,
+        })
+    }
+
     pub fn session(&self, id: u64) -> Option<&ChatSession> {
         self.projects.iter().find_map(|project| project.session(id))
     }

@@ -51,6 +51,15 @@ pub const SCREENSHOT_NAME: &str = "screenshot.b64";
 /// worse than a small one.
 pub const SHOT_MAX_BASE64: usize = 900 * 1024;
 
+/// How much of the desktop's own state a report carries.
+///
+/// Jacob's ruling: the bundle holds what is needed to debug it, his app's
+/// internals included. A place's session records hold whole chats, so this
+/// bounds them — and what will not fit is counted and named rather than
+/// dropped in silence, which is the fault this feature has spent a day
+/// removing.
+pub const DESKTOP_STATE_BUDGET: usize = 128 * 1024;
+
 /// A picture is scaled to this width before it is encoded.
 ///
 /// A bug report does not need Retina pixels; it needs to show what the window
@@ -285,6 +294,11 @@ impl Draft {
             "children": children,
             "agents": if self.parts.trajectory { b.agents } else { vec![] },
             "log": if self.parts.log { b.log } else { vec![] },
+            // The window's own state: the rows it draws and the facts behind
+            // them, the session records on disk, the tabs and the focus. The
+            // kernel's roster and agent list are in `place` and `agents` above,
+            // so the two sides can be set against each other — which is the
+            // only way a report can show a row the kernel has no agent for.
             "session": if self.parts.session {
                 self.session.clone().unwrap_or(Value::Null)
             } else {
@@ -506,22 +520,77 @@ pub fn log_lines(log: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// What the app itself believes the chat holds. Deliberately shallow: the
-/// point is whether its count and its kinds match the transcript, not its
-/// internals.
-pub fn session_lines(session: &Value) -> Vec<String> {
-    let Some(items) = session.get("items").and_then(Value::as_array) else {
-        return vec!["(the app kept no view of this chat)".into()];
-    };
-    let mut out = vec![format!("{} items drawn in this chat", items.len())];
-    out.extend(items.iter().take(60).enumerate().map(|(n, item)| {
-        let kind = item
-            .as_object()
-            .and_then(|o| o.keys().next().cloned())
-            .unwrap_or_else(|| "?".into());
-        format!("{}. {kind}", n + 1)
-    }));
+/// What the window knows, set against what the kernel knows.
+///
+/// This does the comparison rather than leaving it to a reader, because the
+/// comparison *is* the diagnosis. F-137 was a `Delegate 1 · Working` row for an
+/// agent the kernel had never heard of, and finding that out meant fetching the
+/// window's state from Jacob's machine by hand. A row the kernel has no agent
+/// for is now named as such, here, in the sheet he is looking at and in the
+/// report an agent reads.
+pub fn session_lines(session: &Value, kernel_agents: &[Value]) -> Vec<String> {
+    if session.is_null() {
+        return vec!["(the app kept no view of this place)".into()];
+    }
+    let known: Vec<&str> = kernel_agents
+        .iter()
+        .filter_map(|a| a.get("id").and_then(Value::as_str))
+        .collect();
+
+    let mut out = Vec::new();
+    let rows = session.get("rows").and_then(Value::as_array);
+    if let Some(rows) = rows {
+        out.push(format!(
+            "{} drawn in this place; the kernel has {}",
+            plural(rows.len(), "row"),
+            plural(known.len(), "agent")
+        ));
+        for row in rows.iter().take(40) {
+            let s = |k: &str| row.get(k).and_then(Value::as_str).unwrap_or("");
+            let label = s("label");
+            let agent = s("agent");
+            let mut line = format!("{label} — agent {}", if agent.is_empty() { "(none)" } else { agent });
+            if row.get("streaming").and_then(Value::as_bool) == Some(true) {
+                line.push_str(", streaming");
+            }
+            if let Some(n) = row.get("live_work").and_then(Value::as_u64).filter(|n| *n > 0) {
+                line.push_str(&format!(", {} running", plural(n as usize, "job")));
+            }
+            if let Some(status) = row.get("status").and_then(Value::as_str) {
+                line.push_str(&format!(", says \"{}\"", clip(status, 40)));
+            }
+            // The disagreement, called by its name.
+            if !agent.is_empty() && !known.is_empty() && !known.contains(&agent) {
+                line.push_str("  ← THE KERNEL HAS NO AGENT BY THIS NAME");
+            }
+            out.push(line);
+        }
+    }
+    if let Some(records) = session.get("records").and_then(Value::as_array) {
+        out.push(format!("{} on disk", plural(records.len(), "session record")));
+        if let Some(note) = session.get("records_note").and_then(Value::as_str) {
+            out.push(note.to_string());
+        }
+    }
+    if let Some(items) = session
+        .get("drawn")
+        .and_then(|d| d.get("items"))
+        .and_then(Value::as_array)
+    {
+        out.push(format!("{} drawn in the chat in front", plural(items.len(), "item")));
+    }
+    if out.is_empty() {
+        out.push("(the app kept no view of this place)".into());
+    }
     out
+}
+
+fn plural(n: usize, one: &str) -> String {
+    if n == 1 {
+        format!("{n} {one}")
+    } else {
+        format!("{n} {one}s")
+    }
 }
 
 fn clock_of(ms: i64) -> String {
@@ -1332,12 +1401,47 @@ mod tests {
             "00:00:55 warn attach.drop — peer went away"
         );
         assert_eq!(
-            session_lines(&json!({"items": [{"User": {}}, {"Assistant": {}}]}))[0],
-            "2 items drawn in this chat"
+            session_lines(&Value::Null, &[])[0],
+            "(the app kept no view of this place)"
         );
-        assert_eq!(
-            session_lines(&Value::Null)[0],
-            "(the app kept no view of this chat)"
+    }
+
+    /// The report has to answer F-137 by itself: a row the window draws for an
+    /// agent the kernel has never heard of. A report carrying one side cannot
+    /// show a disagreement, so both sides travel and the comparison is done
+    /// here rather than left to whoever reads it.
+    #[test]
+    fn a_row_the_kernel_has_no_agent_for_is_named_as_such() {
+        let state = json!({
+            "rows": [
+                {"label": "Main", "agent": "root", "streaming": false, "live_work": 0},
+                {"label": "Delegate 1", "agent": "ghost-7", "streaming": true, "live_work": 1,
+                 "status": "Working"},
+            ],
+            "records": [{"agent": "ghost-7", "delegate_number": 1}],
+            "records_note": "every session record is here",
+        });
+        let kernel = vec![json!({"id": "root", "running": false})];
+        let lines = session_lines(&state, &kernel);
+
+        assert_eq!(lines[0], "2 rows drawn in this place; the kernel has 1 agent");
+        assert!(!lines[1].contains("NO AGENT"), "root is known: {}", lines[1]);
+        assert!(
+            lines[2].contains("THE KERNEL HAS NO AGENT BY THIS NAME"),
+            "the phantom row is named: {}",
+            lines[2]
+        );
+        assert!(lines[2].contains("Delegate 1") && lines[2].contains("ghost-7"));
+        assert!(lines[2].contains("streaming") && lines[2].contains("1 job running"));
+        assert!(lines[2].contains(r#"says "Working""#), "{}", lines[2]);
+        assert!(lines.iter().any(|l| l == "1 session record on disk"));
+
+        // With no kernel list at all nothing is accused: an empty list means the
+        // kernel did not answer, not that every row is a phantom.
+        let quiet = session_lines(&state, &[]);
+        assert!(
+            !quiet.iter().any(|l| l.contains("NO AGENT")),
+            "no kernel side, no accusation: {quiet:?}"
         );
     }
 

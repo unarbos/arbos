@@ -1213,7 +1213,7 @@ impl ChatSession {
         self.streaming || self.turn_open || self.has_running_tool() || !self.live.is_empty()
     }
 
-    fn has_running_tool(&self) -> bool {
+    pub(crate) fn has_running_tool(&self) -> bool {
         self.items.iter().any(|item| {
             matches!(
                 item,
@@ -3451,6 +3451,34 @@ impl ChatSession {
 
     pub fn take_feedback_error(&mut self) -> Option<String> {
         self.feedback_error.take()
+    }
+
+    /// This chat as the window holds it: the facts behind the row it draws.
+    ///
+    /// Enough to explain a row the kernel has no agent for. F-137 was a
+    /// `Delegate 1 · Working` line for an agent the kernel had never heard of,
+    /// and it could not be diagnosed from a report — the window's own view had
+    /// to be fetched from Jacob's machine by hand. Everything the label and its
+    /// status are computed from is here, so the two sides can be compared
+    /// without asking him for anything.
+    pub fn row_facts(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "label": self.label(),
+            "agent": self.agent_session,
+            "parent": self.parent,
+            "parent_kernel": self.parent_kernel,
+            "delegate_number": self.delegate_number,
+            "is_delegate": self.is_delegate(),
+            "title": self.title,
+            "closed": self.closed,
+            "connected": self.connected(),
+            "streaming": self.streaming,
+            "running_tool": self.has_running_tool(),
+            "live_work": self.live.len(),
+            "items": self.items.len(),
+            "status": self.status,
+        })
     }
 
     /// What this window believes the chat holds, for a report to carry beside

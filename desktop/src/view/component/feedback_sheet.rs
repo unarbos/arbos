@@ -394,8 +394,8 @@ impl Render for FeedbackSheet {
             ),
             self.part_row(
                 Open::Session,
-                "What the app drew",
-                "the window's own view, to compare with the transcript",
+                "What the app knows",
+                &self.desktop_detail(),
                 parts.session && self.draft.session.is_some(),
                 self.draft.session.is_some(),
                 &theme,
@@ -637,7 +637,7 @@ impl FeedbackSheet {
                 .draft
                 .session
                 .as_ref()
-                .map(feedback::session_lines)
+                .map(|s| feedback::session_lines(s, &b.agents))
                 .unwrap_or_default(),
             Open::None | Open::Screenshot => vec![],
         };
@@ -682,6 +682,57 @@ impl FeedbackSheet {
             Open::None => {}
         }
         cx.notify();
+    }
+
+    /// What the window's own state amounts to, and whether any of it disagrees
+    /// with the kernel — the one thing worth reading first.
+    fn desktop_detail(&self) -> String {
+        let Some(state) = &self.draft.session else {
+            return "nothing to send".into();
+        };
+        let rows = state.get("rows").and_then(|r| r.as_array()).map_or(0, Vec::len);
+        let records = state
+            .get("records")
+            .and_then(|r| r.as_array())
+            .map_or(0, Vec::len);
+        let clipped = state
+            .get("records_clipped")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let known: Vec<&str> = self
+            .draft
+            .bundle
+            .as_ref()
+            .map(|b| {
+                b.agents
+                    .iter()
+                    .filter_map(|a| a.get("id").and_then(serde_json::Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let phantom = state
+            .get("rows")
+            .and_then(|r| r.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter(|row| {
+                        row.get("agent")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|a| !a.is_empty() && !known.is_empty() && !known.contains(&a))
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        let mut detail = format!("{rows} rows, {records} records on disk");
+        if clipped > 0 {
+            detail.push_str(&format!(", {clipped} left out for size"));
+        }
+        if phantom > 0 {
+            detail.push_str(&format!(
+                " — {phantom} the kernel has no agent for",
+            ));
+        }
+        detail
     }
 
     fn shot_detail(&self) -> String {
