@@ -240,6 +240,8 @@ pub async fn run(
     let mut task_slot: HashMap<tokio::task::Id, usize> = HashMap::new();
     let mut committed = false;
     let mut aborted = false;
+    let mut waiting_on_tree = false;
+    let mut tree_step_said = false;
     let mut rx_open = true;
 
     loop {
@@ -328,6 +330,22 @@ pub async fn run(
                 if blocked {
                     continue;
                 }
+                // A write waits for the turn's checkpoint tree (qal-j17)
+                // *here*, before its record is stamped `started`, so the
+                // wait is the kernel's own step and not six seconds
+                // billed to `echo` (qal-j18). Reads go on meanwhile.
+                if !slots[i].access.is_readonly()
+                    && let Some(rx) = &cx.tree_ready
+                    && !*rx.borrow()
+                {
+                    if !tree_step_said {
+                        tree_step_said = true;
+                        cx.hooks
+                            .kernel_step("Saving a checkpoint of the working tree");
+                    }
+                    waiting_on_tree = true;
+                    continue;
+                }
                 let State::Ready(prepared) = std::mem::replace(&mut slots[i].state, State::Running)
                 else {
                     unreachable!()
@@ -383,9 +401,16 @@ pub async fn run(
             break;
         }
 
+        // The tree's completion is one more thing the loop wakes on when
+        // a write is held for it.
+        let mut tree_rx = cx.tree_ready.clone().filter(|_| waiting_on_tree);
+        waiting_on_tree = false;
         tokio::select! {
             biased;
             _ = control.cancel().cancelled(), if !stopped => {}
+            // The tool's own derived step replaces the checkpoint line
+            // the moment it starts.
+            _ = async { if let Some(rx) = tree_rx.as_mut() { let _ = rx.wait_for(|r| *r).await; } }, if tree_rx.is_some() => {}
             msg = rx.recv(), if rx_open => match msg {
                 Some(Msg::Call(call)) => slots.push(Slot { call, access: Access::none(), state: State::New }),
                 Some(Msg::Commit) => committed = true,
