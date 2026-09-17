@@ -138,6 +138,23 @@ impl Tool for Bash {
                     "bash: {what} is a worker's job, not the coordinator's — spawn a worker with the exact command (wait=true for a one-off) and relay its result. Your bash is for one quick command the user asked to see."
                 );
             }
+            // `sleep N` to wait on workers: a poll by another name. The
+            // report the coordinator is waiting for is a wake that ends
+            // its turn's silence the moment it lands — unless the turn is
+            // asleep, in which case three finished workers sat behind
+            // "Waiting on three sorting workers" for the length of the
+            // sleep and the person asked where their response was
+            // (Jacob, 2026-09-17, twice). Refused with the right move.
+            if let Some(secs) = super::wipe::sleep_wait_secs(cmd)
+                && secs >= 5
+                && let Some(n) = children_count(&cx.place, cx.agent.id.as_str())
+                && n > 0
+            {
+                bail!(
+                    "bash: refused — `{}` while {n} worker(s) of yours run. Their reports wake you the moment they land; a sleep only delays reading them. End the turn now (an empty reply is right here): the next report starts your next turn. To wait on a command of your own, use await <job>.",
+                    arbos_core::text::clip(cmd.trim(), 60)
+                );
+            }
             // A file this turn wrote is never moved or deleted to satisfy
             // the brief's Output line: told its deliverable was "not
             // written yet" at the brief's path, a worker moved the user's
@@ -287,6 +304,9 @@ impl Tool for Bash {
             let mut tick = tokio::time::interval(Duration::from_millis(500));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut steered = false;
+            let mut child_done = false;
+            let has_children =
+                children_count(&cx.place, cx.agent.id.as_str()).is_some_and(|n| n > 0);
             let finished = loop {
                 tokio::select! {
                     _ = &mut done_rx => break true,
@@ -303,6 +323,15 @@ impl Tool for Bash {
                     _ = tick.tick() => {
                         if arbos_core::inbox::has_user_steer(&cx.place, cx.agent.id.as_str()) {
                             steered = true;
+                            break false;
+                        }
+                        // A worker's report landed: the parent's command
+                        // yields to it the way it yields to the user's
+                        // words (#362); the command goes on as a job.
+                        if has_children
+                            && arbos_core::inbox::has_child_done(&cx.place, cx.agent.id.as_str())
+                        {
+                            child_done = true;
                             break false;
                         }
                         // The command's own end is the `exit` file, and
@@ -339,6 +368,8 @@ impl Tool for Bash {
                 };
                 let why = if steered {
                     " The user said something while it ran — it follows this result. Answer them, then follow the command with await."
+                } else if child_done {
+                    " A worker's report landed while it ran — it follows this result. Read it and act on it; follow the command with await if you still need it."
                 } else {
                     ""
                 };
@@ -827,6 +858,19 @@ mod approval_tests {
             assert!(!needs_approval(free), "{free:?} should run");
         }
     }
+}
+
+/// How many agents name `agent` as their parent and are not archived —
+/// the workers whose reports it is waiting for. `None` when the place
+/// cannot be read.
+fn children_count(place: &arbos_core::Place, agent: &str) -> Option<usize> {
+    let agents = arbos_core::list_agents(place).ok()?;
+    Some(
+        agents
+            .iter()
+            .filter(|a| a.parent.as_ref().is_some_and(|p| p.as_str() == agent))
+            .count(),
+    )
 }
 
 /// The files an in-place substitution in `cmd` names, with their bytes
