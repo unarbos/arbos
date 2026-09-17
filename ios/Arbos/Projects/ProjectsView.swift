@@ -192,12 +192,18 @@ struct ProjectsView: View {
 
     /// The reference's bottom composer: words typed here go to the
     /// project last open and its chat opens; the mic is the call.
-    /// Where a line typed on the list goes: the last project, unless the
-    /// roster no longer has it — then the first listed one.
+    /// Where a line typed on the list goes: the last project, unless it is
+    /// not among the rows on screen — then the first that is.
+    ///
+    /// The rows on screen, not the whole roster. Search for one project and
+    /// the composer went on naming the last one opened, which is not in
+    /// front of you and is not what "Message …" beside a filtered list
+    /// means. Typing into a list showing one project and having the line go
+    /// to another is the same complaint Jacob opened with on build 956.
     private var composerTarget: KernelTarget? {
-        let listed = projects.entries.map(\.target)
-        if listed.contains(settings.kernelTarget) { return settings.kernelTarget }
-        return listed.first
+        let onScreen = visible.map(\.target)
+        if onScreen.contains(settings.kernelTarget) { return settings.kernelTarget }
+        return onScreen.first
     }
 
     private var composer: some View {
