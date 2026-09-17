@@ -208,6 +208,9 @@ final class CallViewModel: ObservableObject {
         // Muted: the same frames go out as silence, so the duplex model
         // keeps its clock and nothing of the room is heard.
         let send: (Data) -> Void = { [weak self] frame in
+            #if DEBUG
+            self?.framesSent += 1
+            #endif
             sink(self?.mutedNow == true ? Data(count: frame.count) : frame)
         }
         for frame in held { send(frame) }
@@ -542,7 +545,10 @@ final class CallViewModel: ObservableObject {
                     frame = silence
                 }
                 guard let self else { return }
-                await MainActor.run { self.audio.onCapture?(frame) }
+                await MainActor.run {
+                    self.framesFromClip += 1
+                    self.audio.onCapture?(frame)
+                }
                 sent += 1
                 let due = started.advanced(by: .milliseconds(DebugInjector.frameMilliseconds * sent))
                 try? await Task.sleep(until: due, clock: .continuous)
@@ -550,6 +556,11 @@ final class CallViewModel: ObservableObject {
         }
     }
     private var micClipTask: Task<Void, Never>?
+    /// Frames the rig produced, and frames that reached the socket. They
+    /// should match while `-micWav` runs; a gap means the engine is feeding
+    /// the same sink and the stream has two producers.
+    private var framesFromClip = 0
+    var framesSent = 0
 
     private func stopMicClip() { micClipTask?.cancel(); micClipTask = nil }
     #endif
@@ -582,6 +593,7 @@ final class CallViewModel: ObservableObject {
         #if DEBUG
         injector?.stop()
         injector = nil
+        if framesFromClip > 0 { print("metric mic_frames clip=\(framesFromClip) sent=\(framesSent)") }
         stopMicClip()
         #endif
         link.unsubscribe(subscription)
