@@ -3122,9 +3122,23 @@ fn ssh_install_kernel(
             ));
         }
     }
-    // Another machine type: the release cut for it, from GitHub, checked
-    // against its .sha256 and moved into place as <bin>.new → <bin>; then
-    // the source build when the machine allows it. The script says which.
+    // Another machine type. The channel's feed first, because it is the
+    // only place a dev build's kernel exists at all, then the tagged
+    // release, then a source build where the machine allows one.
+    match ssh_put_kernel_from_feed(target, remote_arch, dest, step) {
+        Ok(true) => return Ok(()),
+        // Nothing in the feed for this machine and this build. Not a
+        // failure: a stable app finds its kernel in the release below.
+        Ok(false) => {}
+        Err(e) => eprintln!(
+            "remote {}: install: the update feed could not place a kernel ({e:#}); trying the release",
+            target.name
+        ),
+    }
+
+    // The release cut for it, from GitHub, checked against its .sha256 and
+    // moved into place as <bin>.new → <bin>; then the source build when the
+    // machine allows it. The script says which.
     {
         let mine = arbos_core::remote_kernel::KernelVersion::parse(&local_kernel_version());
         let version = mine.as_ref().map(|m| m.short()).unwrap_or_default();
@@ -3212,6 +3226,133 @@ test -x "{bin}"
         return Err(anyhow!("build arbos-kernel on {host}: {}", out.problem()));
     }
     Ok(())
+}
+
+/// Put the kernel matching *this app's own build* on a machine of another
+/// type, from the channel the app follows.
+///
+/// This exists because the release route cannot serve a dev build. The
+/// only kernel a dev build could fetch was
+/// `releases/download/v<version>/arbos-kernel-…`, and for a version whose
+/// tag is still an unpublished draft that URL 404s. So an app tracking
+/// `dev` could not place a kernel on any remote machine at all, for as
+/// long as nobody cut a release — which for someone who only ever runs
+/// `main` is not a window but a permanent state. On 2026-09-17 it left
+/// Jacob's ArbosLife tab dead for three hours across eight silent
+/// retries.
+///
+/// The kernel is the one for the app's **own** build, not the newest the
+/// channel has. Two ends of a tunnel that disagree are what the version
+/// check at attach exists to fix, and handing the remote something newer
+/// than the app would leave that check wanting to replace it again on the
+/// very next attach.
+///
+/// Nothing new is trusted: the same feed the app updates itself from, the
+/// same Ed25519 key, the same staging path and rename. The signature is
+/// checked here, where the key is, and the far end is asked for
+/// `--version` before the binary takes the name — the one check this side
+/// cannot make, because it cannot run what it is sending.
+///
+/// `Ok(false)` means the feed has nothing for this machine and this
+/// build, which is the ordinary answer for a stable app and a reason to
+/// try the release, not an error.
+fn ssh_put_kernel_from_feed(
+    target: &RemoteTarget,
+    remote_arch: &str,
+    dest: &str,
+    step: &dyn Fn(arbos_core::remote_kernel::Progress),
+) -> Result<bool> {
+    use arbos_update::{Component, feed, kernel as update_kernel, net, sign};
+    let Some((platform, arch)) = feed::platform_of(remote_arch) else {
+        return Ok(false);
+    };
+    let Some(key) = sign::built_in_key() else {
+        // A build from before the repository had a signing key cannot
+        // check a payload, so it must not install one.
+        return Ok(false);
+    };
+    let channel = crate::update::channel_now();
+    let mine = crate::build::version();
+    let feed = net::feed(channel)
+        .with_context(|| format!("asking the {} channel", channel.as_str()))?;
+    let Some(offered) = feed.for_build(&mine, platform, arch, Component::Kernel) else {
+        // Say which of the two reasons it is, because they need different
+        // things done. A channel that carries kernels but not *this*
+        // build means the app has fallen off the end of the channel's
+        // retention and needs to update itself; a channel that carries no
+        // kernel for this machine at all is the stable feed's normal
+        // answer and the release below is the right route.
+        let carried: Vec<String> = feed
+            .releases
+            .iter()
+            .filter(|r| r.download(platform, arch, Component::Kernel).is_some())
+            .map(|r| format!("{}+{}", r.version, r.build))
+            .collect();
+        if !carried.is_empty() {
+            eprintln!(
+                "remote {}: install: this app is {} and the {} channel now carries kernels for {} \
+                 — it cannot place a matching one until it updates itself",
+                target.name,
+                mine.human(),
+                channel.as_str(),
+                carried.join(", ")
+            );
+        }
+        return Ok(false);
+    };
+
+    step(arbos_core::remote_kernel::Progress::Installing {
+        version: offered.version.human(),
+    });
+    eprintln!(
+        "remote {}: install: {} {} for {remote_arch} from the {} channel",
+        target.name,
+        offered.version.human(),
+        offered.commit,
+        channel.as_str()
+    );
+    let bytes = net::bytes(&offered.download.url)
+        .with_context(|| format!("fetching {}", offered.download.url))?;
+    let scratch = std::env::temp_dir().join("arbos-remote-kernel");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let placed = (|| -> Result<bool> {
+        let binary = update_kernel::payload_for_another_machine(&bytes, &offered, &key, &scratch)?;
+        let host = target.ssh.as_str();
+        // Beside the target and then renamed over it, so nothing ever
+        // reads a half-written kernel at the path it is served from.
+        let tmp = format!("{dest}.new");
+        ssh_put(host, &binary, &tmp)?;
+        // The check this side could not make: it runs there, and it is
+        // the build the feed said. A wrong architecture and a truncated
+        // download both fail here rather than at the next attach.
+        let says = ssh_run(host, &format!(r#"chmod +x "{tmp}" && "{tmp}" --version"#))?;
+        let line = says.stdout.lines().next().unwrap_or_default().trim().to_string();
+        if says.status != 0 || !line.contains(&offered.commit) {
+            let _ = ssh_run(host, &format!(r#"rm -f "{tmp}""#));
+            return Err(anyhow!(
+                "the kernel for {remote_arch} would not run on {}: expected {} and it said {}",
+                target.name,
+                offered.commit,
+                match line.is_empty() {
+                    true => says.problem(),
+                    false => line,
+                }
+            ));
+        }
+        let moved = ssh_run(host, &format!(r#"mv -f "{tmp}" "{dest}""#))?;
+        if moved.status != 0 {
+            let _ = ssh_run(host, &format!(r#"rm -f "{tmp}""#));
+            return Err(anyhow!(
+                "could not put the kernel at {dest} on {}: {}",
+                target.name,
+                moved.problem()
+            ));
+        }
+        eprintln!("remote {}: install: installed from the feed", target.name);
+        Ok(true)
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    placed
 }
 
 /// Where a new binary waits on the remote until it is swapped in. Under

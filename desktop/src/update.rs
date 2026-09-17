@@ -747,6 +747,19 @@ pub fn channel_of(settings: &settings::Settings) -> Channel {
         .unwrap_or_else(|| Channel::parse(&settings.update.channel).unwrap_or_default())
 }
 
+/// The channel this app follows, read from the settings file directly.
+///
+/// [`channel_of`] wants a `Settings` a model is holding. Placing a kernel
+/// on another machine happens on a background thread with no window and
+/// no model, and it needs the same answer — the kernel it puts there has
+/// to come from the same channel the app updates itself from, or the two
+/// ends of a tunnel drift apart by design.
+pub fn channel_now() -> Channel {
+    settings::load()
+        .map(|settings| channel_of(&settings))
+        .unwrap_or_default()
+}
+
 /// Whether this build knows the key an update has to be signed with.
 ///
 /// False for anything built before the repository had a signing key, which
