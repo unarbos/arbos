@@ -164,6 +164,7 @@ pub async fn register(
             version: klog::version().to_string(),
             git_sha: klog::git_sha().to_string(),
             built_at: klog::built_at().to_string(),
+            binary_gone: arbos_core::binary_gone(),
             protocol: HUB_PROTOCOL,
         },
     )

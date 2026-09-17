@@ -94,6 +94,188 @@ pub fn is_stop_word(text: &str) -> bool {
 /// kernel writes comes from [`now_ms`], so they all shift together.
 pub const NOW_ENV: &str = "ARBOS_NOW";
 
+pub mod binary_identity {
+    //! Whether the file this process was started from is still the file
+    //! it is running.
+    //!
+    //! Two ways it can stop being: the file is **gone** (unlinked or
+    //! moved — on Linux `/proc/self/exe` then reads `… (deleted)`, and
+    //! the path no longer exists), or it is **replaced** by a new file at
+    //! the same path, which is what an update does (stage, then rename
+    //! over). Linux shows the second as the first, because `/proc` names
+    //! the inode; macOS does not — `current_exe()` there is the start
+    //! *path*, and the path exists, holding the new file. A check on the
+    //! path alone would say "not gone" on a Mac right after the update
+    //! that made the running image stale, which is the one moment the
+    //! answer matters. So the file's identity — device and inode, with
+    //! size and mtime beside them — is taken at start and compared live.
+
+    use std::path::Path;
+    use std::sync::OnceLock;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Identity {
+        dev: u64,
+        ino: u64,
+        len: u64,
+        mtime_ms: i128,
+    }
+
+    /// The path this process was started from and that file's identity,
+    /// both taken at start. The path, not `current_exe()` later: when an
+    /// update renames the whole `Arbos.app` directory to a backup, the
+    /// running kernel's inode travels with it and `current_exe()` names
+    /// the *backup* — a real file, identical to the one at start — while
+    /// the path the kernel was started from now holds the new build. The
+    /// question is what is at that path now.
+    static AT_START: OnceLock<Option<(std::path::PathBuf, Identity)>> = OnceLock::new();
+
+    /// Read `path`'s identity now.
+    pub fn of(path: &Path) -> Option<Identity> {
+        let m = std::fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        let (dev, ino) = {
+            use std::os::unix::fs::MetadataExt;
+            (m.dev(), m.ino())
+        };
+        #[cfg(not(unix))]
+        let (dev, ino) = (0, 0);
+        let mtime_ms = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i128)
+            .unwrap_or(-1);
+        Some(Identity {
+            dev,
+            ino,
+            len: m.len(),
+            mtime_ms,
+        })
+    }
+
+    /// Take this process's own file's identity. Called once at start,
+    /// before anything can replace the file; a later first call takes
+    /// whatever is there then, which is the best a late start can do.
+    pub fn remember_start() {
+        let _ = AT_START.get_or_init(|| {
+            let p = std::env::current_exe().ok()?;
+            let id = of(&p)?;
+            Some((p, id))
+        });
+    }
+
+    /// The path this process was started from, as remembered at start.
+    pub fn start_path() -> Option<std::path::PathBuf> {
+        remember_start();
+        AT_START.get().and_then(|s| s.as_ref().map(|(p, _)| p.clone()))
+    }
+
+    /// Whether the file at `path` is not the one recorded as `start`:
+    /// gone, or a different file (device/inode, size or mtime changed).
+    pub fn replaced(start: Option<Identity>, path: &Path) -> bool {
+        match (start, of(path)) {
+            (_, None) => true,
+            (None, Some(_)) => false,
+            (Some(a), Some(b)) => a != b,
+        }
+    }
+
+    /// True when this process no longer runs the file at its own path:
+    /// the file was unlinked or moved (Linux: `(deleted)`; the path is
+    /// gone), or replaced at the same path (any platform: its identity
+    /// differs from the one taken at start). Computed live at every use.
+    /// Seven such processes on two machines ran for up to four days
+    /// looking healthy from outside (mesh sweep, 2026-09-17).
+    pub fn gone() -> bool {
+        remember_start();
+        let Ok(now) = std::env::current_exe() else {
+            return true;
+        };
+        // Linux names the unlinked inode "… (deleted)": gone whatever a
+        // same-named file says.
+        if now.to_string_lossy().ends_with(" (deleted)") {
+            return true;
+        }
+        match AT_START.get().and_then(|s| s.as_ref()) {
+            // What is at the start path *now* against what was there at
+            // start — not where this inode has been moved to.
+            Some((start_path, start_id)) => replaced(Some(*start_id), start_path),
+            // No identity taken at start: only absence can be known.
+            None => !now.exists(),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_file_replaced_at_the_same_path_reads_as_replaced_and_an_unchanged_one_does_not() {
+            let dir = std::env::temp_dir().join(format!("arbos-binid-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let bin = dir.join("kernel");
+            std::fs::write(&bin, b"old image").unwrap();
+            let start = of(&bin);
+            assert!(start.is_some());
+            assert!(!replaced(start, &bin), "unchanged");
+            // The update: stage, then rename over the same path.
+            let staged = dir.join("kernel.new");
+            std::fs::write(&staged, b"new image!").unwrap();
+            std::fs::rename(&staged, &bin).unwrap();
+            assert!(
+                bin.exists(),
+                "the path still exists — a path check would say not gone"
+            );
+            assert!(replaced(start, &bin), "a different file at the same path");
+            // Moved away: gone.
+            std::fs::rename(&bin, dir.join("kernel.old")).unwrap();
+            assert!(replaced(start, &bin));
+            // No start identity (a late first call): only absence counts.
+            assert!(!replaced(None, &dir.join("kernel.old")));
+            assert!(replaced(None, &bin));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn this_test_binary_is_not_gone() {
+            assert!(!gone());
+        }
+
+        /// The app's update renames the whole directory to a backup: the
+        /// running inode travels, so its own current path is a real,
+        /// unchanged file — and the start path holds a new build. Judged
+        /// by the start path, that is replaced; judged by where the inode
+        /// went, it would read as fine for ever.
+        #[test]
+        fn a_directory_renamed_to_a_backup_reads_as_replaced_by_the_start_path() {
+            let dir = std::env::temp_dir().join(format!("arbos-binmove-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let app = dir.join("Arbos.app");
+            std::fs::create_dir_all(&app).unwrap();
+            let start_path = app.join("kernel");
+            std::fs::write(&start_path, b"old image").unwrap();
+            let start_id = of(&start_path).unwrap();
+            // The update: the directory becomes the backup, a new one takes
+            // its place with a new build at the same relative path.
+            std::fs::rename(&app, dir.join("Arbos.app.backup")).unwrap();
+            std::fs::create_dir_all(&app).unwrap();
+            std::fs::write(&start_path, b"new image!").unwrap();
+            let moved_inode_path = dir.join("Arbos.app.backup").join("kernel");
+            assert_eq!(of(&moved_inode_path), Some(start_id), "the inode travelled unchanged");
+            assert!(!replaced(Some(start_id), &moved_inode_path), "by its own current path: fine");
+            assert!(replaced(Some(start_id), &start_path), "by the start path: replaced");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+/// See [`binary_identity::gone`].
+pub fn binary_gone() -> bool {
+    binary_identity::gone()
+}
+
 /// Unix millis, on the shifted clock when `ARBOS_NOW` is set.
 pub fn now_ms() -> i64 {
     real_now_ms() + clock_offset_ms()
