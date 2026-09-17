@@ -10,6 +10,38 @@ mod common;
 use common::{Attach, restart_replay, start_kernel_replay};
 use std::time::{Duration, Instant};
 
+/// Poll the transcript until `ok` holds or `timeout` passes.
+///
+/// A frame arriving on the attach stream says the turn reached that point,
+/// not that the file has caught up — the transcript is written as the turn
+/// runs, and a read taken the instant the frame lands can be one line
+/// short. Reading once is then a coin toss, which is what it turned out to
+/// be: `stop_keeps_follow_up_e2e` failed on `main` at `c40f39b0` and on
+/// [#504](https://github.com/unarbos/arbos/pull/504), and passes five runs
+/// out of five locally.
+///
+/// Only for asking whether something is *there*. The checks below that
+/// nothing ran on its own cannot be waited for — there is no moment at
+/// which absence becomes true — so those keep their settle and their
+/// single read.
+///
+/// The same shape as `wait_transcript` in `audit_kernel_2_e2e` and
+/// `standing_pass_e2e`, which solved this for their own files.
+fn wait_transcript(
+    place: &std::path::Path,
+    timeout: Duration,
+    ok: impl Fn(&[serde_json::Value]) -> bool,
+) -> Vec<serde_json::Value> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let evs = transcript(place);
+        if ok(&evs) || Instant::now() >= deadline {
+            return evs;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn transcript(place: &std::path::Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(place.join(".arbos/agents/root/transcript.jsonl"))
         .unwrap_or_default()
@@ -172,11 +204,22 @@ fn stop_keeps_the_users_queued_follow_up_held_until_send_now_or_remove() {
         })
         .expect("Send now runs it");
     let _ = reply;
-    let events = transcript(&k.place);
+    // The assistant frame has arrived; the line that prompted it may still
+    // be on its way to the file.
+    let events = wait_transcript(&k.place, Duration::from_secs(10), |evs| {
+        evs.iter()
+            .any(|e| e["kind"] == "user" && e["text"] == "then do this next")
+    });
+    // Bounded, and it says what it saw. If the line is late this passes;
+    // if it is genuinely missing — folded into another turn, which is the
+    // thing this file exists to catch — this still fails, and now names
+    // what was there instead of only that something was not.
     let user_at = events
         .iter()
         .position(|e| e["kind"] == "user" && e["text"] == "then do this next")
-        .expect("the words are the prompt");
+        .unwrap_or_else(|| {
+            panic!("the words are the prompt, but the transcript holds: {events:#?}")
+        });
     assert!(
         events[user_at - 1]["kind"] == "wake" && events[user_at - 1]["wake"] == "user",
         "its own turn: {events:?}"
