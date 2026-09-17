@@ -8,6 +8,7 @@ import logging
 import time
 from dataclasses import dataclass
 
+import httpx
 import numpy as np
 
 from . import protocol as P
@@ -63,6 +64,8 @@ class SessionDefaults:
     # `auto` = its answers to small talk and general questions (the phone's feel), while work
     # requests are narrated; `ack` = short acknowledgements only; `full` = everything; `off` = none.
     model_voice: str = "auto"
+    # Duplex engine outside call mode: who answers a spoken turn. kernel | model | auto (kernel unless small talk).
+    answerer: str = "auto"
 
 
 class BaseSession:
@@ -99,6 +102,7 @@ class BaseSession:
         self.screen = "on your screen"
         self.narrator: Narrator | None = None
         self.call_kernel: KernelClient | None = None  # a per-call attach through the hub, when the call names one
+        self.project_info: dict | None = None  # machine/project/name/icon/store/kind from the hub roster, when scoped
         self.dictation = False  # ASR only: words to the client, no reply, no agent, no asks
         self.last_conversational = False  # the last utterance was small talk (auto model voice lets it through)
         self.user_talking = False
@@ -146,6 +150,11 @@ class BaseSession:
         return False
 
     async def on_close(self) -> None: ...
+
+    @property
+    def kernel(self) -> KernelClient | None:
+        """The kernel this call talks to: the per-call hub attach when there is one, else the gateway's."""
+        return self.call_kernel or self.engines.kernel
 
     # ------------------------------------------------------------------ call mode
 
@@ -223,6 +232,8 @@ class BaseSession:
         name (`<machine>/<project>`) with a hub configured: a fresh attach through the hub, owned
         by this call. A hub name with no hub: the own kernel, and the caller is told."""
         own = self.engines.kernel
+        if self.call_kernel is not None:
+            return self.call_kernel  # session.start named the project and _attach_project already attached
         if not project or project in self.engines.own_project_names():
             return own
         if "/" not in project and own is not None:
@@ -240,6 +251,73 @@ class BaseSession:
             return own
         log.info("[%s] call attached to %s through the hub", self.sid, project)
         return client
+
+    # ------------------------------------------------------------------ project scoping (hub)
+
+    async def _attach_project(self, machine: str, project: str) -> bool:
+        """Attach this call to `<machine>/<project>` through the hub. Refuses (error frame, then
+        close 4404) when there is no hub or the project is not on the roster, not live, or
+        does not answer; never falls back to another kernel."""
+        hub, token = self.engines.hub_url, self.engines.hub_token
+        label = f"{machine}/{project}"
+        if not hub:
+            return await self._refuse("no_hub", label, "this voice server has no hub configured, so it cannot scope a call to a project")
+        info = await self._roster_lookup(hub, token, machine, project)
+        if info is None:
+            return await self._refuse("project_unknown", label, f"{label} is not on the hub roster")
+        if not info.get("live", True):
+            return await self._refuse("project_offline", label, f"{label} is on the roster but its kernel is not running")
+        url = hub_attach_url(hub, label, token)
+        kernel = KernelClient(url=url, auto_approve=self.engines.auto_approve, token=token, name=label)
+        try:
+            await asyncio.wait_for(kernel.connect(), 15)
+        except Exception as exc:
+            await kernel.close()
+            return await self._refuse("project_unreachable", label, f"could not attach to {label}: {_ascii_short(exc)}")
+        # swap the call over: tools and the agent mirror follow it
+        self.call_kernel = kernel
+        self.project = label
+        self.tools.rebind(kernel)
+        if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
+            self.engines.kernel.listeners.remove(self._mirror)
+        if self.mirror_agents:
+            kernel.listeners.append(self._mirror)
+        identity = info.get("identity") or {}
+        self.project_info = {
+            "machine": machine, "project": project,
+            "name": identity.get("name") or project, "icon": identity.get("icon"),
+            "store": info.get("store") or f"arbos://{machine}/{project}/",
+            "kind": info.get("kind", "project"),
+        }
+        log.info("[%s] call scoped to %s (%s)", self.sid, label, self.project_info["name"])
+        return True
+
+    async def _roster_lookup(self, hub: str, token: str | None, machine: str, project: str) -> dict | None:
+        base = hub.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                roster = (await client.get(f"{base}/list", headers=headers)).json()
+        except Exception as exc:
+            log.warning("[%s] hub roster unavailable: %s", self.sid, type(exc).__name__)
+            return {"live": True}  # cannot check; let the attach itself decide
+        for m in roster.get("machines", []):
+            if m.get("name") != machine:
+                continue
+            for pr in m.get("projects", []):
+                if pr.get("name") == project:
+                    return pr
+        return None
+
+    async def _refuse(self, code: str, label: str, message: str) -> bool:
+        log.warning("[%s] refused call for %s: %s", self.sid, label, code)
+        self._emit(P.ERROR, code=code, project=label, message=message)
+        await asyncio.sleep(0.2)  # let the error frame leave before the close
+        try:
+            await self.ws.close(4404, f"project unreachable: {code}")
+        except Exception:
+            pass
+        return False
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -346,6 +424,8 @@ class BaseSession:
             channel=self.channel,
             device=self.device,
             project=(self.call_kernel.name if self.call_kernel else (self.project or "")),
+            project_info=self.project_info,
+            answerer=getattr(self, "answerer", "n/a"),
             via=("hub" if self.call_kernel else "gateway"),
         )
 
@@ -367,6 +447,10 @@ class BaseSession:
 
         if kind == P.SESSION_START:
             self._apply_start(msg)
+            target = _parse_target(msg)
+            if target is not None and self.call_kernel is None and "/".join(target) not in self.engines.own_project_names():
+                if not await self._attach_project(*target):
+                    return True  # refused: the caller asked for a project we cannot reach; never another one
             if self.call_mode and (self.narrator is None or self.narrator.only_asks):
                 await self._start_call()
             await self.on_start()
@@ -393,6 +477,12 @@ class BaseSession:
             log.debug("[%s] client.speaking %s", self.sid, bool(msg.get("speaking", False)))
             if self.echo is not None:
                 self.echo.client_speaking = bool(msg.get("speaking", False))
+                route = str(msg.get("route", "") or "").lower()
+                if route:  # headsets cancel their own echo; the gate would only get in the way
+                    bypass = route in ("airpods", "headset", "headphones", "bluetooth", "wired", "earpiece")
+                    if bypass != self.echo.bypass:
+                        self.echo.bypass = bypass
+                        self.echo.confirmations = 0  # a new route is a new echo path
         elif kind == P.SESSION_END:
             return True
         else:
@@ -429,8 +519,14 @@ class BaseSession:
                 self._emit(P.ERROR, message="server started without a reply backend; staying speech-only")
             else:
                 self.reply_kind = reply
-        if isinstance(msg.get("project"), str):
-            self.project = msg["project"].strip()
+        target = _parse_target(msg)
+        if target is not None:
+            self.project = "/".join(target)  # dict, "machine/project" or arbos:// forms all land here
+        elif isinstance(msg.get("project"), str):
+            self.project = msg["project"].strip()  # a bare name: this gateway's own kernel
+        answerer = msg.get("answerer")
+        if answerer in ("kernel", "model", "auto") and hasattr(self, "answerer"):
+            self.answerer = answerer
         if msg.get("channel") in ("voice", "text"):
             self.channel = msg["channel"]
         if isinstance(msg.get("device"), str):
@@ -563,3 +659,25 @@ def _ascii_short(exc: BaseException) -> str:
 def _speak_name(agent: str) -> str:
     """Kernel agent ids are squashed words ('writeahaikuaboutriversto'); say something shorter."""
     return agent[:24]
+
+
+def _parse_target(msg: dict) -> tuple[str, str] | None:
+    """session.start may name the project as {"project": {"machine","project"|"place"}},
+    "project": "machine/project", {"kernel": "machine/project"}, or an "arbos://machine/project/" address."""
+    raw = msg.get("project") or msg.get("kernel")
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        machine = str(raw.get("machine", "")).strip()
+        project = str(raw.get("project") or raw.get("place") or "").strip()
+    else:
+        text = str(raw).strip()
+        if text.startswith("arbos://"):
+            text = text[len("arbos://"):]
+        parts = [p for p in text.strip("/").split("/") if p]
+        if len(parts) < 2:
+            return None  # a bare name means the gateway's own kernel (see Engines.own_project_names)
+        machine, project = parts[:2]
+    if not machine or not project:
+        return None
+    return machine, project

@@ -42,9 +42,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     engine.add_argument("--duplex-url", default=os.environ.get("VOICE_DUPLEX_URL", "ws://127.0.0.1:9000/v1/realtime"),
                         help="NemotronLabs VoiceChat container realtime endpoint")
     engine.add_argument("--instructions", default=None, help="system prompt for the duplex model (text or @file)")
+    engine.add_argument("--answerer", default="auto", choices=["auto", "kernel", "model"],
+                        help="duplex call mode: who answers a spoken turn. kernel: always the Arbos kernel (voiced by the gateway TTS); "
+                             "model: the speech model itself; auto: kernel unless the turn is small talk (default)")
 
     kernel = parser.add_argument_group("Arbos kernel (enables the agent tools and the text channel)")
-    kernel.add_argument("--kernel", default=os.environ.get("VOICE_KERNEL_URL"), help="tcp://127.0.0.1:PORT of `arbos-kernel serve`")
+    kernel.add_argument("--kernel", default=os.environ.get("VOICE_KERNEL_URL"),
+                        help="tcp://127.0.0.1:PORT of a local `arbos-kernel serve`, or wss://host[/path] of a remote one "
+                             "behind its tunnel (token via --kernel-token; a ?token= in the URL is accepted and moved to the header)")
+    kernel.add_argument("--kernel-token", default=os.environ.get("VOICE_KERNEL_TOKEN"),
+                        help="access.toml client token for a remote kernel (env VOICE_KERNEL_TOKEN); never logged")
     kernel.add_argument("--kernel-place", default=os.environ.get("VOICE_KERNEL_PLACE"), help="place dir; reads .arbos/kernel.json")
     kernel.add_argument("--auto-approve", action="store_true",
                         help="answer the gateway's OWN kernel's 'allow ...' asks with allow, unasked. Off by default: "
@@ -56,8 +63,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     kernel.add_argument("--hub", default=os.environ.get("VOICE_HUB_URL"),
                         help="arbos-hub URL (ws[s]://host). A call whose session.start.project names <machine>/<project> "
                              "attaches to that kernel through the hub instead of the gateway's own kernel")
-    kernel.add_argument("--hub-token", default=os.environ.get("VOICE_HUB_TOKEN", ""),
-                        help="the hub client token (env VOICE_HUB_TOKEN); never logged")
+    kernel.add_argument("--hub-token", default=os.environ.get("VOICE_HUB_CLIENT_TOKEN") or os.environ.get("VOICE_HUB_TOKEN", ""),
+                        help="the hub [[client]] token (env VOICE_HUB_CLIENT_TOKEN, else VOICE_HUB_TOKEN); never logged")
     kernel.add_argument("--hub-machine", default=os.environ.get("VOICE_HUB_MACHINE", ""),
                         help="this gateway's own machine name on the hub, so <machine>/<its place> means its own kernel")
 
@@ -83,7 +90,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     reply.add_argument("--reply", default="none", choices=["none", "openrouter", "kernel"],
                        help="none: speech only, the client sends replies with 'speak'. openrouter: OpenRouter model with the Arbos tools "
                             "(env OPENROUTER_API_KEY). kernel: the kernel's main agent answers")
-    reply.add_argument("--reply-model", default="google/gemini-2.5-flash", help="OpenRouter model id")
+    reply.add_argument("--reply-model", default=os.environ.get("VOICE_REPLY_MODEL", "google/gemini-2.5-flash"), help="OpenRouter model id (env VOICE_REPLY_MODEL)")
     reply.add_argument("--call-model-voice", default=os.environ.get("VOICE_CALL_MODEL_VOICE", "auto"),
                        choices=["auto", "off", "ack", "full"],
                        help="call mode, duplex engine: how much of the speech model's own voice the caller hears. "
@@ -171,7 +178,7 @@ async def serve_forever(args: argparse.Namespace) -> None:
         raise SystemExit(f"unknown voice {args.voice!r}; have: {', '.join(engines.tts.voices)}")
     await engines.warm_up(args.voice)
     defaults = SessionDefaults(language=args.language, voice=args.voice, speed=args.speed, reply=args.reply,
-                               instructions=args.instructions, narrator_model=args.narrator_model,
+                               instructions=args.instructions, answerer=args.answerer, narrator_model=args.narrator_model,
                                model_voice=args.call_model_voice, model_highlights=args.highlights == "model",
                                approval_timeout=args.approval_timeout, escalations_log=args.escalations_log or "")
     tuning = Tuning(

@@ -53,7 +53,8 @@ class Engines:
         t0 = time.monotonic()
         kernel: KernelClient | None = None
         if args.kernel or args.kernel_place:
-            kernel = KernelClient(url=args.kernel, place=args.kernel_place, auto_approve=bool(getattr(args, "auto_approve", False)))
+            kernel = KernelClient(url=args.kernel, place=args.kernel_place, auto_approve=bool(getattr(args, "auto_approve", False)),
+                                  token=getattr(args, "kernel_token", "") or "")
             if kernel.auto_approve:
                 log.warning("--auto-approve: the gateway answers its own kernel's allow asks unasked")
             try:
