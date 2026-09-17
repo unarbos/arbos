@@ -183,6 +183,16 @@ struct Serving {
     pid: i32,
     version: String,
     sha: String,
+    /// The file the serving process was started from is gone (Linux:
+    /// `/proc/<pid>/exe` reads `… (deleted)`): it runs an image no file
+    /// holds any more. None where the machine cannot say (no /proc).
+    binary_gone: Option<bool>,
+}
+
+/// Whether `pid`'s own binary is gone from disk, where /proc can say.
+fn pid_binary_gone(pid: i32) -> Option<bool> {
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    Some(!exe.exists() || exe.to_string_lossy().ends_with(" (deleted)"))
 }
 
 fn serving(place_dir: &std::path::Path) -> Option<Serving> {
@@ -207,6 +217,7 @@ fn serving(place_dir: &std::path::Path) -> Option<Serving> {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_owned(),
+        binary_gone: pid_binary_gone(pid),
     })
 }
 
@@ -247,15 +258,25 @@ fn report_serving(args: &Args, on_disk: &kernel::Running) -> bool {
     for one in &running {
         let matches = same_build(&one.sha, &on_disk.sha);
         stale |= !matches;
+        // A process whose own file is gone runs an image nothing on disk
+        // holds: whatever its sha says, only a restart puts it on the
+        // build in front of you. Seven such on two machines went unseen
+        // for days because nothing printed this (mesh sweep, 2026-09-17).
+        let gone = one.binary_gone == Some(true);
+        stale |= gone;
         println!(
             "serving   {} {} (pid {}) in {}{}",
             one.version,
             one.sha,
             one.pid,
             one.place.display(),
-            match matches {
-                true => "",
-                false => "  ← older than the binary on disk",
+            match (gone, matches) {
+                (true, _) => format!(
+                    "  ← binary replaced under it; restart to run {} (on disk)",
+                    on_disk.sha
+                ),
+                (false, true) => String::new(),
+                (false, false) => "  ← older than the binary on disk".to_string(),
             }
         );
     }
@@ -339,5 +360,25 @@ mod tests {
         assert!(note.contains("/usr/local/bin/arbos-kernel"), "{note}");
         assert!(note.contains("kill -TERM"), "{note}");
         assert!(note.contains("kernel.json"), "{note}");
+    }
+
+    /// `serving`'s "binary replaced under it": a process whose own file
+    /// was unlinked reads `(deleted)` in /proc, and the line says so.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_whose_file_was_unlinked_reads_binary_gone() {
+        let dir = std::env::temp_dir().join(format!("arbos-pid-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("sleeper");
+        std::fs::copy("/bin/sleep", &bin).unwrap();
+        let mut child = std::process::Command::new(&bin).arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        assert_eq!(super::pid_binary_gone(pid), Some(false));
+        std::fs::remove_file(&bin).unwrap();
+        assert_eq!(super::pid_binary_gone(pid), Some(true));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

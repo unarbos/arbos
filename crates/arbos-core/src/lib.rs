@@ -95,6 +95,19 @@ pub fn is_stop_word(text: &str) -> bool {
 pub const NOW_ENV: &str = "ARBOS_NOW";
 
 /// Unix millis, on the shifted clock when `ARBOS_NOW` is set.
+/// True when the file this process was started from no longer exists: the
+/// binary was replaced (unlink-and-write) or moved under it, and this
+/// process still runs the old image. On Linux `current_exe()` then reads
+/// `… (deleted)`; on macOS it is the start path, gone. Computed live at
+/// every use — the state changes while the process runs, and a value
+/// cached at start is wrong the moment it matters. Seven such processes
+/// on two machines ran for up to four days looking healthy from outside
+/// (mesh sweep, 2026-09-17); this is the one word that would have shown
+/// every one of them.
+pub fn binary_gone() -> bool {
+    std::env::current_exe().map(|p| !p.exists()).unwrap_or(true)
+}
+
 pub fn now_ms() -> i64 {
     real_now_ms() + clock_offset_ms()
 }

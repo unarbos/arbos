@@ -44,6 +44,12 @@ pub enum Frame {
         git_sha: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         built_at: String,
+        /// The file this kernel was started from is gone (replaced or
+        /// moved): it runs an old image, and a restart would run what is on
+        /// disk now. Only ever sent when true; the one-word reason for a
+        /// "restart needed" beside the version. See `arbos_core::binary_gone`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        binary_gone: bool,
         tail: u32,
         focus: String,
     },
