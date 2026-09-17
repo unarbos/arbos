@@ -71,6 +71,10 @@ final class LiveKernelChat: ChatSource {
         try client.send(text: text, steer: steer, attachments: paths)
     }
 
+    func interrupt() async throws {
+        try client.stop()
+    }
+
     func stop() {
         pump?.cancel()
         client.detach()
@@ -364,7 +368,9 @@ final class LiveKernelChat: ChatSource {
         case .notice(let text, let failed):
             return ChatItem(.notice(text, failed: failed))
         case .interrupted(let detail):
-            return ChatItem(.notice(detail.isEmpty ? "Stopped by you" : detail, failed: false))
+            // The kernel's detail is the bare reason ("stop"); a person
+            // reads "Stopped by you", as the desktop says it.
+            return ChatItem(.notice(detail.isEmpty || detail == "stop" ? "Stopped by you" : detail, failed: false))
         case .thinking, .turnComplete, .other:
             return nil
         }
