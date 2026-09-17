@@ -240,6 +240,9 @@ pub async fn run(
     let mut task_slot: HashMap<tokio::task::Id, usize> = HashMap::new();
     let mut committed = false;
     let mut aborted = false;
+    let mut waiting_on_tree = false;
+    let mut tree_step_said = false;
+    let mut tree_held_since: Option<std::time::Instant> = None;
     let mut rx_open = true;
 
     loop {
@@ -328,6 +331,23 @@ pub async fn run(
                 if blocked {
                     continue;
                 }
+                // A write waits for the turn's checkpoint tree (qal-j17)
+                // *here*, before its record is stamped `started`, so the
+                // wait is the kernel's own step and not six seconds
+                // billed to `echo` (qal-j18). Reads go on meanwhile.
+                if !slots[i].access.is_readonly()
+                    && let Some(rx) = &cx.tree_ready
+                    && !*rx.borrow()
+                {
+                    if !tree_step_said {
+                        tree_step_said = true;
+                        tree_held_since = Some(std::time::Instant::now());
+                        cx.hooks
+                            .kernel_step("Saving a checkpoint of the working tree");
+                    }
+                    waiting_on_tree = true;
+                    continue;
+                }
                 let State::Ready(prepared) = std::mem::replace(&mut slots[i].state, State::Running)
                 else {
                     unreachable!()
@@ -383,9 +403,26 @@ pub async fn run(
             break;
         }
 
+        // The tree's completion is one more thing the loop wakes on when
+        // a write is held for it.
+        let mut tree_rx = cx.tree_ready.clone().filter(|_| waiting_on_tree);
+        waiting_on_tree = false;
         tokio::select! {
             biased;
             _ = control.cancel().cancelled(), if !stopped => {}
+            // The tool's own derived step replaces the checkpoint line
+            // the moment it starts.
+            _ = async { if let Some(rx) = tree_rx.as_mut() { let _ = rx.wait_for(|r| *r).await; } }, if tree_rx.is_some() => {
+                if let Some(since) = tree_held_since.take()
+                    && since.elapsed() > std::time::Duration::from_millis(500)
+                {
+                    eprintln!(
+                        "{}: a writing tool was held {:.1}s for the turn's checkpoint tree",
+                        cx.agent.id,
+                        since.elapsed().as_secs_f64()
+                    );
+                }
+            }
             msg = rx.recv(), if rx_open => match msg {
                 Some(Msg::Call(call)) => slots.push(Slot { call, access: Access::none(), state: State::New }),
                 Some(Msg::Commit) => committed = true,
@@ -468,28 +505,16 @@ fn log_speedup(agent: &arbos_core::AgentId, outcomes: &[(ToolCall, Outcome)]) {
 /// the result and may add context for the model.
 async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Result<ToolOut> {
     let name = call.name.clone();
-    // A tool that writes waits for the turn's checkpoint to have its
-    // tree: taken beside the turn, on a large repository `add -A` takes
-    // seconds while a model's first call can come sooner, and a tree
-    // taken after the call held the turn's own file — a rewind then put
-    // that file back and said restored (qal-j17). Reads go on; the wait
-    // is bounded only by the stop button.
+    // The scheduler holds a writing tool until the turn's checkpoint has
+    // its tree (qal-j17/j18), so this is normally already true; a caller
+    // that reached here another way still does not write before it.
     if !prepared.plan.access.is_readonly()
         && let Some(rx) = cx.tree_ready.clone()
         && !*rx.borrow()
     {
         let mut rx = rx;
-        let waited = std::time::Instant::now();
         tokio::select! {
-            r = rx.wait_for(|ready| *ready) => {
-                if r.is_ok() && waited.elapsed() > std::time::Duration::from_millis(500) {
-                    eprintln!(
-                        "{}: {name} waited {:.1}s for the turn's checkpoint tree",
-                        cx.agent.id,
-                        waited.elapsed().as_secs_f64()
-                    );
-                }
-            }
+            _ = rx.wait_for(|ready| *ready) => {}
             _ = cx.cancel.cancelled() => {
                 anyhow::bail!("{name}: stopped while waiting for the turn's checkpoint tree");
             }

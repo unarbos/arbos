@@ -1044,6 +1044,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             _ = sigint.recv() => {
                 println!("arbos-kernel stopping");
                 klog::info("kernel_stop", None, "signal");
+                arbos_engine::set_kill_reason(STOP_REASON);
                 stop_turns(&sched, &hooks, &mut done_rx).await;
                 crate::remote::stop_all(&hooks).await;
                 end_jobs_for_stop(&place);
@@ -1052,6 +1053,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             _ = sigterm.recv() => {
                 println!("arbos-kernel stopping");
                 klog::info("kernel_stop", None, "signal");
+                arbos_engine::set_kill_reason(STOP_REASON);
                 stop_turns(&sched, &hooks, &mut done_rx).await;
                 crate::remote::stop_all(&hooks).await;
                 end_jobs_for_stop(&place);
@@ -1067,6 +1069,10 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
 /// The leash is the backstop for a kernel that dies; a kernel that is
 /// asked to stop knows what it started. (SWE-bench cycle 14: 4–10 test
 /// processes alive after the kernel had exited, reparented to init.)
+/// What every job's `killed` marker says during a graceful stop, whoever
+/// writes it — the stop's own sweep or a turn's cancel path.
+pub const STOP_REASON: &str = "the kernel was stopped and ended its jobs with it";
+
 fn end_jobs_for_stop(place: &Place) {
     let agents = arbos_core::list_agents(place).unwrap_or_default();
     let mut ended = 0usize;
@@ -1080,13 +1086,10 @@ fn end_jobs_for_stop(place: &Place) {
             // is `Err` and has already withdrawn the `killed` marker, so the
             // folder keeps reading `running` and the leash stays with it.
             match root.kill(&job) {
-                Ok(true) => {
-                    let _ = std::fs::write(
-                        job.dir.join("killed"),
-                        "killed: the kernel was stopped and ended its jobs with it\n",
-                    );
-                    ended += 1;
-                }
+                // The marker's words come from the kill reason set at the
+                // start of the stop (`STOP_REASON`), the same for every
+                // path that kills during it.
+                Ok(true) => ended += 1,
                 Ok(false) => {}
                 Err(e) => klog::warn(
                     "kernel_stop_jobs",

@@ -63,6 +63,11 @@ pub trait Hooks: Send + Sync {
     /// instead of the `status` tool. `step` is the words after the colon,
     /// clipped; the kernel shows them as the live line.
     fn spoke_status(&self, _step: &str) {}
+    /// The kernel's own step while a tool is held — the checkpoint's tree
+    /// being saved before the turn's first write. A derived line: it
+    /// never overwrites what the agent said this turn, and the tool's
+    /// own line replaces it when the tool starts.
+    fn kernel_step(&self, _step: &str) {}
 
     /// A file in another node's store, by address (`arbos://…`). The host
     /// reaches it through the hub; a host with no hub says so. Failure is
