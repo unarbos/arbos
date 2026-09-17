@@ -36,6 +36,12 @@ sleep 30; shot 02-call-delegated-answer
 # Out of the call and into the chat it belongs to. Closing the call lands on
 # the project list, not on the chat, so the project is opened by name — the
 # list is alphabetical and its rows move as machines come and go.
+# The call's controls fade while it runs and a touch brings them back, so
+# the close button is waited for rather than assumed to be on screen.
+for _ in 1 2 3 4 5; do
+  ui find "Close" >/dev/null 2>&1 && break
+  idb ui tap 196 400 --udid "$UDID"; sleep 1.5
+done
 ui tap "Close" || { echo "no close control"; exit 1; }
 sleep 2.5; shot 03-project-list
 ui tap "${PROJECT:-phone}, Idle" || { echo "project row not on screen"; exit 1; }
