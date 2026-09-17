@@ -49,7 +49,7 @@ pub use tool::{
 pub use tools::git;
 pub use tools::{
     Grep, GrepHit, Hooks, NO_MESH, PromptSize, StoreFile, StoreWritten, is_readonly_command,
-    kill_job,
+    kill_job, reap_by_pid,
 };
 pub use turn::{TurnOpts, brief_output_paths, turn, written_this_turn};
 

@@ -958,9 +958,26 @@ async fn run_job(
     // Whose run this is, for a kernel that finds the job at boot.
     let _ = std::fs::write(job.dir.join(SUB_MARKER), sub_id.to_string());
     let id = job.id.clone();
-    let timed_out = tokio::time::timeout(CMD_TIMEOUT, child.wait())
-        .await
-        .is_err();
+    // The runtime's wait, or the wrapper's `exit` file — whichever says
+    // first that the command ended (see bash.rs on a reaper that never
+    // wakes); reaped by pid when the file spoke first.
+    let pid = job.meta.pid;
+    let deadline = tokio::time::Instant::now() + CMD_TIMEOUT;
+    let mut tick = tokio::time::interval(Duration::from_millis(500));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut wait = std::pin::pin!(child.wait());
+    let timed_out = loop {
+        tokio::select! {
+            _ = &mut wait => break false,
+            _ = tokio::time::sleep_until(deadline) => break true,
+            _ = tick.tick() => {
+                if root.load(&id).is_ok_and(|j| !j.running()) {
+                    arbos_engine::reap_by_pid(pid);
+                    break false;
+                }
+            }
+        }
+    };
     if timed_out && let Ok(j) = root.load(&id) {
         root.kill(&j);
     }
