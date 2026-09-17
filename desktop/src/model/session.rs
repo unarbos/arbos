@@ -3365,6 +3365,9 @@ impl ChatSession {
                     self.flush();
                     return;
                 }
+                if self.plan_op_gone(&detail) {
+                    return;
+                }
                 self.notice(true, &detail);
                 self.flush();
                 // The kernel no longer has this agent: the row keeps its
@@ -3758,6 +3761,42 @@ impl ChatSession {
         if let Connection::Live(session) = &self.connection {
             session.plan_op(node, op, text);
         }
+        // The row goes as the click lands; the kernel's next plan frame is
+        // the truth and puts it back if the cancel did not take.
+        if op == "cancel"
+            && let Some(n) = self.plan.iter_mut().find(|n| n.id == node)
+        {
+            n.status = "cancelled".into();
+        }
+    }
+
+    /// The kernel's answer to a plan op on a message it no longer holds —
+    /// the running turn took the queued line before the click (an
+    /// attached `bash` yields to a queued line within seconds since #362).
+    /// For a cancel that is the end state the person wanted: the row goes
+    /// and nothing is said. For anything else, one calm line — the words
+    /// went, they were not lost. Never a failure: nothing failed. Returns
+    /// whether the detail was this case.
+    fn plan_op_gone(&mut self, detail: &str) -> bool {
+        let Some(rest) = detail.strip_prefix("plan op ") else {
+            return false;
+        };
+        if !rest.contains("no longer in the inbox") {
+            return false;
+        }
+        let mut words = rest.split_whitespace();
+        let op = words.next().unwrap_or("");
+        let node = words
+            .next()
+            .and_then(|w| w.trim_start_matches('#').trim_end_matches(':').parse::<u64>().ok());
+        if let Some(id) = node {
+            self.plan.retain(|n| n.id != id);
+        }
+        if op != "cancel" {
+            self.notice(false, "That follow-up had already gone into the turn.");
+        }
+        self.flush();
+        true
     }
 
     fn apply_update(&mut self, update: SessionUpdate) {
