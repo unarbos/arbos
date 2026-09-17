@@ -180,3 +180,16 @@ The rig's row targeting, which had cost three cycles, and two rotation rows behi
 - PR: **#472**. #433, #465 still open; #447 merged. Feedback poll hourly, nothing new.
 - Media: `media/mobile/cycle-50/01-fixture-project-open.png`, `02-before-background.png`, `03-after-seven-minutes.png`, `04-sent-after-resume.png`, `evidence.txt`.
 - Next: M-151 — a project keeps its row when its machine goes, drawn Off and naming what it waits on. That unblocks the refusal wording and fixes the "my project vanished" reading at the same time. Then the journey with `type_send` fixed (M-162).
+
+## Cycle 51 report (18:30 UTC, 09-17)
+
+M-151: the project that vanishes when its machine goes off.
+
+- **Half done, and left as a draft rather than merged looking finished** (M-169, #480). A project Jacob has opened keeps its row now: `k51-place, Idle` → `k51-place, Off` after its kernel stops and a pull-to-refresh, still there when the hub goes too, where cycle 45 saw it vanish entirely leaving only `pod`. Tapping it reaches a chat again, which cycle 50 could not do at all.
+- **What is not working, and I am not claiming it**: the row says "Off" where it should say "awsmac is off" or "k51-place isn't running on awsmac". `waitingOn` is empty. Survival alone does not prove my branch fired — M-88 already keeps rows when the hub does not answer, which is exactly the second case. Cause not established; cycle 52 instruments it rather than guessing.
+- **The hub deregisters a machine whose only kernel stops** (M-170): `/list` returns `[]` rather than the project marked not-live. So a client cannot tell "asleep" from "never here" from the roster alone, which is the reason the phone has to remember what Jacob opened.
+- **The list does not refresh on relaunch** (M-171): `simctl launch` against a running app does not re-run `.task`, so two runs read a stale row and I drew the wrong conclusion from the first before catching it. Pull-to-refresh does trigger it; "read the list" now means "pull first, then read".
+- Recording: not taken. The cycle's work was list state, which a still shows better than a film; due again next cycle.
+- PR: **#480** (draft). #433 and #472 still open; #465 merged. Feedback poll hourly, nothing new.
+- Media: `media/mobile/cycle-51/01-project-open.png`, `02-row-kept-kernel-stopped.png`, `03-row-kept-hub-gone.png`, `04-chat-reachable-again.png`, `evidence.txt`.
+- Next: instrument `waitingOn` and finish #480; then the journey with `type_send` fixed (M-162), and the recording.

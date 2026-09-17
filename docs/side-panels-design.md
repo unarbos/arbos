@@ -295,7 +295,7 @@ Each of these is a client-visible gap, not an internal refactor.
 3. **Job metadata on the frame** — the command line, cwd, owning agent, started-at, and `journal: present | gone`. Today a `Job` frame carries deltas but not enough to title a row honestly.
 4. **Stop a job from a client**, routed through the kernel's own group kill, with the reason written by a single writer. There is already a known race between two writers on the killed reason; do not add a third.
 5. **Per-turn changed paths** — expose the rewind checkpoint's diff as a frame (`turn N`, paths, `+`/`−`), plus the paths each edit tool call touched. The data exists for rewind and is not readable by a client.
-6. **`write_if_unchanged(path, expected_hash)`** and a `changed` frame per watched path, so an editor can save safely and can tell when the agent wrote underneath it.
+6. **A path a person is editing, and `write_if_unchanged`** — the two halves of Jacob's co-editing ruling. A client claims a path while its editor holds unsaved edits, and the kernel **refuses the agent's write** to a claimed path, telling the agent in its own turn so it can say what it wanted. Plus `write_if_unchanged(path, expected_hash)` and a `changed` frame per watched path for the save itself. Without the refusal the window can only decline to be overwritten, which defends his buffer but not his file.
 7. **Browser screencast and input** — `Page.startScreencast` frames out, an input frame in, and a `driver: agent | user` field with a loud refusal for whoever is not driving.
 8. **A person's shell in a job's directory**, so *Open a shell here* starts your shell where the job ran.
 
@@ -339,12 +339,17 @@ The Xvfb check is `desktop/driver/examples/side_panel.py`. For anything a harnes
 
 ---
 
-## One decision for you
+## Decided: co-editing, and who wins
 
-**When you open a file to edit while the agent may be writing it, which of these?**
+**Jacob's ruling, 2026-09-17: option 1 — his version wins, and the agent is refused.** No fork remains here; this is the rule.
 
-1. **Always yours to type in.** Saving is checked against the file on disk, and if the agent got there first you choose: keep mine, take theirs, or see the difference. Most freedom, and the clash lands at save time.
-2. **Read-only while the agent's turn is running**, with a *Take it anyway* button that switches to option 1. Safest, and it costs you a click on a file the agent happens to be near.
-3. **Opening it holds the agent off that one file** until you save or close, with the agent told plainly. Never a clash — but your open editor can now block a working agent, and you would have to remember it is open.
+What that means, precisely, because the halves are easy to confuse:
 
-My recommendation is **1**. Clashes on the same file in the same minute will be rare, the compare-and-swap save makes a silent overwrite impossible, and 2 and 3 both pay a standing cost to prevent a rare event.
+1. **The file is always his to type in.** Opening a document for editing never waits on the agent's turn and is never read-only for being near one.
+2. **While he has unsaved edits in a file, the agent's write to that path is refused** — told plainly, in the agent's own turn, so it can say what it wanted to change instead of losing it silently. His buffer is never reloaded under him and never merged into.
+3. **With no unsaved edits, the agent writes freely** and the tab says `changed on disk`. Nothing is auto-reloaded: a reload while he is reading is its own small theft.
+4. **His save is still a compare-and-swap** on the bytes the file had when he opened it. Rule 2 makes a clash rare rather than impossible — another window, another machine, a hook — and a refused save says what happened rather than overwriting.
+
+Rules 1, 3 and 4 are the window's. **Rule 2 is the kernel's**, and it is the one thing this needs that does not exist yet: a client must be able to say "a person is editing this path", and the kernel must refuse the agent's writes to it while that holds. That is handover 6, with `write_if_unchanged` beside it for rule 4.
+
+Until the kernel can refuse, the window keeps the half it owns — his buffer is never overwritten and never silently reloaded — and a document tab stays read-only rather than pretending his edit is defended. Offering an edit we cannot keep is worse than not offering it yet.

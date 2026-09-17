@@ -306,6 +306,61 @@ Re-checked after the change, because a change to a wait can make a break disappe
 fails the same way, and `uw-02` got measurably quicker (1.0 s to 0.7 s) since the event lands before the
 nudge that `idle` waits for.
 
+## Where the second cycle got to, and the two things I broke myself
+
+The cycle that started 13:46 ran for 4½ hours and did **not** finish. Its record, from disk:
+
+- reached: the kernel build (`42cb9751ace8`), the library, the kickoff headline (**9 of 12**, 2309 s), the
+  tracked-`main` suite, three inbox branches, and the desktop step;
+- never reached: call mode, retention, `publish.sh`, and the closing mirror;
+- counted 58 pass, 41 break, 206 skip — **and 24 of those breaks are one rig fault**, `qal-j23`: the
+  desktop scenarios import their driver from the store's FUSE mount, so the acceptance journey died in
+  10 s on `Errno 5` and `sq-02` held the step for 2.5 hours on `Errno 11`. The journey's `0/8, 8
+  unverified` is that, not a product result.
+
+Then two errors of my own, both repaired, both worth writing down because each is a rule this project had
+already paid for:
+
+**1. I killed the running cycle by swapping the script under it.** I copied the edited `cycle.sh` over the
+path bash was still reading; bash reads a script incrementally, so it resumed at a shifted offset and died
+on `syntax error near unexpected token 'done'` at the call-mode step. `bash -n` on the file passes — the
+script was never wrong. This is the project's own rule ("put the new thing in place before removing the
+old one … a supervised process is the dangerous case") arriving from a direction it had not been written
+for: not a binary under a supervisor, but a shell script under its own interpreter. **Never write to a
+file a running process is still reading; install to a new path, or wait for the process to end.**
+
+**2. I deleted 38 bug files by matching a rule name, and said the opposite of what my own check printed.**
+Meaning to remove the false drafts the driver fault had created, I selected on the string
+`driver-exception` — which is a *rule* name, not a timestamp, so it also matched 28 records from 13
+September onwards that were already on `qa-results`. Worse, the same command printed `on the branch: 28`
+two lines above a message asserting "none were on the branch": a hardcoded claim next to the computed
+truth, which is the exact thing `qal-j21` was filed about. Repaired in the next command: 30 came back from
+the store byte-for-byte, and the 8 that exist in neither the store nor the branch are precisely the
+drafts this machine had made minutes earlier — the ones actually intended. The tree is now a superset of
+the branch (313 against 208, zero missing) and `publish.sh`'s guard confirms a push would proceed.
+
+Then a third, smaller one in the same ten minutes: the "floor check" I ran to prove the repair compared
+this machine's `bugs/` against **every path on the branch**, not `bugs/` alone, and reported 2,934 files
+missing. A confident wrong number, printed twice in ten minutes from one-line checks written in a hurry.
+The lesson is not about care in general: it is that **a check written to confirm a repair deserves the
+same review as a check written to find a bug**, and neither of mine would have survived the review list.
+
+## The mirror's gap, and the timers that were missing
+
+`store-docs` had not moved between 14:53 and 18:18 — the longest gap since the branch existed. Cause: the
+mirror runs at the start and end of each cycle *and* on `mirror-timer.sh`'s own 15-minute clock, and on
+this machine only the first existed, because I had not started the timer. The cycle interrupted at 18:15
+therefore took the mirror with it.
+
+Closed two ways: the cycle started at 18:18 pushed `f7c4756d` as its first act (27 documents, 584
+`internal/` files, media 156 → 168 — the tree grew, so the gate had nothing to refuse and the store is
+whole), and `mirror-timer.sh` now runs on this machine every 15 minutes as `qa-vm2`, which also carries
+the store probe and the second reader. Its first pass: probe written, reader `BEHIND` (391 files here
+against a 0-minute-old tip), mirror pushed `e37f30f4`.
+
+The cycle timer is the piece still outstanding: cycles are being run by hand while the tree settles, and
+`vm-loop.sh` takes over as the standing hourly loop once one completes clean.
+
 ## Cross-references
 
 - `internal/qa/bugs/qal-j21-publish-mirrors-a-smaller-bug-set-and-deletes-the-branchs-drafts.md`
