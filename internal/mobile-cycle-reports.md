@@ -254,3 +254,47 @@ prefix, and a `tail -8` of a long dump.
 re-run against the fixed `type_send`; that is the first item of cycle 55 and
 it is the run that tells us how much of the journey's history was measuring
 the harness.
+
+## Cycle 55 report (23:10 UTC, 09-17)
+
+**The acceptance journey, run against the fixed `type_send`, and recorded.**
+Run 32 on `pod`, kernel `arbos-kernel 0.2.0 efcab58f29e1`.
+
+**Seven typed lines of seven reached the kernel**, each at "after 0s". Run 31
+landed two of eight. Every J step now passes or carries a standing
+`unverified`, and the steps run 31 had to record as *unexercised* are
+exercised — this is the first journey run in a while that measures the app
+rather than the harness. The three FAILs left are the phone-only steps: P1
+dictation, P2e the photo line, P3 the call.
+
+**Getting there found three more harness faults, all of the same family —
+a check that could not pass, or a failure that said nothing.**
+
+- J1 scored FAIL on every run because its wait read the transcript against
+  an anchor it was itself about to set.
+- The journey never passed `-noAskNotifications`, so iOS's permission alert
+  sat over the chat and swallowed every typed line after it appeared. The
+  first attempt at this run died there, and the log only said "gave up".
+- The recording produced no file, because a recorder left by the interrupted
+  earlier run holds the device and refuses every later one — silently, with
+  the output going to `/dev/null`. Clearing it needs the simulator shut down
+  and booted.
+
+All three are fixed on #515, and `type_send` now names what is on screen when
+there is no composer to type into. That is how the photo-picker cause of P2e
+was identified in the same run instead of next cycle.
+
+**A fourth, mine:** `type_send`'s read-back retried for ever on a line
+containing `'seeded'`, because iOS had made it `‘seeded’` — same sentence,
+same length, different characters. `ui field plain` undoes the substitutions
+before comparing.
+
+**The recording is done**, three cycles late:
+`media/mobile/cycle-55/recording-journey-challenge-and-workers-123s.mp4` —
+the 490-character challenge typed in about six seconds and arriving whole,
+sent, the worker stepping through `Reading mathlib.py` and `creating fix
+branch`, and the reply at 2:02 with the branch name and `OK (7 tests ran)`.
+19 stills, `score.txt` and `run.txt` beside it.
+
+**Owed:** P1, P2e and P3 are the only steps the journey cannot speak for, and
+P2e is now understood. That is cycle 56.

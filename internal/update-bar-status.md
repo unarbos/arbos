@@ -5,14 +5,17 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-17 22:45 UTC.
+Last checked 2026-09-17 23:12 UTC.
 
-## Click Update. You will get build 1662.
+## Click Update. You will get build 1674.
 
-**1662** — signed, notarised, stapled, on the feed since 22:41 UTC. It is
-the tip of `main`, so the channel is caught up.
+**1674** — signed, notarised, stapled, on the feed since 23:07 UTC.
 
-It contains everything you were waiting for:
+It carries everything 1662 had, plus **#518**: a kernel without git says so
+once on root's transcript, carries `git_missing` in `kernel.json`, and says
+when git is back.
+
+Still in it, from earlier builds:
 
 - **#490** — voice lines drawn in the project chat
 - **#500** — GPT-Live sees the project, the on-screen chat and live workers
@@ -23,47 +26,49 @@ It contains everything you were waiting for:
 
 | | |
 |---|---|
-| Signed | `Developer ID Application: Jacob Steeves` |
+| Signed | `Developer ID Application: Jacob Steeves`, the kernel inside the bundle and then the bundle |
 | Notarised | Apple returned `status: Accepted` |
 | Stapled | ticket present in the downloaded zip — 1674 bytes, signed by Apple System Integration CA for "Software Ticket Signing" |
 | Gatekeeper | `source=Notarized Developer ID` |
-| Bundle | `Info.plist` reads `0.2.0 build 1662` |
+| Bundle | `Info.plist` reads `0.2.0 build 1674` |
 | Feed | every download it names is really on the tag |
 
-The ticket was read out of `Arbos-0.2.0-1662-macos-arm64.zip` as
+The ticket was read out of `Arbos-0.2.0-1674-macos-arm64.zip` as
 downloaded, not from the build log, so it is the copy you will get.
 
-## The stall that held it, and the fix
+## Why the channel runs a little behind `main`
 
-The channel sat on 1657 from 22:19 to 22:41 for the same reason it sat
-from 21:37 to 22:19. At 22:29 the publisher said:
+`main` is on build 1680; the feed is on 1674. That gap is the design
+working, not a fault, and my earlier note in this file said otherwise —
+see below.
 
-> `8d0688d is newer and still running. Its run decides, and comes back
-> here whichever way it goes.`
+The publisher waits when a commit newer than the one it is about is still
+being tested, so that a runner and an Apple notarisation are not spent on
+a build that is already superseded. When `main` merges faster than CI
+finishes, there is almost always such a commit, so the channel publishes
+whenever it catches a settled tip rather than on every merge. A quarter of
+an hour behind is normal at this pace.
 
-`8d0688d` was that run's **own** triggering commit. Every commit gets two
-CI runs about forty seconds apart; the first to finish fires the event,
-the second is still going when the publisher asks the API, so it reads
-"still deciding" and waits for an event that has already happened. It
-published only once a later CI completion came along.
+Nothing is stuck. If the gap ever stops closing, that is worth a look; a
+gap that keeps closing is the rule doing its job.
 
-[#517](https://github.com/unarbos/arbos/pull/517) is the fix and is
-**green, waiting on the steward**: the commit that started a run takes its
-conclusion from the event rather than re-asking, so it can never block. A
-green sibling still counts; the answer for that one commit is simply never
-"wait".
+## Correction to the previous note
 
-## Also since the last note
+The previous version of this file said the channel had been held by a run
+"waiting on its own triggering commit". That was wrong, and I should say
+so plainly because it is the kind of claim that sends someone looking in
+the wrong place.
 
-- The transcript-race flake that took `main` red earlier is **fixed on
-  `main`** (`87bedb25`), by its owner and better than my version: it waits
-  through the shared `common::wait_for` and prints both the transcript and
-  the kernel log on failure. My [#507](https://github.com/unarbos/arbos/pull/507)
-  stays closed rather than landing a worse duplicate.
-- [#510](https://github.com/unarbos/arbos/pull/510) is **merged** — a
-  binary that was only just written is briefly unrunnable when another
-  thread's fork holds a descriptor to it. That was a product fault, not
-  only a test one: the installer runs a binary moments after copying it.
+I read the triggering commit off `gh run list --json headSha`, which for a
+`workflow_run` reports the **branch tip**, not the commit whose run fired
+the event. Reading the actual value out of the job showed the run was
+about `86fc0bc6` and waiting on `8d0688d` — a genuinely newer commit that
+was genuinely still running. Correct behaviour, twice.
+
+[#517](https://github.com/unarbos/arbos/pull/517) is merged and does no
+harm — taking the triggering commit's conclusion from the event is more
+accurate than re-asking, and the event is the authority for that run — but
+it fixed something that was not happening.
 
 ## How to check for yourself
 

@@ -106,3 +106,13 @@ Harness notes: run 1's call did not start because the call screen waits for a ta
 - **The "spawn refused" in the raw score is not this run's** (M-160). No spawn happened here at all; the refusals quoted belong to runs 29 and 30, matched because an empty anchor let the scorer read the whole transcript. Fixed in #447.
 - **JB-6 neither fired nor was disproved, and its premise is in doubt** (M-161): the roster's per-process `builds` for `arboslife` list six kernels and a worker daemon with none reporting `binary_gone`.
 - Evidence: `media/mobile/journey/0917-120912/` (23 files including `record.json`, `kernel-version.txt`, `score.txt` and the challenge recording).
+
+## Run 32 — 2026-09-17 22:48 UTC, `pod` — the first run against the fixed `type_send`
+
+- **App** `cursor/mobile-cycle-54-type-send-a4fa` (main + #515). **Kernel, asked on the attach socket at both ends:** `arbos-kernel 0.2.0 efcab58f29e1 protocol 1`.
+- **Every typed line reached the kernel — seven of seven, each at "after 0s".** Run 31 landed two of eight. So the steps run 31 had to record as *unexercised* are exercised now, and there is finally a run that measures the app rather than the harness.
+- **Scored:** J1, J1s, J2 (both halves), J3 (both halves), J4a, J4m, J5q, J5s, J7, J7v **pass**. J4, J5, J8 **unverified** (standing: the phone has no Stop control; the mid-flight half of J4 needs the turn still running; J8a/b are not reachable from the phone). J6, J6k **eye**.
+- **Three FAILs, all phone-only steps, none of them `type_send`:** P1 the dictation line, P2e the photo line, P3 the call. P2e is the harness: the photo picker sheet covers the composer, and the run log now says so in as many words — `no composer to type into … on screen: Application Arbos` — instead of giving up silently.
+- **J1 no longer scores a false FAIL.** Its wait read the transcript against an anchor it was itself about to set, so it could never pass; it waits on the line's own seq now.
+- **The recording is real this time.** Run 32's first attempt produced no video at all: a recorder left behind by an interrupted run holds the device and every later `recordVideo` is refused with "Host recording is already in progress", silently, because the output went to `/dev/null`. The journey clears stale recorders, logs the refusal and says when no file appeared.
+- Evidence: `media/mobile/cycle-55/` — 19 stills, `score.txt`, `run.txt`, and two recordings. `recording-journey-challenge-and-workers-123s.mp4` is the one worth watching: the 490-character challenge typed in about six seconds and arriving whole, sent, the worker appearing and stepping through `Reading mathlib.py` and `creating fix branch`, and the reply at 2:02 — `Branch name: fix-mathlib-J224840`, `OK (7 tests ran)`.
