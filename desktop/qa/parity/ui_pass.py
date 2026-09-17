@@ -386,6 +386,15 @@ class Pass:
             self.clear_composer()
         self.app.click("composer-field")
         self.app.type(text + "\n")
+        # The line must leave the composer: once (cycle 32's full gate) the
+        # typed Enter landed on nothing and the prompt sat in the field while
+        # every row after it measured a turn that never ran. Wait for the
+        # field to empty; press Enter once more if it has not; say so.
+        if self.wait(lambda s: not s["composer"]["text"], 4) is None:
+            log(f"send: composer still holds the line after Enter; pressing Enter again ({text[:40]!r})")
+            self.app.click("composer-field"); self.app.key("enter")
+            if self.wait(lambda s: not s["composer"]["text"], 4) is None:
+                log("send: the line did not leave the composer (R17)")
 
     def close_second_windows(self) -> None:
         for title in ("Settings",):
