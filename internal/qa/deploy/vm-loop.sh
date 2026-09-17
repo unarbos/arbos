@@ -31,7 +31,9 @@ qa_paused() {
 PENDING="$ROOT/store-pending"
 store_sound() { [ -s "$STORE_ROOT/notes.md" ] && [ -d "$STORE_ROOT/docs" ] && [ -f "$STORE/run.py" ]; }
 store_put() {  # store_put <local file> <store-relative path>
-  local src="$1" rel="$2" dst="$STORE_ROOT/$rel"
+  local src="$1"
+  local rel="${2:?store_put needs <local file> <store-relative path>}"
+  local dst="$STORE_ROOT/$rel"
   if store_sound && mkdir -p "$(dirname "$dst")" 2>/dev/null && cp -f "$src" "$dst" 2>/dev/null; then return 0; fi
   mkdir -p "$PENDING/$(dirname "$rel")" && cp -f "$src" "$PENDING/$rel" && echo "== store write failed or store not sound; staged $rel under $PENDING" >&2
   return 1
