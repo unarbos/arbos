@@ -1296,6 +1296,17 @@ class Pass:
             self.app.click(rows[0])
 
     def phase_settings(self) -> None:
+        # The eyesight check (`weight-visible`) compares the main window's
+        # prose before and after the bionic toggle: it needs a chat with a
+        # real answer in front, not a New chat's static greeting, which is
+        # no transcript item and takes no weight (cycle 34b read 0 pixels
+        # and called it a fail). The main chat has answers by now.
+        self.go_project()
+        if not any(i.get("kind") == "agent" for i in (active(self.state()) or {}).get("items", [])):
+            for row in self.ids("panel-agent-*"):
+                self.app.click(row); time.sleep(0.5)
+                if any(i.get("kind") == "agent" for i in (active(self.state()) or {}).get("items", [])):
+                    break
         # Settings closes from the keyboard and the chat gets the keyboard back.
         gear = "settings" if self.app.exists("settings") else "status-bar-settings"
         if not self.state().get("settings_open") and self.app.exists(gear):
