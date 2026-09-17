@@ -35,10 +35,12 @@ set -euo pipefail
 repo="${STEWARD_REPO:-unarbos/arbos}"
 window_h="${1:-2}"
 stale_h="${2:-3}"
-# Branches that are not meant to land on main: mirrors the workers write to
-# (store-docs, qa-results, store-watch) and the pre-Rust history. Space-
-# separated; override with STEWARD_IGNORE_BRANCHES.
-ignore="${STEWARD_IGNORE_BRANCHES:-main rust HEAD store-docs qa-results store-watch discord update arbos-matrix}"
+# Record branches: orphan branches that exist to hold documents and reader
+# verdicts and are never meant to merge into main. Listed by exact name, not
+# pattern, so a genuinely orphaned feature branch cannot hide behind a
+# similar name. The pre-Rust history is listed here too. Space-separated;
+# override with STEWARD_IGNORE_BRANCHES.
+ignore="${STEWARD_IGNORE_BRANCHES:-main rust HEAD store-docs store-watch qa-results cursor/store-docs-94d6 discord update arbos-matrix}"
 since="$(date -u -d "-${window_h} hours" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
       || date -u -v-"${window_h}"H +%Y-%m-%dT%H:%M:%SZ)"
 now="$(date -u +%s)"
@@ -75,16 +77,25 @@ else
 fi
 
 # ---- Part 2: branches with no open PR and commits main does not have --------
-# The open PRs' branches are someone's live work; everything else with
-# unlanded commits is either finished-and-forgotten or a merge that missed.
+# Two populations, reported apart so the loud one is not drowned:
+#   A. the branch had a PR that merged, and commits were pushed after — work
+#      that was reviewed and then lost (63666ae0). Loud, with its age.
+#   B. the branch never had a merged PR — old integration branches, drafts
+#      nobody opened. A list for owners to confirm dead or open a PR.
 gh pr list --repo "$repo" --state open --limit 200 --json headRefName --jq '.[].headRefName' > "$open_heads"
 if [ ! -s "$open_heads" ] && ! gh pr list --repo "$repo" --state open --limit 1 >/dev/null 2>&1; then
   echo "steward-exit-check: could not list open PRs — part 2 checked nothing."
   exit 2
 fi
+merged_heads="$(mktemp)"; after="$(mktemp)"; never="$(mktemp)"
+trap 'rm -f "$rows" "$open_heads" "$merged_heads" "$after" "$never"' EXIT
+gh pr list --repo "$repo" --state merged --limit 500 --json number,headRefName,mergedAt \
+    --jq '.[] | [.headRefName, .number, .mergedAt] | @tsv' > "$merged_heads"
+if [ ! -s "$merged_heads" ]; then
+  echo "steward-exit-check: could not list merged PRs — part 2 checked nothing."
+  exit 2
+fi
 
-echo "--- branches with no open PR and commits not on main ---"
-found=0
 while read -r ref; do
   branch="${ref#origin/}"
   case " $ignore " in *" $branch "*) continue;; esac
@@ -96,21 +107,28 @@ while read -r ref; do
   # have; '-' one it already has. Only the '+' lines are unlanded work.
   unlanded="$(git cherry origin/main "$ref" | awk '$1=="+"{print $2}')"
   [ -z "$unlanded" ] && continue
-  found=1
   n="$(printf '%s\n' "$unlanded" | wc -l | tr -d ' ')"
   tip_epoch="$(git log -1 --format=%ct "$ref")"
   age_h=$(( (now - tip_epoch) / 3600 ))
-  flag=""
-  if [ "$age_h" -ge "$stale_h" ]; then flag="  STALE"; lost=1; fi
-  printf '%s  %s commit(s) main does not have, tip %sh old%s\n' "$branch" "$n" "$age_h" "$flag"
-  printf '%s\n' "$unlanded" | head -n 5 | while read -r c; do
-    git log -1 --format='    %h %ad %s' --date=format:%Y-%m-%dT%H:%MZ "$c" | cut -c1-150
-  done
+  lines="$(printf '%s\n' "$unlanded" | head -n 5 | while read -r c; do
+    git log -1 --format='    %h %ad %s' --date=format:%Y-%m-%dT%H:%MZ "$c" | cut -c1-150; done)"
+  pr="$(awk -F'\t' -v b="$branch" '$1==b {print "#"$2" merged "$3; exit}' "$merged_heads")"
+  if [ -n "$pr" ]; then
+    flag=""
+    if [ "$age_h" -ge "$stale_h" ]; then flag="  STALE"; lost=1; fi
+    printf '%s  %s commit(s) pushed after %s, tip %sh old%s\n%s\n' "$branch" "$n" "$pr" "$age_h" "$flag" "$lines" >> "$after"
+  else
+    printf '%s  %s commit(s), tip %sh old, no merged PR\n%s\n' "$branch" "$n" "$age_h" "$lines" >> "$never"
+  fi
 done < <(git for-each-ref --format='%(refname:short)' refs/remotes/origin)
-[ "$found" = 0 ] && echo "(none)"
+
+echo "--- A. commits pushed after the branch's PR merged (reviewed work, then lost) ---"
+if [ -s "$after" ]; then cat "$after"; else echo "(none)"; fi
+echo "--- B. branches with unlanded commits and no merged PR (owners: confirm dead, or open a PR) ---"
+if [ -s "$never" ]; then cat "$never"; else echo "(none)"; fi
 
 if [ "$lost" = 1 ]; then
   echo "steward-exit-check: work left the queue without landing on main — look before reporting."
   exit 1
 fi
-echo "steward-exit-check: every PR closed in the last ${window_h}h is on main, and no branch without a PR holds unlanded commits older than ${stale_h}h."
+echo "steward-exit-check: every PR closed in the last ${window_h}h is on main, and no branch holds commits pushed after its PR merged that are older than ${stale_h}h."
