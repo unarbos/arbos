@@ -155,11 +155,20 @@ pub fn behind(running: &Running, offered: &Available) -> Result<(), Refusal> {
     }
 }
 
-/// The feed carries a short commit and the kernel a longer one, so whichever
-/// is shorter decides. An `unknown` sha — a build from a tarball — matches
-/// nothing, so such a build is always considered behind, which is right: there
-/// is no way to tell what it is.
-fn same_commit(running: &str, offered: &str) -> bool {
+/// Whether two commits name the same build.
+///
+/// Public because the app needs it for a second question with the same shape:
+/// **is the kernel I am about to attach to the one this bundle ships?**
+/// `kernel.json` carries the `git_sha` of the process that wrote it and
+/// `hello` carries it too, so comparing either with the bundled kernel's own
+/// commit says whether a running kernel is this build or a survivor of an
+/// older one. On 2026-09-17 a survivor 223 commits behind was attached to
+/// after an update and sent frames it had never heard of.
+///
+/// One is short and one is long, so whichever is shorter decides. An
+/// `unknown` sha — a build from a tarball — matches nothing, which is right:
+/// a build that cannot account for itself is not one to trust as current.
+pub fn same_commit(running: &str, offered: &str) -> bool {
     if running.is_empty() || offered.is_empty() || running == "unknown" {
         return false;
     }

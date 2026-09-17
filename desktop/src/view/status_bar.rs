@@ -403,15 +403,26 @@ fn plate(cx: &mut Context<Arbos>, plate: Plate) -> AnyElement {
         })
         .when(clickable, |el| {
             el.on_click(cx.listener(|this, _, _, cx| {
-                // The open projects: their kernels run on the binary about to
-                // be replaced, so the updater stops them before it swaps.
-                let places = this
-                    .workspace
-                    .read(cx)
+                // Every place this app knows a kernel for, not only the tabs
+                // that happen to be open.
+                //
+                // The open projects alone are not enough, and that gap did
+                // real harm: after an update on 2026-09-17 a kernel from a
+                // closed tab kept running from the deleted old bundle, and
+                // the new app attached to it and sent frames it had never
+                // heard of. Recents are where those kernels are — a place
+                // stops being a tab long before its kernel stops running.
+                let workspace = this.workspace.read(cx);
+                let mut places: Vec<_> = workspace
                     .projects
                     .iter()
                     .map(|project| project.place().clone())
                     .collect();
+                for recent in &workspace.recents {
+                    if !places.contains(recent) {
+                        places.push(recent.clone());
+                    }
+                }
                 this.updater
                     .update(cx, |updater, cx| updater.install(places, cx));
             }))

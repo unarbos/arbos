@@ -554,6 +554,15 @@ fn installed_root() -> Result<Installed> {
 /// Only the kernels on this machine. A remote place's kernel runs from that
 /// host's own binary, which this update does not touch; the tunnels to it are
 /// already down by the time this is called, and the new app dials them again.
+///
+/// **This is the first of two layers and it cannot be the only one.** It
+/// reaches the places the caller knows about, which is not every kernel on the
+/// machine — one started by the CLI, by a worker, or by another window is
+/// invisible here — and a kernel that does not stop inside
+/// [`KERNEL_STOP_WAIT`] is deliberately left running rather than blocking the
+/// update. So the app must also refuse to *attach* to a kernel that is not the
+/// build it ships, which is the layer that holds however this one fails. See
+/// `docs/kernel-self-update-design.md`.
 fn stop_kernels(places: &[Place]) {
     let mut asked = Vec::new();
     for place in places.iter().filter(|place| !place.is_remote()) {
